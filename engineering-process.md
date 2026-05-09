@@ -172,9 +172,11 @@ A project is active under SE Core if and only if it appears in `registry.md` and
 
 Claude Code does **not** cascade `CLAUDE.md` up the directory tree. Inheritance is explicit, via two mechanisms with different trust profiles:
 
-**Primary — `.claude/rules/se-core.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project. Track the symlink in git (add `.gitignore` exceptions if `.claude/` is broadly ignored).
+**Primary — `.claude/rules/se-core.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project.
 
-**Secondary — `@`-import in project `CLAUDE.md`.** `@__USER_HOME__/projects/se-core/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
+**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$SE_CORE_ROOT` (e.g., `__SE_CORE_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/se-core/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
+
+**Secondary — `@`-import in project `CLAUDE.md`.** `@__SE_CORE_PATH__/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
 
 If either mechanism breaks, Claude Code drops the instruction silently — no error, no warning. The `parent-hook-drift` audit catches drift; the `cross-project-process-audit` catches missing symlinks. See `core-rules/inheritance.md` for silent-drop invariants and the registered-project checklist.
 
@@ -404,7 +406,7 @@ Each registered project has a `CLAUDE.md` at its root. Structure:
 ```markdown
 # <project-name>
 
-@__USER_HOME__/projects/se-core/core-rules/CLAUDE.md
+@__SE_CORE_PATH__/core-rules/CLAUDE.md
 
 > Engineering process manual: `~/projects/se-core/engineering-process.md`
 
@@ -504,27 +506,27 @@ git init -b main
 mkdir -p .claude/rules .claude/hooks
 
 # 4. Symlink parent rules (PRIMARY inheritance — required)
-ln -s __USER_HOME__/projects/se-core/core-rules/CLAUDE.md \
+ln -s __SE_CORE_PATH__/core-rules/CLAUDE.md \
       .claude/rules/se-core.md
 
 # 5. Copy canonical hooks
-cp __USER_HOME__/projects/se-core/core-rules/hooks/*.sh .claude/hooks/
+cp __SE_CORE_PATH__/core-rules/hooks/*.sh .claude/hooks/
 chmod +x .claude/hooks/*.sh
 
 # 5b. Symlink canonical skills (process-gate)
 mkdir -p .claude/skills
-ln -s __USER_HOME__/projects/se-core/core-rules/skills/process-gate \
+ln -s __SE_CORE_PATH__/core-rules/skills/process-gate \
       .claude/skills/process-gate
 
 # 5c. (Codex-enabled projects only) seed .agents and .codex trees
 # If `harnesses` in se-core.config.json includes "codex":
 #   mkdir -p .agents/rules .agents/skills .codex/hooks
-#   ln -s __USER_HOME__/projects/se-core/core-rules/CLAUDE.md \
+#   ln -s __SE_CORE_PATH__/core-rules/CLAUDE.md \
 #         .agents/rules/se-core.md
-#   ln -s __USER_HOME__/projects/se-core/core-rules/skills/process-gate \
+#   ln -s __SE_CORE_PATH__/core-rules/skills/process-gate \
 #         .agents/skills/process-gate
-#   cp __USER_HOME__/projects/se-core/core-rules/codex/hooks.json .codex/hooks.json
-#   cp __USER_HOME__/projects/se-core/core-rules/codex/hooks/*.sh .codex/hooks/
+#   cp __SE_CORE_PATH__/core-rules/codex/hooks.json .codex/hooks.json
+#   cp __SE_CORE_PATH__/core-rules/codex/hooks/*.sh .codex/hooks/
 #   chmod +x .codex/hooks/*.sh
 #   # AGENTS.md at project root: either content + @-import OR symlink → CLAUDE.md
 #   ln -s CLAUDE.md AGENTS.md   # if no Codex-specific divergence is needed
@@ -536,7 +538,7 @@ ln -s __USER_HOME__/projects/se-core/core-rules/skills/process-gate \
 cat > CLAUDE.md <<'EOF'
 # <name>
 
-@__USER_HOME__/projects/se-core/core-rules/CLAUDE.md
+@__SE_CORE_PATH__/core-rules/CLAUDE.md
 
 <1-3 sentence project overview>
 
@@ -545,22 +547,23 @@ cat > CLAUDE.md <<'EOF'
 EOF
 
 # 8. Write gotchas.md (template in se-core/core-rules/templates/gotchas.md)
-cp __USER_HOME__/projects/se-core/core-rules/templates/gotchas.md .
+cp __SE_CORE_PATH__/core-rules/templates/gotchas.md .
 
-# 9. .gitignore (stack-appropriate) + .claude/ exceptions
+# 9. .gitignore — append the SE Core fragment + project-local entries
+cat __SE_CORE_PATH__/core-rules/templates/project.gitignore.fragment >> .gitignore
 cat >> .gitignore <<'EOF'
 context-log.md
 .claude/settings.local.json
 EOF
-# If .claude/ is ignored elsewhere in your .gitignore, add:
-#   !.claude/rules/
-#   !.claude/rules/se-core.md
+# The fragment gitignores the four canonical absolute-path symlinks
+# (.claude/rules/se-core.md, .claude/skills/process-gate,
+#  .agents/rules/se-core.md, .agents/skills/process-gate). Each developer
+# regenerates them post-clone via scripts/onboard-project.sh.
 
 # 10. README.md (template in §9.2)
 
 # 11. Initial commit
 git add -A
-git add -f .claude/rules/se-core.md   # force-add the tracked symlink if needed
 git commit -m "chore: initial scaffold with SE Core inheritance"
 
 # 12. Add to registry.md
@@ -579,14 +582,15 @@ git push -u origin main
 
 - [ ] Read `~/projects/se-core/engineering-process.md` end-to-end. Everything below this line assumes you have.
 - [ ] `ls -la .claude/rules/se-core.md` — symlink exists, points at canonical path.
-- [ ] `readlink .claude/rules/se-core.md` — target is `__USER_HOME__/projects/se-core/core-rules/CLAUDE.md`.
+- [ ] `readlink .claude/rules/se-core.md` — target is `__SE_CORE_PATH__/core-rules/CLAUDE.md`.
 - [ ] `ls .claude/hooks/` — all nine canonical `.sh` files present and executable.
 - [ ] `ls -la .claude/skills/process-gate` — symlink exists, points at canonical `core-rules/skills/process-gate`.
-- [ ] `readlink .claude/skills/process-gate` — target is `__USER_HOME__/projects/se-core/core-rules/skills/process-gate`.
+- [ ] `readlink .claude/skills/process-gate` — target is `__SE_CORE_PATH__/core-rules/skills/process-gate`.
 - [ ] `grep -q '$CLAUDE_PROJECT_DIR' .claude/settings.json` — no hardcoded project paths.
-- [ ] `CLAUDE.md` starts with `@__USER_HOME__/projects/se-core/core-rules/CLAUDE.md` on line 2.
+- [ ] `CLAUDE.md` starts with `@__SE_CORE_PATH__/core-rules/CLAUDE.md` on line 2.
 - [ ] `gotchas.md` exists at project root.
-- [ ] `.gitignore` has `context-log.md` and `.claude/settings.local.json`.
+- [ ] `.gitignore` includes the SE Core symlink fragment (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
+- [ ] `git ls-files .claude/rules/se-core.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
 - [ ] If Codex-enabled: `AGENTS.md`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and `.codex/hooks/*.sh` are present.
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] codex_hooks = true`.
 - [ ] `registry.md` has a row for the new project.
@@ -595,6 +599,20 @@ git push -u origin main
 ### 10.4 Post-onboarding verification
 
 Wait for the next scheduled run of `parent-hook-drift` (Sunday 21:00) and `registry-blacklist-health` (Monday 10:36) — both should come back clean with the new project listed. Or manually trigger them via the scheduled-tasks MCP to verify immediately.
+
+### 10.5 Bootstrapping a fresh clone (every developer, every machine)
+
+The canonical absolute-path symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are gitignored — they encode a per-machine `$SE_CORE_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
+
+```bash
+git clone <repo-url>
+cd <project>
+~/projects/se-core/scripts/onboard-project.sh "$PWD"
+```
+
+`onboard-project.sh` is idempotent: it creates each missing symlink, leaves existing correct ones alone, warns on mismatches, and never overwrites tracked files. Re-running after every `git pull` is harmless.
+
+If you skip this step, Claude Code and Codex sessions in the project will silently run **without** the SE Core parent rules and skills — no error, no warning, just a session quietly missing the load-bearing inheritance file. Add the bootstrap to your project README's "Setup" section so teammates can't miss it.
 
 ---
 

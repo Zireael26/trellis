@@ -6,7 +6,7 @@ Claude Code does **not** cascade `CLAUDE.md` up the directory tree — a child s
 
 Each project under `registry.md` MUST carry a symlink at:
 
-    <project-root>/.claude/rules/se-core.md → __USER_HOME__/projects/se-core/core-rules/CLAUDE.md
+    <project-root>/.claude/rules/se-core.md → __SE_CORE_PATH__/core-rules/CLAUDE.md
 
 Claude Code loads every file under `.claude/rules/` **unconditionally** at session start — no approval dialog, no gate, no TTY dependency. This works identically in interactive and `claude -p` headless modes, which is the property that matters: every automated run (scheduled tasks, cron jobs, subagents, CI) must inherit parent rules without human interaction.
 
@@ -16,7 +16,7 @@ Track the symlink in git so the inheritance is visible in repo state and protect
 
 Every project `CLAUDE.md` also carries an `@`-import line pointing at the canonical path:
 
-    @__USER_HOME__/projects/se-core/core-rules/CLAUDE.md
+    @__SE_CORE_PATH__/core-rules/CLAUDE.md
 
 This is kept for belt-and-braces redundancy in **interactive** sessions only. `@`-imports are gated by Claude Code's trust-verification approval dialog, which:
 
@@ -47,8 +47,8 @@ Every project in `registry.md` must:
 
 Canonical skills live under `core-rules/skills/<name>/` and are inherited via symlinks identical in shape to the rules symlink:
 
-    <project-root>/.claude/skills/<name>/  →  __USER_HOME__/projects/se-core/core-rules/skills/<name>/
-    <project-root>/.agents/skills/<name>/  →  __USER_HOME__/projects/se-core/core-rules/skills/<name>/
+    <project-root>/.claude/skills/<name>/  →  __SE_CORE_PATH__/core-rules/skills/<name>/
+    <project-root>/.agents/skills/<name>/  →  __SE_CORE_PATH__/core-rules/skills/<name>/
 
 The directory itself is symlinked (not individual files) so additions to canonical files appear automatically without per-project re-onboarding. Project-local overrides go in `<project-root>/.claude/skills/<name>/local.config.sh` (or other ungitignored override file the skill defines) — these are project-private, NOT covered by the canonical symlink.
 

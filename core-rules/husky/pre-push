@@ -53,4 +53,33 @@ else
   echo "[pre-push] no test script - skipping"
 fi
 
+# --- security-gate diff scan ---
+# Mode 2: scopes scanners to changed files, dedupes against the latest baseline JSON.
+# Skipped (warn) when no baseline exists. Fails the push only on new Critical/High.
+# Override: SECURITY_GATE_SKIP=1 git push
+if [ "${SECURITY_GATE_SKIP:-0}" = "1" ]; then
+  echo "[pre-push] SECURITY_GATE_SKIP=1 — skipping security-gate diff"
+elif [ -x .claude/skills/security-gate/scripts/run-diff.sh ]; then
+  echo "[pre-push] security-gate diff scan..."
+  if ! bash .claude/skills/security-gate/scripts/run-diff.sh; then
+    rc=$?
+    if [ "$rc" = "1" ]; then
+      echo "[pre-push] security-gate BLOCKED — new Critical/High findings. Justify with SECURITY_GATE_SKIP=1 only in emergencies." >&2
+      exit 1
+    fi
+    # rc=2 (NEEDS CHANGES, warn-only) is non-blocking.
+  fi
+elif [ -x .agents/skills/security-gate/scripts/run-diff.sh ]; then
+  echo "[pre-push] security-gate diff scan (codex)..."
+  if ! bash .agents/skills/security-gate/scripts/run-diff.sh; then
+    rc=$?
+    if [ "$rc" = "1" ]; then
+      echo "[pre-push] security-gate BLOCKED — new Critical/High findings. Justify with SECURITY_GATE_SKIP=1 only in emergencies." >&2
+      exit 1
+    fi
+  fi
+else
+  echo "[pre-push] security-gate not symlinked — skipping (run scripts/onboard-project.sh to install)"
+fi
+
 echo "[pre-push] ok"

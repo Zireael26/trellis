@@ -12,8 +12,8 @@ When sampling worktree state, do NOT invoke `git status` against project worktre
 
 ## Inputs
 
-1. Read `__USER_HOME__/projects/se-core/registry.md`.
-2. Read `__USER_HOME__/projects/se-core/blacklist.md`.
+1. Read `__SE_CORE_PATH__/registry.md`.
+2. Read `__SE_CORE_PATH__/blacklist.md`.
 3. Target set = `registry \ blacklist`.
 
 ## Checks per project
@@ -48,7 +48,7 @@ If no test command can be detected, mark the project as `no-test-configured` and
 
 ## Output
 
-Write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-test-health.md`:
+Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-test-health.md`:
 
 ```
 # Test health — <date>

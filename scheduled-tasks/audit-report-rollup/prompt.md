@@ -1,14 +1,14 @@
 # Audit report rollup (monthly)
 
 You are reading the past month's audit reports in
-`__USER_HOME__/projects/se-core/audits/` and producing
+`__SE_CORE_PATH__/audits/` and producing
 a single executive summary that shows trends across tasks and time. The raw
 audits are detailed and numerous; this rollup is the "did things get better
 or worse?" view.
 
 ## Inputs
 
-1. All files in `__USER_HOME__/projects/se-core/audits/`
+1. All files in `__SE_CORE_PATH__/audits/`
    whose filename starts with a date in the last 35 days (i.e., previous
    calendar month plus a few days of overlap).
 2. For context: the most recent `-rollup` from the prior month (if any), so
@@ -16,8 +16,18 @@ or worse?" view.
 
 ## Audit file naming convention
 
-Audits are named `YYYY-MM-DD-<task-name>.md`. Group by task name. Expected
-task names:
+Authoritative taxonomy: [`scheduled-tasks/README.md` "Audit file naming conventions"](../README.md#audit-file-naming-conventions).
+
+Four file classes live in `audits/`:
+
+| Class | Pattern | Treatment in this rollup |
+|---|---|---|
+| **Audit** (scheduled-task output) | `YYYY-MM-DD-<task>.md` | Group by `<task>`, count per-task runs, compute trends |
+| **Remediation report** | `YYYY-MM-DD-<source-audit>-remediation.md` | Separate class — list under "Remediation activity"; do **not** count toward the source audit's run count |
+| **Plan** | `YYYY-MM-DD-<topic>-plan.md` | Skip in this rollup (loop agent tracks status) |
+| **Source audit** (one-off authored) | `YYYY-MM-DD-<topic>.md` (no `-remediation`/`-plan` suffix; `<topic>` doesn't match a registered task name) | List under "One-off authored audits"; surface findings but don't trend-line |
+
+Recognized scheduled-task names (group regular audits under these):
 
 - `cross-project-process-audit` — weekly
 - `registry-blacklist-health` — weekly
@@ -25,6 +35,29 @@ task names:
 - `bypass-tripwire` — daily (may be silent on clean days; count those too)
 - `parent-hook-drift` — weekly
 - `gotchas-rollup` — monthly (one file, from the 1st)
+- `dep-currency` — weekly
+- `dep-vulnerabilities` — daily
+- `dep-major-upgrade-watch` — monthly
+- `security-baseline` — quarterly
+
+## Eval harness inputs
+
+Phase 4 P4.3 ships an eval harness at `core-rules/evals/`. Per-run results land under `core-rules/evals/.results/<timestamp>.json` (gitignored). Schema: see [`core-rules/evals/SCHEMA.md`](../../core-rules/evals/SCHEMA.md).
+
+For this rollup, look for eval-results files in the last 30 days under `core-rules/evals/.results/`. Each results file's top-level shape is:
+
+```json
+{
+  "schema_version": 1,
+  "started_at": "...",
+  "fixtures": [ { "id": "...", "project": "...", "pass_rate": 0.8, "passed": true, ... } ],
+  "summary": { "total": <N>, "passed": <N>, "failed": <N>, "pass_rate": 0.0–1.0 }
+}
+```
+
+If no results files exist (i.e., `ANTHROPIC_API_KEY` not yet wired per plan task P4.4a, or no PRs ran the workflow's `run` job yet), surface that in the rollup as: "Eval harness shipped (PRs #44/#47/#48-50/#52-53), runtime not yet wired — eval pass-rate trend unavailable until P4.4a lands." Do not synthesize results.
+
+If results files exist, treat them as inputs alongside audit files: per-fixture pass-rate, per-project rollup, 30-day trend. Promote-rule rule (per audit §6 P4.4): rule-changes (PRs touching `core-rules/CLAUDE.md`, `core-rules/hooks/*.sh`, or any skill prompt) should not regress eval pass-rate. Flag any rule-touching PR whose post-merge eval pass-rate is below the prior 7-day median.
 
 ## Process
 
@@ -58,7 +91,7 @@ prompt-level rule. Surface these explicitly.
 
 ## Output
 
-Write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-audit-rollup.md` (monthly, 1st of the month):
+Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-audit-rollup.md` (monthly, 1st of the month):
 
 ```
 # Audit rollup — <YYYY-MM>
@@ -83,6 +116,22 @@ Missed runs usually mean the app wasn't open at the scheduled time. If a run was
 | Critical | <N> | <N> | <+/-> |
 | Warning | <N> | <N> | <+/-> |
 | Info | <N> | <N> | <+/-> |
+
+## Eval pass-rate (last 30 days)
+
+If `core-rules/evals/.results/` has results files in the window:
+
+| Project | Fixtures | Pass-rate (median) | Trend (7d) | Notes |
+|---|---|---|---|---|
+| neev | 10 | <0.0–1.0> | <+/-> | <regression flags or empty> |
+| tgsc | 10 | <...> | <...> | <...> |
+| akaushik.org | 10 | <...> | <...> | <...> |
+| curat.money | 10 | <...> | <...> | <...> |
+| vericite | 10 | <...> | <...> | <...> |
+| lume | 10 | <...> | <...> | <...> |
+| **Fleet** | 60 | <...> | <...> | <...> |
+
+If no results files in the window, replace the table with: "Eval harness landed (PRs #44, #47, #48–53). Awaiting `ANTHROPIC_API_KEY` wiring (plan task P4.4a) before runtime data flows. No regression signal yet."
 
 ## Per-task highlights
 

@@ -6,8 +6,8 @@ three files/directories below.
 
 ## Inputs
 
-1. `__USER_HOME__/projects/se-core/registry.md`
-2. `__USER_HOME__/projects/se-core/blacklist.md`
+1. `__SE_CORE_PATH__/registry.md`
+2. `__SE_CORE_PATH__/blacklist.md`
 3. Filesystem: `__PROJECTS_ROOT__/*/` (scan for git repos)
 
 ## Scope

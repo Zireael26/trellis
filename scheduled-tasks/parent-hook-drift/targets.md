@@ -1,6 +1,6 @@
 # Targets — parent-hook-drift
 
-Reads `__USER_HOME__/projects/se-core/registry.md` at
+Reads `__SE_CORE_PATH__/registry.md` at
 runtime. Target set = `registry \ blacklist`.
 
 ## Scope
@@ -8,33 +8,22 @@ runtime. Target set = `registry \ blacklist`.
 - Weekly, Sunday at 9 PM — deliberately end-of-week and late, so the
   Monday morning audits can act on findings the same week.
 - Compares each project's `.claude/hooks/` against canonical in
-  `__USER_HOME__/projects/se-core/core-rules/hooks/`.
+  `__SE_CORE_PATH__/core-rules/hooks/`.
 
 ## Canonical hook manifest
 
-Maintained in the prompt. As of 2026-04-20 the nine canonical hooks are:
+**Single source of truth:** [`core-rules/hooks/README.md`](../../core-rules/hooks/README.md) — the Tier 1 + Tier 2 tables list every canonical hook by name and tier.
 
-```
-session-context.sh
-save-context-log.sh
-post-compact-context.sh
-block-destructive.sh
-post-edit-verify.sh
-truncation-check.sh
-ui-verify.sh
-stop-verify.sh
-code-review-subagent.sh
-```
+For audit-runtime matcher detail (which Claude Code event + matcher each hook must wire to in `settings.json`), see [`./prompt.md`](./prompt.md) "Canonical Claude hook manifest" section.
 
-Update both `prompt.md` and this file when adding or removing a canonical
-hook.
+Earlier versions of this file kept the hook list inline. That created drift risk: adding a hook needed three edits (the README, this file, and `prompt.md`). Plan task P3.7 collapsed the duplication.
 
 ## Per-project allowlisted extras
 
 Projects are allowed to have hooks beyond the canonical set. Known extras:
 
 ```
-msme-neev: check-module-boundary.sh
+neev: check-module-boundary.sh
 ```
 
 No other project-specific hooks as of 2026-04-20. If new ones appear, add

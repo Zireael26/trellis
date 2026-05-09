@@ -100,7 +100,7 @@ if [ -n "${PROCESS_GATE_COVERAGE_CMD:-}" ]; then
   floor="${PROCESS_GATE_COVERAGE_FLOOR:-0}"
   if [ -n "$pct" ] && [ "$(printf '%.0f' "$pct")" -lt "$floor" ]; then
     findings+=("coverage: ${pct}% < floor ${floor}%")
-    [ "$worst" = "pass" ] && worst="warn"
+    if [ "$worst" = "pass" ]; then worst="warn"; fi
   fi
 fi
 

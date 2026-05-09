@@ -21,10 +21,12 @@ set -u
 
 INPUT=$(cat)
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "post-edit-verify: jq not found; skipping" >&2
-  exit 0
-fi
+# Source shared lib (sibling to this script) + enforce jq dependency.
+__se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
+[ -f "$__se_lib" ] || { echo "post-edit-verify: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/deps.sh disable=SC1090
+. "$__se_lib"
+_se_require_jq "post-edit-verify"
 
 FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty')
 

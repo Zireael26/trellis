@@ -18,7 +18,7 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, Cl
 ### block-destructive
 - **Event:** `PreToolUse` on `Bash`
 - **Triggers:** command matches any of —
-  - `rm` with force flags targeting `/`, `~`, `$HOME`, or `..` (not blanket `rm -rf` — that legitimately appears in build scripts)
+  - `rm` with force flags targeting any **absolute path**, `~`, `$HOME`, or `..` (e.g. `rm -rf /`, `rm -rf /Users/me/foo`, `rm -rf ~/work`, `rm -rf ../sibling`); allows relative-cwd targets (`rm -rf .`, `rm -rf ./build`, `rm -rf node_modules`) so blanket cleanups in build scripts still pass
   - `git push --force` / `-f` / `--force-with-lease` on any branch
   - `git reset --hard` targeting `HEAD`, `HEAD~N`, or `origin/*`
   - SQL `DROP TABLE`, `DROP DATABASE`, `TRUNCATE TABLE`, or `DELETE FROM` without a `WHERE` clause

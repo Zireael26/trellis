@@ -145,6 +145,30 @@ sync_one() {
     fi
   done
 
+  # Sibling lib/: ship shared helpers (P3.5) alongside the hook scripts.
+  if [ -d "$CANONICAL_HOOKS_DIR/lib" ]; then
+    for src in "$CANONICAL_HOOKS_DIR/lib"/*.sh; do
+      local fn dst src_sha dst_sha
+      fn="$(basename "$src")"
+      dst="$proj/.claude/hooks/lib/$fn"
+
+      if [ ! -f "$dst" ]; then
+        echo "  + would add: lib/$fn"
+        $DRY_RUN || { mkdir -p "$proj/.claude/hooks/lib"; cp "$src" "$dst"; }
+        changed=$((changed+1))
+        continue
+      fi
+
+      src_sha="$(shasum -a 256 "$src" | awk '{print $1}')"
+      dst_sha="$(shasum -a 256 "$dst" | awk '{print $1}')"
+      if [ "$src_sha" != "$dst_sha" ]; then
+        echo "  ~ would update: lib/$fn"
+        $DRY_RUN || cp "$src" "$dst"
+        changed=$((changed+1))
+      fi
+    done
+  fi
+
   if [ "$changed" -eq 0 ]; then
     echo "  (in sync)"
   fi

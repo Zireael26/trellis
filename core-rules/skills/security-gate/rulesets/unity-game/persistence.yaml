@@ -1,0 +1,59 @@
+rules:
+  - id: unity-game.playerprefs-credentials
+    message: >-
+      PlayerPrefs is plaintext on every platform — even iOS/Android keychain
+      is not used unless the project wires it manually. Storing tokens,
+      session IDs, IAP receipts, or any credential here lets a rooted /
+      jailbroken device extract them with one shell command. Use
+      Keychain/Keystore via a platform plugin (or encrypt with a per-device
+      key derived from a hardware-bound source).
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-312"
+    pattern-either:
+      - patterns:
+          - pattern: PlayerPrefs.SetString($KEY, $V)
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: '(?i)"(.*)(token|secret|password|passwd|api[_-]?key|session|jwt|auth|receipt|credential)(.*)"'
+
+  - id: unity-game.json-save-no-signature
+    message: >-
+      Save data is serialized with JsonUtility but no integrity signature
+      is computed. A user editing the save file on disk can grant
+      themselves resources, change progression flags, or set a paid IAP
+      flag. Compute an HMAC over the JSON with a per-install key (kept in
+      Keychain/Keystore) and verify on load — the mismatch means tampering.
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-345"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              File.WriteAllText($PATH, JsonUtility.ToJson($O, ...))
+          - pattern: |
+              File.WriteAllText($PATH, JsonUtility.ToJson($O))
+      - pattern-not-inside: |
+          if ($COND) { ... }
+      - pattern-not: |
+          File.WriteAllText("...", ...)
+
+  - id: unity-game.binary-formatter-deserialize
+    message: >-
+      BinaryFormatter.Deserialize on attacker-controlled input is remote
+      code execution — Microsoft has formally deprecated it for that
+      reason. If this is loading a save file, the user IS the attacker
+      against IAP-gated content. Switch to a typed JSON or MessagePack
+      flow with strict schema validation.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-502"
+    pattern-either:
+      - pattern: new BinaryFormatter()
+      - pattern: $BF.Deserialize($S)

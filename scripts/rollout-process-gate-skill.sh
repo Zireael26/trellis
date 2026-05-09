@@ -48,6 +48,7 @@ DRY_RUN=false
 ASSUME_YES=false
 ONLY_PROJECT=""
 DATE_TAG="$(date +%Y%m%d)"
+SEEDED_LOCAL_CONFIGS=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -124,11 +125,13 @@ seed_local_config() {
   cfg_dir="$p/$harness_dir/skills/process-gate-local"
   local cfg="$cfg_dir/local.config.sh"
   if [ -f "$cfg" ]; then
-    echo "  skip (local config exists): ${cfg#$p/}"
+    echo "  skip (local config exists): ${cfg#"$p"/}"
     return
   fi
   $DRY_RUN && { echo "  + would seed: $harness_dir/skills/process-gate-local/local.config.sh ($profile)"; return; }
   mkdir -p "$cfg_dir"
+  # Track that we seeded a new local config in this run so the footer can warn about it.
+  SEEDED_LOCAL_CONFIGS+=("${cfg#"$PROJECTS_ROOT"/}")
   cat > "$cfg" <<EOF
 # Project-local process-gate overrides for $(basename "$p")
 # Loaded by canonical scripts via:
@@ -285,9 +288,30 @@ done
 
 echo "== done =="
 echo
+
+if [ "${#SEEDED_LOCAL_CONFIGS[@]:-0}" -gt 0 ]; then
+  echo "!! Newly seeded local.config.sh files in this run:" >&2
+  for c in "${SEEDED_LOCAL_CONFIGS[@]}"; do echo "   - $c" >&2; done
+  echo "   These contain DEFAULT skeleton values. Before committing:" >&2
+  echo "   - customize stack profile, test commands, validators per project" >&2
+  echo "   - if main already carries a customized version, REBASE and discard" >&2
+  echo "     the seeded skeleton — never replace customized config with the seed." >&2
+  echo >&2
+fi
+
 echo "Per-project next steps:"
 echo "  1. cd <project>"
-echo "  2. review .claude/skills/process-gate-local/local.config.sh and, if Codex-enabled, .agents/skills/process-gate-local/local.config.sh"
-echo "  3. for projects with backed-up content: review .claude/skills/process-gate.local-backup-$DATE_TAG/"
-echo "     and migrate any keepers into process-gate-local/ as scripts or reference docs"
-echo "  4. git add .claude/skills/ .agents/ AGENTS.md && git commit -m 'chore: rollout SE Core process-gate skill'"
+echo "  2. The four canonical symlinks (.claude/rules/se-core.md, .claude/skills/process-gate,"
+echo "     .agents/rules/se-core.md, .agents/skills/process-gate) are gitignored — do NOT"
+echo "     stage them. They live on this machine only; teammates regenerate via onboard-project.sh."
+echo "  3. Review .claude/skills/process-gate-local/local.config.sh and, if Codex-enabled,"
+echo "     .agents/skills/process-gate-local/local.config.sh — customize stack profile,"
+echo "     test commands, validators. Commit local.config.sh files in a SEPARATE PR titled"
+echo "     'chore: customize process-gate local.config.sh' with the customizations applied —"
+echo "     never commit the seeded skeleton over an existing customized config."
+echo "  4. For projects with backed-up content: review .claude/skills/process-gate.local-backup-$DATE_TAG/"
+echo "     and migrate any keepers into process-gate-local/ as scripts or reference docs."
+echo "  5. Verify the project's .gitignore contains the SE Core symlink fragment"
+echo "     (.claude/rules/se-core.md, .claude/skills/process-gate, .agents/rules/se-core.md,"
+echo "     .agents/skills/process-gate). If absent, append from"
+echo "     core-rules/templates/project.gitignore.fragment in se-core."

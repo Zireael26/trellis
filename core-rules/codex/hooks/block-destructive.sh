@@ -19,10 +19,12 @@ set -u
 INPUT=$(cat)
 
 # Degrade gracefully if jq is missing — surface the problem via stderr, don't block.
-if ! command -v jq >/dev/null 2>&1; then
-  echo "block-destructive: jq not found; skipping checks" >&2
-  exit 0
-fi
+# Source shared lib (sibling to this script) + enforce jq dependency.
+__se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
+[ -f "$__se_lib" ] || { echo "block-destructive: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/deps.sh disable=SC1090
+. "$__se_lib"
+_se_require_jq "block-destructive"
 
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 
@@ -38,10 +40,11 @@ emit_deny() {
   exit 2
 }
 
-# --- rm with force flags targeting /, ~, $HOME, or .. ---
-# Intentionally does NOT block blanket `rm -rf` in build scripts.
-if printf '%s' "$COMMAND" | grep -qE 'rm[[:space:]]+(-[a-zA-Z]*f[a-zA-Z]*[[:space:]]+|(-[a-zA-Z]+[[:space:]]+)*)(/|~|\$HOME|\.\.)(/|[[:space:]]|$)'; then
-  emit_deny "Blocked destructive rm targeting /, ~, \$HOME, or .. — run manually if intentional."
+# --- rm with force flags targeting any absolute path, ~, $HOME, or .. ---
+# Intent: block `rm -rf <absolute-or-parent>`; allow `rm -rf .`, `rm -rf ./build`, `rm -rf node_modules`.
+# Tail change vs. earlier rooted-at-/ form: the path may be /Users/me/foo, ~/work, $HOME/cache, ../sibling, ../foo/bar — match through to whitespace/EOL.
+if printf '%s' "$COMMAND" | grep -qE 'rm[[:space:]]+(-[a-zA-Z]*f[a-zA-Z]*[[:space:]]+|(-[a-zA-Z]+[[:space:]]+)*)((/|~|\$HOME)[^[:space:]]*|\.\.(/[^[:space:]]*)?)([[:space:]]|$)'; then
+  emit_deny "Blocked destructive rm targeting absolute path, ~, \$HOME, or .. — run manually if intentional."
 fi
 
 # --- git push --force / -f / --force-with-lease on any branch ---
@@ -60,9 +63,10 @@ if printf '%s' "$COMMAND" | grep -qiE 'DROP[[:space:]]+(TABLE|DATABASE)|TRUNCATE
 fi
 
 # --- SQL: DELETE FROM <table> without a WHERE clause ---
-# Upstream didn't have this. Match DELETE FROM ... where no WHERE exists before statement end (; or EOL).
-if printf '%s' "$COMMAND" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+[^;]*$' \
-   && ! printf '%s' "$COMMAND" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+.+[[:space:]]+WHERE[[:space:]]+'; then
+# Upstream didn't have this. Trigger on `DELETE FROM <ident>` anywhere; allow if `WHERE` appears anywhere on the same command line.
+# Earlier `[^;]*$` form required no semicolon to EOL — broke on terminated SQL like `DELETE FROM users;`.
+if printf '%s' "$COMMAND" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+["`]?[a-zA-Z_][a-zA-Z0-9_."`]*' \
+   && ! printf '%s' "$COMMAND" | grep -qiE '[[:space:]]+WHERE[[:space:]]+'; then
   emit_deny "Blocked DELETE FROM without WHERE — unbounded delete, run manually if intentional."
 fi
 

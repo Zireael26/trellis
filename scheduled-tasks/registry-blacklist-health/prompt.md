@@ -4,25 +4,25 @@ You are verifying the control-plane files — `registry.md` and `blacklist.md` �
 
 ## Canonical paths (authoritative)
 
-- SE Core control plane: `__USER_HOME__/projects/se-core/`
+- SE Core control plane: `__SE_CORE_PATH__/`
 - Personal projects root: `__PROJECTS_ROOT__/`
 
-These are the only authoritative paths. Any alternate paths that may appear in prior run notes, user memory, or snapshots (e.g., `~/Documents/Claude/Projects/Software Engineering Core/`, `~/Documents/Software Engineering Core/`) are **pre-migration artifacts**. Do not fall back to them. Do not "reconcile" output to them. Do not include them in report footers as a "canonical" alternate. The migration to `__USER_HOME__/projects/se-core/` is complete.
+These are the only authoritative paths. Any alternate paths that may appear in prior run notes, user memory, or snapshots (e.g., `~/Documents/Claude/Projects/Software Engineering Core/`, `~/Documents/Software Engineering Core/`) are **pre-migration artifacts**. Do not fall back to them. Do not "reconcile" output to them. Do not include them in report footers as a "canonical" alternate. The migration to `__SE_CORE_PATH__/` is complete.
 
 ## Environment guard
 
 Before running checks, verify the audit environment mounts the canonical paths:
 
-- `[ -d __USER_HOME__/projects/se-core ]`
-- `[ -f __USER_HOME__/projects/se-core/registry.md ]`
+- `[ -d __SE_CORE_PATH__ ]`
+- `[ -f __SE_CORE_PATH__/registry.md ]`
 - `[ -d __PROJECTS_ROOT__ ]`
 
 If any fail, emit a single **info** finding — `SE Core mount not available in audit environment; audit skipped` — and stop. Do not read `registry.md` or `blacklist.md` from any other location. Do not emit control-plane findings based on an absent mount.
 
 ## Inputs
 
-1. `__USER_HOME__/projects/se-core/registry.md` — list of active projects (opt-in).
-2. `__USER_HOME__/projects/se-core/blacklist.md` — temporary opt-outs with review-after dates.
+1. `__SE_CORE_PATH__/registry.md` — list of active projects (opt-in).
+2. `__SE_CORE_PATH__/blacklist.md` — temporary opt-outs with review-after dates.
 3. Filesystem scan of `__PROJECTS_ROOT__/` for directories containing a `.git/`.
 
 ## Checks
@@ -57,7 +57,7 @@ For each entry in `blacklist.md`:
 
 ## Output
 
-Write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-registry-blacklist-health.md`:
+Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-registry-blacklist-health.md`:
 
 ```
 # Registry & blacklist health — <date>

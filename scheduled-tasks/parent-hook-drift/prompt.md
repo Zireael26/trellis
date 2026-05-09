@@ -1,9 +1,9 @@
 # Parent-hook drift (weekly)
 
 You are verifying that the canonical parent-layer artifacts —
-hook scripts in `__USER_HOME__/projects/se-core/core-rules/hooks/`
-Codex hook assets in `__USER_HOME__/projects/se-core/core-rules/codex/`
-**and** canonical skills in `__USER_HOME__/projects/se-core/core-rules/skills/` —
+hook scripts in `__SE_CORE_PATH__/core-rules/hooks/`
+Codex hook assets in `__SE_CORE_PATH__/core-rules/codex/`
+**and** canonical skills in `__SE_CORE_PATH__/core-rules/skills/` —
 are **byte-identical** to their deployed copies in each registered project.
 The parent layer only has teeth if projects actually inherit the current
 version — silent drift defeats the whole point.
@@ -12,18 +12,18 @@ This audit covers two artifact classes:
 
 1. **Hook drift** — files copied into `<project>/.claude/hooks/` (must be byte-identical copies of canonical).
 2. **Codex hook drift** — files copied into `<project>/.codex/` (must be byte-identical copies of canonical when Codex is enabled).
-3. **Skill drift** — symlinks at `<project>/.claude/skills/<name>/` (and `<project>/.agents/skills/<name>/` if Codex-enabled) MUST resolve to the canonical directory under `__USER_HOME__/projects/se-core/core-rules/skills/<name>/`. Symlink target verification, not byte-content (the symlink IS the inheritance).
+3. **Skill drift** — symlinks at `<project>/.claude/skills/<name>/` (and `<project>/.agents/skills/<name>/` if Codex-enabled) MUST resolve to the canonical directory under `__SE_CORE_PATH__/core-rules/skills/<name>/`. Symlink target verification, not byte-content (the symlink IS the inheritance).
 
 ## Inputs
 
 1. Canonical hook source:
-   `__USER_HOME__/projects/se-core/core-rules/hooks/*.sh`
+   `__SE_CORE_PATH__/core-rules/hooks/*.sh`
 2. Canonical Codex hook source:
-   `__USER_HOME__/projects/se-core/core-rules/codex/hooks.json` and `__USER_HOME__/projects/se-core/core-rules/codex/hooks/*.sh`
+   `__SE_CORE_PATH__/core-rules/codex/hooks.json` and `__SE_CORE_PATH__/core-rules/codex/hooks/*.sh`
 3. Canonical skills source:
-   `__USER_HOME__/projects/se-core/core-rules/skills/*/`
-4. Read `__USER_HOME__/projects/se-core/registry.md`
-5. Read `__USER_HOME__/projects/se-core/blacklist.md`
+   `__SE_CORE_PATH__/core-rules/skills/*/`
+4. Read `__SE_CORE_PATH__/registry.md`
+5. Read `__SE_CORE_PATH__/blacklist.md`
 6. Target set = `registry \ blacklist`.
 
 ## Canonical hook manifest
@@ -54,8 +54,8 @@ are not checked by this task.
 
 When parent `se-core.config.json` includes `"codex"` in `harnesses`, each project must carry:
 
-- `<project>/.codex/hooks.json`, byte-identical to `__USER_HOME__/projects/se-core/core-rules/codex/hooks.json`
-- `<project>/.codex/hooks/*.sh`, byte-identical to `__USER_HOME__/projects/se-core/core-rules/codex/hooks/*.sh`
+- `<project>/.codex/hooks.json`, byte-identical to `__SE_CORE_PATH__/core-rules/codex/hooks.json`
+- `<project>/.codex/hooks/*.sh`, byte-identical to `__SE_CORE_PATH__/core-rules/codex/hooks/*.sh`
 - all `.sh` files executable
 
 The manifest must use environment-relative commands such as `${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/...`; hardcoded project paths are drift.
@@ -114,7 +114,7 @@ Canonical skills currently shipped: `process-gate`.
 For each canonical skill, verify the project carries the inheritance symlink:
 
 - `<project>/.claude/skills/<name>/` exists AND is a symlink
-- `readlink <project>/.claude/skills/<name>/` resolves to `__USER_HOME__/projects/se-core/core-rules/skills/<name>/` (or the equivalent canonical path)
+- `readlink <project>/.claude/skills/<name>/` resolves to `__SE_CORE_PATH__/core-rules/skills/<name>/` (or the equivalent canonical path)
 
 Missing or wrong target → **critical: skill not inherited**. The skill will silently not load.
 
@@ -142,7 +142,7 @@ For each project, the project-local `<project>/.claude/skills/process-gate-local
 
 ## Output
 
-Write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-parent-hook-drift.md`:
+Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-parent-hook-drift.md`:
 
 ```
 # Parent-hook drift — <date>

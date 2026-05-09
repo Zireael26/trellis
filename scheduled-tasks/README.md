@@ -20,9 +20,9 @@ prompt can be edited here in version control without reregistering the task.
 
 ## Tier 1 — registered and running
 
-Nine centralized tasks cover: hook compliance, process bypasses, test health,
-control-plane hygiene, pattern rollup, executive summary, and dependency
-posture (security, currency, major-version watch).
+Ten centralized tasks cover: hook compliance, process bypasses, test health,
+control-plane hygiene, pattern rollup, executive summary, dependency posture
+(security, currency, major-version watch), and fleet-wide security baseline.
 
 | Task | Cadence | Cron (local) | Purpose |
 |---|---|---|---|
@@ -36,6 +36,7 @@ posture (security, currency, major-version watch).
 | `gotchas-rollup` | Monthly | `0 9 1 * *` (1st 09:00) | Rule-of-Three aggregator — n≥3 → promote, n=2 → defer. |
 | `audit-report-rollup` | Monthly | `0 10 1 * *` (1st 10:00) | Month-over-month trend report across all other audits. |
 | `dep-major-upgrade-watch` | Monthly | `0 11 1 * *` (1st 11:00) | Curated framework-tier (Next, React, TS, Node…) drift vs. watchlist targets. |
+| `security-baseline` | Quarterly | `0 5 1 1,4,7,10 *` (Q1/Q2/Q3/Q4 1st 05:00) | Mode 1 fleet-wide security baseline (semgrep + osv-scanner + gitleaks). Host-pinned. Rewrites per-project baseline JSON; diff scans dedupe against newest. |
 
 **Ordering rationale:**
 
@@ -126,6 +127,31 @@ Every `targets.md` should specify:
 4. **Tunable thresholds** — if the task has magic numbers, surface them
    here with defaults and override syntax.
 
+---
+
+## Audit file naming conventions
+
+Two file classes live side-by-side in `audits/`. The audit-report-rollup
+distinguishes them when computing run counts and trends.
+
+| Class | Filename pattern | Example | Source |
+|---|---|---|---|
+| **Audit** (scheduled-task output) | `YYYY-MM-DD-<task>.md` | `2026-05-08-cross-project-process-audit.md` | One of the registered tasks above |
+| **Remediation report** (post-audit fix narrative) | `YYYY-MM-DD-<source-audit>-remediation.md` | `2026-04-27-cross-project-process-audit-remediation.md` | Hand-authored after a remediation cycle |
+| **Plan** (executable contract for a remediation cycle) | `YYYY-MM-DD-<topic>-plan.md` | `2026-05-08-se-core-meta-audit-plan.md` | Hand-authored alongside / before remediation |
+| **Source audit** (one-off deep audit) | `YYYY-MM-DD-<topic>.md` | `2026-05-08-se-core-meta-audit.md` | Hand-authored, not from a scheduled task |
+
+Rules:
+- The `-remediation.md` suffix is **load-bearing** — `audit-report-rollup`'s
+  parser must treat these as a separate class so monthly run counts of the
+  underlying scheduled task aren't double-counted by their remediation reports.
+- Plan files (`-plan.md` suffix) are also separate from regular audits — they
+  are status-tracked by the loop agent, not by the rollup.
+- Source audits without `-remediation` or `-plan` suffix and without a
+  task-name match are one-off authored audits — surface them in the rollup
+  but don't try to compute trend lines.
+- Plan task: P3.8 introduced this taxonomy. P3.6 conformance test enforces it.
+
 Some tasks also carry a curated, human-edited reference file alongside
 `prompt.md` / `targets.md` (e.g., `dep-major-upgrade-watch/watchlist.md`).
 Convention: name it for what it contains, document the read/write contract
@@ -142,7 +168,7 @@ The three dependency tasks (`dep-vulnerabilities`, `dep-currency`, `dep-major-up
 
 Each scheduled task captures its connected-folder set **at registration time** from the session that registered it. The cron path runs the task with that captured set; "Run now" inherits the calling Cowork session's set instead.
 
-**Required folder set for dep-* tasks:** both `__USER_HOME__/projects/se-core/` and `__PROJECTS_ROOT__/`. Reference: `cross-project-process-audit` and `gotchas-rollup` are configured this way and run successfully.
+**Required folder set for dep-* tasks:** both `__SE_CORE_PATH__/` and `__PROJECTS_ROOT__/`. Reference: `cross-project-process-audit` and `gotchas-rollup` are configured this way and run successfully.
 
 **If you create or recreate a dep-* task**, do it from a Cowork session that has both folders connected — otherwise the new registration will only capture `se-core/` and the task will hit the connected-folder preflight on every run, write a stub report, and exit. The MCP scheduler tool (`create_scheduled_task` / `update_scheduled_task`) does not expose folder selection; the only way to fix a misregistered task is to delete and recreate from a properly-connected session, or edit folder selection in the Cowork app's task-settings UI.
 

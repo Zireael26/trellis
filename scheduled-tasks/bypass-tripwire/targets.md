@@ -1,6 +1,6 @@
 # Targets — bypass-tripwire
 
-Reads `__USER_HOME__/projects/se-core/registry.md` at runtime. The registry minus `blacklist.md` is the target set — no hardcoded paths.
+Reads `__SE_CORE_PATH__/registry.md` at runtime. The registry minus `blacklist.md` is the target set — no hardcoded paths.
 
 ## Scope
 

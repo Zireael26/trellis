@@ -4,8 +4,8 @@ You are running a daily scan for process bypasses across the user's active perso
 
 ## Inputs
 
-1. Read `__USER_HOME__/projects/se-core/registry.md`.
-2. Read `__USER_HOME__/projects/se-core/blacklist.md`.
+1. Read `__SE_CORE_PATH__/registry.md`.
+2. Read `__SE_CORE_PATH__/blacklist.md`.
 3. Target set = `registry \ blacklist`.
 
 ## Checks per project
@@ -35,7 +35,7 @@ Everything at this cadence is **critical** by construction — that's why we run
 
 If **nothing** is found: do not write a file. Report "No bypasses detected across N projects in the last 24 hours" and exit.
 
-If **anything** is found: write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-bypass-tripwire.md` with:
+If **anything** is found: write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-bypass-tripwire.md` with:
 
 ```
 # Bypass tripwire — <date>

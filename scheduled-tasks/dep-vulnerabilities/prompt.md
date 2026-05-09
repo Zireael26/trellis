@@ -6,7 +6,7 @@ You are scanning every active project's dependency graph for **known security vu
 
 This audit runs in the standard scheduled-task sandbox (Linux aarch64). The sandbox has:
 
-- **File tools** (`Read`, `Glob`, `Grep`) with access to `__USER_HOME__/projects/se-core/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all lockfile / manifest reads. The `cross-project-process-audit` audit uses the same access pattern successfully.
+- **File tools** (`Read`, `Glob`, `Grep`) with access to `__SE_CORE_PATH__/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all lockfile / manifest reads. The `cross-project-process-audit` audit uses the same access pattern successfully.
 - **Bash sandbox** (`mcp__workspace__bash`) with `curl`, `jq`, and `npm` available, plus public-internet network. **Bash does NOT see `__PROJECTS_ROOT__/`.** Don't `ls` or `cat` project files from bash — it will return "No such file or directory" and an earlier version of this audit mistook that for "project paths unmounted." Use `Read` / `Glob` for project paths; use bash only for HTTP calls.
 - `osv-scanner`, `pnpm`, `bun`, `cargo`, `go` are **not** installed in the sandbox. Don't rely on them. Vulnerability data comes from osv.dev's HTTP API directly.
 
@@ -24,10 +24,10 @@ When sampling worktree state, do NOT invoke `git status` against project worktre
 
 ## Inputs
 
-1. `Read` `__USER_HOME__/projects/se-core/registry.md`.
-2. `Read` `__USER_HOME__/projects/se-core/blacklist.md` (both sections).
+1. `Read` `__SE_CORE_PATH__/registry.md`.
+2. `Read` `__SE_CORE_PATH__/blacklist.md` (both sections).
 3. Target set = `registry \ blacklist` (sections 1 + 2).
-4. Read prior audit at `__USER_HOME__/projects/se-core/audits/<previous-date>-dep-vulnerabilities.md` if present (use `Glob` to find the most recent) — used only for the "newly introduced this run" delta.
+4. Read prior audit at `__SE_CORE_PATH__/audits/<previous-date>-dep-vulnerabilities.md` if present (use `Glob` to find the most recent) — used only for the "newly introduced this run" delta.
 
 ## Connected-folder preflight (do this FIRST, before per-project work)
 
@@ -163,7 +163,7 @@ Do not attempt `pnpm audit` or `bun audit`; the binaries aren't installed.
 
 ## Output
 
-Write to `__USER_HOME__/projects/se-core/audits/YYYY-MM-DD-dep-vulnerabilities.md`:
+Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-dep-vulnerabilities.md`:
 
 ```
 # Dependency vulnerabilities — <date>

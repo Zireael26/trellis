@@ -69,7 +69,9 @@ SYNC_PATHS=(
   "se-core.config.json"
 )
 
-# Files NEVER synced (private / instance-specific)
+# Files NEVER synced (private / instance-specific) — informational; the
+# actual exclusion is implemented via SYNC_PATHS being a positive allowlist.
+# shellcheck disable=SC2034  # documents intent; not consumed
 NEVER_SYNC=(
   "registry.md"
   "blacklist.md"

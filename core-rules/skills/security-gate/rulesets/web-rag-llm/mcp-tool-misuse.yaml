@@ -1,0 +1,61 @@
+rules:
+  - id: web-rag-llm.mcp-tool-no-input-validation
+    message: >-
+      MCP tool handler reads incoming arguments without schema validation
+      against `inputSchema`. The model can be coerced (via prompt injection,
+      compromised retrieval, or chained tool misuse) into calling tools with
+      malformed or boundary-crossing arguments. Validate every arg before
+      use, ideally via a generated schema validator (zod, ajv) so drift
+      between `inputSchema` and runtime is detected.
+    severity: ERROR
+    languages: [typescript, javascript]
+    metadata:
+      category: security
+      owasp: "LLM06:2025 Excessive Agency"
+    patterns:
+      - pattern: |
+          server.tool($NAME, { inputSchema: $SCHEMA, ... }, async ($ARGS) => {
+            ...
+          })
+      - pattern-not: |
+          server.tool($NAME, { inputSchema: $SCHEMA, ... }, async ($ARGS) => {
+            ...
+            $VALIDATOR($ARGS, ...)
+            ...
+          })
+      - pattern-not: |
+          server.tool($NAME, { inputSchema: $SCHEMA, ... }, async ($ARGS) => {
+            ...
+            $SCHEMA.parse($ARGS)
+            ...
+          })
+
+  - id: web-rag-llm.mcp-tool-shell-command-with-user-args
+    message: >-
+      MCP tool passes argument-derived strings into a shell-spawning API.
+      A compromised model (via prompt injection or RAG poisoning) can
+      compose tool calls into arbitrary command execution. Use argv-array
+      forms with no shell (e.g. execFile), validate against an allowlist,
+      and never construct command strings via concatenation.
+    severity: ERROR
+    languages: [typescript, javascript]
+    metadata:
+      category: security
+      cwe: "CWE-78"
+      owasp: "LLM06:2025 Excessive Agency"
+    pattern-either:
+      - patterns:
+          - pattern: |
+              server.tool($NAME, ..., async ($ARGS) => {
+                ...
+                $SHELL_FN($CMD, ...)
+                ...
+              })
+          - metavariable-regex:
+              metavariable: $SHELL_FN
+              regex: '^(exec|execSync|spawn|spawnSync)$'
+          - metavariable-pattern:
+              metavariable: $CMD
+              patterns:
+                - pattern-not: '"..."'
+                - pattern-not: "`...`"

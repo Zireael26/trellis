@@ -18,9 +18,12 @@ set -u
 
 INPUT=$(cat 2>/dev/null || true)
 
-if ! command -v jq >/dev/null 2>&1; then
-  exit 0
-fi
+# Source shared lib (sibling to this script) + enforce jq dependency.
+__se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
+[ -f "$__se_lib" ] || { echo "session-context: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/deps.sh disable=SC1090
+. "$__se_lib"
+_se_require_jq "session-context"
 
 SOURCE=$(printf '%s' "$INPUT" | jq -r '.source // "startup"')
 
@@ -30,7 +33,7 @@ case "$SOURCE" in
   *) exit 0 ;;
 esac
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
 CTX=""

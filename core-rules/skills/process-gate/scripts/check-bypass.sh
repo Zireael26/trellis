@@ -29,7 +29,7 @@ if [ -d "$PROJECT_DIR/.husky" ]; then
     # First non-empty, non-shebang, non-comment line
     first="$(awk 'NR>1 && !/^#/ && !/^[[:space:]]*$/ {print; exit}' "$hook" 2>/dev/null || true)"
     case "$first" in
-      "exit 0"|"true"|":") findings+=("${hook#$PROJECT_DIR/}: short-circuit (first effective line: $first)"); worst="fail" ;;
+      "exit 0"|"true"|":") findings+=("${hook#"$PROJECT_DIR"/}: short-circuit (first effective line: $first)"); worst="fail" ;;
     esac
   done < <(find "$PROJECT_DIR/.husky" -maxdepth 1 -type f \( -name 'pre-*' -o -name 'commit-msg' -o -name 'post-*' \) 2>/dev/null)
 fi

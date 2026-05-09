@@ -1,0 +1,76 @@
+rules:
+  - id: unity-game.unitywebrequest-no-cert-validation
+    message: >-
+      UnityWebRequest with a custom CertificateHandler that always returns
+      true defeats TLS — anyone on the same network can MITM the traffic.
+      Either use the default handler (which validates against the system
+      trust store) or implement proper certificate pinning by comparing
+      the leaf certificate's public key against a hard-coded value.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-295"
+    pattern-either:
+      - pattern: |
+          public class $C : CertificateHandler {
+            ...
+            protected override bool ValidateCertificate($CERT) {
+              return true;
+            }
+            ...
+          }
+      - pattern: |
+          public override bool ValidateCertificate($CERT) {
+            return true;
+          }
+
+  - id: unity-game.hardcoded-api-key
+    message: >-
+      Long-lived API key embedded in shipped Unity code. Mobile builds are
+      trivially decompilable (IL2CPP can be reversed; Mono assemblies are
+      open IL). Use a server-side proxy that holds the credential, or a
+      short-lived token issued after authentication. This finding is the
+      single most-exploited mobile-game class.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-798"
+    pattern-either:
+      - patterns:
+          - pattern: |
+              private const string $K = $V;
+          - metavariable-regex:
+              metavariable: $K
+              regex: '(?i).*(api[_-]?key|secret|token|access[_-]?key).*'
+          - metavariable-pattern:
+              metavariable: $V
+              patterns:
+                - pattern-regex: '"[A-Za-z0-9_\-]{20,}"'
+      - patterns:
+          - pattern: |
+              public const string $K = $V;
+          - metavariable-regex:
+              metavariable: $K
+              regex: '(?i).*(api[_-]?key|secret|token|access[_-]?key).*'
+          - metavariable-pattern:
+              metavariable: $V
+              patterns:
+                - pattern-regex: '"[A-Za-z0-9_\-]{20,}"'
+
+  - id: unity-game.iap-receipt-not-server-validated
+    message: >-
+      IAP receipt is consumed in-client (CompletePurchase / GrantContent)
+      with no server-side validation against Apple/Google receipt
+      verification endpoints. A jailbroken / rooted device can replay or
+      forge receipts and unlock paid content. Always round-trip the
+      receipt payload to a backend that calls Apple's verifyReceipt or
+      Google's androidpublisher API before granting the entitlement.
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: security
+      cwe: "CWE-345"
+    pattern-either:
+      - pattern: return PurchaseProcessingResult.Complete;

@@ -35,7 +35,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - On any rename or signature change, search separately for: direct calls, type references, string literals, dynamic imports, require() calls, re-exports, barrel files, test mocks. Assume grep missed something.
 - Never delete a file without verifying nothing references it.
 
-## Definition of done **[new policy]**
+## Definition of done
 
 - Receipts required. When declaring done, include the verification command you ran, its exit code, and the diff lines that prove the change. "It works" without receipts is not done.
 - Open todos mean not done. If `TodoWrite` has `in_progress` or `pending` items, complete them, defer with a reason, or abandon with a reason. The Stop hook enforces this.
@@ -76,7 +76,7 @@ Canonical skills under `core-rules/skills/<name>/`. Inherited by every project v
 
 ## Control plane
 
-Active projects opt in via `registry.md`; temporary exemptions in `blacklist.md`. Audits, registry, and project onboarding live in `__USER_HOME__/projects/se-core/`. Narrative manual (why/how, onboarding playbook, incident patterns, glossary): `__USER_HOME__/projects/se-core/engineering-process.md` — read on demand when you need deeper context than these terse rules give you. Target <5 KB for this file; split deeper reference into sibling docs on demand.
+Active projects opt in via `registry.md`; temporary exemptions in `blacklist.md`. Audits, registry, and project onboarding live in `__SE_CORE_PATH__/`. Narrative manual (why/how, onboarding playbook, incident patterns, glossary): `__SE_CORE_PATH__/engineering-process.md` — read on demand when you need deeper context than these terse rules give you. Target <5 KB for this file; split deeper reference into sibling docs on demand.
 
 ## Inheritance
 

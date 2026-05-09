@@ -18,9 +18,12 @@ set -u
 
 INPUT=$(cat)
 
-if ! command -v jq >/dev/null 2>&1; then
-  exit 0
-fi
+# Source shared lib (sibling to this script) + enforce jq dependency.
+__se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
+[ -f "$__se_lib" ] || { echo "truncation-check: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/deps.sh disable=SC1090
+. "$__se_lib"
+_se_require_jq "truncation-check"
 
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 

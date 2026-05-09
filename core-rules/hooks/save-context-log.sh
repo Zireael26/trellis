@@ -21,12 +21,26 @@ set -u
 
 INPUT=$(cat 2>/dev/null || true)
 
-if ! command -v jq >/dev/null 2>&1; then
-  exit 0
-fi
+# Source shared lib (sibling to this script) + enforce jq dependency.
+__se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
+[ -f "$__se_lib" ] || { echo "save-context-log: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/deps.sh disable=SC1090
+. "$__se_lib"
+_se_require_jq "save-context-log"
 
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+# --- Envelope validation: PROJECT_DIR must be a directory; transcript_path,
+# if present, must exist. A malformed envelope errors loudly to stderr instead
+# of silently writing a meaningless context-log.
+PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
+if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+  echo "save-context-log: PROJECT_DIR not a directory ('$PROJECT_DIR') — malformed envelope; skipping" >&2
+  exit 1
+fi
 TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
+if [ -n "$TRANSCRIPT" ] && [ ! -f "$TRANSCRIPT" ]; then
+  echo "save-context-log: transcript_path '$TRANSCRIPT' does not exist — malformed envelope; skipping" >&2
+  exit 1
+fi
 
 OUT="${PROJECT_DIR}/context-log.md"
 
@@ -62,10 +76,15 @@ OUT="${PROJECT_DIR}/context-log.md"
   fi
 
   # --- Last two user asks and assistant decisions from the transcript ---
+  # Real user prompts have .message.content as a string. Tool-result wrappers
+  # have .type == "user" but .message.content is an array of objects whose
+  # .type is "tool_result" — those must NOT be treated as user input.
+  # Real assistant decisions have .message.content as an array of text blocks;
+  # extract .text from blocks where .type == "text".
   if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    USER_MSGS=$(jq -r 'select(.role == "user" or .type == "user") | .content // .message.content // empty' "$TRANSCRIPT" 2>/dev/null \
+    USER_MSGS=$(jq -r 'select(.type == "user" and (.message.content | type) == "string") | .message.content' "$TRANSCRIPT" 2>/dev/null \
                 | tail -n 2)
-    ASSISTANT_MSGS=$(jq -r 'select(.role == "assistant" or .type == "assistant") | .content // .message.content // empty' "$TRANSCRIPT" 2>/dev/null \
+    ASSISTANT_MSGS=$(jq -r 'select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n")' "$TRANSCRIPT" 2>/dev/null \
                 | tail -n 2)
 
     if [ -n "$USER_MSGS" ]; then
