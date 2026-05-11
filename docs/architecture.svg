@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <defs>
+    <linearGradient id="parent" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="child" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#1e40af"/>
+    </linearGradient>
+    <linearGradient id="audit" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#7c2d12"/>
+      <stop offset="100%" stop-color="#9a3412"/>
+    </linearGradient>
+    <linearGradient id="hooks" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#065f46"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="550" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Trellis — Parent / Child Engineering Process</text>
+  <text x="550" y="58" text-anchor="middle" font-size="13" fill="#475569">One source of truth, inherited by every project. Enforced by hooks. Audited weekly.</text>
+
+  <!-- Parent control plane -->
+  <rect x="370" y="90" width="360" height="130" rx="12" fill="url(#parent)"/>
+  <text x="550" y="118" text-anchor="middle" font-size="16" font-weight="700" fill="#f8fafc">Control Plane — trellis/</text>
+  <text x="550" y="142" text-anchor="middle" font-size="12" fill="#cbd5e1">core-rules/CLAUDE.md  ·  hooks.md  ·  inheritance.md</text>
+  <text x="550" y="162" text-anchor="middle" font-size="12" fill="#cbd5e1">registry.md  ·  blacklist.md  ·  deferred.md  ·  config.json</text>
+  <text x="550" y="186" text-anchor="middle" font-size="11" fill="#94a3b8" font-style="italic">Rule of Three — n=3 to promote, n=2 stays in deferred</text>
+  <text x="550" y="204" text-anchor="middle" font-size="11" fill="#94a3b8" font-style="italic">Target: &lt;5 KB. Small surface, deep discipline.</text>
+
+  <!-- Inheritance arrows -->
+  <line x1="430" y1="220" x2="220" y2="290" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="550" y1="220" x2="550" y2="290" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="670" y1="220" x2="880" y2="290" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="285" y="262" text-anchor="middle" font-size="10" fill="#64748b">symlink + @-import</text>
+
+  <!-- Projects (real ones under Trellis management) -->
+  <g>
+    <rect x="80" y="290" width="280" height="180" rx="10" fill="url(#child)"/>
+    <text x="220" y="316" text-anchor="middle" font-size="14" font-weight="700" fill="#f8fafc">neev</text>
+    <text x="220" y="338" text-anchor="middle" font-size="11" fill="#dbeafe">multi-tenant monorepo SaaS</text>
+    <text x="220" y="362" text-anchor="middle" font-size="11" fill="#bfdbfe">.claude/rules/trellis.md → parent</text>
+    <text x="220" y="380" text-anchor="middle" font-size="11" fill="#bfdbfe">.agents/rules/trellis.md → parent</text>
+    <text x="220" y="398" text-anchor="middle" font-size="11" fill="#bfdbfe">.claude/skills/process-gate → parent</text>
+    <text x="220" y="424" text-anchor="middle" font-size="11" fill="#fde68a">+ module-boundary &amp; tenant-id hooks</text>
+    <text x="220" y="442" text-anchor="middle" font-size="11" fill="#fde68a">+ husky pre-commit appendix</text>
+
+    <rect x="410" y="290" width="280" height="180" rx="10" fill="url(#child)"/>
+    <text x="550" y="316" text-anchor="middle" font-size="14" font-weight="700" fill="#f8fafc">curat.money</text>
+    <text x="550" y="338" text-anchor="middle" font-size="11" fill="#dbeafe">Next.js consumer app</text>
+    <text x="550" y="362" text-anchor="middle" font-size="11" fill="#bfdbfe">same inheritance shape</text>
+    <text x="550" y="380" text-anchor="middle" font-size="11" fill="#bfdbfe">harness: Claude Code + Codex</text>
+    <text x="550" y="398" text-anchor="middle" font-size="11" fill="#bfdbfe">husky · lint-staged · branch protection</text>
+    <text x="550" y="424" text-anchor="middle" font-size="11" fill="#fde68a">+ stack-profile validators</text>
+    <text x="550" y="442" text-anchor="middle" font-size="11" fill="#fde68a">  (design tokens · a11y · phrases)</text>
+
+    <rect x="740" y="290" width="280" height="180" rx="10" fill="url(#child)"/>
+    <text x="880" y="316" text-anchor="middle" font-size="14" font-weight="700" fill="#f8fafc">vericite</text>
+    <text x="880" y="338" text-anchor="middle" font-size="11" fill="#dbeafe">institutional RAG · compliance</text>
+    <text x="880" y="362" text-anchor="middle" font-size="11" fill="#bfdbfe">same inheritance shape</text>
+    <text x="880" y="380" text-anchor="middle" font-size="11" fill="#bfdbfe">project-local UI_PORT hook helper</text>
+    <text x="880" y="398" text-anchor="middle" font-size="11" fill="#bfdbfe">active gotchas.md (RAG domain)</text>
+    <text x="880" y="424" text-anchor="middle" font-size="11" fill="#fde68a">+ compliance &amp; evals stack profile</text>
+    <text x="880" y="442" text-anchor="middle" font-size="11" fill="#fde68a">  (n=1 today — awaiting witnesses)</text>
+  </g>
+
+  <!-- Hooks band -->
+  <rect x="80" y="500" width="940" height="90" rx="10" fill="url(#hooks)"/>
+  <text x="550" y="525" text-anchor="middle" font-size="14" font-weight="700" fill="#ecfdf5">Three-Tier Hook Enforcement (runs inside every project)</text>
+  <line x1="395" y1="540" x2="395" y2="585" stroke="#a7f3d0" stroke-width="1"/>
+  <line x1="705" y1="540" x2="705" y2="585" stroke="#a7f3d0" stroke-width="1"/>
+  <text x="240" y="558" text-anchor="middle" font-size="11" font-weight="600" fill="#d1fae5">Tier 1 — fast-local (&lt;3s, every turn)</text>
+  <text x="240" y="576" text-anchor="middle" font-size="10" fill="#a7f3d0">block-destructive · post-edit-verify · session-context</text>
+  <text x="550" y="558" text-anchor="middle" font-size="11" font-weight="600" fill="#d1fae5">Tier 2 — heavy-gated (on Stop, ≤90s)</text>
+  <text x="550" y="576" text-anchor="middle" font-size="10" fill="#a7f3d0">stop-verify · code-review-subagent · ui-verify</text>
+  <text x="860" y="558" text-anchor="middle" font-size="11" font-weight="600" fill="#d1fae5">Tier 3 — git-boundary (husky / native)</text>
+  <text x="860" y="576" text-anchor="middle" font-size="10" fill="#a7f3d0">pre-commit · commit-msg · pre-push (blocks main)</text>
+
+  <!-- Audits -->
+  <rect x="80" y="615" width="940" height="80" rx="10" fill="url(#audit)"/>
+  <text x="550" y="640" text-anchor="middle" font-size="14" font-weight="700" fill="#fff7ed">Scheduled Audit Fleet — writes dated reports to audits/</text>
+  <text x="550" y="660" text-anchor="middle" font-size="11" fill="#fed7aa">cross-project-process · parent-hook-drift · bypass-tripwire · test-health</text>
+  <text x="550" y="678" text-anchor="middle" font-size="11" fill="#fed7aa">dep-vulnerabilities · dep-currency · dep-major-upgrade-watch · gotchas-rollup · audit-report-rollup · registry-blacklist-health</text>
+
+  <!-- Audit feedback arrow -->
+  <path d="M 80 655 Q 30 400 370 155" fill="none" stroke="#fb923c" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="40" y="430" text-anchor="middle" font-size="10" fill="#c2410c" font-style="italic" transform="rotate(-90 40 430)">feedback → rule updates</text>
+</svg>
