@@ -39,18 +39,18 @@ HOOKS=(
   [ ${#failed[@]} -eq 0 ] || { printf 'FAIL: %s\n' "${failed[@]}"; false; }
 }
 
-@test "P1.5: every hook degrades cleanly when SE_CORE_NO_JQ_DEGRADE=1" {
+@test "P1.5: every hook degrades cleanly when TRELLIS_NO_JQ_DEGRADE=1" {
   jq_free_path="$(make_jq_free_path)"
   PATH_BACKUP="$PATH"
-  export SE_CORE_NO_JQ_DEGRADE=1
+  export TRELLIS_NO_JQ_DEGRADE=1
   failed=()
   for h in "${HOOKS[@]}"; do
     PATH="$jq_free_path" run_with_stderr "$h" '{}'
-    if [ "$status" -ne 0 ] || ! [[ "$stderr" == *"SE_CORE_NO_JQ_DEGRADE=1"* ]]; then
+    if [ "$status" -ne 0 ] || ! [[ "$stderr" == *"TRELLIS_NO_JQ_DEGRADE=1"* ]]; then
       failed+=("$h:rc=$status")
     fi
   done
-  unset SE_CORE_NO_JQ_DEGRADE
+  unset TRELLIS_NO_JQ_DEGRADE
   PATH="$PATH_BACKUP"
   rm -rf "$jq_free_path"
   [ ${#failed[@]} -eq 0 ] || { printf 'FAIL: %s\n' "${failed[@]}"; false; }

@@ -69,7 +69,7 @@ When the `advisor` tool is available (auto-forwards full conversation history; n
 
 ## Hooks
 
-Two tiers — **fast-local** (every turn) and **heavy-gated** (wrap-up) — plus a **git-boundary** tier (husky / native git hooks) whose `pre-push` carries the SE Core PR-flow guard blocking direct push to `main`. Per-hook names, harness paths (`.claude/` vs `.codex/`), and event wiring live in `hooks.md`.
+Two tiers — **fast-local** (every turn) and **heavy-gated** (wrap-up) — plus a **git-boundary** tier (husky / native git hooks) whose `pre-push` carries the Trellis PR-flow guard blocking direct push to `main`. Per-hook names, harness paths (`.claude/` vs `.codex/`), and event wiring live in `hooks.md`.
 
 ## Skills
 
@@ -83,7 +83,7 @@ Canonical skills under `core-rules/skills/<name>/`, inherited by every project v
 
 ## Control plane
 
-Active projects opt in via `registry.md`; temporary exemptions in `blacklist.md`. Audits, registry, and project onboarding live in `/Users/abhishek/projects/se-core/`. Narrative manual (why/how, onboarding playbook, incident patterns, glossary): `/Users/abhishek/projects/se-core/engineering-process.md` — read on demand when you need deeper context than these terse rules give you. Target <5 KB for this file; split deeper reference into sibling docs on demand.
+Active projects opt in via `registry.md`; temporary exemptions in `blacklist.md`. Audits, registry, and project onboarding live in `__TRELLIS_PATH__/`. Narrative manual (why/how, onboarding playbook, incident patterns, glossary): `__TRELLIS_PATH__/engineering-process.md` — read on demand when you need deeper context than these terse rules give you. Target <5 KB for this file; split deeper reference into sibling docs on demand.
 
 ## Inheritance
 

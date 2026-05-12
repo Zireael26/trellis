@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# SE Core canonical pre-commit.
+# Trellis canonical pre-commit.
 # Runs lint-staged if installed; otherwise skips.
 #
 # Deliberate design: this hook does NOT fall back to the `lint` script.

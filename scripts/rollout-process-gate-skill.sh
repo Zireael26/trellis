@@ -3,10 +3,10 @@
 # registered project (skipping blacklist), preserving any existing project-local
 # skill content as a backup.
 #
-# **Run this AFTER the canonical skill is on the main branch of se-core.**
+# **Run this AFTER the canonical skill is on the main branch of the Trellis canonical clone.**
 # (Until then the symlinks would dangle.)
 #
-# Reads se-core.config.json for paths.
+# Reads trellis.config.json for paths.
 # Honors `harnesses` to seed `.agents/` and root `AGENTS.md` parity when Codex enabled.
 #
 # Behavior per project:
@@ -16,7 +16,7 @@
 #   4. If no .claude/skills/process-gate-local/local.config.sh: seed a minimal one
 #      with stack profile auto-guessed from project structure.
 #   5. Same flow for .agents/skills/process-gate/ when codex harness enabled.
-#      Also seeds root AGENTS.md and .agents/rules/se-core.md when absent.
+#      Also seeds root AGENTS.md and .agents/rules/trellis.md when absent.
 #   6. Stage changes; do NOT commit (you commit per project, with project-specific
 #      message + reviewing the local.config.sh seeded values).
 #
@@ -32,15 +32,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
 
-CANONICAL_RULES="$SE_CORE_ROOT/core-rules/CLAUDE.md"
-CANONICAL_SKILL="$SE_CORE_ROOT/core-rules/skills/process-gate"
+CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
+CANONICAL_SKILL="$TRELLIS_ROOT/core-rules/skills/process-gate"
 [ -f "$CANONICAL_RULES" ] || {
   echo "canonical rules missing at $CANONICAL_RULES" >&2
   exit 1
 }
 [ -d "$CANONICAL_SKILL" ] || {
   echo "canonical skill missing at $CANONICAL_SKILL" >&2
-  echo "is the parent branch merged? run from main of se-core." >&2
+  echo "is the parent branch merged? run from main of the Trellis canonical clone." >&2
   exit 1
 }
 
@@ -60,8 +60,8 @@ for arg in "$@"; do
   esac
 done
 
-REGISTRY="$SE_CORE_ROOT/registry.md"
-BLACKLIST="$SE_CORE_ROOT/blacklist.md"
+REGISTRY="$TRELLIS_ROOT/registry.md"
+BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 
 read_registry() {
   awk '
@@ -156,7 +156,7 @@ PROCESS_GATE_TEST_CMD=""
 # Stack-profile validators (project-local scripts)
 PROCESS_GATE_STACK_VALIDATORS=()
 
-# After review, commit with: chore: rollout SE Core process-gate skill
+# After review, commit with: chore: rollout Trellis process-gate skill
 EOF
   echo "  created: $harness_dir/skills/process-gate-local/local.config.sh ($profile)"
 }
@@ -238,7 +238,7 @@ rollout_one() {
   # Codex parity — first-class when the parent config enables the harness.
   if pg_has_harness codex; then
     install_symlink "$p" "AGENTS.md" "CLAUDE.md"
-    install_symlink "$p" ".agents/rules/se-core.md" "$CANONICAL_RULES"
+    install_symlink "$p" ".agents/rules/trellis.md" "$CANONICAL_RULES"
     install_skill_symlink "$p" ".agents/skills/process-gate"
     if [ -f "$p/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$p/.agents/skills/process-gate-local/local.config.sh" ]; then
       $DRY_RUN && {
@@ -301,8 +301,8 @@ fi
 
 echo "Per-project next steps:"
 echo "  1. cd <project>"
-echo "  2. The four canonical symlinks (.claude/rules/se-core.md, .claude/skills/process-gate,"
-echo "     .agents/rules/se-core.md, .agents/skills/process-gate) are gitignored — do NOT"
+echo "  2. The four canonical symlinks (.claude/rules/trellis.md, .claude/skills/process-gate,"
+echo "     .agents/rules/trellis.md, .agents/skills/process-gate) are gitignored — do NOT"
 echo "     stage them. They live on this machine only; teammates regenerate via onboard-project.sh."
 echo "  3. Review .claude/skills/process-gate-local/local.config.sh and, if Codex-enabled,"
 echo "     .agents/skills/process-gate-local/local.config.sh — customize stack profile,"
@@ -311,7 +311,7 @@ echo "     'chore: customize process-gate local.config.sh' with the customizatio
 echo "     never commit the seeded skeleton over an existing customized config."
 echo "  4. For projects with backed-up content: review .claude/skills/process-gate.local-backup-$DATE_TAG/"
 echo "     and migrate any keepers into process-gate-local/ as scripts or reference docs."
-echo "  5. Verify the project's .gitignore contains the SE Core symlink fragment"
-echo "     (.claude/rules/se-core.md, .claude/skills/process-gate, .agents/rules/se-core.md,"
+echo "  5. Verify the project's .gitignore contains the Trellis symlink fragment"
+echo "     (.claude/rules/trellis.md, .claude/skills/process-gate, .agents/rules/trellis.md,"
 echo "     .agents/skills/process-gate). If absent, append from"
-echo "     core-rules/templates/project.gitignore.fragment in se-core."
+echo "     core-rules/templates/project.gitignore.fragment in the Trellis canonical clone."

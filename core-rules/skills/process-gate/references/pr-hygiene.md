@@ -66,7 +66,7 @@ Missing required section: **fail**. Empty required section: **warn**.
 
 ## Review requirements
 
-SE Core defaults:
+Trellis defaults:
 
 - Direct push to `main`: **forbidden** at three layers (Tier-3 `pre-push` hook, GitHub branch protection, this gate).
 - All changes go through a PR.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Sync canonical content from this live se-core to the public se-core-template.
+# Sync canonical content from this live Trellis clone to the public Trellis mirror.
 #
-# Reads se-core.config.json for paths.
+# Reads trellis.config.json for paths.
 # Substitutes user-specific values back to placeholders so the template
 # remains shareable.
 #
@@ -26,7 +26,7 @@ SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # --- Args ------------------------------------------------------------------
 APPLY=false
 PUSH=false
-TEMPLATE_DIR="${SE_CORE_TEMPLATE_DIR:-$USER_HOME/projects/se-core-template}"
+TEMPLATE_DIR="${TRELLIS_TEMPLATE_DIR:-$USER_HOME/projects/trellis}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -47,7 +47,7 @@ done
 
 [ -e "$TEMPLATE_DIR/.git" ] || {
   echo "template repo not found at $TEMPLATE_DIR" >&2
-  echo "set SE_CORE_TEMPLATE_DIR or pass --template-dir=<path>" >&2
+  echo "set TRELLIS_TEMPLATE_DIR or pass --template-dir=<path>" >&2
   exit 1
 }
 
@@ -67,7 +67,7 @@ SYNC_PATHS=(
   "core-rules/templates/"
   "scheduled-tasks/"
   "scripts/"
-  "se-core.config.json"
+  "trellis.config.json"
 )
 
 # Files NEVER synced (private / instance-specific) — informational; the
@@ -80,8 +80,8 @@ NEVER_SYNC=(
 )
 
 # Placeholder substitutions: live values → template placeholders
-declare -a SUB_FROM=("$SE_CORE_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME" "$MAINTAINER_NAME" "$GITHUB_USER")
-declare -a SUB_TO=("__SE_CORE_PATH__" "__SE_CORE_PATH__" "__PROJECTS_ROOT__" "__USER_HOME__" "__MAINTAINER_NAME__" "__GITHUB_USER__")
+declare -a SUB_FROM=("$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME" "$MAINTAINER_NAME" "$GITHUB_USER")
+declare -a SUB_TO=("__TRELLIS_PATH__" "__TRELLIS_PATH__" "__PROJECTS_ROOT__" "__USER_HOME__" "__MAINTAINER_NAME__" "__GITHUB_USER__")
 
 # --- Workspace -------------------------------------------------------------
 TMP_STAGE="$(mktemp -d)"
@@ -120,14 +120,14 @@ find "$TMP_STAGE" -type f \( -name '*.md' -o -name '*.sh' -o -name '*.json' -o -
       done
     done
 
-# Reset se-core.config.json to placeholder shape
-if [ -f "$TMP_STAGE/se-core.config.json" ]; then
-  cat > "$TMP_STAGE/se-core.config.json" <<'EOF'
+# Reset trellis.config.json to placeholder shape
+if [ -f "$TMP_STAGE/trellis.config.json" ]; then
+  cat > "$TMP_STAGE/trellis.config.json" <<'EOF'
 {
-  "$schema": "./scripts/lib/se-core.config.schema.json",
+  "$schema": "./scripts/lib/trellis.config.schema.json",
   "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity.",
 
-  "se_core_root": "__SE_CORE_PATH__",
+  "trellis_root": "__TRELLIS_PATH__",
   "projects_root": "__PROJECTS_ROOT__",
   "user_home": "__USER_HOME__",
 
@@ -137,7 +137,7 @@ if [ -f "$TMP_STAGE/se-core.config.json" ]; then
   "harnesses": ["claude"],
 
   "template": {
-    "remote": "git@github.com:__GITHUB_USER__/se-core-template.git",
+    "remote": "git@github.com:__GITHUB_USER__/trellis.git",
     "branch": "main",
     "redact_paths": [
       "audits/",
@@ -224,7 +224,7 @@ if $APPLY; then
       printf "Commit + push? [y/N] "
       read -r ans
       if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-        git commit -m "chore: sync from live se-core ($(date +%Y-%m-%d))"
+        git commit -m "chore: sync from live Trellis clone ($(date +%Y-%m-%d))"
         git push origin "$TEMPLATE_BRANCH"
       else
         echo "  aborted before commit."

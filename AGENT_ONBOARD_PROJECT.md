@@ -1,6 +1,6 @@
 # AGENT_ONBOARD_PROJECT.md — paste-into-agent project onboarding
 
-> **For the human:** open an agent (Claude Code, Codex, Cowork, or any agent with filesystem + shell tools) **inside this `se-core/` repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you, run `scripts/onboard-project.sh`, wire your project's `CLAUDE.md`, update `registry.md`, commit in both repos, and verify.
+> **For the human:** open an agent (Claude Code, Codex, Cowork, or any agent with filesystem + shell tools) **inside this Trellis canonical repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you, run `scripts/onboard-project.sh`, wire your project's `CLAUDE.md`, update `registry.md`, commit in both repos, and verify.
 >
 > Works for three entry paths:
 > - **`new`** — a project not yet in `registry.md`. Full onboarding.
@@ -13,7 +13,7 @@
 
 ## --- BEGIN PROMPT ---
 
-You are onboarding a project into **SE Core** — a multi-project engineering-process control plane. The repo you're working in is the SE Core control plane; the project being onboarded lives elsewhere on disk. Work carefully and verify each step.
+You are onboarding a project into **Trellis** — a multi-project engineering-process control plane. The repo you're working in is the Trellis control plane; the project being onboarded lives elsewhere on disk. Work carefully and verify each step.
 
 ### Step 0 — Establish context
 
@@ -24,7 +24,7 @@ Before touching anything, read these files in order so you understand the system
 3. `core-rules/inheritance.md` — the registered-project checklist (around lines 34-44), the gitignore policy for symlinks (search for "gitignored"), and the "Native git hooks" section for non-Node projects.
 4. `scripts/onboard-project.sh` — at minimum the header comment and the `guess_profile()` function. Don't reimplement anything this script already does.
 5. `blacklist.md` — confirm the target project is not on the never-onboard list.
-6. `se-core.config.json` — to read `se_core_root`, `projects_root`, and `harnesses`. You'll need the resolved `se_core_root` for the `@`-import path.
+6. `trellis.config.json` — to read `trellis_root`, `projects_root`, and `harnesses`. You'll need the resolved `trellis_root` for the `@`-import path.
 
 After reading, in one short paragraph, tell the user what you're about to do and which mode you intend to run (you'll detect the mode in Step 1).
 
@@ -39,7 +39,7 @@ PROJECT="<absolute-path-from-user>"
 test -d "$PROJECT"                                    # must be a directory
 test -e "$PROJECT/.git"                               # must be a git repo (else offer to `git init`)
 
-PROJECTS_ROOT="$(jq -r .projects_root se-core.config.json)"
+PROJECTS_ROOT="$(jq -r .projects_root trellis.config.json)"
 PROJ_BASE="$(basename "$PROJECT")"
 PROJ_SHORT="/personal/$PROJ_BASE"                     # shorthand form used in registry/blacklist
 case "$PROJECT" in
@@ -49,7 +49,7 @@ case "$PROJECT" in
   *) PROJ_REL="" ;;
 esac
 
-# In se-core/. Check abs path, shorthand, and projects-root-relative — registry/blacklist
+# In the Trellis canonical repo. Check abs path, shorthand, and projects-root-relative — registry/blacklist
 # rows wrap paths in backticks, so anchor with backticks to avoid false matches.
 matches_any() {
   local file="$1"
@@ -59,8 +59,8 @@ matches_any blacklist.md && BLACKLISTED=1 || BLACKLISTED=0
 matches_any registry.md  && REGISTERED=1  || REGISTERED=0
 
 # Inside the project
-test -L "$PROJECT/.claude/rules/se-core.md"           # canonical symlink present?
-readlink "$PROJECT/.claude/rules/se-core.md" 2>/dev/null  # target matches se_core_root?
+test -L "$PROJECT/.claude/rules/trellis.md"           # canonical symlink present?
+readlink "$PROJECT/.claude/rules/trellis.md" 2>/dev/null  # target matches trellis_root?
 ```
 
 If either lookup ambiguously matches (e.g. the user's project basename happens to overlap with an unrelated registry row), surface the matching rows and ask the user which is correct before proceeding.
@@ -70,7 +70,7 @@ Mode rules:
 | Mode | Condition |
 |---|---|
 | `new` | Path not in `registry.md`. Not blacklisted. |
-| `fresh-clone` | Path in `registry.md`. `.claude/rules/se-core.md` symlink missing or broken. |
+| `fresh-clone` | Path in `registry.md`. `.claude/rules/trellis.md` symlink missing or broken. |
 | `repair` | Path in `registry.md`. Symlink present. But filesystem state drifted — missing `.claude/hooks/`, missing `gotchas.md`, missing skill symlinks, etc. |
 
 If the project is on `blacklist.md`, **stop and tell the user**. Don't proceed.
@@ -82,7 +82,7 @@ If `registry.md` already has a row for this project under a different path, surf
 Use whatever clarification mechanism your tooling provides (multi-choice question tool if available, or plain chat). Collect:
 
 - **`name`** — final project name. The project's directory basename should match.
-- **`path`** — already captured in Step 1. Confirm it lives under `projects_root` (read from `se-core.config.json`). Warn if it doesn't — the scheduled `cross-project-process-audit` walks `projects_root`, so projects outside it will be invisible to the audit. Symlink targets resolve fine either way.
+- **`path`** — already captured in Step 1. Confirm it lives under `projects_root` (read from `trellis.config.json`). Warn if it doesn't — the scheduled `cross-project-process-audit` walks `projects_root`, so projects outside it will be invisible to the audit. Symlink targets resolve fine either way.
 - **`class`** — one of the documented shapes in `registry.md` ("Current shapes seen in active projects"). At time of writing: `monorepo SaaS`, `single Next.js app`, `portfolio site`, `app`, `game (Unity, 3D)`, plus reserved `service` and `api`. Present as multi-choice. If the user proposes a new shape, accept it but flag that it should also land in the class paragraph in `registry.md`.
 - **`stack profile`** — run the auto-detect from `scripts/onboard-project.sh`:
   ```bash
@@ -97,7 +97,7 @@ Use whatever clarification mechanism your tooling provides (multi-choice questio
   ```
   Show the result and let the user override. The script writes this into `.claude/skills/process-gate-local/local.config.sh` as `PROCESS_GATE_STACK_PROFILE`.
 - **`GitHub repo URL`** — for the registry row's notes column. If the user hasn't created a remote yet, that's fine; capture nothing and remind them at the end.
-- **`Codex acknowledgement`** — if `harnesses` in `se-core.config.json` includes `"codex"`, remind the user that Codex hooks require `[features] codex_hooks = true` in `$CODEX_HOME/config.toml`. Don't ask whether to enable Codex — that's a global config choice already made.
+- **`Codex acknowledgement`** — if `harnesses` in `trellis.config.json` includes `"codex"`, remind the user that Codex hooks require `[features] codex_hooks = true` in `$CODEX_HOME/config.toml`. Don't ask whether to enable Codex — that's a global config choice already made.
 
 Echo all collected values back as a table. Wait for explicit "yes" before continuing.
 
@@ -112,25 +112,25 @@ This step applies to all three modes. The script is idempotent and detects what 
 What the script does (do not re-implement any of this):
 
 - Seeds `gotchas.md`, `context-log.md` at the project root.
-- Appends the SE Core fragment to `.gitignore` (skipped if already present).
+- Appends the Trellis fragment to `.gitignore` (skipped if already present).
 - Removes legacy tracked symlinks from the git index if any.
-- Creates the four absolute-path symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.claude/skills/security-gate`, plus `.agents/...` equivalents if Codex is enabled).
+- Creates the four absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.claude/skills/security-gate`, plus `.agents/...` equivalents if Codex is enabled).
 - Seeds `.claude/skills/process-gate-local/local.config.sh` with the auto-detected stack profile.
 - Copies Claude hooks → `.claude/hooks/*.sh` and `.claude/settings.json`.
 - If `package.json` exists: seeds `.husky/{pre-commit,commit-msg,pre-push}`.
 - If Codex is enabled: seeds `AGENTS.md → CLAUDE.md` relative symlink, `.codex/hooks.json`, `.codex/hooks/*.sh`.
-- Runs the Mode-1 security-gate baseline unless `SE_CORE_SKIP_SECURITY_BASELINE=1`. The baseline can take 10-60 minutes; tell the user before running. Offer the skip env-var if they want to defer.
+- Runs the Mode-1 security-gate baseline unless `TRELLIS_SKIP_SECURITY_BASELINE=1`. The baseline can take 10-60 minutes; tell the user before running. Offer the skip env-var if they want to defer.
 
 Capture the script's stdout. Surface any line starting with `WARN:` to the user — those signal pre-existing files the script didn't overwrite.
 
-**Unity / Rust / Go / Python-only projects.** If the profile is `unity` or `native-other` and there is no `package.json`, the script skips husky. Tell the user they need native git hooks per `core-rules/inheritance.md` "Native git hooks" — at minimum a `pre-push` that runs the SE Core PR-flow guard. Templates live in `core-rules/husky/`; the user can copy them to `.githooks/` and run `git config core.hooksPath .githooks`. Do **not** auto-create `.githooks/` — leave that decision to the user.
+**Unity / Rust / Go / Python-only projects.** If the profile is `unity` or `native-other` and there is no `package.json`, the script skips husky. Tell the user they need native git hooks per `core-rules/inheritance.md` "Native git hooks" — at minimum a `pre-push` that runs the Trellis PR-flow guard. Templates live in `core-rules/husky/`; the user can copy them to `.githooks/` and run `git config core.hooksPath .githooks`. Do **not** auto-create `.githooks/` — leave that decision to the user.
 
 ### Step 4 — Wire the project's `CLAUDE.md` `@`-import
 
 Resolve the canonical path once:
 
 ```bash
-CANONICAL_RULES="$(jq -r .se_core_root se-core.config.json)/core-rules/CLAUDE.md"
+CANONICAL_RULES="$(jq -r .trellis_root trellis.config.json)/core-rules/CLAUDE.md"
 test -f "$CANONICAL_RULES"   # sanity check
 ```
 
@@ -177,14 +177,14 @@ git add CLAUDE.md gotchas.md context-log.md .gitignore \
         .codex/hooks.json .codex/hooks \
         .husky 2>/dev/null || true
 git status                                  # verify staging looks right
-git commit -m "chore: onboard to SE Core"
+git commit -m "chore: onboard to Trellis"
 ```
 
-Some paths above only exist for Codex / Node / Unity projects — `git add` will skip missing ones silently. The four absolute-path symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are **gitignored** by the fragment and should NOT appear in `git status`. If they do, something went wrong — investigate before committing.
+Some paths above only exist for Codex / Node / Unity projects — `git add` will skip missing ones silently. The four absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are **gitignored** by the fragment and should NOT appear in `git status`. If they do, something went wrong — investigate before committing.
 
 Don't `git add -A` — that picks up unrelated working-tree changes the user may have in flight.
 
-**In se-core** (mode `new` only):
+**In the Trellis canonical repo** (mode `new` only):
 
 ```bash
 git status                                  # only registry.md should be modified
@@ -192,7 +192,7 @@ git add registry.md
 git commit -m "chore: register <name>"
 ```
 
-For `fresh-clone` and `repair`: no se-core commit needed.
+For `fresh-clone` and `repair`: no Trellis-repo commit needed.
 
 ### Step 7 — Verification
 
@@ -200,10 +200,10 @@ Run these checks against the project. All must pass.
 
 ```bash
 # Resolves to the canonical rules file
-readlink -f "$PROJECT/.claude/rules/se-core.md" | grep -F "core-rules/CLAUDE.md"
+readlink -f "$PROJECT/.claude/rules/trellis.md" | grep -F "core-rules/CLAUDE.md"
 
 # Symlinks are gitignored, not tracked
-( cd "$PROJECT" && ! git ls-files --error-unmatch .claude/rules/se-core.md 2>/dev/null )
+( cd "$PROJECT" && ! git ls-files --error-unmatch .claude/rules/trellis.md 2>/dev/null )
 ( cd "$PROJECT" && ! git ls-files --error-unmatch .claude/skills/process-gate 2>/dev/null )
 
 # Process-gate skill symlink resolves
@@ -221,9 +221,9 @@ grep -qF "@$CANONICAL_RULES" "$PROJECT/CLAUDE.md" || \
 test -f "$PROJECT/gotchas.md"
 test -f "$PROJECT/context-log.md"
 
-# Codex parity (only if "codex" in se-core.config.json harnesses)
+# Codex parity (only if "codex" in trellis.config.json harnesses)
 test -L "$PROJECT/AGENTS.md"
-test -e "$PROJECT/.agents/rules/se-core.md"
+test -e "$PROJECT/.agents/rules/trellis.md"
 test -e "$PROJECT/.agents/skills/process-gate/SKILL.md"
 test -f "$PROJECT/.codex/hooks.json"
 ls "$PROJECT/.codex/hooks"/*.sh
@@ -233,7 +233,7 @@ grep -nF "$PROJECT" registry.md
 
 # Both repos clean after the commits
 ( cd "$PROJECT" && git status --short )           # should be empty
-git status --short                                # in se-core: should be empty
+git status --short                                # in Trellis canonical repo: should be empty
 ```
 
 Report any check that fails. Don't claim success until they all pass.
@@ -246,7 +246,7 @@ Three short blocks, in order:
 
 1. **What changed.** A short paragraph: mode (new / fresh-clone / repair), paths created, symlinks installed, registry row added, two commit SHAs (if applicable). Quote any `WARN:` lines the script produced.
 2. **What's still on the user.**
-   - Push the project commit and (mode `new`) the se-core commit when ready.
+   - Push the project commit and (mode `new`) the Trellis-repo commit when ready.
    - If GitHub repo doesn't exist yet, create it and enable branch protection on `main` (see `engineering-process.md` §10.2 step 14).
    - If `package.json` exists, run `pnpm install` / `bun install` / `npm install` so husky activates `core.hooksPath`.
    - If Codex is enabled, confirm `$CODEX_HOME/config.toml` has `[features] codex_hooks = true`.

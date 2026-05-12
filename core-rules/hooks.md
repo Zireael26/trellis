@@ -2,7 +2,7 @@
 
 Two tiers: **fast-local** runs on every relevant turn, **heavy-gated** runs on wrap-up. A third tier — **git-boundary** husky hooks — catches anything that slipped past the agent. Specs only; implementations live per-project under `.claude/hooks/`, `.codex/hooks/`, and `.husky/`.
 
-Claude Code and Codex use different hook envelopes, so SE Core keeps separate canonical implementations:
+Claude Code and Codex use different hook envelopes, so Trellis keeps separate canonical implementations:
 
 - Claude Code: `core-rules/hooks/*.sh`, copied to `<project>/.claude/hooks/` and registered in `<project>/.claude/settings.json`.
 - Codex: `core-rules/codex/hooks.json` plus `core-rules/codex/hooks/*.sh`, copied to `<project>/.codex/`.
@@ -130,11 +130,11 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 
 ### pre-push (husky)
 - **Runs, in order:**
-  1. **PR-flow guard** — blocks direct push to `main` or `master` across all SE Core projects. Commits must land on a branch and merge via PR. Emergency override: `SE_CORE_ALLOW_MAIN_PUSH=1 git push` (use rarely; every invocation should be documented in the project's `gotchas.md` or a commit message trailer).
+  1. **PR-flow guard** — blocks direct push to `main` or `master` across all Trellis projects. Commits must land on a branch and merge via PR. Emergency override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use rarely; every invocation should be documented in the project's `gotchas.md` or a commit message trailer).
   2. Full typecheck + lint + fast test suite (same set as `stop-verify` step 2-4)
-- **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces SE Core's PR-flow policy at the git boundary.
+- **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy at the git boundary.
 - **Block:** any step fails
-- **GitHub-side complement:** local guard prevents accidents; branch protection on the remote is the durable gate. Every SE Core project should have `main` branch-protected (require PR, passing status checks, merge-commit only — squash-merge disabled in repo settings to preserve full history). Review-count enforcement is N/A here — sole-maintainer org, GitHub blocks self-approval; the PR window itself + CI is the gate.
+- **GitHub-side complement:** local guard prevents accidents; branch protection on the remote is the durable gate. Every Trellis project should have `main` branch-protected (require PR, passing status checks, merge-commit only — squash-merge disabled in repo settings to preserve full history). Review-count enforcement is N/A here — sole-maintainer org, GitHub blocks self-approval; the PR window itself + CI is the gate.
 
 ---
 

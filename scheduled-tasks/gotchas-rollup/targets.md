@@ -1,6 +1,6 @@
 # Targets — gotchas-rollup
 
-Reads `__SE_CORE_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`.
+Reads `__TRELLIS_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`.
 
 ## Scope
 

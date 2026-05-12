@@ -61,7 +61,7 @@ Ignore the warning if the situation truly didn't merit a gotcha. Otherwise add t
 
 ## EPM / engineering-process.md changes
 
-Changes to the *parent* `engineering-process.md` happen in `se-core/`, not in projects. Out of scope for project-level process-gate.
+Changes to the *parent* `engineering-process.md` happen in the Trellis canonical repo, not in projects. Out of scope for project-level process-gate.
 
 Changes to *project-local* engineering-process docs (e.g., TGSC's `docs/EPM.md`) are project-specific. If declared:
 
@@ -90,7 +90,7 @@ Don't gate on `README.md` content quality (out of scope), but **fail** if any of
 
 ## Templates
 
-Default project file templates live in `$SE_CORE_ROOT/core-rules/templates/`:
+Default project file templates live in `$TRELLIS_ROOT/core-rules/templates/`:
 
 - `gotchas.md` — seed format for new projects.
 - `context-log.md` — hook-managed; gitignored.

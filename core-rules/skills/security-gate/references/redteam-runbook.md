@@ -22,7 +22,7 @@ The run prints a sign-off banner naming the project, target class, and output pa
 - Re-running on a project not currently being remediated wastes LLM cost and increases the surface of leaked attack documents.
 - The skill is designed to leave a paper trail: `<project>/audits/<date>-redteam-<project>-<class>.md` is the artifact of record. The sign-off is the human acknowledgement of intent.
 
-The non-interactive `--confirm` path exists for scheduled / CI integrations. Today, no such integration ships — Mode 3 is on-demand only. If a future scheduled audit composes red-team narratives, it must use `--confirm` and write the output to a path under `audits/` that is **redacted** in template sync (`se-core.config.json` already lists `audits/` under `redact_paths`).
+The non-interactive `--confirm` path exists for scheduled / CI integrations. Today, no such integration ships — Mode 3 is on-demand only. If a future scheduled audit composes red-team narratives, it must use `--confirm` and write the output to a path under `audits/` that is **redacted** in template sync (`trellis.config.json` already lists `audits/` under `redact_paths`).
 
 ## Output handling
 

@@ -4,25 +4,25 @@ You are running a weekly compliance audit across the user's active personal proj
 
 ## Canonical paths (authoritative)
 
-- SE Core control plane: `__SE_CORE_PATH__/`
-- Parent rules file: `__SE_CORE_PATH__/core-rules/CLAUDE.md`
+- Trellis control plane: `__TRELLIS_PATH__/`
+- Parent rules file: `__TRELLIS_PATH__/core-rules/CLAUDE.md`
 - Personal projects root: `__PROJECTS_ROOT__/`
 
-These are the only authoritative paths. Any alternate paths that may appear in prior run notes, user memory, or snapshots (e.g., `~/Documents/Claude/Projects/Software Engineering Core/`) are **pre-migration artifacts**. Do not fall back to them, do not "reconcile" to them, do not treat them as equivalent.
+These are the only authoritative paths. Any alternate paths that may appear in prior run notes, user memory, or snapshots (e.g., `~/Documents/Claude/Projects/Trellis/`) are **pre-migration artifacts**. Do not fall back to them, do not "reconcile" to them, do not treat them as equivalent.
 
 ## Environment guard
 
 Before running any check, verify the audit environment mounts the canonical paths:
 
-- `[ -f __SE_CORE_PATH__/core-rules/CLAUDE.md ]`
+- `[ -f __TRELLIS_PATH__/core-rules/CLAUDE.md ]`
 - `[ -d __PROJECTS_ROOT__ ]`
 
-If either fails, the audit sandbox lacks access to the fleet filesystem. Emit a single **info** finding in the report — `SE Core mount not available in audit environment; checks skipped` — and stop with that note. Do **not** downgrade to alternate paths. Do **not** emit any `critical` findings based on the non-mounted state (a missing mount is an environment issue, not a project-state issue).
+If either fails, the audit sandbox lacks access to the fleet filesystem. Emit a single **info** finding in the report — `Trellis mount not available in audit environment; checks skipped` — and stop with that note. Do **not** downgrade to alternate paths. Do **not** emit any `critical` findings based on the non-mounted state (a missing mount is an environment issue, not a project-state issue).
 
 ## Inputs
 
-1. Read `__SE_CORE_PATH__/registry.md` — the active project list.
-2. Read `__SE_CORE_PATH__/blacklist.md` — the opt-out list.
+1. Read `__TRELLIS_PATH__/registry.md` — the active project list.
+2. Read `__TRELLIS_PATH__/blacklist.md` — the opt-out list.
 3. The set of projects to audit is `registry \ blacklist`. If blacklist has entries with a review-after date ≤ today, flag them as "overdue for review" in the report.
 
 If any registered project's path is missing from the filesystem, report it and continue with the rest.
@@ -33,10 +33,10 @@ Run these checks against each target project's root. Do **not** modify files —
 
 ### 1. Hook-stack presence
 - Does `.claude/hooks/` exist?
-- Do the parent-layer hook scripts exist in it? Compare filenames against `__SE_CORE_PATH__/core-rules/hooks/` (the canonical implementations once Phase 2 ships). Report any missing.
+- Do the parent-layer hook scripts exist in it? Compare filenames against `__TRELLIS_PATH__/core-rules/hooks/` (the canonical implementations once Phase 2 ships). Report any missing.
 - Does `.claude/settings.json` register the hooks?
-- If Codex is enabled in parent `se-core.config.json`, does `.codex/hooks.json` exist?
-- If Codex is enabled, do the Codex hook scripts exist under `.codex/hooks/`? Compare filenames against `__SE_CORE_PATH__/core-rules/codex/hooks/`.
+- If Codex is enabled in parent `trellis.config.json`, does `.codex/hooks.json` exist?
+- If Codex is enabled, do the Codex hook scripts exist under `.codex/hooks/`? Compare filenames against `__TRELLIS_PATH__/core-rules/codex/hooks/`.
 
 ### 2. Hook-script staleness
 - For each hook present in both the project and the parent, run `diff` (or equivalent).
@@ -53,8 +53,8 @@ Run these checks against each target project's root. Do **not** modify files —
 
 - Check whether `git config --get core.hooksPath` returns a non-empty value.
 - If yes, treat that directory (e.g., `.githooks/`) as the hook directory in lieu of `.husky/`.
-- The hook directory MUST be tracked in git and MUST contain a `pre-push` whose body includes the SE Core PR-flow guard string (`Direct push to .* blocked by SE Core policy.`).
-- Missing or untracked native hooks → **critical: SE Core PR-flow guard not enforced**.
+- The hook directory MUST be tracked in git and MUST contain a `pre-push` whose body includes the Trellis PR-flow guard string (`Direct push to .* blocked by Trellis policy.`).
+- Missing or untracked native hooks → **critical: Trellis PR-flow guard not enforced**.
 - Husky presence is **N/A** for projects without `package.json` — do not emit a husky-missing finding for them. The class hint comes from the project's row in `registry.md` (e.g., `game (Unity, 3D)`).
 
 Reference example: `lume` uses `.githooks/pre-push` with `core.hooksPath = .githooks`.
@@ -76,47 +76,47 @@ Reference example: `lume` uses `.githooks/pre-push` with `core.hooksPath = .gith
 - If the project's `CLAUDE.md` is over ~5 KB, note it — projects should extend the parent, not duplicate it.
 - Grep the project's `CLAUDE.md` for phrases that match verbatim text from the parent `CLAUDE.md`. Report any overlap > 20 lines (suggests copy-paste instead of inheritance).
 
-### 8. SE Core rules inheritance wiring (critical)
+### 8. Trellis rules inheritance wiring (critical)
 
-> **Tracking policy.** Symlinks whose targets contain absolute paths under `$SE_CORE_ROOT` (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are **per-machine state** and MUST be gitignored. Each developer recreates them post-clone via `scripts/onboard-project.sh`. Tracking them in git is the failure mode — different developers' clones produce different absolute targets that conflict on every cross-machine merge. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) remain tracked.
+> **Tracking policy.** Symlinks whose targets contain absolute paths under `$TRELLIS_ROOT` (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are **per-machine state** and MUST be gitignored. Each developer recreates them post-clone via `scripts/onboard-project.sh`. Tracking them in git is the failure mode — different developers' clones produce different absolute targets that conflict on every cross-machine merge. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) remain tracked.
 
 The parent rules in `core-rules/CLAUDE.md` are load-bearing — they MUST reach every child session, including headless `claude -p` invocations used by every scheduled task. Two checks:
 
-- **Primary mechanism — `.claude/rules/se-core.md` symlink.** The file `<project-root>/.claude/rules/se-core.md` MUST exist, MUST be a symlink (not a regular file or copy), and MUST resolve to `__SE_CORE_PATH__/core-rules/CLAUDE.md` exactly.
-  - Missing file → **critical: SE Core rules not inherited in headless mode** (every scheduled run against this project is running unparented).
-  - File present but not a symlink → **critical: SE Core rules diverged from canonical** (report the sha256 of the file and the sha256 of the canonical so the user can see the drift).
+- **Primary mechanism — `.claude/rules/trellis.md` symlink.** The file `<project-root>/.claude/rules/trellis.md` MUST exist, MUST be a symlink (not a regular file or copy), and MUST resolve to `__TRELLIS_PATH__/core-rules/CLAUDE.md` exactly.
+  - Missing file → **critical: Trellis rules not inherited in headless mode** (every scheduled run against this project is running unparented).
+  - File present but not a symlink → **critical: Trellis rules diverged from canonical** (report the sha256 of the file and the sha256 of the canonical so the user can see the drift).
   - Symlink present, target path string matches canonical, but `readlink -f` returns empty OR `[ -f <resolved-target> ]` fails:
-    - **If the environment guard above has already confirmed the canonical target exists** (`__SE_CORE_PATH__/core-rules/CLAUDE.md` is present on this filesystem), then the symlink is genuinely broken → **critical: SE Core rules symlink dangling**.
+    - **If the environment guard above has already confirmed the canonical target exists** (`__TRELLIS_PATH__/core-rules/CLAUDE.md` is present on this filesystem), then the symlink is genuinely broken → **critical: Trellis rules symlink dangling**.
     - **If the canonical target is not mounted in the audit environment**, treat this as a mount gap, not a project fault. The environment guard should have already emitted the single info finding and halted the audit — do not reach this case.
-  - Symlink present but target path string is wrong (does not match canonical) → **critical: SE Core rules symlink points at non-canonical path** (report the actual target).
-  - Symlink present and **tracked by git** (`git ls-files --error-unmatch .claude/rules/se-core.md` succeeds) → **warning: SE Core rules symlink is tracked in git but encodes a per-machine absolute path** (different `$SE_CORE_ROOT` on every developer's machine; tracked targets will conflict on every cross-machine merge — gitignore the symlink and recreate via `scripts/onboard-project.sh`).
+  - Symlink present but target path string is wrong (does not match canonical) → **critical: Trellis rules symlink points at non-canonical path** (report the actual target).
+  - Symlink present and **tracked by git** (`git ls-files --error-unmatch .claude/rules/trellis.md` succeeds) → **warning: Trellis rules symlink is tracked in git but encodes a per-machine absolute path** (different `$TRELLIS_ROOT` on every developer's machine; tracked targets will conflict on every cross-machine merge — gitignore the symlink and recreate via `scripts/onboard-project.sh`).
 
 - **Secondary mechanism — `@`-import in project `CLAUDE.md`.** The project `CLAUDE.md` SHOULD contain the line:
 
   ```
-  @__SE_CORE_PATH__/core-rules/CLAUDE.md
+  @__TRELLIS_PATH__/core-rules/CLAUDE.md
   ```
 
   This is approval-gated and interactive-only — missing it is a **warning**, not critical, because the symlink is the load-bearing path.
 
-Rationale for severity: `@`-imports are silently disabled in `claude -p` headless mode per Claude Code's trust-verification design. The `.claude/rules/se-core.md` symlink is the only mechanism that loads unconditionally across modes. See "Load-bearing inheritance mechanism" in `core-rules/CLAUDE.md`.
+Rationale for severity: `@`-imports are silently disabled in `claude -p` headless mode per Claude Code's trust-verification design. The `.claude/rules/trellis.md` symlink is the only mechanism that loads unconditionally across modes. See "Load-bearing inheritance mechanism" in `core-rules/CLAUDE.md`.
 
 ### 9. Codex parity wiring
 
-If parent `__SE_CORE_PATH__/se-core.config.json` includes `"codex"` in `harnesses`, every registered project must also carry Codex inheritance:
+If parent `__TRELLIS_PATH__/trellis.config.json` includes `"codex"` in `harnesses`, every registered project must also carry Codex inheritance:
 
-- Root `AGENTS.md` exists. Symlink to `CLAUDE.md` is OK (relative symlinks are stable across machines and stay tracked); a regular file is OK only if it contains the SE Core import/path or equivalent project-specific Codex instructions.
-- `<project-root>/.agents/rules/se-core.md` exists, is a symlink, and resolves to `__SE_CORE_PATH__/core-rules/CLAUDE.md`. If the symlink is **tracked by git** → **warning** per the tracking policy in §8.
-- `<project-root>/.agents/skills/process-gate/` exists, is a symlink, and resolves to `__SE_CORE_PATH__/core-rules/skills/process-gate`. If the symlink is **tracked by git** → **warning** per the tracking policy in §8.
+- Root `AGENTS.md` exists. Symlink to `CLAUDE.md` is OK (relative symlinks are stable across machines and stay tracked); a regular file is OK only if it contains the Trellis import/path or equivalent project-specific Codex instructions.
+- `<project-root>/.agents/rules/trellis.md` exists, is a symlink, and resolves to `__TRELLIS_PATH__/core-rules/CLAUDE.md`. If the symlink is **tracked by git** → **warning** per the tracking policy in §8.
+- `<project-root>/.agents/skills/process-gate/` exists, is a symlink, and resolves to `__TRELLIS_PATH__/core-rules/skills/process-gate`. If the symlink is **tracked by git** → **warning** per the tracking policy in §8.
 - `<project-root>/.agents/skills/process-gate-local/local.config.sh` exists.
 - `<project-root>/.codex/hooks.json` exists and does not contain hardcoded absolute project paths.
-- Every script in `__SE_CORE_PATH__/core-rules/codex/hooks/*.sh` exists under `<project-root>/.codex/hooks/` and is executable.
+- Every script in `__TRELLIS_PATH__/core-rules/codex/hooks/*.sh` exists under `<project-root>/.codex/hooks/` and is executable.
 
 Missing `AGENTS.md`, `.agents/rules`, `.agents/skills/process-gate`, or `.codex/hooks.json` is **critical** because Codex sessions will run without the parent layer or without hook enforcement. Missing local config or non-executable Codex hook scripts are **warning**.
 
 ## Output format
 
-Write a single compliance report to `__SE_CORE_PATH__/audits/YYYY-MM-DD-cross-project-process-audit.md` (create the `audits/` directory if missing). Structure:
+Write a single compliance report to `__TRELLIS_PATH__/audits/YYYY-MM-DD-cross-project-process-audit.md` (create the `audits/` directory if missing). Structure:
 
 ```
 # Weekly process audit — <date>
@@ -160,4 +160,4 @@ Write a single compliance report to `__SE_CORE_PATH__/audits/YYYY-MM-DD-cross-pr
 
 If `registry.md` is missing, stop with a clear error — audit cannot run without it.
 If a project in the registry has no `.git/`, note it and skip git-dependent checks (bypass history, recent commits).
-If `__SE_CORE_PATH__/core-rules/hooks/` doesn't exist yet (pre-Phase-2), skip the staleness check and note "parent hook canonical not yet established."
+If `__TRELLIS_PATH__/core-rules/hooks/` doesn't exist yet (pre-Phase-2), skip the staleness check and note "parent hook canonical not yet established."

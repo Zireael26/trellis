@@ -1,11 +1,11 @@
 ---
 name: process-gate
-description: Pre-PR enforcement gate for any registered SE Core project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks Conventional Commit format, PR size ceiling, branch-name pattern, secrets scan, bypass-marker scan, todos closure, and stack-specific gates loaded from `local.config.sh`. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
+description: Pre-PR enforcement gate for any registered Trellis project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks Conventional Commit format, PR size ceiling, branch-name pattern, secrets scan, bypass-marker scan, todos closure, and stack-specific gates loaded from `local.config.sh`. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
 ---
 
 # process-gate
 
-Harness-agnostic enforcement layer for the SE Core engineering process. Runs in Claude Code, Codex, headless `claude -p`, and CI. The skill is the executor; authoritative rules live in `engineering-process.md` and the project's own `CLAUDE.md`.
+Harness-agnostic enforcement layer for the Trellis engineering process. Runs in Claude Code, Codex, headless `claude -p`, and CI. The skill is the executor; authoritative rules live in `engineering-process.md` and the project's own `CLAUDE.md`.
 
 When in doubt, those documents win. If a rule here contradicts either, fix the rule here.
 
@@ -141,7 +141,7 @@ The canonical six gates apply regardless of stack profile.
 
 The skill and `engineering-process.md` change together. Adding a process in the manual: add an enforcement here. Retiring one: retire here.
 
-Every change to canonical (`$SE_CORE_ROOT/core-rules/skills/process-gate/`) is a PR in se-core. The skill cannot relax its own rules silently — that's what `parent-hook-drift` (extended to skills) detects.
+Every change to canonical (`$TRELLIS_ROOT/core-rules/skills/process-gate/`) is a PR against the Trellis canonical repo. The skill cannot relax its own rules silently — that's what `parent-hook-drift` (extended to skills) detects.
 
 ## Multi-harness support
 
@@ -154,6 +154,6 @@ Project-local configuration and stack validators live beside those symlinks in
 `process-gate-local/`, for example
 `<project>/.claude/skills/process-gate-local/local.config.sh` and
 `<project>/.agents/skills/process-gate-local/scripts/check-tokens.sh`.
-Onboarding seeds both when `harnesses` in `se-core.config.json` includes `"codex"`.
+Onboarding seeds both when `harnesses` in `trellis.config.json` includes `"codex"`.
 Skills, references, and scripts are byte-identical across harnesses; files under
 `process-gate-local/` are the per-project extension points.

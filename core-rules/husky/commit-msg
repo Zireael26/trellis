@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# SE Core canonical commit-msg.
+# Trellis canonical commit-msg.
 # Runs commitlint if installed; skips gracefully otherwise.
 
 set -e

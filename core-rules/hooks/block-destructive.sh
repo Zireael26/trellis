@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # block-destructive.sh — PreToolUse on Bash. Deny rm/git-force/SQL/.env reads.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Reads Claude Code tool event JSON on stdin.

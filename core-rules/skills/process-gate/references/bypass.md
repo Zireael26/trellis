@@ -20,7 +20,7 @@ Detection: `check-bypass.sh` parses `git log --format=%h%n%P%n%s%n%b` for the ra
 
 | Marker | What it means | Posture |
 |---|---|---|
-| `SE_CORE_ALLOW_MAIN_PUSH=1` in commit trailer or recent shell history | Used the documented override | **warn** — must be justified in `gotchas.md` |
+| `TRELLIS_ALLOW_MAIN_PUSH=1` in commit trailer or recent shell history | Used the documented override | **warn** — must be justified in `gotchas.md` |
 | Direct push to `main` without a merge commit (i.e., not the result of a PR merge) | Bypassed the PR flow | **fail** |
 | `git push --force` or `--force-with-lease` to a protected branch | Bypassed branch protection (or branch protection is missing) | **fail** |
 
@@ -34,7 +34,7 @@ Detection: `check-bypass.sh` parses `git log --format=%h%n%P%n%s%n%b` for the ra
 
 ## Allowed overrides
 
-`SE_CORE_ALLOW_MAIN_PUSH=1` exists for genuine emergencies (production outage, force-fix, etc.). Each use must be:
+`TRELLIS_ALLOW_MAIN_PUSH=1` exists for genuine emergencies (production outage, force-fix, etc.). Each use must be:
 
 1. Documented in the project's `gotchas.md` with date, reason, and resolution.
 2. Visible in commit trailers if used during a commit.

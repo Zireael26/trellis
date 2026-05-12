@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ui-verify.sh — Stop. Screenshot verification on UI-touching turns.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Guard: stop_hook_active → exit 0.

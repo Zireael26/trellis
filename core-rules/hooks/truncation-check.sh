@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # truncation-check.sh — PostToolUse on Grep|Bash|Read. Advisory only; never blocks.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Triggers when tool_response length ≥ 50,000 chars OR contains a

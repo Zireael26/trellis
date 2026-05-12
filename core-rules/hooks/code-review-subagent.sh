@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # code-review-subagent.sh — Stop. Advisory review on edit-heavy turns.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Guard: stop_hook_active → exit 0.

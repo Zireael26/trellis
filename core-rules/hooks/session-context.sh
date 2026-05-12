@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # session-context.sh — SessionStart (startup|resume). Inject repo context header.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Runs on SessionStart with source=startup or source=resume.

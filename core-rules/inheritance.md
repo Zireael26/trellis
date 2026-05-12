@@ -6,17 +6,17 @@ Claude Code does **not** cascade `CLAUDE.md` up the directory tree — a child s
 
 Each project under `registry.md` MUST carry a symlink at:
 
-    <project-root>/.claude/rules/se-core.md → __SE_CORE_PATH__/core-rules/CLAUDE.md
+    <project-root>/.claude/rules/trellis.md → __TRELLIS_PATH__/core-rules/CLAUDE.md
 
 Claude Code loads every file under `.claude/rules/` **unconditionally** at session start — no approval dialog, no gate, no TTY dependency. This works identically in interactive and `claude -p` headless modes, which is the property that matters: every automated run (scheduled tasks, cron jobs, subagents, CI) must inherit parent rules without human interaction.
 
-Track the symlink in git so the inheritance is visible in repo state and protected from local deletion. If `.claude/` is gitignored in a project, add explicit exceptions for `.claude/rules/` and `.claude/rules/se-core.md` — otherwise the symlink exists only on one machine.
+Track the symlink in git so the inheritance is visible in repo state and protected from local deletion. If `.claude/` is gitignored in a project, add explicit exceptions for `.claude/rules/` and `.claude/rules/trellis.md` — otherwise the symlink exists only on one machine.
 
 ## Secondary — `@`-import in project `CLAUDE.md` (interactive fallback only)
 
 Every project `CLAUDE.md` also carries an `@`-import line pointing at the canonical path:
 
-    @__SE_CORE_PATH__/core-rules/CLAUDE.md
+    @__TRELLIS_PATH__/core-rules/CLAUDE.md
 
 This is kept for belt-and-braces redundancy in **interactive** sessions only. `@`-imports are gated by Claude Code's trust-verification approval dialog, which:
 
@@ -36,36 +36,61 @@ So the `@`-import is useful only after a human has clicked "approve" at least on
 Every project in `registry.md` must:
 
 - [ ] Contain `CLAUDE.md` at the project root.
-- [ ] Contain `.claude/rules/se-core.md` as a symlink to the canonical core-rules path.
-- [ ] Track `.claude/rules/se-core.md` in git (including `.gitignore` exceptions where needed).
+- [ ] Contain `.claude/rules/trellis.md` as a symlink to the canonical core-rules path.
+- [ ] Track `.claude/rules/trellis.md` in git (including `.gitignore` exceptions where needed).
 - [ ] Contain the `@`-import line in the project `CLAUDE.md` for interactive fallback.
 - [ ] Contain `.claude/skills/process-gate/` as a symlink to the canonical skills path (see "Skills inheritance" above).
-- [ ] If Codex-enabled (`harnesses` includes `"codex"` in `se-core.config.json`): contain root `AGENTS.md`, `.agents/rules/se-core.md`, `.agents/skills/process-gate/`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and executable `.codex/hooks/*.sh`.
+- [ ] If Codex-enabled (`harnesses` includes `"codex"` in `trellis.config.json`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and executable `.codex/hooks/*.sh`.
 - [ ] Have GitHub branch protection enabled on `main` (see `registry.md` step 5).
 
 ## Skills inheritance (process-gate + future canonical skills)
 
 Canonical skills live under `core-rules/skills/<name>/` and are inherited via symlinks identical in shape to the rules symlink:
 
-    <project-root>/.claude/skills/<name>/  →  __SE_CORE_PATH__/core-rules/skills/<name>/
-    <project-root>/.agents/skills/<name>/  →  __SE_CORE_PATH__/core-rules/skills/<name>/
+    <project-root>/.claude/skills/<name>/  →  __TRELLIS_PATH__/core-rules/skills/<name>/
+    <project-root>/.agents/skills/<name>/  →  __TRELLIS_PATH__/core-rules/skills/<name>/
 
 The directory itself is symlinked (not individual files) so additions to canonical files appear automatically without per-project re-onboarding. Project-local overrides go in `<project-root>/.claude/skills/<name>/local.config.sh` (or other ungitignored override file the skill defines) — these are project-private, NOT covered by the canonical symlink.
 
-The current canonical skill is `process-gate`. See `core-rules/skills/process-gate/SKILL.md` for the contract.
+As of Phase C (2026-05-12), seven canonical skills ship: `process-gate`, `security-gate` (always-on), and the opt-in pipeline `clarify`, `spec`, `plan`, `tasks`, `analyze`.
 
 Same silent-drop invariant: if the symlink target moves or breaks, the skill simply does not load — no error. Detected by the extended `parent-hook-drift` audit (skills coverage), not at session time.
 
+## Presets inheritance (opt-in rule layering)
+
+Presets are the rules-side counterpart to the skills inheritance above: opt-in layers that sit on top of the parent CLAUDE.md. Each preset is a single markdown file at `core-rules/presets/<name>.md`. Projects opt in via the `presets` array in `<project>/.trellis.config.json` (or `trellis.config.json`).
+
+For each declared preset, parallel symlinks land at:
+
+    <project-root>/.claude/rules/preset-<name>.md  →  __TRELLIS_PATH__/core-rules/presets/<name>.md
+    <project-root>/.agents/rules/preset-<name>.md  →  __TRELLIS_PATH__/core-rules/presets/<name>.md
+
+Both harnesses load every file under their rules directory and add the content to the agent's prompt — rules are additive, not last-wins. There is no mechanical "override". The "priority" framing in `engineering-process.md §14.7` is a conceptual contract for how an agent should resolve apparent conflicts between layers (later layers in the parent < preset < project-local chain are more specific and should win), not a directive that the engine enforces. If a preset's prose contradicts the parent rules, the preset's wording typically carries because it's more contextual — but the parent rule's voice is still in the context too. Authoring presets means staying additive and carving out explicitly when needed, not relying on naming order to silently override.
+
+Symmetry with skills:
+
+| Aspect | Skills | Presets |
+|---|---|---|
+| Canonical source | `core-rules/skills/<name>/` (directory) | `core-rules/presets/<name>.md` (single file) |
+| Project symlink (Claude) | `.claude/skills/<name>/` | `.claude/rules/preset-<name>.md` |
+| Project symlink (Codex) | `.agents/skills/<name>/` | `.agents/rules/preset-<name>.md` |
+| Opt-in mechanism | Always seeded by `onboard-project.sh` | Only seeded when project's `.trellis.config.json` declares it |
+| Rollout script | `scripts/rollout-feature-skills.sh` | `scripts/rollout-presets.sh` |
+| Drift audit | `parent-hook-drift` (skills section) | `scheduled-tasks/preset-drift/` |
+| Silent-drop invariant | yes — broken symlink → skill doesn't load | yes — broken symlink → preset rules don't load |
+
+Removing a preset from the project's config + re-running `rollout-presets.sh` prunes the now-stale symlink automatically.
+
 ## Multi-harness support (Claude Code + Codex)
 
-Claude Code is the primary harness. Codex is the secondary. SE Core is configured per-project via `harnesses` in `se-core.config.json` (Phase B); when `"codex"` is included, onboarding seeds both `.claude/` and `.agents/` artifact trees as parallel symlinks pointing at the same canonical sources.
+Claude Code is the primary harness. Codex is the secondary. Trellis is configured per-project via `harnesses` in `trellis.config.json` (Phase B); when `"codex"` is included, onboarding seeds both `.claude/` and `.agents/` artifact trees as parallel symlinks pointing at the same canonical sources.
 
 **Canonical file layout under `core-rules/`:**
 
 | Path | Purpose | Used by |
 |---|---|---|
-| `core-rules/CLAUDE.md` | Parent rules — single source of truth | Claude Code (`.claude/rules/se-core.md` symlink target) |
-| `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex (when `<project>/AGENTS.md` symlinks here, or `.agents/rules/se-core.md` does) |
+| `core-rules/CLAUDE.md` | Parent rules — single source of truth | Claude Code (`.claude/rules/trellis.md` symlink target) |
+| `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex (when `<project>/AGENTS.md` symlinks here, or `.agents/rules/trellis.md` does) |
 | `core-rules/skills/<name>/` | Canonical skills | Both harnesses via parallel project symlinks |
 | `core-rules/hooks/` | Tier 1 + 2 Claude Code hooks | Claude Code |
 | `core-rules/codex/` | Codex hook manifest + scripts | Codex |
@@ -78,13 +103,13 @@ Claude Code is the primary harness. Codex is the secondary. SE Core is configure
 ├── CLAUDE.md                                                ← Claude Code rules entry
 ├── AGENTS.md                                                ← symlink → CLAUDE.md (or its own equivalent)
 ├── .claude/
-│   ├── rules/se-core.md   → /…/se-core/core-rules/CLAUDE.md
-│   ├── skills/process-gate/ → /…/se-core/core-rules/skills/process-gate/
+│   ├── rules/trellis.md   → /…/trellis-instance/core-rules/CLAUDE.md
+│   ├── skills/process-gate/ → /…/trellis-instance/core-rules/skills/process-gate/
 │   ├── hooks/                                               ← Tier 1+2, Claude-only
 │   └── settings.json
 ├── .agents/
-│   ├── rules/se-core.md   → /…/se-core/core-rules/CLAUDE.md   (same target as .claude/rules/)
-│   ├── skills/process-gate/ → /…/se-core/core-rules/skills/process-gate/
+│   ├── rules/trellis.md   → /…/trellis-instance/core-rules/CLAUDE.md   (same target as .claude/rules/)
+│   ├── skills/process-gate/ → /…/trellis-instance/core-rules/skills/process-gate/
 │   └── skills/process-gate-local/local.config.sh
 └── .codex/
     ├── hooks.json
@@ -104,10 +129,10 @@ For Claude-Code-only projects (default), `.agents/` is omitted entirely.
 
 ## Native git hooks (Unity / non-Node projects)
 
-Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot use husky. They MUST instead enforce the SE Core PR-flow guard via native git hooks:
+Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot use husky. They MUST instead enforce the Trellis PR-flow guard via native git hooks:
 
 - Set `git config core.hooksPath` to a tracked directory (e.g., `.githooks/`).
-- That directory MUST contain a `pre-push` whose body includes the canonical SE Core PR-flow guard (block direct push to `main`/`master`, `SE_CORE_ALLOW_MAIN_PUSH=1` override).
+- That directory MUST contain a `pre-push` whose body includes the canonical Trellis PR-flow guard (block direct push to `main`/`master`, `TRELLIS_ALLOW_MAIN_PUSH=1` override).
 - The hooks directory and its scripts MUST be tracked in git so the enforcement is visible in repo state and survives a clone.
 
 Reference example: `lume` (Unity 3D) uses `.githooks/pre-push` with `core.hooksPath = .githooks`. The `cross-project-process-audit` rubric skips the husky-presence check when `package.json` is absent and the native-hooks fallback is in place — see `scheduled-tasks/cross-project-process-audit/prompt.md` §3.

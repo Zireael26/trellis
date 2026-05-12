@@ -1,22 +1,22 @@
 #!/usr/bin/env sh
-# SE Core canonical pre-push.
-# 1. Blocks direct pushes to main/master (SE Core PR-flow policy).
-#    Override for emergencies: SE_CORE_ALLOW_MAIN_PUSH=1 git push
+# Trellis canonical pre-push.
+# 1. Blocks direct pushes to main/master (Trellis PR-flow policy).
+#    Override for emergencies: TRELLIS_ALLOW_MAIN_PUSH=1 git push
 # 2. Runs typecheck then test scripts if present. Missing scripts skip with log line.
 
 set -e
 
-# --- SE Core PR-flow guard ---
+# --- Trellis PR-flow guard ---
 # Git passes refs via stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
 while read -r local_ref local_sha remote_ref remote_sha; do
   case "$remote_ref" in
     refs/heads/main|refs/heads/master)
-      if [ "${SE_CORE_ALLOW_MAIN_PUSH:-0}" != "1" ]; then
-        echo "[pre-push] Direct push to $remote_ref blocked by SE Core policy." >&2
-        echo "[pre-push] Open a branch + PR. Emergency override: SE_CORE_ALLOW_MAIN_PUSH=1 git push" >&2
+      if [ "${TRELLIS_ALLOW_MAIN_PUSH:-0}" != "1" ]; then
+        echo "[pre-push] Direct push to $remote_ref blocked by Trellis policy." >&2
+        echo "[pre-push] Open a branch + PR. Emergency override: TRELLIS_ALLOW_MAIN_PUSH=1 git push" >&2
         exit 1
       fi
-      echo "[pre-push] SE_CORE_ALLOW_MAIN_PUSH=1 set; allowing direct push to $remote_ref." >&2
+      echo "[pre-push] TRELLIS_ALLOW_MAIN_PUSH=1 set; allowing direct push to $remote_ref." >&2
       ;;
   esac
 done
@@ -39,7 +39,7 @@ run_script() {
   esac
 }
 
-echo "[pre-push] SE Core verification starting..."
+echo "[pre-push] Trellis verification starting..."
 
 if has_script typecheck; then
   run_script typecheck || { echo "[pre-push] typecheck failed"; exit 1; }

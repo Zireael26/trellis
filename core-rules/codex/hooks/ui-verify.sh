@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ui-verify.sh — Codex Stop. Screenshot verification on UI-touching turns.
-# Source: Software Engineering Core / core-rules / codex hooks.
+# Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
 #   - Guard: stop_hook_active → exit 0.

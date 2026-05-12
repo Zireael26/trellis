@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # post-compact-context.sh — SessionStart (source=compact). Re-inject context-log.md.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Runs only when SessionStart.source == "compact".

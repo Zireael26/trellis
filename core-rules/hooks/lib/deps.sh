@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared dependency helpers for SE Core hooks.
+# Shared dependency helpers for Trellis hooks.
 # Sourced by each hook. Sibling location: lib/ alongside the hook scripts.
 #
 # Plan task: P3.5 (extract shared hook utilities).
@@ -11,7 +11,7 @@
 
 # _se_require_jq <hook-name>
 #   - if jq is available → return 0
-#   - if SE_CORE_NO_JQ_DEGRADE=1   → write a stderr breadcrumb + exit 0
+#   - if TRELLIS_NO_JQ_DEGRADE=1   → write a stderr breadcrumb + exit 0
 #   - otherwise                    → write stderr install help + exit 1
 #
 # Replaces the inline `if ! command -v jq ...; then exit 0; fi` pattern that
@@ -19,11 +19,11 @@
 _se_require_jq() {
   local hook="${1:-hook}"
   if command -v jq >/dev/null 2>&1; then return 0; fi
-  if [ "${SE_CORE_NO_JQ_DEGRADE:-0}" = "1" ]; then
-    echo "${hook}: jq not found; SE_CORE_NO_JQ_DEGRADE=1 — degrading to no-op (install jq: brew install jq | apt-get install -y jq)" >&2
+  if [ "${TRELLIS_NO_JQ_DEGRADE:-0}" = "1" ]; then
+    echo "${hook}: jq not found; TRELLIS_NO_JQ_DEGRADE=1 — degrading to no-op (install jq: brew install jq | apt-get install -y jq)" >&2
     exit 0
   fi
-  echo "${hook}: jq required but not found — install jq (brew install jq | apt-get install -y jq) or set SE_CORE_NO_JQ_DEGRADE=1 to allow degradation" >&2
+  echo "${hook}: jq required but not found — install jq (brew install jq | apt-get install -y jq) or set TRELLIS_NO_JQ_DEGRADE=1 to allow degradation" >&2
   exit 1
 }
 

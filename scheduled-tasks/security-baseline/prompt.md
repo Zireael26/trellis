@@ -1,15 +1,15 @@
 # Security baseline (quarterly, host-only)
 
-You are running the quarterly **project-wide security baseline** across every active project. Mode 1 of the `security-gate` skill — see `__SE_CORE_PATH__/core-rules/skills/security-gate/SKILL.md` for the canonical contract and `__SE_CORE_PATH__/security-gate-plan.md` for threat model and rationale.
+You are running the quarterly **project-wide security baseline** across every active project. Mode 1 of the `security-gate` skill — see `__TRELLIS_PATH__/core-rules/skills/security-gate/SKILL.md` for the canonical contract and `__TRELLIS_PATH__/security-gate-plan.md` for threat model and rationale.
 
 This task replaces the **ground truth** that per-push diff scans (Mode 2) deduplicate against. Without a fresh baseline, latent vulnerabilities sit forever — diff scans only see what current PRs touch.
 
 ## Canonical paths (authoritative)
 
-- SE Core control plane: `__SE_CORE_PATH__/`
-- Skill scripts: `__SE_CORE_PATH__/core-rules/skills/security-gate/scripts/`
+- Trellis control plane: `__TRELLIS_PATH__/`
+- Skill scripts: `__TRELLIS_PATH__/core-rules/skills/security-gate/scripts/`
 - Personal projects root: `__PROJECTS_ROOT__/`
-- Fleet audit output: `__SE_CORE_PATH__/audits/`
+- Fleet audit output: `__TRELLIS_PATH__/audits/`
 
 These are the only authoritative paths. Do not "reconcile" to alternates that may appear in older snapshots.
 
@@ -19,14 +19,14 @@ Before running any scanner, verify the host:
 
 1. `[ "$(uname)" = "Darwin" ]` must succeed. If not — you are in the linux-arm64 sandbox, not on the macOS host. Write the rollup with a single info finding (`security-baseline requires host execution; sandbox run skipped`) at the canonical output path and stop. Do **not** attempt scans.
 2. `command -v semgrep && command -v osv-scanner && command -v gitleaks` must all succeed. If any is missing, emit one info finding per missing tool and continue with the engines that are present (the scanner libraries warn-and-skip gracefully — see `core-rules/skills/security-gate/scripts/lib/*.sh`).
-3. `[ -f __SE_CORE_PATH__/core-rules/CLAUDE.md ]` and `[ -d __PROJECTS_ROOT__ ]` — if either fails, the host is not configured correctly. Stop with one info finding describing the mismatch.
+3. `[ -f __TRELLIS_PATH__/core-rules/CLAUDE.md ]` and `[ -d __PROJECTS_ROOT__ ]` — if either fails, the host is not configured correctly. Stop with one info finding describing the mismatch.
 
 ## Inputs
 
-1. `Read` `__SE_CORE_PATH__/registry.md` — active project list.
-2. `Read` `__SE_CORE_PATH__/blacklist.md` — opt-out list.
-3. `Read` `__SE_CORE_PATH__/scheduled-tasks/security-baseline/targets.md` — per-project overrides + skip list.
-4. Glob `__SE_CORE_PATH__/audits/*-security-baseline-rollup.md`, sorted lexically; the **most recent** is the previous run, used for the new-vs-recurring-vs-resolved delta.
+1. `Read` `__TRELLIS_PATH__/registry.md` — active project list.
+2. `Read` `__TRELLIS_PATH__/blacklist.md` — opt-out list.
+3. `Read` `__TRELLIS_PATH__/scheduled-tasks/security-baseline/targets.md` — per-project overrides + skip list.
+4. Glob `__TRELLIS_PATH__/audits/*-security-baseline-rollup.md`, sorted lexically; the **most recent** is the previous run, used for the new-vs-recurring-vs-resolved delta.
 
 Target set = `(registry ∖ blacklist) ∖ targets-skip-list`.
 
@@ -48,7 +48,7 @@ For each target project `<P>`:
 ### 2. Run the baseline
 
 ```
-bash __SE_CORE_PATH__/core-rules/skills/security-gate/scripts/run-baseline.sh <P> [--profile=<name>] [--no-llm]
+bash __TRELLIS_PATH__/core-rules/skills/security-gate/scripts/run-baseline.sh <P> [--profile=<name>] [--no-llm]
 ```
 
 - Pass `--no-llm` if no `LLM_PROVIDER` is configured for the project (host or project-local). The OSS engine produces real findings without LLM triage; the rollup must note FP rate is unmeasured for those projects.
@@ -73,7 +73,7 @@ Already on disk (`<P>/audits/<date>-baseline-<P>.{md,json}`). Do not duplicate �
 
 ## Fleet rollup
 
-Write `__SE_CORE_PATH__/audits/<YYYY-MM-DD>-security-baseline-rollup.md`:
+Write `__TRELLIS_PATH__/audits/<YYYY-MM-DD>-security-baseline-rollup.md`:
 
 ```markdown
 # Security baseline rollup — <YYYY-MM-DD>
@@ -136,7 +136,7 @@ For every **new** Critical/High finding, leave a one-line note:
 ## Receipts (definition of done for this run)
 
 - One per-project audit written under `<P>/audits/` for every non-skipped target.
-- One fleet rollup written under `__SE_CORE_PATH__/audits/`.
+- One fleet rollup written under `__TRELLIS_PATH__/audits/`.
 - Tool versions captured in the rollup header (reproducibility — re-running this rollup must be possible from the recorded versions alone).
 - Quarter-over-quarter delta populated, even when the answer is "no change".
 - For at least one new Critical/High finding (if any): full reproduction step from the per-project audit's `exploit_steps` field surfaced in the rollup.

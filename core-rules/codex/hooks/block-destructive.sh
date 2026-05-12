@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # block-destructive.sh — Codex PreToolUse on Bash. Deny rm/git-force/SQL/.env reads.
-# Source: Software Engineering Core / core-rules / codex hooks.
+# Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
 #   - Reads Codex tool event JSON on stdin.

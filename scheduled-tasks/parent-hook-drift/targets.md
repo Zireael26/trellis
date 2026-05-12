@@ -1,6 +1,6 @@
 # Targets — parent-hook-drift
 
-Reads `__SE_CORE_PATH__/registry.md` at
+Reads `__TRELLIS_PATH__/registry.md` at
 runtime. Target set = `registry \ blacklist`.
 
 ## Scope
@@ -8,7 +8,7 @@ runtime. Target set = `registry \ blacklist`.
 - Weekly, Sunday at 9 PM — deliberately end-of-week and late, so the
   Monday morning audits can act on findings the same week.
 - Compares each project's `.claude/hooks/` against canonical in
-  `__SE_CORE_PATH__/core-rules/hooks/`.
+  `__TRELLIS_PATH__/core-rules/hooks/`.
 
 ## Canonical hook manifest
 

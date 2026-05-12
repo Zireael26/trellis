@@ -1,0 +1,22 @@
+{
+  "$schema": "./scripts/lib/trellis.config.schema.json",
+  "comment": "Example Trellis configuration. Copy to repo root as trellis.config.json, then fill in absolute paths and identity. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to.",
+
+  "trellis_root": "/ABSOLUTE/PATH/TO/trellis-instance",
+  "projects_root": "/ABSOLUTE/PATH/TO/projects",
+  "user_home": "/ABSOLUTE/PATH/TO/home",
+
+  "maintainer_name": "Your Name",
+  "github_user": "your-github-handle",
+
+  "harnesses": ["claude", "codex"],
+
+  "trellis_version": "0.1.0",
+
+  "template": {
+    "remote": "git@github.com:your-org/trellis.git",
+    "branch": "main"
+  },
+
+  "sed_flavor": "auto"
+}

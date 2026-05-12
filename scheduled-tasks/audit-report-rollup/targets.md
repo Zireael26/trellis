@@ -11,6 +11,6 @@ iterate over projects.
 
 ## Audit directory
 
-`__SE_CORE_PATH__/audits/`
+`__TRELLIS_PATH__/audits/`
 
 Naming convention: `YYYY-MM-DD-<task-name>.md`

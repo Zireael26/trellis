@@ -130,14 +130,14 @@ run_with_cmd() {
   [[ "$stderr" == *"install jq"* ]]
 }
 
-@test "P1.5: jq missing + SE_CORE_NO_JQ_DEGRADE=1 → exit 0 + breadcrumb" {
+@test "P1.5: jq missing + TRELLIS_NO_JQ_DEGRADE=1 → exit 0 + breadcrumb" {
   jq_free_path="$(make_jq_free_path)"
   PATH_BACKUP="$PATH"; export PATH="$jq_free_path"
-  export SE_CORE_NO_JQ_DEGRADE=1
+  export TRELLIS_NO_JQ_DEGRADE=1
   run_with_stderr "$HOOK" '{}'
-  unset SE_CORE_NO_JQ_DEGRADE
+  unset TRELLIS_NO_JQ_DEGRADE
   PATH="$PATH_BACKUP"
   rm -rf "$jq_free_path"
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *"SE_CORE_NO_JQ_DEGRADE=1"* ]]
+  [[ "$stderr" == *"TRELLIS_NO_JQ_DEGRADE=1"* ]]
 }

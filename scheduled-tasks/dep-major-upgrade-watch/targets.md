@@ -1,6 +1,6 @@
 # Targets — dep-major-upgrade-watch
 
-Reads `__SE_CORE_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`. Curated watchlist is `watchlist.md` in this directory.
+Reads `__TRELLIS_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`. Curated watchlist is `watchlist.md` in this directory.
 
 ## Runner requirement
 

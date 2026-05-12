@@ -1,11 +1,11 @@
 ---
 name: security-gate
-description: Project-wide security baseline scanner for any registered SE Core project. Use to establish ground truth across the entire codebase (SAST, dependency, secret findings) before relying on per-PR diff scans. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer. Phase 1 ships Mode 1 (baseline) only; diff (Phase 2), scheduled re-baseline (Phase 3), LLM-app probes (Phase 4), Unity profile (Phase 5), and red-team (Phase 6) follow.
+description: Project-wide security baseline scanner for any registered Trellis project. Use to establish ground truth across the entire codebase (SAST, dependency, secret findings) before relying on per-PR diff scans. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer. Phase 1 ships Mode 1 (baseline) only; diff (Phase 2), scheduled re-baseline (Phase 3), LLM-app probes (Phase 4), Unity profile (Phase 5), and red-team (Phase 6) follow.
 ---
 
 # security-gate
 
-Harness-agnostic security scanner for the SE Core engineering process. The engine is OSS tooling; the LLM is a swappable triage and remediation layer. Authoritative scope, threat model, and phasing live in `security-gate-plan.md` at the SE Core root.
+Harness-agnostic security scanner for the Trellis engineering process. The engine is OSS tooling; the LLM is a swappable triage and remediation layer. Authoritative scope, threat model, and phasing live in `security-gate-plan.md` at the Trellis root.
 
 When in doubt, that document and `engineering-process.md` win. If a rule here contradicts either, fix the rule here.
 
@@ -170,7 +170,7 @@ Identical SKILL.md, prompts/, and scripts/ are surfaced to:
 - **Claude Code** via `<project>/.claude/skills/security-gate/` symlink → canonical.
 - **Codex** via `<project>/.agents/skills/security-gate/` symlink → canonical.
 
-Project-local configuration and overrides live beside those symlinks in `security-gate-local/`. Onboarding (extended in Phase 2) will seed both when `harnesses` in `se-core.config.json` includes `"codex"`.
+Project-local configuration and overrides live beside those symlinks in `security-gate-local/`. Onboarding (extended in Phase 2) will seed both when `harnesses` in `trellis.config.json` includes `"codex"`.
 
 ## Scope boundaries
 
@@ -180,4 +180,4 @@ Project-local configuration and overrides live beside those symlinks in `securit
 
 ## Updating this skill
 
-The skill and `security-gate-plan.md` evolve together. Phasing is locked in §7 of the plan; deviations require updating the plan first. Every change to canonical (`$SE_CORE_ROOT/core-rules/skills/security-gate/`) is a PR in se-core.
+The skill and `security-gate-plan.md` evolve together. Phasing is locked in §7 of the plan; deviations require updating the plan first. Every change to canonical (`$TRELLIS_ROOT/core-rules/skills/security-gate/`) is a PR against the Trellis canonical repo.

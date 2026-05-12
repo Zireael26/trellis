@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "SE Core configuration",
+  "title": "Trellis configuration",
   "type": "object",
   "required": [
-    "se_core_root",
+    "trellis_root",
     "projects_root",
     "user_home",
     "maintainer_name",
@@ -17,7 +17,7 @@
     "comment": {
       "type": "string"
     },
-    "se_core_root": {
+    "trellis_root": {
       "type": "string",
       "minLength": 1
     },
@@ -37,11 +37,27 @@
       "type": "string",
       "minLength": 1
     },
+    "trellis_version": {
+      "description": "Optional. Semver of the canonical core-rules this clone is pinned to. Read by scripts/upgrade.sh.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
     "harnesses": {
       "type": "array",
       "minItems": 1,
       "items": {
         "enum": ["claude", "codex"]
+      },
+      "uniqueItems": true
+    },
+    "presets": {
+      "description": "Optional. List of preset rule-layers to load on top of the parent rules. Each entry must match a file under core-rules/presets/<name>.md. Symlinks land at <project>/.claude/rules/preset-<name>.md and <project>/.agents/rules/preset-<name>.md (under Codex). Order is preserved — later entries compose on top of earlier ones.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+        "minLength": 2,
+        "maxLength": 64
       },
       "uniqueItems": true
     },

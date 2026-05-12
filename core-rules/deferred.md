@@ -63,7 +63,7 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 ### API surface gate
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** at PR time, diff the project's declared API surface (OpenAPI / GraphQL SDL / route table / RPC manifest) against `main`. Breaking changes (removed routes, removed fields, narrowed types, tightened required-ness) without an accompanying version bump or deprecation marker block the merge.
-**Why defer:** SE Core has zero service-shaped projects in `registry.md` today (`service-node` and `service-python` are taxonomy-only). At n=0 the rule's exact shape — which manifest format, what counts as breaking, where the version bump lives — would be a coin flip.
+**Why defer:** Trellis has zero service-shaped projects in `registry.md` today (`service-node` and `service-python` are taxonomy-only). At n=0 the rule's exact shape — which manifest format, what counts as breaking, where the version bump lives — would be a coin flip.
 **Lift when:** three independent service-shaped projects each ship a route-surface diff at PR time. They don't have to use the same tool, but the rule converges only when there's evidence of a common shape across them.
 
 ### Migration safety gate

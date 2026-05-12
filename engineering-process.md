@@ -1,10 +1,10 @@
-# SE Core — engineering process manual
+# Trellis — engineering process manual
 
 **Owner:** __MAINTAINER_NAME__ (solo maintainer)
-**Status:** Authoritative. Updates only via PR against `~/projects/se-core/`.
+**Status:** Authoritative. Updates only via PR against `~/projects/trellis-instance/`.
 **Last revised:** 2026-05-02
 
-This is the single human-readable source of truth for how engineering is done under the Software Engineering Core regime. Everything elaborated here is grounded in the machinery that already exists in `~/projects/se-core/` — specs in `core-rules/`, canonical hooks in `core-rules/hooks/`, the project list in `registry.md`, and the scheduled audits in `scheduled-tasks/`. This manual narrates and connects them; it does not duplicate them. When a section points at a sibling file, that file is the deep dive.
+This is the single human-readable source of truth for how engineering is done under the Trellis regime. Everything elaborated here is grounded in the machinery that already exists in `~/projects/trellis-instance/` — specs in `core-rules/`, canonical hooks in `core-rules/hooks/`, the project list in `registry.md`, and the scheduled audits in `scheduled-tasks/`. This manual narrates and connects them; it does not duplicate them. When a section points at a sibling file, that file is the deep dive.
 
 ---
 
@@ -23,20 +23,20 @@ This is the single human-readable source of truth for how engineering is done un
 11. [Scheduled audits & the feedback loop](#11-scheduled-audits--the-feedback-loop)
 12. [Incident response & rollback](#12-incident-response--rollback)
 13. [Secrets & dependency management](#13-secrets--dependency-management)
-14. [Evolving SE Core](#14-evolving-se-core)
+14. [Evolving Trellis](#14-evolving-trellis)
 15. [Glossary & quick reference](#15-glossary--quick-reference)
 
 ---
 
 ## 1. Introduction
 
-### What SE Core is
+### What Trellis is
 
-Software Engineering Core (SE Core) is a shared engineering-process regime that a set of opt-in personal projects inherit from. It lives in `~/projects/se-core/` and manifests in each registered project as:
+Trellis is a shared engineering-process regime that a set of opt-in personal projects inherit from. It lives in `~/projects/trellis-instance/` and manifests in each registered project as:
 
-- A `.claude/rules/se-core.md` symlink for Claude Code and `AGENTS.md` / `.agents/rules/se-core.md` for Codex, all pointing at the canonical parent rules.
+- A `.claude/rules/trellis.md` symlink for Claude Code and `AGENTS.md` / `.agents/rules/trellis.md` for Codex, all pointing at the canonical parent rules.
 - Canonical hooks deployed under `.claude/hooks/` for Claude Code and `.codex/` for Codex that enforce the rules mechanically at tool-use time.
-- Weekly and monthly audits that scan every registered project for drift and write reports to `~/projects/se-core/audits/`.
+- Weekly and monthly audits that scan every registered project for drift and write reports to `~/projects/trellis-instance/audits/`.
 
 The goal: shared high standards across projects without hand-enforcing them per session.
 
@@ -48,11 +48,11 @@ The specs (`core-rules/CLAUDE.md`, `hooks.md`, `inheritance.md`) are terse and L
 
 - **You (Abhishek)** — when you need to remember what the policy is, when you need to decide whether a pattern should be lifted into the parent, or when you're about to change something about the process.
 - **Your LLM collaborators** — Claude Code, Codex, and headless audit runners — already load the parent rules via the inheritance mechanism. This manual is a companion for human-readable context that can be referenced on demand.
-- **Future contributors** — if SE Core ever has other humans working inside it, this is the doc that onboards them.
+- **Future contributors** — if Trellis ever has other humans working inside it, this is the doc that onboards them.
 
 ### Scope
 
-SE Core covers engineering process for *personal* projects under `~/projects/personal/`. Work projects, client engagements, and throwaway experiments are out of scope — this regime is opinionated, prescriptive, and designed around solo-dev-with-high-standards dynamics. If a project opts into SE Core it commits to the whole stack; partial adoption is not supported.
+Trellis covers engineering process for *personal* projects under `~/projects/personal/`. Work projects, client engagements, and throwaway experiments are out of scope — this regime is opinionated, prescriptive, and designed around solo-dev-with-high-standards dynamics. If a project opts into Trellis it commits to the whole stack; partial adoption is not supported.
 
 ---
 
@@ -60,7 +60,7 @@ SE Core covers engineering process for *personal* projects under `~/projects/per
 
 Five principles the manual comes back to:
 
-**1. Parent/child layered rules, Rule of Three for promotion.** Cross-cutting rules live in the parent (`core-rules/CLAUDE.md` + `hooks.md`). Project-specific rules live in each project's own `CLAUDE.md`. A rule earns parent status only when three independent projects adopt it; n=2 is the danger zone where you lock in the wrong abstraction. Candidates waiting for their third witness live in `core-rules/deferred.md`. See [§14](#14-evolving-se-core).
+**1. Parent/child layered rules, Rule of Three for promotion.** Cross-cutting rules live in the parent (`core-rules/CLAUDE.md` + `hooks.md`). Project-specific rules live in each project's own `CLAUDE.md`. A rule earns parent status only when three independent projects adopt it; n=2 is the danger zone where you lock in the wrong abstraction. Candidates waiting for their third witness live in `core-rules/deferred.md`. See [§14](#14-evolving-trellis).
 
 **2. Process is code.** Every rule that can be mechanically enforced becomes a hook. Hooks fail closed (block the agent or fail the build). Written rules that depend on good intentions erode in under a month; written rules backed by a hook persist until the hook is deleted. See [§5](#5-hook-enforcement).
 
@@ -74,12 +74,12 @@ Five principles the manual comes back to:
 
 ## 3. The control plane
 
-Everything that defines and evolves SE Core lives in `~/projects/se-core/`:
+Everything that defines and evolves Trellis lives in `~/projects/trellis-instance/`:
 
 ```
-se-core/
+trellis-instance/
 ├── engineering-process.md          ← you are here
-├── se-core.config.json             ← deployment-local configuration (paths, harnesses, GitHub user)
+├── trellis.config.json             ← deployment-local configuration (paths, harnesses, GitHub user)
 ├── registry.md                     ← active projects opt-in list
 ├── blacklist.md                    ← temporary exemptions
 ├── recon.md                        ← LIFT/LEAVE/DEFER thesis doc (history)
@@ -104,20 +104,20 @@ se-core/
 └── audits/                         ← dated output of every audit run
 ```
 
-### 3.1 `se-core.config.json`
+### 3.1 `trellis.config.json`
 
-Single file capturing the customizations of THIS clone of se-core. Bootstrapped from the template; consumed by every script that needs absolute paths or harness mode.
+Single file capturing the customizations of THIS clone of Trellis. Bootstrapped from the template; consumed by every script that needs absolute paths or harness mode.
 
 ```jsonc
 {
-  "se_core_root":   "/abs/path/to/se-core",
+  "trellis_root":   "/abs/path/to/trellis-instance",
   "projects_root":  "/abs/path/to/projects/personal",
   "user_home":      "/Users/<you>",
   "maintainer_name":"<your name>",
   "github_user":    "<github-username>",
   "harnesses":      ["claude"],         // or ["claude", "codex"]
   "template": {
-    "remote": "git@github.com:<you>/se-core-template.git",
+    "remote": "git@github.com:<you>/trellis.git",
     "branch": "main",
     "redact_paths": ["audits/", "blacklist.md", "registry.md"]
   },
@@ -125,11 +125,11 @@ Single file capturing the customizations of THIS clone of se-core. Bootstrapped 
 }
 ```
 
-Scripts source `scripts/lib/config-load.sh` to populate `$SE_CORE_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders).
+Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders).
 
 Cross-machine portability is achieved by:
 
-1. **The template repo** (`se-core-template`) — placeholders + `AGENT_SETUP.md` walking an LLM through bootstrap.
+1. **The template repo** (`trellis-template`) — placeholders + `AGENT_SETUP.md` walking an LLM through bootstrap.
 2. **`sync-to-template.sh`** — exports current canonical content from this live repo back to the template, redacting user-specific values to placeholders. The friend pulls template updates and re-applies to their own clone.
 3. **Audit prompts retain absolute paths** — bootstrap-time sed-substitution, not runtime resolution. Headless-safe by construction; each customer's clone has their own absolute paths after bootstrap.
 
@@ -140,7 +140,7 @@ Cross-machine portability is achieved by:
 | `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed `AGENTS.md`, `.agents/`, and `.codex/` parity when Codex enabled. |
 | `scripts/sync-hooks.sh [--dry-run\|--yes]` | Canonical Tier 1+2 hook scripts → all registered projects' `.claude/hooks/`. Skill symlinks update automatically (no rsync needed). |
 | `scripts/sync-codex-hooks.sh [--dry-run\|--yes]` | Canonical Codex hook manifest + scripts → all registered projects' `.codex/` trees when Codex is enabled. |
-| `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$SE_CORE_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
+| `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
 
 **Read-repeatedly files** (the contract):
 - `engineering-process.md` (this doc)
@@ -158,9 +158,9 @@ Cross-machine portability is achieved by:
 
 ## 4. Project regime
 
-### 4.1 What "active under SE Core" means
+### 4.1 What "active under Trellis" means
 
-A project is active under SE Core if and only if it appears in `registry.md` and not in `blacklist.md`. Active projects are:
+A project is active under Trellis if and only if it appears in `registry.md` and not in `blacklist.md`. Active projects are:
 
 - Required to carry the canonical hooks, symlink, and `CLAUDE.md` files (see [§10](#10-onboarding-a-new-project-full-playbook) for the checklist).
 - Automatically included in every scheduled audit run (see [§11](#11-scheduled-audits--the-feedback-loop)).
@@ -172,11 +172,11 @@ A project is active under SE Core if and only if it appears in `registry.md` and
 
 Claude Code does **not** cascade `CLAUDE.md` up the directory tree. Inheritance is explicit, via two mechanisms with different trust profiles:
 
-**Primary — `.claude/rules/se-core.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project.
+**Primary — `.claude/rules/trellis.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project.
 
-**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$SE_CORE_ROOT` (e.g., `__SE_CORE_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/se-core/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
+**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$TRELLIS_ROOT` (e.g., `__TRELLIS_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/trellis-instance/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
 
-**Secondary — `@`-import in project `CLAUDE.md`.** `@__SE_CORE_PATH__/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
+**Secondary — `@`-import in project `CLAUDE.md`.** `@__TRELLIS_PATH__/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
 
 If either mechanism breaks, Claude Code drops the instruction silently — no error, no warning. The `parent-hook-drift` audit catches drift; the `cross-project-process-audit` catches missing symlinks. See `core-rules/inheritance.md` for silent-drop invariants and the registered-project checklist.
 
@@ -202,7 +202,7 @@ Full spec: `core-rules/hooks.md`. Summary follows.
 | **Tier 2 — heavy-gated** | On turn wrap-up (`Stop` event) | ≤ 90s | Catch "claimed done but isn't" before the turn ends. |
 | **Tier 3 — git-boundary** | On commit / push (husky) | Project-local | Last-line defense if tier 1/2 misfired. |
 
-Tier 1 and 2 are harness hook events. Claude Code and Codex use separate JSON envelopes, so SE Core keeps separate canonical script trees while preserving the same policy intent. Tier 3 is husky + lint-staged + commitlint, standard git machinery.
+Tier 1 and 2 are harness hook events. Claude Code and Codex use separate JSON envelopes, so Trellis keeps separate canonical script trees while preserving the same policy intent. Tier 3 is husky + lint-staged + commitlint, standard git machinery.
 
 ### 5.2 The nine canonical hooks
 
@@ -231,7 +231,7 @@ Canonical skills live under `core-rules/skills/<name>/` and are inherited by eve
 **Project deployment.** Each registered project carries:
 
 ```
-<project-root>/.claude/skills/process-gate/  →  $SE_CORE_ROOT/core-rules/skills/process-gate/
+<project-root>/.claude/skills/process-gate/  →  $TRELLIS_ROOT/core-rules/skills/process-gate/
 ```
 
 The directory itself is symlinked, so canonical updates appear automatically. Project-local configuration goes beside the symlink in `<project-root>/.claude/skills/process-gate-local/local.config.sh` (NOT covered by the canonical symlink — project owns it).
@@ -265,13 +265,13 @@ Claude Code is the primary harness. Codex is the secondary. Different layers cov
 
 | Layer | Claude Code | Codex | Notes |
 |---|---|---|---|
-| Parent rules doc | `CLAUDE.md` (via `.claude/rules/se-core.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/se-core.md` symlink) | Single canonical source of truth in `core-rules/CLAUDE.md`. |
+| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | Single canonical source of truth in `core-rules/CLAUDE.md`. |
 | Skills (`process-gate`, future) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | Same canonical target; byte-identical across harnesses. |
 | Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | Separate canonical envelopes; same policy intent. |
 | Tier 3 git hooks (husky / native) | runs in both | runs in both | Harness-agnostic. |
 | Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
 
-Projects opt into Codex by setting `harnesses: ["claude", "codex"]` in `se-core.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane runs both.
+Projects opt into Codex by setting `harnesses: ["claude", "codex"]` in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane runs both.
 
 ---
 
@@ -304,7 +304,7 @@ Commit bodies are optional. When present, use them for *why*, not for *what* (th
 
 **Every change to `main` goes through a PR.** No exceptions under normal conditions. Direct push to `main` is blocked at three layers:
 
-1. Local `pre-push` hook (husky) — refuses direct push to `main`/`master`. Override: `SE_CORE_ALLOW_MAIN_PUSH=1 git push` (use almost never, document every use in the project's `gotchas.md` or commit trailer).
+1. Local `pre-push` hook (husky) — refuses direct push to `main`/`master`. Override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use almost never, document every use in the project's `gotchas.md` or commit trailer).
 2. GitHub branch protection — require PR, require passing status checks, **squash-merge disabled in repo settings** so merge commits are the only path that lands on `main` (preserves full PR history). Do not enable "Require linear history" — it forbids merge commits.
 3. Convention — you know better.
 
@@ -316,7 +316,7 @@ Review model for sole-maintainer projects: **self-review discipline + CI gates**
 
 ### 6.4 Branch protection
 
-Every SE Core project must have branch protection on `main`:
+Every Trellis project must have branch protection on `main`:
 - Require pull requests before merging.
 - Require status checks to pass (CI: install → lint → typecheck → unit tests → build).
 - Disable squash-merge in repo settings; allow merge-commit (default) and rebase-merge only. Do **not** enable the "Require linear history" branch-protection toggle — it forbids merge commits, conflicting with the canonical merge-commit policy. Effective linearity is achieved by rebasing feature branches onto current `main` before merge so the merge commit is fast-forwardable.
@@ -406,9 +406,9 @@ Each registered project has a `CLAUDE.md` at its root. Structure:
 ```markdown
 # <project-name>
 
-@__SE_CORE_PATH__/core-rules/CLAUDE.md
+@__TRELLIS_PATH__/core-rules/CLAUDE.md
 
-> Engineering process manual: `~/projects/se-core/engineering-process.md`
+> Engineering process manual: `~/projects/trellis-instance/engineering-process.md`
 
 <1–3 sentences: what is this project, who uses it, what's its current phase>
 
@@ -508,27 +508,27 @@ git init -b main
 mkdir -p .claude/rules .claude/hooks
 
 # 4. Symlink parent rules (PRIMARY inheritance — required)
-ln -s __SE_CORE_PATH__/core-rules/CLAUDE.md \
-      .claude/rules/se-core.md
+ln -s __TRELLIS_PATH__/core-rules/CLAUDE.md \
+      .claude/rules/trellis.md
 
 # 5. Copy canonical hooks
-cp __SE_CORE_PATH__/core-rules/hooks/*.sh .claude/hooks/
+cp __TRELLIS_PATH__/core-rules/hooks/*.sh .claude/hooks/
 chmod +x .claude/hooks/*.sh
 
 # 5b. Symlink canonical skills (process-gate)
 mkdir -p .claude/skills
-ln -s __SE_CORE_PATH__/core-rules/skills/process-gate \
+ln -s __TRELLIS_PATH__/core-rules/skills/process-gate \
       .claude/skills/process-gate
 
 # 5c. (Codex-enabled projects only) seed .agents and .codex trees
-# If `harnesses` in se-core.config.json includes "codex":
+# If `harnesses` in trellis.config.json includes "codex":
 #   mkdir -p .agents/rules .agents/skills .codex/hooks
-#   ln -s __SE_CORE_PATH__/core-rules/CLAUDE.md \
-#         .agents/rules/se-core.md
-#   ln -s __SE_CORE_PATH__/core-rules/skills/process-gate \
+#   ln -s __TRELLIS_PATH__/core-rules/CLAUDE.md \
+#         .agents/rules/trellis.md
+#   ln -s __TRELLIS_PATH__/core-rules/skills/process-gate \
 #         .agents/skills/process-gate
-#   cp __SE_CORE_PATH__/core-rules/codex/hooks.json .codex/hooks.json
-#   cp __SE_CORE_PATH__/core-rules/codex/hooks/*.sh .codex/hooks/
+#   cp __TRELLIS_PATH__/core-rules/codex/hooks.json .codex/hooks.json
+#   cp __TRELLIS_PATH__/core-rules/codex/hooks/*.sh .codex/hooks/
 #   chmod +x .codex/hooks/*.sh
 #   # AGENTS.md at project root: either content + @-import OR symlink → CLAUDE.md
 #   ln -s CLAUDE.md AGENTS.md   # if no Codex-specific divergence is needed
@@ -540,7 +540,7 @@ ln -s __SE_CORE_PATH__/core-rules/skills/process-gate \
 cat > CLAUDE.md <<'EOF'
 # <name>
 
-@__SE_CORE_PATH__/core-rules/CLAUDE.md
+@__TRELLIS_PATH__/core-rules/CLAUDE.md
 
 <1-3 sentence project overview>
 
@@ -548,29 +548,29 @@ cat > CLAUDE.md <<'EOF'
 ...
 EOF
 
-# 8. Write gotchas.md (template in se-core/core-rules/templates/gotchas.md)
-cp __SE_CORE_PATH__/core-rules/templates/gotchas.md .
+# 8. Write gotchas.md (template in core-rules/templates/gotchas.md)
+cp __TRELLIS_PATH__/core-rules/templates/gotchas.md .
 
-# 9. .gitignore — append the SE Core fragment + project-local entries
-cat __SE_CORE_PATH__/core-rules/templates/project.gitignore.fragment >> .gitignore
+# 9. .gitignore — append the Trellis fragment + project-local entries
+cat __TRELLIS_PATH__/core-rules/templates/project.gitignore.fragment >> .gitignore
 cat >> .gitignore <<'EOF'
 context-log.md
 .claude/settings.local.json
 EOF
 # The fragment gitignores the four canonical absolute-path symlinks
-# (.claude/rules/se-core.md, .claude/skills/process-gate,
-#  .agents/rules/se-core.md, .agents/skills/process-gate). Each developer
+# (.claude/rules/trellis.md, .claude/skills/process-gate,
+#  .agents/rules/trellis.md, .agents/skills/process-gate). Each developer
 # regenerates them post-clone via scripts/onboard-project.sh.
 
 # 10. README.md (template in §9.2)
 
 # 11. Initial commit
 git add -A
-git commit -m "chore: initial scaffold with SE Core inheritance"
+git commit -m "chore: initial scaffold with Trellis inheritance"
 
 # 12. Add to registry.md
-# Edit ~/projects/se-core/registry.md, add a new row under "Active projects"
-# Commit that change in se-core with "chore: register <name>"
+# Edit ~/projects/trellis-instance/registry.md, add a new row under "Active projects"
+# Commit that change in trellis-instance with "chore: register <name>"
 
 # 13. Create GitHub repo (via gh CLI or UI), add remote
 gh repo create <owner>/<name> --private --source=. --remote=origin
@@ -582,18 +582,18 @@ git push -u origin main
 
 ### 10.3 First-commit checklist (verify before you push)
 
-- [ ] Read `~/projects/se-core/engineering-process.md` end-to-end. Everything below this line assumes you have.
-- [ ] `ls -la .claude/rules/se-core.md` — symlink exists, points at canonical path.
-- [ ] `readlink .claude/rules/se-core.md` — target is `__SE_CORE_PATH__/core-rules/CLAUDE.md`.
+- [ ] Read `~/projects/trellis-instance/engineering-process.md` end-to-end. Everything below this line assumes you have.
+- [ ] `ls -la .claude/rules/trellis.md` — symlink exists, points at canonical path.
+- [ ] `readlink .claude/rules/trellis.md` — target is `__TRELLIS_PATH__/core-rules/CLAUDE.md`.
 - [ ] `ls .claude/hooks/` — all nine canonical `.sh` files present and executable.
 - [ ] `ls -la .claude/skills/process-gate` — symlink exists, points at canonical `core-rules/skills/process-gate`.
-- [ ] `readlink .claude/skills/process-gate` — target is `__SE_CORE_PATH__/core-rules/skills/process-gate`.
+- [ ] `readlink .claude/skills/process-gate` — target is `__TRELLIS_PATH__/core-rules/skills/process-gate`.
 - [ ] `grep -q '$CLAUDE_PROJECT_DIR' .claude/settings.json` — no hardcoded project paths.
-- [ ] `CLAUDE.md` starts with `@__SE_CORE_PATH__/core-rules/CLAUDE.md` on line 2.
+- [ ] `CLAUDE.md` starts with `@__TRELLIS_PATH__/core-rules/CLAUDE.md` on line 2.
 - [ ] `gotchas.md` exists at project root.
-- [ ] `.gitignore` includes the SE Core symlink fragment (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
-- [ ] `git ls-files .claude/rules/se-core.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
-- [ ] If Codex-enabled: `AGENTS.md`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and `.codex/hooks/*.sh` are present.
+- [ ] `.gitignore` includes the Trellis symlink fragment (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
+- [ ] `git ls-files .claude/rules/trellis.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
+- [ ] If Codex-enabled: `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and `.codex/hooks/*.sh` are present.
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] codex_hooks = true`.
 - [ ] `registry.md` has a row for the new project.
 - [ ] Branch protection enabled on `main`.
@@ -604,17 +604,17 @@ Wait for the next scheduled run of `parent-hook-drift` (Sunday 21:00) and `regis
 
 ### 10.5 Bootstrapping a fresh clone (every developer, every machine)
 
-The canonical absolute-path symlinks (`.claude/rules/se-core.md`, `.claude/skills/process-gate`, `.agents/rules/se-core.md`, `.agents/skills/process-gate`) are gitignored — they encode a per-machine `$SE_CORE_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
+The canonical absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are gitignored — they encode a per-machine `$TRELLIS_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
 
 ```bash
 git clone <repo-url>
 cd <project>
-~/projects/se-core/scripts/onboard-project.sh "$PWD"
+~/projects/trellis-instance/scripts/onboard-project.sh "$PWD"
 ```
 
 `onboard-project.sh` is idempotent: it creates each missing symlink, leaves existing correct ones alone, warns on mismatches, and never overwrites tracked files. Re-running after every `git pull` is harmless.
 
-If you skip this step, Claude Code and Codex sessions in the project will silently run **without** the SE Core parent rules and skills — no error, no warning, just a session quietly missing the load-bearing inheritance file. Add the bootstrap to your project README's "Setup" section so teammates can't miss it.
+If you skip this step, Claude Code and Codex sessions in the project will silently run **without** the Trellis parent rules and skills — no error, no warning, just a session quietly missing the load-bearing inheritance file. Add the bootstrap to your project README's "Setup" section so teammates can't miss it.
 
 ---
 
@@ -632,7 +632,7 @@ If you skip this step, Claude Code and Codex sessions in the project will silent
 | `gotchas-rollup` | Monthly (1st 09:00) | Clusters each project's gotchas, applies Rule of Three for promotion. |
 | `audit-report-rollup` | Monthly (1st 10:00) | Trend analysis across the six audits above. |
 
-All audits write to `~/projects/se-core/audits/YYYY-MM-DD-<name>.md`. All are headless `claude -p` runs driven by the scheduled-tasks MCP (`mcp__scheduled-tasks__*`). Prompt sources live in `scheduled-tasks/<name>/prompt.md`; runtime prompts live inside the MCP and should be kept in sync with disk.
+All audits write to `~/projects/trellis-instance/audits/YYYY-MM-DD-<name>.md`. All are headless `claude -p` runs driven by the scheduled-tasks MCP (`mcp__scheduled-tasks__*`). Prompt sources live in `scheduled-tasks/<name>/prompt.md`; runtime prompts live inside the MCP and should be kept in sync with disk.
 
 ### 11.2 Remediation workflow
 
@@ -663,7 +663,7 @@ Solo-dev scope — this is not PagerDuty territory. The patterns:
 
 1. **Is the production deployment broken?** Roll back first, diagnose second. `gh pr list --state merged --limit 5` to find the suspect; revert via `git revert <sha>` (never `git reset --hard` on shared branches); push through a revert PR.
 2. **Is local dev broken but prod is fine?** Diagnose without urgency. Check the last clean sha (`test-health` weekly report gives last-green automatically).
-3. **Is SE Core itself broken?** (Hooks failing, audits erroring, inheritance drift.) Fix at the parent layer; rsync fix to every project; commit in `se-core/` with `fix:` prefix.
+3. **Is Trellis itself broken?** (Hooks failing, audits erroring, inheritance drift.) Fix at the parent layer; rsync fix to every project; commit in the Trellis canonical repo with `fix:` prefix.
 
 ### 12.2 Rollback options, ranked
 
@@ -727,7 +727,7 @@ GitHub's Dependabot alerts are the default channel. High-severity alerts get sam
 
 ---
 
-## 14. Evolving SE Core
+## 14. Evolving Trellis
 
 ### 14.1 Rule of Three
 
@@ -737,7 +737,7 @@ The parent layer grows slowly and deliberately. A rule earns parent status only 
 - **n = 2:** a rule appears in two. Enter it in `core-rules/deferred.md` with source, what/why, and the condition for lift (usually "when a third project adopts a close variant").
 - **n = 3:** a third project adopts a close variant of the rule. Promote: edit `core-rules/CLAUDE.md` or `core-rules/hooks.md` as appropriate, cite the three sources, delete the `deferred.md` entry, run `parent-hook-drift` to sync.
 
-This is the discipline that prevents `core-rules/CLAUDE.md` from bloating into a 30 KB kitchen sink (as Neev's did before SE Core extracted it).
+This is the discipline that prevents `core-rules/CLAUDE.md` from bloating into a 30 KB kitchen sink (as Neev's did before Trellis extracted it).
 
 ### 14.2 Demotion
 
@@ -749,7 +749,7 @@ Demotion mechanics: move the rule body into an `archived/` file with date + reas
 
 ### 14.3 Who edits `core-rules/`
 
-Edits to `core-rules/` affect every registered project immediately (via the symlink). Consequence: every edit to `core-rules/CLAUDE.md`, `hooks.md`, or `inheritance.md` is a PR in `se-core/` with:
+Edits to `core-rules/` affect every registered project immediately (via the symlink). Consequence: every edit to `core-rules/CLAUDE.md`, `hooks.md`, or `inheritance.md` is a PR in the Trellis canonical repo with:
 - The rationale (why this edit).
 - The Rule-of-Three evidence if it's a lift.
 - A re-run of `parent-hook-drift` after merge to confirm every project's deployed copies are still identical.
@@ -757,13 +757,127 @@ Edits to `core-rules/` affect every registered project immediately (via the syml
 ### 14.4 Rollout hygiene
 
 When a canonical hook changes:
-1. Edit `core-rules/hooks/<name>.sh` in `se-core/`.
-2. Commit in `se-core/` with `fix:` or `feat:` prefix.
+1. Edit `core-rules/hooks/<name>.sh` in the Trellis canonical repo.
+2. Commit in the Trellis canonical repo with `fix:` or `feat:` prefix.
 3. Rsync to every active project: `for p in $(registry-list); do cp core-rules/hooks/<name>.sh ~/projects/personal/$p/.claude/hooks/; done`.
 4. Commit in each project with `chore: sync <hook> to canonical`.
 5. Next `parent-hook-drift` run confirms all byte-identical.
 
 Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently manual).
+
+### 14.5 Versioning & the upgrade flow
+
+Spec-kit adoption (Phase A, 2026-05-12) introduced a semver pin on the canonical core-rules so downstream consumers can decide when to pull canonical changes instead of getting silently dragged along.
+
+- `core-rules/VERSION` — single-line semver. Authoritative. Bumped intentionally when a meaningful rule, hook, or skill change lands. The version is tagged on the public mirror after `sync-to-template.sh`, never on the private clone.
+- `trellis.config.json` — optional `trellis_version` field. Downstream forks (and the parent itself, on the canonical clone) pin to a specific version. Absent = "not pinned yet" (the expected pre-rollout state for existing projects).
+- `scripts/upgrade.sh` — consumer-side check. Fetches tags from `origin` (or `template.remote` fallback), compares pinned version to highest `v*.*.*` tag, prints a stat diff of `core-rules/`. Read-only by default; `--opt-in` rewrites the pin and revalidates the config against the schema. `--check` exits non-zero on drift for CI.
+- `scheduled-tasks/version-drift/` — weekly audit. Walks the registry, classifies each project as current / no-pin / patch-drift / minor-drift / major-drift / ahead / malformed. Only major drift is critical; everything else is informational while the rollout reaches each project.
+
+Severity contract is shared between `upgrade.sh` and `version-drift`. If you change tiers, change both in the same commit.
+
+`core-rules/VERSION` is at `0.2.0` after the spec-kit Phase A + rebrand work. `v0.1.0` was already taken by the 2026-05-08 meta-audit Phase 3 wrap-up (commit `b5eb660`); the next release tag is `v0.2.0`, applied on the public mirror after `sync-to-template.sh`. Existing projects that already use the legacy `SE_CORE_*` env vars or `.claude/rules/se-core.md` symlink will be re-linked by `scripts/rollout-rebrand.sh` (one-shot, idempotent); after that pass the audit's `no-pin` rows can convert to real pins on a project-by-project schedule.
+
+### 14.6 The clarify → spec → plan → tasks → analyze pipeline (opt-in)
+
+Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague request through structured questioning, formal specification, technical planning, work breakdown, and a final coherence check. They live as canonical skills under `core-rules/skills/{clarify,spec,plan,tasks,analyze}/` and are seeded into every registered project's `.claude/skills/` (and `.agents/skills/` under Codex) by `onboard-project.sh` / `scripts/rollout-feature-skills.sh`.
+
+**Decision rule — when to invoke the pipeline:**
+
+Trellis's default is surgical scope. The pipeline is for changes that DON'T fit that mould. Invoke when any of:
+
+- The request lists **three or more acceptance criteria**.
+- The change introduces **net-new behaviour across more than two files**.
+- The change is **cross-cutting** (auth, billing, infra, shared UI primitives) or otherwise load-bearing.
+- The operator explicitly says "spec this out first" or asks for a write-up.
+
+If none apply, skip the pipeline. Bug fixes with clear reproductions, refactors with no behaviour change, single-file additions, and operational tasks all stay on the surgical-default path: failing test → fix → PR.
+
+**Where each skill fits:**
+
+- `clarify` — front-step question pass. Use BEFORE `spec` when the operator's request is vague, contradictory, or leaves any of the five canonical intent dimensions unresolved. Optional but recommended for non-trivial requests.
+- `spec` — formal specification: problem, users, success criteria, non-goals, constraints, open questions, risks, out-of-scope.
+- `plan` — file-by-file technical design.
+- `tasks` — checkbox work breakdown, ≤4h per task, dependencies tracked, every task maps back to a spec criterion.
+- `analyze` — tail-step drift check across spec ↔ plan ↔ tasks (and clarify if present). Advisory, not gating; runs BEFORE implementation begins, OR mid-implementation when something feels off.
+
+**Pipeline mechanics:**
+
+The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scripts/new-feature.sh <slug>` validates the kebab-case slug, checks for a dirty tree, picks the next NNN, creates branch `feature/<slug>` from main/master, and lays down a *template* `spec.md`. After scaffolding, the skills compose:
+
+1. **`clarify` skill** *(optional, recommended for vague requests)* — captures the operator's voice verbatim across five canonical questions (intent, users affected, success metric, edge cases, rollback plan). Writes `specs/<NNN>-<slug>/clarify.md` alongside the template spec.md. Refuses to declare done until every question has an answer or an explicit `Deferred: <reason>` block. The schema lives at `core-rules/skills/clarify/references/question-schema.md`.
+2. **`spec` skill** — reads `clarify.md` if it exists, then replaces the template `spec.md` placeholders with real content. Authoring rules forbid implementation detail; the spec answers *what* + *why* only.
+3. **`plan` skill** — reads the reviewed spec, writes `specs/<NNN>-<slug>/plan.md`: technical approach, schema, API surface, file-by-file change list, sequencing + dependencies, test strategy mapping each spec criterion to a test, rollout plan, risks + mitigations, decisions log. Refuses to overwrite.
+4. **`tasks` skill** — reads the reviewed plan, writes `specs/<NNN>-<slug>/tasks.md`: checkbox table of atomic tasks (≤4h each), dependencies, coverage map. `tasks.md` is the source of truth for the feature's work breakdown; `TodoWrite` mirrors the active 3–5-item slice during implementation.
+5. **`analyze` skill** — reads `spec.md` + `plan.md` + `tasks.md` (+ `clarify.md` if present), writes `specs/<NNN>-<slug>/analyze.md`: drift findings across 8 categories (coverage, origin, scope, constraint compliance, intent fidelity, rollback consistency, test strategy completeness, sequencing sanity). Ends with a verdict — PASS / NEEDS-REVISION / BLOCKED. Advisory only; operator owns the call to act or override.
+
+**The TodoWrite-vs-tasks.md contract.** `tasks.md` is committed, reviewed, archived alongside the rest of the pipeline — the document of record. `TodoWrite` is the ephemeral in-flight surface: pull the next 3–5 unchecked tasks into TodoWrite as you sit down to work; tick the box in `tasks.md` AND mark TodoWrite items complete in lockstep. If they disagree, `tasks.md` wins.
+
+**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is reviewed before the next is generated. After any skill returns, do not chain to the next in the same turn unless the operator asks. The skills are writers (and one analyst), not builders — implementation begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before.
+
+**Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). `core-rules/templates/project.gitignore.fragment` lists all seven canonical skill symlinks (process-gate + security-gate + the five pipeline skills) under both `.claude/skills/` and `.agents/skills/`; new onboarding picks the fragment up automatically. Pre-Phase-C projects with the older 5-skill fragment trigger an automatic legacy-detection note when re-onboarded; duplicate gitignore entries are harmless.
+
+**Artifact layout per feature:**
+
+```
+<project-root>/specs/<NNN>-<slug>/
+├── clarify.md          # clarify skill (optional front-step)
+├── spec.md             # spec skill
+├── plan.md             # plan skill
+├── tasks.md            # tasks skill (work-breakdown source of truth)
+└── analyze.md          # analyze skill (advisory verdict before implementation)
+```
+
+After a feature ships, the directory stays in git as historical record.
+
+### 14.7 Presets — layering opt-in rule variants on top of parent
+
+Spec-kit Phase D (2026-05-12) added an opt-in mechanism for projects whose discipline needs genuinely diverge from the parent default. The Rule of Three protects the parent layer from bloat (§14.1); presets let two projects compose differently without forcing every project to inherit either side of the divergence.
+
+**Mechanism.** Each preset is a single markdown file at `core-rules/presets/<name>.md`. Projects opt in by listing the name(s) in a project-local `<project>/.trellis.config.json` (preferred, hidden) or `<project>/trellis.config.json`:
+
+```json
+{
+  "presets": ["compliance-strict"]
+}
+```
+
+`scripts/rollout-presets.sh` (and `onboard-project.sh`'s preset-seeding pass) read this array, install symlinks at `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` (under Codex), and prune symlinks no longer declared. Both harnesses load every file under their rules directory, so preset content composes with `trellis.md` automatically.
+
+**Priority order (conceptual — rules are additive, not last-wins):**
+
+Both harnesses load every file under their rules directory and concatenate the content into the agent's prompt. There is no engine-level override; "priority" here means *which layer's voice an agent should defer to when prose conflicts*, not which file silently overwrites another.
+
+1. Parent rules (`core-rules/CLAUDE.md`) — always loaded. The baseline.
+2. Presets (`core-rules/presets/<name>.md`) — opt-in; the array order in the project config is also conceptual (later entries are more specific). All declared presets are loaded.
+3. Project-local (`<project>/CLAUDE.md`) — most specific; the agent should give it the most weight when it contradicts a higher-up layer.
+
+In practice, presets stay additive — they extend the parent with new rules or explicit carve-outs ("§X of the parent rules is relaxed here because…"). They never directly contradict without a written carve-out. The drift audit and code-review pass catch contradictions that slipped in silently.
+
+**Available presets** (catalogue lives at `core-rules/presets/README.md`):
+
+- `compliance-strict` — additions on top of parent: mandatory ADR per architectural change, two-human PR sign-off, no `--no-verify` ever, mandatory CHANGELOG per PR, hard-fail secrets scan, deploy artifacts encode merge SHA. For regulated-data / audit-bound projects.
+- `experimental-loose` — carve-outs only: direct commits to main allowed, skip the spec-kit pipeline (TodoWrite only), optional CHANGELOG, PR-size ceiling demoted to warn, test coverage not required. Time-bound (three-week revisit); security-gate still runs. For throwaway prototypes / hackathon projects.
+
+**Authoring new presets** is governed by `core-rules/presets/README.md` — single-purpose, ≤50 lines, additions+carve-outs structure, cite a reason. Two-project minimum before a new preset ships (a scaled-down Rule of Three because presets are opt-in).
+
+**Drift audit.** `scheduled-tasks/preset-drift/` runs weekly (Mon 12:00). For each registered project it compares the declared `presets` array against the symlinks actually present and reports critical findings (unknown preset, missing symlink, harness divergence) plus stale-symlink warnings.
+
+**Rollout flow:**
+
+```
+# 1. Pick a preset (or write a new one). Catalogue: core-rules/presets/README.md
+# 2. Add to the project's local config:
+$EDITOR <project>/.trellis.config.json   # add to .presets array
+# 3. Apply (idempotent — also prunes anything no longer declared):
+scripts/rollout-presets.sh <project>
+# 4. Re-onboard the project if its .gitignore predates Phase D (the
+#    preset-*.md gitignore globs are in the (7-skill set + presets)
+#    fragment, sentinel-bumped from prior versions).
+scripts/onboard-project.sh /abs/path/to/<project>
+```
+
+Onboarding new projects with presets pre-declared is fully automatic: write `<project>/.trellis.config.json` before running `onboard-project.sh`, and the seeding pass installs the preset symlinks alongside the canonical skill + rule symlinks.
 
 ---
 
@@ -771,9 +885,9 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 **Active project** — appears in `registry.md`, not in `blacklist.md`.
 
-**Canonical hook** — the nine `.sh` files under `~/projects/se-core/core-rules/hooks/`. Projects deploy copies; drift is flagged by `parent-hook-drift`.
+**Canonical hook** — the nine `.sh` files under `~/projects/trellis-instance/core-rules/hooks/`. Projects deploy copies; drift is flagged by `parent-hook-drift`.
 
-**Control plane** — the contents of `~/projects/se-core/`. The place where the regime is defined, evolved, and audited.
+**Control plane** — the contents of `~/projects/trellis-instance/`. The place where the regime is defined, evolved, and audited.
 
 **Drift** — a project's deployed hook or required file has diverged from canonical. Critical: flagged, must be remediated.
 
@@ -781,9 +895,9 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 **Headless-safe** — works identically in `claude -p` mode and interactive mode. All primary mechanisms must be headless-safe.
 
-**Inheritance** — the mechanism by which each project picks up parent rules. Primary: `.claude/rules/se-core.md` symlink. Secondary: `@`-import in project `CLAUDE.md`.
+**Inheritance** — the mechanism by which each project picks up parent rules. Primary: `.claude/rules/trellis.md` symlink. Secondary: `@`-import in project `CLAUDE.md`.
 
-**Parent layer** — the rules and hooks in `~/projects/se-core/core-rules/` that every registered project inherits.
+**Parent layer** — the rules and hooks in `~/projects/trellis-instance/core-rules/` that every registered project inherits.
 
 **Receipts** — the verification command + exit code + diff lines required to claim "done."
 
@@ -791,7 +905,7 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 **Rule of Three** — promotion criterion: three independent project adoptions before a rule enters the parent layer.
 
-**SE Core** — this regime. The name, the directory, the process.
+**Trellis** — this regime. The name, the directory, the process.
 
 **Silent drop** — Claude Code's behavior when inheritance breaks: no error, no warning, instruction simply doesn't load. Detection is via the `InstructionsLoaded` hook and periodic audits.
 
@@ -801,9 +915,9 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 | I want to... | Do this |
 |---|---|
-| Add a project to SE Core | [§10](#10-onboarding-a-new-project-full-playbook) |
+| Add a project to Trellis | [§10](#10-onboarding-a-new-project-full-playbook) |
 | Temporarily exempt a project | Move row to `blacklist.md` with reason + revisit date |
-| Change a parent rule | PR in `se-core/`, cite Rule-of-Three evidence, rsync hooks, re-run `parent-hook-drift` |
+| Change a parent rule | PR in the Trellis canonical repo, cite Rule-of-Three evidence, rsync hooks, re-run `parent-hook-drift` |
 | Understand why a hook blocked me | Read `core-rules/hooks.md` for the spec; error output identifies the rule |
 | Roll back a bad merge | `git revert <sha>` → PR → merge. Never `reset --hard` on main. |
 | Commit while `.env` is in my diff | Stop. Remove the file. Rotate the secret. Recommit. |
@@ -829,4 +943,4 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 ## Upstream attribution
 
-Core hook patterns (`block-destructive`, `post-edit-verify`, `stop-verify`, `truncation-check`) derive from [iamfakeguru/claude-md](https://github.com/iamfakeguru/claude-md) (MIT). Extensions are documented in each script's header. The three-tier architecture, TodoWrite-completion guard, `code-review-subagent`, `ui-verify`, session-context / save-context-log / post-compact-context hooks, and the git-boundary tier are SE Core additions.
+Core hook patterns (`block-destructive`, `post-edit-verify`, `stop-verify`, `truncation-check`) derive from [iamfakeguru/claude-md](https://github.com/iamfakeguru/claude-md) (MIT). Extensions are documented in each script's header. The three-tier architecture, TodoWrite-completion guard, `code-review-subagent`, `ui-verify`, session-context / save-context-log / post-compact-context hooks, and the git-boundary tier are Trellis additions.

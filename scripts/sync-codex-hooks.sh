@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sync canonical Codex hook assets to all registered projects.
 #
-# Reads se-core.config.json for paths.
+# Reads trellis.config.json for paths.
 # Reads registry.md for the project list (rows in "Active projects" table).
 # Skips blacklisted projects.
 #
@@ -44,15 +44,15 @@ for arg in "$@"; do
 done
 
 if ! pg_has_harness codex; then
-  echo "Codex harness is not enabled in $SE_CORE_CONFIG_PATH; nothing to sync."
+  echo "Codex harness is not enabled in $TRELLIS_CONFIG_PATH; nothing to sync."
   echo "Set harnesses to include \"codex\" before running this script."
   exit 0
 fi
 
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_HOOKS_DIR="$CANONICAL_CODEX_DIR/hooks"
-REGISTRY="$SE_CORE_ROOT/registry.md"
-BLACKLIST="$SE_CORE_ROOT/blacklist.md"
+REGISTRY="$TRELLIS_ROOT/registry.md"
+BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 
 [ -f "$CANONICAL_CODEX_DIR/hooks.json" ] || { echo "canonical Codex hooks manifest missing: $CANONICAL_CODEX_DIR/hooks.json" >&2; exit 1; }
 [ -d "$CANONICAL_HOOKS_DIR" ] || { echo "canonical Codex hooks dir missing: $CANONICAL_HOOKS_DIR" >&2; exit 1; }

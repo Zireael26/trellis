@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# conformance-check.sh — verify that file paths cited by SE Core spec docs
+# conformance-check.sh — verify that file paths cited by Trellis spec docs
 # actually exist in the repo. Plan task P3.6 (audit §3.10 / doc-drift table).
 #
 # Scope (intentionally narrow for the first cut):
 #   - inline-code refs of the form `path/to/file` where path/to looks like
-#     an SE Core directory we control (core-rules/, scheduled-tasks/, scripts/,
+#     an Trellis directory we control (core-rules/, scheduled-tasks/, scripts/,
 #     docs/, audits/, .claude/, .github/, recon.md, engineering-process.md).
 #   - emits one finding per missing reference: source doc, line, broken ref.
 #   - exits non-zero if any miss is found.
@@ -46,7 +46,7 @@ while IFS= read -r f; do SPEC_DOCS+=("$f"); done < <(find "$ROOT/core-rules/skil
 # should resolve to a real file at the repo root. Project-relative paths
 # (.claude/, .codex/, .husky/, .agents/, AGENTS.md, gotchas.md,
 # context-log.md, project-side CLAUDE.md) are NOT in this set — they live
-# inside registered projects, not at se-core root.
+# inside registered projects, not at the Trellis canonical root.
 PREFIXES=(
   "core-rules/"
   "scheduled-tasks/"
@@ -63,7 +63,7 @@ SINGLE_FILES=(
   "registry.md"
   "blacklist.md"
   "CHANGELOG.md"
-  "se-core.config.json"
+  "trellis.config.json"
   "security-gate-plan.md"
 )
 
@@ -128,8 +128,8 @@ for doc in "${SPEC_DOCS[@]}"; do
       }
     ' > "$spans_tmp"
     while IFS= read -r span; do
-      # Strip leading `__SE_CORE_PATH__/` if present
-      span="${span#__SE_CORE_PATH__/}"
+      # Strip leading `__TRELLIS_PATH__/` if present
+      span="${span#__TRELLIS_PATH__/}"
       span="${span#./}"
       # Skip if not ours
       is_ours "$span" || continue
@@ -147,7 +147,7 @@ for doc in "${SPEC_DOCS[@]}"; do
         *\<*|*\>*|*NNNN*|*YYYY*|*XXXX*) continue ;;
       esac
       # Allowlisted: refs that genuinely describe project-local paths
-      # (not se-core repo-root paths). Add here when a spec doc legitimately
+      # (not Trellis canonical repo-root paths). Add here when a spec doc legitimately
       # cites a path that exists only inside a registered project.
       case "$rel_doc:$cleaned" in
         "core-rules/skills/process-gate/references/docs.md:docs/EPM.md") continue ;;

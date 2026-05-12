@@ -1,6 +1,6 @@
 # Targets — security-baseline
 
-Reads `__SE_CORE_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`.
+Reads `__TRELLIS_PATH__/registry.md` at runtime. Target set = `registry \ blacklist`.
 
 ## Runner requirement (REQUIRED — not optional)
 
@@ -63,4 +63,4 @@ Per-project artifacts (overwritten each run — earlier baselines are recoverabl
 
 Fleet rollup (new file each quarter):
 
-- `__SE_CORE_PATH__/audits/<YYYY-MM-DD>-security-baseline-rollup.md`
+- `__TRELLIS_PATH__/audits/<YYYY-MM-DD>-security-baseline-rollup.md`

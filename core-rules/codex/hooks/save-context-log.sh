@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # save-context-log.sh — Codex Stop. Dumps a session summary to context-log.md.
-# Source: Software Engineering Core / core-rules / codex hooks.
+# Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
 #   - Runs on Stop because Codex does not expose the Claude PreCompact event.

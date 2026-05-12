@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sync canonical hook scripts to all registered projects.
 #
-# Reads se-core.config.json for paths.
+# Reads trellis.config.json for paths.
 # Reads registry.md for the project list (rows in "Active projects" table).
 # Skips blacklisted projects.
 #
@@ -53,8 +53,8 @@ for arg in "$@"; do
 done
 
 CANONICAL_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
-REGISTRY="$SE_CORE_ROOT/registry.md"
-BLACKLIST="$SE_CORE_ROOT/blacklist.md"
+REGISTRY="$TRELLIS_ROOT/registry.md"
+BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 
 [ -d "$CANONICAL_HOOKS_DIR" ] || { echo "canonical hooks dir missing: $CANONICAL_HOOKS_DIR" >&2; exit 1; }
 [ -f "$REGISTRY" ]            || { echo "registry.md missing: $REGISTRY" >&2; exit 1; }

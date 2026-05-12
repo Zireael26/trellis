@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # save-context-log.sh — PreCompact. Dumps a session summary to context-log.md.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Runs on PreCompact.

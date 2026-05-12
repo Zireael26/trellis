@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# SE Core project onboarding. Idempotent: never overwrites existing files.
+# Trellis project onboarding. Idempotent: never overwrites existing files.
 #
-# Reads se-core.config.json for paths and harness selection.
+# Reads trellis.config.json for paths and harness selection.
 # Seeds:
 #   - <project>/gotchas.md, <project>/context-log.md
-#   - <project>/.claude/rules/se-core.md → canonical CLAUDE.md (symlink)
-#   - <project>/.claude/skills/process-gate → canonical skill (symlink)
-#   - <project>/.claude/skills/security-gate → canonical skill (symlink)
+#   - <project>/.claude/rules/trellis.md → canonical CLAUDE.md (symlink)
+#   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
+#       → canonical skills (symlinks; always-on: process-gate + security-gate,
+#         opt-in pipeline: clarify → spec → plan → tasks → analyze)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
 #   - <project>/.husky/{pre-commit,commit-msg,pre-push}     [if Node project]
 #   - <project>/AGENTS.md                     → CLAUDE.md    [if Codex enabled and absent]
-#   - <project>/.agents/rules/se-core.md   → canonical CLAUDE.md  [if Codex enabled]
-#   - <project>/.agents/skills/process-gate → canonical skill     [if Codex enabled]
-#   - <project>/.agents/skills/security-gate → canonical skill    [if Codex enabled]
+#   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if Codex enabled]
+#   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
+#       → canonical skills (symlinks; mirrors .claude/skills/)        [if Codex enabled]
 #   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if Codex enabled]
 # Then runs the initial Mode 1 security-gate baseline (override:
-# SE_CORE_SKIP_SECURITY_BASELINE=1).
+# TRELLIS_SKIP_SECURITY_BASELINE=1).
 #
 # Usage: onboard-project.sh <project-path>
 
@@ -29,8 +30,8 @@ SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TEMPLATES="$SOURCE_ROOT/core-rules/templates"
 HUSKY_CANONICAL="$SOURCE_ROOT/core-rules/husky"
-CANONICAL_RULES="$SE_CORE_ROOT/core-rules/CLAUDE.md"
-CANONICAL_SKILLS_DIR="$SE_CORE_ROOT/core-rules/skills"
+CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
+CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
 CANONICAL_CLAUDE_SETTINGS="$TEMPLATES/claude-settings.json"
@@ -171,6 +172,54 @@ seed_claude_hooks() {
   fi
 }
 
+CANONICAL_PRESETS_DIR="$SOURCE_ROOT/core-rules/presets"
+
+# Read this project's preset selection from <project>/.trellis.config.json or
+# <project>/trellis.config.json (first match wins). The file is OPTIONAL; if
+# absent, the project gets no presets and seed_presets is a no-op.
+# Echoes preset names one per line; empty output = no presets.
+read_project_presets() {
+  for cand in "$PROJECT/.trellis.config.json" "$PROJECT/trellis.config.json"; do
+    if [ -f "$cand" ]; then
+      jq -r '.presets // [] | .[]' "$cand" 2>/dev/null
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Seed preset symlinks under .claude/rules/ and (if Codex enabled) .agents/rules/.
+# Each preset symlink is named preset-<name>.md and points at the canonical
+# core-rules/presets/<name>.md. Refuses to seed for an unknown preset name.
+seed_presets() {
+  local presets harness_dir name target link
+  presets="$(read_project_presets)"
+  if [ -z "$presets" ]; then
+    echo "info: no presets declared for this project (no .trellis.config.json or empty .presets array)"
+    return 0
+  fi
+  for name in $presets; do
+    # Re-validate the name even though the schema also enforces it. The schema
+    # validation runs against the *parent* config in config-load.sh; the
+    # per-project config that supplies this preset name does NOT pass through
+    # that validator, so a malformed name (path traversal, whitespace, etc.)
+    # would otherwise reach the filesystem unchecked.
+    if ! printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9-]*[a-z0-9]$'; then
+      echo "WARN: skipping malformed preset name '$name' (must match ^[a-z0-9][a-z0-9-]*[a-z0-9]\$)" >&2
+      continue
+    fi
+    target="$CANONICAL_PRESETS_DIR/$name.md"
+    if [ ! -f "$target" ]; then
+      echo "WARN: preset '$name' declared but $target does not exist — skipping" >&2
+      continue
+    fi
+    seed_symlink "$target" "$PROJECT/.claude/rules/preset-$name.md"
+    if pg_has_harness codex; then
+      seed_symlink "$target" "$PROJECT/.agents/rules/preset-$name.md"
+    fi
+  done
+}
+
 seed_husky_hook() {
   local name="$1"
   local dst="$PROJECT/.husky/$name"
@@ -183,41 +232,59 @@ seed_husky_hook() {
   fi
 }
 
-# Ensure project .gitignore carries the canonical SE Core symlink fragment.
-# The four absolute-path symlinks must NOT be tracked — different developers'
-# clones produce different absolute targets that conflict on cross-machine
-# merges. Idempotent: detected via sentinel header, appended only if absent.
+# Ensure project .gitignore carries the canonical Trellis symlink fragment.
+# Absolute-path symlinks must NOT be tracked — different developers' clones
+# produce different absolute targets that conflict on cross-machine merges.
+# Idempotent: detected via the current fragment's sentinel header.
+# The sentinel includes a version marker ('5-skill set') so a fragment update
+# that adds new symlinks (e.g., Phase B added spec/plan/tasks beyond the
+# original process-gate) triggers an append on re-onboard. Older blocks remain
+# in place; duplicate gitignore entries are harmless. Operators may clean up
+# legacy blocks manually if desired.
 ensure_gitignore_fragment() {
   local fragment="$TEMPLATES/project.gitignore.fragment"
   local gi="$PROJECT/.gitignore"
-  local sentinel="SE Core inheritance symlinks"
+  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets)"
+  local any_legacy_marker="Trellis inheritance symlinks"
+  local had_any_legacy=false
 
   if [ ! -f "$fragment" ]; then
     echo "WARN: gitignore fragment template missing at $fragment — skipping" >&2
     return
   fi
 
-  if [ -f "$gi" ] && grep -qF "$sentinel" "$gi"; then
-    echo "skip (already present): .gitignore SE Core fragment"
+  if [ -f "$gi" ] && grep -qF "$current_sentinel" "$gi"; then
+    echo "skip (already present): .gitignore Trellis fragment ($current_sentinel)"
     return
+  fi
+
+  if [ -f "$gi" ] && grep -qF "$any_legacy_marker" "$gi"; then
+    had_any_legacy=true
   fi
 
   if [ -f "$gi" ] && [ -n "$(tail -c 1 "$gi" 2>/dev/null)" ]; then
     printf '\n' >> "$gi"
   fi
   cat "$fragment" >> "$gi"
-  echo "created: .gitignore SE Core fragment appended"
+
+  if $had_any_legacy; then
+    echo "note: legacy pre-7-skill Trellis fragment detected in .gitignore." >&2
+    echo "      the new (7-skill set) block was appended alongside; duplicate" >&2
+    echo "      gitignore entries are harmless. Remove the older block manually" >&2
+    echo "      once you've confirmed the new one covers your symlinks." >&2
+  fi
+  echo "created: .gitignore Trellis fragment appended ($current_sentinel)"
 }
 
 echo "== onboarding $PROJECT =="
-echo "   se_core_root:  $SE_CORE_ROOT"
+echo "   trellis_root:  $TRELLIS_ROOT"
 echo "   harnesses:     ${HARNESSES[*]}"
 
 # Project root files
 seed_file "$TEMPLATES/gotchas.md"     "$PROJECT/gotchas.md"
 seed_file "$TEMPLATES/context-log.md" "$PROJECT/context-log.md"
 
-# .gitignore — ensure the SE Core fragment is present BEFORE creating any symlinks
+# .gitignore — ensure the Trellis fragment is present BEFORE creating any symlinks
 # so subsequent `git status` doesn't show them as untracked. Idempotent.
 ensure_gitignore_fragment
 
@@ -231,15 +298,40 @@ untrack_if_tracked() {
     echo "untracked (legacy tracked symlink removed from index): $rel"
   fi
 }
-untrack_if_tracked ".claude/rules/se-core.md"
+untrack_if_tracked ".claude/rules/trellis.md"
 untrack_if_tracked ".claude/skills/process-gate"
-untrack_if_tracked ".agents/rules/se-core.md"
+untrack_if_tracked ".claude/skills/security-gate"
+untrack_if_tracked ".claude/skills/clarify"
+untrack_if_tracked ".claude/skills/spec"
+untrack_if_tracked ".claude/skills/plan"
+untrack_if_tracked ".claude/skills/tasks"
+untrack_if_tracked ".claude/skills/analyze"
+untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
+untrack_if_tracked ".agents/skills/security-gate"
+untrack_if_tracked ".agents/skills/clarify"
+untrack_if_tracked ".agents/skills/spec"
+untrack_if_tracked ".agents/skills/plan"
+untrack_if_tracked ".agents/skills/tasks"
+untrack_if_tracked ".agents/skills/analyze"
 
-# Claude Code inheritance: rules + skills + hooks
-seed_symlink "$CANONICAL_RULES"                       "$PROJECT/.claude/rules/se-core.md"
+# Claude Code inheritance: rules + skills + hooks.
+# Canonical skills shipped today: process-gate, security-gate (always on),
+# plus the opt-in clarify → spec → plan → tasks → analyze pipeline (skills
+# surface in the agent's skill picker but never run automatically; operators
+# invoke them by name when scaffolding a non-trivial feature). See
+# core-rules/skills/spec/SKILL.md for the "when to use" decision rule on the
+# pipeline as a whole, core-rules/skills/clarify/SKILL.md for the front-step
+# question pass, and core-rules/skills/analyze/SKILL.md for the tail-step
+# drift check.
+seed_symlink "$CANONICAL_RULES"                       "$PROJECT/.claude/rules/trellis.md"
 seed_symlink "$CANONICAL_SKILLS_DIR/process-gate"     "$PROJECT/.claude/skills/process-gate"
 seed_symlink "$CANONICAL_SKILLS_DIR/security-gate"    "$PROJECT/.claude/skills/security-gate"
+seed_symlink "$CANONICAL_SKILLS_DIR/clarify"          "$PROJECT/.claude/skills/clarify"
+seed_symlink "$CANONICAL_SKILLS_DIR/spec"             "$PROJECT/.claude/skills/spec"
+seed_symlink "$CANONICAL_SKILLS_DIR/plan"             "$PROJECT/.claude/skills/plan"
+seed_symlink "$CANONICAL_SKILLS_DIR/tasks"            "$PROJECT/.claude/skills/tasks"
+seed_symlink "$CANONICAL_SKILLS_DIR/analyze"          "$PROJECT/.claude/skills/analyze"
 PROFILE="$(guess_profile "$PROJECT")"
 seed_process_gate_config "$PROJECT/.claude/skills/process-gate-local/local.config.sh" "$PROFILE"
 seed_claude_hooks
@@ -258,9 +350,14 @@ fi
 if pg_has_harness codex; then
   echo "-- codex harness enabled --"
   seed_symlink "CLAUDE.md" "$PROJECT/AGENTS.md"
-  seed_symlink "$CANONICAL_RULES"                    "$PROJECT/.agents/rules/se-core.md"
+  seed_symlink "$CANONICAL_RULES"                    "$PROJECT/.agents/rules/trellis.md"
   seed_symlink "$CANONICAL_SKILLS_DIR/process-gate"  "$PROJECT/.agents/skills/process-gate"
   seed_symlink "$CANONICAL_SKILLS_DIR/security-gate" "$PROJECT/.agents/skills/security-gate"
+  seed_symlink "$CANONICAL_SKILLS_DIR/clarify"       "$PROJECT/.agents/skills/clarify"
+  seed_symlink "$CANONICAL_SKILLS_DIR/spec"          "$PROJECT/.agents/skills/spec"
+  seed_symlink "$CANONICAL_SKILLS_DIR/plan"          "$PROJECT/.agents/skills/plan"
+  seed_symlink "$CANONICAL_SKILLS_DIR/tasks"         "$PROJECT/.agents/skills/tasks"
+  seed_symlink "$CANONICAL_SKILLS_DIR/analyze"       "$PROJECT/.agents/skills/analyze"
   if [ -f "$PROJECT/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$PROJECT/.agents/skills/process-gate-local/local.config.sh" ]; then
     mkdir -p "$PROJECT/.agents/skills/process-gate-local"
     cp "$PROJECT/.claude/skills/process-gate-local/local.config.sh" "$PROJECT/.agents/skills/process-gate-local/local.config.sh"
@@ -271,12 +368,18 @@ if pg_has_harness codex; then
   seed_codex_hooks
 fi
 
+# Optional preset layering — opt-in per project via <project>/.trellis.config.json
+# (or trellis.config.json) with a "presets": [...] array. No-op if the file is
+# absent or the array is empty. Seeds preset-<name>.md symlinks under .claude/
+# rules/ and (if Codex enabled) .agents/rules/.
+seed_presets
+
 # Initial security-gate baseline (Mode 1). Idempotent — re-running on an
 # unchanged tree produces the same findings JSON. Override:
-# SE_CORE_SKIP_SECURITY_BASELINE=1 onboard-project.sh ...
-if [ "${SE_CORE_SKIP_SECURITY_BASELINE:-0}" != "1" ] && [ -x "$CANONICAL_SKILLS_DIR/security-gate/scripts/run-baseline.sh" ]; then
+# TRELLIS_SKIP_SECURITY_BASELINE=1 onboard-project.sh ...
+if [ "${TRELLIS_SKIP_SECURITY_BASELINE:-0}" != "1" ] && [ -x "$CANONICAL_SKILLS_DIR/security-gate/scripts/run-baseline.sh" ]; then
   echo "-- running initial security-gate baseline (Mode 1) --"
-  echo "   override: SE_CORE_SKIP_SECURITY_BASELINE=1 to skip"
+  echo "   override: TRELLIS_SKIP_SECURITY_BASELINE=1 to skip"
   bash "$CANONICAL_SKILLS_DIR/security-gate/scripts/run-baseline.sh" "$PROJECT" --no-llm || \
     echo "WARN: baseline produced non-zero exit — review $PROJECT/audits/" >&2
 fi
@@ -287,7 +390,7 @@ echo "Next:"
 echo "  - add @-import line to project CLAUDE.md if not present:"
 echo "      @$CANONICAL_RULES"
 pg_has_harness codex && echo "  - confirm Codex hooks are enabled in \$CODEX_HOME/config.toml: [features] codex_hooks = true"
-echo "  - register the project in $SE_CORE_ROOT/registry.md (chore: register <name>)"
+echo "  - register the project in $TRELLIS_ROOT/registry.md (chore: register <name>)"
 echo "  - configure project-local skill:"
 echo "      $PROJECT/.claude/skills/process-gate-local/local.config.sh"
 pg_has_harness codex && echo "      $PROJECT/.agents/skills/process-gate-local/local.config.sh"

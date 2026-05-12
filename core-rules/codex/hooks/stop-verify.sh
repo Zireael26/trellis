@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # stop-verify.sh — Codex Stop. Todo state → typecheck → lint → test, auto-detected.
-# Source: Software Engineering Core / core-rules / codex hooks.
+# Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).

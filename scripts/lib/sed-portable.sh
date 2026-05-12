@@ -5,7 +5,7 @@
 #
 # Usage:
 #   . "$(dirname "$0")/lib/sed-portable.sh"
-#   sed_inplace -e 's/__SE_CORE_PATH__/'"$SE_CORE_ROOT"'/g' some-file.md
+#   sed_inplace -e 's/__TRELLIS_PATH__/'"$TRELLIS_ROOT"'/g' some-file.md
 
 set -euo pipefail
 

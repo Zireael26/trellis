@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # stop-verify.sh — Stop. TodoWrite → typecheck → lint → test, auto-detected.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).

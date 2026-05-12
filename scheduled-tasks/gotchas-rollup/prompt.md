@@ -4,10 +4,10 @@ You are aggregating per-project `gotchas.md` entries across the user's active pe
 
 ## Inputs
 
-1. Read `__SE_CORE_PATH__/registry.md`.
-2. Read `__SE_CORE_PATH__/blacklist.md`.
+1. Read `__TRELLIS_PATH__/registry.md`.
+2. Read `__TRELLIS_PATH__/blacklist.md`.
 3. Target set = `registry \ blacklist`.
-4. Also read `__SE_CORE_PATH__/core-rules/deferred.md` — this is the promotion queue. Entries here are waiting for more data points before graduation.
+4. Also read `__TRELLIS_PATH__/core-rules/deferred.md` — this is the promotion queue. Entries here are waiting for more data points before graduation.
 
 ## Process
 
@@ -43,7 +43,7 @@ For each entry currently in `deferred.md`:
 
 ## Output
 
-Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-gotchas-rollup.md` (monthly):
+Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-gotchas-rollup.md` (monthly):
 
 ```
 # Gotchas rollup — <date>

@@ -11,7 +11,7 @@ Examples it should answer at a glance:
 
 This audit runs in the standard scheduled-task sandbox (Linux aarch64). The sandbox has:
 
-- **File tools** (`Read`, `Glob`, `Grep`) with access to `__SE_CORE_PATH__/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all manifest / lockfile / engine-version reads.
+- **File tools** (`Read`, `Glob`, `Grep`) with access to `__TRELLIS_PATH__/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all manifest / lockfile / engine-version reads.
 - **Bash sandbox** (`mcp__workspace__bash`) with `curl`, `jq`, `npm` available, plus public-internet network. **Bash does NOT see `__PROJECTS_ROOT__/`.** Use bash only for HTTP calls (registry latest-version checks).
 
 **Proof point: `gotchas-rollup` Reads `<project>/gotchas.md` on every run and successfully collects content from each registered project. `cross-project-process-audit` Reads `<project>/.claude/`, `<project>/.husky/`, `<project>/CLAUDE.md`, and other per-project files and produces detailed per-file findings. The same Read access is available to this audit. Do not assume otherwise.**
@@ -29,9 +29,9 @@ When sampling worktree state, do NOT invoke `git status` against project worktre
 
 ## Inputs
 
-1. `Read` `__SE_CORE_PATH__/registry.md`.
-2. `Read` `__SE_CORE_PATH__/blacklist.md`.
-3. `Read` `__SE_CORE_PATH__/scheduled-tasks/dep-major-upgrade-watch/watchlist.md` — **canonical** list of framework-tier packages, target versions, per-project overrides. Human-maintained. The audit reads but never modifies it.
+1. `Read` `__TRELLIS_PATH__/registry.md`.
+2. `Read` `__TRELLIS_PATH__/blacklist.md`.
+3. `Read` `__TRELLIS_PATH__/scheduled-tasks/dep-major-upgrade-watch/watchlist.md` — **canonical** list of framework-tier packages, target versions, per-project overrides. Human-maintained. The audit reads but never modifies it.
 4. Most recent `dep-currency` audit (use `Glob` over `audits/*-dep-currency.md`) if present and within 14 days — used to corroborate "current version" rather than re-deriving from lockfiles.
 5. Prior `dep-major-upgrade-watch` audit if present — for the "movement since last run" delta.
 
@@ -39,7 +39,7 @@ When sampling worktree state, do NOT invoke `git status` against project worktre
 
 This audit needs `Read` access to `__PROJECTS_ROOT__/<project>/` for the per-project drift table. Cowork mode bounds `Read` to **connected folders** — directories explicitly attached to the running session. The cron path inherits connected folders from the task's registration context; "Run now" inherits them from the calling Cowork session.
 
-The watchlist-hygiene checks and upstream cross-check (steps 1 and 4 below) do NOT need `personal/` — they only read se-core files and make HTTPS calls. Even if the preflight fails, those checks should still run and produce useful findings. The preflight gates only the per-project drift table.
+The watchlist-hygiene checks and upstream cross-check (steps 1 and 4 below) do NOT need `personal/` — they only read Trellis canonical-repo files and make HTTPS calls. Even if the preflight fails, those checks should still run and produce useful findings. The preflight gates only the per-project drift table.
 
 **Procedure:** Run this immediately after the Inputs section, before any Process step.
 
@@ -140,7 +140,7 @@ Continue to report project drift against the (possibly stale) watchlist target �
 
 ## Output
 
-Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-dep-major-upgrade-watch.md`:
+Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-dep-major-upgrade-watch.md`:
 
 ```
 # Major upgrade watch — <date>

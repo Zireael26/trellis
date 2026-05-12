@@ -1,14 +1,14 @@
 # Audit report rollup (monthly)
 
 You are reading the past month's audit reports in
-`__SE_CORE_PATH__/audits/` and producing
+`__TRELLIS_PATH__/audits/` and producing
 a single executive summary that shows trends across tasks and time. The raw
 audits are detailed and numerous; this rollup is the "did things get better
 or worse?" view.
 
 ## Inputs
 
-1. All files in `__SE_CORE_PATH__/audits/`
+1. All files in `__TRELLIS_PATH__/audits/`
    whose filename starts with a date in the last 35 days (i.e., previous
    calendar month plus a few days of overlap).
 2. For context: the most recent `-rollup` from the prior month (if any), so
@@ -91,7 +91,7 @@ prompt-level rule. Surface these explicitly.
 
 ## Output
 
-Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-audit-rollup.md` (monthly, 1st of the month):
+Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-audit-rollup.md` (monthly, 1st of the month):
 
 ```
 # Audit rollup — <YYYY-MM>

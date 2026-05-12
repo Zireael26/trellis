@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # post-edit-verify.sh — PostToolUse on Edit|Write|MultiEdit. Lint the touched file.
-# Source: Software Engineering Core / core-rules / hooks.md
+# Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Reads tool event JSON on stdin, extracts tool_input.file_path.

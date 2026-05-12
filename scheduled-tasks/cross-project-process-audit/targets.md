@@ -1,6 +1,6 @@
 # Targets — cross-project-process-audit
 
-This audit **always** reads `__SE_CORE_PATH__/registry.md` at runtime for the project list. That file is the source of truth; don't hardcode paths here.
+This audit **always** reads `__TRELLIS_PATH__/registry.md` at runtime for the project list. That file is the source of truth; don't hardcode paths here.
 
 ## Current expected set (as of 2026-04-20)
 

@@ -15,9 +15,9 @@ PROJECT_DIR="$(pg_project_dir)"
 worst="pass"
 findings=()
 
-# 1. SE_CORE_ALLOW_MAIN_PUSH=1 in commit trailers within range -> warn (must be justified)
-if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'SE_CORE_ALLOW_MAIN_PUSH=1'; then
-  findings+=("commit-trailer: SE_CORE_ALLOW_MAIN_PUSH=1 found — must be justified in gotchas.md")
+# 1. TRELLIS_ALLOW_MAIN_PUSH=1 in commit trailers within range -> warn (must be justified)
+if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'TRELLIS_ALLOW_MAIN_PUSH=1'; then
+  findings+=("commit-trailer: TRELLIS_ALLOW_MAIN_PUSH=1 found — must be justified in gotchas.md")
   [ "$worst" = "pass" ] && worst="warn"
 fi
 

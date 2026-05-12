@@ -253,7 +253,7 @@ run_one() {
 
   ( cd "$ws" \
     && git init -q \
-    && git config user.email "eval@se-core.test" \
+    && git config user.email "eval@trellis.test" \
     && git config user.name "eval" \
     && git add -A \
     && git commit -q --allow-empty -m "seed" )
@@ -262,7 +262,7 @@ run_one() {
   if [ "$bare" = "true" ]; then
     cmd+=(--bare --append-system-prompt "$(cat "$PARENT_RULES_FILE")")
   fi
-  # Expose the SE Core repo for Read access. Fixtures that need to reference
+  # Expose the Trellis repo for Read access. Fixtures that need to reference
   # canonical hooks, skill scripts, or audit material cite them by repo-rooted
   # path (e.g. core-rules/hooks/block-destructive.sh) and the model resolves
   # them via this --add-dir without leaking the developer's wider filesystem.

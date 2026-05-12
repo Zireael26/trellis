@@ -34,7 +34,7 @@ detected toolchain, record "not configured" and skip.
 ### 2. Compare to trend history
 
 Read prior audits at
-`__SE_CORE_PATH__/audits/*-lint-debt-trend.md`
+`__TRELLIS_PATH__/audits/*-lint-debt-trend.md`
 and extract the per-project counts. Compute deltas vs. 1 week ago, 1 month
 ago, 3 months ago.
 
@@ -46,7 +46,7 @@ ago, 3 months ago.
 
 ## Output
 
-Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-lint-debt-trend.md`.
+Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-lint-debt-trend.md`.
 
 Format: one row per project, one column per tool, with deltas in parens.
 

@@ -6,7 +6,7 @@ You are checking how **out-of-date** each active project's dependencies are. The
 
 This audit runs in the standard scheduled-task sandbox (Linux aarch64). The sandbox has:
 
-- **File tools** (`Read`, `Glob`, `Grep`) with access to `__SE_CORE_PATH__/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all manifest / lockfile reads.
+- **File tools** (`Read`, `Glob`, `Grep`) with access to `__TRELLIS_PATH__/` AND `__PROJECTS_ROOT__/<project>/`. Use these for all manifest / lockfile reads.
 - **Bash sandbox** (`mcp__workspace__bash`) with `curl`, `jq`, and `npm` available, plus public-internet network. **Bash does NOT see `__PROJECTS_ROOT__/`.** Use bash only for HTTP queries to the npm registry.
 - `pnpm`, `bun`, `pip`, `cargo-outdated`, `go` are **not** installed in the sandbox. Don't rely on `pnpm outdated` / `npm outdated` — they need `node_modules`. Compute "current" from lockfiles, "latest" from the registry HTTP API, and diff yourself.
 
@@ -24,8 +24,8 @@ When sampling worktree state, do NOT invoke `git status` against project worktre
 
 ## Inputs
 
-1. `Read` `__SE_CORE_PATH__/registry.md`.
-2. `Read` `__SE_CORE_PATH__/blacklist.md`.
+1. `Read` `__TRELLIS_PATH__/registry.md`.
+2. `Read` `__TRELLIS_PATH__/blacklist.md`.
 3. Target set = `registry \ blacklist`.
 4. Most recent prior `dep-currency` audit if present (use `Glob` over `audits/*-dep-currency.md`) — for the "drift change since last run" delta.
 
@@ -114,7 +114,7 @@ Per project, partition drift findings by manifest bucket:
 
 ## Output
 
-Write to `__SE_CORE_PATH__/audits/YYYY-MM-DD-dep-currency.md`:
+Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-dep-currency.md`:
 
 ```
 # Dependency currency — <date>

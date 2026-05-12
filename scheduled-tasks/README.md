@@ -1,7 +1,7 @@
 # Scheduled tasks — index
 
 This directory holds prompt + config for every centralized scheduled task
-run out of Software Engineering Core. Tasks iterate over
+run out of Trellis. Tasks iterate over
 `registry.md ∖ blacklist.md` unless noted otherwise.
 
 Each task lives in its own subdirectory:
@@ -30,6 +30,8 @@ control-plane hygiene, pattern rollup, executive summary, dependency posture
 | `registry-blacklist-health` | Weekly | `30 10 * * 1` (Mon 10:30) | Audits registry ↔ filesystem ↔ blacklist consistency. |
 | `test-health` | Weekly | `0 11 * * 1` (Mon 11:00) | Runs each project's fast test suite; bisects for last-green on red. |
 | `dep-currency` | Weekly | `30 11 * * 1` (Mon 11:30) | Outdated-dep scan: patch / minor / major drift across the registry. |
+| `version-drift` | Weekly | `45 11 * * 1` (Mon 11:45) | `trellis_version` pin drift across the registry; flags major drift as critical. |
+| `preset-drift` | Weekly | `0 12 * * 1` (Mon 12:00) | Declared-vs-installed preset symlinks across the registry; flags missing/unknown/divergent presets as critical. |
 | `bypass-tripwire` | Weekdays | `0 8 * * 1-5` (weekdays 08:00) | Silent-unless-tripped scan for `--no-verify`, force-push, direct-to-main. |
 | `dep-vulnerabilities` | Weekdays | `30 8 * * 1-5` (weekdays 08:30) | CVE / GHSA scan via native pkg-mgr audit + osv-scanner. |
 | `parent-hook-drift` | Weekly | `0 21 * * 0` (Sun 21:00) | SHA256-compares canonical hooks vs. deployed copies. |
@@ -43,9 +45,11 @@ control-plane hygiene, pattern rollup, executive summary, dependency posture
 - Monday morning runs in strict sequence so downstream tasks see a verified
   target list: `cross-project-process-audit` (10:00) →
   `registry-blacklist-health` (10:30) → `test-health` (11:00) →
-  `dep-currency` (11:30). Currency lands last so it doesn't pile upgrade
-  noise on top of test-failure noise — by 11:30 the user already knows which
-  projects are healthy enough to plan upgrades for.
+  `dep-currency` (11:30) → `version-drift` (11:45) → `preset-drift` (12:00).
+  Currency lands before version-drift so the user reads dependency drift
+  and framework-pin drift in the same mental pass — both are "are we
+  current with upstream?". Preset-drift lands last; preset composition
+  layers on top of the version that the prior audits define as current.
 - `parent-hook-drift` is Sunday night so Monday morning can act on findings
   within the same week.
 - `bypass-tripwire` fires early (08:00) and is silent on clean days —
@@ -168,9 +172,9 @@ The three dependency tasks (`dep-vulnerabilities`, `dep-currency`, `dep-major-up
 
 Each scheduled task captures its connected-folder set **at registration time** from the session that registered it. The cron path runs the task with that captured set; "Run now" inherits the calling Cowork session's set instead.
 
-**Required folder set for dep-* tasks:** both `__SE_CORE_PATH__/` and `__PROJECTS_ROOT__/`. Reference: `cross-project-process-audit` and `gotchas-rollup` are configured this way and run successfully.
+**Required folder set for dep-* tasks:** both `__TRELLIS_PATH__/` and `__PROJECTS_ROOT__/`. Reference: `cross-project-process-audit` and `gotchas-rollup` are configured this way and run successfully.
 
-**If you create or recreate a dep-* task**, do it from a Cowork session that has both folders connected — otherwise the new registration will only capture `se-core/` and the task will hit the connected-folder preflight on every run, write a stub report, and exit. The MCP scheduler tool (`create_scheduled_task` / `update_scheduled_task`) does not expose folder selection; the only way to fix a misregistered task is to delete and recreate from a properly-connected session, or edit folder selection in the Cowork app's task-settings UI.
+**If you create or recreate a dep-* task**, do it from a Cowork session that has both folders connected — otherwise the new registration will only capture `trellis-instance/` and the task will hit the connected-folder preflight on every run, write a stub report, and exit. The MCP scheduler tool (`create_scheduled_task` / `update_scheduled_task`) does not expose folder selection; the only way to fix a misregistered task is to delete and recreate from a properly-connected session, or edit folder selection in the Cowork app's task-settings UI.
 
 **Symptoms of a misconfigured task:**
 - Audit report contains `personal/ not connected to this session` info finding (preflight detected the issue and exited cleanly).
