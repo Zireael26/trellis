@@ -8,6 +8,9 @@
 #   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
 #       → canonical skills (symlinks; always-on: process-gate + security-gate,
 #         opt-in pipeline: clarify → spec → plan → tasks → analyze)
+#   - <project>/.claude/commands/{primer,primer-refresh,primer-check}.md
+#       → canonical commands (symlinks; feature primer system)
+#   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
 #   - <project>/.husky/{pre-commit,commit-msg,pre-push}     [if Node project]
@@ -15,6 +18,9 @@
 #   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if Codex enabled]
 #   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
 #       → canonical skills (symlinks; mirrors .claude/skills/)        [if Codex enabled]
+#   - <project>/.agents/commands/{primer,primer-refresh,primer-check}.md
+#       → canonical commands (symlinks; mirrors .claude/commands/)    [if Codex enabled]
+#   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if Codex enabled]
 #   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if Codex enabled]
 # Then runs the initial Mode 1 security-gate baseline (override:
 # TRELLIS_SKIP_SECURITY_BASELINE=1).
@@ -32,6 +38,8 @@ TEMPLATES="$SOURCE_ROOT/core-rules/templates"
 HUSKY_CANONICAL="$SOURCE_ROOT/core-rules/husky"
 CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
+CANONICAL_COMMANDS_DIR="$TRELLIS_ROOT/core-rules/commands"
+CANONICAL_PRIMER_INDEX_TEMPLATE="$TRELLIS_ROOT/core-rules/commands/templates/primer-index-template.md"
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
 CANONICAL_CLAUDE_SETTINGS="$TEMPLATES/claude-settings.json"
@@ -46,10 +54,12 @@ PROJECT="$1"
 [ -e "$PROJECT/.git" ]  || { echo "not a git repo: $PROJECT" >&2; exit 1; }
 
 # Sanity-check canonical sources exist before we start seeding
-[ -f "$CANONICAL_RULES" ]            || { echo "canonical rules missing: $CANONICAL_RULES" >&2; exit 1; }
-[ -d "$CANONICAL_SKILLS_DIR" ]       || { echo "canonical skills dir missing: $CANONICAL_SKILLS_DIR" >&2; exit 1; }
-[ -d "$CANONICAL_CLAUDE_HOOKS_DIR" ] || { echo "canonical Claude hooks dir missing: $CANONICAL_CLAUDE_HOOKS_DIR" >&2; exit 1; }
-[ -f "$CANONICAL_CLAUDE_SETTINGS" ]  || { echo "canonical Claude settings template missing: $CANONICAL_CLAUDE_SETTINGS" >&2; exit 1; }
+[ -f "$CANONICAL_RULES" ]                  || { echo "canonical rules missing: $CANONICAL_RULES" >&2; exit 1; }
+[ -d "$CANONICAL_SKILLS_DIR" ]             || { echo "canonical skills dir missing: $CANONICAL_SKILLS_DIR" >&2; exit 1; }
+[ -d "$CANONICAL_COMMANDS_DIR" ]           || { echo "canonical commands dir missing: $CANONICAL_COMMANDS_DIR" >&2; exit 1; }
+[ -f "$CANONICAL_PRIMER_INDEX_TEMPLATE" ]  || { echo "canonical primer INDEX template missing: $CANONICAL_PRIMER_INDEX_TEMPLATE" >&2; exit 1; }
+[ -d "$CANONICAL_CLAUDE_HOOKS_DIR" ]       || { echo "canonical Claude hooks dir missing: $CANONICAL_CLAUDE_HOOKS_DIR" >&2; exit 1; }
+[ -f "$CANONICAL_CLAUDE_SETTINGS" ]        || { echo "canonical Claude settings template missing: $CANONICAL_CLAUDE_SETTINGS" >&2; exit 1; }
 if pg_has_harness codex; then
   [ -f "$CANONICAL_CODEX_DIR/hooks.json" ] || { echo "canonical Codex hooks manifest missing: $CANONICAL_CODEX_DIR/hooks.json" >&2; exit 1; }
   [ -d "$CANONICAL_CODEX_DIR/hooks" ]      || { echo "canonical Codex hooks dir missing: $CANONICAL_CODEX_DIR/hooks" >&2; exit 1; }
@@ -244,7 +254,7 @@ seed_husky_hook() {
 ensure_gitignore_fragment() {
   local fragment="$TEMPLATES/project.gitignore.fragment"
   local gi="$PROJECT/.gitignore"
-  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets)"
+  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer commands)"
   local any_legacy_marker="Trellis inheritance symlinks"
   local had_any_legacy=false
 
@@ -306,6 +316,9 @@ untrack_if_tracked ".claude/skills/spec"
 untrack_if_tracked ".claude/skills/plan"
 untrack_if_tracked ".claude/skills/tasks"
 untrack_if_tracked ".claude/skills/analyze"
+untrack_if_tracked ".claude/commands/primer.md"
+untrack_if_tracked ".claude/commands/primer-refresh.md"
+untrack_if_tracked ".claude/commands/primer-check.md"
 untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
 untrack_if_tracked ".agents/skills/security-gate"
@@ -314,6 +327,9 @@ untrack_if_tracked ".agents/skills/spec"
 untrack_if_tracked ".agents/skills/plan"
 untrack_if_tracked ".agents/skills/tasks"
 untrack_if_tracked ".agents/skills/analyze"
+untrack_if_tracked ".agents/commands/primer.md"
+untrack_if_tracked ".agents/commands/primer-refresh.md"
+untrack_if_tracked ".agents/commands/primer-check.md"
 
 # Claude Code inheritance: rules + skills + hooks.
 # Canonical skills shipped today: process-gate, security-gate (always on),
@@ -332,6 +348,17 @@ seed_symlink "$CANONICAL_SKILLS_DIR/spec"             "$PROJECT/.claude/skills/s
 seed_symlink "$CANONICAL_SKILLS_DIR/plan"             "$PROJECT/.claude/skills/plan"
 seed_symlink "$CANONICAL_SKILLS_DIR/tasks"            "$PROJECT/.claude/skills/tasks"
 seed_symlink "$CANONICAL_SKILLS_DIR/analyze"          "$PROJECT/.claude/skills/analyze"
+
+# Canonical commands — explicit user invocations (primer system today).
+seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"          "$PROJECT/.claude/commands/primer.md"
+seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md"  "$PROJECT/.claude/commands/primer-refresh.md"
+seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"    "$PROJECT/.claude/commands/primer-check.md"
+
+# Primer INDEX — opt-in feature primer system. INDEX is project-state (copied,
+# not symlinked) so each project owns its primer list. Empty INDEX = "primers
+# bootstrapped, no primers yet" which is the correct v1 state.
+seed_file "$CANONICAL_PRIMER_INDEX_TEMPLATE" "$PROJECT/.claude/primers/INDEX.md"
+
 PROFILE="$(guess_profile "$PROJECT")"
 seed_process_gate_config "$PROJECT/.claude/skills/process-gate-local/local.config.sh" "$PROFILE"
 seed_claude_hooks
@@ -358,6 +385,10 @@ if pg_has_harness codex; then
   seed_symlink "$CANONICAL_SKILLS_DIR/plan"          "$PROJECT/.agents/skills/plan"
   seed_symlink "$CANONICAL_SKILLS_DIR/tasks"         "$PROJECT/.agents/skills/tasks"
   seed_symlink "$CANONICAL_SKILLS_DIR/analyze"       "$PROJECT/.agents/skills/analyze"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/commands/primer.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/commands/primer-refresh.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/commands/primer-check.md"
+  seed_file    "$CANONICAL_PRIMER_INDEX_TEMPLATE"          "$PROJECT/.agents/primers/INDEX.md"
   if [ -f "$PROJECT/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$PROJECT/.agents/skills/process-gate-local/local.config.sh" ]; then
     mkdir -p "$PROJECT/.agents/skills/process-gate-local"
     cp "$PROJECT/.claude/skills/process-gate-local/local.config.sh" "$PROJECT/.agents/skills/process-gate-local/local.config.sh"

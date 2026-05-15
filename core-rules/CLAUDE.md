@@ -75,6 +75,39 @@ Two tiers — **fast-local** (every turn) and **heavy-gated** (wrap-up) — plus
 
 Canonical skills under `core-rules/skills/<name>/`, inherited by every project via symlink (Claude Code: `.claude/skills/`; Codex: `.agents/skills/`). Current canonical: **process-gate** — mandatory pre-PR gate. Spec: `core-rules/skills/process-gate/SKILL.md`.
 
+## Commands
+
+Canonical slash commands under `core-rules/commands/<name>.md`, inherited by every project via symlink (Claude Code: `.claude/commands/`; Codex: `.agents/commands/`). Commands are explicit user invocations (`/<name> <args>`) — distinct from skills, which the agent dispatches based on context. Current canonical set: `primer`, `primer-refresh`, `primer-check` (feature primer system, see below).
+
+<!-- BEGIN PRIMER SECTION -->
+
+## Feature primers
+
+Trellis ships a primer system that gives agents pre-built context for stable features, reducing exploration cost on tasks like testing, debugging, or extending those features. Project opt-in: if `<canonical-root>/.claude/primers/INDEX.md` exists, primers are live for that project. Projects without that directory are unaffected by this section.
+
+**At session start**, if `.claude/primers/INDEX.md` exists (resolved at the canonical repo root via `git rev-parse --git-common-dir`, same pattern as `context-log.md`):
+
+1. Read `.claude/primers/INDEX.md`. It is small (one line per primer) and lists every available primer with a one-line description.
+2. Based on the user's task, identify primers that are likely relevant. Lean toward loading them — primers are cheap to read and dramatically reduce subsequent exploration.
+3. If the task touches a feature without a primer, do the work, then at the end propose running `/primer <feature-slug>` to capture what you learned for future sessions.
+
+**Loading policy (default):** agent-decides. The agent reads INDEX, judges relevance from the task description, and loads what fits. A future enhancement may let users pin a list in local `plot.md` (`active_primers:`) for automatic load without consulting INDEX — see `docs/primers/plot-md-integration.md`.
+
+**Authorship:** primers are agent-written via `/primer` and hand-editable. Treat any hand-edits to a primer as load-bearing — `/primer-refresh` patches around them rather than overwriting.
+
+**Staleness:** every primer is pinned to a commit SHA. When loading a primer, do a quick check that the referenced files still exist. If a primer looks stale (referenced files moved, SHA unreachable), note it to the user and suggest `/primer-refresh <slug>` rather than acting on potentially-wrong information.
+
+**Available commands:**
+- `/primer <slug>` — create a new primer for a feature
+- `/primer-refresh <slug>` — update an existing primer against current HEAD
+- `/primer-check` — audit all primers for staleness (no changes made)
+
+**What primers describe:** stable shape — entry points, data flow, dependencies, test commands, gotchas. Not line-by-line walkthroughs. If a primer is over ~150 lines or describes implementation details, it should be split or trimmed.
+
+**Storage location.** Primer files live at the canonical repo root (`<canonical-root>/.claude/primers/`), not the worktree-specific path — so worktree sessions see the same primer set as the main checkout. Same load-bearing canonical-root convention as the three context-log hooks; see `gotchas.md` 2026-05-11 entry for rationale.
+
+<!-- END PRIMER SECTION -->
+
 ## Project-local files every project maintains
 
 - `CLAUDE.md` — project-specific rules only. No duplication of this file. Target <5 KB.

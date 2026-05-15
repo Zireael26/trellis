@@ -114,11 +114,12 @@ What the script does (do not re-implement any of this):
 - Seeds `gotchas.md`, `context-log.md` at the project root.
 - Appends the Trellis fragment to `.gitignore` (skipped if already present).
 - Removes legacy tracked symlinks from the git index if any.
-- Creates the four absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.claude/skills/security-gate`, plus `.agents/...` equivalents if Codex is enabled).
+- Creates the absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/{process-gate,security-gate,...}`, `.claude/commands/{primer,primer-refresh,primer-check}.md`, plus `.agents/...` equivalents if Codex is enabled).
 - Seeds `.claude/skills/process-gate-local/local.config.sh` with the auto-detected stack profile.
+- Copies `.claude/primers/INDEX.md` from the canonical primer-index template — opt-in feature primer system bootstrap. Empty INDEX = "no primers yet"; primers accumulate via `/primer <slug>` over time. INDEX.md and individual primer files are project-state (tracked in git); the three command symlinks are gitignored per the fragment.
 - Copies Claude hooks → `.claude/hooks/*.sh` and `.claude/settings.json`.
 - If `package.json` exists: seeds `.husky/{pre-commit,commit-msg,pre-push}`.
-- If Codex is enabled: seeds `AGENTS.md → CLAUDE.md` relative symlink, `.codex/hooks.json`, `.codex/hooks/*.sh`.
+- If Codex is enabled: seeds `AGENTS.md → CLAUDE.md` relative symlink, `.codex/hooks.json`, `.codex/hooks/*.sh`, plus `.agents/commands/` and `.agents/primers/INDEX.md` mirrors.
 - Runs the Mode-1 security-gate baseline unless `TRELLIS_SKIP_SECURITY_BASELINE=1`. The baseline can take 10-60 minutes; tell the user before running. Offer the skip env-var if they want to defer.
 
 Capture the script's stdout. Surface any line starting with `WARN:` to the user — those signal pre-existing files the script didn't overwrite.
