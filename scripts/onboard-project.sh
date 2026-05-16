@@ -111,21 +111,45 @@ seed_symlink() {
 
 guess_profile() {
   local p="$1"
+  local has_go=0 has_pnpm=0 has_py=0
+
+  [ -f "$p/go.work" ] && has_go=1
   if [ -f "$p/pnpm-workspace.yaml" ] || ([ -f "$p/package.json" ] && grep -q '"workspaces"' "$p/package.json" 2>/dev/null); then
+    has_pnpm=1
+  fi
+  [ -f "$p/pyproject.toml" ] && has_py=1
+
+  # Polyglot first: 2+ language signals at the root → polyglot monorepo.
+  if [ $((has_go + has_pnpm + has_py)) -ge 2 ]; then
+    echo "monorepo-polyglot"; return
+  fi
+
+  # Single-language workspace monorepos
+  if [ "$has_go" = 1 ]; then
+    echo "monorepo-go"; return
+  fi
+  if [ "$has_pnpm" = 1 ]; then
     echo "monorepo-pnpm"; return
   fi
+
+  # Framework-specific single apps
   if [ -f "$p/next.config.ts" ] || [ -f "$p/next.config.js" ] || [ -f "$p/next.config.mjs" ]; then
     echo "web-next"; return
   fi
   if [ -f "$p/vite.config.ts" ] || [ -f "$p/vite.config.js" ]; then
     echo "web-vite"; return
   fi
+
+  # Native single-module fallbacks
   if [ -f "$p/Cargo.toml" ] || [ -f "$p/go.mod" ] || [ -f "$p/pyproject.toml" ]; then
     echo "native-other"; return
   fi
+
+  # Unity heuristic
   if [ -d "$p/Assets" ] && [ -d "$p/ProjectSettings" ]; then
     echo "unity"; return
   fi
+
   echo "n-a"
 }
 

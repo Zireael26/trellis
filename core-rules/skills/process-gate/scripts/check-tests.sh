@@ -54,6 +54,24 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
       PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PY_RUN pytest}"
     fi
   fi
+
+  # Go toolchain detection (workspaces or single module)
+  if [ -z "${PM:-}" ] && { [ -f "go.work" ] || [ -f "go.mod" ]; }; then
+    # Go workspaces break `go vet ./...` and `go test ./...` from the repo
+    # root — prefer a Makefile orchestrator if one exposes vet/lint/test
+    # targets. clusterbid-console established this pattern.
+    if [ -f "Makefile" ] && grep -qE '^(vet|lint|test):' Makefile 2>/dev/null; then
+      PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-make vet}"
+      PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-make lint}"
+      PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-make test}"
+    else
+      PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-go vet ./...}"
+      if command -v golangci-lint >/dev/null 2>&1; then
+        PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-golangci-lint run ./...}"
+      fi
+      PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-go test ./...}"
+    fi
+  fi
 fi
 
 PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-300}"

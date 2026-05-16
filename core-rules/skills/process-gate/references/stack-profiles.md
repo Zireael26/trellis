@@ -49,6 +49,41 @@ Typical project-local validators (same n=0 status as `service-node`):
 
 Same Rule-of-Three caveat: nothing canonical ships under `service-python` until three independent backend-shaped projects converge on a shared validator shape.
 
+### `service-go` — Go HTTP services / APIs
+
+Reserved (n=0). Mirrors `service-node` and `service-python`: route-surface diffing (gRPC reflection / OpenAPI), `.env.example` sync, migration safety (sqlc / goose / atlas), Dockerfile lint (hadolint), pinned base images, non-root runtime user.
+
+Same Rule-of-Three caveat: slot exists in the taxonomy so future single-service Go projects have a landing pad for project-local validators.
+
+### `monorepo-polyglot` — multi-language monorepos
+
+Worked example: `clusterbid-console`. Shape: Go workspace (`services/`, `pkg/`, `tools/`) + pnpm workspace (`clients/`, `ts/`) + Python (`py/` + service trees) coordinated by a root Makefile orchestrator. Trellis hits the orchestrator (`make vet|lint|test`) — language-specific tooling stays inside the Makefile, keeping `local.config.sh` language-agnostic.
+
+Candidate project-local validators:
+
+- `check-orchestrator-coverage.sh` — every language subtree is reached by the root `make vet|lint|test`; no orphan trees.
+- `check-go-work.sh` — every directory under `services/<go-service>/`, `pkg/`, `tools/` has a matching `use` directive in `go.work`, and vice-versa.
+- `check-proto-contract.sh` — generated stubs in Go + TS + Python (`buf generate` outputs) are fresh against `proto/*.proto`; flag if generation lags source.
+- `check-ci-subtree-routing.sh` — every language subtree has a corresponding GH Actions `paths:` filter; cross-language workflow leakage flagged.
+- `check-pyproject-discipline.sh` — Python files only under sanctioned roots (project-specific allowlist; e.g., for clusterbid: `services/inference-runner/`, `services/fine-tuning-orchestrator/`, `py/`).
+
+Lume-style carve-out: single adopter today (clusterbid-console), validators stay project-local until n=2. The canonical six gates still apply.
+
+Long-form reference: `references/monorepo-polyglot.md`.
+
+### `monorepo-go` — Go-only workspace monorepos
+
+Reserved (n=0). Sibling to `monorepo-polyglot` for the Go-only case. Distinct slot so Rule-of-Three count is independent — a future Go-only workspace project should land here, not be lumped in with polyglot.
+
+Candidate project-local validators:
+
+- `check-go-work.sh` — every directory under `services/`, `pkg/`, `tools/` has a matching `use` directive in `go.work`, and vice-versa.
+- `check-module-graph.sh` — `go mod graph` over all workspace modules; flag import cycles or layering violations (e.g., `pkg/*` may not import from `services/*`).
+- `check-public-api-drift.sh` — `apidiff` (or `gorelease`) against last release tag for every `pkg/*` module; flag breaking changes without a major-version bump.
+- `check-go-vet-coverage.sh` — every workspace module is reached by `make vet`; no orphan modules.
+
+Same Rule-of-Three caveat as `service-node`/`service-python`: nothing canonical ships under this profile until three independent Go-workspace projects converge on a shared validator shape.
+
 ### `unity` — Unity / native game projects
 
 Common validators:
