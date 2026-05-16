@@ -148,3 +148,14 @@ Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 Lume (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical six gates still apply.
 
 Lume's row in `registry.md` documents the carve-out. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
+
+## Public web surface — cross-profile note
+
+Any registered project that ships a public web surface (portfolio site, marketing page, SaaS console, app landing) should consult the four `web-*.md` references before non-trivial public-page changes:
+
+- [`web-perf.md`](web-perf.md) — Core Web Vitals + Lighthouse Performance
+- [`web-a11y.md`](web-a11y.md) — WCAG 2.2 AA + axe-core
+- [`web-seo.md`](web-seo.md) — Lighthouse SEO + Google AI optimization guide
+- [`web-agent-readiness.md`](web-agent-readiness.md) — `llms.txt`, AI-crawler `robots.txt`, agent-targeted surfaces (Trellis stance on three-way Google / Lighthouse / Cloudflare disagreement)
+
+Advisory at the gate level today. Automated frontend gates (Lighthouse CI, axe-core in CI) remain deferred per [`core-rules/deferred.md:57`](../../../../core-rules/deferred.md) until Rule of Three is met. Applies cross-profile (`web-next`, `monorepo-pnpm`, `monorepo-polyglot`, and any future web-shaped profile); not tied to one stack.

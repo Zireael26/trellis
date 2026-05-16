@@ -477,6 +477,10 @@ Architecture Decision Records are currently in `deferred.md` awaiting a third pr
 
 **Interim guidance:** if you write an ADR, use TGSC's shape. When a third project picks the same shape, promote it.
 
+### 9.6 Frontend-quality references
+
+Projects with a public web surface (portfolio, marketing page, SaaS console, app landing) inherit four reference docs via the process-gate skill: `core-rules/skills/process-gate/references/web-{perf,a11y,seo,agent-readiness}.md`. These synthesize Lighthouse (Performance, Accessibility, Best Practices, SEO, Agentic Browsing), web.dev a11y, Google's AI optimization guide, and Cloudflare's `isitagentready.com` scorecard into a single Trellis-stamped checklist. Advisory today; automation deferred per `core-rules/deferred.md` until Rule of Three. Consult before any non-trivial public-page PR.
+
 ---
 
 ## 10. Onboarding a new project — full playbook
