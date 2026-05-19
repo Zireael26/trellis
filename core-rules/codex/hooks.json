@@ -51,6 +51,12 @@
             "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/post-compact-context.sh",
             "timeout": 10,
             "statusMessage": "Restoring context after compact..."
+          },
+          {
+            "type": "command",
+            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/inject-primer-index.sh",
+            "timeout": 5,
+            "statusMessage": "Loading primer index..."
           }
         ]
       }

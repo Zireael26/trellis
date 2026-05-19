@@ -55,8 +55,10 @@ done
 SYNC_PATHS=(
   "engineering-process.md"
   "AGENT_ONBOARD_PROJECT.md"
+  "CHANGELOG.md"
   "core-rules/CLAUDE.md"
   "core-rules/AGENTS.md"
+  "core-rules/VERSION"
   "core-rules/codex/"
   "core-rules/hooks.md"
   "core-rules/inheritance.md"
@@ -66,6 +68,7 @@ SYNC_PATHS=(
   "core-rules/skills/"
   "core-rules/commands/"
   "core-rules/templates/"
+  "docs/adr/"
   "docs/primers/"
   "scheduled-tasks/"
   "scripts/"

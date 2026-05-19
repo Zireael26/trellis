@@ -38,12 +38,13 @@ wiring is:
 | `truncation-check.sh` | PostToolUse | `Grep\|Bash\|Read` |
 | `session-context.sh` | SessionStart | (none) |
 | `post-compact-context.sh` | SessionStart | (none) |
+| `inject-primer-index.sh` | SessionStart | (none) |
 | `save-context-log.sh` | PreCompact | (none) |
 | `stop-verify.sh` | Stop | (none) |
 | `code-review-subagent.sh` | Stop | (none) |
 | `ui-verify.sh` | Stop | (none) |
 
-Nine canonical hooks total. Each must be present as a file, byte-identical
+Ten canonical hooks total. Each must be present as a file, byte-identical
 to canonical, executable, and registered under the expected event + matcher.
 
 The project may have **additional** hooks beyond these — that's fine and

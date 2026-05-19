@@ -89,11 +89,12 @@ Trellis ships a primer system that gives agents pre-built context for stable fea
 
 **At session start**, if `.claude/primers/INDEX.md` exists (resolved at the canonical repo root via `git rev-parse --git-common-dir`, same pattern as `context-log.md`):
 
-1. Read `.claude/primers/INDEX.md`. It is small (one line per primer) and lists every available primer with a one-line description.
-2. Based on the user's task, identify primers that are likely relevant. Lean toward loading them — primers are cheap to read and dramatically reduce subsequent exploration.
-3. If the task touches a feature without a primer, do the work, then at the end propose running `/primer <feature-slug>` to capture what you learned for future sessions.
+1. The `inject-primer-index` SessionStart hook auto-injects `.claude/primers/INDEX.md` (one line per primer, with drift flags: FRESH / WARM / STALE / MISSING_PATHS / UNREACHABLE_PIN / BROKEN / NO_ENTRY_POINTS) into your context. You do not need to read INDEX manually.
+2. **If the user's task names a feature, directory, or subsystem listed in INDEX, you MUST read that primer before exploring code.** Loading is not optional — that is why the primer exists. Cost is ~3 KB; reread cost would be 50× that.
+3. If a relevant primer shows drift status WARM, FRESH, or no flag, load and use it. If it shows STALE / MISSING_PATHS / UNREACHABLE_PIN / BROKEN, tell the user before relying on it and offer `/primer-refresh`.
+4. If the task touches a feature without a primer, do the work, then at the end propose running `/primer <feature-slug>` to capture what you learned.
 
-**Loading policy (default):** agent-decides. The agent reads INDEX, judges relevance from the task description, and loads what fits. A future enhancement may let users pin a list in local `plot.md` (`active_primers:`) for automatic load without consulting INDEX — see `docs/primers/plot-md-integration.md`.
+**Loading policy:** auto-injected via SessionStart hook (since v0.3.1); the agent is required to load when task scope overlaps INDEX entries.
 
 **Authorship:** primers are agent-written via `/primer` and hand-editable. Treat any hand-edits to a primer as load-bearing — `/primer-refresh` patches around them rather than overwriting.
 

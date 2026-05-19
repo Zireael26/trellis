@@ -20,7 +20,7 @@ prompt can be edited here in version control without reregistering the task.
 
 ## Tier 1 — registered and running
 
-Fifteen centralized tasks cover: morning per-project digest, hook compliance, process bypasses, test health,
+Sixteen centralized tasks cover: morning per-project digest, hook compliance, process bypasses, test health,
 control-plane hygiene, pattern rollup, executive summary, dependency posture
 (security, currency, major-version watch), fleet-wide security baseline, and
 quarterly obsolete-rules pruning.
@@ -34,6 +34,7 @@ quarterly obsolete-rules pruning.
 | `dep-currency` | Weekly | `30 11 * * 1` (Mon 11:30) | Outdated-dep scan: patch / minor / major drift across the registry. |
 | `version-drift` | Weekly | `45 11 * * 1` (Mon 11:45) | `trellis_version` pin drift across the registry; flags major drift as critical. |
 | `preset-drift` | Weekly | `0 12 * * 1` (Mon 12:00) | Declared-vs-installed preset symlinks across the registry; flags missing/unknown/divergent presets as critical. |
+| `primer-drift` | Weekly | `15 12 * * 1` (Mon 12:15) | Primer freshness backstop — staleness / missing entry points / unreachable pins across the registry. Cold-path counterpart to the `inject-primer-index` SessionStart hook (v0.3.1). |
 | `bypass-tripwire` | Weekdays | `0 8 * * 1-5` (weekdays 08:00) | Silent-unless-tripped scan for `--no-verify`, force-push, direct-to-main. |
 | `dep-vulnerabilities` | Weekdays | `30 8 * * 1-5` (weekdays 08:30) | CVE / GHSA scan via native pkg-mgr audit + osv-scanner. |
 | `parent-hook-drift` | Weekly | `0 21 * * 0` (Sun 21:00) | SHA256-compares canonical hooks vs. deployed copies. |
@@ -59,6 +60,7 @@ quarterly obsolete-rules pruning.
   and framework-pin drift in the same mental pass — both are "are we
   current with upstream?". Preset-drift lands last; preset composition
   layers on top of the version that the prior audits define as current.
+  primer-drift runs after preset-drift because both are cold-path freshness audits.
 - `parent-hook-drift` is Sunday night so Monday morning can act on findings
   within the same week.
 - `bypass-tripwire` fires early (08:00) and is silent on clean days —
