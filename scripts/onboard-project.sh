@@ -8,20 +8,34 @@
 #   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
 #       → canonical skills (symlinks; always-on: process-gate + security-gate,
 #         opt-in pipeline: clarify → spec → plan → tasks → analyze)
-#   - <project>/.claude/commands/{primer,primer-refresh,primer-check}.md
-#       → canonical commands (symlinks; feature primer system)
+#   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore}.md
+#       → canonical commands (symlinks; feature primer system + /explore)
 #   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
 #   - <project>/.husky/{pre-commit,commit-msg,pre-push}     [if Node project]
-#   - <project>/AGENTS.md                     → CLAUDE.md    [if Codex enabled and absent]
-#   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if Codex enabled]
+#
+# Shared "agents/" surface (Codex AND AntiGravity both read this):
+#   - <project>/AGENTS.md                     → CLAUDE.md    [if codex OR antigravity enabled, and absent]
+#   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if codex OR antigravity]
 #   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
-#       → canonical skills (symlinks; mirrors .claude/skills/)        [if Codex enabled]
-#   - <project>/.agents/commands/{primer,primer-refresh,primer-check}.md
-#       → canonical commands (symlinks; mirrors .claude/commands/)    [if Codex enabled]
-#   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if Codex enabled]
-#   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if Codex enabled]
+#       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex OR antigravity]
+#   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex OR antigravity]
+#   - <project>/.agents/skills/process-gate-local/local.config.sh (copy of Claude local config)
+#                                                                     [if codex OR antigravity]
+#
+# Codex-only surface:
+#   - <project>/.agents/commands/{primer,primer-refresh,primer-check,explore}.md
+#       → canonical commands (Codex reads commands/, AntiGravity reads workflows/)  [if codex]
+#   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if codex]
+#
+# AntiGravity-only surface:
+#   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore}.md
+#       → canonical commands (AntiGravity uses workflows/ where Codex uses commands/) [if antigravity]
+#   - NO hooks: AntiGravity 2.0 has no native hook API as of 2026-05-20.
+#     If/when Google ships one, re-open via a fresh ADR. See core-rules/inheritance.md
+#     "Known gap: AntiGravity native hooks deferred".
+#
 # Then runs the initial Mode 1 security-gate baseline (override:
 # TRELLIS_SKIP_SECURITY_BASELINE=1).
 #
