@@ -46,7 +46,7 @@
       "type": "array",
       "minItems": 1,
       "items": {
-        "enum": ["claude", "codex"]
+        "enum": ["claude", "codex", "antigravity"]
       },
       "uniqueItems": true
     },
