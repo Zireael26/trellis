@@ -418,9 +418,11 @@ else
   echo "info: no package.json — husky skipped. Project must enforce PR-flow guard via .githooks/ (see core-rules/inheritance.md \"Native git hooks\")."
 fi
 
-# Codex parity
-if pg_has_harness codex; then
-  echo "-- codex harness enabled --"
+# Shared "agents/" surface — Codex AND AntiGravity both read AGENTS.md,
+# .agents/rules/, .agents/skills/, and .agents/primers/. Seed once when either
+# harness is enabled; the file contents are byte-identical across consumers.
+if pg_has_harness codex || pg_has_harness antigravity; then
+  echo "-- shared .agents/ surface enabled (codex and/or antigravity) --"
   seed_symlink "CLAUDE.md" "$PROJECT/AGENTS.md"
   seed_symlink "$CANONICAL_RULES"                    "$PROJECT/.agents/rules/trellis.md"
   seed_symlink "$CANONICAL_SKILLS_DIR/process-gate"  "$PROJECT/.agents/skills/process-gate"
@@ -430,11 +432,7 @@ if pg_has_harness codex; then
   seed_symlink "$CANONICAL_SKILLS_DIR/plan"          "$PROJECT/.agents/skills/plan"
   seed_symlink "$CANONICAL_SKILLS_DIR/tasks"         "$PROJECT/.agents/skills/tasks"
   seed_symlink "$CANONICAL_SKILLS_DIR/analyze"       "$PROJECT/.agents/skills/analyze"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/commands/primer.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/commands/primer-refresh.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/commands/primer-check.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/commands/explore.md"
-  seed_file    "$CANONICAL_PRIMER_INDEX_TEMPLATE"          "$PROJECT/.agents/primers/INDEX.md"
+  seed_file    "$CANONICAL_PRIMER_INDEX_TEMPLATE"    "$PROJECT/.agents/primers/INDEX.md"
   if [ -f "$PROJECT/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$PROJECT/.agents/skills/process-gate-local/local.config.sh" ]; then
     mkdir -p "$PROJECT/.agents/skills/process-gate-local"
     cp "$PROJECT/.claude/skills/process-gate-local/local.config.sh" "$PROJECT/.agents/skills/process-gate-local/local.config.sh"
@@ -442,7 +440,31 @@ if pg_has_harness codex; then
   else
     seed_process_gate_config "$PROJECT/.agents/skills/process-gate-local/local.config.sh" "$PROFILE"
   fi
+fi
+
+# Codex-only surface — .agents/commands/ slash commands + .codex/ hook envelope.
+if pg_has_harness codex; then
+  echo "-- codex harness enabled --"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/commands/primer.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/commands/primer-refresh.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/commands/primer-check.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/commands/explore.md"
   seed_codex_hooks
+fi
+
+# AntiGravity-only surface — .agents/workflows/ slash commands. Native hook
+# integration is deferred: AntiGravity 2.0's language_server has hook code
+# internally (events: PreToolUse, PostToolUse, PreInvocation, PostInvocation,
+# Stop; reads hooks.json from gemini_dir_uri and workspace_dir_uri), but the
+# standalone Antigravity 2.0 desktop app does not expose a hooks UI and no
+# workspace hooks.json path is documented as of 2026-05-20. Re-open via fresh
+# ADR when Google exposes the hook config surface.
+if pg_has_harness antigravity; then
+  echo "-- antigravity harness enabled --"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/workflows/primer.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/workflows/primer-refresh.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/workflows/primer-check.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/workflows/explore.md"
 fi
 
 # Optional preset layering — opt-in per project via <project>/.trellis.config.json
