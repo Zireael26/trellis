@@ -6,6 +6,76 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v0.4.0] — 2026-05-20
+
+Add AntiGravity (Google's `agy` CLI / standalone Antigravity 2.0 desktop app)
+as Trellis's third first-class harness. Shares the existing `AGENTS.md` +
+`.agents/{rules,skills,primers}/` inheritance surface with Codex (rules and
+skills are byte-identical between the two engines); adds AntiGravity-specific
+`.agents/workflows/*.md` slash-command symlinks. **AntiGravity native hook
+integration is deferred** — public docs as of 2026-05-20 do not describe a
+workspace hook envelope and the standalone desktop app's Customizations panel
+does not expose hooks UI; Tier-1 and Tier-2 enforcement on AntiGravity
+sessions relies on parent rules + skills + Tier-3 git hooks until the API
+ships.
+
+### Added
+
+- **`antigravity` admitted to the `harnesses` enum** in
+  `scripts/lib/trellis.config.schema.json`. `scripts/lib/config-load.sh`'s
+  jq-fallback error message updated to list all three canonical values.
+- **Three-gate onboarding shape in `scripts/onboard-project.sh`.** The
+  former Codex-only `if pg_has_harness codex` block is refactored into
+  (a) shared `.agents/` surface gated on `codex || antigravity`,
+  (b) Codex-only `.codex/` + `.agents/commands/` block,
+  (c) AntiGravity-only `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md`
+  symlink block. Untrack-legacy and Next-echo blocks updated to match.
+- **Rollout scripts honor the shared-surface gate.**
+  `scripts/rollout-process-gate-skill.sh`,
+  `scripts/rollout-feature-skills.sh`, and `scripts/rollout-presets.sh` all
+  change their inner Codex gate to `codex || antigravity` for `.agents/`
+  artifacts. Codex-only assets (hook envelope, `commands/` slash commands)
+  remain Codex-gated.
+- **Branch-name regex extension.**
+  `core-rules/skills/process-gate/scripts/check-pr.sh` adds `antigravity` to
+  the allowed branch-name prefix regex; the doc at
+  `core-rules/skills/process-gate/references/pr-hygiene.md` is updated to
+  match, in one commit (cross-file consistency risk).
+- **Gitignore fragment carries four new workflow symlinks.**
+  `core-rules/templates/project.gitignore.fragment` adds
+  `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md`. The
+  sentinel header bumps from "7-skill set + presets + primer/explore
+  commands" to "7-skill set + presets + primer/explore commands +
+  antigravity workflows"; the `current_sentinel` literal in
+  `scripts/onboard-project.sh` updates in lockstep so re-onboarding is
+  idempotent.
+- **Example config and template heredoc updated.**
+  `core-rules/templates/trellis.config.json.example` shows
+  `["claude", "codex", "antigravity"]`. `scripts/sync-to-template.sh`'s
+  embedded comment mentions AntiGravity alongside Codex.
+- **Documentation sweep.** `README.md` badge + "what you get" row + FAQ;
+  `SETUP.md` §4; `AGENT_SETUP.md` Step 1 + Step 2b; `AGENT_ONBOARD_PROJECT.md`
+  Step 2 + Step 3 + Step 7 verification block; `engineering-process.md` §3,
+  §3.2, §5.5 (now tri-harness matrix), §10.3 first-commit checklist;
+  `core-rules/inheritance.md` Multi-harness section (now covers three
+  harnesses) plus new "Known gap: AntiGravity native hooks deferred"
+  subsection.
+- **ADR.** `docs/adr/2026-05-20-antigravity-third-harness.md` records the
+  decision to admit AntiGravity now and defer hooks, modeled on the
+  2026-05-04 Codex parity ADR.
+- `core-rules/VERSION` 0.3.1 → 0.4.0 (minor bump — new canonical surface).
+
+### Known gap
+
+- **AntiGravity native hooks not implemented.** Public docs as of 2026-05-20
+  do not describe a workspace hook envelope, and the standalone Antigravity
+  2.0 desktop app does not expose hooks UI. Tier-1 and Tier-2 enforcement
+  on AntiGravity sessions is not available; rules + skills + Tier-3 git
+  hooks remain in effect. Gap surfaced in `core-rules/inheritance.md`
+  "Known gap" subsection, this CHANGELOG entry, the `onboard-project.sh`
+  final-echo block when antigravity is enabled, and the new ADR. Re-evaluate
+  when Google publishes a workspace hook API.
+
 ## [v0.3.1] — 2026-05-19
 
 Primer freshness loop. Makes the v0.3.0 primer system close the loop on
