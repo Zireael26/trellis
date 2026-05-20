@@ -262,7 +262,7 @@ seed_presets() {
       continue
     fi
     seed_symlink "$target" "$PROJECT/.claude/rules/preset-$name.md"
-    if pg_has_harness codex; then
+    if pg_has_harness codex || pg_has_harness antigravity; then
       seed_symlink "$target" "$PROJECT/.agents/rules/preset-$name.md"
     fi
   done
