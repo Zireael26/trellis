@@ -292,7 +292,7 @@ seed_husky_hook() {
 ensure_gitignore_fragment() {
   local fragment="$TEMPLATES/project.gitignore.fragment"
   local gi="$PROJECT/.gitignore"
-  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer/explore commands)"
+  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer/explore commands + antigravity workflows)"
   local any_legacy_marker="Trellis inheritance symlinks"
   local had_any_legacy=false
 
@@ -317,7 +317,7 @@ ensure_gitignore_fragment() {
 
   if $had_any_legacy; then
     echo "note: legacy pre-7-skill Trellis fragment detected in .gitignore." >&2
-    echo "      the new (7-skill set) block was appended alongside; duplicate" >&2
+    echo "      the new (7-skill set + antigravity workflows) block was appended alongside; duplicate" >&2
     echo "      gitignore entries are harmless. Remove the older block manually" >&2
     echo "      once you've confirmed the new one covers your symlinks." >&2
   fi
