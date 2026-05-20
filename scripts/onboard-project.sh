@@ -453,12 +453,10 @@ if pg_has_harness codex; then
 fi
 
 # AntiGravity-only surface — .agents/workflows/ slash commands. Native hook
-# integration is deferred: AntiGravity 2.0's language_server has hook code
-# internally (events: PreToolUse, PostToolUse, PreInvocation, PostInvocation,
-# Stop; reads hooks.json from gemini_dir_uri and workspace_dir_uri), but the
-# standalone Antigravity 2.0 desktop app does not expose a hooks UI and no
-# workspace hooks.json path is documented as of 2026-05-20. Re-open via fresh
-# ADR when Google exposes the hook config surface.
+# integration is deferred. See core-rules/inheritance.md "Known gap:
+# AntiGravity native hooks deferred" for the gap rationale; the elaborated
+# evidence (language-server internals, lack of UI exposure as of 2026-05-20)
+# lives in the ADR added by Task 18 of the rollout plan.
 if pg_has_harness antigravity; then
   echo "-- antigravity harness enabled --"
   seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/workflows/primer.md"
