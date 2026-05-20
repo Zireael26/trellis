@@ -156,12 +156,12 @@ rollout_one() {
     install_skill_symlink "$p" ".claude/skills/$s" "$s"
   done
 
-  if pg_has_harness codex; then
+  if pg_has_harness codex || pg_has_harness antigravity; then
     for s in "${FEATURE_SKILLS[@]}"; do
       install_skill_symlink "$p" ".agents/skills/$s" "$s"
     done
   elif [ -d "$p/.agents" ]; then
-    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — Codex parity NOT applied; rerun with codex enabled if desired"
+    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex or antigravity enabled if desired"
   fi
 }
 

@@ -197,7 +197,7 @@ rollout_one() {
   done
   prune_stale_presets "$p" ".claude" "$declared"
 
-  if pg_has_harness codex; then
+  if pg_has_harness codex || pg_has_harness antigravity; then
     for n in $declared; do
       install_preset_symlink "$p" ".agents" "$n"
     done
