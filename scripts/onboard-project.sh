@@ -370,6 +370,10 @@ untrack_if_tracked ".agents/commands/primer.md"
 untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
 untrack_if_tracked ".agents/commands/explore.md"
+untrack_if_tracked ".agents/workflows/primer.md"
+untrack_if_tracked ".agents/workflows/primer-refresh.md"
+untrack_if_tracked ".agents/workflows/primer-check.md"
+untrack_if_tracked ".agents/workflows/explore.md"
 
 # Claude Code inheritance: rules + skills + hooks.
 # Canonical skills shipped today: process-gate, security-gate (always on),
