@@ -4,8 +4,8 @@ Authoritative source: `engineering-process.md` §6 (Git workflow) and §7 (Defin
 
 ## Branch name
 
-- Pattern: `<type>/<kebab-slug>`. Type ∈ `codex`, `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `revert`.
-- Examples: `codex/agent-parity`, `feat/avatar-rotation-gesture`, `fix/wardrobe-zoom-reset`, `chore/upgrade-next-15`.
+- Pattern: `<type>/<kebab-slug>`. Type ∈ `antigravity`, `codex`, `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `revert`.
+- Examples: `antigravity/workflow-rollout`, `codex/agent-parity`, `feat/avatar-rotation-gesture`, `fix/wardrobe-zoom-reset`, `chore/upgrade-next-15`.
 - Anything else: **warn** (rename if the branch is short-lived).
 
 ## Commit messages

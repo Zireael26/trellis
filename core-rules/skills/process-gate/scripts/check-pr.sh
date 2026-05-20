@@ -21,7 +21,7 @@ if [ "$branch" = "HEAD" ] || [ -z "$branch" ]; then
 elif [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
   pg_log info "on $branch; branch-name check is N/A"
 else
-  if ! printf "%s" "$branch" | grep -qE '^(codex|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*$'; then
+  if ! printf "%s" "$branch" | grep -qE '^(antigravity|codex|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*$'; then
     findings+=("branch:$branch — does not match <type>/<kebab-slug>")
     [ "$worst" = "pass" ] && worst="warn"
   fi
