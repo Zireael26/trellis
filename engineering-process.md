@@ -115,7 +115,7 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
   "user_home":      "/Users/<you>",
   "maintainer_name":"<your name>",
   "github_user":    "<github-username>",
-  "harnesses":      ["claude"],         // or ["claude", "codex"]
+  "harnesses":      ["claude"],         // any subset of ["claude", "codex", "antigravity"]
   "template": {
     "remote": "git@github.com:<you>/trellis.git",
     "branch": "main",
@@ -146,7 +146,7 @@ Cross-machine portability is achieved by:
 
 | Script | Purpose |
 |---|---|
-| `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed `AGENTS.md`, `.agents/`, and `.codex/` parity when Codex enabled. |
+| `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface when Codex OR AntiGravity is enabled, the Codex-only `.codex/` + `.agents/commands/` trees when Codex is enabled, and the AntiGravity-only `.agents/workflows/` tree when AntiGravity is enabled. AntiGravity hook integration is deferred (see `core-rules/inheritance.md` "Known gap"). |
 | `scripts/sync-hooks.sh [--dry-run\|--yes]` | Canonical Tier 1+2 hook scripts → all registered projects' `.claude/hooks/`. Skill symlinks update automatically (no rsync needed). |
 | `scripts/sync-codex-hooks.sh [--dry-run\|--yes]` | Canonical Codex hook manifest + scripts → all registered projects' `.codex/` trees when Codex is enabled. |
 | `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
@@ -270,17 +270,18 @@ Overrides live in each project's `.claude/hooks/config.sh` and/or `.codex/hooks/
 
 ### 5.5 Harness coverage matrix
 
-Claude Code is the primary harness. Codex is the secondary. Different layers cover different harnesses:
+Claude Code is the primary harness. Codex and AntiGravity are secondaries. Different layers cover different harnesses:
 
-| Layer | Claude Code | Codex | Notes |
-|---|---|---|---|
-| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | Single canonical source of truth in `core-rules/CLAUDE.md`. |
-| Skills (`process-gate`, future) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | Same canonical target; byte-identical across harnesses. |
-| Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | Separate canonical envelopes; same policy intent. |
-| Tier 3 git hooks (husky / native) | runs in both | runs in both | Harness-agnostic. |
-| Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
+| Layer | Claude Code | Codex | AntiGravity | Notes |
+|---|---|---|---|---|
+| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | `AGENTS.md` (same symlink as Codex) or `.agents/rules/trellis.md` | Single canonical source of truth in `core-rules/CLAUDE.md`. `AGENTS.md` and `.agents/rules/` are byte-identical between Codex and AntiGravity — both engines read the same files. |
+| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | `.agents/skills/<name>/` symlink (same as Codex) | Same canonical target; byte-identical across harnesses. |
+| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` | `.agents/workflows/<name>.md` | Different directory names per engine; same canonical targets. |
+| Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | **deferred** (see "Known gap" in `core-rules/inheritance.md`) | Trellis does not seed `.antigravity/` today. |
+| Tier 3 git hooks (husky / native) | runs in all | runs in all | runs in all | Harness-agnostic — git-level enforcement protects every harness. |
+| Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
 
-Projects opt into Codex by setting `harnesses: ["claude", "codex"]` in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane runs both.
+Projects opt into the secondaries by adding `"codex"` and/or `"antigravity"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. AntiGravity's deferred native-hook integration is a known gap; turn-level enforcement on AntiGravity sessions relies on parent rules + Tier-3 git hooks only until Trellis ships hook seeding.
 
 ### 5.6 Token-noise filter (`permissions.deny`)
 
@@ -641,8 +642,10 @@ git push -u origin main
 - [ ] `gotchas.md` exists at project root.
 - [ ] `.gitignore` includes the Trellis symlink fragment (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
 - [ ] `git ls-files .claude/rules/trellis.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
-- [ ] If Codex-enabled: `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and `.codex/hooks/*.sh` are present.
+- [ ] If Codex- or AntiGravity-enabled (shared surface): `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, and `.agents/primers/INDEX.md` are present.
+- [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` are present.
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] hooks = true` (or the legacy `codex_hooks = true` alias; deprecated as of Codex CLI 0.129+).
+- [ ] If AntiGravity-enabled (AntiGravity-only): `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present. `.antigravity/` directory **must not** exist — AntiGravity hook integration is deferred.
 - [ ] `registry.md` has a row for the new project.
 - [ ] Branch protection enabled on `main`.
 
