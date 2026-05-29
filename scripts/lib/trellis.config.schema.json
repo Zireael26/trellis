@@ -104,6 +104,18 @@
         "additionalProperties": true
       },
       "uniqueItems": true
+    },
+    "autonomy_default": {
+      "description": "Optional. Fleet default autonomy level (integer 1–5) used by every session under this clone unless overridden. 1=pedagogical, 2=cautious, 3=standard (default), 4=initiative, 5=autonomous. Project-local <project>/.trellis.config.json may override with its own 'autonomy' field. Presets may clamp via 'autonomy_ceiling'.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "autonomy": {
+      "description": "Optional. Project-local override of autonomy_default. Same range and semantics. Used only in project-local <project>/.trellis.config.json files, but accepted at fleet-level for symmetry.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
     }
   },
   "additionalProperties": true

@@ -121,6 +121,14 @@ bash "$SKILL_DIR/scripts/check-docs.sh"    --range=main..HEAD
 
 Output goes into the PR description's "process-gate" section, pasted verbatim. Accepted warnings carry a one-line justification.
 
+### Autonomy-aware review (L4/L5)
+
+When the active autonomy level is L4 or L5 (resolved per `core-rules/autonomy.md`), agent-invoked review carries an additional clause:
+
+> Additionally: read `<canonical-root>/decisions-log.md`'s entries for this session. The diff under review must be consistent with the logged decisions. If you see implicit decisions in the diff that are NOT in the log (e.g., a non-obvious choice between two valid implementations, a pattern divergence, an interpretation of an ambiguous requirement), flag each as a missing-decision-log finding. Treat omission as a code-review finding; an incomplete decision log undermines the audit trail that L4/L5 depends on.
+
+At L1–L3 the `decisions-log.md` file is not expected and this clause is skipped. All standard `check-*.sh` scripts run identically at every level.
+
 ## Stack-profile carve-outs
 
 Some projects don't fit the web-default assumptions baked into the canonical scripts. Document the carve-out in `local.config.sh`:

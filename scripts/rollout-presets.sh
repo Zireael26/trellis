@@ -130,6 +130,13 @@ install_preset_symlink() {
     echo "  WARN: preset '$name' declared but $target missing — skipping" >&2
     return
   fi
+  # Surface autonomy frontmatter (if any) for operator visibility
+  AUTONOMY_BLOCK=$(awk '/^---$/{c++; if(c==2){exit}; next} c==1{print}' "$target")
+  FM_CEIL=$(printf '%s\n' "$AUTONOMY_BLOCK" | awk '/^autonomy_ceiling:/{print $2}')
+  FM_DEF=$(printf '%s\n' "$AUTONOMY_BLOCK" | awk '/^autonomy_default:/{print $2}')
+  if [ -n "$FM_CEIL" ] || [ -n "$FM_DEF" ]; then
+    printf '       autonomy: ceiling=%s default=%s\n' "${FM_CEIL:-(none)}" "${FM_DEF:-(none)}"
+  fi
   if [ -L "$link" ]; then
     local cur; cur="$(readlink "$link")"
     if [ "$cur" = "$target" ]; then
@@ -159,7 +166,8 @@ prune_stale_presets() {
   for link in "$dir"/preset-*.md; do
     [ -e "$link" ] || continue   # glob didn't match anything
     [ -L "$link" ] || continue   # not a symlink — leave alone
-    local fname="$(basename "$link")"
+    local fname
+    fname="$(basename "$link")"
     local name="${fname#preset-}"; name="${name%.md}"
     if echo "$declared" | grep -qxF "$name"; then
       continue                    # still declared
@@ -222,7 +230,14 @@ else
 fi
 
 echo "Targets: ${TARGETS[*]}"
-echo "Canonical presets available: $(ls "$CANONICAL_PRESETS_DIR"/*.md 2>/dev/null | grep -v README | xargs -n1 basename 2>/dev/null | sed 's/\.md$//' | tr '\n' ' ')"
+preset_names=""
+for p in "$CANONICAL_PRESETS_DIR"/*.md; do
+  [ -f "$p" ] || continue
+  base="$(basename "$p" .md)"
+  [ "$base" = "README" ] && continue
+  preset_names="$preset_names $base"
+done
+echo "Canonical presets available: ${preset_names# }"
 $DRY_RUN && echo "(dry-run mode — no writes)"
 
 if ! $ASSUME_YES && ! $DRY_RUN; then

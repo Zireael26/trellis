@@ -9,7 +9,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. Flag real problems and wait.
 - For non-trivial features (3+ steps or architectural decisions), interview the user about implementation, UX, and tradeoffs before writing code.
-- Never attempt multi-file refactors in one response. Break into phases of max 5 files. Complete, verify (hooks enforce), get approval, then continue.
+- Never attempt multi-file refactors in one response. Break into phases of max 7 files. Complete, verify (hooks enforce), get approval, then continue.
 - Don't hide confusion. If a request has multiple valid interpretations, surface them — don't pick silently. If something is unclear, stop and name what's confusing before guessing.
 - Frame each task as a verifiable goal before writing code: bug → reproducing test that fails then passes; refactor → tests green before and after; new behavior → explicit acceptance check per step. Weak goals ("make it work") force back-and-forth; strong goals let you loop independently.
 
@@ -21,12 +21,13 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - Write code that reads like a human wrote it. No robotic comment blocks. Default to no comments. Only comment when the WHY is non-obvious.
 - Commit messages follow the same rule: terse, human voice, no `Co-authored-by: Claude` or `🤖 Generated with Claude Code` footers.
 - Don't build for imaginary scenarios. Simple and correct beats elaborate and speculative.
+- No speculative defensive code. Don't add error handling, fallbacks, or validation for cases that can't occur — trust internal callers and framework guarantees; validate only at system boundaries (user input, external APIs).
 
 ## Context management
 
 - Before any structural refactor on a file >300 LOC, remove all dead props, unused exports, unused imports, debug logs. Commit cleanup separately.
-- Dispatch sub-agents in parallel whenever work decomposes into independent units — not just file-count refactors. Use them when (a) parallelism cuts wall time meaningfully (≥2 independent searches, fetches, or analyses), or (b) bulky read-heavy work would bloat the main context window. Single message, multiple `Agent` tool calls. Skip for trivially serial work or when one result must inform the next.
-- Token cost is real. Before spawning sub-agents, starting `monitor`, or fetching large files, ask if a narrower tool would suffice. Don't optimize for thoroughness when the question is small.
+- Dispatch sub-agents in parallel for speed and context-isolation whenever work decomposes into independent units. Wall-clock parallelism beats sequential agent time; each subagent gets a fresh context = higher-quality output. Triggers: (a) ≥2 independent searches/fetches/analyses, (b) >5 files, (c) edit-heavy turns. Single message, multiple `Agent` tool calls. Skip only when one result must inform the next or work is trivially serial. Opus 4.8 under-dispatches subagents and tools by default — honor these triggers even when inlining feels easier, and batch independent tool calls (reads, greps, bash) in one message rather than firing them serially.
+- When ctx use ≥40% or after 25 messages (whichever comes first), re-read any file before editing it. Auto-compaction may have destroyed your memory of its contents.
 - If you notice context degradation (referencing nonexistent variables, forgetting file structure), run `/compact` proactively — the `save-context-log` hook fires on `PreCompact` and writes `context-log.md` automatically; do not author the file by hand.
 - At session start, the `session-context` hook auto-injects the previous session's `context-log.md`. Treat that injection as authoritative for "what was I in the middle of" — branch, files touched, open todos, last decisions. Read it before asking the user to re-explain context. The log is stored at the canonical project root (resolved via `git --git-common-dir`), so worktree sessions see the same log as the main checkout.
 
@@ -47,7 +48,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 
 ## Debugging
 
-- Work from raw error data. Don't guess. If a bug report has no output, ask for it.
+- Work from raw error data. Don't guess. If a bug report has no output, ask for it. Never claim anything about code you haven't opened — if the user names a file, read it before answering, not after.
 - For any long-running process (dev server, test watcher, build, log tail), use the `monitor` tool — never `tail -f`, polling loops, or repeated Bash calls. Monitor streams stdout lines as notifications with zero token overhead.
 - If a fix doesn't work after two attempts, stop. Read the entire relevant section top-down. State where your mental model was wrong before trying again.
 
@@ -62,6 +63,18 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - When the user says "yes," "do it," or "push," execute. Don't repeat the plan.
 - Terse responses. No trailing prose summaries — TodoWrite carries in-flight state, the diff carries the result.
 - Flag real problems up front. Don't bury them under "here's what I did."
+
+## Autonomy
+
+Trellis ships a **responsibility slider** (L1–L5, default L3) that controls *who answers* interactive gates — user or agent. All gates and quality controls fire at every level; level only changes consultation surface. Full matrix, guardrails, and resolution algorithm: `core-rules/autonomy.md`.
+
+Active level resolution (pick → clamp): `trellis.config.json.autonomy_default` → project-local `.trellis.config.json.autonomy` → preset `autonomy_default` (if no project-local) → session override at `<canonical-root>/.claude/session-autonomy` (written by `/autonomy N`). Then clamp by lowest preset `autonomy_ceiling`.
+
+At L4/L5, agent appends each decision made on user's behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes same block.
+
+**Architectural decisions surface inline mid-turn even at L5** (reversibility cliff). Bright-line guardrails (hard hooks, destructive ops, external messages, secrets, DoD receipts, code-review subagent) remain mandatory at every level.
+
+Default L3 = current Trellis behavior; existing projects see no change.
 
 ## Advisor
 

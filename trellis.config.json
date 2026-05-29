@@ -1,6 +1,6 @@
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity.",
+  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity or \"antigravity\" when opting into AntiGravity (Google's agent CLI). Multiple harnesses may be enabled together.",
 
   "trellis_root": "__TRELLIS_PATH__",
   "projects_root": "__PROJECTS_ROOT__",

@@ -6,7 +6,25 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
-## [v0.4.0] — 2026-05-20
+## [v0.6.5] — 2026-05-29
+
+Opus 4.8 prompting best-practices incorporation. Anthropic's consolidated [Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) guide (Opus 4.8 release) was gap-analyzed against Trellis; the guide largely *validates* the existing regime, so the change set is small and targeted. ADR: `docs/adr/2026-05-29-opus-4.8-prompting-best-practices.md`. **Version note:** `feat/antigravity-third-harness` merged first and claimed `v0.6.0`; per that overlap's documented carve-out the later release re-versions, so this Opus 4.8 work ships as `v0.6.5`.
+
+### Added
+
+- **`docs/opus-4.8-steering.md`** — Opus 4.8 steering reference: the deltas between Anthropic's guide and Trellis, plus a reusable prompt-snippet library (overengineering, investigate-before-answering, parallel tool calls, default-to-action, hard-code-to-tests, code-review coverage, short frontend snippet, model identity), each mapped to the Trellis surface that already implements it. Verbose snippets live here rather than in the always-injected parent `CLAUDE.md`.
+- **`docs/adr/2026-05-29-opus-4.8-prompting-best-practices.md`** — records what was incorporated, what was deliberately skipped (API-only mechanics, forced `alwaysThinkingEnabled`, the deprecated long pre-4.8 frontend snippet), and the restraint rationale on parent-rule bloat.
+
+### Changed
+
+- **`core-rules/templates/claude-settings.json` — `"effortLevel": "xhigh"`.** The guide's highest-value 4.8 lever. Verified against the Claude Code [model-config docs](https://code.claude.com/docs/en/model-config): `effortLevel` is a real settings field (`low|medium|high|xhigh`; `max` and `ultracode` are session-only and rejected there). Opus 4.8's Claude Code default is `high`; `xhigh` is recommended for coding/agentic work and degrades to `high` on models without it (Sonnet 4.6, Opus 4.6), so the template is fleet-safe. Reaches a project on its next scaffold or settings re-sync; existing projects are unaffected until then.
+- **`core-rules/CLAUDE.md` — three surgical rule deltas.** (a) Code quality: no speculative defensive code — validate only at system boundaries, trust internal callers and framework guarantees. (b) Debugging: never claim anything about code you haven't opened; read a referenced file before answering, not after. (c) Context management: noted that Opus 4.8 *under*-dispatches subagents and tools by default (the reverse of 4.6's over-spawning), so the existing dispatch triggers must be honored even when inlining feels easier, and independent tool calls batched in one message. Each delta changes behavior beyond text already present; everything else the guide recommends as a parent-rule line was already in place.
+- **`core-rules/autonomy.md` — "Opus 4.8 alignment" section.** Documents that the L1–L5 slider is the guide's `<default_to_action>` ↔ `<do_not_act_before_instructions>` spectrum expressed as a setting, and that the bright-line guardrails implement its balancing-autonomy-and-safety advice (confirm before destructive / shared / external actions; never `--no-verify` as a shortcut).
+- **`engineering-process.md`** — §8.6 testing bar gains a general-solutions / don't-hard-code-to-tests rule; §14.3 gains "write rules for the current model" (4.8 literalism → explicit scope, positive > negative examples, sparing `CRITICAL:`/`MUST`); §5.2 gains a code-review coverage-not-filtering note; References lists the steering doc.
+- **`core-rules/hooks/code-review-subagent.sh` — reviewer-prompt guidance in the header contract.** The hook is the filter (`severity == "critical"` blocks, the rest advisory); the project-local reviewer should be prompted for coverage, not filtering — report every finding with severity and an optional confidence. Comment-only; the hook's behavior is unchanged (it remains an unwired skeleton).
+- **`scripts/sync-to-template.sh` — public-mirror parity.** SYNC_PATHS extended so the public template reaches full 0.6.0 parity, publishing formerly instance-only artifacts: `core-rules/autonomy.md`, `core-rules/presets/`, `recon.md`, `docs/opus-4.8-steering.md`, and the autonomy design spec. The `2026-05-08` meta-audit stays private (it maps per-project security gaps); its lone example citation in `references/secrets.md` was genericized so no synced spec doc dangles on it.
+
+## [v0.6.0] — 2026-05-20
 
 Add AntiGravity (Google's `agy` CLI / standalone Antigravity 2.0 desktop app)
 as Trellis's third first-class harness. Shares the existing `AGENTS.md` +
@@ -44,18 +62,15 @@ ships.
 - **Gitignore fragment carries four new workflow symlinks.**
   `core-rules/templates/project.gitignore.fragment` adds
   `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md`. The
-  sentinel header bumps from "7-skill set + presets + primer/explore
-  commands" to "7-skill set + presets + primer/explore commands +
-  antigravity workflows"; the `current_sentinel` literal in
-  `scripts/onboard-project.sh` updates in lockstep so re-onboarding is
-  idempotent.
+  sentinel header bumps to include `antigravity workflows`; the
+  `current_sentinel` literal in `scripts/onboard-project.sh` updates in
+  lockstep so re-onboarding is idempotent.
 - **Example config and template heredoc updated.**
   `core-rules/templates/trellis.config.json.example` shows
   `["claude", "codex", "antigravity"]`. `scripts/sync-to-template.sh`'s
   embedded comment mentions AntiGravity alongside Codex.
-- **Documentation sweep.** `README.md` badge + "what you get" row + FAQ;
-  `SETUP.md` §4; `AGENT_SETUP.md` Step 1 + Step 2b; `AGENT_ONBOARD_PROJECT.md`
-  Step 2 + Step 3 + Step 7 verification block; `engineering-process.md` §3,
+- **Documentation sweep.** `README.md` Codex/AntiGravity setup section + harness bullets + requirements;
+  `AGENT_ONBOARD_PROJECT.md` Step 2 + Step 3 + Step 7 verification block; `engineering-process.md` §3,
   §3.2, §5.5 (now tri-harness matrix), §10.3 first-commit checklist;
   `core-rules/inheritance.md` Multi-harness section (now covers three
   harnesses) plus new "Known gap: AntiGravity native hooks deferred"
@@ -63,7 +78,7 @@ ships.
 - **ADR.** `docs/adr/2026-05-20-antigravity-third-harness.md` records the
   decision to admit AntiGravity now and defer hooks, modeled on the
   2026-05-04 Codex parity ADR.
-- `core-rules/VERSION` 0.3.1 → 0.4.0 (minor bump — new canonical surface).
+- `core-rules/VERSION` 0.5.0 → 0.6.0 (minor bump — new canonical surface).
 
 ### Known gap
 
@@ -75,6 +90,107 @@ ships.
   "Known gap" subsection, this CHANGELOG entry, the `onboard-project.sh`
   final-echo block when antigravity is enabled, and the new ADR. Re-evaluate
   when Google publishes a workspace hook API.
+
+## [v0.5.0] — 2026-05-20
+
+MEDIUM-severity remediation pass against `audits/2026-05-08-se-core-meta-audit.md`. Eleven items triaged; six required code or doc changes, three verified already closed, two CI workflows brought back to green. New parked rule lifted from the n=2 `gotchas-rollup` clusters.
+
+### Added
+
+- **`core-rules/deferred.md` — "Code-asset pairing rule" entry (n=2).** From `audits/2026-05-01-gotchas-rollup.md`: vericite shipped a TS rename in `apps/api-gateway/src/lib/openapi.ts` without regenerating the checked-in `docs/api/02-openapi.yaml`; lume authored MonoBehaviours in `Assets/Scripts/` without wiring them into `Assets/Scenes/SampleScene.unity`. Both failed only at runtime / integrity-test time; static checks (typecheck, build, lint) were blind to the drift. Parked as an n=2 candidate with graduation criterion "a third project independently reports a bug whose root cause is a code change landing without its paired non-code artifact" — phrasing of the eventual lift (narrow "regenerate generated artifacts" vs. broader "code-asset pairing" invariant with per-project hooks) deferred to the n=3 instance.
+- **Bats coverage for the MEDIUM hook + process-gate fixes.** New `core-rules/hooks/tests/session-context.bats` (11 cases — gotchas regex against heading / status-field / bold-tag positives, free-text negatives, Codex parity, 5K-log injection size sanity). New `core-rules/skills/process-gate/tests/` directory with `check-pr-subject.bats` (8 cases including `codex:` and audit-closure for `!` / empty-scope), `check-bypass.bats` (6 cases for active-bypass config detection), `check-secrets.bats` (5 cases for the locator-rewrite). Both suites run from `bats core-rules/hooks/tests/` (45/45 pass) and `bats core-rules/skills/process-gate/tests/` (19/19 pass).
+
+### Changed
+
+- **Collapsed three sources of truth for the canonical hook manifest into two by-design sources.** Audit §2.3 flagged that `scheduled-tasks/parent-hook-drift/prompt.md` inlined the full hook+event+matcher table while `engineering-process.md` §5.2 carried a parallel narrative table and `core-rules/templates/claude-settings.json` was the actual deployment. Three edits to add a hook. Now: `core-rules/hooks/README.md` is the authoritative inventory (names + tiers + origin), and `core-rules/templates/claude-settings.json` is the authoritative event/matcher wiring. `parent-hook-drift/prompt.md` no longer duplicates the manifest — it enumerates canonical scripts from `core-rules/hooks/*.sh` at audit-runtime and iterates the template's `hooks` block for the registration check (with a new finding shape for "canonical manifest disagreement between disk and template" when those drift). `engineering-process.md` §5.2 keeps its narrative "Responsibility" column but gains a preamble citing README.md + template as canonical, marking the table as non-authoritative narrative. Adding a hook is now two edits (README.md + settings.json template) plus an optional narrative row; the audit prompt requires no change.
+- **`core-rules/hooks/session-context.sh` and `post-compact-context.sh` — context-log read windows reconciled with documented rationale (audit §2.1).** Session-start budget raised from `head -c 800` to `head -c 1200` (cap is the hook's own 2000-char `additionalContext` ceiling; 1200 leaves room for the branch + commits + gotchas sections that share the budget). Post-compact rehydration budget raised from `head -c 4000` to `head -c 8000` (no overall cap there; `save-context-log.sh` regularly emits 6–10K of branch + open-todos + transcript snippets, so 4K was undersized). Inline comments at each `head -c <N>` document the rationale + cross-reference the other hook's value. Codex parity copies updated.
+
+### Fixed
+
+- **Gotchas "unresolved" detector no longer false-positives on free-text (audit §2.1).** `session-context.sh:73` was `grep -inE 'unresolved'` — case-insensitive substring match anywhere on a line, so prose like "this issue is now resolved (was unresolved on …)" tripped the detector. New regex anchors to line-start and matches ATX headings (`## Unresolved`, `### Unresolved gotchas`), bold status tags (`**unresolved**`), or status fields (`Status: unresolved`). Codex parity copy patched. Bats fixtures in `session-context.bats` cover the three positive shapes and the free-text negative.
+- **`check-pr.sh` commit-subject regex now allows the `codex` type (audit §2.2).** Branch-name regex on line 24 already accepted `codex/<slug>`; the subject regex on line 35 did not. A commit `codex: foo` would fail the gate even though `codex/foo` was a valid branch. One-line fix adds `codex` to the leading alternation. Audit's original concerns about `!` breaking-change marker and empty scope were verified CLOSED by the new bats fixture (`feat!: bang` passes, `fix(api)!: scoped bang` passes, `feat(): empty` fails).
+- **`check-bypass.sh` now detects active `core.hooksPath` / `commit.gpgsign` bypasses (audit §2.2).** New §3a: `git config --get core.hooksPath` returning `/dev/null` / `/dev/zero` / empty-after-set fires a fail-level finding "core.hooksPath: actively set to disable hooks". New §3b: `git config --get commit.gpgsign` returning `false` fires a warn-level finding "commit.gpgsign: actively disabled via persistent config" (warn, not fail — many projects legitimately disable signing). One-shot bypasses (`git -c commit.gpgsign=false commit`, `git commit --no-gpg-sign`) leave no trace post-hoc and are documented as undetectable in an inline comment block — only branch-protection or pre-commit trapping can catch them.
+- **`check-secrets.sh` collapsed the per-pattern-hit O(N×M) diff re-walk (audit §2.2).** The locator that resolved each pattern hit to `file:line` re-ran `git diff --no-color --unified=0 "$RANGE"` per hit, walking the full diff once per match. Now a single awk pass builds a `<file>\t<lineno>\t<content>` lookup table in a `mktemp` temp file; per-hit resolution becomes a single `awk -F'\t' -v h="$hit" 'index($3, h) {print $1":"$2; exit}'` against the small temp file. Bash 3.2-portable (no `declare -A`, no `mapfile`). Trap on EXIT preserves the script's exit code. Wall-clock benchmark on a 1K-line diff with 49 distinct secrets: ~290ms vs ~455ms before (~37% faster); on the audit-named 5K/1-secret case the table-build overhead slightly dominates the savings (~135ms vs ~118ms) — the improvement only manifests when hit count grows, which is the audit's scaling concern. Pre-existing bash-3.2 empty-array bug in `is_allowed` (which crashed the script under `set -u` when the allowlist file was absent and any finding had a non-empty `file`) fixed inline.
+- **Shellcheck CI gate green again.** Three warnings on `main` blocking the workflow: `scripts/rollout-presets.sh:162` (SC2155 declare-and-assign), `scripts/rollout-presets.sh:225` (SC2010 ls-pipe-grep), `scripts/onboard-project.sh:229` (SC2034 unused `harness_dir` in `seed_presets()`). Fixed in place; `shellcheck --severity=warning` over the workflow's full `find` invocation now exits 0.
+- **Conformance CI gate green again.** Five missing-reference findings on `main`: `engineering-process.md:526` brace `web-{perf,a11y,seo,agent-readiness}.md` and `monorepo-polyglot.md:205` brace `core-rules/husky/{commit-msg,pre-push}` rewritten as individual inline-code paths (all eight target files exist); `monorepo-polyglot.md:246` references to `docs/adr/0001-slice-1-bundle.md` / `docs/adr/0002-slice-2-bundle.md` and `:288` reference to `docs/engineering/repo-structure.md` were prose pointers to clusterbid-external ADRs / docs not present in Trellis canonical — inline-code markers stripped to remove the false signal to the conformance checker while preserving the prose. Final scan: `clean (19 spec docs, 154 refs scanned)`.
+
+### Verified
+
+Three MEDIUM items were checked against current code and confirmed already closed by earlier remediation cycles. Documented for the audit ledger; no code changes required.
+
+- **Duplicated repo-root helpers (audit §2.1).** P3.5 (v0.1.0) extracted `_se_repo_root` into `core-rules/hooks/lib/deps.sh:50-61` and re-sourced it from `session-context.sh`, `save-context-log.sh`, `post-compact-context.sh` on both harnesses. Grep confirms no inlined `__se_repo_root` definitions remain — every hook reads through the shared lib.
+- **Process-gate PR-size lockfile handling (audit §2.2).** `check-pr.sh:56-66` already iterates the diff file list, calls `pg_is_lockfile` (defined in `scripts/lib/common.sh`) per file, and subtracts the lockfile add/del lines from the countable total. Documented as a §1.2 win in the original audit; verified still in force.
+- **Remediation-report filename convention (audit §2.3).** P3.8 (v0.1.0) documented the 4-class taxonomy in `scheduled-tasks/README.md:152-166`. Convention: `YYYY-MM-DD-<source-audit>-remediation.md`. `audits/2026-04-27-cross-project-process-audit-remediation.md` follows the convention; `audits/2026-04-27-three-audits-remediation.md` is grandfathered as a multi-source rollup. The `-remediation.md` suffix is load-bearing for `audit-report-rollup` parsing.
+- **`core-rules/hooks/README.md` — `inject-primer-index.sh` added to the Tier 1 table.** The v0.3.1 backfill (PR #66) added the hook on disk and wired it into `core-rules/templates/claude-settings.json` and the inline manifest of `scheduled-tasks/parent-hook-drift/prompt.md`, but missed updating the Tier 1 table in `core-rules/hooks/README.md`. This is exactly the kind of canonical-manifest disagreement the v0.5.0 source-of-truth consolidation surfaces — caught and closed in the same release. Tier 1 table now lists all six Tier-1 hooks including `inject-primer-index.sh`.
+
+## [v0.4.5] — 2026-05-20
+
+Autonomy slider — L1–L5 responsibility-slider that controls *who answers* Trellis's interactive gates (user vs. agent) at each gate-hit. Default L3 = current behavior; all gates and quality controls remain mandatory at every level. Independent feature scope from v0.4.0 (rule calibration / audit sweep) — slotted as a minor bump.
+
+### Added
+
+- **Autonomy slider (L1–L5, default L3).** Five-level responsibility slider that controls who answers Trellis's interactive gates — user (lower) or agent (higher). All gates and quality controls fire at every level; the level only changes *who decides*. L1 Pedagogical (ask + explain), L2 Cautious (ask with recommendation), L3 Standard (current behavior), L4 Initiative (single plan-approval, batched questions, architectural decisions still inline), L5 Autonomous (silent decision-making + decision log). Bright-line guardrails (hard hooks, destructive ops, external messages, secrets, DoD receipts, code-review subagent) remain mandatory at every level; PR creation flexes. Architectural decisions surface inline mid-turn even at L5 (reversibility cliff). Defaults to L3 ⇒ no regression for existing projects.
+- **`core-rules/autonomy.md`** — canonical level matrix, guardrail list, resolution algorithm, decision-log schema. Imported by `core-rules/CLAUDE.md` via cross-reference.
+- **`/autonomy N` slash command** at `core-rules/commands/autonomy.md` — validates 1–5, resolves preset ceiling, clamps with one-line warning if needed, writes `<canonical-root>/.claude/session-autonomy` (gitignored), acknowledges. Session-scoped; survives `/compact` and worktree boundaries.
+- **`scripts/lib/trellis.config.schema.json`** gains `autonomy_default` (fleet, 1–5) and `autonomy` (project-local override, 1–5) fields. Both optional. Schema-validated by ajv when available, jq-fallback otherwise.
+- **Preset frontmatter** — `compliance-strict.md` declares `autonomy_ceiling: 2` (audit-grade discipline requires human-in-the-loop). `experimental-loose.md` declares `autonomy_ceiling: 5, autonomy_default: 4` (throwaway work; decisions cheap to undo). `core-rules/presets/README.md` documents the new optional frontmatter fields.
+- **`<canonical-root>/decisions-log.md`** — new agent-authored file at the canonical project root capturing decisions made at L4/L5. Append-only by agent during turns. Renders into end-of-turn message + PR description body (when PR is created). Separate file (NOT inside `context-log.md`) so it survives `save-context-log.sh`'s overwrite cycle on every PreCompact. Git-tracked by default; storage policy documented in `core-rules/autonomy.md`.
+- **`core-rules/hooks/session-context.sh`** extended to inject `Level: L<n> (<name>)` into the session-start context block. At L4/L5, also injects the last 10 entries from `decisions-log.md`. Bats test suite at `core-rules/hooks/tests/session-context-autonomy.bats` (6 tests).
+- **`core-rules/hooks/code-review-subagent.sh`** reads autonomy level + passes `decisions-log.md` content as part of the reviewer JSON payload `{diff, autonomy_level, decisions_log}`. At L4/L5 the reviewer is expected to flag implicit decisions present in the diff that are missing from the log.
+- **`core-rules/skills/process-gate/SKILL.md`** — code-review subagent prompt at L4/L5 gains a decision-log-completeness clause: implicit decisions present in the diff but missing from the log are flagged as findings. Incomplete logs are no longer free.
+- **`scheduled-tasks/autonomy-drift/`** — new weekly audit (Mon 11:30, ahead of preset-drift at 12:00). Flags silent L4/L5 (decisions missing on edit-heavy weeks), chronic override (config probably under-set), ceiling friction (repeated clamp events), schema issues. Read-only; remediation through config edits.
+- **`scripts/show-config.sh`** — pretty-prints resolved autonomy level (after fleet + project + session + clamp), active presets with their ceilings/defaults, approved_mcps list. Discoverability without a UI; the deferred UI/TUI work is parked.
+- **ADR** at `docs/adr/2026-05-20-autonomy-slider.md`; design spec at `docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md`; implementation plan at `docs/superpowers/plans/2026-05-20-trellis-autonomy.md`.
+- **`engineering-process.md` §14.8** — narrative for the autonomy slider (why it exists, layers, guardrails, decision log, audit, references).
+
+### Changed
+
+- **`core-rules/CLAUDE.md`** — new `## Autonomy` section cross-referencing `core-rules/autonomy.md`. No behavior change at default L3.
+- **`scripts/onboard-project.sh`** — symlinks `core-rules/commands/autonomy.md` into project `.claude/commands/` and `.agents/commands/`. Sentinel bumped to `7-skill set + presets + primer/explore/autonomy commands`.
+- **`scripts/rollout-presets.sh`** — `--dry-run` output now surfaces each preset's `autonomy_ceiling` / `autonomy_default` so operators see ceiling clamps at-a-glance.
+- **`core-rules/templates/trellis.config.json.example`** — example carries `autonomy_default: 3` with a comment explaining the levels.
+- **`core-rules/templates/project.gitignore.fragment`** — gitignores `.claude/session-autonomy` (per-developer state).
+- **`core-rules/VERSION`** bumped to `0.4.5` (additive, no breaking change since default L3 preserves current behavior).
+
+### Notes for operators rolling out v0.4.5
+
+- After pulling v0.4.5 into a Trellis clone, run `scripts/sync-hooks.sh --apply` to propagate the extended `session-context.sh` and `code-review-subagent.sh` into registered projects. Without this, the autonomy level + decision-log injection only fires inside the canonical clone.
+- Existing projects that want the `/autonomy` slash command available locally should re-run `scripts/onboard-project.sh <project>` (it now symlinks `core-rules/commands/autonomy.md` into `.claude/commands/` and `.agents/commands/`).
+- Presets gained `autonomy_ceiling` / `autonomy_default` frontmatter. If your project declares `compliance-strict` or `experimental-loose`, no action needed — the rollout-presets script reads the frontmatter live.
+
+### Implementation note (one-off)
+
+The 20-task plan was executed via the superpowers:subagent-driven-development skill. On ~half the tasks classified as mechanical (single-line edits, pure-prose markdown), the standalone spec-compliance and code-quality reviewer subagents were skipped — the implementer's report plus controller-side bash verification (jq/grep/bats) served as the spec compliance check, and there was no separable code-quality surface beyond what spec compliance covered. Full review machinery ran on substantive code tasks (hook extensions, shell scripts, audit prompts). This was a one-off speed compromise; do not treat it as a new convention for future plans.
+
+## [v0.4.0] — 2026-05-20
+
+Rule calibration for the modern Claude 4.7 / Sonnet 4.6 era plus a 17-audit
+sweep confirming the audit backlog is clean. Two behavioral shifts in the
+parent layer (context thresholds at 500K-effective-ceiling; parallel-subagent
+rule reframed around wall-clock speed and context-isolation), one residual
+hook bug fixed, and explicit verification that every prior audit's
+Trellis-repo-scoped finding has been resolved.
+
+### Changed
+
+- **Rule calibration for 500K effective context ceiling.** Nominal context is 1M for Opus 4.7 / Sonnet 4.6, but model performance degrades past ~500K — rules now anchor on the empirical limit. Threshold updates across `core-rules/CLAUDE.md`, `engineering-process.md`, `recon.md`, `core-rules/hooks.md`, `security-gate-plan.md`, `scheduled-tasks/obsolete-rules/prompt.md`, plus both Claude and Codex `truncation-check.sh` copies: re-read trigger moved from "after 10+ messages" to "when ctx use ≥40% OR after 25 messages, whichever first"; chunked-read threshold raised from `>500 LOC` to `>1500 LOC`; tool-result truncation threshold raised from `50K` to `100K`; refactor phase cap raised from `max 5 files` to `max 7 files`. Compact-trigger stays env-var configured at 500K for Claude models (no rule change required). Subagent-dispatch threshold (`>5 files`) deliberately preserved — the value is right for the new framing (see next entry).
+- **Parallel-subagent rule reframed: speed + context-isolation, not context-bloat avoidance.** `core-rules/CLAUDE.md` and `engineering-process.md` §8.3 now lead with wall-clock parallelism and fresh-context-per-subagent quality, not with cost or main-context-bloat rationale. The cost frame (Anthropic's published "multi-agent costs 10-15× tokens, start single") is a public-API stance for production volume; interactive personal-project development wins on latency and per-subagent context isolation. Triggers unchanged: ≥2 independent searches/fetches/analyses, >5 files, edit-heavy turns. Removed the now-redundant "Token cost is real" follow-up sentence at `core-rules/CLAUDE.md:30` that contradicted the new framing.
+
+### Fixed
+
+- **`code-review-subagent.sh` doc-only skip was too broad.** The previous skip pattern `grep -vE '\.(md|mdx|rst|txt)$|^docs/'` skipped *any* file under `docs/` regardless of extension, so non-doc files like `docs/scripts/setup.sh`, `docs/examples/app.ts`, and `docs/data.json` were wrongly classified as docs and the code-review subagent never fired on them. Pattern tightened to `(^|/)[^/]+\.(md|mdx|rst|txt)$` — only the final path segment's extension decides "doc," so a doc anywhere in the tree still counts as a doc and a non-doc under `docs/` no longer slips through. Applied to both Claude (`core-rules/hooks/code-review-subagent.sh`) and Codex (`core-rules/codex/hooks/code-review-subagent.sh`) variants.
+
+### Verified
+
+- **17-audit sweep (2026-04-26 → 2026-05-11): all Trellis-scoped findings closed.** Direct file-level verification confirmed every critical defect from prior audits is already resolved in tree:
+  - `audits/2026-05-08-se-core-meta-audit.md` — six criticals all closed: jq-missing guard via `core-rules/hooks/lib/deps.sh:19-28` (`_se_require_jq` with `TRELLIS_NO_JQ_DEGRADE=1` escape hatch); `block-destructive.sh:45` rm-rf regex tail rewritten to match through whitespace/EOL; `block-destructive.sh:71-72` DELETE-without-WHERE inverted-regex fixed (line 70 comment documents the prior broken `[^;]*$` form); `stop-verify.sh:102-118` runs the TodoWrite check before the dirty-tree skip at line 120-131 (inline comment documents the deliberate ordering); `save-context-log.sh:91-95` JSONL parser filters to `(.message.content | type) == "string"`, excluding tool-result array wrappers; `scripts/onboard-project.sh:193-207, 391` defines and calls `seed_claude_hooks()`.
+  - `audits/2026-05-02-dep-major-upgrade-watch.md` — TypeScript / Vite / Unity watchlist bumps already landed: `scheduled-tasks/dep-major-upgrade-watch/watchlist.md` carries TypeScript `^6` (was `~5.7`), Vite `^8` (was `^7`), Unity `6000.4 LTS` (was `2022.3 LTS`).
+  - `audits/2026-04-26-parent-hook-drift.md`, `audits/2026-04-27-cross-project-process-audit.md`, `audits/2026-04-27-three-audits-remediation.md`, `audits/2026-04-28-bypass-tripwire.md`, `audits/2026-05-01-audit-rollup.md` — all closed; remediation work landed downstream and on-canonical between 2026-04-27 and 2026-05-11.
+  - `audits/2026-05-11-sync-tool-rca.md` — closed; sync-hooks provenance breadcrumbs + worktree-source warning + `--from-main-only` opt-in shipped in `scripts/sync-hooks.sh`.
+  - `audits/2026-05-01-dep-currency.md`, `audits/2026-05-01-dep-vulnerabilities.md`, `audits/2026-05-01-dep-major-upgrade-watch.md` — sandbox-skipped runs only (host-execution required); no findings to action.
+  - `audits/2026-05-01-gotchas-rollup.md` — first monthly rollup proposed one deferred-rule candidate (code-asset pairing, n=2); deferred for separate work since adding it is process-improvement, not defect-resolution.
+  - `audits/2026-04-27-registry-blacklist-health.md`, `audits/2026-04-27-test-health.md` — closed for Trellis scope; the remaining test-health open item (4 Node projects fail at module load in linux-arm64 sandbox vs darwin-arm64 `node_modules`) is scheduled-task MCP configuration, not Trellis-repo code.
+- **Pre-existing remediations re-confirmed in tree.** Several fixes from prior internal remediation work that had not been explicitly audited-against-current-code since landing were re-verified during this sweep (see `audits/2026-05-08-se-core-meta-audit.md` defect list above). No drift detected.
 
 ## [v0.3.1] — 2026-05-19
 
@@ -112,6 +228,24 @@ updates and usage without per-turn LLM cost.
   agent-decides → auto-injected (since v0.3.1).
 - `core-rules/VERSION` 0.3.0 → 0.3.1.
 
+### Note on landing path
+
+This v0.3.1 entry was written on 2026-05-19 and synced to the public mirror
+(`__GITHUB_USER__/trellis@v0.3.1`) but the corresponding private commits were lost
+when `chore/v0.3.1-primer-freshness-loop` was reset to `origin/main` instead
+of merged. Backfilled into the private trellis-instance repo on 2026-05-20
+alongside the v0.4.0 release; the public mirror tag was already correct.
+
+### Notes for operators rolling out v0.4.0
+
+- After pulling v0.4.0 into a Trellis clone, run `scripts/sync-hooks.sh --apply` to propagate the extended `session-context.sh` and `code-review-subagent.sh` into registered projects. Without this, the autonomy level + decision-log injection only fires inside the canonical clone.
+- Existing projects that want the `/autonomy` slash command available locally should re-run `scripts/onboard-project.sh <project>` (it now symlinks `core-rules/commands/autonomy.md` into `.claude/commands/` and `.agents/commands/`).
+- Presets gained `autonomy_ceiling` / `autonomy_default` frontmatter. If your project declares `compliance-strict` or `experimental-loose`, no action needed — the rollout-presets script reads the frontmatter live.
+
+### Implementation note (one-off)
+
+The 20-task plan was executed via the superpowers:subagent-driven-development skill. On ~half the tasks classified as mechanical (single-line edits, pure-prose markdown), the standalone spec-compliance and code-quality reviewer subagents were skipped — the implementer's report plus controller-side bash verification (jq/grep/bats) served as the spec compliance check, and there was no separable code-quality surface beyond what spec compliance covered. Full review machinery ran on substantive code tasks (hook extensions, shell scripts, audit prompts). This was a one-off speed compromise; do not treat it as a new convention for future plans.
+
 ## [v0.3.0] — 2026-05-18
 
 Anthropic large-codebase best-practices bundle plus the late-2026-05 follow-ups
@@ -132,6 +266,7 @@ cleanup, Obsidian dep retire). Tagged on the public mirror at
 - **Codex feature-flag rename: `[features].codex_hooks` → `[features].hooks`.** Codex CLI 0.129+ emits a deprecation warning when it sees `[features].codex_hooks` in `$CODEX_HOME/config.toml`; the canonical key is now `[features].hooks`. The legacy key still works as an alias but should not be used in new installs. Doc references updated across `README.md`, `AGENT_ONBOARD_PROJECT.md`, `engineering-process.md` (§5a hook-tier section and §10.3 onboarding checklist), `core-rules/inheritance.md`, and the `scripts/onboard-project.sh` post-onboarding echo. Each touch points new operators at `hooks = true` while noting the alias for users who still have the legacy key in their config. The bash function name `seed_codex_hooks()` (script-internal — copies `.codex/hooks/*.sh`) is unaffected — it describes a category of hooks, not the deprecated TOML key.
 - **Retired Obsidian dependency from the `monthly-documentation-audit` description.** The Neev-scoped monthly doc audit in `scheduled-tasks/README.md` no longer claims to check "Obsidian sync" — the audit covers EPM currency and ADR coverage; doc-write target is the project filesystem (already mounted), so the MCP path is unnecessary overhead.
 - **Brand sweep follow-ups.** `security-gate-plan.md` had three stale "SE Core" / `se-core` mentions left over from the 2026-05-12 rebrand (§1 purpose paragraph, §3 infrastructure reuse line, §11 per-project flow); all three now read "Trellis" / "Trellis instance". Historical references in `CHANGELOG.md` (rebrand entry), audit filenames under `audits/`, ADR PR URLs at `__GITHUB_USER__/se-core`, and `scripts/rollout-rebrand.sh` (whose purpose is the migration itself) are intentionally preserved.
+
 
 ### Added
 

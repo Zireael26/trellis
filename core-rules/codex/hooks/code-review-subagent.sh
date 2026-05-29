@@ -59,9 +59,14 @@ if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" 
   exit 0
 fi
 
-# --- Doc-only skip: if every changed file is markdown/docs, skip.
+# --- Doc-only skip: if every changed file has a doc extension (.md/.mdx/.rst/.txt),
+# skip. Earlier versions also skipped anything under `docs/` regardless of
+# extension — that wrongly skipped non-doc files like `docs/scripts/setup.sh`
+# or `docs/examples/app.ts`. The `(^|/)[^/]+\.ext$` anchor matches the final
+# path segment only, so a doc anywhere in the tree (e.g. `src/notes.md`) still
+# counts as a doc and a non-doc under `docs/` still counts as a non-doc.
 NONDOC_COUNT=$(git diff HEAD --name-only 2>/dev/null \
-  | grep -vE '\.(md|mdx|rst|txt)$|^docs/' \
+  | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
   | awk 'END{print NR}')
 if [ "$NONDOC_COUNT" -eq 0 ]; then
   exit 0

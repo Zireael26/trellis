@@ -59,18 +59,77 @@ ${COMMITS}
 fi
 
 # --- context-log.md (from a previous session) ---
+# Read 1200 chars: 2000-char cap below leaves ~1600 after the branch section
+# (~400). Worst-case gotchas (10 lines × ~80 chars) can claim up to ~800, but
+# in practice the anchored gotchas regex (audit §2.1) keeps that section
+# small enough that 1200 of log content fits without crowding gotchas out.
+# Paired with post-compact-context.sh's 8000 — see comment there for asymmetry.
 if [ -f "${REPO_ROOT}/context-log.md" ]; then
-  LOG_CONTENT=$(head -c 800 "${REPO_ROOT}/context-log.md")
+  LOG_CONTENT=$(head -c 1200 "${REPO_ROOT}/context-log.md")
   CTX="${CTX}--- context-log.md (previous session) ---
 ${LOG_CONTENT}
 
 "
 fi
 
+# --- Autonomy level ---
+# Resolution priority: session override file > project config > preset default > fleet default > 3
+LEVEL=3
+TRELLIS_CFG=""
+# Find trellis.config.json — search PROJECT_DIR upward, then $TRELLIS_ROOT env.
+if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+  TRELLIS_CFG="$TRELLIS_ROOT/trellis.config.json"
+fi
+if [ -n "$TRELLIS_CFG" ] && command -v jq >/dev/null 2>&1; then
+  FLEET=$(jq -r '.autonomy_default // empty' "$TRELLIS_CFG" 2>/dev/null)
+  [ -n "$FLEET" ] && LEVEL="$FLEET"
+fi
+# Project-local override
+for cand in "$REPO_ROOT/.trellis.config.json" "$REPO_ROOT/trellis.config.json"; do
+  if [ -f "$cand" ] && command -v jq >/dev/null 2>&1; then
+    PL=$(jq -r '.autonomy // empty' "$cand" 2>/dev/null)
+    [ -n "$PL" ] && LEVEL="$PL"
+    break
+  fi
+done
+# Session-autonomy file (highest priority before clamp)
+SESSION_FILE="$REPO_ROOT/.claude/session-autonomy"
+if [ -f "$SESSION_FILE" ]; then
+  SESS=$(head -1 "$SESSION_FILE" | tr -d '[:space:]')
+  case "$SESS" in 1|2|3|4|5) LEVEL="$SESS" ;; esac
+fi
+# Map to name
+case "$LEVEL" in
+  1) NAME="Pedagogical" ;;
+  2) NAME="Cautious" ;;
+  3) NAME="Standard" ;;
+  4) NAME="Initiative" ;;
+  5) NAME="Autonomous" ;;
+  *) NAME="?"; LEVEL=3 ;;
+esac
+CTX="${CTX}--- Autonomy ---
+Level: L${LEVEL} (${NAME})
+
+"
+
+# --- Recent decisions (L4/L5 only) ---
+if [ "$LEVEL" -ge 4 ] 2>/dev/null && [ -f "$REPO_ROOT/decisions-log.md" ]; then
+  RECENT=$(grep -E '^- 20[0-9]{2}-' "$REPO_ROOT/decisions-log.md" 2>/dev/null | tail -10)
+  if [ -n "$RECENT" ]; then
+    CTX="${CTX}--- Recent decisions (L4/L5) ---
+${RECENT}
+
+"
+  fi
+fi
+
 # --- Unresolved gotchas ---
-# Convention: entries tagged with 'unresolved' (case-insensitive) in gotchas.md.
+# Convention: entry is "unresolved" when anchored at line-start either as a
+# heading (`## Unresolved …`) or a status field (`Status: unresolved`,
+# `**unresolved**`). Free-text mentions of "unresolved" elsewhere are ignored
+# to avoid false positives like "this issue is now resolved (was unresolved …)".
 if [ -f "${REPO_ROOT}/gotchas.md" ]; then
-  UNRESOLVED=$(grep -inE 'unresolved' "${REPO_ROOT}/gotchas.md" 2>/dev/null | head -10 || true)
+  UNRESOLVED=$(grep -inE '^(#{1,6}[[:space:]]+.*unresolved|[[:space:]]*\*\*unresolved\*\*|[[:space:]]*status:[[:space:]]+unresolved)' "${REPO_ROOT}/gotchas.md" 2>/dev/null | head -10 || true)
   if [ -n "$UNRESOLVED" ]; then
     CTX="${CTX}--- Unresolved gotchas ---
 ${UNRESOLVED}

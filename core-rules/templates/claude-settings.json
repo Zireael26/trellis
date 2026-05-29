@@ -1,4 +1,5 @@
 {
+  "effortLevel": "xhigh",
   "permissions": {
     "deny": [
       "Read(./node_modules/**)",
