@@ -43,7 +43,7 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, Cl
 
 ### truncation-check
 - **Event:** `PostToolUse` on `Grep`, `Bash`, `Read`
-- **Triggers:** tool result length ≥ 50,000 chars OR output ends with a `...truncated...` marker
+- **Triggers:** tool result length ≥ 100,000 chars OR output ends with a `...truncated...` marker
 - **Return:** `{ "additionalContext": "Result was truncated. Re-run with narrower scope or read the source file directly." }`
 - **Exit:** never blocks — advisory only
 

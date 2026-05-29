@@ -16,6 +16,7 @@ reference files. Projects copy the subset they need into their own
 | `session-context.sh` | SessionStart (startup/resume) | new |
 | `save-context-log.sh` | PreCompact | new |
 | `post-compact-context.sh` | SessionStart (compact) | new |
+| `inject-primer-index.sh` | SessionStart | new |
 
 **Tier 2 — heavy-gated (wrap-up)**
 

@@ -32,7 +32,7 @@ declare -a bad_subjects=()
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   # Conventional Commits: type(scope)?(!)? : subject  -> first line
-  if ! printf "%s" "$line" | grep -qE '^(feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
+  if ! printf "%s" "$line" | grep -qE '^(codex|feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
     bad_subjects+=("$line")
   elif [ "${#line}" -gt 72 ]; then
     bad_subjects+=("$line  (>72 chars)")

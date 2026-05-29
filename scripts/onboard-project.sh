@@ -240,7 +240,7 @@ read_project_presets() {
 # Each preset symlink is named preset-<name>.md and points at the canonical
 # core-rules/presets/<name>.md. Refuses to seed for an unknown preset name.
 seed_presets() {
-  local presets harness_dir name target link
+  local presets name target link
   presets="$(read_project_presets)"
   if [ -z "$presets" ]; then
     echo "info: no presets declared for this project (no .trellis.config.json or empty .presets array)"
@@ -292,7 +292,7 @@ seed_husky_hook() {
 ensure_gitignore_fragment() {
   local fragment="$TEMPLATES/project.gitignore.fragment"
   local gi="$PROJECT/.gitignore"
-  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer/explore commands + antigravity workflows)"
+  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer/explore/autonomy commands + antigravity workflows)"
   local any_legacy_marker="Trellis inheritance symlinks"
   local had_any_legacy=false
 
@@ -358,6 +358,7 @@ untrack_if_tracked ".claude/commands/primer.md"
 untrack_if_tracked ".claude/commands/primer-refresh.md"
 untrack_if_tracked ".claude/commands/primer-check.md"
 untrack_if_tracked ".claude/commands/explore.md"
+untrack_if_tracked ".claude/commands/autonomy.md"
 untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
 untrack_if_tracked ".agents/skills/security-gate"
@@ -370,6 +371,7 @@ untrack_if_tracked ".agents/commands/primer.md"
 untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
 untrack_if_tracked ".agents/commands/explore.md"
+untrack_if_tracked ".agents/commands/autonomy.md"
 untrack_if_tracked ".agents/workflows/primer.md"
 untrack_if_tracked ".agents/workflows/primer-refresh.md"
 untrack_if_tracked ".agents/workflows/primer-check.md"
@@ -398,6 +400,7 @@ seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"          "$PROJECT/.claude/comm
 seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md"  "$PROJECT/.claude/commands/primer-refresh.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"    "$PROJECT/.claude/commands/primer-check.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"         "$PROJECT/.claude/commands/explore.md"
+seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"        "$PROJECT/.claude/commands/autonomy.md"
 
 # Primer INDEX — opt-in feature primer system. INDEX is project-state (copied,
 # not symlinked) so each project owns its primer list. Empty INDEX = "primers
@@ -449,6 +452,7 @@ if pg_has_harness codex; then
   seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/commands/primer-refresh.md"
   seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/commands/primer-check.md"
   seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/commands/explore.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"       "$PROJECT/.agents/commands/autonomy.md"
   seed_codex_hooks
 fi
 

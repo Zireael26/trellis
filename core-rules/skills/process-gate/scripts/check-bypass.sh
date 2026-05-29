@@ -46,6 +46,38 @@ if [ ! -f "$PROJECT_DIR/package.json" ]; then
   fi
 fi
 
+# 3a. core.hooksPath actively disabled: persistent config pointing hooks to /dev/null.
+# Distinguish "key set" from "key unset" via exit code — `git config --get` returns 1 when unset.
+if git -C "$PROJECT_DIR" config --get core.hooksPath >/dev/null 2>&1; then
+  hp_active="$(git -C "$PROJECT_DIR" config --get core.hooksPath 2>/dev/null || true)"
+  case "$hp_active" in
+    /dev/null|/dev/zero|"")
+      display="$hp_active"
+      [ -z "$display" ] && display="<empty>"
+      findings+=("core.hooksPath: actively set to disable hooks (value: $display)")
+      worst="fail"
+      ;;
+  esac
+fi
+
+# 3b. commit.gpgsign actively disabled via persistent config.
+# Policy-level — many projects legitimately disable signing; warn rather than fail.
+if git -C "$PROJECT_DIR" config --get commit.gpgsign >/dev/null 2>&1; then
+  gp="$(git -C "$PROJECT_DIR" config --get commit.gpgsign 2>/dev/null || true)"
+  if [ "$gp" = "false" ]; then
+    findings+=("commit.gpgsign: actively disabled via persistent config")
+    [ "$worst" = "pass" ] && worst="warn"
+  fi
+fi
+
+# Undetectable bypasses (no trace post-hoc):
+#   - `git -c commit.gpgsign=false commit ...` (one-shot config override)
+#   - `git commit --no-gpg-sign ...` (flag does not appear in reflog)
+# These can only be caught by either pre-commit-hook trapping or by
+# tracking expected-signed-commit policy via branch protection. Out of
+# scope for this gate — flagging here so future readers don't reinvent
+# an undetectable check.
+
 # 4. .claude/settings.json hooks block: present?
 if [ -f "$PROJECT_DIR/.claude/settings.json" ]; then
   if ! grep -q '"hooks"' "$PROJECT_DIR/.claude/settings.json" 2>/dev/null; then

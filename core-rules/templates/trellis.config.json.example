@@ -11,6 +11,9 @@
 
   "harnesses": ["claude", "codex", "antigravity"],
 
+  "autonomy_default": 3,
+  "comment_autonomy_default": "Optional. Fleet autonomy level 1–5; default 3 (current Trellis behavior). 1=pedagogical, 2=cautious, 3=standard, 4=initiative, 5=autonomous. Per-project override via <project>/.trellis.config.json autonomy field. Presets may clamp via autonomy_ceiling.",
+
   "trellis_version": "0.1.0",
 
   "template": {

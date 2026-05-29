@@ -75,3 +75,7 @@ If a secret was committed:
 2. Rotate the secret in the source-of-truth system (cloud console, GitHub settings, etc.).
 3. Remove from the diff and recommit. If already pushed, the secret is leaked — rotation is the only mitigation; rewriting history won't help (caches, mirrors, scrapers).
 4. Document in `gotchas.md` with `**Detection:**` describing how it was caught.
+
+## Anti-patterns that broke earlier runs (do NOT repeat)
+
+- **`producer | consumer-with-early-exit` under `set -e + pipefail`** is a SIGPIPE hazard. The consumer's `exit` closes its stdin while the producer is still emitting; the producer receives SIGPIPE (exit 141); `pipefail` propagates the non-zero; `set -e` aborts the script. The pre-v0.5.0 `check-secrets.sh` ran `loc=$(git diff … | awk '… exit')` per pattern hit and silently degraded to zero findings on diffs above ~5KB (full RCA in the v0.5.0 meta-audit addendum 2026-05-20; fix shipped in v0.5.0 via lookup-table refactor). When the consumer must exit early, land the pattern through a temp-file intermediary (compute the producer's output once into `mktemp`, then `awk` over the file), or guard the consumer with `|| true` so the non-zero from SIGPIPE doesn't trip the script. Never as a raw pipe under `set -e + pipefail` with an early `exit` on the consumer side.

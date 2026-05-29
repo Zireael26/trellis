@@ -202,7 +202,7 @@ A project-local `check-ci-subtree-routing.sh` validator (see `stack-profiles.md`
 
 ## 7. Native git hooks
 
-Use native git hooks (not husky) for polyglot projects — husky's pnpm-centric assumption fights the orchestrator pattern. Bootstrap by copying `core-rules/husky/{commit-msg,pre-push}` and replacing the pnpm tail with `make vet && make lint`.
+Use native git hooks (not husky) for polyglot projects — husky's pnpm-centric assumption fights the orchestrator pattern. Bootstrap by copying `core-rules/husky/commit-msg` and `core-rules/husky/pre-push` and replacing the pnpm tail with `make vet && make lint`.
 
 Wire-up:
 
@@ -243,7 +243,7 @@ ADRs live at `docs/adr/`, numbered `NNNN-<slug>.md`. Cross-language decisions al
 - "Turborepo vs Nx" — pick-one rationale for the TS task runner.
 - "uv vs poetry" — Python lock-file and env-manager choice.
 
-clusterbid's `docs/adr/0001-slice-1-bundle.md` and `docs/adr/0002-slice-2-bundle.md` are the existing pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
+clusterbid's docs/adr/0001-slice-1-bundle.md and docs/adr/0002-slice-2-bundle.md are the existing pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
 
 Set in `local.config.sh` so the PR-size hard-cap override knows where to look:
 
@@ -285,7 +285,7 @@ Field meanings:
 - `depends_on` — list of upstream services this one calls. Used by the dependency-graph drift check.
 - `db_schemas` — list of schemas this service owns. Used by the migration-safety validator.
 
-Pattern source: `docs/engineering/repo-structure.md` in clusterbid-console. Extend the schema in that doc, not per-service.
+Pattern source: docs/engineering/repo-structure.md in clusterbid-console. Extend the schema in that doc, not per-service.
 
 ## 11. Promotion path
 

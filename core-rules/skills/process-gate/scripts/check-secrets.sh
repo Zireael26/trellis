@@ -42,7 +42,10 @@ fi
 is_allowed() {
   local file="$1" hit="$2"
   local entry pat
-  for entry in "${ALLOW_ENTRIES[@]}"; do
+  # Iterate via the `${arr[@]+...}` expansion so bash 3.2 (macOS default)
+  # does not trip its empty-array + set -u bug. Without this guard, a project
+  # with no allowlist file crashes here before any finding can be emitted.
+  for entry in ${ALLOW_ENTRIES[@]+"${ALLOW_ENTRIES[@]}"}; do
     pat="${entry#*:}"
     epath="${entry%%:*}"
     if [ "$file" = "$epath" ] && printf "%s" "$hit" | grep -qE "$pat"; then
@@ -69,20 +72,34 @@ while IFS= read -r f; do
   esac
 done < <(pg_diff_files "$RANGE")
 
-# Pattern scan over added lines
-added_lines="$(git diff --no-color --unified=0 "$RANGE" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+# Pattern scan over added lines.
+#
+# Build the lookup table once (file<TAB>lineno<TAB>content per added line)
+# via a single awk pass over the unified diff. Each pattern hit then resolves
+# its location with a single tab-delimited content-column lookup. Replaces
+# the previous O(N×M) per-hit awk re-walk of the full diff.
+LOOKUP="$(mktemp 2>/dev/null || mktemp -t check-secrets)"
+# Preserve $? so the trap does not mask a non-zero exit from the script body.
+# shellcheck disable=SC2154  # `rc` is assigned inside the trap, which shellcheck cannot see
+trap 'rc=$?; rm -f "$LOOKUP"; exit "$rc"' EXIT
+
+git diff --no-color --unified=0 "$RANGE" 2>/dev/null \
+  | awk 'BEGIN{file=""; line=0} \
+      /^\+\+\+ b\// {file=substr($0,7); next} \
+      /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; next} \
+      /^\+/ && !/^\+\+\+/ {printf "%s\t%d\t%s\n", file, line, substr($0,2); line++}' \
+  > "$LOOKUP" || true
+
+added_lines="$(awk -F'\t' '{print "+"$3}' "$LOOKUP" 2>/dev/null || true)"
 
 if [ -n "$added_lines" ]; then
   while IFS='|' read -r name regex; do
     # Use `--` so patterns that start with `-` don't get parsed as flags by BSD grep
     while IFS= read -r hit; do
       [ -z "$hit" ] && continue
-      # Try to locate file:line for the hit (best-effort)
-      loc="$(git diff --no-color --unified=0 "$RANGE" 2>/dev/null \
-        | awk -v h="$hit" 'BEGIN{file=""; line=0} \
-            /^\+\+\+ b\// {file=substr($0,7)} \
-            /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0} \
-            /^\+/ && !/^\+\+\+/ {if (index($0,h)) {print file":"line; exit} line++}')"
+      # Resolve file:line via fixed-string lookup against the content column.
+      # First match wins to preserve prior behavior.
+      loc="$(awk -F'\t' -v h="$hit" 'index($3, h) {print $1":"$2; exit}' "$LOOKUP")"
       file="${loc%%:*}"
       lineno="${loc##*:}"
       if [ -n "${file:-}" ] && is_allowed "$file" "$hit"; then

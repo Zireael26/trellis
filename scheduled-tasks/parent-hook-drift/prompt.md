@@ -28,39 +28,50 @@ This audit covers two artifact classes:
 
 ## Canonical hook manifest
 
-As of 2026-04-20, the canonical hook set and expected `settings.json`
-wiring is:
+There are two authoritative sources, by design — one for names and tiers,
+one for event/matcher wiring:
 
-| Hook | Event | Matcher |
-|---|---|---|
-| `block-destructive.sh` | PreToolUse | `Bash` |
-| `post-edit-verify.sh` | PostToolUse | `Write\|Edit\|MultiEdit` |
-| `truncation-check.sh` | PostToolUse | `Grep\|Bash\|Read` |
-| `session-context.sh` | SessionStart | (none) |
-| `post-compact-context.sh` | SessionStart | (none) |
-| `inject-primer-index.sh` | SessionStart | (none) |
-| `save-context-log.sh` | PreCompact | (none) |
-| `stop-verify.sh` | Stop | (none) |
-| `code-review-subagent.sh` | Stop | (none) |
-| `ui-verify.sh` | Stop | (none) |
+- **Hook names + tiers + origin** — `core-rules/hooks/README.md` (Tier 1 +
+  Tier 2 tables). This is the single source of truth for "which hooks
+  exist" and "which are experimental".
+- **Event + matcher wiring** — `core-rules/templates/claude-settings.json`
+  (the `hooks` block). This is the canonical `settings.json` snippet that
+  every project must register. Compare each project's
+  `.claude/settings.json` against this template.
 
-Ten canonical hooks total. Each must be present as a file, byte-identical
-to canonical, executable, and registered under the expected event + matcher.
+**Audit-runtime enumeration.** Do not maintain a manifest inline here.
+Instead:
+
+1. Enumerate canonical hook scripts from `core-rules/hooks/*.sh` on disk —
+   that is the actual canonical set the project must mirror.
+2. Cross-reference `core-rules/hooks/README.md` to identify which scripts
+   are **experimental** (currently `propose-rules.sh`, marked as "Stop
+   (opt-in, experimental)" in the Tier 2 table). Experimental hooks are
+   excluded from the registration check below.
+3. Load `core-rules/templates/claude-settings.json` and treat its `hooks`
+   block as the authoritative event/matcher wiring. For every
+   non-experimental canonical hook, the template must register it; for
+   every entry the template registers, each project's
+   `.claude/settings.json` must match (same event, same matcher, same
+   command path under `$CLAUDE_PROJECT_DIR/.claude/hooks/`).
+
+These two enumeration sources should agree by construction: any
+non-experimental script under `core-rules/hooks/*.sh` should appear in
+the template, and vice versa. A divergence between disk and template is
+itself a finding — flag it as **critical: canonical manifest disagreement
+between `core-rules/hooks/` and `core-rules/templates/claude-settings.json`**.
 
 The project may have **additional** hooks beyond these — that's fine and
 expected (e.g., msme-neev has `check-module-boundary.sh`). Additional hooks
 are not checked by this task.
 
 **Experimental hooks (opt-in, no registration check):**
-
-| Hook | Event | Status |
-|---|---|---|
-| `propose-rules.sh` | Stop | opt-in via `PROCESS_GATE_PROPOSE_RULES=1` |
-
-Experimental hooks must still be **present and byte-identical** to canonical
-when copied (sync-hooks ships them automatically), but registration in
-`settings.json` is project-discretion. Absence of a settings.json entry for
-an experimental hook is **not** drift.
+`propose-rules.sh` is shipped to projects by `sync-hooks` automatically, so
+the byte-identity and executable-bit checks still apply, but registration
+in `settings.json` is project-discretion (opt-in via
+`PROCESS_GATE_PROPOSE_RULES=1`). Absence of a settings.json entry for an
+experimental hook is **not** drift. The authoritative experimental list
+lives in the Tier 2 table of `core-rules/hooks/README.md`.
 
 ## Canonical Codex hook manifest
 
@@ -76,7 +87,8 @@ The manifest must use environment-relative commands such as `${CODEX_PROJECT_DIR
 
 ### 1. Presence
 
-For each canonical hook, does the project have a file at the expected path?
+Enumerate canonical scripts from `core-rules/hooks/*.sh`. For each, does
+the project have a file at the expected path?
 - `<project>/.claude/hooks/<hook-name>.sh`
 
 Missing file → **critical: hook missing from deployment**.
@@ -91,12 +103,20 @@ the two files, capped at 50 lines).
 
 ### 3. Settings.json registration
 
-Read `<project>/.claude/settings.json`. Verify each canonical hook is
-registered under the correct event (SessionStart / PreCompact /
-PreToolUse / PostToolUse / Stop) with the expected matcher.
+Load `core-rules/templates/claude-settings.json` and iterate its `hooks`
+block — this is the canonical event/matcher wiring. Read
+`<project>/.claude/settings.json`. For each entry in the template, verify
+the project's settings.json carries an equivalent registration: same event
+(SessionStart / PreCompact / PreToolUse / PostToolUse / Stop), same
+matcher, command pointing to
+`$CLAUDE_PROJECT_DIR/.claude/hooks/<hook-name>.sh`.
 
 Unregistered canonical hook → **critical: hook file exists but is not wired
 into settings.json** (this is silent failure — the hook will never run).
+
+Experimental hooks (per the Tier 2 table in `core-rules/hooks/README.md`,
+currently `propose-rules.sh`) are excluded from this check — they are
+project-discretion to register.
 
 ### 4. Executable bit
 

@@ -19,6 +19,33 @@
 # standardized. Wire it up once Claude Code exposes a stable subagent-from-hook
 # entrypoint (today options are: an HTTP callback, a `claude` CLI invocation,
 # or a project-local script at $CLAUDE_PROJECT_DIR/.claude/agents/code-reviewer).
+#
+# Env-var/payload contract (exported to $REVIEWER):
+#   AUTONOMY_LEVEL       — resolved integer 1–5 (same algorithm as session-context.sh)
+#   DECISIONS_LOG_PATH   — absolute path to <canonical-root>/decisions-log.md
+#   - At L4/L5 (resolved per core-rules/autonomy.md), the dispatched reviewer
+#     also receives the contents of <canonical-root>/decisions-log.md and is
+#     expected to flag implicit decisions in the diff that are missing from
+#     the log. Reviewer input is a JSON envelope {diff, autonomy_level,
+#     decisions_log}; lower levels receive an empty decisions_log string.
+#     The reviewer's output schema (findings array) is unchanged.
+#
+# Reviewer-prompt guidance (Opus 4.8): the dispatched reviewer's job at this
+# stage is COVERAGE, not filtering. Opus 4.8 follows "only report high-severity"
+# instructions more faithfully than older models — told to be conservative it
+# investigates just as deeply but converts fewer investigations into reported
+# findings, silently dropping low-severity bugs it judges below the bar (recall
+# falls even as precision rises). This hook is ALREADY the filter: severity ==
+# "critical" blocks, everything else is advisory. So whoever wires the
+# project-local $REVIEWER MUST prompt it to report every issue it finds —
+# including low-confidence and low-severity ones — and attach `severity` plus an
+# optional `confidence` (0.0–1.0) per finding, rather than self-filtering for
+# importance. The block/advisory split here does the ranking. Concretely, the
+# reviewer prompt should say something like: "Report every issue you find,
+# including ones you are uncertain about or consider low-severity. Do not filter
+# for importance or confidence — the hook does that. For each finding include a
+# confidence level and estimated severity." `confidence` is back-compat:
+# absent ⇒ treat as 1.0; the hook does not key off it today.
 
 set -u
 
@@ -38,6 +65,39 @@ fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
+
+# --- Resolve canonical repo root + autonomy level ---
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  REPO_ROOT=$(dirname "$(git rev-parse --git-common-dir)")
+else
+  REPO_ROOT="$PROJECT_DIR"
+fi
+
+# Autonomy resolution mirrors session-context.sh. Used to decide whether the
+# reviewer receives the L4/L5 decision-log verification clause.
+AUTONOMY_LEVEL=3
+TRELLIS_CFG=""
+if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+  TRELLIS_CFG="$TRELLIS_ROOT/trellis.config.json"
+fi
+if [ -n "$TRELLIS_CFG" ] && command -v jq >/dev/null 2>&1; then
+  FLEET=$(jq -r '.autonomy_default // empty' "$TRELLIS_CFG" 2>/dev/null)
+  [ -n "$FLEET" ] && AUTONOMY_LEVEL="$FLEET"
+fi
+for cand in "$REPO_ROOT/.trellis.config.json" "$REPO_ROOT/trellis.config.json"; do
+  if [ -f "$cand" ] && command -v jq >/dev/null 2>&1; then
+    PL=$(jq -r '.autonomy // empty' "$cand" 2>/dev/null)
+    [ -n "$PL" ] && AUTONOMY_LEVEL="$PL"
+    break
+  fi
+done
+SESSION_FILE="$REPO_ROOT/.claude/session-autonomy"
+if [ -f "$SESSION_FILE" ]; then
+  SESS=$(head -1 "$SESSION_FILE" | tr -d '[:space:]')
+  case "$SESS" in 1|2|3|4|5) AUTONOMY_LEVEL="$SESS" ;; esac
+fi
+export AUTONOMY_LEVEL
+export DECISIONS_LOG_PATH="$REPO_ROOT/decisions-log.md"
 
 if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 0
@@ -59,9 +119,14 @@ if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" 
   exit 0
 fi
 
-# --- Doc-only skip: if every changed file is markdown/docs, skip.
+# --- Doc-only skip: if every changed file has a doc extension (.md/.mdx/.rst/.txt),
+# skip. Earlier versions also skipped anything under `docs/` regardless of
+# extension — that wrongly skipped non-doc files like `docs/scripts/setup.sh`
+# or `docs/examples/app.ts`. The `(^|/)[^/]+\.ext$` anchor matches the final
+# path segment only, so a doc anywhere in the tree (e.g. `src/notes.md`) still
+# counts as a doc and a non-doc under `docs/` still counts as a non-doc.
 NONDOC_COUNT=$(git diff HEAD --name-only 2>/dev/null \
-  | grep -vE '\.(md|mdx|rst|txt)$|^docs/' \
+  | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
   | awk 'END{print NR}')
 if [ "$NONDOC_COUNT" -eq 0 ]; then
   exit 0
@@ -102,7 +167,19 @@ fi
 REVIEWER="${CODE_REVIEWER_CMD:-${PROJECT_DIR}/.claude/agents/code-reviewer.sh}"
 
 if [ -x "$REVIEWER" ]; then
-  FINDINGS=$(printf '%s' "$DIFF" | timeout 60 "$REVIEWER" 2>/dev/null || true)
+  # At L4/L5 the reviewer must also verify decision-log completeness vs diff.
+  # Pass the decisions-log content (if any) and the level as a JSON envelope.
+  if [ "$AUTONOMY_LEVEL" -ge 4 ] 2>/dev/null && [ -f "$DECISIONS_LOG_PATH" ]; then
+    DECISIONS_PAYLOAD=$(head -c 50000 "$DECISIONS_LOG_PATH" 2>/dev/null)
+  else
+    DECISIONS_PAYLOAD=""
+  fi
+  REVIEW_PAYLOAD=$(jq -nc \
+    --arg diff "$DIFF" \
+    --arg level "$AUTONOMY_LEVEL" \
+    --arg decisions "$DECISIONS_PAYLOAD" \
+    '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions}')
+  FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | timeout 60 "$REVIEWER" 2>/dev/null || true)
 
   if [ -n "$FINDINGS" ]; then
     CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)

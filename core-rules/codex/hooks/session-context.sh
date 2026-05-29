@@ -56,8 +56,13 @@ ${COMMITS}
 fi
 
 # --- context-log.md (from a previous session) ---
+# Read 1200 chars: 2000-char cap below leaves ~1600 after the branch section
+# (~400). Worst-case gotchas (10 lines × ~80 chars) can claim up to ~800, but
+# in practice the anchored gotchas regex (audit §2.1) keeps that section
+# small enough that 1200 of log content fits without crowding gotchas out.
+# Paired with post-compact-context.sh's 8000 — see comment there for asymmetry.
 if [ -f "${REPO_ROOT}/context-log.md" ]; then
-  LOG_CONTENT=$(head -c 800 "${REPO_ROOT}/context-log.md")
+  LOG_CONTENT=$(head -c 1200 "${REPO_ROOT}/context-log.md")
   CTX="${CTX}--- context-log.md (previous session) ---
 ${LOG_CONTENT}
 
@@ -65,9 +70,12 @@ ${LOG_CONTENT}
 fi
 
 # --- Unresolved gotchas ---
-# Convention: entries tagged with 'unresolved' (case-insensitive) in gotchas.md.
+# Convention: entry is "unresolved" when anchored at line-start either as a
+# heading (`## Unresolved …`) or a status field (`Status: unresolved`,
+# `**unresolved**`). Free-text mentions of "unresolved" elsewhere are ignored
+# to avoid false positives like "this issue is now resolved (was unresolved …)".
 if [ -f "${REPO_ROOT}/gotchas.md" ]; then
-  UNRESOLVED=$(grep -inE 'unresolved' "${REPO_ROOT}/gotchas.md" 2>/dev/null | head -10 || true)
+  UNRESOLVED=$(grep -inE '^(#{1,6}[[:space:]]+.*unresolved|[[:space:]]*\*\*unresolved\*\*|[[:space:]]*status:[[:space:]]+unresolved)' "${REPO_ROOT}/gotchas.md" 2>/dev/null | head -10 || true)
   if [ -n "$UNRESOLVED" ]; then
     CTX="${CTX}--- Unresolved gotchas ---
 ${UNRESOLVED}

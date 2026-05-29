@@ -37,8 +37,11 @@ if [ ! -f "$LOG" ]; then
   exit 0
 fi
 
-# Cap injected content at ~4K chars — compact rehydration should be lean.
-CONTENT=$(head -c 4000 "$LOG")
+# Read 8000 chars: post-compact rehydration has no overall additionalContext
+# cap, and save-context-log.sh routinely produces 6-10K of branch + open-todos
+# + transcript snippets. Asymmetric with session-context.sh's 1200 because
+# startup is constrained by its 2000-char total cap — see comment there.
+CONTENT=$(head -c 8000 "$LOG")
 if [ -z "$CONTENT" ]; then
   exit 0
 fi

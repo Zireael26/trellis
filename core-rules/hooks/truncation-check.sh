@@ -3,7 +3,7 @@
 # Source: Trellis / core-rules / hooks.md
 #
 # Contract:
-#   - Triggers when tool_response length ≥ 50,000 chars OR contains a
+#   - Triggers when tool_response length ≥ 100,000 chars OR contains a
 #     "...truncated..." / "Output too large" marker.
 #   - Returns {"additionalContext": "..."} for Claude's awareness.
 #   - Always exit 0. Advisory only — the tool already ran.
@@ -11,7 +11,7 @@
 # Dependencies: jq (required).
 #
 # Base: github.com/iamfakeguru/claude-md (MIT). Spec alignment:
-#   - Explicit 50,000-char threshold per our hooks.md.
+#   - Explicit 100,000-char threshold per our hooks.md.
 #   - Kept upstream's low-result-count grep heuristic as a bonus signal.
 
 set -u
@@ -46,10 +46,10 @@ if printf '%s' "$TOOL_RESPONSE" | grep -qE '\.\.\.truncated\.\.\.|Output too lar
   exit 0
 fi
 
-# 2) ≥ 50,000 chars → treat as effective truncation.
+# 2) ≥ 100,000 chars → treat as effective truncation.
 RESP_LEN=${#TOOL_RESPONSE}
-if [ "$RESP_LEN" -ge 50000 ]; then
-  emit_advisory "Result is large (${RESP_LEN} chars, ≥50K). Narrow the scope or read specific files/ranges instead of scanning broadly."
+if [ "$RESP_LEN" -ge 100000 ]; then
+  emit_advisory "Result is large (${RESP_LEN} chars, ≥100K). Narrow the scope or read specific files/ranges instead of scanning broadly."
   exit 0
 fi
 

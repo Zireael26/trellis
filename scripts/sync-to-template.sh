@@ -73,6 +73,15 @@ SYNC_PATHS=(
   "scheduled-tasks/"
   "scripts/"
   "trellis.config.json"
+  # Public-mirror parity (v0.6.0) — formerly instance-only, published on
+  # maintainer decision so the public template reaches full feature parity.
+  # The 2026-05-08 meta-audit stays private (security-gap detail); its example
+  # citation in references/secrets.md was genericized to avoid a dangling ref.
+  "recon.md"
+  "core-rules/autonomy.md"
+  "core-rules/presets/"
+  "docs/opus-4.8-steering.md"
+  "docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md"
 )
 
 # Files NEVER synced (private / instance-specific) — informational; the
@@ -102,8 +111,13 @@ for p in "${SYNC_PATHS[@]}"; do
   dst="${TMP_STAGE}/${p%/}"
   if [ -d "$src" ]; then
     mkdir -p "$dst"
+    # check-secrets.bats carries literal secret-pattern fixtures (fake
+    # sk_live_… keys) that trip GitHub push protection for anyone cloning
+    # the public template. Keep it instance-only; the public skill ships the
+    # detector + its other tests without the fixture footgun.
     rsync -a --delete \
       --exclude='__pycache__/' --exclude='.DS_Store' --exclude='*.swp' \
+      --exclude='check-secrets.bats' \
       "${src}/" "${dst}/"
   else
     mkdir -p "$(dirname "$dst")"

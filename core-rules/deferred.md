@@ -90,6 +90,12 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Why defer:** depends on a service's env-var-driven configuration model. The current registry skews toward static-site / monorepo / native-app projects where the env-var surface is small and lives elsewhere (Vercel project settings, native build configs).
 **Lift when:** three service-shaped projects each maintain a meaningful `.env.example` and have caught at least one drift incident the gate would have prevented.
 
+### Code-asset pairing rule
+**Source:** vericite + lume (n=2 from `audits/2026-05-01-gotchas-rollup.md`).
+**What:** when a code change has a non-code companion artifact (a checked-in generated file, a scene/prefab reference, a fixture, a snapshot, a binding manifest), update the companion in the **same commit**. Static checks (typecheck, build, lint) cannot detect drift between code and these companions; the failure surfaces only via an integrity test or at runtime.
+**Why defer:** the underlying lesson is consistent across the two sources, but the mechanisms differ enough — vericite's case was a regenerated `docs/api/02-openapi.yaml` lagging behind a TS rename, lume's was a Unity `.unity` scene file not referencing newly-authored `MonoBehaviour`s — that the right shape of the rule isn't yet obvious. A third instance from a different domain would tell us whether to phrase this as "regenerate generated artifacts" (narrow, file-scoped) or as a broader "code-asset pairing" invariant with per-project enforcement hooks.
+**Lift when:** a third project independently reports a bug whose root cause is a code change landing without its paired non-code artifact (e.g., GraphQL schema dump out of sync, Storybook snapshot not regenerated, locale file drift, IaC plan not re-applied).
+
 ---
 
 ## Meta

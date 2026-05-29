@@ -215,17 +215,21 @@ Tier 1 and 2 are harness hook events. Claude Code and Codex use separate JSON en
 
 ### 5.2 The nine canonical hooks
 
+Canonical inventory (names + tiers + origin) is `core-rules/hooks/README.md`; canonical event/matcher wiring is `core-rules/templates/claude-settings.json` (the `hooks` block each project must register). The table below is narrative — the "Responsibility" column captures what each hook does in plain English; do not treat this table as the authoritative manifest. Add or remove hooks in README.md + the settings.json template first, then update this row if the responsibility changes.
+
 | Script | Tier | Event | Responsibility |
 |---|---|---|---|
 | `block-destructive.sh` | 1 | PreToolUse (Bash) | Deny `rm -rf /`, force-push, hard-reset, DB DROP, `.env` reads. |
 | `post-edit-verify.sh` | 1 | PostToolUse (Write/Edit/MultiEdit) | Per-file lint (eslint/ruff/clippy/golangci-lint). Block on fail. |
-| `truncation-check.sh` | 1 | PostToolUse (Grep/Bash/Read) | Warn when tool output ≥50K chars or truncation marker present. |
+| `truncation-check.sh` | 1 | PostToolUse (Grep/Bash/Read) | Warn when tool output ≥100K chars or truncation marker present. |
 | `session-context.sh` | 1 | SessionStart (startup/resume) | Inject branch, last commits, dirty-file count, pending gotchas. |
 | `save-context-log.sh` | 1 | PreCompact | Persist session state to `context-log.md`. |
 | `post-compact-context.sh` | 1 | SessionStart (compact) | Restore `context-log.md` into context after auto-compact. |
 | `stop-verify.sh` | 2 | Stop | Block if todos open, run typecheck + lint + fast tests. |
 | `code-review-subagent.sh` | 2 | Stop (edit-heavy) | Dispatch a code-review subagent on the diff; findings must resolve or defer. |
 | `ui-verify.sh` | 2 | Stop (UI diff) | Spin up dev server, take screenshot, attach. |
+
+`code-review-subagent` is the *filter*, not the finder: `severity == "critical"` blocks, everything else is advisory. When wiring a project-local reviewer, prompt it for **coverage, not filtering** — report every issue with a confidence and severity, and let the hook rank. Opus 4.8 honors "be conservative / only report high-severity" instructions literally and will otherwise silently drop low-severity findings (precision rises, recall falls). Detail + snippet: the hook's header contract and `docs/opus-4.8-steering.md` §6.
 
 Claude implementations are version-controlled at `core-rules/hooks/`. Projects deploy by copying into `.claude/hooks/` and wiring into `.claude/settings.json` using `$CLAUDE_PROJECT_DIR` paths.
 
@@ -375,7 +379,7 @@ Full expression in `core-rules/CLAUDE.md`. Summary:
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. Flag real problems and wait.
 - For non-trivial features (3+ steps or architectural decisions), interview the user first: implementation, UX, trade-offs.
-- Never attempt multi-file refactors in one response. Phase them: max 5 files per phase, verify, get approval, continue.
+- Never attempt multi-file refactors in one response. Phase them: max 7 files per phase, verify, get approval, continue.
 
 ### 8.2 Edit safety
 
@@ -385,11 +389,11 @@ Full expression in `core-rules/CLAUDE.md`. Summary:
 
 ### 8.3 Context management
 
-- For tasks touching >5 independent files, dispatch parallel sub-agents (5–8 files each). Sequential processing of 20 files guarantees context decay by file 12.
-- After 10+ messages, re-read any file before editing it. Auto-compaction may have destroyed your memory of its contents.
+- Dispatch sub-agents in parallel for speed and context-isolation whenever work decomposes into independent units. Wall-clock parallelism beats sequential agent time; each subagent gets a fresh context = higher-quality output. Triggers: (a) ≥2 independent searches/fetches/analyses, (b) >5 files, (c) edit-heavy turns. Single message, multiple `Agent` tool calls. Skip only when one result must inform the next or work is trivially serial.
+- When ctx use ≥40% or after 25 messages (whichever comes first), re-read any file before editing it. Auto-compaction may have destroyed your memory of its contents.
 - If you notice context degradation (referencing nonexistent variables, forgetting file structure), run `/compact` proactively. `save-context-log` captures state to `context-log.md`.
-- Reads are capped at 2000 lines. For files >500 LOC, use offset/limit chunks.
-- Tool results over 50K chars truncate to a 2KB preview. Re-run narrower or read the source directly.
+- Reads are capped at 2000 lines. For files >1500 LOC, use offset/limit chunks.
+- Tool results over 100K chars truncate to a 2KB preview. Re-run narrower or read the source directly.
 - Before touching an unfamiliar subsystem, run `/explore <subsystem>` to dispatch a read-only subagent that writes a compact map to `.claude/primers/_explore/`. Editing without that map on a sufficiently-large unfamiliar subsystem produces wrong-shaped changes. Promote to a durable `/primer` post-edit if the subsystem is stable enough to warrant it.
 
 #### Language server integration (polyglot projects)
@@ -421,6 +425,7 @@ Minimum per project (enforced by CI and `stop-verify`):
 - **Type-check** — `tsc --noEmit`, `mypy`, `cargo check`, or `go vet` — whichever fits the stack.
 - **Lint** — project's configured linter runs repo-wide on Stop, per-file on edit.
 - **Integration / E2E** — where the project warrants it; run in CI, not on every turn. Don't mock boundaries that production crosses (DB, queue, auth).
+- **General solutions, not test-gaming** — implement logic that works for all valid inputs, not just the test cases. Don't hard-code values or build workarounds that only pass the specific tests in front of you; tests verify correctness, they don't define the solution. If a test is wrong or a task infeasible, say so rather than working around it. Opus 4.8 is less prone to this than older models, but the bar is stated explicitly — snippet in `docs/opus-4.8-steering.md` §6.
 
 Playwright is the default E2E framework for web projects. Non-web stacks (games, CLIs, native apps, embedded) bring their own testing and tooling conventions — document those in the project's own `CLAUDE.md` and let the Rule of Three ([§14.1](#141-rule-of-three)) decide whether any of it rises into this manual. The parent layer stays small on purpose.
 
@@ -524,7 +529,7 @@ Architecture Decision Records are currently in `deferred.md` awaiting a third pr
 
 ### 9.6 Frontend-quality references
 
-Projects with a public web surface (portfolio, marketing page, SaaS console, app landing) inherit four reference docs via the process-gate skill: `core-rules/skills/process-gate/references/web-{perf,a11y,seo,agent-readiness}.md`. These synthesize Lighthouse (Performance, Accessibility, Best Practices, SEO, Agentic Browsing), web.dev a11y, Google's AI optimization guide, and Cloudflare's `isitagentready.com` scorecard into a single Trellis-stamped checklist. Advisory today; automation deferred per `core-rules/deferred.md` until Rule of Three. Consult before any non-trivial public-page PR.
+Projects with a public web surface (portfolio, marketing page, SaaS console, app landing) inherit four reference docs via the process-gate skill: `core-rules/skills/process-gate/references/web-perf.md`, `core-rules/skills/process-gate/references/web-a11y.md`, `core-rules/skills/process-gate/references/web-seo.md`, and `core-rules/skills/process-gate/references/web-agent-readiness.md`. These synthesize Lighthouse (Performance, Accessibility, Best Practices, SEO, Agentic Browsing), web.dev a11y, Google's AI optimization guide, and Cloudflare's `isitagentready.com` scorecard into a single Trellis-stamped checklist. Advisory today; automation deferred per `core-rules/deferred.md` until Rule of Three. Consult before any non-trivial public-page PR.
 
 ---
 
@@ -805,6 +810,8 @@ Edits to `core-rules/` affect every registered project immediately (via the syml
 - The Rule-of-Three evidence if it's a lift.
 - A re-run of `parent-hook-drift` after merge to confirm every project's deployed copies are still identical.
 
+**Write rules for the current model.** Opus 4.8 follows instructions literally and does not silently generalize scope from one item to another. When you add or edit a rule: state scope explicitly ("apply to every section, not just the first"), prefer a positive example of the desired behavior over a list of "don't"s, and reserve `CRITICAL:`/`MUST` for genuine bright-lines — 4.5/4.6+ over-trigger on aggressive language, so normal "Use this when…" phrasing usually steers better. Rationale and the full steering map: `docs/opus-4.8-steering.md` §4.
+
 ### 14.4 Rollout hygiene
 
 When a canonical hook changes:
@@ -932,6 +939,39 @@ Onboarding new projects with presets pre-declared is fully automatic: write `<pr
 
 ---
 
+### 14.8 Autonomy — the responsibility slider (opt-in per project)
+
+Trellis ships an L1–L5 **responsibility slider** that determines who answers the harness's interactive gates: user (lower) or agent (higher). All gates and quality controls remain at every level; the level only changes *who decides*. Default L3 = legacy Trellis behavior; existing projects see no change.
+
+**Why this exists.** New users routinely report Trellis's interactive surface as the primary friction barrier — plan-approval, ambiguity flagging, pre-implementation interview, per-phase approval, brainstorming, spec-kit phase gates, destructive-action confirmation, PR-creation confirmation. Each gate exists to catch a real failure mode. But experienced operators on chore-grade work pay the same input cost as a novice on a high-stakes refactor. The slider lets them dial it.
+
+**Levels.**
+- L1 Pedagogical — ask + explain reasoning.
+- L2 Cautious — ask with embedded recommendation.
+- L3 Standard — current behavior.
+- L4 Initiative — single plan-approval, batched questions, architectural decisions still inline.
+- L5 Autonomous — silent decision-making + decision log; architectural decisions still inline.
+
+**Configuration layers** (later overrides earlier; preset ceiling clamps at the end):
+1. Hard default = L3.
+2. Fleet: `trellis.config.json.autonomy_default`.
+3. Preset `autonomy_default` (if no project override).
+4. Project: `<project>/.trellis.config.json.autonomy`.
+5. Session: `<canonical-root>/.claude/session-autonomy` (written by `/autonomy N` slash command).
+6. Clamp by lowest active preset `autonomy_ceiling`.
+
+**Bright-line guardrails** (always-on, every level): hard hooks, destructive ops, external messages to others (Slack/email/PR-comments), secrets, DoD receipts, code-review subagent. PR *creation* flexes with level.
+
+**Reversibility carve-out:** architectural decisions (new dep, new module, auth flow, data store, public API) surface inline mid-turn even at L5. The reversibility cliff is honored.
+
+**Decision log.** At L4/L5, agent appends each decision-on-user's-behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes the same. Code-review subagent at L4/L5 verifies decision-log completeness vs diff — incomplete logs are findings.
+
+**Audit.** `scheduled-tasks/autonomy-drift/` runs weekly. Flags silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), schema issues.
+
+Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/2026-05-20-autonomy-slider.md`. Spec: `docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md`.
+
+---
+
 ## 15. Glossary & quick reference
 
 **Active project** — appears in `registry.md`, not in `blacklist.md`.
@@ -983,6 +1023,7 @@ Onboarding new projects with presets pre-declared is fully automatic: write `<pr
 - `core-rules/CLAUDE.md` — parent rules (LLM-facing, 76 lines).
 - `core-rules/hooks.md` — three-tier hook spec (159 lines).
 - `core-rules/inheritance.md` — symlink + @-import mechanism (43 lines).
+- `docs/opus-4.8-steering.md` — Opus 4.8 prompting deltas vs Trellis + reusable snippet library.
 - `core-rules/deferred.md` — n=1 candidates awaiting third witness (71 lines).
 - `core-rules/hooks/README.md` — canonical hook script index + attribution.
 - `core-rules/hooks/*.sh` — nine canonical hook implementations.
