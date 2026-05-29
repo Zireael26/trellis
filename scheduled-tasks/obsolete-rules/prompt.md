@@ -22,7 +22,7 @@ This is the only audit that proposes **removals** rather than additions. Treat t
 Walk each rules file. For each discrete rule (one line, one bullet, one short paragraph), tag it with one of:
 
 - **load-bearing** — the rule encodes domain knowledge (commit conventions, branch protection, secrets handling, security baselines) that no model upgrade obsoletes. Skip.
-- **model-compensating** — the rule exists because some past Claude / Codex version got it wrong without prompting (e.g., "max 5 files per phase", "always re-read before editing", "don't summarise what you did"). Candidate.
+- **model-compensating** — the rule exists because some past Claude / Codex version got it wrong without prompting (e.g., "max 7 files per phase", "always re-read before editing", "don't summarise what you did"). Candidate.
 - **harness-compensating** — the rule exists because some past hook / tool / CLI version misbehaved. Candidate. Cross-check against the current Claude Code release notes if you can fetch them.
 - **stylistic** — the rule encodes the user's voice / aesthetic ("terse responses", "no AI footers", "human voice in commits"). Skip — these are preference, not capability.
 - **process** — the rule encodes a workflow contract (Rule of Three, presets, registry, audits). Skip — these are scaffolding, not model behaviour.

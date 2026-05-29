@@ -37,6 +37,9 @@ SPEC_DOCS=(
   "$ROOT/recon.md"
   "$ROOT/registry.md"
   "$ROOT/scheduled-tasks/README.md"
+  "$ROOT/docs/UPGRADING.md"
+  "$ROOT/core-rules/commands/doctor.md"
+  "$ROOT/scheduled-tasks/cross-project-process-audit/prompt.md"
 )
 
 # Add references/*.md under process-gate

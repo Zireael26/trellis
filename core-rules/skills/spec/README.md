@@ -4,7 +4,7 @@ Authoritative content is in [`SKILL.md`](./SKILL.md). This file is the short-for
 
 ## When to invoke
 
-Use the spec skill when a change won't fit Trellis's surgical default. The decision rule from `engineering-process.md` §14.6: invoke when any of —
+Use the spec skill when a change won't fit Trellis's surgical default. The decision rule from `engineering-process.md` §14.7: invoke when any of —
 
 - The request lists three or more acceptance criteria.
 - The change introduces net-new behaviour across more than two files.

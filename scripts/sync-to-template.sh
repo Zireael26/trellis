@@ -70,6 +70,7 @@ SYNC_PATHS=(
   "core-rules/templates/"
   "docs/adr/"
   "docs/primers/"
+  "docs/UPGRADING.md"
   "scheduled-tasks/"
   "scripts/"
   "trellis.config.json"

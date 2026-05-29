@@ -29,6 +29,8 @@ If any registered project's path is missing from the filesystem, report it and c
 
 ## Checks per project
 
+**Run `scripts/doctor.sh` (read-only) first.** It deterministically covers the inheritance / symlink / hook-freshness checks below (checks 1, 2, 8, 9), so let its output stand as the verdict for those and spend your judgment on what the script cannot mechanically check — husky/native-hook adequacy, `--no-verify` bypass history, gotchas/codebase-map staleness, long-lived in-progress todos, and copy-paste-vs-inheritance overlap.
+
 Run these checks against each target project's root. Do **not** modify files — read-only audit.
 
 ### 1. Hook-stack presence

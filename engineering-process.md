@@ -836,7 +836,22 @@ Severity contract is shared between `upgrade.sh` and `version-drift`. If you cha
 
 `core-rules/VERSION` is at `0.2.0` after the spec-kit Phase A + rebrand work. `v0.1.0` was already taken by the 2026-05-08 meta-audit Phase 3 wrap-up (commit `b5eb660`); the next release tag is `v0.2.0`, applied on the public mirror after `sync-to-template.sh`. Existing projects that already use the legacy `SE_CORE_*` env vars or `.claude/rules/se-core.md` symlink will be re-linked by `scripts/rollout-rebrand.sh` (one-shot, idempotent); after that pass the audit's `no-pin` rows can convert to real pins on a project-by-project schedule.
 
-### 14.6 The clarify → spec → plan → tasks → analyze pipeline (opt-in)
+### 14.6 Updating Trellis
+
+§14.5 describes the version-pin *machinery*; this is the *sequence* an agent runs to apply an update. Trellis is agent-operated, so the canonical step order below is load-bearing — getting it wrong silently poisons every project's inheritance. The full agent runbook is `docs/UPGRADING.md`; this section is the summary.
+
+**The canonical upgrade sequence:**
+
+1. **Pull latest canonical.** Fetch and pull the canonical clone (`$TRELLIS_ROOT`).
+2. **Ensure the canonical checkout is on `main` and clean.** Every project symlinks to the canonical working tree at a fixed path, so a feature or dirty canonical silently feeds *every* project stale rules. This is a Tier-0 precondition — verify it before trusting any inheritance, never assume it. (`docs/UPGRADING.md` makes this its leading Step 0 and re-asserts it as Step 2 *after* the pull, since the pull itself can leave the tree dirty; check it both before and after.)
+3. **`scripts/upgrade.sh --opt-in`** to adopt the version pin (rewrites `trellis_version`, revalidates the config — see §14.5).
+4. **`scripts/doctor.sh`** runs read-only — `upgrade.sh` auto-invokes it. On drift it prints the exact `doctor --fix` command to run.
+5. **Preview, then repair.** `scripts/doctor.sh --fix --dry-run` shows exactly what would change per project; `scripts/doctor.sh --fix` applies it. Hook re-sync is gated behind `--fix-hooks` because it changes enforcement behavior.
+6. **Re-run `scripts/doctor.sh`** to confirm green.
+
+**`doctor` is the verification gate after every update** — it is the deterministic check that adopted rules actually reached the projects, which the version pin alone does not verify. Two lessons this sequence encodes (from the 2026-05-30 drift incidents): a canonical checkout left on a feature branch silently unparents every project, so confirm canonical-is-on-`main` *before* trusting inheritance; and resolve symlink targets rather than assuming a name implies its target, since a stale or cross-machine target drops the rule with no error. See `docs/UPGRADING.md` for the step-by-step runbook and `docs/adr/2026-05-30-trellis-doctor.md` for the rationale.
+
+### 14.7 The clarify → spec → plan → tasks → analyze pipeline (opt-in)
 
 Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague request through structured questioning, formal specification, technical planning, work breakdown, and a final coherence check. They live as canonical skills under `core-rules/skills/{clarify,spec,plan,tasks,analyze}/` and are seeded into every registered project's `.claude/skills/` (and `.agents/skills/` under Codex) by `onboard-project.sh` / `scripts/rollout-feature-skills.sh`.
 
@@ -888,7 +903,7 @@ The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scri
 
 After a feature ships, the directory stays in git as historical record.
 
-### 14.7 Presets — layering opt-in rule variants on top of parent
+### 14.8 Presets — layering opt-in rule variants on top of parent
 
 Spec-kit Phase D (2026-05-12) added an opt-in mechanism for projects whose discipline needs genuinely diverge from the parent default. The Rule of Three protects the parent layer from bloat (§14.1); presets let two projects compose differently without forcing every project to inherit either side of the divergence.
 
@@ -939,7 +954,7 @@ Onboarding new projects with presets pre-declared is fully automatic: write `<pr
 
 ---
 
-### 14.8 Autonomy — the responsibility slider (opt-in per project)
+### 14.9 Autonomy — the responsibility slider (opt-in per project)
 
 Trellis ships an L1–L5 **responsibility slider** that determines who answers the harness's interactive gates: user (lower) or agent (higher). All gates and quality controls remain at every level; the level only changes *who decides*. Default L3 = legacy Trellis behavior; existing projects see no change.
 

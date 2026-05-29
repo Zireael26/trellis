@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Thin Trellis dispatcher. Maps a subcommand to its script and execs it,
+# passing the remaining args through verbatim. No subcommand framework, no
+# per-command flag parsing — each engine owns its own flags and exit codes,
+# and `exec` makes those codes (and signals) propagate unchanged.
+#
+#   trellis doctor   -> doctor.sh           (inheritance health check / --fix)
+#   trellis onboard  -> onboard-project.sh  (onboard a project into Trellis)
+#   trellis upgrade  -> upgrade.sh          (compare/adopt the version pin)
+#   trellis sync     -> sync-hooks.sh       (sync Claude hooks into projects)
+#
+# No args / `help` -> list subcommands (stdout, exit 0).
+# Unknown command  -> usage to stderr, exit 2.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+trellis — Trellis management dispatcher
+Usage: trellis <command> [args...]
+
+  doctor    Diagnose (and --fix) inheritance health
+  onboard   Onboard a project into Trellis
+  upgrade   Compare/adopt the canonical version pin
+  sync      Sync Claude hooks into managed projects
+EOF
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  doctor)  shift; exec "$SCRIPT_DIR/doctor.sh" "$@" ;;
+  onboard) shift; exec "$SCRIPT_DIR/onboard-project.sh" "$@" ;;
+  upgrade) shift; exec "$SCRIPT_DIR/upgrade.sh" "$@" ;;
+  sync)    shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
+  help)    usage ;;
+  *)       usage >&2; exit 2 ;;
+esac

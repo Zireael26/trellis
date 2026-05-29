@@ -209,4 +209,28 @@ if ! _pgcfg_validate "$TRELLIS_CONFIG_PATH" >/dev/null 2>&1; then
   exit 1
 fi
 
+# --- Post-adopt verification: run the read-only doctor -------------------
+# Reaching here means the --opt-in version pin was adopted successfully (the
+# control flow guards this: every non-opt-in / read-only / ahead / drift path
+# exits above, and the schema tripwire exits 1 on failure). Run doctor in
+# READ-ONLY mode as the verification gate. This is informational only — it
+# must NOT change the upgrade's success semantics, so a drift (doctor exit 1)
+# is reported but does not fail the adoption. Never invoke --fix from here.
+DOCTOR="$SCRIPT_DIR/doctor.sh"
+if [ "${TRELLIS_SKIP_DOCTOR:-0}" = 1 ]; then
+  echo "doctor: skipped (TRELLIS_SKIP_DOCTOR=1)."
+elif [ -x "$DOCTOR" ]; then
+  echo
+  echo "running doctor (read-only) to verify the adopted pin..."
+  # `if !` keeps this non-fatal under `set -e` AND lets us branch on drift.
+  if ! "$DOCTOR"; then
+    echo
+    echo "doctor reported drift (the version-pin adoption itself succeeded)."
+    echo "  preview the repair: $DOCTOR --fix --dry-run"
+    echo "  apply the repair:   $DOCTOR --fix"
+  fi
+else
+  echo "doctor: $DOCTOR not found or not executable — skipping verification." >&2
+fi
+
 echo "next: review the diff, run hooks/tests, commit the pin change."

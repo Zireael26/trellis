@@ -6,6 +6,26 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v0.7.0] — 2026-05-30
+
+**`trellis doctor`** — a deterministic, on-demand inheritance health-check + repair command that unifies the existing check and fix engines behind one front-end and runs (read-only) after every update. Motivated by two 2026-05-30 drift incidents: a project (`curat.money`) silently running with zero parent rules (no rules symlink, dead cross-machine `@`-import), and the canonical checkout left on a feature branch silently feeding *every* project stale rules. ADR: `docs/adr/2026-05-30-trellis-doctor.md`.
+
+### Added
+
+- **`scripts/lib/health-checks.sh`** — shared deterministic check library (single source of truth for "what healthy looks like"). Pure functions taking explicit path args (no cwd assumptions); Tier-0 functions probe the canonical clone via `git -C "$TRELLIS_ROOT"` resolved from config, never the caller's cwd. Status codes `HC_OK/HC_ERROR/HC_WARN/HC_INFO`.
+- **`scripts/doctor.sh`** — the engine. Read-only by default: Tier-0 global preconditions (canonical on `main` + clean — ahead-of-origin is normal, behind is at most INFO; conformance-check passes; VERSION/CHANGELOG coherent) and Tier-1 per active project (rules symlink resolves to canonical, `@`-import resolves + matches, skills/commands/harness-artifact symlinks, hook + settings drift, version-pin lag). Per-project `✓/⚠/✗` table + deduplicated suggested actions; exit `0` healthy, `1` on ERROR, `2` on bad args. `--project <name>` scopes to one project.
+- **`scripts/doctor.sh --fix [--dry-run] [--fix-hooks]`** — repairs by delegating to the idempotent never-clobber treatments (`onboard-project.sh` + a bounded `rm` of known-bad trellis-managed symlinks). `--dry-run` prints the per-project repair plan and mutates nothing. Hook re-sync is gated behind `--fix-hooks` (it changes enforcement behavior). Dead `@`-imports, `settings.json` drift, and Tier-0 issues are reported as manual-only — never auto-editing a user-owned file or the canonical clone.
+- **`docs/UPGRADING.md`** — agent-followable upgrade runbook. Leads with the Tier-0 canonical-on-`main` precondition and encodes the two incident lessons (verify canonical-is-on-main before trusting inheritance; resolve symlink targets rather than assuming).
+- **`core-rules/commands/doctor.md`** — `/doctor` slash-command (read-only by default; repair only when asked).
+- **`scripts/trellis`** — thin dispatcher (`trellis doctor | onboard | upgrade | sync`) so "trellis doctor" reads naturally.
+
+### Changed
+
+- **`scripts/upgrade.sh`** — after a successful `--opt-in` pin adoption, auto-runs `doctor` read-only and prints the exact `--fix` command on drift. Check-only (never mutates projects), exit-neutral for the adoption itself, degrades gracefully if `doctor.sh` is absent (`TRELLIS_SKIP_DOCTOR=1` escape hatch for CI).
+- **`engineering-process.md`** — new §14.6 "Updating Trellis" (the canonical upgrade sequence + `doctor` as the verification gate), distinct from §14.5's version-pin machinery. Following §14.x subsections renumbered; live cross-references updated.
+- **`scheduled-tasks/cross-project-process-audit/prompt.md`** — runs `scripts/doctor.sh` first for the deterministic inheritance/symlink/hook checks, focusing the audit's LLM judgment on what a script cannot mechanically check.
+- **`scripts/conformance-check.sh`** — `SPEC_DOCS` extended to validate the new docs' inline path references.
+
 ## [v0.6.5] — 2026-05-29
 
 Opus 4.8 prompting best-practices incorporation. Anthropic's consolidated [Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices) guide (Opus 4.8 release) was gap-analyzed against Trellis; the guide largely *validates* the existing regime, so the change set is small and targeted. ADR: `docs/adr/2026-05-29-opus-4.8-prompting-best-practices.md`. **Version note:** `feat/antigravity-third-harness` merged first and claimed `v0.6.0`; per that overlap's documented carve-out the later release re-versions, so this Opus 4.8 work ships as `v0.6.5`.
