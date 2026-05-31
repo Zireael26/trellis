@@ -122,6 +122,40 @@ pg_is_lockfile() {
   esac
 }
 
+# pg_resolve_pm [project_dir]
+#   Echoes the resolved JS package manager (pnpm|npm|bun|yarn) for a project,
+#   or empty when no JS lockfile is present (lets Python/Go detection proceed).
+#   Mirror of core-rules/hooks/lib/pm.sh:trellis_resolve_pm — kept in sync by
+#   hand (Trellis avoids incidental cross-subsystem coupling). Config value
+#   "auto"/unset == lockfile detection: additive, no behaviour change unless a
+#   project/fleet sets .package_manager.
+pg_resolve_pm() {
+  local dir="${1:-$(pg_project_dir)}" pm="" cand
+  if command -v jq >/dev/null 2>&1; then
+    for cand in "$dir/.trellis.config.json" "$dir/trellis.config.json"; do
+      if [ -f "$cand" ]; then
+        pm="$(jq -r '.package_manager // empty' "$cand" 2>/dev/null)"
+        [ -n "$pm" ] && break
+      fi
+    done
+    if [ -z "$pm" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+      pm="$(jq -r '.package_manager // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null)"
+    fi
+  fi
+  # Explicit config wins even if no lockfile. "auto"/unset → detect; a project
+  # with no JS lockfile and no explicit value resolves to empty (not npm) so
+  # callers can fall through to non-JS toolchains.
+  if [ "$pm" = "auto" ]; then pm=""; fi
+  if [ -z "$pm" ]; then
+    if   [ -f "$dir/pnpm-lock.yaml" ];                       then pm=pnpm
+    elif [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ];  then pm=bun
+    elif [ -f "$dir/yarn.lock" ];                            then pm=yarn
+    elif [ -f "$dir/package-lock.json" ];                    then pm=npm
+    fi
+  fi
+  printf '%s' "$pm"
+}
+
 # pg_exit_code <pass|warn|fail> -> 0|2|1 (warn=2 to differentiate)
 pg_exit_code() {
   case "$1" in

@@ -781,6 +781,22 @@ Every active Python project declares `requires-python` in `pyproject.toml` match
 
 GitHub's Dependabot alerts are the default channel. High-severity alerts get same-week attention. For runtime-critical projects (e.g., anything public-facing handling user data), subscribe to the relevant advisory feeds (Node security, Rust advisory DB, GHSA).
 
+### 13.4 Local toolchain baseline (Node / package manager)
+
+Trellis hooks (`pre-push`, `stop-verify`, the process-gate) shell out to `node` and a package manager. They run as **git hooks and harness hooks — non-login, non-interactive shells.** A login-only PATH (the common `.zprofile` / nvm-in-`.zshrc` setup) leaves those shells with a *different* Node and no pnpm, which silently breaks enforcement. This bit us twice (see `gotchas.md` 2026-05-31). The machine-level baseline that prevents it is **not repo-tracked**, so a fresh machine or new agent must re-establish it:
+
+- **Node 24 LTS via nvm**, single version installed; `nvm alias default 24`. Don't leave multiple 24.x point releases around — long-running dev servers pin a since-deleted version path in memory and confuse audits.
+- **Stable symlink** `~/.nvm/default-node` → the active `~/.nvm/versions/node/vXX`. nvm's own dir name changes per upgrade; the symlink gives a stable target.
+- **`~/.zshenv` prepends `$HOME/.nvm/default-node/bin` to PATH** — `.zshenv` is sourced by *every* zsh (login, non-login, non-interactive), so git hooks inherit Node 24 + pnpm. This is the load-bearing fix; `.zprofile`/`.zshrc` are not enough because hooks don't source them.
+- **Standalone pnpm** pinned to each repo's `packageManager` field (corepack disabled). Not corepack-shimmed — corepack adds a Node-version-sensitive layer that broke under the wrong Node.
+- **Homebrew Node (currently 26) is a *kept transitive dependency*** of the `summarize` formula (`brew uses --installed node` → `summarize`). Do **not** uninstall it — that breaks `summarize`. It must simply stay *shadowed* on PATH behind the nvm Node via the `.zshenv` prepend. nvm remains the only Node *manager*; brew Node is just a hidden library dep.
+
+**Per-repo:** `.nvmrc` pins the dev-shell Node major (`24`). `engines.node` stays the *loose floor* (`>=22.0.0`) — do not bump it to `24.x`. Repos with `engine-strict=true` (e.g. an `.npmrc`) hard-fail installs on a mismatched Node, so a pinned `24.x` engine would break installs on a Node-26 box. `.nvmrc` is the hint; `engines` is the floor. This split is intentional, not an inconsistency.
+
+**Package-manager agnosticism.** Hooks never hardcode a manager. They resolve it via `trellis.config.json.package_manager` (fleet) → `<project>/.trellis.config.json.package_manager` (project-local) → `"auto"` = lockfile detection (`pnpm-lock.yaml`→pnpm, `bun.lock(b)`→bun, `yarn.lock`→yarn, `package-lock.json`→npm). A configured-but-absent manager makes the step *skip*, never hard-fail. Resolver lives in `core-rules/hooks/lib/pm.sh` (`trellis_resolve_pm`), mirrored in process-gate `common.sh` (`pg_resolve_pm`) and inlined in `husky/pre-push`. Schema: `scripts/lib/trellis.config.schema.json`.
+
+**Doctor check.** `scripts/doctor.sh` has a `== Tooling baseline ==` section: it flags any tool present interactively but missing in a non-login shell (the regression signature above), and any registered project whose `.nvmrc` major diverges from the running Node. Both are WARN-only (dev-env hygiene, never gates inheritance). Run `scripts/doctor.sh` after touching node/nvm/PATH.
+
 ---
 
 ## 14. Evolving Trellis

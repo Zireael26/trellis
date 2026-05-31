@@ -39,6 +39,12 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "stop-verify"
 
+# Optional: package-manager resolver (config-driven, lockfile fallback). Absent
+# copy → test step falls back to npm (legacy behaviour).
+__se_pm_lib="$(dirname "${BASH_SOURCE[0]}")/lib/pm.sh"
+# shellcheck source=lib/pm.sh disable=SC1090
+[ -f "$__se_pm_lib" ] && . "$__se_pm_lib"
+
 # --- Guard 1: stop_hook_active ---
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
@@ -242,7 +248,15 @@ TEST_CMD=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
   HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>/dev/null)
   if [ -n "$HAS_TEST" ] && [ "$HAS_TEST" != "echo \"Error: no test specified\" && exit 1" ]; then
-    TEST_CMD="npm test --silent"
+    if command -v trellis_resolve_pm >/dev/null 2>&1; then
+      _PM="$(trellis_resolve_pm "$PROJECT_DIR")"
+    else
+      _PM="npm"
+    fi
+    # Configured-but-missing PM → skip the test step rather than hard-fail.
+    if [ -n "$_PM" ] && command -v "$_PM" >/dev/null 2>&1; then
+      TEST_CMD="$_PM run test"
+    fi
   fi
 elif { [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; } && command -v pytest >/dev/null 2>&1; then
   TEST_CMD="pytest --tb=short -q"

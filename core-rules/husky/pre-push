@@ -23,31 +23,53 @@ done
 
 command -v node >/dev/null 2>&1 || { echo "[pre-push] node unavailable; skipping"; exit 0; }
 
-if   [ -f pnpm-lock.yaml ];                 then PM=pnpm
-elif [ -f bun.lock ] || [ -f bun.lockb ];   then PM=bun
-elif [ -f yarn.lock ];                      then PM=yarn
-else                                             PM=npm
+# --- package-manager resolution (config-driven; "auto"/unset = lockfile detect) ---
+# Inlined mirror of core-rules/hooks/lib/pm.sh:trellis_resolve_pm — husky hooks
+# are git-level + seeded once and cannot reliably source the synced
+# .claude/hooks/lib copy. Keep the resolution + lockfile order in sync.
+PM=""
+if command -v jq >/dev/null 2>&1; then
+  for _cand in .trellis.config.json trellis.config.json; do
+    [ -f "$_cand" ] || continue
+    PM="$(jq -r '.package_manager // empty' "$_cand" 2>/dev/null)"
+    [ -n "$PM" ] && break
+  done
+  if [ -z "$PM" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+    PM="$(jq -r '.package_manager // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null)"
+  fi
+fi
+if [ -z "$PM" ] || [ "$PM" = "auto" ]; then
+  if   [ -f pnpm-lock.yaml ];                 then PM=pnpm
+  elif [ -f bun.lock ] || [ -f bun.lockb ];   then PM=bun
+  elif [ -f yarn.lock ];                      then PM=yarn
+  elif [ -f package-lock.json ];              then PM=npm
+  else                                             PM=npm
+  fi
+fi
+
+# Configured-but-missing PM → skip verification rather than block the push.
+PM_OK=1
+if ! command -v "$PM" >/dev/null 2>&1; then
+  echo "[pre-push] package manager '$PM' not on PATH — skipping typecheck/test" >&2
+  PM_OK=0
 fi
 
 has_script() {
   node -e "const p=require('./package.json');process.exit((p.scripts||{})['$1']?0:1)" 2>/dev/null
 }
 run_script() {
-  case "$PM" in
-    pnpm|bun|yarn) "$PM" run "$1" ;;
-    npm)           npm run "$1" ;;
-  esac
+  "$PM" run "$1"
 }
 
 echo "[pre-push] Trellis verification starting..."
 
-if has_script typecheck; then
+if [ "$PM_OK" = 1 ] && has_script typecheck; then
   run_script typecheck || { echo "[pre-push] typecheck failed"; exit 1; }
 else
   echo "[pre-push] no typecheck script - skipping"
 fi
 
-if has_script test; then
+if [ "$PM_OK" = 1 ] && has_script test; then
   run_script test || { echo "[pre-push] tests failed"; exit 1; }
 else
   echo "[pre-push] no test script - skipping"

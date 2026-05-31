@@ -6,6 +6,23 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v0.7.1] — 2026-05-31
+
+**Package-manager-agnostic hooks + tooling-baseline doctor check.** Hooks that run project scripts no longer assume a package manager, and `trellis doctor` now guards the non-login-shell toolchain regression that bit the fleet twice. Motivated by the 2026-05-31 incident: git hooks run in a non-login shell, resolved Homebrew Node 26 (no pnpm) instead of the nvm Node 24, silently breaking enforcement (see `gotchas.md` 2026-05-31).
+
+### Added
+
+- **`trellis.config.json.package_manager`** (new, optional; schema in `scripts/lib/trellis.config.schema.json`). Resolution: project-local `<project>/.trellis.config.json.package_manager` → fleet `trellis.config.json.package_manager` → `"auto"`. `"auto"` (the default when the key is **unset**) is byte-identical to the previous lockfile detection (`pnpm-lock.yaml`→pnpm, `bun.lock(b)`→bun, `yarn.lock`→yarn, `package-lock.json`→npm), so this key is **purely additive** — no behavior change for any existing consumer, npm projects included. The npm fallback is preserved.
+- **`core-rules/hooks/lib/pm.sh`** — shared resolver (`trellis_resolve_pm`, `trellis_pm_available`), auto-propagated to projects via `sync-hooks.sh`. Codex mirror at `core-rules/codex/hooks/lib/pm.sh`. Mirrored (by deliberate anti-coupling) in process-gate `common.sh` (`pg_resolve_pm`) and inlined in `husky/pre-push` (git-level hooks cannot reliably source the synced lib).
+- **`scripts/doctor.sh` `== Tooling baseline ==` section** — flags any tool present interactively but missing in a non-login shell (the exact incident signature) and any registered project whose `.nvmrc` major diverges from the running Node. WARN-only — dev-env hygiene, never gates inheritance. New check `hc_tooling_noninteractive_path` in `health-checks.sh`.
+- **`engineering-process.md` §13.4 "Local toolchain baseline"** — codifies the machine-level baseline that is otherwise untracked (Node 24 via nvm, the `~/.nvm/default-node` symlink + `~/.zshenv` PATH prepend for non-login shells, standalone pnpm, brew Node kept-but-shadowed as a `summarize` dep, `.nvmrc`-hint vs loose `engines.node`-floor split) + the `gotchas.md` 2026-05-31 root-cause entry.
+
+### Changed
+
+- **`core-rules/hooks/stop-verify.sh`** (+ codex mirror) — the test step's hard-coded `npm test --silent` is replaced by the resolved package manager (`<pm> run test`); a configured-but-absent manager makes the step **skip** rather than hard-fail. This was the one site that ran `npm` regardless of a project's actual manager — wrong on the all-pnpm fleet.
+- **`core-rules/husky/pre-push`** — package-manager resolution made config-aware (inlined resolver mirror); `run_script` simplified to `"$PM" run`; added a `command -v "$PM"` guard so a missing manager skips typecheck/test instead of blocking the push.
+- **`core-rules/skills/process-gate/scripts/check-tests.sh`** — inline lockfile detection replaced by `pg_resolve_pm` (now config-aware). Invocation form unchanged.
+
 ## [v0.7.0] — 2026-05-30
 
 **`trellis doctor`** — a deterministic, on-demand inheritance health-check + repair command that unifies the existing check and fix engines behind one front-end and runs (read-only) after every update. Motivated by two 2026-05-30 drift incidents: a project (`curat.money`) silently running with zero parent rules (no rules symlink, dead cross-machine `@`-import), and the canonical checkout left on a feature branch silently feeding *every* project stale rules. ADR: `docs/adr/2026-05-30-trellis-doctor.md`.

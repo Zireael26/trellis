@@ -17,16 +17,20 @@ findings=()
 
 # Auto-detect package manager if not declared
 if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE_TEST_CMD:-}" ]; then
-  if [ -f "pnpm-lock.yaml" ];      then PM="pnpm"
-  elif [ -f "bun.lockb" ];         then PM="bun"
-  elif [ -f "package-lock.json" ]; then PM="npm"
-  elif [ -f "yarn.lock" ];         then PM="yarn"
-  else PM=""
+  PM="$(pg_resolve_pm "$PROJECT_DIR")"
+  # Configured-but-missing PM → surface as WARN and skip the JS toolchain rather
+  # than hard-failing the gate (mirrors stop-verify / pre-push skip-on-absent-PM).
+  if [ -n "$PM" ] && [ -f "package.json" ] && ! command -v "$PM" >/dev/null 2>&1; then
+    pg_log warn "Tests & coverage"
+    pg_finding "package manager '$PM' not on PATH — JS typecheck/lint/test skipped (install $PM, or set PROCESS_GATE_*_CMD in local.config.sh)"
+    exit 2
   fi
+  # `$PM run <script>` is the portable form across pnpm/npm/yarn/bun — bare
+  # `npm typecheck`/`npm lint` are invalid (npm only aliases test/start/stop).
   if [ -n "$PM" ] && [ -f "package.json" ]; then
-    PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-$PM typecheck}"
-    PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-$PM lint}"
-    PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PM test}"
+    PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-$PM run typecheck}"
+    PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-$PM run lint}"
+    PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PM run test}"
   fi
 
   # Python toolchain detection (order: uv → poetry → pdm → bare pyproject)

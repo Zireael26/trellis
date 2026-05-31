@@ -116,6 +116,10 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 5
+    },
+    "package_manager": {
+      "description": "Optional. Default JS package manager for hooks and gates that run project scripts (pre-push, stop-verify, process-gate). 'auto' (the default when unset) = detect from lockfile: pnpm-lock.yaml→pnpm, bun.lock(b)→bun, yarn.lock→yarn, package-lock.json→npm. An explicit value (pnpm|npm|bun|yarn) forces that manager regardless of lockfile. Project-local <project>/.trellis.config.json may override with its own 'package_manager'. With the key unset, resolution is byte-identical to pre-config Trellis (pure lockfile detection) — this key is purely additive.",
+      "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
     }
   },
   "additionalProperties": true

@@ -197,6 +197,37 @@ hc_version_changelog_coherent() {
   return "$HC_WARN"
 }
 
+# hc_tooling_noninteractive_path
+# Tooling baseline (NOT inheritance). Git hooks run in a NON-LOGIN, non-
+# interactive shell. The 2026-05-31 incident: node/pnpm were on PATH only for
+# login shells, so git hooks resolved a different (brew) Node with no pnpm —
+# breaking pnpm/corepack and Node-26-sensitive tests. Durable fix was a PATH
+# prepend in ~/.zshenv so non-login shells inherit the nvm Node + pnpm.
+# This check flags any tool that resolves INTERACTIVELY but vanishes in a
+# non-login shell — the precise regression signature. No false positive for a
+# tool that simply isn't installed (we only probe tools already on PATH).
+# Portable: the probe only runs when the login shell is zsh; skipped otherwise.
+# WARN at worst — never blocks inheritance.
+hc_tooling_noninteractive_path() {
+  case "${SHELL:-}" in
+    *zsh) ;;
+    *) echo "non-login PATH probe skipped (login shell is not zsh)"; return "$HC_OK" ;;
+  esac
+  command -v zsh >/dev/null 2>&1 || { echo "non-login PATH probe skipped (zsh not found)"; return "$HC_OK"; }
+  local tool missing=""
+  for tool in node pnpm npm yarn bun; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      zsh -c "command -v $tool >/dev/null 2>&1" 2>/dev/null || missing="$missing $tool"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    echo "tools on PATH interactively but MISSING in a non-login shell:$missing — git hooks (non-login) lose them; add a PATH prepend to ~/.zshenv (see gotchas: non-login hooks)"
+    return "$HC_WARN"
+  fi
+  echo "node + package managers resolve in both login and non-login shells"
+  return "$HC_OK"
+}
+
 # ===========================================================================
 # TIER 1 — per active project. Each takes the project dir as $1 and the
 # canonical clone path as $2 so the function can compute the expected target

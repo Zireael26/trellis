@@ -822,6 +822,41 @@ if [ "${#TARGETS[@]:-0}" -gt 0 ]; then
   done
 fi
 
+# ---------------------------------------------------------------------------
+# Tooling baseline — dev-environment health (Node + package-manager resolution
+# in non-login shells, .nvmrc/node coherence). Distinct from inheritance:
+# WARN at worst, never gates the exit. Guards the 2026-05-31 regression where
+# git hooks (non-login) resolved the wrong Node and lost pnpm.
+# ---------------------------------------------------------------------------
+echo
+echo "== Tooling baseline =="
+run_tier0 hc_tooling_noninteractive_path
+
+node_major="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || true)"
+if [ -z "$node_major" ]; then
+  report_line "  " "$HC_OK" ".nvmrc/node coherence skipped (node not on PATH)"
+else
+  nvmrc_seen=0
+  nvmrc_bad=""
+  if [ "${#TARGETS[@]:-0}" -gt 0 ]; then
+    for name in "${TARGETS[@]}"; do
+      f="$(resolve_project_path "$name")/.nvmrc"
+      [ -f "$f" ] || continue
+      nvmrc_seen=1
+      want="$(tr -dc '0-9.' < "$f" 2>/dev/null | cut -d. -f1)"
+      [ -n "$want" ] && [ "$want" != "$node_major" ] && nvmrc_bad="$nvmrc_bad $name(.nvmrc=$want)"
+    done
+  fi
+  if [ "$nvmrc_seen" -eq 0 ]; then
+    report_line "  " "$HC_OK" "no project .nvmrc pins to compare against node v$node_major"
+  elif [ -n "$nvmrc_bad" ]; then
+    report_line "  " "$HC_WARN" ".nvmrc pins differ from running node v$node_major:$nvmrc_bad — hooks may run under the wrong Node"
+    add_hint "Tooling: align these projects' .nvmrc with the active Node major (v$node_major) or nvm-use the pinned version. See gotchas: non-login hooks + Node baseline."
+  else
+    report_line "  " "$HC_OK" "all project .nvmrc pins match running node v$node_major"
+  fi
+fi
+
 echo
 
 # ---------------------------------------------------------------------------
