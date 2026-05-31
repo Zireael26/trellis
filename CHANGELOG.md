@@ -6,6 +6,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v0.7.2] — 2026-05-31
+
+**Settings-wiring doctor check tolerates project extensions.** `trellis doctor`'s per-project settings check no longer false-positives on projects that legitimately extend their `.claude/settings.json`.
+
+### Changed
+
+- **`scripts/lib/health-checks.sh` `hc_settings_wiring`** — was an exact `.hooks` block match, which flagged any project that added its own wiring (e.g. neev's project-specific `check-module-boundary.sh` PreToolUse hook, or a bumped `stop-verify` timeout) as drift. Now uses **superset semantics**: each settings file is flattened to `(event, matcher, command)` wirings and the check warns only when a **canonical** wiring is *absent* from the project — extra project hooks and differing timeouts are allowed. Missing wirings are named in the message. Backward-compatible: projects that exactly match the template still pass.
+
 ## [v0.7.1] — 2026-05-31
 
 **Package-manager-agnostic hooks + tooling-baseline doctor check.** Hooks that run project scripts no longer assume a package manager, and `trellis doctor` now guards the non-login-shell toolchain regression that bit the fleet twice. Motivated by the 2026-05-31 incident: git hooks run in a non-login shell, resolved Homebrew Node 26 (no pnpm) instead of the nvm Node 24, silently breaking enforcement (see `gotchas.md` 2026-05-31).

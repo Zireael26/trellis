@@ -463,9 +463,15 @@ hc_hook_freshness() {
 }
 
 # hc_settings_wiring <project> <canonical>
-# WARN if .claude/settings.json is missing or its .hooks block does not match
-# the canonical template's .hooks block. settings.json is the ONLY thing that
-# seeds hook *wiring*; drift here means hooks may be installed but not fired.
+# WARN if .claude/settings.json is missing, invalid, or fails to wire every
+# canonical hook. settings.json is the ONLY thing that seeds hook *wiring*; a
+# MISSING canonical wiring means a hook is installed but never fires.
+#
+# Superset semantics (not exact match): the project must contain every canonical
+# (event, matcher, command) wiring, but MAY add its own hooks and tune timeouts.
+# Projects legitimately extend the baseline — e.g. a project-specific boundary
+# check, or a longer stop-verify timeout for a big suite — and that is not drift.
+# Only an absent canonical wiring is. Timeouts are intentionally not compared.
 hc_settings_wiring() {
   local proj="$1" canon="$2"
   local settings="$proj/.claude/settings.json"
@@ -482,18 +488,32 @@ hc_settings_wiring() {
     echo "settings: jq unavailable — wiring check skipped"
     return "$HC_OK"
   fi
-  local proj_hooks tmpl_hooks
-  proj_hooks="$(jq -S -c '.hooks // {}' "$settings" 2>/dev/null || echo 'ERR')"
-  tmpl_hooks="$(jq -S -c '.hooks // {}' "$template" 2>/dev/null || echo 'ERR')"
-  if [ "$proj_hooks" = "ERR" ]; then
+  # Flatten each file to one "event<TAB>matcher<TAB>command" line per wired hook
+  # (matcher-less events use "*"). Timeout is deliberately excluded.
+  local extract='.hooks // {} | to_entries[] | .key as $e | .value[]
+    | (.matcher // "*") as $m | (.hooks // [])[] | [$e, $m, .command] | @tsv'
+  local proj_pairs canon_pairs missing names line
+  proj_pairs="$(jq -r "$extract" "$settings" 2>/dev/null)" || proj_pairs="ERR"
+  if [ "$proj_pairs" = "ERR" ]; then
     echo "settings: .claude/settings.json is not valid JSON"
     return "$HC_WARN"
   fi
-  if [ "$proj_hooks" != "$tmpl_hooks" ]; then
-    echo "settings: .hooks wiring differs from canonical template"
+  canon_pairs="$(jq -r "$extract" "$template" 2>/dev/null || true)"
+  # Portable set difference (no process substitution — mirrors this library):
+  # collect canonical wirings absent from the project.
+  missing=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    printf '%s\n' "$proj_pairs" | grep -Fxq -- "$line" || missing="${missing}${line}"$'\n'
+  done <<EOF
+$canon_pairs
+EOF
+  if [ -n "$missing" ]; then
+    names="$(printf '%s' "$missing" | awk -F'\t' 'NF{n=$3; sub(/.*\//,"",n); printf "%s ", n}')"
+    echo "settings: missing canonical hook wiring —${names% }"
     return "$HC_WARN"
   fi
-  echo "settings: hook wiring matches canonical template"
+  echo "settings: canonical hook wiring present (project extensions OK)"
   return "$HC_OK"
 }
 
