@@ -84,6 +84,81 @@ ${UNRESOLVED}
   fi
 fi
 
+# --- Worktree inheritance safety-net ---
+# Detect a linked worktree missing its Trellis inheritance symlinks.
+# Fail-safe: any error is swallowed; hook always continues normally.
+# NOTE: seeder stdout/stderr is suppressed to protect the JSON contract.
+_se_worktree_warn=""
+(
+  command -v git >/dev/null 2>&1 || exit 0
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+  gitdir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+  [ -n "$common" ] && [ -n "$gitdir" ] || exit 0
+  # In a main checkout, --git-dir == --git-common-dir (both resolve to .git).
+  # Canonicalize both before comparing so macOS /var vs /private/var doesn't matter.
+  common_abs="$(cd "$common" 2>/dev/null && pwd -P)" || exit 0
+  gitdir_abs="$(cd "$gitdir" 2>/dev/null && pwd -P)" || exit 0
+  [ "$common_abs" != "$gitdir_abs" ] || exit 0
+  # We are in a linked worktree. Locate the seeder via the main checkout.
+  main_line=""
+  wt_list=$(git worktree list --porcelain 2>/dev/null) || exit 0
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) main_line="$line"; break ;;
+    esac
+  done <<< "$wt_list"
+  [ -n "$main_line" ] || exit 0
+  MAIN="${main_line#worktree }"
+  [ -d "$MAIN" ] || exit 0
+  MAIN="$(cd "$MAIN" && pwd -P)" || exit 0
+  # Resolve TRELLIS_ROOT from the main checkout's trellis.md symlink.
+  root=""
+  trellis_link="$MAIN/.claude/rules/trellis.md"
+  if [ -L "$trellis_link" ]; then
+    link_target="$(readlink "$trellis_link" 2>/dev/null)" || true
+    candidate="${link_target%/core-rules/CLAUDE.md}"
+    if [ "$candidate" != "$link_target" ] && [ -d "$candidate" ]; then
+      root="$candidate"
+    fi
+  fi
+  # Fallback: $TRELLIS_ROOT env var
+  if [ -z "$root" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -d "$TRELLIS_ROOT" ]; then
+    root="$TRELLIS_ROOT"
+  fi
+  # Fallback: trellis.config.json walk-up
+  if [ -z "$root" ] && command -v jq >/dev/null 2>&1; then
+    walk="$PWD"
+    while [ "$walk" != "/" ]; do
+      if [ -f "$walk/trellis.config.json" ]; then
+        candidate="$(jq -r '.trellis_root // empty' "$walk/trellis.config.json" 2>/dev/null || true)"
+        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+          root="$candidate"
+        fi
+        break
+      fi
+      walk="$(dirname "$walk")"
+    done
+  fi
+  [ -n "$root" ] || exit 0
+  seeder="$root/scripts/seed-inheritance-symlinks.sh"
+  [ -f "$seeder" ] || exit 0
+  # Check if symlinks are present.
+  bash "$seeder" --target "$PWD" --verify-only --quiet >/dev/null 2>&1 && exit 0
+  # Symlinks missing: seed for next session (suppress all output).
+  bash "$seeder" --target "$PWD" --quiet >/dev/null 2>&1 || true
+  # Signal that warning should be emitted.
+  printf 'WARN'
+) > /tmp/_trellis_wt_warn_$$ 2>/dev/null || true
+_se_worktree_warn=$(cat /tmp/_trellis_wt_warn_$$ 2>/dev/null || true)
+rm -f /tmp/_trellis_wt_warn_$$ 2>/dev/null || true
+
+if [ "${_se_worktree_warn:-}" = "WARN" ]; then
+  _se_wt_msg="⚠️ TRELLIS INHERITANCE WAS MISSING IN THIS WORKTREE. Parent rules + skills (process-gate, etc.) did not load for THIS session — Claude Code enumerates them at startup, before this hook ran. I have re-created the symlinks; RESTART this session (or open a new one in this worktree) to load them. Until then, parent rules/skills are NOT active. Tip: create worktrees with \`trellis worktree add <path>\` to avoid this."
+  CTX="${_se_wt_msg}
+
+${CTX}"
+fi
+
 if [ -z "$CTX" ]; then
   exit 0
 fi

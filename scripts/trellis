@@ -25,15 +25,17 @@ Usage: trellis <command> [args...]
   onboard   Onboard a project into Trellis
   upgrade   Compare/adopt the canonical version pin
   sync      Sync Claude hooks into managed projects
+  worktree  Create/repair a worktree with Trellis inheritance seeded
 EOF
 }
 
 cmd="${1:-help}"
 case "$cmd" in
-  doctor)  shift; exec "$SCRIPT_DIR/doctor.sh" "$@" ;;
-  onboard) shift; exec "$SCRIPT_DIR/onboard-project.sh" "$@" ;;
-  upgrade) shift; exec "$SCRIPT_DIR/upgrade.sh" "$@" ;;
-  sync)    shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
-  help)    usage ;;
-  *)       usage >&2; exit 2 ;;
+  doctor)   shift; exec "$SCRIPT_DIR/doctor.sh" "$@" ;;
+  onboard)  shift; exec "$SCRIPT_DIR/onboard-project.sh" "$@" ;;
+  upgrade)  shift; exec "$SCRIPT_DIR/upgrade.sh" "$@" ;;
+  sync)     shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
+  worktree) shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
+  help)     usage ;;
+  *)        usage >&2; exit 2 ;;
 esac

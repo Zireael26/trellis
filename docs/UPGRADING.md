@@ -316,6 +316,25 @@ Decision branch:
 
 ---
 
+## Worktrees of managed projects
+
+Every linked worktree must carry the Trellis inheritance symlinks. `git worktree
+add` does not recreate gitignored files, so a fresh worktree starts unparented
+by default.
+
+- **Native-`.githooks` projects (lume, clusterbid-console):** `post-checkout`
+  fires automatically — the worktree is seeded at creation, first-session-correct
+  on raw `git worktree add`.
+- **Husky projects and all others:** use `trellis worktree add <path>` (the
+  universal eager front door). On raw `git worktree add`, the SessionStart
+  safety-net detects the gap, seeds for the *next* session, and emits a loud
+  restart warning — no project fails silently, but a restart is required.
+- **Repair after the fact:** `trellis doctor` (Tier-1 `hc_worktree_inheritance`)
+  flags any linked worktree missing inheritance; `doctor --fix` repairs it via
+  the seeder.
+
+---
+
 ## Reference — scripts used by this runbook
 
 - `scripts/doctor.sh` — read-only inheritance health check; `--fix` repair.

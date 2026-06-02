@@ -50,6 +50,7 @@ SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TEMPLATES="$SOURCE_ROOT/core-rules/templates"
 HUSKY_CANONICAL="$SOURCE_ROOT/core-rules/husky"
+GITHOOKS_CANONICAL="$SOURCE_ROOT/core-rules/githooks"
 CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
 CANONICAL_COMMANDS_DIR="$TRELLIS_ROOT/core-rules/commands"
@@ -280,6 +281,44 @@ seed_husky_hook() {
   fi
 }
 
+# Install the Trellis eager post-checkout hook for worktree inheritance.
+# Skipped for Husky projects (hooksPath is gitignored → absent in worktrees).
+# For tracked hooksPath (e.g. .githooks) or plain git, copies the canonical
+# hook body so it fires automatically on `git worktree add`.
+install_post_checkout_hook() {
+  if [ ! -f "$GITHOOKS_CANONICAL/post-checkout" ]; then
+    echo "WARN: canonical post-checkout hook missing at $GITHOOKS_CANONICAL/post-checkout — skipping worktree hook install" >&2
+    return
+  fi
+
+  local hp destdir hp_label
+  hp="$(git -C "$PROJECT" config core.hooksPath || true)"
+
+  if [ -n "$hp" ]; then
+    # hooksPath is set — check if it is gitignored (e.g. .husky/_)
+    if git -C "$PROJECT" check-ignore -q "$hp" 2>/dev/null; then
+      echo "info: core.hooksPath ($hp) is gitignored (husky) — eager post-checkout unavailable in worktrees; relies on 'trellis worktree' wrapper + SessionStart self-heal."
+      return
+    fi
+    # Tracked hooksPath (e.g. .githooks)
+    destdir="$PROJECT/$hp"
+    hp_label="$hp"
+  else
+    # No hooksPath — use machine-local .git/hooks (per-clone)
+    destdir="$PROJECT/.git/hooks"
+    hp_label=".git/hooks (machine-local; per-clone)"
+  fi
+
+  mkdir -p "$destdir"
+  if [ -e "$destdir/post-checkout" ]; then
+    echo "skip (exists): post-checkout in $hp_label"
+  else
+    cp "$GITHOOKS_CANONICAL/post-checkout" "$destdir/post-checkout"
+    chmod +x "$destdir/post-checkout"
+    echo "created: post-checkout in $hp_label"
+  fi
+}
+
 # Ensure project .gitignore carries the canonical Trellis symlink fragment.
 # Absolute-path symlinks must NOT be tracked — different developers' clones
 # produce different absolute targets that conflict on cross-machine merges.
@@ -420,6 +459,9 @@ if [ -f "$PROJECT/package.json" ]; then
 else
   echo "info: no package.json — husky skipped. Project must enforce PR-flow guard via .githooks/ (see core-rules/inheritance.md \"Native git hooks\")."
 fi
+
+# Eager post-checkout hook for worktree inheritance
+install_post_checkout_hook
 
 # Shared "agents/" surface — Codex AND AntiGravity both read AGENTS.md,
 # .agents/rules/, .agents/skills/, and .agents/primers/. Seed once when either

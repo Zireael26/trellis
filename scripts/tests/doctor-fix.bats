@@ -459,3 +459,151 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   [[ "$output" == *"canonical clone: $CANON"* ]]
   [[ -z "$LIVE_CANON" || "$output" != *"$LIVE_CANON"* ]]
 }
+
+# ===========================================================================
+# 8. Worktree-inheritance: DETECTION — linked worktree missing symlinks => WARN.
+#
+# The project is a real git repo (git_init_canonical_main + build_healthy_project
+# already handles canonical; build_healthy_project here inits the project too).
+# We add a linked worktree via `git worktree add` and leave its .claude/ absent
+# (git worktree add only materialises tracked files; the symlinks are untracked
+# so they are not present in the new worktree). We also copy the seeder into the
+# fixture canonical (needed so hc_worktree_inheritance can locate it). The
+# project's main-checkout symlinks are committed-untracked (they exist in the
+# working tree, which is what the seeder mirrors).
+# ===========================================================================
+
+# Copy the real seed-inheritance-symlinks.sh into the fixture canonical's
+# scripts/ directory so hc_worktree_inheritance can find it. Must be called
+# BEFORE git_init_canonical_main so the copy is committed and the canonical
+# stays clean.
+add_canonical_seeder() {
+  mkdir -p "$CANON/scripts"
+  cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$CANON/scripts/seed-inheritance-symlinks.sh"
+  chmod +x "$CANON/scripts/seed-inheritance-symlinks.sh"
+}
+
+# Create a linked worktree for the healthy project at <sandbox>/worktrees/<name>.
+# Returns the path in WT_PATH. Must be called AFTER build_healthy_project (needs
+# a committed HEAD — git worktree add requires at least one commit).
+add_linked_worktree() {
+  local wt_name="${1:-wt1}"
+  mkdir -p "$SANDBOX/worktrees"
+  WT_PATH="$SANDBOX/worktrees/$wt_name"
+  local hp="$PROJECTS/healthy"
+  # Ensure there is at least one commit in the project (needed for git worktree
+  # add). We commit only CLAUDE.md so the .claude/ symlinks stay untracked.
+  (
+    cd "$hp"
+    git add CLAUDE.md 2>/dev/null || true
+    git commit -q -m "init" --allow-empty 2>/dev/null || true
+    git worktree add -q "$WT_PATH" HEAD
+  )
+}
+
+@test "worktree-inheritance DETECTION: linked worktree missing symlinks => WARN (read-only doctor)" {
+  add_canonical_seeder
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  add_linked_worktree "missing-wt"
+
+  # Pre-condition: the worktree exists but has no .claude/ directory.
+  [ -d "$WT_PATH" ]
+  [ ! -d "$WT_PATH/.claude" ]
+
+  run_doctor
+  # Doctor WARNs about the missing-inheritance worktree.
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"⚠ worktree-inheritance:"* ]]
+  [[ "$output" == *"missing inheritance symlinks"* ]]
+}
+
+@test "worktree-inheritance DETECTION: all linked worktrees healthy => no WARN" {
+  add_canonical_seeder
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  add_linked_worktree "healthy-wt"
+
+  # Seed the worktree manually so it is fully healthy before running doctor.
+  bash "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" \
+    --target "$WT_PATH" --root "$CANON" --quiet
+
+  run_doctor
+  # The worktree is healthy — no worktree-inheritance WARN.
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"⚠ worktree-inheritance:"* ]]
+  [[ "$output" == *"✓ worktree-inheritance:"* ]]
+}
+
+@test "worktree-inheritance FIX --dry-run: plans the seeder repair (seed-inheritance-symlinks.sh + wt path), changes nothing" {
+  add_canonical_seeder
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  add_linked_worktree "dryrun-wt"
+
+  # Pre-condition: worktree missing .claude/
+  [ ! -d "$WT_PATH/.claude" ]
+  local before
+  before="$(ls "$WT_PATH" 2>/dev/null | sort)"
+
+  run_doctor --fix --dry-run
+  [ "$status" -eq 0 ]
+  # The plan mentions seed-inheritance-symlinks.sh and the worktree path.
+  [[ "$output" == *"seed-inheritance-symlinks.sh"* ]]
+  [[ "$output" == *"$WT_PATH"* ]]
+  [[ "$output" == *"nothing applied"* ]]
+
+  # Filesystem is unchanged (dry-run = no mutation).
+  local after
+  after="$(ls "$WT_PATH" 2>/dev/null | sort)"
+  [ "$before" = "$after" ]
+  [ ! -d "$WT_PATH/.claude" ]
+}
+
+@test "worktree-inheritance FIX: --fix seeds missing inheritance and re-check is OK (exit 0)" {
+  add_canonical_seeder
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  add_linked_worktree "fix-wt"
+
+  # Pre-condition: worktree missing .claude/
+  [ ! -d "$WT_PATH/.claude" ]
+
+  run_doctor --fix
+  # After fix the re-check must show the worktree as healthy.
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"re-checking healthy after fixes"* ]]
+  [[ "$output" == *"✓ worktree-inheritance:"* ]]
+  # The symlinks must actually exist in the worktree.
+  [ -d "$WT_PATH/.claude" ]
+  [ -L "$WT_PATH/.claude/rules/trellis.md" ]
+}
+
+@test "worktree-inheritance FIX: Tier-0 gate blocks seed repair when canonical is off-main" {
+  add_canonical_seeder
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  add_linked_worktree "gate-wt"
+
+  # Push canonical off main so Tier-0 ERRORs.
+  ( cd "$CANON" && git checkout -q -b feat/poison )
+
+  run_doctor --fix
+  # Tier-0 is in error → non-zero exit.
+  [ "$status" -ne 0 ]
+  # The seed repair is explicitly skipped (Tier-0 gate).
+  [[ "$output" == *"SKIPPED"* ]]
+  [[ "$output" == *"Tier-0"* ]]
+  # The worktree must remain un-seeded.
+  [ ! -d "$WT_PATH/.claude" ]
+}

@@ -517,6 +517,83 @@ EOF
   return "$HC_OK"
 }
 
+# hc_worktree_offenders <project> <canonical>
+# Helper (not an hc_ check): prints one offending linked-worktree path per line.
+# Used by hc_worktree_inheritance to build the WARN message AND by doctor.sh's
+# WARN-branch to fill PLAN_SEED_WORKTREES without re-running full check logic.
+# Prints nothing and returns 0 when there are no offending worktrees.
+# Skips worktrees that no longer exist on disk (detached-but-deleted worktrees).
+hc_worktree_offenders() {
+  local proj="$1" canon="$2"
+  local seeder="$canon/scripts/seed-inheritance-symlinks.sh"
+  # If the project is not a git repo, there are no worktrees to check.
+  local wt_list
+  wt_list="$(git -C "$proj" worktree list --porcelain 2>/dev/null || true)"
+  [ -z "$wt_list" ] && return 0
+  # Parse all 'worktree <path>' entries; skip the first (the main checkout).
+  local first_seen=0 wt_path line
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        wt_path="${line#worktree }"
+        if [ "$first_seen" -eq 0 ]; then
+          first_seen=1
+          continue  # skip the main checkout
+        fi
+        # Only probe linked worktrees that still exist on disk.
+        [ -d "$wt_path" ] || continue
+        # If the seeder is absent, skip (can't verify); not an error.
+        [ -f "$seeder" ] || continue
+        if ! bash "$seeder" --target "$wt_path" --verify-only --quiet >/dev/null 2>&1; then
+          printf '%s\n' "$wt_path"
+        fi
+        ;;
+    esac
+  done <<EOF
+$wt_list
+EOF
+}
+
+# hc_worktree_inheritance <project> <canonical>
+# WARN if any linked git worktree of the project is missing Trellis inheritance
+# symlinks. Uses seed-inheritance-symlinks.sh --verify-only to probe each linked
+# worktree (found via `git worktree list --porcelain`; the first entry — the
+# main checkout — is always skipped).
+#   - Not a git repo, or no linked worktrees, or seeder absent -> OK (silent)
+#   - Any linked worktree missing symlinks                      -> WARN
+# Classification: WARN / [auto] (fixable via seed-inheritance-symlinks.sh).
+hc_worktree_inheritance() {
+  local proj="$1" canon="$2"
+  # Guard: project must be a git repo (doctor.bats's healthy fixture is NOT
+  # git-inited — only doctor-fix.bats's version is).
+  if ! git -C "$proj" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "worktree-inheritance: not a git repo — check skipped"
+    return "$HC_OK"
+  fi
+  local seeder="$canon/scripts/seed-inheritance-symlinks.sh"
+  if [ ! -f "$seeder" ]; then
+    echo "worktree-inheritance: seeder not present in canonical — check skipped"
+    return "$HC_OK"
+  fi
+  local offenders wt_count
+  offenders="$(hc_worktree_offenders "$proj" "$canon")"
+  if [ -z "$offenders" ]; then
+    # Either no linked worktrees or all are healthy.
+    echo "worktree-inheritance: all linked worktrees carry inheritance symlinks"
+    return "$HC_OK"
+  fi
+  # Count and list offenders.
+  wt_count="$(printf '%s\n' "$offenders" | grep -c .)"
+  local detail=""
+  while IFS= read -r wt; do
+    [ -n "$wt" ] && detail="$detail $wt"
+  done <<EOF
+$offenders
+EOF
+  echo "worktree-inheritance: $wt_count linked worktree(s) missing inheritance symlinks —${detail}"
+  return "$HC_WARN"
+}
+
 # hc_version_pin_lag <project> <canonical>
 # INFO if the project's own pin (<project>/.trellis.config.json .trellis_version)
 # trails the canonical core-rules/VERSION. Rules themselves are current via the

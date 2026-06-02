@@ -192,3 +192,38 @@ Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot 
 - The hooks directory and its scripts MUST be tracked in git so the enforcement is visible in repo state and survives a clone.
 
 Reference example: `lume` (Unity 3D) uses `.githooks/pre-push` with `core.hooksPath = .githooks`. The `cross-project-process-audit` rubric skips the husky-presence check when `package.json` is absent and the native-hooks fallback is in place — see `scheduled-tasks/cross-project-process-audit/prompt.md` §3.
+
+## Worktree inheritance (`git worktree add` re-seeding)
+
+### The problem
+
+All Trellis inheritance symlinks — `.claude/rules/trellis.md`, `.claude/rules/preset-*.md`, `.claude/skills/*`, `.claude/commands/*`, and the `.agents/` mirror — are **gitignored** by design: their targets are absolute paths under each developer's `$TRELLIS_ROOT`, which differs per machine. `git worktree add` materializes only tracked content from the commit. Gitignored files are never recreated in a new worktree.
+
+The consequence is the canonical silent-drop failure: a fresh worktree of any managed project has no parent rules, no skills, no commands. An agent starts without error, without warning, and runs completely unparented. This is the same silent-drop class as a broken symlink target — undetectable at runtime unless the caller checks explicitly.
+
+### The fix: mirror the main checkout
+
+**`scripts/seed-inheritance-symlinks.sh`** is an idempotent seeder. It enumerates the inheritance symlinks already present in the project's **main working tree** (the ones `onboard-project.sh` placed there) and recreates each at the same relative path with the same target in the target worktree. It owns no symlink list and cannot drift from onboard; new skills, presets, and `.agents` entries are covered automatically. Root is resolved from the main checkout's `.claude/rules/trellis.md` symlink target — machine-local, correct on every developer's clone.
+
+### Four triggers
+
+One seeder; four contexts that call it:
+
+1. **`core-rules/githooks/post-checkout`** (eager, native-hooks projects only) — fires on `git worktree add`. Installed by `onboard-project.sh` only when `core.hooksPath` points at a tracked directory (native-`.githooks` projects: lume, clusterbid-console; plain-git: `.git/hooks`). Always `exit 0` — seeding failure never aborts the worktree creation.
+
+2. **`trellis worktree add|sync`** (universal — use this) — wraps `git worktree add` and calls the seeder immediately after. Works on every project, regardless of hook type. `trellis worktree sync [<path>]` re-seeds an existing worktree. This is the recommended way to create worktrees of Trellis-managed projects.
+
+3. **SessionStart safety-net** (`core-rules/hooks/session-context.sh` + codex mirror) — on session start in a linked worktree, runs the seeder in verify-only mode; if symlinks are missing, seeds them (for the *next* session) and emits a loud restart warning. Cannot heal the current session — skills are enumerated at process init before any SessionStart hook filesystem change lands (verified). Converts the silent-drop into a visible, self-repairing event.
+
+4. **`doctor` `hc_worktree_inheritance` check + `--fix`** — Tier-1 doctor check; enumerates `git worktree list` and reports linked worktrees with missing inheritance. `doctor --fix` (gated by the Tier-0 canonical-on-main guard) repairs them via the seeder.
+
+### Per-project capability
+
+The eager git hook is unavailable on husky projects. Husky v9 sets `core.hooksPath=.husky/_` and `.husky/_` (the dispatch directory) is gitignored — it never materializes in a worktree. Any `post-checkout` placed in the dispatch dir is dead. This is the same bug class as the inheritance symlinks themselves, verified on neev.
+
+| Project type | Eager hook | `trellis worktree add` | Raw `git worktree add` → first session |
+|---|---|---|---|
+| native-`.githooks` (lume, clusterbid-console) | ✓ correct | ✓ correct | **first-session-correct** |
+| husky (neev, tgsc, akaushik.org, curat.money, vericite) | ✗ dead | ✓ correct | unparented → SessionStart warns + seeds-for-next → restart |
+
+No project ever fails silently. The silent-drop invariant that governs rules and skills symlinks throughout this document holds for worktrees too — but only because the seeder + triggers make silence structurally impossible.

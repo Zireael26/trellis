@@ -65,6 +65,7 @@ SYNC_PATHS=(
   "core-rules/deferred.md"
   "core-rules/hooks/"
   "core-rules/husky/"
+  "core-rules/githooks/"
   "core-rules/skills/"
   "core-rules/commands/"
   "core-rules/templates/"

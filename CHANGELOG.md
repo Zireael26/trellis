@@ -6,6 +6,23 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v0.8.0] — 2026-06-02
+
+**Worktree inheritance seeding — `git worktree add` silently loses all Trellis inheritance (parent rules, 7 skills, 5 commands, presets, `.agents` mirror) because gitignored symlinks are never recreated in a new worktree; this release adds a four-trigger seeder that mirrors the main checkout's inheritance symlinks into every linked worktree, ensuring no project ever fails silently.** ADR: `docs/adr/2026-06-02-worktree-inheritance.md`.
+
+### Added
+
+- **`scripts/seed-inheritance-symlinks.sh`** — idempotent core seeder. Enumerates the inheritance symlinks already present in the project's main checkout (the symlinks `onboard-project.sh` created) and recreates each at the same relative path with the same target in the target worktree. Mirrors rather than re-derives the list, so it owns no symlink inventory and cannot drift from onboard; new skills, presets, and `.agents` entries are covered automatically with no seeder change. Interface: `[--target <dir>] [--root <dir>] [--quiet] [--verify-only]`; exit `0` all present/created, `1` missing (verify-only) or hard error; never aborts its caller for a single bad symlink. Root resolved from the main checkout's `.claude/rules/trellis.md` symlink target — machine-local, teammate-safe on every clone.
+- **`core-rules/githooks/post-checkout`** — eager post-checkout hook (thin, harness-agnostic). Fires on `git worktree add` (and branch switches, where seeding is idempotent + cheap): detects a linked worktree via `git rev-parse --git-common-dir` vs `--git-dir`; seeds only in a linked worktree; always `exit 0` so seeding failure never aborts the worktree creation. Installed only on projects whose `core.hooksPath` points at a **tracked** directory — native-`.githooks` projects (lume, clusterbid-console) and plain-git. **Not installed on husky projects**: husky v9 sets `core.hooksPath=.husky/_` and `.husky/_/.gitignore` is `*` (husky-generated), so `.husky/_` never materializes in a linked worktree — any hook placed there is dead (verified live on neev). `onboard-project.sh` gains one additive step: installs the hook for native-hooks projects; the symlink phase is untouched.
+- **`scripts/worktree.sh` + `trellis worktree` subcommand** — the universal eager front door, stack-independent. `trellis worktree add <path> [git-args...]` runs `git worktree add` then calls the seeder on the new path; `trellis worktree sync [<path>]` re-seeds an existing worktree (default `$PWD`). Works on every project, including husky projects where the eager git hook is dead. Discoverable via `trellis help`.
+- **`scripts/lib/health-checks.sh` `hc_worktree_inheritance`** — new Tier-1 doctor check. Enumerates `git worktree list` for the current repo; for each linked worktree runs the seeder in `--verify-only` mode and reports any missing core inheritance symlinks. `doctor --fix` (gated by the existing Tier-0 canonical-on-main guard) runs the seeder on each offending worktree.
+- **SessionStart worktree safety-net** — when `session-context.sh` detects it is running inside a linked worktree with missing inheritance symlinks: (1) runs the seeder (repairs for the *next* session — skills are enumerated at process init before SessionStart hook filesystem changes land, so the current session cannot be healed, verified); (2) emits a loud `additionalContext` warning naming the gap and instructing the operator to restart. Converts the silent-drop failure mode into a visible, self-repairing event for any worktree born without the eager hook (e.g. a husky project on raw `git worktree add`, or a pre-ship clone).
+
+### Changed
+
+- **`core-rules/hooks/session-context.sh`** (+ codex mirror `core-rules/codex/hooks/session-context.sh`) — gained the worktree detect/seed call: at session start, checks whether cwd is a linked worktree and if so runs `seed-inheritance-symlinks.sh --verify-only`; on failure, runs the seeder and emits the loud restart warning. Guard is a no-op outside of linked worktrees and in fully-seeded worktrees.
+- **`scripts/onboard-project.sh`** — one additive step: after the symlink phase (untouched), installs `core-rules/githooks/post-checkout` into the project's hook home when the hook home is a tracked directory (native-hooks projects only); husky and plain-git detection logic selects the correct install path or skips as described above.
+
 ## [v0.7.2] — 2026-05-31
 
 **Settings-wiring doctor check tolerates project extensions.** `trellis doctor`'s per-project settings check no longer false-positives on projects that legitimately extend their `.claude/settings.json`.

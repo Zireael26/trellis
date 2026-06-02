@@ -436,6 +436,7 @@ PLAN_HOOKS_CLAUDE=0
 PLAN_HOOKS_CODEX=0
 PLAN_MANUAL=""
 PLAN_INFO=""
+PLAN_SEED_WORKTREES=""
 
 # plan_add_rm <abs-path> — queue a known-bad symlink for rm (deduped).
 plan_add_rm() {
@@ -483,6 +484,7 @@ run_project_checks() {
   PLAN_HOOKS_CODEX=0
   PLAN_MANUAL=""
   PLAN_INFO=""
+  PLAN_SEED_WORKTREES=""
 
   # --- rules symlink (ERROR class) ---
   if emit "  " hc_rules_symlink "$proj" "$CANON"; then :; else
@@ -609,6 +611,24 @@ run_project_checks() {
     fi
   fi
 
+  # --- worktree inheritance (WARN) — [auto]-fixable via seed-inheritance-symlinks.sh ---
+  if emit "  " hc_worktree_inheritance "$proj" "$CANON"; then :; else
+    # Re-enumerate offenders here (same data hc_worktree_inheritance used) so
+    # the plan lists only the actually-broken worktrees rather than all of them.
+    local wt_offenders wt_path
+    wt_offenders="$(hc_worktree_offenders "$proj" "$CANON")"
+    if [ -n "$wt_offenders" ]; then
+      add_hint "$name: linked worktree(s) missing inheritance symlinks — run: scripts/seed-inheritance-symlinks.sh --target <wt>"
+      while IFS= read -r wt_path; do
+        [ -n "$wt_path" ] || continue
+        plan_add PLAN_SEED_WORKTREES "$wt_path"
+        plan_add PLAN_AUTO "seed inheritance symlinks into worktree: $wt_path"
+      done <<EOF
+$wt_offenders
+EOF
+    fi
+  fi
+
   # --- version-pin lag (INFO) — report-only, never auto-applied ---
   if emit "  " hc_version_pin_lag "$proj" "$CANON"; then :; else
     rc=$?
@@ -670,8 +690,20 @@ EOF
 $PLAN_INFO
 EOF
   fi
+  if [ -n "$PLAN_SEED_WORKTREES" ]; then
+    if [ "$TIER0_ERROR" -eq 1 ]; then
+      echo "  [auto] SKIPPED — Tier-0 ERROR stands; --fix will not seed worktrees against an off-main/dirty canonical."
+    else
+      while IFS= read -r line; do
+        [ -n "$line" ] && echo "  [auto] scripts/seed-inheritance-symlinks.sh --target \"$line\""
+      done <<EOF
+$PLAN_SEED_WORKTREES
+EOF
+    fi
+  fi
   if [ "$PLAN_NEEDS_ONBOARD" -eq 0 ] && [ "$PLAN_HOOKS_CLAUDE" -eq 0 ] && \
-     [ "$PLAN_HOOKS_CODEX" -eq 0 ] && [ -z "$PLAN_MANUAL" ] && [ -z "$PLAN_INFO" ]; then
+     [ "$PLAN_HOOKS_CODEX" -eq 0 ] && [ -z "$PLAN_MANUAL" ] && [ -z "$PLAN_INFO" ] && \
+     [ -z "$PLAN_SEED_WORKTREES" ]; then
     echo "  (nothing to do — healthy)"
   fi
 }
@@ -756,6 +788,25 @@ apply_project_fix() {
       fi
     else
       echo "  [hooks] Codex hook drift — skipped (run with --fix-hooks)."
+    fi
+  fi
+
+  # [seed-worktrees] — Tier-0 gated, [auto] repair via seed-inheritance-symlinks.sh.
+  if [ -n "$PLAN_SEED_WORKTREES" ]; then
+    if [ "$TIER0_ERROR" -eq 1 ]; then
+      echo "  [auto] SKIPPED — Tier-0 ERROR stands; not seeding worktrees against an off-main/dirty canonical. Clear Tier-0 first."
+    else
+      local wt_path
+      while IFS= read -r wt_path; do
+        [ -n "$wt_path" ] || continue
+        echo "  [auto] scripts/seed-inheritance-symlinks.sh --target \"$wt_path\""
+        if run_cmd "seed worktree $wt_path" \
+              bash "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$wt_path" --quiet; then
+          echo "  [auto] worktree seeded: $wt_path"
+        fi
+      done <<EOF
+$PLAN_SEED_WORKTREES
+EOF
     fi
   fi
 
