@@ -22,6 +22,8 @@ SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/config-load.sh"
 # shellcheck source=lib/sed-portable.sh
 . "$SCRIPT_DIR/lib/sed-portable.sh"
+# shellcheck source=lib/sync-coverage.sh
+. "$SCRIPT_DIR/lib/sync-coverage.sh"
 
 # --- Args ------------------------------------------------------------------
 APPLY=false
@@ -95,9 +97,40 @@ NEVER_SYNC=(
   "audits/"
 )
 
+# core-rules/ subdirs deliberately kept instance-private — the explicit
+# "do not publish" register that the sync-coverage pre-flight checks against.
+# Each bare basename here is a core-rules/<name>/ subdir that must NEVER reach
+# the public template. Document WHY for every entry:
+#   evals — per-project eval suites; subdirs are named after registered
+#           private projects (akaushik.org, curat.money, lume, neev, tgsc,
+#           vericite). Instance-private, intentionally never published.
+# shellcheck disable=SC2034  # consumed via "${CORE_RULES_NO_SYNC[@]}" below
+CORE_RULES_NO_SYNC=(
+  "evals"
+)
+
 # Placeholder substitutions: live values → template placeholders
 declare -a SUB_FROM=("$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME" "$MAINTAINER_NAME" "$GITHUB_USER")
 declare -a SUB_TO=("__TRELLIS_PATH__" "__TRELLIS_PATH__" "__PROJECTS_ROOT__" "__USER_HOME__" "__MAINTAINER_NAME__" "__GITHUB_USER__")
+
+# --- Pre-flight: core-rules/ sync coverage ---------------------------------
+# Fail closed if any core-rules/<name>/ subdir is neither published
+# (SYNC_PATHS) nor explicitly kept private (CORE_RULES_NO_SYNC). Runs in ALL
+# modes (including the default dry-run) so the gap is caught before any work.
+# The helper returns 1 by design when uncovered subdirs exist; `|| true` keeps
+# pipefail from killing the script before we can print the actionable message.
+echo "==> Checking core-rules/ sync coverage"
+uncovered="$(check_core_rules_coverage "$SOURCE_ROOT" \
+  "$(printf '%s\n' "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}")" \
+  "$(printf '%s\n' "${CORE_RULES_NO_SYNC[@]+"${CORE_RULES_NO_SYNC[@]}"}")" )" || true
+if [ -n "$uncovered" ]; then
+  echo "  ERROR: core-rules/ subdir(s) neither in SYNC_PATHS nor CORE_RULES_NO_SYNC:" >&2
+  printf '%s\n' "$uncovered" | sed 's|^|    |' >&2
+  echo "  Decide for each: add to SYNC_PATHS (publish to the template) or to CORE_RULES_NO_SYNC (keep instance-private)." >&2
+  echo "  This guard prevents the PR #78 class of silent omission. Aborting." >&2
+  exit 1
+fi
+echo "  all core-rules/ subdirs classified."
 
 # --- Workspace -------------------------------------------------------------
 TMP_STAGE="$(mktemp -d)"

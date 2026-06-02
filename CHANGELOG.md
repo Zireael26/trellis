@@ -6,6 +6,10 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+### Added
+
+- **Fail-closed `core-rules/` sync-coverage pre-flight** — `scripts/sync-to-template.sh` now aborts before staging if any `core-rules/<name>/` subdir is neither published (listed in `SYNC_PATHS`) nor explicitly kept private (listed in the new `CORE_RULES_NO_SYNC` register). SYNC_PATHS is a positive allowlist with no completeness check, so a newly-added subdir could be silently dropped from the public template — the exact failure that bit PR #78 (`core-rules/githooks/` missing, mirror lacked the new git hook). The check runs in every mode including dry-run, names each unclassified subdir with an actionable message, and is covered by `scripts/tests/sync-coverage.bats`. Logic lives in the pure, sourceable `scripts/lib/sync-coverage.sh`.
+
 ## [v0.8.0] — 2026-06-02
 
 **Worktree inheritance seeding — `git worktree add` silently loses all Trellis inheritance (parent rules, 7 skills, 5 commands, presets, `.agents` mirror) because gitignored symlinks are never recreated in a new worktree; this release adds a four-trigger seeder that mirrors the main checkout's inheritance symlinks into every linked worktree, ensuring no project ever fails silently.** ADR: `docs/adr/2026-06-02-worktree-inheritance.md`.
