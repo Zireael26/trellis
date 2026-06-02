@@ -636,3 +636,70 @@ hc_version_pin_lag() {
   echo "version: pin ($pin) lags canonical ($canon_ver) — pinned features trail"
   return "$HC_INFO"
 }
+
+# Canonical one-line fix for an unscoped Turbo `.next/**` outputs glob. SINGLE
+# SOURCE OF TRUTH for the hint string — disk-janitor-lib.sh's dj_turbo_fix_hint
+# echoes the SAME text; keep the two byte-identical. The fleet incident (148 GB
+# in 2 days, 2026-06-02) was an unscoped `.next/**` that tarred `.next/cache/`
+# (Next's incremental cache) + `.next/dev/` into every Turbo cache entry. The
+# fix scopes the glob with both negations.
+hc_turbo_fix_hint() {
+  printf '%s' 'in turbo.json, add "!.next/cache/**" and "!.next/dev/**" after ".next/**" in the task'"'"'s outputs (e.g. ["...", ".next/**", "!.next/cache/**", "!.next/dev/**"]) — keeps Next'"'"'s incremental + dev caches out of the Turbo cache'
+}
+
+# hc_turbo_outputs <project>
+# RECURRENCE GUARD for the fleet-wide build-cache blowup (disk-janitor feature,
+# finding #2). WARN if the project's turbo.json has any task whose `outputs[]`
+# carries a `.next/**`-class glob WITHOUT a matching `!.next/cache/**` negation —
+# the exact misconfiguration that let Next's cache get tarred into every Turbo
+# cache entry. Inspects both turbo v2 (`.tasks`) and v1 (`.pipeline`) shapes.
+#   - no turbo.json / jq unavailable / already-scoped / no .next glob -> OK
+#   - any task with an unscoped .next/** outputs glob               -> WARN + fix
+# REPORT-ONLY: turbo.json is a user-owned project file — doctor NEVER auto-edits
+# it (same policy as the CLAUDE.md @-import). doctor.sh must NOT add a --fix
+# action for this check; it only prints the one-line fix as a suggested action.
+#
+# Self-contained: the jq predicate below is DUPLICATED from
+# disk-janitor-lib.sh's dj_turbo_outputs_unscoped (deliberate — health-checks.sh
+# must not take a runtime source dependency on disk-janitor-lib.sh). The
+# fix-hint string is shared via hc_turbo_fix_hint above.
+hc_turbo_outputs() {
+  local proj="$1"
+  local turbo="$proj/turbo.json"
+  if [ ! -f "$turbo" ]; then
+    echo "turbo-outputs: no turbo.json — recurrence check skipped"
+    return "$HC_OK"
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "turbo-outputs: jq unavailable — recurrence check skipped"
+    return "$HC_OK"
+  fi
+  # A task is "unscoped" iff its outputs contain a positive `.next/**`-class glob
+  # (a string with `.next/` AND `**`, not starting with `!`) but NO `!.next/cache`
+  # negation. Probe v2 `.tasks` and v1 `.pipeline`; emit "unscoped" if any match.
+  local verdict
+  verdict="$(jq -r '
+    ((.tasks // {}) + (.pipeline // {}))
+    | to_entries
+    | map(
+        (.value.outputs // []) as $o
+        | (($o | map(select(type == "string"
+              and (startswith("!") | not)
+              and (contains(".next/"))
+              and (contains("**"))
+            )) | length) > 0) as $has_next
+        | (($o | map(select(type == "string"
+              and startswith("!")
+              and (contains(".next/cache"))
+            )) | length) > 0) as $has_neg
+        | ($has_next and ($has_neg | not))
+      )
+    | if any(.) then "unscoped" else "scoped" end
+  ' "$turbo" 2>/dev/null)" || verdict=""
+  if [ "$verdict" = "unscoped" ]; then
+    echo "turbo-outputs: turbo.json has an unscoped .next/** outputs glob (Next caches get tarred into the Turbo cache) — fix: $(hc_turbo_fix_hint)"
+    return "$HC_WARN"
+  fi
+  echo "turbo-outputs: turbo.json outputs are scoped (no unscoped .next/** glob)"
+  return "$HC_OK"
+}

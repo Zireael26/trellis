@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Trellis disk-janitor LaunchAgent template.
+
+  This file is a TEMPLATE. The placeholder tokens (the trellis root, the user
+  home, and PATH) are substituted with absolute values at install time by
+  scripts/install-disk-janitor-launchd.sh, which renders a copy into
+  ~/Library/LaunchAgents/. Do not load this file directly — the unrendered
+  tokens are not valid paths.
+
+  Behaviour: runs `trellis disk-janitor --report` once a day at an off-peak
+  hour. Report-only — the agent NEVER runs --apply and never deletes anything.
+  RunAtLoad is false so installing/loading the agent does not trigger a scan;
+  the first run is at the next scheduled interval.
+
+  PATH is baked in at install time from the installing shell's environment so
+  that jq / git / gh / du / find (often under Homebrew) resolve — launchd's
+  default PATH (/usr/bin:/bin:/usr/sbin:/sbin) does not include them.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.trellis.disk-janitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TRELLIS_ROOT__/scripts/trellis</string>
+        <string>disk-janitor</string>
+        <string>--report</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__USER_HOME__/Library/Logs/org.trellis.disk-janitor.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__USER_HOME__/Library/Logs/org.trellis.disk-janitor.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

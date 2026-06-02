@@ -797,6 +797,18 @@ Trellis hooks (`pre-push`, `stop-verify`, the process-gate) shell out to `node` 
 
 **Doctor check.** `scripts/doctor.sh` has a `== Tooling baseline ==` section: it flags any tool present interactively but missing in a non-login shell (the regression signature above), and any registered project whose `.nvmrc` major diverges from the running Node. Both are WARN-only (dev-env hygiene, never gates inheritance). Run `scripts/doctor.sh` after touching node/nvm/PATH.
 
+### 13.5 Disk maintenance
+
+Build caches, stale `git worktree` checkouts, and package stores accumulate silently across the fleet. The triggering incident: a single unscoped `turbo.json` `outputs` glob (a `.next` entry without the `cache`/`dev` negations) made turbo re-archive the whole `.next` tree on every run, reaching 148 GB on one machine over two days before the disk filled. Disk reclamation is a **host** operation — the scheduled-task sandbox cannot see the real host footprint, so this lives in a CLI, not an audit.
+
+`trellis disk-janitor` (`scripts/disk-janitor.sh`) scans the active fleet across three scopes — build caches, stale worktrees, package stores — and is **report-first, never auto-delete**. The flow is `--report` → `--dry-run` → `--apply`:
+
+- **`--report`** (default) prints a fleet disk summary and writes `audits/YYYY-MM-DD-disk-janitor.md`, including a tripwire (free space vs floor, largest cache vs ceiling) and a recurrence pre-pass flagging any unscoped-`turbo.json` landmine.
+- **`--dry-run`** prints the exact deletion plan — per row the human-readable bytes and why it is safe to delete; worktrees show their four-gate verdict — and mutates nothing.
+- **`--apply`** prints the plan, then confirms **per category** (a mandatory `y/N` unless `--yes`) before deleting. A worktree is reaped only when all four gates hold: non-main, older than the stale threshold, working tree clean, and verified-merged (merge detection avoids `git branch --merged`, which is blind to squash-merge history). An unverified merge is reported as a candidate and never reaped.
+
+A **daily launchd report agent** (`core-rules/templates/org.trellis.disk-janitor.plist`, installed by `scripts/install-disk-janitor-launchd.sh`) runs `trellis disk-janitor --report` off-peak — **report-only; it never runs `--apply`** — so the next runaway cache surfaces as a daily `audits/` line, not a full disk. The recurrence tripwire is also wired into `trellis doctor` as the report-only `hc_turbo_outputs` check in `scripts/lib/health-checks.sh` (it warns and prints the fix; it does not auto-edit the user-owned `turbo.json`). Config lives under the optional `disk_janitor` object in `trellis.config.json` (TTLs, stale-days, the free-space floor and cache ceiling, `skip_projects`); a clone with no block runs on defaults. Rationale and rejected alternatives: `docs/adr/2026-06-02-disk-janitor.md`.
+
 ---
 
 ## 14. Evolving Trellis

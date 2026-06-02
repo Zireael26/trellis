@@ -120,6 +120,46 @@
     "package_manager": {
       "description": "Optional. Default JS package manager for hooks and gates that run project scripts (pre-push, stop-verify, process-gate). 'auto' (the default when unset) = detect from lockfile: pnpm-lock.yaml→pnpm, bun.lock(b)→bun, yarn.lock→yarn, package-lock.json→npm. An explicit value (pnpm|npm|bun|yarn) forces that manager regardless of lockfile. Project-local <project>/.trellis.config.json may override with its own 'package_manager'. With the key unset, resolution is byte-identical to pre-config Trellis (pure lockfile detection) — this key is purely additive.",
       "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
+    },
+    "disk_janitor": {
+      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []). Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch for the disk-janitor scans. Default true.",
+          "type": "boolean"
+        },
+        "cache_ttl_days": {
+          "description": "A build-cache directory is a prune candidate only when its mtime is older than this many days. Default 14.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "worktree_stale_days": {
+          "description": "A worktree is a reap candidate only when its last commit is older than this many days (one of four gates). Default 30.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "free_space_floor_gb": {
+          "description": "Tripwire: report flags low disk when free space on the projects volume drops below this many GB. Default 30.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_ceiling_gb": {
+          "description": "Tripwire: report flags a runaway cache when the largest single build cache exceeds this many GB. Default 20.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "skip_projects": {
+          "description": "Registry project names the janitor never scans or touches, on top of blacklist.md. Default [].",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

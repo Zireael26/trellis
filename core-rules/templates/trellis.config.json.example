@@ -27,5 +27,15 @@
     { "name": "scheduled-tasks", "purpose": "Trellis weekly + quarterly audits", "scope": "fleet" },
     { "name": "computer-use", "purpose": "Native-app screenshots + UI control for ui-verify fallback", "scope": "fleet" },
     { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
-  ]
+  ],
+
+  "comment_disk_janitor": "Optional. Tuning for `trellis disk-janitor`. The whole object is optional and every key inside it is optional — omit any key (or the whole block) to take the default shown below. The janitor never auto-deletes; the launchd agent runs `--report` only.",
+  "disk_janitor": {
+    "enabled": true,
+    "cache_ttl_days": 14,
+    "worktree_stale_days": 30,
+    "free_space_floor_gb": 30,
+    "cache_ceiling_gb": 20,
+    "skip_projects": []
+  }
 }

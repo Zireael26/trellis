@@ -638,6 +638,15 @@ EOF
     fi
   fi
 
+  # --- turbo outputs recurrence guard (WARN) — REPORT-ONLY, never auto-fixed ---
+  # turbo.json is a user-owned project file: doctor NEVER auto-edits it (same
+  # policy as the @-import). So this WARN queues a suggested-action hint ONLY and
+  # touches NO PLAN_* accumulator — it deliberately stays out of the --fix
+  # machinery. The operator applies the one-line glob per repo and commits it.
+  if emit "  " hc_turbo_outputs "$proj"; then :; else
+    add_hint "$name: turbo.json has an unscoped .next/** outputs glob (Next caches get tarred into the Turbo cache, the disk-blowup recurrence) — ${proj}/turbo.json: $(hc_turbo_fix_hint)"
+  fi
+
   return 0
 }
 
