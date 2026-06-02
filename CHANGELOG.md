@@ -206,7 +206,7 @@ Autonomy slider — L1–L5 responsibility-slider that controls *who answers* Tr
 - **`core-rules/skills/process-gate/SKILL.md`** — code-review subagent prompt at L4/L5 gains a decision-log-completeness clause: implicit decisions present in the diff but missing from the log are flagged as findings. Incomplete logs are no longer free.
 - **`scheduled-tasks/autonomy-drift/`** — new weekly audit (Mon 11:30, ahead of preset-drift at 12:00). Flags silent L4/L5 (decisions missing on edit-heavy weeks), chronic override (config probably under-set), ceiling friction (repeated clamp events), schema issues. Read-only; remediation through config edits.
 - **`scripts/show-config.sh`** — pretty-prints resolved autonomy level (after fleet + project + session + clamp), active presets with their ceilings/defaults, approved_mcps list. Discoverability without a UI; the deferred UI/TUI work is parked.
-- **ADR** at `docs/adr/2026-05-20-autonomy-slider.md`; design spec at `docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md`; implementation plan at `docs/superpowers/plans/2026-05-20-trellis-autonomy.md`.
+- **ADR** at `docs/adr/2026-05-20-autonomy-slider.md`; design spec at `docs/specs/2026-05-20-trellis-autonomy-design.md`; implementation plan at `docs/plans/2026-05-20-trellis-autonomy.md`.
 - **`engineering-process.md` §14.8** — narrative for the autonomy slider (why it exists, layers, guardrails, decision log, audit, references).
 
 ### Changed

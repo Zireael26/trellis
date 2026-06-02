@@ -155,5 +155,5 @@ dispatch layer fails on the five husky projects in the fleet.
 - Doctor check: `scripts/lib/health-checks.sh` `hc_worktree_inheritance`.
 - Safety-net hooks: `core-rules/hooks/session-context.sh`, `core-rules/codex/hooks/session-context.sh`.
 - Invariants: `core-rules/inheritance.md` (new "Worktree inheritance" section).
-- Design spec (full verified findings + algorithm): `docs/superpowers/specs/2026-06-02-worktree-inheritance-design.md`.
+- Design spec (full verified findings + algorithm): `docs/specs/2026-06-02-worktree-inheritance-design.md`.
 - Prior doctor ADR: `docs/adr/2026-05-30-trellis-doctor.md`.

@@ -52,6 +52,6 @@ Config layering:
 
 ## References
 
-- Spec: `docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md`.
-- Plan: `docs/superpowers/plans/2026-05-20-trellis-autonomy.md`.
+- Spec: `docs/specs/2026-05-20-trellis-autonomy-design.md`.
+- Plan: `docs/plans/2026-05-20-trellis-autonomy.md`.
 - Related: `core-rules/presets/README.md` (preset model).

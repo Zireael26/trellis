@@ -999,7 +999,7 @@ Trellis ships an L1–L5 **responsibility slider** that determines who answers t
 
 **Audit.** `scheduled-tasks/autonomy-drift/` runs weekly. Flags silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), schema issues.
 
-Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/2026-05-20-autonomy-slider.md`. Spec: `docs/superpowers/specs/2026-05-20-trellis-autonomy-design.md`.
+Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/2026-05-20-autonomy-slider.md`. Spec: `docs/specs/2026-05-20-trellis-autonomy-design.md`.
 
 ---
 
