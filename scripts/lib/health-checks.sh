@@ -703,3 +703,152 @@ hc_turbo_outputs() {
   echo "turbo-outputs: turbo.json outputs are scoped (no unscoped .next/** glob)"
   return "$HC_OK"
 }
+
+# ===========================================================================
+# PROCESS-ENFORCEMENT PLACEHOLDERS (design 2026-06-02 §3 Phase 0).
+# Registered (defined in the standard hc_* form) so doctor wiring can land
+# incrementally without a later >7-file phase. Each is a no-op that returns
+# HC_OK (pass/skip cleanly) until the owning phase fills it in. They are NOT
+# yet wired into scripts/doctor.sh — Phase 8a wires them into the run order —
+# so they do not change doctor's verdict while stubbed. Intended signatures are
+# documented in each header so the filling phase knows the expected arguments.
+# Bodies take no arguments to stay shellcheck-clean (no unused-var SC2034).
+# ===========================================================================
+
+# hc_reviewer_resolvable <project> <canonical>
+# STATIC (DL-P8a-01/02): NEVER invokes the reviewer — doctor runs this across
+# every registered project as a read-only sweep, so executing the rung-2
+# `claude -p` would spawn N side-effecting LLM calls. The 3-rung ladder's rung 3
+# (deterministic regex) ALWAYS resolves, so "no reviewer at any rung" is
+# structurally impossible. The meaningful inheritance-health condition is a
+# review hook wired with a MISSING sibling lib: the wired hook then can't source
+# the ladder and the review silently fails open. So WARN ONLY when the review
+# hook IS present AND lib/code-reviewer.sh is absent; a project that legitimately
+# runs no review (no review hook) is OK with no warning (no manufactured noise).
+# The <canonical> arg ($2) is part of the standard signature but unused here.
+hc_reviewer_resolvable() {
+  local proj="$1"
+  local hook="$proj/.claude/hooks/code-review-subagent.sh"
+  local lib="$proj/.claude/hooks/lib/code-reviewer.sh"
+  if [ ! -f "$hook" ]; then
+    echo "reviewer-resolvable: no review hook wired — project runs no code-review (OK)"
+    return "$HC_OK"
+  fi
+  if [ ! -f "$lib" ]; then
+    echo "reviewer-resolvable: code-review hook wired but lib/code-reviewer.sh MISSING — review silently fails open (re-seed hooks)"
+    return "$HC_WARN"
+  fi
+  echo "reviewer-resolvable: review hook + reviewer lib both present"
+  return "$HC_OK"
+}
+
+# hc_ui_screenshot_path <project> <canonical>
+# STATIC (DL-P8a-01/03): NEVER runs a screenshot tool. UI project = the project
+# tracks at least one file whose final path segment ends in a UI extension
+# (.tsx/.jsx/.vue/.svelte/.html/.css — matching ui-verify-core's UI_REGEX),
+# enumerated via `git ls-files` (doctor runs outside a turn, so it keys off
+# TRACKED files, never "changed files"). "No resolvable screenshot path" =
+# UI_SHOT_CMD is empty AND playwright is not on PATH. UI project AND no
+# resolvable tool -> WARN with a remediation hint. Otherwise OK. The <canonical>
+# arg ($2) is part of the standard signature but unused here.
+hc_ui_screenshot_path() {
+  local proj="$1"
+  local ui_count
+  # pipefail-safe: `grep -c` reads all input (no SIGPIPE on grep short-circuit)
+  # and `|| true` swallows grep's exit-1-on-no-match. Each ls-files line is one
+  # path, so the `$`-anchored extension test matches the final path segment.
+  ui_count="$(git -C "$proj" ls-files 2>/dev/null \
+    | grep -ciE '\.(tsx|jsx|vue|svelte|html|css)$' || true)"
+  if [ "${ui_count:-0}" -le 0 ]; then
+    echo "ui-screenshot-path: no tracked UI source files — not a UI project (OK)"
+    return "$HC_OK"
+  fi
+  if [ -n "${UI_SHOT_CMD:-}" ] || command -v playwright >/dev/null 2>&1; then
+    echo "ui-screenshot-path: UI project with a resolvable screenshot tool"
+    return "$HC_OK"
+  fi
+  echo "ui-screenshot-path: UI project but no screenshot tool resolves — configure UI_SHOT_CMD or install playwright (ui-verify can't capture)"
+  return "$HC_WARN"
+}
+
+# hc_prepush_wired_runall <project> <canonical>
+# STATIC (DL-P8a-01/04): NEVER executes the hook — running pre-push runs the
+# WHOLE merge gate incl. tests. Resolves the ACTIVE pre-push the way git itself
+# does, honoring core.hooksPath (mirrors resolve_prepush_target() in
+# lib/prepush-target.sh) so native-git-hooks projects (core.hooksPath=.githooks,
+# e.g. lume / clusterbid-console) are inspected at .githooks/pre-push instead of
+# being falsely WARNed:
+#   hp = git config --local core.hooksPath
+#   hp empty   -> .git/hooks/pre-push, BUT husky-classic also keeps the real gate
+#                 body at .husky/pre-push, so a .husky/pre-push is honored too.
+#   hp=.husky/_ (husky v9) -> the real gate body is .husky/pre-push.
+#   hp other   -> (hp absolute ? hp : <worktree>/hp)/pre-push.
+# Whichever ACTIVE hook exists is grep'd for the literal substring `run-all.sh`
+# (accepting either a .claude/ or .agents/ path): found -> OK; present but not
+# wired -> WARN (bypassed); none exists -> WARN (unwired). A stale .git/hooks or
+# inactive .husky hook is NOT consulted unless it is the one git would run, so
+# the check cannot report a false positive. The <canonical> arg ($2) is part of
+# the standard signature but unused.
+hc_prepush_wired_runall() {
+  local proj="$1"
+  local husky="$proj/.husky/pre-push"
+  # Plain `git config` honors git's effective precedence (a local value already
+  # wins over a global one), so this matches the hook git actually runs and the
+  # canonical resolver in lib/prepush-target.sh; `|| true` keeps set -e/-u quiet
+  # when $proj is not a git repo.
+  local hp
+  hp="$(git -C "$proj" config core.hooksPath 2>/dev/null || true)"
+
+  local hook=""
+  if [ -z "$hp" ]; then
+    # No hooksPath: git runs .git/hooks/pre-push. Husky-classic keeps the real
+    # gate body at .husky/pre-push, so honor that first when it exists.
+    if [ -f "$husky" ]; then
+      hook="$husky"
+    elif [ -f "$proj/.git/hooks/pre-push" ]; then
+      hook="$proj/.git/hooks/pre-push"
+    fi
+  elif [ "$hp" = ".husky/_" ]; then
+    # husky v9 wrapper dir: the real gate body lives at .husky/pre-push.
+    [ -f "$husky" ] && hook="$husky"
+  else
+    # Native hooks dir. A relative hooksPath is resolved against the worktree
+    # root (git's own interpretation; falls back to $proj if rev-parse fails).
+    local abs_hooks toplevel
+    case "$hp" in
+      /*) abs_hooks="$hp" ;;
+      *)
+        toplevel="$(git -C "$proj" rev-parse --show-toplevel 2>/dev/null || true)"
+        abs_hooks="${toplevel:-$proj}/$hp"
+        ;;
+    esac
+    [ -f "$abs_hooks/pre-push" ] && hook="$abs_hooks/pre-push"
+  fi
+
+  if [ -z "$hook" ]; then
+    echo "prepush-wired-runall: no pre-push hook — merge gate not wired (install process-gate's pre-push)"
+    return "$HC_WARN"
+  fi
+  # -F: literal substring (the `.` in run-all.sh must not act as a wildcard).
+  if grep -qF 'run-all.sh' "$hook" 2>/dev/null; then
+    echo "prepush-wired-runall: pre-push references process-gate run-all.sh"
+    return "$HC_OK"
+  fi
+  echo "prepush-wired-runall: pre-push present but not wired to run-all.sh — merge gate bypassed (re-seed the canonical pre-push)"
+  return "$HC_WARN"
+}
+
+# hc_receipt_grammar_present <canonical>
+# STATIC (DL-P8a-01/05): SINGLE-ARG canonical-side check (Tier-0). Greps the
+# canonical core-rules/CLAUDE.md for the literal `dod-receipt` grammar anchor.
+# Present -> OK; absent (or file missing) -> WARN.
+hc_receipt_grammar_present() {
+  local canon="$1"
+  local claudemd="$canon/core-rules/CLAUDE.md"
+  if [ -f "$claudemd" ] && grep -qF 'dod-receipt' "$claudemd" 2>/dev/null; then
+    echo "receipt-grammar-present: dod-receipt grammar present in core-rules/CLAUDE.md"
+    return "$HC_OK"
+  fi
+  echo "receipt-grammar-present: dod-receipt grammar MISSING from core-rules/CLAUDE.md — execute receipts have no canonical contract"
+  return "$HC_WARN"
+}

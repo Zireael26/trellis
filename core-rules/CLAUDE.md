@@ -40,7 +40,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 
 ## Definition of done
 
-- Receipts required. When declaring done, include the verification command you ran, its exit code, and the diff lines that prove the change. "It works" without receipts is not done.
+- Receipts required. When declaring done, include the verification command you ran, its exit code, and the diff lines that prove the change. "It works" without receipts is not done. The canonical machine-readable form is the marker `<!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->`: Stop hooks check it and the `execute` skill emits it. It maps 1:1 to this prose — `cmd`→verification command, `exit`→exit code, `diff`→diff lines.
 - Open todos mean not done. If `TodoWrite` has `in_progress` or `pending` items, complete them, defer with a reason, or abandon with a reason. The Stop hook enforces this.
 - On edit-heavy turns a code-review subagent runs against the diff. Resolve findings or explicitly acknowledge and defer them. You do not self-mark your own homework.
 - For UI-visible changes, verify visually: run the dev server, take a computer-use screenshot (fallback: headless Playwright), attach it. Logically verified is not visually verified.

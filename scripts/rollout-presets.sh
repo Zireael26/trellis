@@ -96,7 +96,7 @@ while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done <
 
 is_blacklisted() {
   local n="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do [ "$b" = "$n" ] && return 0; done
   return 1
 }

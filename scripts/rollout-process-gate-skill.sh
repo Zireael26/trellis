@@ -94,7 +94,7 @@ while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done <
 
 is_blacklisted() {
   local n="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do [ "$b" = "$n" ] && return 0; done
   return 1
 }
@@ -289,7 +289,7 @@ done
 echo "== done =="
 echo
 
-if [ "${#SEEDED_LOCAL_CONFIGS[@]:-0}" -gt 0 ]; then
+if [ "${#SEEDED_LOCAL_CONFIGS[@]}" -gt 0 ]; then
   echo "!! Newly seeded local.config.sh files in this run:" >&2
   for c in "${SEEDED_LOCAL_CONFIGS[@]}"; do echo "   - $c" >&2; done
   echo "   These contain DEFAULT skeleton values. Before committing:" >&2

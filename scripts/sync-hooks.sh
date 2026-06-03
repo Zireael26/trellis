@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
-# Sync canonical hook scripts to all registered projects.
+# Sync canonical hook scripts to all registered projects, AND reconcile each
+# project's .claude/settings.json .hooks wiring with the canonical baseline.
 #
 # Reads trellis.config.json for paths.
 # Reads registry.md for the project list (rows in "Active projects" table).
 # Skips blacklisted projects.
 #
+# Two things happen per project:
+#   1. Hook FILE copies — every canonical .sh under core-rules/hooks/ (and its
+#      lib/ siblings) is sha-compared and overwritten if stale.
+#   2. settings.json .hooks RECONCILE — the project's .hooks object is rebuilt
+#      from the canonical .hooks baseline (core-rules/templates/claude-settings
+#      .json) PLUS any project-specific hook block re-appended verbatim into its
+#      original event array. A block is project-specific iff none of its command
+#      basenames appear in the canonical command-basename set. Every non-.hooks
+#      key (permissions, effortLevel, …) is preserved untouched. Projects with
+#      no settings.json are skipped with a note (run onboard-project.sh first) —
+#      this script operates on existing projects and never creates settings.json.
+#
 # Skill symlinks are not synced — they are symlinks to canonical and
 # update automatically. This script handles only the .sh hook *copies*
-# under <project>/.claude/hooks/.
+# under <project>/.claude/hooks/ plus the settings.json .hooks wiring.
 #
 # Usage:
 #   sync-hooks.sh                  # interactive: confirm before each project
@@ -27,6 +40,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/settings-hooks-merge.sh
+. "$SCRIPT_DIR/lib/settings-hooks-merge.sh"
 
 DRY_RUN=false
 ASSUME_YES=false
@@ -53,11 +68,19 @@ for arg in "$@"; do
 done
 
 CANONICAL_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
+# Canonical .hooks baseline lives in the settings template (same path
+# rollout-settings.sh resolves via TRELLIS_ROOT). Used by the settings.json
+# .hooks reconcile step at the end of sync_one.
+CANONICAL_SETTINGS_TEMPLATE="$TRELLIS_ROOT/core-rules/templates/claude-settings.json"
 REGISTRY="$TRELLIS_ROOT/registry.md"
 BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 
 [ -d "$CANONICAL_HOOKS_DIR" ] || { echo "canonical hooks dir missing: $CANONICAL_HOOKS_DIR" >&2; exit 1; }
 [ -f "$REGISTRY" ]            || { echo "registry.md missing: $REGISTRY" >&2; exit 1; }
+# jq is required for the settings.json .hooks reconcile (config-load already
+# checked it, but be explicit since this script now depends on it directly).
+command -v jq >/dev/null 2>&1 || { echo "jq required for settings reconcile" >&2; exit 1; }
+[ -f "$CANONICAL_SETTINGS_TEMPLATE" ] || { echo "canonical settings template missing: $CANONICAL_SETTINGS_TEMPLATE" >&2; exit 1; }
 
 # --- Provenance breadcrumbs ---
 # Loudly identify the source the sync is reading from. The 2026-05-09 incident
@@ -85,6 +108,34 @@ case "$SOURCE_ROOT" in
     echo "WARNING: SOURCE_ROOT is inside a worktree (.claude/worktrees/...) — pass --from-main-only to refuse this configuration." >&2
     ;;
 esac
+
+# Linked-worktree guard (generalizes the path check above): a linked worktree
+# whose path is NOT under .claude/worktrees/ — e.g. a sibling dir — is just as
+# stale-prone. A linked worktree's --git-dir is <main>/.git/worktrees/<name>;
+# the main work tree's is a plain .git. This catches the path-pattern-miss case.
+if command -v git >/dev/null 2>&1 \
+   && git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  __sh_gitdir="$(git -C "$SOURCE_ROOT" rev-parse --git-dir 2>/dev/null || true)"
+  case "$__sh_gitdir" in
+    */worktrees/*)
+      if $FROM_MAIN_ONLY; then
+        echo "refusing to run: SOURCE_ROOT is a linked git worktree and --from-main-only is set" >&2
+        exit 1
+      fi
+      echo "WARNING: SOURCE_ROOT is a linked git worktree — pass --from-main-only to refuse this configuration." >&2
+      ;;
+  esac
+fi
+
+# Detached-HEAD guard: --from-main-only promises to refuse a detached HEAD too
+# (a detached source is as stale-prone as a worktree). symbolic-ref -q fails on
+# a detached HEAD; only enforce when the flag is set and SOURCE_ROOT is a repo.
+if $FROM_MAIN_ONLY && command -v git >/dev/null 2>&1 \
+   && git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+   && ! git -C "$SOURCE_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+  echo "refusing to run: SOURCE_ROOT HEAD is detached and --from-main-only is set" >&2
+  exit 1
+fi
 
 # Parse Active projects table from registry.md
 # Format: | name | `/personal/<dir>` | class | notes |
@@ -136,7 +187,7 @@ done < <(read_blacklist_names)
 
 is_blacklisted() {
   local name="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do
     [ "$b" = "$name" ] && return 0
   done
@@ -212,32 +263,88 @@ sync_one() {
     done
   fi
 
+  # --- settings.json .hooks reconcile (Gap A) -------------------------------
+  # Bring the project's .hooks wiring up to the canonical baseline while
+  # preserving project-specific blocks and every non-.hooks key. The
+  # load-bearing merge is reconcile_settings_hooks() in lib/settings-hooks-
+  # merge.sh; here we own change-detection + DRY_RUN + the temp-file write.
+  local settings="$proj/.claude/settings.json"
+  if [ ! -f "$settings" ]; then
+    # sync-hooks operates on existing projects only — never create settings.json.
+    echo "  note: settings.json missing — run onboard-project.sh first (skipping settings reconcile)"
+  else
+    # Non-fatal per project: a malformed settings.json that makes jq error must
+    # NOT abort the whole fleet sync. Capture the reconcile status explicitly and
+    # skip ONLY this project's settings on failure (the rest of the run, and this
+    # project's hook-file copies above, still stand).
+    local merged tmp_err
+    tmp_err="$(mktemp)"
+    if ! merged="$(reconcile_settings_hooks "$CANONICAL_SETTINGS_TEMPLATE" "$settings" 2>"$tmp_err")"; then
+      echo "  WARN: settings reconcile failed (skipping settings for this project): $(cat "$tmp_err")" >&2
+    else
+      # Change-detection: only write if the canonicalized merged differs from
+      # current (mirrors rollout-settings.sh idiom).
+      if printf '%s' "$merged" | jq -S . | diff -q - <(jq -S . "$settings") >/dev/null 2>&1; then
+        : # settings already current — no change
+      else
+        changed=$((changed+1))
+        if $DRY_RUN; then
+          echo "  ~ would update settings.json .hooks (diff below)"
+          # diff returns 1 when the inputs differ — which is exactly when this
+          # line runs — so `|| true` keeps pipefail+set -e from aborting the run
+          # at the first changed project (defeating --dry-run).
+          diff <(jq -S '.hooks' "$settings") <(printf '%s' "$merged" | jq -S '.hooks') | sed 's/^/    /' || true
+        else
+          echo "  ~ updating settings.json .hooks"
+          # Non-fatal write: a printf/mv failure (disk full, perms) must not
+          # abort the whole fleet run either — WARN + skip this project's
+          # settings, matching the reconcile-failure branch above.
+          if printf '%s\n' "$merged" > "$settings.tmp" && mv "$settings.tmp" "$settings"; then
+            :
+          else
+            echo "  WARN: settings.json write failed (skipping settings for this project)" >&2
+            rm -f "$settings.tmp"
+          fi
+        fi
+      fi
+    fi
+    rm -f "$tmp_err"
+  fi
+
   if [ "$changed" -eq 0 ]; then
     echo "  (in sync)"
   fi
 }
 
-# Filter target list
+# Filter target list. NOTE (bash 3.2 + set -u): every array expansion that can be
+# empty must be length-guarded — an empty registry/blacklist/target list would
+# otherwise trip "unbound variable". Use a `[ ${#arr[@]} -gt 0 ] && for` guard
+# (NOT "${arr[@]:-}", which iterates once with an empty string and would append
+# a spurious "" element to TARGETS).
 TARGETS=()
 if [ -n "$ONLY_PROJECT" ]; then
-  for n in "${REGISTRY_NAMES[@]}"; do
-    [ "$n" = "$ONLY_PROJECT" ] && TARGETS+=("$n")
-  done
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
+    for n in "${REGISTRY_NAMES[@]}"; do
+      [ "$n" = "$ONLY_PROJECT" ] && TARGETS+=("$n")
+    done
+  fi
   if [ "${#TARGETS[@]}" -eq 0 ]; then
     echo "project not in registry: $ONLY_PROJECT" >&2
     exit 1
   fi
 else
-  for n in "${REGISTRY_NAMES[@]}"; do
-    if is_blacklisted "$n"; then
-      echo "skip (blacklisted): $n"
-      continue
-    fi
-    TARGETS+=("$n")
-  done
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
+    for n in "${REGISTRY_NAMES[@]}"; do
+      if is_blacklisted "$n"; then
+        echo "skip (blacklisted): $n"
+        continue
+      fi
+      TARGETS+=("$n")
+    done
+  fi
 fi
 
-echo "Targets: ${TARGETS[*]}"
+echo "Targets: ${TARGETS[*]:-(none)}"
 $DRY_RUN && echo "(dry-run mode — no writes)"
 
 if ! $ASSUME_YES && ! $DRY_RUN; then
@@ -246,9 +353,11 @@ if ! $ASSUME_YES && ! $DRY_RUN; then
   [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "aborted"; exit 0; }
 fi
 
-for n in "${TARGETS[@]}"; do
-  sync_one "$n"
-done
+if [ "${#TARGETS[@]}" -gt 0 ]; then
+  for n in "${TARGETS[@]}"; do
+    sync_one "$n"
+  done
+fi
 
 echo "== done =="
 $DRY_RUN || echo "Reminder: commit changes in each project (chore: sync hooks to canonical)."

@@ -21,6 +21,12 @@ if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'TRELLIS_ALLOW_MAIN_PUS
   [ "$worst" = "pass" ] && worst="warn"
 fi
 
+# 1a. PROCESS_GATE_SKIP=1 in commit trailers within range -> warn (must be justified)
+if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'PROCESS_GATE_SKIP=1'; then
+  findings+=("commit-trailer: PROCESS_GATE_SKIP=1 found — must be justified in gotchas.md")
+  [ "$worst" = "pass" ] && worst="warn"
+fi
+
 # 2. .husky/* tampering: short-circuit at top
 if [ -d "$PROJECT_DIR/.husky" ]; then
   while IFS= read -r hook; do

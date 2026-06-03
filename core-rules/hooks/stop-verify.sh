@@ -55,10 +55,56 @@ fi
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
+# Fail-counter state: absolute under the canonical project root (NOT a subtree —
+# emit_block fires both before and after the subtree cd). A clean pass removes it.
+STATE_FILE="${PROJECT_DIR}/.claude/.fail-counter"
+
+# _se_changed_files — echo the full set of files changed this turn, one per line:
+# tracked diff-vs-HEAD UNION untracked (not-yet-`git add`ed). Mirrors the union
+# in _se_find_subtree. cwd-independent (git -C PROJECT_DIR) so it's stable on
+# both sides of the subtree cd. `git diff HEAD --name-only` alone OMITS untracked
+# new files — a turn that only Writes new code files would otherwise look empty.
+# Filter the hook's OWN state file: where .claude/ is committed (not gitignored,
+# as in Trellis projects) ls-files would otherwise surface .claude/.fail-counter,
+# (a) destabilising the file-set hash between consecutive blocks (counter never
+# reaches 2) and (b) making a code-revert-plus-doc-edit turn read as non-doc.
+# Exact path only — a genuine .claude/settings.json edit still needs a receipt.
+_se_changed_files() {
+  { git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
+    git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
+    | grep -vxF '.claude/.fail-counter' \
+    | sort -u
+}
+
 emit_block() {
   local step="$1"
   local output="$2"
+
+  # --- Fail-counter: count consecutive blocks against the SAME changed file-set.
+  # File-set hash is cwd-independent (git -C PROJECT_DIR) so it's stable whether
+  # emit_block fires before or after the subtree cd. cksum is POSIX-portable
+  # (macOS has no sha256sum); we key off the set of changed paths, not contents.
+  local fileset_hash prevhash prevcount count
+  fileset_hash=$(_se_changed_files | cksum | awk '{print $1}')
+  prevhash=""
+  prevcount=0
+  if [ -f "$STATE_FILE" ]; then
+    read -r prevhash prevcount < "$STATE_FILE"
+  fi
+  prevcount=${prevcount:-0}
+  if [ "$prevhash" = "$fileset_hash" ]; then
+    count=$((prevcount + 1))
+  else
+    count=1
+  fi
+  mkdir -p "${PROJECT_DIR}/.claude" 2>/dev/null || true
+  printf '%s %s\n' "$fileset_hash" "$count" > "$STATE_FILE" 2>/dev/null || true
+
   local reason="${step}: ${output}"
+  if [ "$count" -ge 2 ]; then
+    reason="${reason}
+STOP: re-read top-down, state the wrong assumption before retrying (same files failed ${count} times)."
+  fi
   jq -nc --arg reason "$reason" '{decision: "block", reason: $reason}'
   exit 2
 }
@@ -274,10 +320,59 @@ if [ -n "$TEST_CMD" ]; then
   fi
 fi
 
+# --- Step 5: Receipts gate — structural done-detection. -----------------------
+# Reached only on a dirty tree (pure-chat clean-tree skip already exited) with no
+# open todos (TodoWrite check already blocked) and all configured checks passed.
+# Runs even when CHECKS_RUN==0: a code change with no toolchain STILL needs a
+# receipt. Placed BEFORE the CHECKS_RUN==0 advisory so it gates that path too.
+if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
+  # Doc-only skip: every changed file has a doc extension (.md/.mdx/.rst/.txt).
+  # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
+  # logic, but over the diff-UNION-untracked set (a turn that only Writes new
+  # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
+  NONDOC_COUNT=$(_se_changed_files \
+    | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
+    | awk 'END{print NR}')
+  if [ "$NONDOC_COUNT" != "0" ]; then
+    # Read transcript path from the Stop envelope. Missing or absent file → the
+    # receipt is unverifiable in this harness (e.g. Codex / no transcript_path):
+    # fail OPEN with an advisory rather than block.
+    TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
+    if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
+      rm -f "$STATE_FILE"
+      jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no transcript_path in this harness envelope); state your DoD receipt to the user."}'
+      exit 0
+    fi
+
+    # Turn-scoping (load-bearing): a receipt from a PRIOR turn must not satisfy
+    # THIS turn. The transcript is JSONL. Emit one role per input line (1:1 map,
+    # robust to malformed lines via fromjson? // "null"), find the LAST user-role
+    # line, and search ONLY lines after it. No user line → scope whole file.
+    LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
+      | grep -n '^user$' | tail -1 | cut -d: -f1)
+    # Canonical marker: <!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->
+    # ERE matches the fields IN ORDER and requires FILLED values, not just field
+    # names: `exit=[0-9]` (a digit must follow, rejecting the literal `exit=<int>`)
+    # and `diff=.*\+[0-9]` (a `+<digit>` must appear, rejecting `+N/-M`). Without
+    # this, the unfilled template the block message prints below would itself
+    # satisfy the gate. Anchoring on `\+[0-9]` (not the quote char) is agnostic to
+    # JSONL-escaped (\") vs unescaped (") quoting. See CLAUDE.md:43.
+    if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
+         | grep -Eq '<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'; then
+      rm -f "$STATE_FILE"
+      exit 0
+    fi
+    emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):
+<!-- dod-receipt cmd="<verification command>" exit=<int> diff="+N/-M (K files)" -->'
+  fi
+fi
+
 # --- Pass / no-check advisory ---
 if [ "$CHECKS_RUN" -eq 0 ]; then
+  rm -f "$STATE_FILE"
   jq -nc '{additionalContext: "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."}'
   exit 0
 fi
 
+rm -f "$STATE_FILE"
 exit 0

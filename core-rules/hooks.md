@@ -81,6 +81,7 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
   2. **Typecheck** — auto-detected: `tsc --noEmit` if `tsconfig.json`, `mypy .` if configured in `pyproject.toml`/`mypy.ini`, `cargo check` if `Cargo.toml`, `go vet ./...` if `go.mod`. Full repo.
   3. **Lint** — same detection as `post-edit-verify` but run repo-wide: eslint, ruff, clippy, golangci-lint.
   4. **Test** — auto-detected fast suite: `npm test` (if `test` script), `pytest` (if installed), `cargo test`, `go test ./...`. Skip e2e/integration unless explicitly configured.
+- **Canonical receipt marker:** the single machine-readable anchor the receipts check reads and the `execute` skill emits is `<!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->`, byte-identical to its definition in `core-rules/CLAUDE.md`. Fields map 1:1 to that prose — `cmd`→verification command, `exit`→exit code, `diff`→diff lines that prove the change.
 - **Block condition:** any step fails OR todos are open
 - **Error slicing on failure:**
   - Typecheck / lint output → **first 30 lines** (compile errors are at the top; the rest is cascade noise)
@@ -124,6 +125,105 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
 
 ---
 
+## Realized cores — reviewer ladder & ui-verify decision core
+
+This section is the **authoritative implementation interface** for the two Tier-2
+gates above. It refines the `code-review-subagent` and `ui-verify` specs: where the
+prose above describes intent, the contracts here describe what the shipped
+`core-rules/hooks/lib/*.sh` cores actually do. Where they differ, the cores win — the
+differences are deliberate and called out inline. The framing convention matches the
+receipt-marker note: every core emits **exactly one newline-terminated line of JSON**,
+machine-readable and byte-stable; the core never decides block/allow, the **caller**
+maps the payload to its own `emit_block` / exit 2.
+
+### Reviewer ladder (`lib/code-reviewer.sh`)
+
+Refines `code-review-subagent`. The realized reviewer is **not** an Agent-tool
+dispatch; it is a three-rung ladder that emits one findings line and lets the caller
+gate. Resolution order, first that applies wins:
+
+1. **Rung 1 — operator override (`$CODE_REVIEWER_CMD`).** If set and resolvable on
+   `PATH` (`command -v`), it is `exec`'d with the untouched stdin on fd 0. That command
+   then owns the contract (its own stdout + exit). Unset → fall through.
+2. **Rung 2 — LLM review (`claude -p`).** Skipped if `claude` is absent or the
+   fork-bomb sentinel is set (see below). The verified invocation is:
+   `claude -p --max-turns 1 --output-format text --tools Read --max-budget-usd 0.50 "<prompt>"`
+   with the JSON envelope piped on stdin, wrapped in a **perl-alarm portable-timeout
+   shim** because GNU `timeout` (and `gtimeout`) is absent on macOS. The embedded prompt
+   is byte-identical to `agents/code-reviewer.md`. Output is normalized (jq-strict, with
+   a jq-less tolerant fallback) to one compact `{"findings":[…]}` line. Any failure —
+   `claude` nonzero, timeout (perl-alarm exit 142), perl missing, parse failure,
+   multi-value or unparseable output — falls through to rung 3.
+3. **Rung 3 — deterministic regex fallback.** A pure, side-effect-free scan of the raw
+   unified diff. Findings carry `file=""`, `line=0`, `confidence=0.9` (a regex scan has
+   no reliable file/line). This is the unit-testable core for the bats suite.
+
+**stdin contract:** read once (single-shot), EITHER a JSON envelope
+`{diff, autonomy_level, decisions_log}` (jq present and `.diff` non-null → that string is
+the diff under review) OR — if not valid JSON, or jq absent — the entire stdin treated
+as a raw unified diff. `decisions_log` is populated only at autonomy L4/L5.
+
+**stdout contract:** exactly one line —
+`{"findings":[{"severity":"critical|important|minor","file":"path","line":N,"msg":"short","confidence":0.0-1.0}]}`
+— or `{"findings":[]}` when nothing is found. `confidence` is **optional / back-compat:
+absent is treated as `1.0` by the caller**. Uniform single-`\n` framing across all three
+rungs.
+
+**fail-OPEN on infra vs fail-CLOSED on a real finding.** Every infrastructure failure
+(no jq, no `claude`, timeout, SIGPIPE, unparseable LLM output) degrades to
+`{"findings":[]}` and **exit 0 — never blocks on infra**. Conversely, a successfully
+parsed finding with `severity=="critical"` is the one path that makes the **caller**
+block (caller exits 2); every other severity is advisory and non-blocking. `critical`
+is reserved for **exactly three classes**: (1) a security hole introduced by the diff,
+(2) data loss, (3) a broken build. Everything else is `important` or `minor`.
+
+**Fork-bomb sentinel `TRELLIS_REVIEW_IN_PROGRESS`.** Rung 2 spawns a child `claude`
+turn, whose own `Stop` hook would otherwise re-fire the reviewer — recursively. The
+usual `stop_hook_active` guard does **not** help here: it is `false` in the `claude -p`
+child, since that child is a fresh, separate session, not a re-entrant stop. So the
+reviewer **exports `TRELLIS_REVIEW_IN_PROGRESS=1` before the `claude` call** and the
+Stop-side hook checks it; on entry, if the sentinel is `1`, rung 2 is skipped outright
+and the ladder goes straight to rung 3. The sentinel is the only recursion guard on this
+path.
+
+### ui-verify decision core (`lib/ui-verify-core.sh`)
+
+Refines `ui-verify`. The realized core **ignores stdin** and decides from git state +
+env, not from the hook envelope (reading stdin in a sourced lib would hang). It emits one
+line — `{"verdict":"skip|advisory|block|pass","reason":"…","artifacts":["…"]}` — and the
+caller maps `verdict=="block"` to its own `emit_block` / exit 2. `artifacts` is `[]`
+except on `pass`, where it holds the screenshot path. The core itself always exits 0.
+
+Decision table (first matching row wins):
+
+| Condition | Verdict |
+|---|---|
+| No UI files changed this turn (presence gate) | `skip` |
+| UI changed, but **no** visual tool available (`UI_SHOT_CMD` unset and `npx --no-install playwright` not found) | `advisory` |
+| UI changed, visual tool present, but **dev server not reachable** at `http://localhost:$UI_PORT$UI_PATH` | `advisory` |
+| UI changed, tool present, server up, but the screenshot command **timed out** (perl-alarm 142) | `advisory` |
+| UI changed, tool present, server up, command ran, **non-empty screenshot produced** | `pass` |
+| UI changed, tool present, server up, command ran (not a timeout), yet **produced no artifact** | `block` |
+
+The narrow `block` surface is the key refinement over the Tier-2 prose:
+
+- **`block` fires only when a visual tool IS present and the dev server is up, yet the
+  capture produced nothing.** "Tool can't be attempted" is never a block.
+- **Server-down is `advisory`, not `block`** — an intentional divergence from the old
+  `ui-verify.sh`, which blocked on server-down. "Could not attempt verification" fails
+  open; only "attempted and got nothing back" gates.
+- **There is no "claimed a UI change without running the hook" detection.** Because the
+  core decides from git state rather than from a stdin claim, that third block condition
+  from the prose above does not exist in the realized core.
+
+**Env knobs:** `UI_REGEX` (UI-extension egrep; default `\.(tsx|jsx|vue|svelte|html|css)$`),
+`UI_PORT` (default `3000`), `UI_PATH` (default `/`), `UI_SHOT_CMD` (override screenshot
+command, receives `<url> <out>`; also forces tool detection to report `custom`),
+`UI_VERIFY_TIMEOUT` (bounded-probe wall-clock seconds; default `20`), and the
+`CODEX_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` / `$PWD` project-dir fallback chain.
+
+---
+
 ## Tier 3 — git-boundary (husky)
 
 Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git commit/push still catches it. Never the primary gate — Claude should not rely on these running.
@@ -138,12 +238,13 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 - **Scope policy:** **unscoped default**. Scopes are optional; when used, they must match a project-configured allowlist. Prevents invented scopes.
 - **Block:** message does not parse as conventional commit
 
-### pre-push (husky)
+### pre-push (husky on Node projects; native `core-rules/githooks/pre-push` mirror elsewhere)
 - **Runs, in order:**
-  1. **PR-flow guard** — blocks direct push to `main` or `master` across all Trellis projects. Commits must land on a branch and merge via PR. Emergency override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use rarely; every invocation should be documented in the project's `gotchas.md` or a commit message trailer).
-  2. Full typecheck + lint + fast test suite (same set as `stop-verify` step 2-4)
-- **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy at the git boundary.
-- **Block:** any step fails
+  1. **PR-flow guard** — blocks direct push to `main` or `master` across all Trellis projects. Commits must land on a branch and merge via PR. Emergency override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use rarely; every invocation should be documented in the project's `gotchas.md` or a commit message trailer). The override bypasses only the PR-flow policy, not the merge gate below — `run-all.sh` still runs in merge mode.
+  2. **The merge gate** — `process-gate/scripts/run-all.sh --mode=<merge|push>`, derived from the pushed refs: a push targeting `main`/`master` runs `--mode=merge` (full BLOCKED semantics, no downgrade), a WIP feature-branch push runs the lenient `--mode=push`. This single call supersedes the old standalone typecheck+lint+test block (`check-tests.sh` is a strict superset of those). It covers the deterministic gate set: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. rc 1 → block (exit 1); rc 2 → warn (exit 0); rc 0 → ok.
+- **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy + the deterministic merge gate at the git boundary.
+- **Block:** PR-flow guard trips, or `run-all.sh --mode=merge` returns a hard failure.
+- **Cross-harness reach (incl. AntiGravity).** Git hooks are harness-agnostic — they run on Claude Code, Codex, AND AntiGravity, even though AntiGravity runs no workspace (Tier 1/2) hooks. So this local `pre-push` git hook is the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire caught by the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`), the after-the-fact backstop. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`, so on AntiGravity — where the `execute` skill body runs those in-body but advisory-only, with nothing rejecting the turn — **code-review, ui-verify, and receipts are SOFT (advisory, no automated backstop)**. Standing mitigation: route risky / UI / edit-heavy runs through Claude or Codex, where the turn-level hooks actually block. (See `core-rules/inheritance.md` "Known gap: AntiGravity native hooks deferred" for the full harness gap.)
 - **GitHub-side complement:** local guard prevents accidents; branch protection on the remote is the durable gate. Every Trellis project should have `main` branch-protected (require PR, passing status checks, merge-commit only — squash-merge disabled in repo settings to preserve full history). Review-count enforcement is N/A here — sole-maintainer org, GitHub blocks self-approval; the PR window itself + CI is the gate.
 
 ---

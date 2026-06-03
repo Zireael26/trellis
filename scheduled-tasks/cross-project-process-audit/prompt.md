@@ -132,6 +132,43 @@ Skip this check entirely if `<project>/CLAUDE.md` is missing — §5 already cov
 
 Rationale: large repos pay a per-session exploration cost the agent does not need to pay every time. A five-line map saves the round trip. The rule lives in `engineering-process.md` §9.1; this check enforces it.
 
+### 11. Pipeline-skip nudge (advisory)
+
+The `clarify → spec → plan → tasks → analyze` pipeline (`engineering-process.md` §14.7) is **opt-in**. A project is never required to run it, so mere absence of spec/plan artifacts is **not** a finding — flagging it would fire on nearly every project and bury the report in noise. This check fires only on a signal that a **feature-sized** change *should* have used the heavyweight track: a genuinely large landing in the audit window with no corresponding spec/plan artifact alongside it. The bar is deliberately high — ordinary weekly maintenance churn must NOT trip it.
+
+Procedure (read-only). Use the same 8-day window as check 4 (this is the *weekly* audit, not the daily bypass scan). The window is wide, so the threshold must be feature-scale, not per-turn — a project doing normal maintenance (a few hundred lines across several files of routine work) must stay silent:
+
+- **Primary signal — a new top-level subsystem appeared.** Did a brand-new top-level directory land in the window (a new feature area / subsystem, not a renamed or vendored dir)? This is the strongest, lowest-false-positive "a feature landed" indicator. Detect via `git log --since="8 days ago" --diff-filter=A --name-only` and look for files introducing a new top-level dir.
+- **Secondary signal — a single substantial landing.** Scope to the *largest single commit or merge* in the window, not the cumulative weekly diff (cumulative churn over 8 days clears any per-turn bar and would re-create the mere-absence noise). A single commit/merge that is clearly feature-sized (well above routine churn — e.g. a single landing on the order of many hundreds of lines across multiple files, materially larger than the project's typical commit) qualifies; a week of small maintenance commits that merely sum to a large total does NOT.
+- **No pipeline artifact alongside it:** `git log --since="8 days ago" --name-only -- docs/specs/ docs/plans/` is empty (no spec or plan file added or modified in the same window).
+- If a **feature-sized landing** occurred (primary OR secondary signal) **and** no `docs/specs/` or `docs/plans/` artifact was added/modified in the window → **info**: `pipeline-skip nudge: a feature-sized change landed (<new subsystem / single large landing>) with no spec/plan artifact under docs/specs|plans in the window` → suggest, as a nudge not a block, that a change of this scale is a candidate for the opt-in `clarify → spec → plan` track next time (or a short `docs/plans/<topic>.md` retroactively if the work is still in flight).
+- If no feature-sized landing occurred (only routine churn), or a spec/plan artifact was touched in the window → emit no finding. When in doubt, stay silent — a false nudge is worse than a missed one for an advisory category.
+
+Severity is **info** by design — the pipeline is opt-in, so this is a forward-looking nudge, never a compliance failure. Skip this check if the project has no `.git/` (no window history to measure).
+
+### 12. Steering-doc / skill-name drift (advisory)
+
+Vendored steering docs and the skill names a project references should track the canonical set in the control plane. Two sub-checks, both read-only:
+
+- **Steering-doc drift.** Compare the project's vendored steering docs (under its `docs/` if it carries them) against the canonical set published from `__TRELLIS_PATH__/docs/` — the `docs/*-steering.md` family (e.g. `opus-4.8-steering.md` and its sibling per-harness steering docs). If a project vendors a steering doc that no longer exists in the canonical set (a renamed/removed doc), or carries a canonical-named steering doc whose content is stale versus the canonical copy (`diff` differs), report it. A project that vendors *no* steering docs is not a finding (vendoring is not mandatory).
+- **Skill-name drift.** Grep the project's `CLAUDE.md` (and any project skill prompts under `.claude/skills/`) for references to Trellis skill names. The canonical skill set lives in `__TRELLIS_PATH__/core-rules/skills/`: `analyze`, `brainstorming`, `clarify`, `execute`, `plan`, `process-gate`, `security-gate`, `spec`, `tasks`. If a project's operational instructions reference a skill name that is not in the canonical set (a renamed or removed skill — e.g. an old `writing-plans` handoff that should now point at `execute`), report it. **Do not** flag intentionally-preserved historical references (e.g. `superpowers:<skill>` mentions in CHANGELOG or dated plan history) — those are deliberately retained per the docs convention; scope this to live, operational handoffs.
+- Emit **info**: `steering-doc/skill-name drift: <project references renamed/removed artifact X>` → suggest re-vendoring the current steering doc, or repointing the operational handoff at the canonical skill name.
+
+Severity is **info** (minor drift). Rationale: model-specific steering and skill names evolve in the control plane; a project pinned to a stale name silently loses the current guidance.
+
+### 13. Pre-push wired to the merge gate (warning)
+
+The local `pre-push` git hook is the **cross-harness merge gate**: it runs `run-all.sh --mode=merge` on every harness — including AntiGravity, which runs no workspace hooks — and is fail-closed at push for the deterministic gate set (PR-hygiene / secrets / bypass / tests / docs / stack / security-diff / analyze). A registered project whose `pre-push` is not wired to `run-all.sh` is not getting that merge gate.
+
+This check uses the **same detection as doctor's `hc_prepush_wired_runall`** (`scripts/lib/health-checks.sh`) so the two never disagree — doctor and this audit must reach the same verdict on the same project:
+
+- Locate `.husky/pre-push`, else `.git/hooks/pre-push` (husky takes precedence if both exist). **Never execute the hook** — running `pre-push` runs the whole merge gate including tests; this is a read-only inspection.
+- If a `pre-push` exists and its content references `run-all.sh` (literal substring, accepting either a `.claude/` or `.agents/` path) → PASS, emit no finding.
+- If no `pre-push` exists at all → **warning**: `prepush-wired-runall: no pre-push hook — merge gate not wired` → re-seed the canonical `pre-push` (run `scripts/onboard-project.sh`).
+- If a `pre-push` exists but does not reference `run-all.sh` → **warning**: `prepush-wired-runall: pre-push present but not wired to run-all.sh — merge gate bypassed` → re-seed the canonical `pre-push`.
+
+Both failure sub-cases are **warning**, matching `hc_prepush_wired_runall`'s `HC_WARN` return in both — this is a wiring gap, not the §3 PR-flow-guard breach (a project can pass §3's PR-flow guard yet fail this merge-gate-wiring check). Note that the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`) remains the after-the-fact backstop: it catches anyone who bypassed the local hook after the fact (`--no-verify`, direct-push, force-push), so an unwired or bypassed `pre-push` is a proactive nudge here while the daily scan is the reactive net.
+
 ## Output format
 
 Write a single compliance report to `__TRELLIS_PATH__/audits/YYYY-MM-DD-cross-project-process-audit.md` (create the `audits/` directory if missing). Structure:
@@ -164,8 +201,8 @@ Write a single compliance report to `__TRELLIS_PATH__/audits/YYYY-MM-DD-cross-pr
 ## Severity rubric
 
 - **critical**: hook missing entirely, `--no-verify` bypass in the last 7 days, CLAUDE.md missing
-- **warning**: stale hook (parent has updates not pulled), husky missing a standard hook, long-lived in-progress todos
-- **info**: gotchas.md not updated in 30 days, minor drift, blacklist overdue-for-review
+- **warning**: stale hook (parent has updates not pulled), husky missing a standard hook, long-lived in-progress todos, `pre-push` not wired to the merge gate (check 13)
+- **info**: gotchas.md not updated in 30 days, minor drift, blacklist overdue-for-review, pipeline-skip nudge (check 11), steering-doc/skill-name drift (check 12)
 
 ## Boundaries
 

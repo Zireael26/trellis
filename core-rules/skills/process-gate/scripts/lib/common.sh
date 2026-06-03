@@ -97,6 +97,23 @@ pg_parse_range() {
   printf "%s" "$range"
 }
 
+# Parse --mode=<push|merge> from "$@" -> echo the mode.
+# Defaults to "merge" (the fail-closed / strict choice) when not provided or
+# when the value is anything other than the literal "push". A parse miss MUST
+# land in the strict mode, never the lenient one.
+pg_parse_mode() {
+  local mode=""
+  for arg in "$@"; do
+    case "$arg" in
+      --mode=*) mode="${arg#--mode=}" ;;
+    esac
+  done
+  case "$mode" in
+    push) printf "push" ;;
+    *)    printf "merge" ;;
+  esac
+}
+
 # pg_diff_files <range> -> emit changed files in range
 pg_diff_files() {
   local range="$1"

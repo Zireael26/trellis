@@ -19,7 +19,7 @@ The autonomy slider controls **who answers Trellis's interactive gates** — use
 3. **External messages to others** — Slack, email, PR comments on existing PRs. (PR creation itself flexes; see below.) Always confirm.
 4. **Secrets** — never disclose, never commit. No overrides.
 5. **Definition-of-Done receipts** — verification command + exit code in every "done" claim. Receipts are the audit; cannot skip.
-6. **Code-review subagent on edit-heavy turns** — always runs. At L4/L5 its prompt is expanded to verify decision-log completeness vs diff.
+6. **Code-review + ui-verify on the turns that warrant them** — always run. Code-review fires on every edit-heavy turn (≥3 files or ≥200 lines); ui-verify fires on every diff that touches UI files. Neither is skipped at any level. At L4/L5 the code-review prompt is expanded to verify decision-log completeness vs diff. *(Level-axis guarantee; turn-level-enforced on Claude Code + Codex, SOFT/advisory on AntiGravity — see engineering-process.md §5.5/§7.)*
 
 ## What flexes with the slider
 

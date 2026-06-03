@@ -323,7 +323,7 @@ install_post_checkout_hook() {
 # Absolute-path symlinks must NOT be tracked — different developers' clones
 # produce different absolute targets that conflict on cross-machine merges.
 # Idempotent: detected via the current fragment's sentinel header.
-# The sentinel includes a version marker ('5-skill set') so a fragment update
+# The sentinel includes a version marker ('9-skill set') so a fragment update
 # that adds new symlinks (e.g., Phase B added spec/plan/tasks beyond the
 # original process-gate) triggers an append on re-onboard. Older blocks remain
 # in place; duplicate gitignore entries are harmless. Operators may clean up
@@ -331,7 +331,7 @@ install_post_checkout_hook() {
 ensure_gitignore_fragment() {
   local fragment="$TEMPLATES/project.gitignore.fragment"
   local gi="$PROJECT/.gitignore"
-  local current_sentinel="Trellis inheritance symlinks (7-skill set + presets + primer/explore/autonomy commands + antigravity workflows)"
+  local current_sentinel="Trellis inheritance symlinks (9-skill set + presets + primer/explore/autonomy commands + antigravity workflows)"
   local any_legacy_marker="Trellis inheritance symlinks"
   local had_any_legacy=false
 
@@ -355,8 +355,8 @@ ensure_gitignore_fragment() {
   cat "$fragment" >> "$gi"
 
   if $had_any_legacy; then
-    echo "note: legacy pre-7-skill Trellis fragment detected in .gitignore." >&2
-    echo "      the new (7-skill set + antigravity workflows) block was appended alongside; duplicate" >&2
+    echo "note: legacy pre-9-skill Trellis fragment detected in .gitignore." >&2
+    echo "      the new (9-skill set + antigravity workflows) block was appended alongside; duplicate" >&2
     echo "      gitignore entries are harmless. Remove the older block manually" >&2
     echo "      once you've confirmed the new one covers your symlinks." >&2
   fi
@@ -393,6 +393,8 @@ untrack_if_tracked ".claude/skills/spec"
 untrack_if_tracked ".claude/skills/plan"
 untrack_if_tracked ".claude/skills/tasks"
 untrack_if_tracked ".claude/skills/analyze"
+untrack_if_tracked ".claude/skills/execute"
+untrack_if_tracked ".claude/skills/brainstorming"
 untrack_if_tracked ".claude/commands/primer.md"
 untrack_if_tracked ".claude/commands/primer-refresh.md"
 untrack_if_tracked ".claude/commands/primer-check.md"
@@ -406,6 +408,8 @@ untrack_if_tracked ".agents/skills/spec"
 untrack_if_tracked ".agents/skills/plan"
 untrack_if_tracked ".agents/skills/tasks"
 untrack_if_tracked ".agents/skills/analyze"
+untrack_if_tracked ".agents/skills/execute"
+untrack_if_tracked ".agents/skills/brainstorming"
 untrack_if_tracked ".agents/commands/primer.md"
 untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"

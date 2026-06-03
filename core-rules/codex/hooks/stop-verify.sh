@@ -9,6 +9,17 @@
 #     {"decision":"block","reason":"<step>: <sliced output>"} and exit 2.
 #   - Error slicing: typecheck/lint → first 30 lines; tests → last 30 lines.
 #   - Budget: 90s soft cap.
+#   - Receipts gate (Step 5): on a dirty non-doc tree with no open todos and all
+#     checks passed, require a Definition-of-Done receipt for this turn. The
+#     receipt is detected from EITHER the Stop payload's last_assistant_message
+#     OR a turn-scoped parse of transcript_path (union; both are NullableString).
+#     No receipt in either source → block. Both sources unavailable → advisory
+#     fail-open. Doc-only turns + PROCESS_GATE_NO_RECEIPTS=1 skip the gate.
+#   - Fail-counter: emit_block counts consecutive blocks against the same
+#     git-derived changed-file set (cksum of sorted paths, .codex/.fail-counter
+#     state); same set ≥2 injects a "re-read top-down" steer. A clean pass
+#     removes the state file. The counter is GIT-derived only — the
+#     NullableString payload fields never feed it.
 #
 # Dependencies: jq (required). Toolchains are detected; absence → skip that step.
 #
@@ -54,10 +65,60 @@ fi
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
+# Fail-counter state: absolute under the canonical project root (NOT a subtree —
+# emit_block fires both before and after the subtree cd). Codex path: .codex/.
+# A clean pass removes it.
+STATE_FILE="${PROJECT_DIR}/.codex/.fail-counter"
+
+# _se_changed_files — echo the full set of files changed this turn, one per line:
+# tracked diff-vs-HEAD UNION untracked (not-yet-`git add`ed). Mirrors the union
+# in _se_find_subtree. cwd-independent (git -C PROJECT_DIR) so it's stable on
+# both sides of the subtree cd. `git diff HEAD --name-only` alone OMITS untracked
+# new files — a turn that only Writes new code files would otherwise look empty
+# (false fail-counter escalation AND a new code file would read as doc-only in
+# the receipts gate, slipping a done-claim past it). Filter the hook's OWN state
+# file: where .codex/ is committed (not gitignored) ls-files would surface
+# .codex/.fail-counter, (a) destabilising the file-set hash between consecutive
+# blocks (counter never reaches 2) and (b) making a code-revert-plus-doc-edit
+# turn read as non-doc. Exact path only — a genuine .codex/ edit still needs a
+# receipt.
+_se_changed_files() {
+  { git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
+    git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
+    | grep -vxF '.codex/.fail-counter' \
+    | sort -u
+}
+
 emit_block() {
   local step="$1"
   local output="$2"
+
+  # --- Fail-counter: count consecutive blocks against the SAME changed file-set.
+  # File-set hash is cwd-independent (git -C PROJECT_DIR) so it's stable whether
+  # emit_block fires before or after the subtree cd. cksum is POSIX-portable
+  # (macOS has no sha256sum); we key off the set of changed paths, not contents.
+  # GIT-DERIVED ONLY — never the (NullableString) payload/transcript.
+  local fileset_hash prevhash prevcount count
+  fileset_hash=$(_se_changed_files | cksum | awk '{print $1}')
+  prevhash=""
+  prevcount=0
+  if [ -f "$STATE_FILE" ]; then
+    read -r prevhash prevcount < "$STATE_FILE"
+  fi
+  prevcount=${prevcount:-0}
+  if [ "$prevhash" = "$fileset_hash" ]; then
+    count=$((prevcount + 1))
+  else
+    count=1
+  fi
+  mkdir -p "${PROJECT_DIR}/.codex" 2>/dev/null || true
+  printf '%s %s\n' "$fileset_hash" "$count" > "$STATE_FILE" 2>/dev/null || true
+
   local reason="${step}: ${output}"
+  if [ "$count" -ge 2 ]; then
+    reason="${reason}
+STOP: re-read top-down, state the wrong assumption before retrying (same files failed ${count} times)."
+  fi
   jq -nc --arg reason "$reason" '{decision: "block", reason: $reason}'
   exit 2
 }
@@ -276,10 +337,91 @@ if [ -n "$TEST_CMD" ]; then
   fi
 fi
 
+# --- Step 5: Receipts gate — structural done-detection. -----------------------
+# Reached only on a dirty tree (pure-chat clean-tree skip already exited) with no
+# open todos (TodoWrite check already blocked) and all configured checks passed.
+# Runs even when CHECKS_RUN==0: a code change with no toolchain STILL needs a
+# receipt. Placed BEFORE the CHECKS_RUN==0 advisory so it gates that path too.
+#
+# Codex specifics (vs the Claude hook): the Stop payload hands us BOTH
+# last_assistant_message (final agent text, NullableString) AND transcript_path
+# (JSONL, NullableString). A receipt counts as PRESENT if the canonical marker
+# matches in EITHER source — generous detection. We only block a done-claim that
+# has NO receipt in either. The fail-counter (emit_block) stays GIT-derived; the
+# NullableString fields below never touch it.
+if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
+  # Doc-only skip: every changed file has a doc extension (.md/.mdx/.rst/.txt).
+  # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
+  # logic, but over the diff-UNION-untracked set (a turn that only Writes new
+  # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
+  NONDOC_COUNT=$(_se_changed_files \
+    | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
+    | awk 'END{print NR}')
+  if [ "$NONDOC_COUNT" != "0" ]; then
+    # Two-source union. (a) last_assistant_message: robust when transcript_path
+    # is null but sees only the FINAL message. (b) turn-scoped transcript parse:
+    # catches a receipt emitted before the final tool call. NullableString → use
+    # `// empty` so a JSON null collapses to "".
+    LAST_MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty')
+    TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
+
+    # Canonical marker (must match the Claude hook's TIGHTENED form): fields IN
+    # ORDER with FILLED values — `exit=[0-9]` (a digit must follow, rejecting the
+    # literal `exit=<int>`) and `diff=.*\+[0-9]` (a `+<digit>` must appear,
+    # rejecting `+N/-M`). Without this the unfilled template the block prints
+    # below would itself satisfy the gate. Anchoring on `\+[0-9]` (not the quote
+    # char) is agnostic to JSONL-escaped (\") vs unescaped (") quoting. One
+    # constant, used against BOTH sources, so they cannot drift. See CLAUDE.md:43.
+    RECEIPT_RE='<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'
+
+    RECEIPT_FOUND=0
+
+    # Source (a): last_assistant_message.
+    if [ -n "$LAST_MSG" ] && printf '%s' "$LAST_MSG" | grep -Eq "$RECEIPT_RE"; then
+      RECEIPT_FOUND=1
+    fi
+
+    # Source (b): turn-scoped transcript parse. Turn-scoping (load-bearing): a
+    # receipt from a PRIOR turn must not satisfy THIS turn. The transcript is
+    # JSONL. Emit one role per input line (1:1 map, robust to malformed lines via
+    # fromjson? // "null"), find the LAST user-role line, and search ONLY lines
+    # after it. No user line → scope whole file. Same technique as the Claude
+    # hook / save-context-log.sh.
+    if [ "$RECEIPT_FOUND" = "0" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
+        | grep -n '^user$' | tail -1 | cut -d: -f1)
+      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | grep -Eq "$RECEIPT_RE"; then
+        RECEIPT_FOUND=1
+      fi
+    fi
+
+    if [ "$RECEIPT_FOUND" = "1" ]; then
+      rm -f "$STATE_FILE"
+      exit 0
+    fi
+
+    # NullableString fail-open: ONLY when BOTH sources are unavailable — neither
+    # a last_assistant_message NOR a usable transcript_path (null/absent/missing
+    # file). The receipt is unverifiable in this harness state: advisory PASS
+    # rather than block. NOTE: last_assistant_message present (non-null) with no
+    # receipt and a null transcript still BLOCKS — that is a verifiable miss.
+    if [ -z "$LAST_MSG" ] && { [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; }; then
+      rm -f "$STATE_FILE"
+      jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no last_assistant_message and no transcript_path in this Stop envelope); state your DoD receipt to the user."}'
+      exit 0
+    fi
+
+    emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):
+<!-- dod-receipt cmd="<verification command>" exit=<int> diff="+N/-M (K files)" -->'
+  fi
+fi
+
 # --- Pass / no-check advisory ---
 if [ "$CHECKS_RUN" -eq 0 ]; then
+  rm -f "$STATE_FILE"
   jq -nc '{additionalContext: "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."}'
   exit 0
 fi
 
+rm -f "$STATE_FILE"
 exit 0

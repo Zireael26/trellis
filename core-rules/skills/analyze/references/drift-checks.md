@@ -144,9 +144,36 @@ If you add a check, also add a row to SKILL.md's "Drift checks" section.
 
 ---
 
+## 9. Constitution compliance — pipeline honours the assembled constitution
+
+**Looks for:** The spec/plan/tasks artifacts don't diverge from the project's *effective constitution* — the rule layers that actually govern this project. Three things: (a) artifact prose that contradicts a higher layer's stated rule without a written carve-out; (b) tasks that produce no Definition-of-Done receipt the constitution requires; (c) a plan that breaches a perf budget the constitution sets.
+
+This check reads a *different* source of truth than §4. §4 (constraint compliance) checks the plan against **spec.md §5** constraints. §9 checks all three artifacts against the **assembled constitution** — the rule prose layered across parent, presets, and project-local, which the spec itself may also violate.
+
+**How to check (read-only — this check writes nothing):**
+
+1. Resolve the canonical project root: run `git rev-parse --git-common-dir` and take its parent (same pattern the read-only commands use; call it `<root>`). The effective rule layers are reached via the inheritance symlinks under `<root>/.claude/rules/` — *follow each symlink to its target, never hardcode a control-plane path*. This is what makes the check work inside a **downstream onboarded project** (where there is no literal `core-rules/` — only the gitignored symlinks into the control plane) exactly as it does in the control plane itself. If `<root>/.claude/rules/` has no `trellis.md`, the project isn't parented — note it (degrade to an `info` provenance-ambiguous finding) and assess only the layers present.
+2. Assemble the constitution in §14.8 order (parent → presets → project-local), labelling each rule with its provenance:
+   - `[parent]` — follow `<root>/.claude/rules/trellis.md` to its target and read it. The baseline.
+   - `[preset:<name>]` — follow each `<root>/.claude/rules/preset-*.md` symlink (`<name>` = the filename stem after `preset-`), in filename order. Read the *present* preset symlinks, not the `.trellis.config.json` `presets` array: the effective constitution is what the harness actually loads, and declared-vs-present drift is the `preset-drift` check's job, not this one (mirrors the `/constitution` command's resolution).
+   - `[project]` — `<root>/CLAUDE.md` (the project-root file, if present). Most specific.
+3. Assemble; do **not** adjudicate. Layers are additive, not last-wins — there is no mechanical override (the deference contract is defined in `engineering-process.md` §14.8 and `inheritance.md`; cited here, not redefined). A more-specific layer's prose *should* carry when it conflicts, but only when the divergence is a *written* carve-out ("§X of the parent rules is relaxed here because…"). A contradiction with no such carve-out is the silent drift this check exists to catch. Report the contradiction and whether a carve-out is present; never decide which layer wins.
+4. For (b)/(c): treat the assembled constitution as the source of requirements. Scan tasks.md for any task whose constitution-required DoD receipt is absent; scan plan.md against any perf budget the constitution states.
+
+**Severity:**
+- **critical** — `[project]`/`[preset]` prose contradicts a higher layer with **no written carve-out** (silent drift); OR a constitution-mandated DoD receipt is entirely absent from the tasks that need it; OR the plan breaches a stated perf budget.
+- **warning** — a carve-out exists but cites no reason (§14.8 wants a written reason); OR a DoD receipt is present but underspecified; OR the plan is silent on a perf budget that probably applies.
+- **info** — a lower layer contradicts a higher one *with* a written, reasoned carve-out (the legitimate deference mechanism — surfaced for transparency, not a defect); OR provenance is ambiguous (e.g., a preset symlink couldn't be resolved) and the check degraded gracefully.
+
+**Example finding:**
+
+> **C9 (critical)** — `tasks.md` T4 *"Disable the secrets scan for the demo build"* contradicts `[preset:compliance-strict]` *"hard-fail secrets scan, no `--no-verify` ever"*, and no carve-out for this relaxation appears in `[project]` `CLAUDE.md`. Silent drift against the assembled constitution. Either add a written, reasoned carve-out at the project layer or drop the task. (This check assembles the layers and surfaces the contradiction; it does not decide which layer wins.)
+
+---
+
 ## Verdict rule
 
-After running all 8 checks, the skill emits a final verdict:
+After running all 9 checks, the skill emits a final verdict:
 
 - **PASS** — zero critical, zero warning findings. Pipeline coheres.
 - **NEEDS-REVISION** — zero critical, ≥1 warning. Operator should address before merging.

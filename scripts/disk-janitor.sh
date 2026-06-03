@@ -218,7 +218,7 @@ done < <(jq -r '.disk_janitor.skip_projects[]? // empty' "$CFG" 2>/dev/null || t
 # is_skip_project <name> — in disk_janitor.skip_projects?
 is_skip_project() {
   local name="$1" s
-  [ "${#SKIP_PROJECTS[@]:-0}" -eq 0 ] && return 1
+  [ "${#SKIP_PROJECTS[@]}" -eq 0 ] && return 1
   for s in "${SKIP_PROJECTS[@]}"; do
     [ "$s" = "$name" ] && return 0
   done
@@ -296,7 +296,7 @@ done < <(read_blacklist_names)
 
 is_blacklisted() {
   local name="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do
     [ "$b" = "$name" ] && return 0
   done
@@ -310,7 +310,7 @@ is_blacklisted() {
 TARGETS=()
 if [ -n "$ONLY_PROJECT" ]; then
   found=0
-  if [ "${#REGISTRY_NAMES[@]:-0}" -gt 0 ]; then
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
     for n in "${REGISTRY_NAMES[@]}"; do
       [ "$n" = "$ONLY_PROJECT" ] && found=1
     done
@@ -324,7 +324,7 @@ if [ -n "$ONLY_PROJECT" ]; then
   fi
   TARGETS+=("$ONLY_PROJECT")
 else
-  if [ "${#REGISTRY_NAMES[@]:-0}" -gt 0 ]; then
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
     for n in "${REGISTRY_NAMES[@]}"; do
       is_blacklisted "$n" && continue
       is_skip_project "$n" && continue
@@ -361,7 +361,7 @@ TURBO_LANDMINES=""
 turbo_prepass() {
   local name proj tj rc
   TURBO_LANDMINES=""
-  [ "${#TARGETS[@]:-0}" -gt 0 ] || return 0
+  [ "${#TARGETS[@]}" -gt 0 ] || return 0
   for name in "${TARGETS[@]}"; do
     proj="$(resolve_project_path "$name")"
     tj="$proj/turbo.json"
@@ -508,7 +508,7 @@ scan_project() {
 # Run the scan over the fleet.
 # ---------------------------------------------------------------------------
 turbo_prepass
-if [ "${#TARGETS[@]:-0}" -gt 0 ]; then
+if [ "${#TARGETS[@]}" -gt 0 ]; then
   for name in "${TARGETS[@]}"; do
     proj="$(resolve_project_path "$name")"
     if [ ! -e "$proj/.git" ]; then
@@ -794,7 +794,7 @@ fi
 
 # Re-scan caches post-delete to report the actually-reclaimed bytes.
 remaining_cache_bytes=0
-if scope_enabled caches && [ "${#TARGETS[@]:-0}" -gt 0 ]; then
+if scope_enabled caches && [ "${#TARGETS[@]}" -gt 0 ]; then
   for name in "${TARGETS[@]}"; do
     proj="$(resolve_project_path "$name")"
     [ -e "$proj/.git" ] || continue

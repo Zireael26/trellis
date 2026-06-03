@@ -11,6 +11,17 @@
             "statusMessage": "Checking command safety..."
           }
         ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/reread-guard.sh",
+            "timeout": 5,
+            "statusMessage": "Re-read guard..."
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -33,6 +44,17 @@
             "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/truncation-check.sh",
             "timeout": 5,
             "statusMessage": "Checking for truncation..."
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/track-read.sh",
+            "timeout": 5,
+            "statusMessage": "Recording reads..."
           }
         ]
       }
@@ -87,6 +109,12 @@
             "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/ui-verify.sh",
             "timeout": 120,
             "statusMessage": "UI verification..."
+          },
+          {
+            "type": "command",
+            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stamp-turn.sh",
+            "timeout": 5,
+            "statusMessage": "Stamping turn..."
           }
         ]
       }

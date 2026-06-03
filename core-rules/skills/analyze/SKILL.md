@@ -50,6 +50,7 @@ The full check matrix lives in [`references/drift-checks.md`](references/drift-c
 6. **Rollback consistency** — plan §7 rollback path matches spec §5 constraints and (if present) clarify Q5 rollback answer. Mismatches are critical.
 7. **Test strategy completeness** — every spec criterion has a corresponding test in plan §6. Missing tests are critical.
 8. **Sequencing sanity** — tasks dependencies don't form cycles; sequencing leaves the tree buildable at each step. Cycles are critical.
+9. **Constitution compliance** — assembles the project's effective constitution (parent CLAUDE.md → preset(s) → project CLAUDE.md, §14.8 order) and surfaces where the pipeline diverges from it: prose that contradicts a higher layer with no written carve-out, DoD-receipt-less tasks, perf-budget breach. critical / warning / info. **Advisory cap:** a #9 finding can push the report's existing verdict line to `## Verdict: BLOCKED`, but the skill never hard-gates and its exit semantics are unchanged — the process-gate remains the only hard gate. This category *detects and surfaces*; it never adjudicates which layer wins.
 
 ## How to use
 

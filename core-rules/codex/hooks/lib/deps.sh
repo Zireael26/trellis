@@ -59,3 +59,88 @@ _se_repo_root() {
   esac
   ( cd "${common}/.." 2>/dev/null && pwd ) || printf '%s' "$dir"
 }
+
+# _se_state_key <transcript_path> <session_id>
+#   - prints the 16-hex state key for the re-read guard's per-session state
+#     files, or prints NOTHING (empty) on any failure (caller fails-open).
+#   - SOURCE precedence: session_id PRIMARY, transcript_path FALLBACK,
+#     literal "default" last. (DL-P5-09: session_id is reliably present on every
+#     Claude/Codex event; transcript_path is NullableString with cross-event
+#     population unconfirmed — keying off it first risked stamp-turn and the
+#     guard deriving DIFFERENT keys → the guard reads a never-written .epoch →
+#     permanent silent permit. One shared helper ELIMINATES the drift class.)
+#   - SUM = shasum -a 256 of SRC (macOS has no sha256sum); key = first 16 hex of
+#     the sum's first field.
+_se_state_key() {
+  local tp="${1:-}" sid="${2:-}" src sum key
+  if [ -n "$sid" ]; then
+    src="$sid"
+  elif [ -n "$tp" ]; then
+    src="$tp"
+  else
+    src="default"
+  fi
+  sum=$(printf '%s' "$src" | shasum -a 256 2>/dev/null) || return 1
+  sum=$(printf '%s' "$sum" | awk '{print $1}')
+  [ -n "$sum" ] || return 1
+  key=$(printf '%s' "$sum" | cut -c1-16)
+  [ -n "$key" ] || return 1
+  printf '%s' "$key"
+}
+
+# _se_normpath <path>
+#   - prints a LEXICALLY normalized path. No file-existence required (must work
+#     for new files). bash 3.2 / BSD-awk safe — pure string ops, NO realpath /
+#     readlink -f (absent / non-portable on macOS).
+#   - Normalize (DL-P5-10): strip a leading './'; collapse '//' to '/'; collapse
+#     '/./' to '/'; resolve a real 'X/../' segment lexically; drop a trailing
+#     '/' (but keep a bare '/'). The SAME normalized spelling must be produced
+#     on the store side (track-read) and the compare side (reread-guard), so
+#     './foo' ≡ 'foo' ≡ 'a/../foo'. A near-no-op for Claude's absolute paths;
+#     this fixes the Codex relative-path IN_SET self-block.
+_se_normpath() {
+  local p="${1:-}"
+  [ -n "$p" ] || { printf '%s' "$p"; return; }
+  # awk does the segment work so the '..' resolution is robust; it preserves a
+  # leading '/' (absolute) and the './' / '//' / '/./' collapses lexically.
+  printf '%s' "$p" | awk '
+    {
+      path = $0
+      # remember whether the path is absolute, then split on "/".
+      abs = (substr(path, 1, 1) == "/") ? 1 : 0
+      n = split(path, parts, "/")
+      top = 0            # stack depth of the resolved output segments
+      for (i = 1; i <= n; i++) {
+        seg = parts[i]
+        if (seg == "" || seg == ".") {
+          # empty segment (from "//" or leading/trailing "/") or "." → drop.
+          continue
+        }
+        if (seg == "..") {
+          if (top > 0 && stack[top] != "..") {
+            # pop a real preceding segment (lexical X/.. resolution).
+            top--
+          } else if (abs) {
+            # ".." at the root of an absolute path → drop (stays at root).
+            continue
+          } else {
+            # leading ".." on a relative path has nothing to pop → keep it.
+            stack[++top] = ".."
+          }
+          continue
+        }
+        stack[++top] = seg
+      }
+      out = ""
+      for (i = 1; i <= top; i++) {
+        out = (out == "") ? stack[i] : out "/" stack[i]
+      }
+      if (abs) {
+        out = "/" out          # bare "/" survives (out == "" → just "/")
+      } else if (out == "") {
+        out = "."              # relative path that normalized to nothing → "."
+      }
+      printf "%s", out
+    }
+  '
+}

@@ -51,11 +51,20 @@ fi
 
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_HOOKS_DIR="$CANONICAL_CODEX_DIR/hooks"
+# Reviewer decision cores live ONLY in the Claude canonical lib (single source
+# of truth). The Codex hooks source them from .codex/hooks/lib/, so we deploy
+# them from here rather than duplicating copies under core-rules/codex/.
+CANONICAL_REVIEWER_LIB_DIR="$SOURCE_ROOT/core-rules/hooks/lib"
+REVIEWER_CORES="code-reviewer.sh ui-verify-core.sh"
 REGISTRY="$TRELLIS_ROOT/registry.md"
 BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 
 [ -f "$CANONICAL_CODEX_DIR/hooks.json" ] || { echo "canonical Codex hooks manifest missing: $CANONICAL_CODEX_DIR/hooks.json" >&2; exit 1; }
 [ -d "$CANONICAL_HOOKS_DIR" ] || { echo "canonical Codex hooks dir missing: $CANONICAL_HOOKS_DIR" >&2; exit 1; }
+[ -d "$CANONICAL_REVIEWER_LIB_DIR" ] || { echo "canonical reviewer lib dir missing: $CANONICAL_REVIEWER_LIB_DIR" >&2; exit 1; }
+for core in $REVIEWER_CORES; do
+  [ -f "$CANONICAL_REVIEWER_LIB_DIR/$core" ] || { echo "canonical reviewer core missing: $CANONICAL_REVIEWER_LIB_DIR/$core" >&2; exit 1; }
+done
 [ -f "$REGISTRY" ]            || { echo "registry.md missing: $REGISTRY" >&2; exit 1; }
 
 # Parse Active projects table from registry.md
@@ -108,7 +117,7 @@ done < <(read_blacklist_names)
 
 is_blacklisted() {
   local name="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do
     [ "$b" = "$name" ] && return 0
   done
@@ -183,6 +192,32 @@ sync_one() {
       fi
     done
   fi
+
+  # Reviewer decision cores: deploy the canonical Claude reviewer ladder
+  # (code-reviewer.sh) and UI-verify core (ui-verify-core.sh) into
+  # .codex/hooks/lib/ so the Codex Stop hooks can source the same verdict
+  # logic as the Claude hooks. Single source of truth: copied from the Claude
+  # canonical lib, never duplicated under core-rules/codex/.
+  for core in $REVIEWER_CORES; do
+    local src dst src_sha dst_sha
+    src="$CANONICAL_REVIEWER_LIB_DIR/$core"
+    dst="$proj/.codex/hooks/lib/$core"
+
+    if [ ! -f "$dst" ]; then
+      $DRY_RUN && echo "  + would add: .codex/hooks/lib/$core" || echo "  added: .codex/hooks/lib/$core"
+      $DRY_RUN || { mkdir -p "$proj/.codex/hooks/lib"; cp "$src" "$dst"; }
+      changed=$((changed+1))
+      continue
+    fi
+
+    src_sha="$(shasum -a 256 "$src" | awk '{print $1}')"
+    dst_sha="$(shasum -a 256 "$dst" | awk '{print $1}')"
+    if [ "$src_sha" != "$dst_sha" ]; then
+      $DRY_RUN && echo "  ~ would update: .codex/hooks/lib/$core" || echo "  updated: .codex/hooks/lib/$core"
+      $DRY_RUN || cp "$src" "$dst"
+      changed=$((changed+1))
+    fi
+  done
 
   if [ "$changed" -eq 0 ]; then
     echo "  (in sync)"

@@ -38,6 +38,17 @@ run_check() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT'"
 }
 
+# Add an empty commit carrying the given body, then run check-bypass.sh over
+# just that commit (HEAD~1..HEAD) so commit-trailer detection is isolated.
+commit_body_and_check() {
+  local body="$1"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    git commit --allow-empty -q -m "chore: trailer test" -m "$body"
+  )
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+}
+
 # --- §3a: core.hooksPath active-disable ---
 
 @test "§3a: core.hooksPath=/dev/null -> fail with finding" {
@@ -86,4 +97,25 @@ run_check() {
   run_check
   [ "$status" -eq 0 ]
   [[ "$output" != *"actively disabled via persistent config"* ]]
+}
+
+# --- §1a: PROCESS_GATE_SKIP=1 commit-trailer detection ---
+
+@test "§1a: PROCESS_GATE_SKIP=1 trailer in range -> warn (exit 2) with finding" {
+  commit_body_and_check "PROCESS_GATE_SKIP=1"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"PROCESS_GATE_SKIP=1"* ]]
+  [[ "$output" == *"must be justified"* ]]
+}
+
+@test "§1a: no PROCESS_GATE_SKIP trailer -> no finding from this check (exit 0)" {
+  commit_body_and_check "ordinary body with no override trailers"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"PROCESS_GATE_SKIP=1 found"* ]]
+}
+
+@test "§1 baseline: TRELLIS_ALLOW_MAIN_PUSH=1 trailer in range -> warn (exit 2)" {
+  commit_body_and_check "TRELLIS_ALLOW_MAIN_PUSH=1"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1"* ]]
 }

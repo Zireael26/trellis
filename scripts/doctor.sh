@@ -219,7 +219,7 @@ tally() {
 # add_hint <line> — queue a de-duplicated fix hint.
 add_hint() {
   local h="$1" existing
-  if [ "${#HINTS[@]:-0}" -gt 0 ]; then
+  if [ "${#HINTS[@]}" -gt 0 ]; then
     for existing in "${HINTS[@]}"; do
       [ "$existing" = "$h" ] && return 0
     done
@@ -300,7 +300,7 @@ done < <(read_blacklist_names)
 
 is_blacklisted() {
   local name="$1" b
-  [ "${#BLACKLIST_NAMES[@]:-0}" -eq 0 ] && return 1
+  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
   for b in "${BLACKLIST_NAMES[@]}"; do
     [ "$b" = "$name" ] && return 0
   done
@@ -344,6 +344,9 @@ run_tier0 hc_canonical_clean "$CANON"
 run_tier0 hc_canonical_sync "$CANON"
 run_tier0 hc_conformance_passes "$CANON"
 run_tier0 hc_version_changelog_coherent "$CANON"
+# Canonical-side, single-arg, WARN-class (report-only): the dod-receipt grammar
+# anchor must live in core-rules/CLAUDE.md so execute receipts have a contract.
+run_tier0 hc_receipt_grammar_present "$CANON"
 
 # Tier-0 runs before any project, so N_ERROR here is purely Tier-0. Capture it:
 # Tier-0 is REPORT-ONLY (--fix never mutates the canonical clone), AND a
@@ -376,7 +379,7 @@ echo "== Tier 1: per-project inheritance =="
 TARGETS=()
 if [ -n "$ONLY_PROJECT" ]; then
   found=0
-  if [ "${#REGISTRY_NAMES[@]:-0}" -gt 0 ]; then
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
     for n in "${REGISTRY_NAMES[@]}"; do
       [ "$n" = "$ONLY_PROJECT" ] && found=1
     done
@@ -390,7 +393,7 @@ if [ -n "$ONLY_PROJECT" ]; then
   fi
   TARGETS+=("$ONLY_PROJECT")
 else
-  if [ "${#REGISTRY_NAMES[@]:-0}" -gt 0 ]; then
+  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
     for n in "${REGISTRY_NAMES[@]}"; do
       if is_blacklisted "$n"; then
         continue
@@ -400,7 +403,7 @@ else
   fi
 fi
 
-if [ "${#TARGETS[@]:-0}" -eq 0 ]; then
+if [ "${#TARGETS[@]}" -eq 0 ]; then
   echo "  (no active projects to check)"
 fi
 
@@ -647,6 +650,28 @@ EOF
     add_hint "$name: turbo.json has an unscoped .next/** outputs glob (Next caches get tarred into the Turbo cache, the disk-blowup recurrence) — ${proj}/turbo.json: $(hc_turbo_fix_hint)"
   fi
 
+  # --- process-enforcement inheritance-health checks (WARN) — REPORT-ONLY ---
+  # All three are static (DL-P8a-01: never invoke the subject) advisory checks.
+  # Like hc_turbo_outputs above, they queue a suggested-action hint ONLY and
+  # touch NO PLAN_* accumulator — they stay out of the --fix machinery and never
+  # flip the overall exit (WARN tallies into N_WARN, not N_ERROR).
+
+  # reviewer resolvable: WARN only when a review hook is wired but its lib is
+  # missing (silent fail-open). A project that runs no review is OK (no noise).
+  if emit "  " hc_reviewer_resolvable "$proj" "$CANON"; then :; else
+    add_hint "$name: code-review hook wired but lib/code-reviewer.sh is missing (review silently fails open) — re-seed hooks: scripts/sync-hooks.sh $name"
+  fi
+
+  # ui screenshot path: WARN when a UI project has no resolvable screenshot tool.
+  if emit "  " hc_ui_screenshot_path "$proj" "$CANON"; then :; else
+    add_hint "$name: UI project has no resolvable screenshot path for ui-verify — configure UI_SHOT_CMD or install a screenshot tool (e.g. playwright)"
+  fi
+
+  # pre-push wired to run-all.sh: WARN when the local merge gate is not wired.
+  if emit "  " hc_prepush_wired_runall "$proj" "$CANON"; then :; else
+    add_hint "$name: pre-push hook is not wired to process-gate's run-all.sh — the local merge gate is bypassed; re-seed the canonical pre-push hook"
+  fi
+
   return 0
 }
 
@@ -836,7 +861,7 @@ EOF
   fi
 }
 
-if [ "${#TARGETS[@]:-0}" -gt 0 ]; then
+if [ "${#TARGETS[@]}" -gt 0 ]; then
   for name in "${TARGETS[@]}"; do
     proj="$(resolve_project_path "$name")"
     echo
@@ -898,7 +923,7 @@ if [ -z "$node_major" ]; then
 else
   nvmrc_seen=0
   nvmrc_bad=""
-  if [ "${#TARGETS[@]:-0}" -gt 0 ]; then
+  if [ "${#TARGETS[@]}" -gt 0 ]; then
     for name in "${TARGETS[@]}"; do
       f="$(resolve_project_path "$name")/.nvmrc"
       [ -f "$f" ] || continue
@@ -924,7 +949,7 @@ echo
 # printed inline ([auto]/[hooks]/[manual]/[info]); this block is suppressed so
 # the two channels never duplicate each other.
 # ---------------------------------------------------------------------------
-if [ "$DO_FIX" -eq 0 ] && [ "${#HINTS[@]:-0}" -gt 0 ]; then
+if [ "$DO_FIX" -eq 0 ] && [ "${#HINTS[@]}" -gt 0 ]; then
   echo "== Suggested actions =="
   for h in "${HINTS[@]}"; do
     printf '  - %s\n' "$h"
@@ -948,7 +973,7 @@ fi
 
 echo "== Summary =="
 if [ "$N_ERROR" -eq 0 ] && [ "$N_WARN" -eq 0 ] && [ "$N_INFO" -eq 0 ]; then
-  echo "$GLYPH_OK healthy — no drift detected (${#TARGETS[@]:-0} project(s) checked)"
+  echo "$GLYPH_OK healthy — no drift detected (${#TARGETS[@]} project(s) checked)"
   exit 0
 fi
 

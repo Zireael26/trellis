@@ -61,7 +61,10 @@ teardown() {
 # init — branch/clean state is set per test by the helpers below.
 build_canonical_tree() {
   mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands"
-  printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
+  # A healthy canonical carries the dod-receipt grammar anchor (Tier-0
+  # hc_receipt_grammar_present greps for the literal `dod-receipt`).
+  printf '# Parent engineering rules\n\n<!-- dod-receipt cmd= exit=0 diff= -->\n' \
+    > "$CANON/core-rules/CLAUDE.md"
   local s c
   for s in $CANON_SKILLS; do
     mkdir -p "$CANON/core-rules/skills/$s"
@@ -150,6 +153,12 @@ build_healthy_project() {
 @$CANON/core-rules/CLAUDE.md
 EOF
   printf '{ "hooks": {} }\n' > "$hp/.claude/settings.json"
+  # A healthy project has its pre-push wired to process-gate's run-all.sh so
+  # hc_prepush_wired_runall passes. (No review hook + no tracked UI files keep
+  # hc_reviewer_resolvable / hc_ui_screenshot_path silently OK by default.)
+  mkdir -p "$hp/.husky"
+  printf '#!/usr/bin/env sh\nbash .claude/skills/process-gate/scripts/run-all.sh --mode=merge\n' \
+    > "$hp/.husky/pre-push"
 }
 
 # Run the doctor against the fixture. $TRELLIS_CONFIG is already exported in
@@ -158,6 +167,39 @@ EOF
 # canonical from config, not cwd.
 run_doctor() {
   run bash "$DOCTOR" "$@"
+}
+
+# Build a symlink-farm bin dir under $BATS_TEST_TMPDIR that mirrors EVERY
+# executable on the current PATH EXCEPT any named `playwright`, then print the
+# farm dir. Adapts the make_jq_free_path symlink-farm idiom from
+# core-rules/hooks/tests/helpers.bash but enumerates the FULL PATH (not a fixed
+# command list) so doctor's complete toolchain — git + its helpers, jq, shasum,
+# coreutils — resolves under the farm and only `playwright` is excluded
+# (DL-P8a-12 hermeticity: the no-screenshot-tool WARN branch must be reached on
+# EVERY host, including this operator's, where playwright IS on the real PATH).
+# First-wins on basename collisions to preserve PATH precedence order. Local to
+# this suite — NOT cross-sourced from the hooks test dir.
+make_no_playwright_path() {
+  local farm dir entry base
+  farm="$(mktemp -d "$BATS_TEST_TMPDIR/farm.XXXXXX")"
+  # Split PATH on ':' without a subshell-unsafe IFS leak.
+  local oldifs="$IFS"
+  IFS=':'
+  for dir in $PATH; do
+    IFS="$oldifs"
+    [ -d "$dir" ] || { IFS=':'; continue; }
+    for entry in "$dir"/*; do
+      [ -x "$entry" ] && [ ! -d "$entry" ] || continue
+      base="$(basename "$entry")"
+      [ "$base" = "playwright" ] && continue
+      # First-wins: do not overwrite an earlier (higher-precedence) link.
+      [ -e "$farm/$base" ] && continue
+      ln -s "$entry" "$farm/$base"
+    done
+    IFS=':'
+  done
+  IFS="$oldifs"
+  printf '%s' "$farm"
 }
 
 # ===========================================================================
@@ -388,4 +430,238 @@ run_doctor() {
   run_doctor
   [ "$status" -eq 1 ]
   [[ "$output" == *"✗"* ]]
+}
+
+# ===========================================================================
+# Phase 8a — process-enforcement inheritance-health checks (all WARN-class,
+# never flip the exit; DL-P8a-01..05). Static: never invoke the subject.
+# ===========================================================================
+
+@test "P8a hc_reviewer_resolvable: review hook wired + reviewer lib MISSING => WARN, exit 0" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Wire the review hook but leave its sibling lib absent.
+  mkdir -p "$PROJECTS/healthy/.claude/hooks"
+  printf '#!/usr/bin/env bash\n: review\n' \
+    > "$PROJECTS/healthy/.claude/hooks/code-review-subagent.sh"
+
+  run_doctor
+  # bats fails only on the LAST command, so the load-bearing WARN assertion is
+  # chained into ONE terminal statement (DL-P8a-12): any failing conjunct aborts
+  # the test, and the WARN-specific substring is the final discriminator (flips
+  # RED under an always-HC_OK mutation of hc_reviewer_resolvable).
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ reviewer-resolvable:"* ]] \
+    && [[ "$output" == *"lib/code-reviewer.sh MISSING"* ]]
+}
+
+@test "P8a hc_reviewer_resolvable: no review hook => OK (no manufactured noise)" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # build_healthy_project wires no review hook at all.
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ reviewer-resolvable: no review hook wired"* ]]
+}
+
+@test "P8a hc_reviewer_resolvable: review hook + reviewer lib both present => OK" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  mkdir -p "$PROJECTS/healthy/.claude/hooks/lib"
+  printf '#!/usr/bin/env bash\n: review\n' \
+    > "$PROJECTS/healthy/.claude/hooks/code-review-subagent.sh"
+  printf '#!/usr/bin/env bash\n: reviewer-lib\n' \
+    > "$PROJECTS/healthy/.claude/hooks/lib/code-reviewer.sh"
+
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ reviewer-resolvable: review hook + reviewer lib both present"* ]]
+}
+
+@test "P8a hc_ui_screenshot_path: tracked UI files + no screenshot tool => WARN, exit 0" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # The project must be a git work tree with a TRACKED UI source file for
+  # `git ls-files` to enumerate it.
+  (
+    cd "$PROJECTS/healthy"
+    git init -q -b main
+    git config user.email "test@example.com"
+    git config user.name  "test"
+    git config commit.gpgsign false
+    printf 'export const X = 1;\n' > App.tsx
+    git add App.tsx
+    git commit -q -m "ui"
+  )
+  # HERMETIC (DL-P8a-12): the WARN branch is gated on `command -v playwright`,
+  # which RESOLVES on this operator's host (pyenv shim) — so without isolation
+  # the doctor would run the OPPOSITE (resolvable-tool) branch and the WARN
+  # assertion would be false-green. Run the doctor child under a sanitized PATH
+  # that mirrors every executable EXCEPT playwright, so the no-tool WARN branch
+  # is deterministically reached on EVERY host. UI_SHOT_CMD="" closes the first
+  # leg of "no resolvable tool".
+  local farm
+  farm="$(make_no_playwright_path)"
+  run env PATH="$farm" UI_SHOT_CMD="" bash "$DOCTOR"
+  # Chained terminal assertion (DL-P8a-12): WARN substring is the final
+  # discriminator so the test goes RED under an always-HC_OK / resolvable-✓
+  # mutation of hc_ui_screenshot_path.
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ ui-screenshot-path:"* ]] \
+    && [[ "$output" == *"no screenshot tool resolves"* ]]
+}
+
+@test "P8a hc_ui_screenshot_path: non-UI project => OK" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # build_healthy_project is not a git work tree and tracks no UI files, so
+  # `git ls-files` is empty -> not a UI project.
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ ui-screenshot-path: no tracked UI source files"* ]]
+}
+
+@test "P8a hc_prepush_wired_runall: no pre-push hook => WARN, exit 0" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Remove the pre-push the healthy fixture wires.
+  rm -f "$PROJECTS/healthy/.husky/pre-push"
+
+  run_doctor
+  # Chained terminal assertion (DL-P8a-12): WARN substring is the final
+  # discriminator so the test goes RED under an always-HC_OK mutation.
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ prepush-wired-runall:"* ]] \
+    && [[ "$output" == *"no pre-push hook"* ]]
+}
+
+@test "P8a hc_prepush_wired_runall: pre-push present but NOT wired to run-all.sh => WARN" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Overwrite the wired hook with one that does not reference run-all.sh.
+  printf '#!/usr/bin/env sh\nnpm test\n' > "$PROJECTS/healthy/.husky/pre-push"
+
+  run_doctor
+  # Chained terminal assertion (DL-P8a-12): the dead non-final `status` check is
+  # folded into one statement ending on the WARN-specific discriminator.
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ prepush-wired-runall:"* ]] \
+    && [[ "$output" == *"not wired to run-all.sh"* ]]
+}
+
+@test "P8a hc_prepush_wired_runall: pre-push wired to run-all.sh => OK (.git/hooks fallback)" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Drop the .husky hook and instead wire .git/hooks/pre-push (the fallback
+  # location) referencing the .agents/ path variant.
+  rm -f "$PROJECTS/healthy/.husky/pre-push"
+  mkdir -p "$PROJECTS/healthy/.git/hooks"
+  printf '#!/usr/bin/env sh\nbash .agents/skills/process-gate/scripts/run-all.sh --mode=merge\n' \
+    > "$PROJECTS/healthy/.git/hooks/pre-push"
+
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ prepush-wired-runall: pre-push references process-gate run-all.sh"* ]]
+}
+
+@test "P8a hc_prepush_wired_runall: native core.hooksPath=.githooks wired to run-all.sh => OK" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Native-git-hooks project (lume / clusterbid-console shape): no husky, the
+  # active hook lives at .githooks/pre-push via core.hooksPath. Reading
+  # core.hooksPath needs a real repo, so git-init the project and pin the config.
+  local hp="$PROJECTS/healthy"
+  rm -rf "$hp/.husky"
+  (
+    cd "$hp"
+    git init -q -b main
+    git config user.email "test@example.com"
+    git config user.name  "test"
+    git config core.hooksPath .githooks
+  )
+  mkdir -p "$hp/.githooks"
+  printf '#!/usr/bin/env sh\nbash .claude/skills/process-gate/scripts/run-all.sh --mode=merge\n' \
+    > "$hp/.githooks/pre-push"
+
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ prepush-wired-runall: pre-push references process-gate run-all.sh"* ]]
+}
+
+@test "P8a hc_prepush_wired_runall: core.hooksPath set but target pre-push missing => WARN" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # No false positive: hooksPath points at .githooks but no .githooks/pre-push
+  # exists, and a stale .husky/pre-push (the fixture default) must NOT be
+  # consulted because git would never run it.
+  local hp="$PROJECTS/healthy"
+  (
+    cd "$hp"
+    git init -q -b main
+    git config user.email "test@example.com"
+    git config user.name  "test"
+    git config core.hooksPath .githooks
+  )
+  mkdir -p "$hp/.githooks"
+
+  run_doctor
+  # Chained terminal assertion (DL-P8a-12): WARN substring is the final
+  # discriminator so the test goes RED under an always-HC_OK mutation.
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ prepush-wired-runall:"* ]] \
+    && [[ "$output" == *"no pre-push hook"* ]]
+}
+
+@test "P8a hc_receipt_grammar_present (Tier-0): canonical CLAUDE.md MISSING dod-receipt => WARN, exit 0" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Strip the dod-receipt grammar from the canonical rules, then re-commit so
+  # the canonical tree stays clean (else the Tier-0 dirty check would fire too).
+  printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
+  ( cd "$CANON" && git add -A && git commit -q -m "strip receipt grammar" )
+
+  run_doctor
+  # Chained terminal assertion (DL-P8a-12): WARN substring is the final
+  # discriminator so the test goes RED under an always-HC_OK mutation.
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ receipt-grammar-present:"* ]] \
+    && [[ "$output" == *"dod-receipt grammar MISSING"* ]]
+}
+
+@test "P8a hc_receipt_grammar_present (Tier-0): canonical CLAUDE.md with dod-receipt => OK" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # build_canonical_tree now lays down the dod-receipt anchor.
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ receipt-grammar-present: dod-receipt grammar present"* ]]
 }

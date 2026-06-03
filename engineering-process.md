@@ -287,6 +287,8 @@ Claude Code is the primary harness. Codex and AntiGravity are secondaries. Diffe
 
 Projects opt into the secondaries by adding `"codex"` and/or `"antigravity"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. AntiGravity's deferred native-hook integration is a known gap; turn-level enforcement on AntiGravity sessions relies on parent rules + Tier-3 git hooks only until Trellis ships hook seeding.
 
+**The `execute` skill body compensates — advisory only — on AntiGravity.** Because AntiGravity runs no Tier 1/2 workspace hooks, the `code-review` / `ui-verify` / receipt gates that block at turn end on Claude Code and Codex have no hook to fire from. The canonical builder `execute` partly fills the gap from inside the model turn: its body emits the byte-identical receipt marker (`<!-- dod-receipt … -->`) and runs `code-review` / `ui-verify` in-body as it builds. But this is **advisory only — nothing rejects the turn**: a skill body cannot block its own harness, and `run-all.sh` (the merge gate, §6.4) carries no `code-review` / `ui-verify` / receipt gate to catch them later. So on AntiGravity, **code-review, ui-verify, and receipts are SOFT (advisory, no automated backstop)** — model discipline, not enforcement. The deterministic merge gate still catches secrets / tests / security / PR-shape there (§6.4). Standing mitigation: route risky / UI / edit-heavy runs through Claude or Codex, where the turn-level hooks actually block.
+
 ### 5.6 Token-noise filter (`permissions.deny`)
 
 The canonical settings template ships a `permissions.deny` block that blocks the agent from reading generated files, build artifacts, vendored dependencies, and lockfiles. Same payload across every project: `node_modules/`, `.next/`, `dist/`, `build/`, `out/`, `target/`, `vendor/`, `.venv/`, `__pycache__/`, every cache dir, every lockfile. New projects pick it up automatically through `onboard-project.sh`. Existing projects converge via `scripts/rollout-settings.sh` — idempotent jq merge that preserves project-local additions and only ever adds entries, never deletes.
@@ -347,6 +349,8 @@ Every Trellis project must have branch protection on `main`:
 
 Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval block means any required-review setting = undeployable). The local `pre-push` guard + CI + the PR window are the functional gate.
 
+**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code, Codex, AND AntiGravity** — because git hooks are harness-agnostic, even on AntiGravity, which runs no workspace (Tier 1/2) hooks. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push, which is itself a logged tripwire caught by the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`), the after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those have no automated merge backstop and, on AntiGravity (no turn-level hooks), are SOFT/advisory (see §5.5 and §7). Branch protection (require-PR) is the remote complement to this local gate.
+
 ### 6.5 History hygiene
 
 - **Merge-commit by default** — one merge commit per PR on `main`, preserving the branch's per-commit history. Squash-merge is forbidden (drops agent attribution, intermediate review state, and bisect resolution). Rebase-merge is allowed only for branches whose commit history is intentionally clean and linear, with explicit approval per PR.
@@ -360,11 +364,13 @@ Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval bloc
 
 A change is done when all of the following are true:
 
-1. **Receipts attached.** The response that claims done includes: the verification command(s) run, their exit codes, and the diff lines (or a summary pointing at the PR) that prove the change. "It works" without receipts is not done.
-2. **Todos closed.** If `TodoWrite` has `in_progress` or `pending` items, the turn is not done. Complete them, defer with reason, or abandon with reason. `stop-verify` enforces this.
-3. **Typecheck + lint + fast tests green.** Enforced by `stop-verify` at turn end and by `pre-push` at git boundary.
-4. **Code review resolved.** On edit-heavy turns (≥ 3 files or ≥ 200 lines), the `code-review-subagent` runs. Findings either get fixed or explicitly acknowledged and deferred.
-5. **Visual verification for UI.** For any diff touching UI files, `ui-verify` has run and attached a screenshot. Logically verified is not visually verified.
+1. **Receipts attached.** The response that claims done includes: the verification command(s) run, their exit codes, and the diff lines (or a summary pointing at the PR) that prove the change. "It works" without receipts is not done. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`; SOFT/advisory on AntiGravity — see the harness note below.)*
+2. **Todos closed.** If `TodoWrite` has `in_progress` or `pending` items, the turn is not done. Complete them, defer with reason, or abandon with reason. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`; SOFT/advisory on AntiGravity — see the harness note below.)*
+3. **Typecheck + lint + fast tests green.** Enforced by `stop-verify` at turn end and by `pre-push` at git boundary (the latter on every harness incl. AntiGravity — tests are in the deterministic merge gate set, §6.4).
+4. **Code review resolved.** On edit-heavy turns (≥ 3 files or ≥ 200 lines), the `code-review-subagent` runs. Findings either get fixed or explicitly acknowledged and deferred. *(Turn-level-enforced on Claude Code + Codex; SOFT/advisory on AntiGravity — see the harness note below.)*
+5. **Visual verification for UI.** For any diff touching UI files, `ui-verify` has run and attached a screenshot. Logically verified is not visually verified. *(Turn-level-enforced on Claude Code + Codex; SOFT/advisory on AntiGravity — see the harness note below.)*
+
+**Harness honesty for items 1, 2, 4, and 5.** Receipts, todos-closed, code-review, and ui-verify are turn-level-enforced (a hook blocks the turn) only on **Claude Code and Codex** — receipts and todos-closed by `stop-verify`, code-review and ui-verify by their Stop subagents. On **AntiGravity** they are **SOFT (advisory, no automated backstop)**: AntiGravity runs no Tier 1/2 workspace hooks, the `execute` skill body runs them in-body but cannot reject the turn (§5.5), and the local `pre-push` merge gate has no code-review / ui-verify / receipt / todo gate to catch them (§6.4). They are model discipline there, not enforcement. Standing mitigation: route risky / UI / edit-heavy runs through Claude or Codex, where these gates actually block. (The deterministic gate set — PR-hygiene / secrets / bypass / tests / docs / stack / security-diff / analyze — *is* fail-closed at push on AntiGravity via `pre-push`, so item 3 above (tests) is carried there; item 2 (todos-closed) is `stop-verify`-only and not in the deterministic set, so like items 1/4/5 it is advisory on AntiGravity.)
 
 Done is a property of the *turn* that claimed done, not of the project. Turn-level done compounds into project-level correctness; don't skip the turn-level gate on the theory that a later turn will catch it.
 
@@ -883,7 +889,15 @@ Severity contract is shared between `upgrade.sh` and `version-drift`. If you cha
 
 Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague request through structured questioning, formal specification, technical planning, work breakdown, and a final coherence check. They live as canonical skills under `core-rules/skills/{clarify,spec,plan,tasks,analyze}/` and are seeded into every registered project's `.claude/skills/` (and `.agents/skills/` under Codex) by `onboard-project.sh` / `scripts/rollout-feature-skills.sh`.
 
-**Decision rule — when to invoke the pipeline:**
+**This pipeline is the heavyweight track of a three-track router.** The `brainstorming` front-door (the canonical skill ships under `core-rules/skills/brainstorming/`) sizes every change to one of three tracks before any building begins. The same boundaries are stated in `core-rules/inheritance.md` and the `brainstorming` skill itself:
+
+- **Surgical** — a tiny, obvious change with one clear correct shape (one-line fix, copy tweak, config flip). Skip ideation and skip the pipeline; make the change directly with a receipt, or hand it to `execute` if a checkbox already exists.
+- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author `docs/plans/<topic>.md`, then build it with `execute`.
+- **Heavyweight** — cross-cutting / load-bearing / multi-subsystem work, vague or contradictory intent, or three-plus acceptance criteria. **This is the pipeline below:** `clarify` → `spec` → `plan` → `tasks` → `analyze`, then build with `execute`.
+
+All three tracks converge on the single canonical builder, **`execute`** (`core-rules/skills/execute/`, shipped Phase 4) — it is the implement/build stage that turns a plan's or `tasks.md`'s checkboxes into shipped, receipted work. The pipeline below produces the design artifacts; `execute` is what runs *after* them. When unsure between two tracks, choose the heavier one — a little extra design is cheap; a wrong "surgical" change is not.
+
+**Decision rule — when to invoke the pipeline (the heavyweight track):**
 
 Trellis's default is surgical scope. The pipeline is for changes that DON'T fit that mould. Invoke when any of:
 
@@ -914,7 +928,7 @@ The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scri
 
 **The TodoWrite-vs-tasks.md contract.** `tasks.md` is committed, reviewed, archived alongside the rest of the pipeline — the document of record. `TodoWrite` is the ephemeral in-flight surface: pull the next 3–5 unchecked tasks into TodoWrite as you sit down to work; tick the box in `tasks.md` AND mark TodoWrite items complete in lockstep. If they disagree, `tasks.md` wins.
 
-**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is reviewed before the next is generated. After any skill returns, do not chain to the next in the same turn unless the operator asks. The skills are writers (and one analyst), not builders — implementation begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before.
+**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is reviewed before the next is generated. After any skill returns, do not chain to the next in the same turn unless the operator asks. The skills are writers (and one analyst), not builders — building is the `execute` skill's job and begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before. `execute` reads the resulting `tasks.md` checkbox-by-checkbox; the lightweight track points it at a `docs/plans/<topic>.md` instead.
 
 **Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). `core-rules/templates/project.gitignore.fragment` lists all seven canonical skill symlinks (process-gate + security-gate + the five pipeline skills) under both `.claude/skills/` and `.agents/skills/`; new onboarding picks the fragment up automatically. Pre-Phase-C projects with the older 5-skill fragment trigger an automatic legacy-detection note when re-onboarded; duplicate gitignore entries are harmless.
 

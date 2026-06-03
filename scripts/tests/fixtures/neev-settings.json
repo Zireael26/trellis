@@ -1,0 +1,151 @@
+{
+	"hooks": {
+		"PreToolUse": [
+			{
+				"matcher": "Bash",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh",
+						"timeout": 5,
+						"statusMessage": "Checking command safety..."
+					}
+				]
+			},
+			{
+				"matcher": "Edit|Write",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/check-module-boundary.sh",
+						"timeout": 5,
+						"statusMessage": "Checking module boundaries..."
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "Write|Edit|MultiEdit",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-verify.sh",
+						"timeout": 120,
+						"statusMessage": "Verifying edit..."
+					}
+				]
+			},
+			{
+				"matcher": "Grep|Bash|Read",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/truncation-check.sh",
+						"timeout": 5,
+						"statusMessage": "Checking for truncation..."
+					}
+				]
+			}
+		],
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-context.sh",
+						"timeout": 10,
+						"statusMessage": "Loading session context..."
+					},
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-compact-context.sh",
+						"timeout": 10,
+						"statusMessage": "Restoring context after compact..."
+					},
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/inject-primer-index.sh",
+						"timeout": 5,
+						"statusMessage": "Loading primer index..."
+					}
+				]
+			}
+		],
+		"PreCompact": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/save-context-log.sh",
+						"timeout": 10,
+						"statusMessage": "Saving session context..."
+					}
+				]
+			}
+		],
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-verify.sh",
+						"timeout": 600,
+						"statusMessage": "Running final verification..."
+					},
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/code-review-subagent.sh",
+						"timeout": 120,
+						"statusMessage": "Code review on diff..."
+					},
+					{
+						"type": "command",
+						"command": "$CLAUDE_PROJECT_DIR/.claude/hooks/ui-verify.sh",
+						"timeout": 120,
+						"statusMessage": "UI verification..."
+					}
+				]
+			}
+		]
+	},
+	"permissions": {
+		"deny": [
+			"Read(./**/.next/**)",
+			"Read(./**/__pycache__/**)",
+			"Read(./**/build/**)",
+			"Read(./**/dist/**)",
+			"Read(./**/node_modules/**)",
+			"Read(./**/out/**)",
+			"Read(./**/target/**)",
+			"Read(./**/vendor/**)",
+			"Read(./.cache/**)",
+			"Read(./.coverage)",
+			"Read(./.mypy_cache/**)",
+			"Read(./.next/**)",
+			"Read(./.parcel-cache/**)",
+			"Read(./.pytest_cache/**)",
+			"Read(./.ruff_cache/**)",
+			"Read(./.turbo/**)",
+			"Read(./.venv/**)",
+			"Read(./Cargo.lock)",
+			"Read(./Library/**)",
+			"Read(./Pipfile.lock)",
+			"Read(./Temp/**)",
+			"Read(./build/**)",
+			"Read(./coverage/**)",
+			"Read(./dist/**)",
+			"Read(./go.sum)",
+			"Read(./node_modules/**)",
+			"Read(./out/**)",
+			"Read(./package-lock.json)",
+			"Read(./pnpm-lock.yaml)",
+			"Read(./poetry.lock)",
+			"Read(./target/**)",
+			"Read(./uv.lock)",
+			"Read(./vendor/**)",
+			"Read(./venv/**)",
+			"Read(./yarn.lock)"
+		]
+	}
+}

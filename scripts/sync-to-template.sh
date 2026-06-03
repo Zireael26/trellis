@@ -85,7 +85,10 @@ SYNC_PATHS=(
   "core-rules/autonomy.md"
   "core-rules/presets/"
   "docs/opus-4.8-steering.md"
+  "docs/gpt-5.5-steering.md"
+  "docs/antigravity-steering.md"
   "docs/specs/2026-05-20-trellis-autonomy-design.md"
+  "docs/specs/2026-06-02-trellis-process-enforcement-design.md"
 )
 
 # Files NEVER synced (private / instance-specific) — informational; the

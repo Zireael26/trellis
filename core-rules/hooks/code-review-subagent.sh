@@ -13,12 +13,8 @@
 #
 # Dependencies: jq (required), git (required for diff / skipped otherwise).
 #
-# Status: NEW (no upstream template). v1 is a SKELETON — the actual subagent
-# dispatch is marked TODO below. It relies on a Claude Code mechanism for
-# invoking the Agent tool from inside a hook; that surface area is not yet
-# standardized. Wire it up once Claude Code exposes a stable subagent-from-hook
-# entrypoint (today options are: an HTTP callback, a `claude` CLI invocation,
-# or a project-local script at $CLAUDE_PROJECT_DIR/.claude/agents/code-reviewer).
+# Status: wired (Phase 2a) — calls lib/code-reviewer.sh ladder; fail-open on
+# infra, fail-closed on critical.
 #
 # Env-var/payload contract (exported to $REVIEWER):
 #   AUTONOMY_LEVEL       — resolved integer 1–5 (same algorithm as session-context.sh)
@@ -63,6 +59,21 @@ if [ "$STOP_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# --- Mandatory fork-bomb sentinel ---
+# Rung 2 of the ladder spawns a child `claude -p` turn, whose own Stop hook would
+# otherwise re-fire this reviewer — recursively. `stop_hook_active` does NOT guard
+# this: it is FALSE in the `claude -p` child (a fresh, separate session, not a
+# re-entrant stop). The ladder exports TRELLIS_REVIEW_IN_PROGRESS=1 before its
+# claude call, and that env DOES propagate into the child's Stop-hook environment
+# (empirically confirmed). So on entry, if the sentinel is set, bail immediately.
+if [ "${TRELLIS_REVIEW_IN_PROGRESS:-}" = "1" ]; then
+  exit 0
+fi
+
+# Resolve the hook directory now, BEFORE any `cd`, so the sibling-ladder path
+# below is correct regardless of the working directory we change into.
+HOOK_DIR="$(dirname "${BASH_SOURCE[0]}")"
+
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
@@ -71,6 +82,27 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   REPO_ROOT=$(dirname "$(git rev-parse --git-common-dir)")
 else
   REPO_ROOT="$PROJECT_DIR"
+fi
+
+# --- TRELLIS_REVIEW_OVERRIDE escape ---
+# Documented, LOGGED deferral — mirrors the TRELLIS_ALLOW_MAIN_PUSH tripwire. When
+# the operator sets this, code-review is skipped for this turn, but NEVER silently:
+# we append an acknowledged-and-deferred entry to the decisions-log so a false
+# critical never trains the operator toward a habitual --no-verify. Logged in the
+# dated format session-context.sh greps ("^- 20YY-..."). Uses the literal path
+# because DECISIONS_LOG_PATH is exported further below.
+if [ -n "${TRELLIS_REVIEW_OVERRIDE:-}" ]; then
+  OVERRIDE_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+  if printf '%s\n' "- $(date +%Y-%m-%d) code-review deferred via TRELLIS_REVIEW_OVERRIDE on a turn touching ${OVERRIDE_FILES} file(s)" \
+       >> "$REPO_ROOT/decisions-log.md" 2>/dev/null; then
+    :
+  else
+    # The deferral must never be both un-logged AND un-surfaced. If the
+    # decisions-log is unwritable (read-only file/dir/FS), surface a breadcrumb
+    # instead of silently swallowing the skip.
+    jq -nc --arg ctx "code-review override applied (TRELLIS_REVIEW_OVERRIDE) but the decisions-log at $REPO_ROOT/decisions-log.md was unwritable — record the deferral manually." '{additionalContext: $ctx}'
+  fi
+  exit 0
 fi
 
 # Autonomy resolution mirrors session-context.sh. Used to decide whether the
@@ -138,66 +170,72 @@ if [ -z "$DIFF" ]; then
   exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# TODO (v1 skeleton): dispatch the `code-reviewer` subagent here.
-#
-# Expected interface once wired:
-#   - Input: the $DIFF string above + PROJECT_DIR.
-#   - Reviewer runs with read-only tools.
-#   - Output: JSON on stdout shaped like:
-#       {
-#         "findings": [
-#           {"severity":"info|warn|critical", "file":"...","line":N,"msg":"..."},
-#           ...
-#         ]
-#       }
-#   - If any finding has severity=="critical", this hook returns
-#     {"decision":"block","reason":"<critical finding summary>"} and exits 2.
-#   - Otherwise, findings are appended as advisory context.
-#
-# Implementation options (pick at Phase 2 wiring time):
-#   a) `claude -p "Review this diff: ..." --agent code-reviewer` (CLI one-shot).
-#   b) A project-local script: $CLAUDE_PROJECT_DIR/.claude/agents/code-reviewer.sh
-#      reading the diff from stdin and emitting the JSON above.
-#   c) An HTTP callback to a reviewer service.
-#
-# For now the skeleton exits 0 without dispatching, so stop flow is never blocked.
-# -----------------------------------------------------------------------------
+# --- Idempotency marker ---
+# A turn can fire this hook AND run the execute-body review over the same diff;
+# we must not double-charge the LLM. Key the marker on a sha256 of the diff
+# (shasum -a 256 — macOS has no sha256sum). If this exact diff was already
+# reviewed this turn, exit 0. The marker is touched only AFTER a completed
+# review (clean + advisory paths), NOT on the block path — a blocked turn must
+# re-review once the diff changes via the fix.
+DIFF_HASH=$(printf '%s' "$DIFF" | shasum -a 256 | awk '{print $1}')
+MARKER="$REPO_ROOT/.claude/.review-done-${DIFF_HASH}"
+if [ -f "$MARKER" ]; then
+  exit 0
+fi
 
-REVIEWER="${CODE_REVIEWER_CMD:-${PROJECT_DIR}/.claude/agents/code-reviewer.sh}"
+# --- Build the reviewer envelope ---
+# At L4/L5 the reviewer must also verify decision-log completeness vs diff.
+# Pass the decisions-log content (if any) and the level as a JSON envelope.
+if [ "$AUTONOMY_LEVEL" -ge 4 ] 2>/dev/null && [ -f "$DECISIONS_LOG_PATH" ]; then
+  DECISIONS_PAYLOAD=$(head -c 50000 "$DECISIONS_LOG_PATH" 2>/dev/null)
+else
+  DECISIONS_PAYLOAD=""
+fi
+REVIEW_PAYLOAD=$(jq -nc \
+  --arg diff "$DIFF" \
+  --arg level "$AUTONOMY_LEVEL" \
+  --arg decisions "$DECISIONS_PAYLOAD" \
+  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions}')
 
-if [ -x "$REVIEWER" ]; then
-  # At L4/L5 the reviewer must also verify decision-log completeness vs diff.
-  # Pass the decisions-log content (if any) and the level as a JSON envelope.
-  if [ "$AUTONOMY_LEVEL" -ge 4 ] 2>/dev/null && [ -f "$DECISIONS_LOG_PATH" ]; then
-    DECISIONS_PAYLOAD=$(head -c 50000 "$DECISIONS_LOG_PATH" 2>/dev/null)
-  else
-    DECISIONS_PAYLOAD=""
-  fi
-  REVIEW_PAYLOAD=$(jq -nc \
-    --arg diff "$DIFF" \
-    --arg level "$AUTONOMY_LEVEL" \
-    --arg decisions "$DECISIONS_PAYLOAD" \
-    '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions}')
-  FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | timeout 60 "$REVIEWER" 2>/dev/null || true)
+# --- Invoke the reviewer ladder (sibling lib) ---
+# The 3-rung ladder (operator override → claude -p → deterministic regex) owns
+# rung selection and ALWAYS emits one findings line, fail-open on every infra
+# failure. Do NOT pre-export TRELLIS_REVIEW_IN_PROGRESS here: the ladder gates
+# rung 2 on that sentinel, so pre-setting it would force every default-path call
+# straight to the rung-3 regex and the built-in `claude -p` reviewer would never
+# run. The ladder exports the sentinel itself before spawning ANY child (the
+# rung-1 `exec` AND the rung-2 `claude`), so the child's own top-of-hook guard
+# still trips — recursion is prevented without disabling rung 2. No outer
+# `timeout` — the ladder bounds rung 2 internally via its perl-alarm shim.
+# NB: no `2>/dev/null` here. lib/code-reviewer.sh deliberately leaves the rung-2
+# `claude` stderr unsuppressed so a failing reviewer is visible; silencing fd 2
+# on the caller side would re-introduce that documented mistake. stdout (the one
+# findings line) is what we capture. `|| true` so a nonzero ladder never aborts.
+FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$HOOK_DIR/lib/code-reviewer.sh" || true)
 
-  if [ -n "$FINDINGS" ]; then
-    CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)
-    if [ -n "$CRITICAL" ]; then
-      REASON="Code review flagged critical issues — resolve or explicitly defer:
+if [ -n "$FINDINGS" ]; then
+  CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)
+  if [ -n "$CRITICAL" ]; then
+    REASON="Code review flagged critical issues — resolve or explicitly defer:
 ${CRITICAL}"
-      jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
-      exit 2
-    fi
+    jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
+    # Block path: do NOT touch the marker — a blocked turn must re-review the
+    # corrected diff (which will hash differently anyway).
+    exit 2
+  fi
 
-    # Advisory findings → additionalContext (shown to Claude, not blocking).
-    ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -30)
-    if [ -n "$ADVISORY" ]; then
-      jq -nc --arg ctx "<review>
+  # Advisory findings → additionalContext (shown to Claude, not blocking).
+  ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -30)
+  if [ -n "$ADVISORY" ]; then
+    jq -nc --arg ctx "<review>
 ${ADVISORY}
 </review>" '{additionalContext: $ctx}'
-    fi
   fi
 fi
+
+# Review completed (clean or advisory) — record the idempotency marker so the
+# execute-body review does not re-charge the LLM for this exact diff this turn.
+mkdir -p "$REPO_ROOT/.claude" 2>/dev/null || true
+: > "$MARKER" 2>/dev/null || true
 
 exit 0
