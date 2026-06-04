@@ -6,6 +6,24 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc] — 2026-06-03
+
+**The process-enforcement program — Trellis's first release candidate. The system could already detect drift (the audit fleet), enforce at the turn (hooks), and gate the merge boundary (pre-push), but enforcement was not uniform: a rule could be wired in one harness and missing in the other, or gated at one layer and not the layer that mattered. This release is a thirteen-phase pass that makes every rule fire the same way across both harnesses (Claude Code and Codex) and all three enforcement layers (skills, hooks, gates), then rolls the result out to all seven registered projects and verifies it with a two-tier health check.** The matrix is feature-complete and fleet-deployed; 1.0.0 follows after a few weeks of audit-fleet soak.
+
+### Added
+
+- **`reread-guard` — PreToolUse hook, both harnesses.** Blocks an edit to any file the agent has not read in the current session, the failure mode where an edit lands on stale lines because the file changed underneath the agent or it is working from a two-turn-old mental model. Shipped with `track-read` (records reads) and `stamp-turn` (the per-turn clock the guard reads); the trio lands atomically so a project can never end up half-wired.
+- **`execute` — the canonical builder skill.** The load-bearing build step that turns an approved plan into commits without stepping outside the process, emitting the machine-readable `dod-receipt` marker the Stop hooks check. Resolves identically in Claude Code (`.claude/skills/`) and Codex (`.agents/skills/`).
+- **Cross-harness pre-push merge gate.** One canonical gate that runs the same `process-gate` check regardless of how a project wires its hooks (husky for Node projects, native `.githooks/` for the rest), replacing per-project wiring that had drifted into three different behaviors. `scripts/sync-merge-gate.sh` re-points each project at the canonical gate safely, skipping any project that carries a custom pre-push it does not recognize rather than overwriting it.
+- **Brownfield settings reconciliation.** `scripts/sync-hooks.sh` now wires the canonical `.hooks` block into an existing `settings.json` via `scripts/lib/settings-hooks-merge.sh`, a preserving merge that applies the canonical wiring and re-appends any project-specific hook entry the canonical set does not carry (verified on neev, whose hand-tuned module-boundary hook survives). The hook-resolution logic is shared with `scripts/lib/prepush-target.sh`.
+- **`propose-rules` Stop hook, default-on.** Scans a finished edit-heavy turn for correction signals and proposes a single `gotchas.md` candidate; never blocks.
+- **Two-tier doctor preconditions.** `scripts/doctor.sh` Tier 0 now gates on the canonical control plane itself (on main, clean, in sync with origin, doc-path conformance, VERSION-matches-CHANGELOG, receipt-grammar present) before Tier 1 walks every project's inheritance. Green across both tiers is the fleet-wide proof the matrix is intact.
+
+### Fixed
+
+- **`hc_prepush_wired_runall` honors `core.hooksPath`** (PR #97). The check probed only `.husky/pre-push` and `.git/hooks/pre-push`, so native-git-hooks projects (`core.hooksPath=.githooks`) were mis-reported as having no merge gate despite a correctly-wired one. It now resolves the hook git actually runs, keyed on `core.hooksPath`, with a red-green `doctor.bats` case.
+- **Reviewer `claude -p` hardened** (DL-SEC-01). The code-review subagent no longer runs with `--dangerously-skip-permissions`; the diff review runs under normal permissions.
+
 ## [v0.9.0] — 2026-06-02
 
 **Disk janitor — a single unscoped `turbo.json` `outputs[]` glob (`.next/**` with no `!.next/cache/**` negation) caused turbo to re-archive the entire `.next` tree on every run, accumulating 148 GB over two days on one fleet machine before the disk filled; this release adds a report-first host CLI that scans the fleet for reclaimable build caches, stale worktrees, and package stores, a daily launchd report agent, and an always-run doctor tripwire for the recurring misconfiguration — nothing ever auto-deletes.** ADR: `docs/adr/2026-06-02-disk-janitor.md`.
