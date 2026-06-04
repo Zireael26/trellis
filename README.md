@@ -8,6 +8,7 @@
 
 *A trellis gives a climbing plant the structure to grow on. This one does the same for code an AI agent writes — without it the work sprawls and breaks; with it, it grows tall and clean.*
 
+[![Version: 1.0.0-rc](https://img.shields.io/badge/version-1.0.0--rc-c2410c.svg)](#release)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-supported-7c3aed.svg)](https://docs.claude.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/Codex-supported-10b981.svg)](https://github.com/openai/codex)
@@ -36,21 +37,38 @@ None of those are bugs in the model. They are gaps in the *process* around the m
 | | |
 |---|---|
 | 📜 **Parent rules in one place** | `core-rules/CLAUDE.md` is the single source of truth. Every project inherits via symlink — Claude Code through `.claude/rules/`, Codex through `AGENTS.md` + `.agents/`. |
-| 🪝 **9 canonical hooks, 3 tiers** | Fast-local (<3s every turn) · Heavy-gated (on `Stop`, ≤90s) · Git-boundary (husky / native). Blocks `rm -rf ~`, force-pushes, direct pushes to `main`, secrets reads, and "done" without receipts. |
-| ✅ **A harness-agnostic process-gate skill** | One canonical implementation, symlinked into every project. Runs the same way in Claude Code, Codex, `claude -p`, and CI. Emits a fixed verdict block: `MERGEABLE / NEEDS CHANGES / BLOCKED`. |
-| 🔍 **A fleet of 10 scheduled audits** | Weekly sweeps for hook drift, `--no-verify` bypasses, dep CVEs, test rot, registry/blacklist health. Every report is dated markdown — grep, diff, quote in commits. |
+| 🪝 **Hooks across three tiers** | Fast-local (<3s every turn) · Heavy-gated (on `Stop`, ≤90s) · Git-boundary (husky / native git hooks). Blocks `rm -rf ~`, force-pushes, direct pushes to `main`, secrets reads, and "done" without receipts. |
+| 🧠 **9 canonical skills** | The auto-invoked spec-kit pipeline (`clarify → spec → plan → tasks → analyze`), the surgical-default `execute` skill, the harness-agnostic `process-gate` and `security-gate`, and mandatory pre-creative `brainstorming` — one implementation each, symlinked into every project. |
+| ✅ **A harness-agnostic process-gate** | Runs the same way in Claude Code, Codex, `claude -p`, and CI. Emits a fixed verdict block: `MERGEABLE / NEEDS CHANGES / BLOCKED`. The companion `security-gate` runs semgrep + osv-scanner + gitleaks under a provider-neutral triage layer. |
+| 🔍 **A fleet of 16 scheduled audits** | Daily digest plus weekly/monthly/quarterly sweeps for hook drift, `--no-verify` bypasses, dep CVEs, test rot, version/preset/primer drift, and security baselines. Every report is dated markdown — grep, diff, quote in commits. (Two more are drafted and parked.) |
+| 🎚 **Autonomy slider (L1–L5)** | Dial how much the agent decides on its own — Pedagogical → Cautious → Standard (default) → Initiative → Autonomous — per session (`/autonomy N`) or per project. Bright-line safety guardrails fire at *every* level. |
+| 🧩 **Presets** | Drop-in policy bundles (`compliance-strict`, `experimental-loose`) that clamp the autonomy ceiling and tune the gates for a project's risk profile. The `preset-drift` audit keeps them honest. |
 | 📐 **Rule of Three for evolution** | New rules wait in `core-rules/deferred.md` until a 3rd independent project adopts them. n=2 is the danger zone. |
 | 🤖 **Multi-harness parity, opt-in or opt-out** | Same policy intent across Claude Code, Codex, and AntiGravity. The `harnesses` array in `trellis.config.json` is the single switch — drop the ones you don't use. AntiGravity inherits via the same `AGENTS.md` / `.agents/` surface as Codex (rules + skills are byte-identical); workflow slash-commands land at `.agents/workflows/`. |
+
+---
+
+## Skills
+
+Trellis ships **9 canonical skills** in `core-rules/skills/` — one implementation each, symlinked into every project so they behave identically across Claude Code, Codex, and CI.
+
+| Skill | When it fires | What it does |
+|---|---|---|
+| **spec-kit pipeline** | Auto-invoked from frontmatter on feature work | A five-stage flow — `clarify → spec → plan → tasks → analyze` — that turns a fuzzy ask into a reviewed spec, an executable plan, and a task list before code is written. No command to remember; the agent discovers and runs it. |
+| **execute** | The surgical default | Single-file fixes and small changes that don't warrant a full spec. The fast path for bug fixes. |
+| **process-gate** | Pre-PR, harness-agnostic | Emits a fixed verdict block: `MERGEABLE / NEEDS CHANGES / BLOCKED`. The same gate in Claude Code, Codex, `claude -p`, and CI. |
+| **security-gate** | On security-relevant changes | semgrep + osv-scanner + gitleaks under a provider-neutral LLM triage layer. |
+| **brainstorming** | Before any creative work | Mandatory exploration of intent, requirements, and design before implementation begins. |
 
 ---
 
 ## Architecture
 
 <div align="center">
-  <img src="docs/architecture.svg" alt="Trellis architecture — parent control plane, project inheritance, three-tier hook enforcement, and scheduled audit feedback loop" width="100%"/>
+  <img src="docs/architecture.svg" alt="Trellis architecture — parent control plane, project inheritance, skills, three-tier hook enforcement, and scheduled audit feedback loop" width="100%"/>
 </div>
 
-The control plane owns the rules. Projects inherit through symlinks. Hooks enforce in the moment. Audits enforce over time. The Rule-of-Three loop keeps the parent layer honest.
+The control plane owns the rules, the skills, and the autonomy/preset defaults. Projects inherit through symlinks. Skills shape the work (spec-kit pipeline, `execute`, `process-gate`, `security-gate`). Hooks enforce in the moment. Audits enforce over time. The Rule-of-Three loop keeps the parent layer honest.
 
 ---
 
@@ -86,6 +104,8 @@ Tier 1 — fast-local         < 3s, every agent turn
 block-destructive   denies rm -rf ~, git push --force, DROP TABLE, .env reads
 post-edit-verify    lints just the touched file (eslint/ruff/clippy/govet)
 session-context     injects last session's state on SessionStart
+inject-primer-index injects the project's primer index on SessionStart
+reread-guard        nudges re-reading a file before editing a stale copy
 save-context-log    writes context-log.md on PreCompact / Stop
 post-compact-context  re-injects context-log.md after compaction
 truncation-check    flags >50K-char tool results
@@ -95,6 +115,7 @@ Tier 2 — heavy-gated         ≤ 90s, on Stop
 stop-verify             open todos? typecheck? lint? fast tests? → block on any fail
 code-review-subagent    dispatches a read-only reviewer on edit-heavy turns (≥3 files)
 ui-verify               boots dev server + screenshots affected route on UI changes
+propose-rules           (experimental, opt-in) surfaces candidate parent rules
 
 Tier 3 — git-boundary        husky or native git hooks
 ─────────────────────────────────────────────────────
@@ -109,22 +130,41 @@ Every tier has the same escape hatch — `TRELLIS_ALLOW_MAIN_PUSH=1`, `--no-veri
 
 ## The audit fleet
 
-Ten scheduled tasks, registered as cron jobs, sweep every project in `registry.md`:
+Sixteen scheduled tasks, registered as cron jobs, sweep every project in `registry.md`:
 
 | Audit | Cadence | What it catches |
 |---|---|---|
+| `daily-project-digest` | Daily 08:00 | Per-project morning status — branch, last commit, 7-day activity, open audit hits, suggested next move. Always emits. |
 | `cross-project-process-audit` | Mon 10:00 | Hook presence, staleness, required files, inheritance wiring |
 | `registry-blacklist-health` | Mon 10:30 | Registry ↔ filesystem ↔ blacklist consistency |
 | `test-health` | Mon 11:00 | Fast suite green/red across the registry, last-green bisect on red |
 | `dep-currency` | Mon 11:30 | Outdated-dep scan: patch / minor / major drift |
-| `parent-hook-drift` | Sun 21:00 | SHA256 canonical-vs-deployed comparison for every hook |
+| `version-drift` | Mon 11:45 | `trellis_version` pin drift across the registry; major drift = critical |
+| `preset-drift` | Mon 12:00 | Declared-vs-installed preset symlinks across the registry |
+| `primer-drift` | Mon 12:15 | Primer freshness — stale / missing / unreachable primer pins |
 | `bypass-tripwire` | Weekdays 08:00 | Silent unless someone used `--no-verify`, force-push, or direct-to-main |
 | `dep-vulnerabilities` | Weekdays 08:30 | CVE / GHSA via native pkg-mgr audit + osv-scanner |
+| `parent-hook-drift` | Sun 21:00 | SHA256 canonical-vs-deployed comparison for every hook |
 | `gotchas-rollup` | 1st of month | Rule-of-Three engine — promotes n≥3 patterns to parent rules |
 | `audit-report-rollup` | 1st of month | Month-over-month trend report across every other audit |
 | `dep-major-upgrade-watch` | 1st of month | Framework-tier (Next, React, TS, Node) drift vs. your watchlist |
+| `security-baseline` | Quarterly | Fleet-wide security baseline (semgrep + osv-scanner + gitleaks) |
+| `obsolete-rules` | Quarterly | Prunes model- / harness-compensating rules that have aged out (removal-only) |
+
+Two more are written and parked, waiting for evidence they're needed: `lint-debt-trend` and `large-file-watch`.
 
 Reports land in `audits/YYYY-MM-DD-<task>.md`. Examples (redacted) live in [`examples/audits/`](examples/audits/).
+
+---
+
+## Tooling
+
+A handful of `scripts/` round out the control plane:
+
+- **`scripts/doctor.sh`** — health check for a Trellis clone or an onboarded project: inheritance wiring, hook presence, drift, required files.
+- **`scripts/worktree.sh`** + **`scripts/seed-inheritance-symlinks.sh`** — git worktrees inherit the parent's rules and hooks automatically, so a worktree is governed the same as its primary checkout.
+- **`scripts/disk-janitor.sh`** + **`scripts/install-disk-janitor-launchd.sh`** — report-first fleet disk reclaim (build caches, package stores), optionally on a `launchd` schedule on macOS.
+- **Primers** — a per-project index of entry points and key files, injected at session start by the `inject-primer-index` hook and kept fresh by the `primer-drift` audit. See [`docs/primers/`](docs/primers/).
 
 ---
 
@@ -141,11 +181,13 @@ Reports land in `audits/YYYY-MM-DD-<task>.md`. Examples (redacted) live in [`exa
 ├── core-rules/                ← THE PARENT LAYER — what every project inherits
 │   ├── CLAUDE.md              ← terse parent rules
 │   ├── AGENTS.md              ← symlink → CLAUDE.md for Codex parity
-│   ├── hooks.md               ← spec for the 9 canonical hooks (3 tiers)
+│   ├── hooks.md               ← spec for the canonical hooks (3 tiers)
 │   ├── hooks/                 ← canonical Claude Code hook implementations
 │   ├── codex/                 ← canonical Codex hooks.json + hook scripts
 │   ├── husky/                 ← canonical pre-commit / commit-msg / pre-push
-│   ├── skills/process-gate/   ← canonical pre-PR enforcement skill
+│   ├── skills/                ← 9 canonical skills (spec-kit, execute, process-gate, security-gate, brainstorming…)
+│   ├── autonomy.md            ← the L1–L5 autonomy slider
+│   ├── presets/               ← policy bundles (compliance-strict, experimental-loose)
 │   ├── templates/             ← per-project file templates (gotchas, context-log)
 │   ├── inheritance.md         ← how Claude and Codex inheritance work
 │   └── deferred.md            ← rules waiting for their 3rd project (Rule of Three)
@@ -155,8 +197,8 @@ Reports land in `audits/YYYY-MM-DD-<task>.md`. Examples (redacted) live in [`exa
 │
 ├── engineering-process.md     ← THE MANUAL — narrative source of truth
 │
-├── scheduled-tasks/           ← 10 audits + 2 drafts; each is prompt + targets
-├── scripts/                   ← onboard-project, sync-hooks, sync-codex-hooks
+├── scheduled-tasks/           ← 16 audits + 2 drafts; each is prompt + targets
+├── scripts/                   ← onboard-project, doctor, worktree, disk-janitor, sync-hooks…
 ├── audits/                    ← generated audit reports land here
 ├── examples/audits/           ← redacted sample reports
 └── docs/                      ← provenance + LIFT/LEAVE/DEFER recon
@@ -227,19 +269,34 @@ Native git hooks under `.githooks/` with `git config core.hooksPath = .githooks`
 </details>
 
 <details>
+<summary><b>How much does the agent decide on its own?</b></summary>
+
+You choose, with the autonomy slider — five levels from **L1 Pedagogical** (ask before every non-trivial action) through **L3 Standard** (the default: plan-approval on multi-step work, flags ambiguity) to **L5 Autonomous** (decides silently, logs decisions). Set it per session with `/autonomy N` or per project in `.trellis.config.json`; presets clamp the ceiling. The bright-line safety guardrails — no destructive commands, no `--no-verify`, no direct push to `main` — fire at *every* level, including L5. See [`core-rules/autonomy.md`](core-rules/autonomy.md).
+
+</details>
+
+<details>
 <summary><b>How do I tune the rules?</b></summary>
 
-Per-project overrides live in `.claude/hooks/config.sh` (and `.codex/hooks/config.sh` if applicable). The parent hook scripts are read-only; projects point them at their tools via env vars. See [`hooks.md`](core-rules/hooks.md) → "Project overrides".
+Per-project overrides live in `.claude/hooks/config.sh` (and `.codex/hooks/config.sh` if applicable). The parent hook scripts are read-only; projects point them at their tools via env vars. See [`hooks.md`](core-rules/hooks.md) → "Project overrides". For broader policy shifts, drop in a **preset** (`core-rules/presets/`) instead of editing rules one by one.
 
 </details>
 
 ---
 
+## Release
+
+**Trellis 1.0.0-rc.** Stable enough to fork and run in earnest; the `-rc` tag means the parent layer and skill set are settling toward a 1.0 that won't move under you. See [`core-rules/VERSION`](core-rules/VERSION).
+
+---
+
 ## Write-up
 
-A longer-form blog post walking through the design decisions, the five principles, and the lessons:
+Longer-form blog posts walking through the design decisions, the principles, and the lessons:
 
-→ **[Trellis: An Engineering Process for AI Coding Agents](https://akaushik.org/writing/trellis)**
+→ **[Trellis: An Engineering Process for AI Coding Agents](https://akaushik.org/writing/trellis)** — the original design post.
+
+→ **[Trellis 1.0-rc](https://akaushik.org/writing/trellis-1-0-rc)** — what landed for the release candidate: skills, the autonomy slider, presets, and the wider audit fleet.
 
 ---
 
