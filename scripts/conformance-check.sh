@@ -154,6 +154,7 @@ for doc in "${SPEC_DOCS[@]}"; do
       # cites a path that exists only inside a registered project.
       case "$rel_doc:$cleaned" in
         "core-rules/skills/process-gate/references/docs.md:docs/EPM.md") continue ;;
+        "registry.md:docs/specs/2026-06-04-gwtf-site-design.md") continue ;;
       esac
       ref_count=$((ref_count + 1))
       # Try repo-root resolution first; fall back to doc-relative for

@@ -1,33 +1,40 @@
 #!/usr/bin/env bash
-# Rollout: install the canonical builder skill symlinks — execute + brainstorming
-# — in every registered project. Idempotent; safe to re-run. Modeled on
-# scripts/rollout-process-gate-skill.sh (and its multi-skill sibling
-# scripts/rollout-feature-skills.sh).
+# Rollout: install the canonical `orchestrate` skill symlink in every registered
+# project. Idempotent; safe to re-run. Modeled on scripts/rollout-debrief-skill.sh
+# (and its siblings rollout-builder-skills.sh / rollout-feature-skills.sh).
 #
-# These are the NON-pipeline skills: brainstorming is the ideation front-door and
-# execute is the canonical builder loop. They are deliberately NOT part of the
-# clarify → spec → plan → tasks → analyze pipeline, so they have their own rollout
-# path and are NOT listed in rollout-feature-skills.sh's FEATURE_SKILLS array.
-# The symlinks make them discoverable in each project (Claude Code reads
-# .claude/skills/; Codex/AntiGravity read .agents/skills/); operators invoke them
-# by name. Stateless per-project — no local config is seeded.
+# orchestrate is the dynamic-workflow orchestration skill (the tenth canonical
+# skill). Like the builder skills it is NOT part of the clarify → spec → plan →
+# tasks → analyze pipeline, so it has its own rollout path. The symlink makes it
+# discoverable per project (Claude Code reads .claude/skills/; Codex/AntiGravity
+# read .agents/skills/). It is capability-gated — it lights up only when the
+# harness exposes a subagent-spawning workflow tool — and stateless per-project;
+# no local config is seeded.
 #
 # Reads trellis.config.json for paths. Honors `harnesses` — .agents/ parity is
 # applied only when "codex" or "antigravity" is enabled in the parent config.
 #
+# NOTE on gitignore: the new symlinks should be gitignored (they target absolute
+# paths under $TRELLIS_ROOT that conflict on cross-machine merges). Since the
+# generate-and-replace block landed (onboard-project.sh write_gitignore_block), a
+# project's Trellis-managed block lists exactly the canonical symlinks present at
+# its last onboard run. If orchestrate's symlink was absent then, the block will
+# not yet ignore it — re-run onboard-project.sh per project (idempotent;
+# regenerates the block in full) to close that. This script does not touch
+# .gitignore.
+#
 # Behavior per project:
-#   1. If <project>/.claude/skills/<skill>/ is already a symlink to canonical: skip.
+#   1. If <project>/.claude/skills/orchestrate is already a symlink to canonical: skip.
 #   2. If a directory exists where the symlink should go: rename to
-#      <skill>.local-backup-YYYYMMDD/ and create the symlink.
+#      orchestrate.local-backup-YYYYMMDD/ and create the symlink.
 #   3. If neither exists: create the symlink.
-#   4. Same flow under .agents/skills/<skill>/ when Codex/AntiGravity is enabled.
-#   5. Does NOT seed any local config — these skills are stateless per-project.
+#   4. Same flow under .agents/skills/orchestrate when Codex/AntiGravity is enabled.
 #
 # Usage:
-#   rollout-builder-skills.sh                 # interactive, all registered projects
-#   rollout-builder-skills.sh --dry-run       # show plan only
-#   rollout-builder-skills.sh --yes           # non-interactive
-#   rollout-builder-skills.sh <project-name>  # single project
+#   rollout-orchestrate-skill.sh                 # interactive, all registered projects
+#   rollout-orchestrate-skill.sh --dry-run       # show plan only
+#   rollout-orchestrate-skill.sh --yes           # non-interactive
+#   rollout-orchestrate-skill.sh <project-name>  # single project
 
 set -euo pipefail
 
@@ -42,20 +49,13 @@ done
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
 
-# The non-pipeline builder skills: brainstorming (ideation front-door) and
-# execute (the canonical builder loop). These are NOT writers in the
-# clarify → spec → plan → tasks → analyze pipeline, so they live here rather
-# than in rollout-feature-skills.sh's FEATURE_SKILLS.
-BUILDER_SKILLS=(execute brainstorming)
+ORCHESTRATE_SKILLS=(orchestrate)
 
 DRY_RUN=false
 ASSUME_YES=false
 ONLY_PROJECT=""
 DATE_TAG="$(date +%Y%m%d)"
 
-# Parse args BEFORE the canonical-skill existence check so --dry-run can soften
-# a missing skill dir (the skill bodies land in later phases of the
-# process-enforcement program; --dry-run must resolve cleanly before then).
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
@@ -67,16 +67,11 @@ for arg in "$@"; do
 done
 
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
-for s in "${BUILDER_SKILLS[@]}"; do
+for s in "${ORCHESTRATE_SKILLS[@]}"; do
   if [ ! -d "$CANONICAL_SKILLS_DIR/$s" ]; then
-    if $DRY_RUN; then
-      echo "  WARN (dry-run): canonical skill not present yet: $CANONICAL_SKILLS_DIR/$s" >&2
-      echo "    (lands in a later phase of the process-enforcement program — dry-run continues)" >&2
-    else
-      echo "canonical skill missing: $CANONICAL_SKILLS_DIR/$s" >&2
-      echo "is the parent branch merged? run from main of the Trellis canonical clone." >&2
-      exit 1
-    fi
+    echo "canonical skill missing: $CANONICAL_SKILLS_DIR/$s" >&2
+    echo "is the parent branch merged? run from main of the Trellis canonical clone." >&2
+    exit 1
   fi
 done
 
@@ -164,12 +159,12 @@ rollout_one() {
 
   echo "== $name =="
 
-  for s in "${BUILDER_SKILLS[@]}"; do
+  for s in "${ORCHESTRATE_SKILLS[@]}"; do
     install_skill_symlink "$p" ".claude/skills/$s" "$s"
   done
 
   if pg_has_harness codex || pg_has_harness antigravity; then
-    for s in "${BUILDER_SKILLS[@]}"; do
+    for s in "${ORCHESTRATE_SKILLS[@]}"; do
       install_skill_symlink "$p" ".agents/skills/$s" "$s"
     done
   elif [ -d "$p/.agents" ]; then
@@ -195,7 +190,7 @@ else
 fi
 
 echo "Targets: ${TARGETS[*]}"
-echo "Builder skills: ${BUILDER_SKILLS[*]}"
+echo "Skill: ${ORCHESTRATE_SKILLS[*]}"
 $DRY_RUN && echo "(dry-run mode — no writes)"
 
 if ! $ASSUME_YES && ! $DRY_RUN; then
@@ -211,14 +206,12 @@ done
 echo "== done =="
 echo
 echo "Per-project next steps:"
-echo "  1. The new symlinks (.claude/skills/{execute,brainstorming},"
-echo "     .agents/skills/{execute,brainstorming}) MUST be gitignored"
-echo "     — they target absolute paths under \$TRELLIS_ROOT that conflict on"
-echo "     cross-machine merges."
-echo "  2. Older projects carry stale/stacked gitignore fragments that do not"
-echo "     list the new execute/brainstorming symlinks. Re-run onboard-project.sh"
-echo "     on the project — it regenerates the .gitignore Trellis-managed block in"
-echo "     full (collapsing any stale/stacked blocks into one) from the symlinks"
-echo "     it creates. No manual fragment paste is needed."
-echo "  3. No project-local config is required for the builder skills — they"
-echo "     run stateless."
+echo "  1. /orchestrate is now discoverable in each project (Claude Code reads"
+echo "     .claude/skills/; Codex/AntiGravity read .agents/skills/). It is"
+echo "     capability-gated: it activates only when the harness exposes a"
+echo "     subagent-spawning workflow tool."
+echo "  2. The new symlinks may not yet be gitignored. The generated .gitignore"
+echo "     block lists only the symlinks present at the last onboard run, so"
+echo "     re-run onboard-project.sh per project (idempotent; regenerates the"
+echo "     block in full) to ignore the new orchestrate symlink."
+echo "  3. No project-local config is required — orchestrate runs stateless."

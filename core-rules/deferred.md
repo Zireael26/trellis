@@ -31,16 +31,10 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Lift when:** two more projects reach enough operational maturity to want systematic autopsies.
 
 ### PR size soft-target 400 / hard-ceiling 800
-**Source:** TGSC.
+**Source:** TGSC; clusterbid-console (registry: "PR size budget 400/800") — n=2.
 **What:** PRs should aim for ≤400 changed lines; ceiling at 800. Larger PRs require justification.
-**Why defer:** TGSC is a single Next.js app. Neev is a monorepo where cross-package refactors legitimately cross 800 lines. The numbers need per-project tuning before being a parent rule.
-**Lift when:** two more projects validate *some* numeric target works cross-class (n=3 total). At that point, lift the pattern (with project override) rather than specific numbers.
-
-### ADR numbered-sequential doc folder
-**Source:** TGSC.
-**What:** `docs/adr/NNNN-<slug>.md` with a fixed template (context, decision, consequences, status).
-**Why defer:** Neev already captures the same decisions in tech-spec docs with a different layout. Picking TGSC's shape over Neev's at n=1 each is arbitrary.
-**Lift when:** two more projects converge on one of the two layouts (n=3 total on that layout); lift the winner.
+**Why defer:** TGSC is a single Next.js app. Neev is a monorepo where cross-package refactors legitimately cross 800 lines (explicitly opts out). The numbers need per-project tuning before being a parent rule.
+**Lift when:** one more project validates *some* numeric target works cross-class (n=3 total). At that point, lift the pattern (with project override) rather than specific numbers.
 
 ### Tech-spec-check CI job
 **Source:** Neev.
@@ -63,38 +57,56 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 ### API surface gate
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** at PR time, diff the project's declared API surface (OpenAPI / GraphQL SDL / route table / RPC manifest) against `main`. Breaking changes (removed routes, removed fields, narrowed types, tightened required-ness) without an accompanying version bump or deprecation marker block the merge.
-**Why defer:** Trellis has zero service-shaped projects in `registry.md` today (`service-node` and `service-python` are taxonomy-only). At n=0 the rule's exact shape — which manifest format, what counts as breaking, where the version bump lives — would be a coin flip.
+**Why defer:** the original "n=0 service-shaped projects" premise is now false — clusterbid-console (Go+Next.js+Python monorepo with `services/*`) and vericite (api-gateway, ai-service, k3s) are both service-shaped. No firsthand API-surface-diff adoption evidence yet, so the rule's exact shape — which manifest format, what counts as breaking, where the version bump lives — is still unsettled. Re-evaluate next cycle.
 **Lift when:** three independent service-shaped projects each ship a route-surface diff at PR time. They don't have to use the same tool, but the rule converges only when there's evidence of a common shape across them.
 
 ### Migration safety gate
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** any DB migration that drops a column, narrows a type, adds a NOT NULL without a default, or changes a primary key is blocked without (a) a defaults-and-backfill plan documented in the PR body and (b) a tested rollback. Additive migrations pass.
-**Why defer:** without a service running against a migrated database, "tested rollback" has no fixture to live in. The rule needs a project shape that owns its schema and runs migrations on its own infra to settle.
+**Why defer:** the "n=0 service-shaped projects" premise is now false — clusterbid-console and vericite are both service-shaped, and vericite/neev have already caught non-additive issues (idempotency, role-before-use, fresh-DB) via a Drizzle migrator (see Addition: Drizzle/Postgres fresh-DB migration). Still missing the specific "tested rollback caught a non-additive change *via the gate*" evidence; closest of the service-shaped entries to graduation. Re-evaluate next cycle.
 **Lift when:** three service-shaped projects each have a migration runner (Alembic / Drizzle / Prisma migrate / Atlas / Goose) in CI and have caught at least one non-additive change with the gate.
 
 ### Container / Dockerfile health check
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** `Dockerfile` lint at PR time — pinned base image (no `:latest`), non-root runtime user, `HEALTHCHECK` declared, no secrets baked into layers, multi-stage build for any compiled language. Tooling: hadolint or equivalent.
-**Why defer:** none of the active projects ship a container image as their primary deliverable. Lume is native, the Next.js apps deploy via Vercel, and the SaaS workspaces in Neev predate any container strategy. Promoting a Docker rule with no Docker-shipping projects to validate against would lock in defaults from a hypothetical.
+**Why defer:** two service-shaped projects now exist (clusterbid-console, vericite — the latter ships a k3s deployment), so the "no Docker-shipping projects" premise is weakening, but there's no firsthand Dockerfile-lint adoption evidence yet. Promoting a Docker rule now would still lock in defaults from a hypothetical. Move from hypothetical to watch; re-evaluate next cycle.
 **Lift when:** three projects in `registry.md` ship production container images and each runs a Dockerfile linter at PR time.
 
 ### service-verify hook
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** the service-equivalent of `ui-verify` — at turn end on a service-shaped project, boot the service against a fixture environment, hit a health endpoint, run a fast contract-test smoke, attach the response as a receipt. Parallel to the UI screenshot in §7 of `engineering-process.md`.
-**Why defer:** the existing `ui-verify` hook is a worked example precisely because TGSC and Lume both produce visual artifacts that require a screenshot. There's no service-shaped project whose "the service is up" is even definable yet, so the hook contract (port? endpoint? what counts as a fixture?) cannot be specified.
+**Why defer:** the "no service-shaped project whose 'the service is up' is even definable" premise is now false — clusterbid-console and vericite are both service-shaped. No firsthand smoke-contract adoption evidence yet, so the hook contract (port? endpoint? what counts as a fixture?) still cannot be specified. Move from hypothetical to watch; re-evaluate next cycle.
 **Lift when:** three service-shaped projects independently define a "is the service up?" smoke and run it as part of their `stop-verify` chain.
 
 ### `.env.example` sync check
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** at PR time, parse the running service's env-var consumption (e.g., `process.env.X` / `os.environ["X"]` / `Deno.env.get("X")`) and compare against the keys declared in `.env.example`. Missing keys in `.env.example` block the merge; orphaned keys (in `.env.example` but unused) warn.
-**Why defer:** depends on a service's env-var-driven configuration model. The current registry skews toward static-site / monorepo / native-app projects where the env-var surface is small and lives elsewhere (Vercel project settings, native build configs).
+**Why defer:** the "n=0 service-shaped projects" premise is now false — clusterbid-console and vericite are both service-shaped, and vericite's RSC self-call bug (2026-05-02, `NEXT_PUBLIC_SITE_URL` unset → 401 HTML) is an env-drift incident the gate targets (n=1). Still short of the threshold. Re-evaluate next cycle.
 **Lift when:** three service-shaped projects each maintain a meaningful `.env.example` and have caught at least one drift incident the gate would have prevented.
 
-### Code-asset pairing rule
-**Source:** vericite + lume (n=2 from `audits/2026-05-01-gotchas-rollup.md`).
-**What:** when a code change has a non-code companion artifact (a checked-in generated file, a scene/prefab reference, a fixture, a snapshot, a binding manifest), update the companion in the **same commit**. Static checks (typecheck, build, lint) cannot detect drift between code and these companions; the failure surfaces only via an integrity test or at runtime.
-**Why defer:** the underlying lesson is consistent across the two sources, but the mechanisms differ enough — vericite's case was a regenerated `docs/api/02-openapi.yaml` lagging behind a TS rename, lume's was a Unity `.unity` scene file not referencing newly-authored `MonoBehaviour`s — that the right shape of the rule isn't yet obvious. A third instance from a different domain would tell us whether to phrase this as "regenerate generated artifacts" (narrow, file-scoped) or as a broader "code-asset pairing" invariant with per-project enforcement hooks.
-**Lift when:** a third project independently reports a bug whose root cause is a code change landing without its paired non-code artifact (e.g., GraphQL schema dump out of sync, Storybook snapshot not regenerated, locale file drift, IaC plan not re-applied).
+### Drizzle / Postgres migration must run from an empty DB and can fail silently
+**Source:** neev + vericite (n=2).
+**What:** a migration set must be runnable from a fresh/empty database in isolation; each migration self-contained (create roles before use, idempotent DDL), and "Migrations complete!" must be verified against actual schema state.
+**Why defer:** both sources are Drizzle/Postgres; a third on a *different* runner is needed to know whether to phrase the rule as Drizzle-specific or runner-agnostic. (Related to the Migration safety gate entry above.)
+**Lift when:** a third project running a migration runner reports a fresh-DB bootstrap or silent-no-op migration failure.
+
+### A11y must be verified against fully-rendered, data-seeded DOM — not empty states or by eye
+**Source:** akaushik.org + vericite (n=2).
+**What:** run axe against the populated, every-state DOM; design intuition under-delivers on contrast and visual reordering breaks source order.
+**Why defer:** both sources are user-facing web projects; adjacent to but distinct from the `axe-core in CI` entry (which is about adopting the gate — this is about *what the gate must run against*). Needs a third user-facing project to confirm.
+**Lift when:** a third user-facing project independently reports an a11y miss that empty-state/by-eye checking let through.
+
+### Don't ship config that advertises an unbuilt or unrequested capability
+**Source:** neev + akaushik.org (n=2).
+**What:** a config/manifest declaration must be gated to the commit that actually lands the capability it advertises; speculative wiring creates false operational signals or 404s for anything that follows the declaration.
+**Why defer:** both instances are config-manifest mismatches (neev `vercel.json` crons, akaushik `mcp.json` endpoint), but the blast radius differs (background-job implication vs route 404). Needs a third instance to confirm the shape.
+**Lift when:** a third project hits a bug or false signal caused by config advertising a capability that isn't built.
+
+### Multi-tenant explicit tenant filter / per-session tenant context
+**Source:** neev + vericite (n=2).
+**What:** every multi-tenant query path must carry an explicit tenant filter and every request/job must establish per-session tenant context; broad OR permission gates and unset `tenant`/`app.current_tenant_id` leak across tenants or dead-end routes.
+**Why defer:** both sources are multi-tenant SaaS with RLS, so this may be architecture-class-specific rather than universal. Queue and watch for a third multi-tenant project before lifting.
+**Lift when:** a third multi-tenant project independently adopts an explicit-tenant-filter / per-session-context rule.
 
 ---
 

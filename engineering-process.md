@@ -611,16 +611,17 @@ EOF
 # 8. Write gotchas.md (template in core-rules/templates/gotchas.md)
 cp __TRELLIS_PATH__/core-rules/templates/gotchas.md .
 
-# 9. .gitignore — append the Trellis fragment + project-local entries
-cat __TRELLIS_PATH__/core-rules/templates/project.gitignore.fragment >> .gitignore
+# 9. .gitignore — onboard-project.sh generates the Trellis-managed block (the
+#    machine-absolute inheritance symlinks) automatically; you only add the
+#    project-local entries.
 cat >> .gitignore <<'EOF'
 context-log.md
 .claude/settings.local.json
 EOF
-# The fragment gitignores the four canonical absolute-path symlinks
-# (.claude/rules/trellis.md, .claude/skills/process-gate,
-#  .agents/rules/trellis.md, .agents/skills/process-gate). Each developer
-# regenerates them post-clone via scripts/onboard-project.sh.
+# The generated block gitignores exactly the canonical absolute-path symlinks
+# onboard creates (rules/skills/commands under .claude/ and .agents/). It is
+# rewritten in full on every run, so each developer regenerates both the symlinks
+# and their ignore lines post-clone via scripts/onboard-project.sh.
 
 # 10. README.md (template in §9.2)
 
@@ -930,7 +931,7 @@ The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scri
 
 **Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is reviewed before the next is generated. After any skill returns, do not chain to the next in the same turn unless the operator asks. The skills are writers (and one analyst), not builders — building is the `execute` skill's job and begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before. `execute` reads the resulting `tasks.md` checkbox-by-checkbox; the lightweight track points it at a `docs/plans/<topic>.md` instead.
 
-**Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). `core-rules/templates/project.gitignore.fragment` lists all seven canonical skill symlinks (process-gate + security-gate + the five pipeline skills) under both `.claude/skills/` and `.agents/skills/`; new onboarding picks the fragment up automatically. Pre-Phase-C projects with the older 5-skill fragment trigger an automatic legacy-detection note when re-onboarded; duplicate gitignore entries are harmless.
+**Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). The project `.gitignore`'s Trellis-managed block is **generated** by `onboard-project.sh` (`write_gitignore_block`): it lists exactly the machine-absolute symlinks onboard creates this run — nothing else — and is rewritten in full on every run. The block is version-agnostic (no skill-count sentinel) and self-healing: each run strips all prior Trellis-managed blocks (any historical sentinel, plus the legacy `end SE Core fragment` variant) and any orphaned canonical-symlink lines, so re-onboarding an older project collapses stacked/stale blocks into one clean block. Project-authored `.gitignore` content is preserved.
 
 **Artifact layout per feature:**
 

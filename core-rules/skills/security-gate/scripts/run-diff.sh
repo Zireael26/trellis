@@ -300,8 +300,9 @@ if [ "${#NEW_LINES[@]}" -gt 0 ]; then
 import json, sys
 f = json.loads(sys.stdin.read())
 loc = f.get("file","(no path)")
-if f.get("line"): loc += f":{f[\"line\"]}"
-print(f"- **{f[\"severity\"]}** `{f[\"tool\"]}/{f[\"rule\"]}` @ `{loc}` — {f.get(\"message\",\"\")}")
+line = f.get("line")
+if line: loc += ":" + str(line)
+print("- **" + f.get("severity","") + "** `" + f.get("tool","") + "/" + f.get("rule","") + "` @ `" + loc + "` — " + f.get("message",""))
 '
   done
   printf "\n"

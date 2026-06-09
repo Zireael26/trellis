@@ -5,9 +5,10 @@
 # Seeds:
 #   - <project>/gotchas.md, <project>/context-log.md
 #   - <project>/.claude/rules/trellis.md → canonical CLAUDE.md (symlink)
-#   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
+#   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
 #       → canonical skills (symlinks; always-on: process-gate + security-gate,
-#         opt-in pipeline: clarify → spec → plan → tasks → analyze)
+#         opt-in pipeline: clarify → spec → plan → tasks → analyze,
+#         capability-gated dynamic-workflow kit: orchestrate)
 #   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore}.md
 #       → canonical commands (symlinks; feature primer system + /explore)
 #   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
@@ -18,7 +19,7 @@
 # Shared "agents/" surface (Codex AND AntiGravity both read this):
 #   - <project>/AGENTS.md                     → CLAUDE.md    [if codex OR antigravity enabled, and absent]
 #   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if codex OR antigravity]
-#   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze}
+#   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
 #       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex OR antigravity]
 #   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex OR antigravity]
 #   - <project>/.agents/skills/process-gate-local/local.config.sh (copy of Claude local config)
@@ -58,6 +59,14 @@ CANONICAL_PRIMER_INDEX_TEMPLATE="$TRELLIS_ROOT/core-rules/commands/templates/pri
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
 CANONICAL_CLAUDE_SETTINGS="$TEMPLATES/claude-settings.json"
+
+# Accumulator: every symlink seed_symlink() creates whose target is an absolute
+# path under $TRELLIS_ROOT. These — and ONLY these — must be gitignored (their
+# machine-specific targets conflict on cross-machine merges). write_gitignore_block
+# reads this at the end of the run to regenerate the project's .gitignore block.
+# Relative-target symlinks (e.g. AGENTS.md → CLAUDE.md) are deliberately excluded
+# so they stay tracked.
+IGNORE_PATHS=()
 
 if [ $# -ne 1 ]; then
   echo "usage: $0 <project-path>" >&2
@@ -105,6 +114,12 @@ seed_executable_file() {
 
 seed_symlink() {
   local target="$1" link="$2"
+  # Record absolute-target links for the .gitignore managed block. Recorded
+  # whether or not the link already exists — the block must list every intended
+  # symlink, not just newly-created ones. Relative targets (AGENTS.md) skipped.
+  case "$target" in
+    /*) IGNORE_PATHS+=("${link#"$PROJECT"/}") ;;
+  esac
   mkdir -p "$(dirname "$link")"
   if [ -L "$link" ]; then
     local cur
@@ -319,48 +334,92 @@ install_post_checkout_hook() {
   fi
 }
 
-# Ensure project .gitignore carries the canonical Trellis symlink fragment.
-# Absolute-path symlinks must NOT be tracked — different developers' clones
-# produce different absolute targets that conflict on cross-machine merges.
-# Idempotent: detected via the current fragment's sentinel header.
-# The sentinel includes a version marker ('9-skill set') so a fragment update
-# that adds new symlinks (e.g., Phase B added spec/plan/tasks beyond the
-# original process-gate) triggers an append on re-onboard. Older blocks remain
-# in place; duplicate gitignore entries are harmless. Operators may clean up
-# legacy blocks manually if desired.
-ensure_gitignore_fragment() {
-  local fragment="$TEMPLATES/project.gitignore.fragment"
+# Regenerate the project .gitignore's Trellis-managed block. The block lists
+# exactly the absolute-target symlinks this run created (IGNORE_PATHS, collected
+# by seed_symlink) — i.e. only the machine-specific links that must not be tracked
+# (their $TRELLIS_ROOT-absolute targets conflict on cross-machine merges).
+# Everything else Trellis seeds — hooks, settings.json, primers/INDEX.md,
+# skill-local configs, the relative AGENTS.md symlink — is project-state and stays
+# tracked.
+#
+# Self-healing + idempotent. Every run STRIPS all prior Trellis-managed blocks
+# (any historical sentinel — they share the begin prefix; each terminated by the
+# current "end Trellis fragment" marker OR the legacy "end SE Core fragment"
+# variant) PLUS any orphaned canonical-symlink lines stranded between old stacked
+# blocks, then writes ONE fresh block. Project-authored .gitignore content — even
+# when interleaved between stacked Trellis blocks — is preserved, because stripping
+# is per-block (not span-based) and the orphan sweep matches only exact
+# Trellis-owned strings no project would author.
+write_gitignore_block() {
   local gi="$PROJECT/.gitignore"
-  local current_sentinel="Trellis inheritance symlinks (9-skill set + presets + primer/explore/autonomy commands + antigravity workflows)"
-  local any_legacy_marker="Trellis inheritance symlinks"
-  local had_any_legacy=false
+  local denyfile tmp pth
 
-  if [ ! -f "$fragment" ]; then
-    echo "WARN: gitignore fragment template missing at $fragment — skipping" >&2
-    return
-  fi
+  # Dedupe IGNORE_PATHS, preserving first-seen order for stable diffs.
+  local dedup=() seen=" "
+  for pth in "${IGNORE_PATHS[@]}"; do
+    case "$seen" in *" $pth "*) ;; *) dedup+=("$pth"); seen="$seen$pth " ;; esac
+  done
 
-  if [ -f "$gi" ] && grep -qF "$current_sentinel" "$gi"; then
-    echo "skip (already present): .gitignore Trellis fragment ($current_sentinel)"
-    return
-  fi
+  # Orphan-sweep denylist: exact Trellis-owned lines to drop when found OUTSIDE a
+  # managed block. Current canonical symlink paths + legacy se-core links + the
+  # stray builder-skill comment header older runs left stranded.
+  denyfile="$(mktemp)"
+  {
+    printf '%s\n' "${dedup[@]}"
+    printf '%s\n' ".claude/rules/se-core.md" ".agents/rules/se-core.md"
+    printf '%s\n' "# Trellis builder-skill symlinks (machine-specific absolute paths)"
+  } > "$denyfile"
 
-  if [ -f "$gi" ] && grep -qF "$any_legacy_marker" "$gi"; then
-    had_any_legacy=true
+  tmp="$(mktemp)"
+  if [ -f "$gi" ]; then
+    awk -v denyfile="$denyfile" '
+      BEGIN { while ((getline l < denyfile) > 0) deny[l] = 1 }
+      /^# --- Trellis inheritance symlinks/ { inblock = 1; next }
+      inblock {
+        if ($0 == "# --- end Trellis fragment ---" || $0 == "# --- end SE Core fragment ---") inblock = 0
+        next
+      }
+      ($0 in deny) { next }
+      { print }
+    ' "$gi" > "$tmp"
+    # Trim trailing blank lines so the fresh block sits flush.
+    awk '{ a[NR] = $0 } END { last = NR; while (last > 0 && a[last] ~ /^[ \t]*$/) last--; for (i = 1; i <= last; i++) print a[i] }' "$tmp" > "$tmp.trim" && mv "$tmp.trim" "$tmp"
   fi
+  rm -f "$denyfile"
 
-  if [ -f "$gi" ] && [ -n "$(tail -c 1 "$gi" 2>/dev/null)" ]; then
-    printf '\n' >> "$gi"
-  fi
-  cat "$fragment" >> "$gi"
+  local out
+  out="$(mktemp)"
+  {
+    cat "$tmp"
+    if [ -s "$tmp" ]; then printf '\n'; fi
+    cat <<'HDR'
+# --- Trellis inheritance symlinks (per-machine; regenerated by onboard-project.sh) ---
+# Targets are absolute paths under $TRELLIS_ROOT, which differs on every developer's
+# machine. Tracking these in git produces cross-machine merge conflicts. Each developer
+# recreates them post-clone by re-running:
+#   ~/projects/trellis-instance/scripts/onboard-project.sh <project-path>
+# See engineering-process.md (in the Trellis canonical repo) §4.2 + §10.5 for the policy.
+#
+# This block is GENERATED — it lists only machine-absolute symlinks and is rewritten
+# in full on every onboard run (no skill-count sentinel; no stacking). Everything else
+# Trellis seeds (hooks, settings.json, primers/INDEX.md, skill-local configs, the
+# relative AGENTS.md symlink) is project-state and IS tracked in git.
+HDR
+    printf '%s\n' "${dedup[@]}"
+    cat <<'STATE'
 
-  if $had_any_legacy; then
-    echo "note: legacy pre-9-skill Trellis fragment detected in .gitignore." >&2
-    echo "      the new (9-skill set + antigravity workflows) block was appended alongside; duplicate" >&2
-    echo "      gitignore entries are harmless. Remove the older block manually" >&2
-    echo "      once you've confirmed the new one covers your symlinks." >&2
-  fi
-  echo "created: .gitignore Trellis fragment appended ($current_sentinel)"
+# --- Trellis per-session state (autonomy slider) ---
+# Single-integer file written by /autonomy N slash command. Per-developer,
+# per-session — NOT shared across machines. See core-rules/autonomy.md.
+.claude/session-autonomy
+# --- end Trellis per-session state ---
+# --- end Trellis fragment ---
+STATE
+  } > "$out"
+
+  rm -f "$tmp"
+  mv "$out" "$gi"
+  echo "rewrote: .gitignore Trellis managed block (${#dedup[@]} symlink paths ignored)"
 }
 
 echo "== onboarding $PROJECT =="
@@ -371,9 +430,9 @@ echo "   harnesses:     ${HARNESSES[*]}"
 seed_file "$TEMPLATES/gotchas.md"     "$PROJECT/gotchas.md"
 seed_file "$TEMPLATES/context-log.md" "$PROJECT/context-log.md"
 
-# .gitignore — ensure the Trellis fragment is present BEFORE creating any symlinks
-# so subsequent `git status` doesn't show them as untracked. Idempotent.
-ensure_gitignore_fragment
+# .gitignore — the Trellis managed block is (re)generated AFTER all symlinks are
+# seeded (see write_gitignore_block near the end), since it lists exactly the
+# absolute-target links seed_symlink created this run.
 
 # Defense in depth: if a previous onboard or rollout left the canonical symlinks
 # tracked in git (legacy state pre-2026-05), force-untrack them now. The working-
@@ -395,6 +454,8 @@ untrack_if_tracked ".claude/skills/tasks"
 untrack_if_tracked ".claude/skills/analyze"
 untrack_if_tracked ".claude/skills/execute"
 untrack_if_tracked ".claude/skills/brainstorming"
+untrack_if_tracked ".claude/skills/orchestrate"
+untrack_if_tracked ".claude/skills/debrief"
 untrack_if_tracked ".claude/commands/primer.md"
 untrack_if_tracked ".claude/commands/primer-refresh.md"
 untrack_if_tracked ".claude/commands/primer-check.md"
@@ -410,6 +471,8 @@ untrack_if_tracked ".agents/skills/tasks"
 untrack_if_tracked ".agents/skills/analyze"
 untrack_if_tracked ".agents/skills/execute"
 untrack_if_tracked ".agents/skills/brainstorming"
+untrack_if_tracked ".agents/skills/orchestrate"
+untrack_if_tracked ".agents/skills/debrief"
 untrack_if_tracked ".agents/commands/primer.md"
 untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
@@ -424,11 +487,17 @@ untrack_if_tracked ".agents/workflows/explore.md"
 # Canonical skills shipped today: process-gate, security-gate (always on),
 # plus the opt-in clarify → spec → plan → tasks → analyze pipeline (skills
 # surface in the agent's skill picker but never run automatically; operators
-# invoke them by name when scaffolding a non-trivial feature). See
+# invoke them by name when scaffolding a non-trivial feature), the canonical
+# builder execute and the ideation front-door brainstorming, the capability-gated
+# dynamic-workflow kit orchestrate (the agent reaches for it when a task
+# decomposes into multi-stage fan-out/verify work; it self-degrades when the
+# harness has no workflow-orchestration tool), and the explicit teach-it-back
+# skill debrief (explicit-invoke-only; never auto-fires). See
 # core-rules/skills/spec/SKILL.md for the "when to use" decision rule on the
 # pipeline as a whole, core-rules/skills/clarify/SKILL.md for the front-step
-# question pass, and core-rules/skills/analyze/SKILL.md for the tail-step
-# drift check.
+# question pass, core-rules/skills/analyze/SKILL.md for the tail-step
+# drift check, and core-rules/skills/orchestrate/SKILL.md for the
+# capability gate + recipe library.
 seed_symlink "$CANONICAL_RULES"                       "$PROJECT/.claude/rules/trellis.md"
 seed_symlink "$CANONICAL_SKILLS_DIR/process-gate"     "$PROJECT/.claude/skills/process-gate"
 seed_symlink "$CANONICAL_SKILLS_DIR/security-gate"    "$PROJECT/.claude/skills/security-gate"
@@ -437,6 +506,10 @@ seed_symlink "$CANONICAL_SKILLS_DIR/spec"             "$PROJECT/.claude/skills/s
 seed_symlink "$CANONICAL_SKILLS_DIR/plan"             "$PROJECT/.claude/skills/plan"
 seed_symlink "$CANONICAL_SKILLS_DIR/tasks"            "$PROJECT/.claude/skills/tasks"
 seed_symlink "$CANONICAL_SKILLS_DIR/analyze"          "$PROJECT/.claude/skills/analyze"
+seed_symlink "$CANONICAL_SKILLS_DIR/execute"          "$PROJECT/.claude/skills/execute"
+seed_symlink "$CANONICAL_SKILLS_DIR/brainstorming"    "$PROJECT/.claude/skills/brainstorming"
+seed_symlink "$CANONICAL_SKILLS_DIR/orchestrate"      "$PROJECT/.claude/skills/orchestrate"
+seed_symlink "$CANONICAL_SKILLS_DIR/debrief"          "$PROJECT/.claude/skills/debrief"
 
 # Canonical commands — explicit user invocations (primer system today).
 seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"          "$PROJECT/.claude/commands/primer.md"
@@ -481,6 +554,10 @@ if pg_has_harness codex || pg_has_harness antigravity; then
   seed_symlink "$CANONICAL_SKILLS_DIR/plan"          "$PROJECT/.agents/skills/plan"
   seed_symlink "$CANONICAL_SKILLS_DIR/tasks"         "$PROJECT/.agents/skills/tasks"
   seed_symlink "$CANONICAL_SKILLS_DIR/analyze"       "$PROJECT/.agents/skills/analyze"
+  seed_symlink "$CANONICAL_SKILLS_DIR/execute"       "$PROJECT/.agents/skills/execute"
+  seed_symlink "$CANONICAL_SKILLS_DIR/brainstorming" "$PROJECT/.agents/skills/brainstorming"
+  seed_symlink "$CANONICAL_SKILLS_DIR/orchestrate"   "$PROJECT/.agents/skills/orchestrate"
+  seed_symlink "$CANONICAL_SKILLS_DIR/debrief"       "$PROJECT/.agents/skills/debrief"
   seed_file    "$CANONICAL_PRIMER_INDEX_TEMPLATE"    "$PROJECT/.agents/primers/INDEX.md"
   if [ -f "$PROJECT/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$PROJECT/.agents/skills/process-gate-local/local.config.sh" ]; then
     mkdir -p "$PROJECT/.agents/skills/process-gate-local"
@@ -520,6 +597,10 @@ fi
 # absent or the array is empty. Seeds preset-<name>.md symlinks under .claude/
 # rules/ and (if Codex enabled) .agents/rules/.
 seed_presets
+
+# .gitignore managed block — regenerate now that every symlink (skills, commands,
+# presets, both surfaces) has been seeded and recorded in IGNORE_PATHS.
+write_gitignore_block
 
 # Initial security-gate baseline (Mode 1). Idempotent — re-running on an
 # unchanged tree produces the same findings JSON. Override:

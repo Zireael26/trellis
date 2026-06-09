@@ -26,7 +26,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 ## Context management
 
 - Before any structural refactor on a file >300 LOC, remove all dead props, unused exports, unused imports, debug logs. Commit cleanup separately.
-- Dispatch sub-agents in parallel for speed and context-isolation whenever work decomposes into independent units. Wall-clock parallelism beats sequential agent time; each subagent gets a fresh context = higher-quality output. Triggers: (a) ≥2 independent searches/fetches/analyses, (b) >5 files, (c) edit-heavy turns. Single message, multiple `Agent` tool calls. Skip only when one result must inform the next or work is trivially serial. Opus 4.8 under-dispatches subagents and tools by default — honor these triggers even when inlining feels easier, and batch independent tool calls (reads, greps, bash) in one message rather than firing them serially.
+- Dispatch sub-agents in parallel for speed and context-isolation whenever work decomposes into independent units. Wall-clock parallelism beats sequential agent time; each subagent gets a fresh context = higher-quality output. Triggers: (a) ≥2 independent searches/fetches/analyses, (b) >5 files, (c) edit-heavy turns. Single message, multiple `Agent` tool calls. Skip only when one result must inform the next or work is trivially serial. Opus 4.8 under-dispatches subagents and tools by default — honor these triggers even when inlining feels easier, and batch independent tool calls (reads, greps, bash) in one message rather than firing them serially. For multi-stage work, if your harness exposes a tool that spawns and coordinates subagents, prefer orchestrating through it (decompose → fan-out → adversarially verify → synthesize); otherwise run the same stages yourself — the decompose / verify / synthesize discipline holds regardless of harness.
 - When ctx use ≥40% or after 25 messages (whichever comes first), re-read any file before editing it. Auto-compaction may have destroyed your memory of its contents.
 - If you notice context degradation (referencing nonexistent variables, forgetting file structure), run `/compact` proactively — the `save-context-log` hook fires on `PreCompact` and writes `context-log.md` automatically; do not author the file by hand.
 - At session start, the `session-context` hook auto-injects the previous session's `context-log.md`. Treat that injection as authoritative for "what was I in the middle of" — branch, files touched, open todos, last decisions. Read it before asking the user to re-explain context. The log is stored at the canonical project root (resolved via `git --git-common-dir`), so worktree sessions see the same log as the main checkout.
@@ -37,6 +37,8 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - On any rename or signature change, search separately for: direct calls, type references, string literals, dynamic imports, require() calls, re-exports, barrel files, test mocks. Assume grep missed something.
 - Before adding new code in an unfamiliar area, read the immediate callers, the module's public exports, and any shared utilities it would touch. "Looks orthogonal" is dangerous — if you can't explain why the surrounding code is structured the way it is, ask.
 - Never delete a file without verifying nothing references it.
+- A git worktree is a tracked-content-only checkout, not a clone: gitignored files, inheritance symlinks, `node_modules`, and build caches are absent or root-scoped, and silently break skills, lint, and typecheck. Confirm which checkout you are in (`git rev-parse --show-toplevel`) before any path-sensitive op, and never run `git clean -fd`, `git checkout .`, or `git commit --amend` against shared/canonical state without attributing every untracked/staged entry — files you don't recognize are almost certainly another worktree's in-progress work. (observed across 4 projects)
+- Code-asset pairing: when a code change has a non-code companion (a checked-in generated file, a scene/prefab reference, a fixture, a binding manifest, rendered media), update it in the same commit — typecheck/build/lint cannot detect the drift; it surfaces only at runtime or via an integrity test. (observed across 4 projects)
 
 ## Definition of done
 
@@ -51,6 +53,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - Work from raw error data. Don't guess. If a bug report has no output, ask for it. Never claim anything about code you haven't opened — if the user names a file, read it before answering, not after.
 - For any long-running process (dev server, test watcher, build, log tail), use the `monitor` tool — never `tail -f`, polling loops, or repeated Bash calls. Monitor streams stdout lines as notifications with zero token overhead.
 - If a fix doesn't work after two attempts, stop. Read the entire relevant section top-down. State where your mental model was wrong before trying again.
+- Cloud provisioning: before committing to a region, zone, or machine family, verify the *specific* capability you need is available there — model serving, machine-type/disk support, and the per-region quota bucket. Global signals (`effectiveLimit=-1`) and other regions lie about the target region; `asia-south1` in particular is on limited rollouts. (observed across 3 GCP projects)
 
 ## Self-correction
 
@@ -129,6 +132,10 @@ Trellis ships a primer system that gives agents pre-built context for stable fea
 - `CLAUDE.md` — project-specific rules only. No duplication of this file. Target <5 KB.
 - `gotchas.md` — lessons logged as they happen.
 - `context-log.md` — maintained by the `save-context-log` hook on every `PreCompact` (Claude Code) / `Stop` (Codex). Stored at the canonical project root so it survives worktree cleanup. Auto-injected at session start by `session-context` and after compaction by `post-compact-context`. Never edit by hand.
+
+## Documentation
+
+- Architecture decisions go in numbered, sequential ADRs (`docs/adr/NNNN-<slug>.md`: context, decision, consequences, status). (observed across 3 projects) Project override: some projects capture the same decisions in tech-spec docs with a different layout — follow the project's established convention where one exists.
 
 ## Control plane
 

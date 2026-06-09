@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# Rollout: install the canonical builder skill symlinks — execute + brainstorming
-# — in every registered project. Idempotent; safe to re-run. Modeled on
-# scripts/rollout-process-gate-skill.sh (and its multi-skill sibling
-# scripts/rollout-feature-skills.sh).
+# Rollout: install the canonical `debrief` skill symlink in every registered
+# project. Idempotent; safe to re-run. Modeled on scripts/rollout-builder-skills.sh
+# (and its siblings rollout-process-gate-skill.sh / rollout-feature-skills.sh).
 #
-# These are the NON-pipeline skills: brainstorming is the ideation front-door and
-# execute is the canonical builder loop. They are deliberately NOT part of the
-# clarify → spec → plan → tasks → analyze pipeline, so they have their own rollout
-# path and are NOT listed in rollout-feature-skills.sh's FEATURE_SKILLS array.
-# The symlinks make them discoverable in each project (Claude Code reads
-# .claude/skills/; Codex/AntiGravity read .agents/skills/); operators invoke them
-# by name. Stateless per-project — no local config is seeded.
+# debrief is the explicit-invoke-only teach-it-back skill (the eleventh canonical
+# skill). Like the builder skills it is NOT part of the clarify → spec → plan →
+# tasks → analyze pipeline, so it has its own rollout path. The symlink makes it
+# discoverable per project (Claude Code reads .claude/skills/; Codex/AntiGravity
+# read .agents/skills/); operators invoke it explicitly with /debrief. Stateless
+# per-project — no local config is seeded.
 #
 # Reads trellis.config.json for paths. Honors `harnesses` — .agents/ parity is
 # applied only when "codex" or "antigravity" is enabled in the parent config.
 #
+# NOTE on gitignore: the new symlinks should be gitignored (they target absolute
+# paths under $TRELLIS_ROOT that conflict on cross-machine merges). The stale
+# per-project fragments do NOT yet list debrief — but they also already omit
+# execute/brainstorming/orchestrate, so debrief joins a pre-existing fleet-wide
+# drift rather than introducing a new one. The gitignore refresh is a separate,
+# batched re-onboard concern; this script does not touch .gitignore.
+#
 # Behavior per project:
-#   1. If <project>/.claude/skills/<skill>/ is already a symlink to canonical: skip.
+#   1. If <project>/.claude/skills/debrief is already a symlink to canonical: skip.
 #   2. If a directory exists where the symlink should go: rename to
-#      <skill>.local-backup-YYYYMMDD/ and create the symlink.
+#      debrief.local-backup-YYYYMMDD/ and create the symlink.
 #   3. If neither exists: create the symlink.
-#   4. Same flow under .agents/skills/<skill>/ when Codex/AntiGravity is enabled.
-#   5. Does NOT seed any local config — these skills are stateless per-project.
+#   4. Same flow under .agents/skills/debrief when Codex/AntiGravity is enabled.
 #
 # Usage:
-#   rollout-builder-skills.sh                 # interactive, all registered projects
-#   rollout-builder-skills.sh --dry-run       # show plan only
-#   rollout-builder-skills.sh --yes           # non-interactive
-#   rollout-builder-skills.sh <project-name>  # single project
+#   rollout-debrief-skill.sh                 # interactive, all registered projects
+#   rollout-debrief-skill.sh --dry-run       # show plan only
+#   rollout-debrief-skill.sh --yes           # non-interactive
+#   rollout-debrief-skill.sh <project-name>  # single project
 
 set -euo pipefail
 
@@ -42,20 +46,13 @@ done
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
 
-# The non-pipeline builder skills: brainstorming (ideation front-door) and
-# execute (the canonical builder loop). These are NOT writers in the
-# clarify → spec → plan → tasks → analyze pipeline, so they live here rather
-# than in rollout-feature-skills.sh's FEATURE_SKILLS.
-BUILDER_SKILLS=(execute brainstorming)
+DEBRIEF_SKILLS=(debrief)
 
 DRY_RUN=false
 ASSUME_YES=false
 ONLY_PROJECT=""
 DATE_TAG="$(date +%Y%m%d)"
 
-# Parse args BEFORE the canonical-skill existence check so --dry-run can soften
-# a missing skill dir (the skill bodies land in later phases of the
-# process-enforcement program; --dry-run must resolve cleanly before then).
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
@@ -67,16 +64,11 @@ for arg in "$@"; do
 done
 
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
-for s in "${BUILDER_SKILLS[@]}"; do
+for s in "${DEBRIEF_SKILLS[@]}"; do
   if [ ! -d "$CANONICAL_SKILLS_DIR/$s" ]; then
-    if $DRY_RUN; then
-      echo "  WARN (dry-run): canonical skill not present yet: $CANONICAL_SKILLS_DIR/$s" >&2
-      echo "    (lands in a later phase of the process-enforcement program — dry-run continues)" >&2
-    else
-      echo "canonical skill missing: $CANONICAL_SKILLS_DIR/$s" >&2
-      echo "is the parent branch merged? run from main of the Trellis canonical clone." >&2
-      exit 1
-    fi
+    echo "canonical skill missing: $CANONICAL_SKILLS_DIR/$s" >&2
+    echo "is the parent branch merged? run from main of the Trellis canonical clone." >&2
+    exit 1
   fi
 done
 
@@ -164,12 +156,12 @@ rollout_one() {
 
   echo "== $name =="
 
-  for s in "${BUILDER_SKILLS[@]}"; do
+  for s in "${DEBRIEF_SKILLS[@]}"; do
     install_skill_symlink "$p" ".claude/skills/$s" "$s"
   done
 
   if pg_has_harness codex || pg_has_harness antigravity; then
-    for s in "${BUILDER_SKILLS[@]}"; do
+    for s in "${DEBRIEF_SKILLS[@]}"; do
       install_skill_symlink "$p" ".agents/skills/$s" "$s"
     done
   elif [ -d "$p/.agents" ]; then
@@ -195,7 +187,7 @@ else
 fi
 
 echo "Targets: ${TARGETS[*]}"
-echo "Builder skills: ${BUILDER_SKILLS[*]}"
+echo "Skill: ${DEBRIEF_SKILLS[*]}"
 $DRY_RUN && echo "(dry-run mode — no writes)"
 
 if ! $ASSUME_YES && ! $DRY_RUN; then
@@ -211,14 +203,11 @@ done
 echo "== done =="
 echo
 echo "Per-project next steps:"
-echo "  1. The new symlinks (.claude/skills/{execute,brainstorming},"
-echo "     .agents/skills/{execute,brainstorming}) MUST be gitignored"
-echo "     — they target absolute paths under \$TRELLIS_ROOT that conflict on"
-echo "     cross-machine merges."
-echo "  2. Older projects carry stale/stacked gitignore fragments that do not"
-echo "     list the new execute/brainstorming symlinks. Re-run onboard-project.sh"
-echo "     on the project — it regenerates the .gitignore Trellis-managed block in"
-echo "     full (collapsing any stale/stacked blocks into one) from the symlinks"
-echo "     it creates. No manual fragment paste is needed."
-echo "  3. No project-local config is required for the builder skills — they"
-echo "     run stateless."
+echo "  1. /debrief is now discoverable in each project (Claude Code reads"
+echo "     .claude/skills/; Codex/AntiGravity read .agents/skills/)."
+echo "  2. The new symlinks are NOT yet gitignored — the stale per-project"
+echo "     fragments predate debrief (and already omit execute/brainstorming/"
+echo "     orchestrate). Refreshing them is a batched re-onboard concern, not"
+echo "     part of this rollout. Run onboard-project.sh per project (idempotent;"
+echo "     appends the current 11-skill fragment) when closing that drift."
+echo "  3. No project-local config is required — debrief runs stateless."

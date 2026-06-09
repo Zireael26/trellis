@@ -54,13 +54,13 @@ Canonical skills live under `core-rules/skills/<name>/` and are inherited via sy
 
 The directory itself is symlinked (not individual files) so additions to canonical files appear automatically without per-project re-onboarding. Project-local overrides go in `<project-root>/.claude/skills/<name>/local.config.sh` (or other ungitignored override file the skill defines) — these are project-private, NOT covered by the canonical symlink.
 
-As of Phase 6 (2026-06-02), nine canonical skills ship: `process-gate`, `security-gate` (always-on), the opt-in pipeline `clarify`, `spec`, `plan`, `tasks`, `analyze`, the canonical builder `execute` (shipped Phase 4), and the ideation front-door `brainstorming` (shipped Phase 6). (Was seven as of Phase C, 2026-05-12, before `execute` and `brainstorming`.)
+As of 2026-06-05, eleven canonical skills ship: `process-gate`, `security-gate` (always-on), the opt-in pipeline `clarify`, `spec`, `plan`, `tasks`, `analyze`, the canonical builder `execute` (shipped Phase 4), the ideation front-door `brainstorming` (shipped Phase 6), the dynamic-workflow orchestration kit `orchestrate` (capability-gated: runs the recipe's workflow script when the harness exposes a subagent-orchestration tool, otherwise degrades to running the same stages by hand), and the explicit teach-it-back skill `debrief` (explicit-invoke-only, never auto-fires: teaches the human the change just made, gated incremental, verifying understanding before advancing). (Was nine before `orchestrate`; seven as of Phase C, 2026-05-12, before `execute` and `brainstorming`.)
 
 Same silent-drop invariant: if the symlink target moves or breaks, the skill simply does not load — no error. Detected by the extended `parent-hook-drift` audit (skills coverage), not at session time.
 
 ### Skill path-scoping (optional, project-local)
 
-Canonical skills are global by design — they apply to the whole repo, regardless of which subtree the agent is editing. That works because every canonical skill is workflow-shaped, not language-shaped: `process-gate`, `security-gate`, and the two `brainstorming` front-door routes — the lightweight track `brainstorming` → `docs/plans` → `execute`, and the heavyweight spec-kit pipeline `clarify` → `spec` → `plan` → `tasks` → `analyze` → `execute`.
+Canonical skills are global by design — they apply to the whole repo, regardless of which subtree the agent is editing. That works because every canonical skill is workflow-shaped, not language-shaped: `process-gate`, `security-gate`, the two `brainstorming` front-door routes — the lightweight track `brainstorming` → `docs/plans` → `execute`, and the heavyweight spec-kit pipeline `clarify` → `spec` → `plan` → `tasks` → `analyze` → `execute` — and the dynamic-workflow orchestration kit `orchestrate`.
 
 **Project-local skills can opt into path-scoping.** A project-local skill (one that does NOT come from the canonical symlink — typically lives at `<project>/.claude/skills/<custom-name>/` and is project-owned) may carry a `scope.json` next to its `SKILL.md`:
 
