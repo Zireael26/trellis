@@ -424,7 +424,7 @@ Full expression in `core-rules/CLAUDE.md`. Summary:
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. Flag real problems and wait.
 - For non-trivial features (3+ steps or architectural decisions), interview the user first: implementation, UX, trade-offs.
-- Never attempt multi-file refactors in one response. Phase them: max 7 files per phase, verify, get approval, continue.
+- Never attempt multi-file refactors in one response. Phase them: a soft, autonomy-scoped ceiling (~7 files at L1–L3, widening at L4/L5), verify, get approval per the active level, continue. The ceiling is a safety rail — the `code-review-subagent` fires at ≥3 files / ≥200 lines, so review coverage scales with phase size — not a hard cap.
 
 ### 8.2 Edit safety
 

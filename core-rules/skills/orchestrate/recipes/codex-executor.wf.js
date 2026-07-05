@@ -136,6 +136,17 @@ const units = args.units ?? []
 const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
 const branchOf = (u) => branchPrefix + '-' + u.name
 const isEmpty = (r) => r == null || (typeof r === 'string' && r.trim() === '')
+// §4 fix (RC.5): the codex-rescue forwarder's own heuristic may background a
+// unit it judges "big/open-ended" (codex-rescue.md:24) and return a JOB HANDLE
+// string instead of the work result — non-empty, so it slips past isEmpty and
+// would silently replace the real diff with handle text in the fan-out. The
+// in-engine forwarder is contractually barred from `status`/`result`
+// (codex-rescue.md:28), so this recipe cannot poll; it detects the handle shape
+// and degrades that unit to Claude. Background execution is a Bash-direct
+// MAIN-LOOP pattern (mechanics (i)), never this in-engine path.
+const isJobHandle = (r) =>
+  typeof r === 'string' &&
+  /(started in the background|task-[a-z0-9]{6,}|\/codex:status|check .* for progress)/i.test(r)
 
 // The prompt handed to Codex. Leading routing flags (`--write --effort xhigh`)
 // are recognized and applied by the codex-rescue forwarder (codex-cli-runtime
@@ -153,6 +164,7 @@ function codexPrompt(u) {
     'Confine every write to that worktree. Do NOT run unbounded `rm` or `$VAR.*` globs.',
     'Make the change, then leave the branch for the orchestrator to review. Do NOT merge.',
     'State the branch name and a one-line summary of the diff in your output.',
+    'RUN SYNCHRONOUSLY IN THE FOREGROUND — this is a bounded unit; do NOT use --background. Return the actual branch name and diff summary as your result, never a job handle.',
   ].join('\n')
 }
 
@@ -178,12 +190,19 @@ function claudePrompt(u) {
 // Claude. This is a system-boundary guard, not speculative defense.
 async function dispatchCodex(u) {
   try {
-    return await agent(codexPrompt(u), {
+    const r = await agent(codexPrompt(u), {
       agentType: 'codex:codex-rescue',
       label: 'codex:' + u.name,
       phase: 'Fan-out',
       isolation: 'worktree',
     })
+    if (isJobHandle(r)) {
+      // Backgrounded despite the foreground directive → the result is a handle,
+      // not the work. Degrade this unit to Claude rather than drop it silently.
+      log('codex:' + u.name + ' returned a background job handle, not a result — degrading to Claude')
+      return null
+    }
+    return r
   } catch {
     return null
   }

@@ -39,6 +39,7 @@ If nothing is wrong, output exactly {"findings":[]}.
   (2) data loss (destructive op without guard: rm -rf on a variable, DROP/DELETE without WHERE, truncate),
   (3) broken build (syntax error, undefined symbol the diff relies on, import of something not present).
 Everything else is "important" or "minor". When in doubt between critical and important, choose important. Never invent issues to seem useful.
+Report every real finding, including low-severity and low-confidence ones — do not omit a finding because it seems unimportant. Set severity and confidence honestly and let the caller rank and gate; coverage is your job, filtering is not.
 ```
 
 ## Contract
@@ -85,6 +86,25 @@ the turn proceeds unblocked. Only a successfully-parsed finding with
 `severity == "critical"` causes the caller to block; every other severity is
 advisory context. A reviewer that cannot produce valid findings JSON must
 therefore never be able to wedge the turn — silence is safe.
+
+## Review axes (reasoning guide, not prompt bloat)
+
+The shipped prompt is deliberately minimal (report findings with `severity` +
+`confidence`; narrow `critical`). This is the *reasoning* the reviewer — and a
+human doing PR review — should apply across the diff, folded from the
+`code-review-and-quality` five-axis framing:
+
+1. **Correctness** — does it do what it claims, including edge cases and error paths?
+2. **Readability** — will the next reader understand it without the author present?
+3. **Architecture** — does it fit existing patterns, or fork a second way to do one thing?
+4. **Security** — untrusted input, authz, secrets, injection (the `critical` class).
+5. **Performance** — only where it matters (hot path, N+1, unbounded growth) — not speculative.
+
+Two habits sharpen the pass: **review the tests first** (they encode intended
+behavior — a diff whose tests don't change when the requirement is inverted is
+suspect), and judge **net health** (does the change leave the codebase better or
+worse, not just "does this line work"). This guidance does not enter the prompt
+string; it documents what a thorough review covers.
 
 ## Source of truth — keep both copies identical
 

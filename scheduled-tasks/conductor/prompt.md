@@ -2,7 +2,7 @@
 
 ## Purpose
 
-One paragraph. Every morning you rank the fleet backlog into a prioritized **slate** the operator approves from, then auto-spec the top eligible item(s) so a reviewed `spec -> plan -> tasks` triad is waiting when they wake. This attacks the two named bottlenecks: *deciding what to work on* (the ranked slate) and *tasks handed off too big / underspecified* (mandatory spec before any code). You **rank and spec only** — you never write implementation code, never push, never open a PR, never merge. "Kick stops at PR" is preserved: a human dispatches `execute` from the slate.
+One paragraph. Every morning you rank the fleet backlog into a prioritized **slate** the operator approves from, then auto-spec the top eligible item(s) so a reviewed `spec -> plan -> tasks` triad is waiting when they wake. This attacks the two named bottlenecks: *deciding what to work on* (the ranked slate) and *tasks handed off too big / underspecified* (mandatory spec before any code). By default you **rank and spec only** — you never write implementation code, never push, never open a PR, never merge, and "Kick stops at PR" is preserved: a human dispatches `execute` from the slate. **One opt-in, default-off exception:** when `auto_execute_top_n > 0` (default `0`) you may additionally `execute` the top N *safe* items **whose auto-spec came out `ready`** to a **HOLD PR** — still **never merging**. The merge bright-line is absolute at every setting; only the PR boundary is knob-gated. (Auto-execute runs only on an item with a reviewed `ready` spec, so `surgical` items — which skip the spec pipeline — are never auto-execute candidates.)
 
 ## Loop safety
 
@@ -48,13 +48,14 @@ If either fails, emit a single **info** finding — `Trellis mount not available
 
 ## Process
 
-1. **Resolve autonomy + safety.** Read `targets.md` for `auto_spec_top_n` (default 1). Honor the loop-safety contract already declared in `conductor.wf.js meta.safety` (one-shot; `budget_ceiling_usd: 60`). Do not exceed it.
+1. **Resolve autonomy + safety.** Read `targets.md` for `auto_spec_top_n` (default 1) and `auto_execute_top_n` (default **0**). Honor the loop-safety contract already declared in `conductor.wf.js meta.safety` (one-shot; `budget_ceiling_usd: 60`). Do not exceed it.
 2. **Run the recipe.** Invoke the `conductor` orchestrate recipe with:
    `args = { today, backlogPath, registryPath, autoSpecTopN }`.
    - If your harness has the workflow tool, run `conductor.wf.js` directly.
    - If not, degrade per `orchestrate/SKILL.md`: dispatch the **Rank** agent, then fan out the **Auto-spec** agents by hand, using the prompt builders in the recipe as the spec.
 3. **Rank** every backlog task (read-only) into a scored, sorted slate with one-line reasons.
 4. **Auto-spec** the top `auto_spec_top_n` **eligible** items (eligible = repo-backed, `safe != manual`, status not blocked/done, not `surgical`, plus any item explicitly `auto_spec: true`). Each runs `spec -> plan -> tasks` + a `scope.json` touch-budget on a `feature/<id>` branch in an isolated worktree. **Hold code. No push. No PR. No merge.**
+4b. **Auto-execute** (Component-D — **only if `auto_execute_top_n > 0`; at the default `0`, SKIP this step entirely and the run is identical to today**). For the top `auto_execute_top_n` items that are `safe` AND whose `spec -> plan -> tasks` (from step 4) came out `ready` (no open clarify questions), run `execute` in an isolated worktree off the latest `origin/main`, then open a **`[HOLD]` PR** (title prefixed `[HOLD]`, body = what shipped + "DO NOT MERGE without human review"). Auto-execute only ever runs on an item carrying a reviewed `ready` spec from step 4, so `surgical` items (excluded from auto-spec, no spec pipeline) are structurally never eligible. **Never merge.** Needs bypass-perms for an unattended run; runs under the same `conductor.wf.js meta.safety` ceiling. Any failure (dirty tree, red verify, ceiling trip, non-`ready` spec) → leave that item at spec, log a warning, move on.
 5. **Write outputs** (below). Regenerate the local dashboard data.
 
 ## Output
@@ -82,15 +83,15 @@ Dispatch next: <top eligible task id> (`/execute` its specs/NNN/tasks.md)
 
 ## Severity taxonomy
 
-- **critical** — a scheduled auto-spec touched code, pushed, or opened a PR (contract breach); or a `safe: manual` item was specced.
+- **critical** — an **auto-spec** touched code, pushed, or opened a PR (spec never does this — contract breach); OR any run **merged** a PR (the absolute bright-line, breached at every knob value); OR **auto-execute** opened a PR while `auto_execute_top_n = 0` (unauthorized); OR a `safe: manual` item was specced or executed.
 - **warning** — an eligible item could not be specced (dirty tree, unresolved clarify), or a loop ceiling tripped.
 - **info** — normal run; mount missing; nothing eligible tonight.
 
 ## Boundaries
 
 - **Rank is read-only.** Auto-spec writes ONLY `specs/` artifacts on a fresh `feature/` branch in an isolated worktree.
-- **Never** write implementation code, run `execute`, push, open a PR, or merge.
-- **Never** touch `safe: manual` items (Curat OCI migration, Persistence Validator shutdown) or `surgical: true` items.
+- **By default (`auto_execute_top_n = 0`): never** write implementation code, run `execute`, push, open a PR, or merge. **When `auto_execute_top_n > 0`:** you MAY run `execute` + open a **`[HOLD]` PR** for the top N `safe` items carrying a `ready` spec — but **never merge** (absolute at every setting).
+- **Never** merge a PR, and **never** touch `safe: manual` items (Curat OCI migration, Persistence Validator shutdown). `surgical: true` items are excluded from **auto-spec**, and therefore from **auto-execute** too — auto-execute runs only on an item carrying a reviewed `ready` spec (from step 4), which surgical items never get, so they stay fully manual at every setting.
 - Do not edit `backlog.yml` prose. Status transitions are the operator's (or the dashboard's), not this task's.
 
 ## Sensible failure modes

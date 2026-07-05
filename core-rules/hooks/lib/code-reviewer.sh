@@ -231,6 +231,7 @@ If nothing is wrong, output exactly {"findings":[]}.
   (2) data loss (destructive op without guard: rm -rf on a variable, DROP/DELETE without WHERE, truncate),
   (3) broken build (syntax error, undefined symbol the diff relies on, import of something not present).
 Everything else is "important" or "minor". When in doubt between critical and important, choose important. Never invent issues to seem useful.
+Report every real finding, including low-severity and low-confidence ones — do not omit a finding because it seems unimportant. Set severity and confidence honestly and let the caller rank and gate; coverage is your job, filtering is not.
 PROMPT_EOF
 }
 

@@ -53,7 +53,12 @@ forwarder is contractually barred from `setup`).
 
 ## Dispatch mechanics — two paths, picked by where you run
 
-Both are first-class; you choose by whether you hold the Bash tool.
+The **default is (ii) — the wrapped, harness-tracked path** whenever you are
+inside a workflow. Reach for (i) from the main loop, for detached async, or for
+the presence gate. There is **no wrapper-free way** to run Codex as a native
+agent (Claude Code spawns Claude models only; the plugin ships no MCP server),
+so the Sonnet forwarder is the bridge — and that is a feature, because it makes
+a Codex unit a first-class tracked node instead of a shell you babysit.
 
 **(i) Bash-direct — from the main orchestrator loop** (a `/loop`, a scheduled
 task, or an agent driving the work by hand). The orchestrator is already
@@ -63,8 +68,9 @@ running, so it spends **zero** on a middleman:
 node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort xhigh "<prompt>"
 ```
 
-This is the **preferred** path (the leanest executor node), and it is
-**mandatory** for two operations that cannot go through the forwarder at all:
+This is the **leanest** path (zero forwarder cost) and the right choice from the
+main loop, and it is **mandatory** for two operations that cannot go through the
+forwarder at all:
 
 - the **presence gate** (`setup --json`) — the forwarder is task-only and may
   not call `setup`;
@@ -80,8 +86,20 @@ agent(prompt, { agentType: 'codex:codex-rescue', label: 'codex:<unit>', isolatio
 
 `codex:codex-rescue` is `model: sonnet` — the **cheapest available forwarder**,
 cheaper than making a general Opus agent shell out to Bash. It forwards one
-`codex-companion task --write` and returns raw stdout. This path is therefore
-**synchronous, in-engine dispatch only**.
+`codex-companion task --write` and returns raw stdout. This is the **canonical
+in-workflow dispatch**: the unit is a tracked node (label, phase, live progress,
+`TaskOutput`), and the Sonnet driver is a courier — Codex/GPT does all the
+reasoning.
+
+**§4 correctness requirement — this path MUST run synchronous.** The forwarder's
+own heuristic (`codex-rescue.md:24`) may background a unit it judges
+"big/open-ended" and return a **job handle instead of the result** — a non-empty
+string that slips past the empty-degrade check and silently drops the work from
+the fan-out. The recipe defends on two fronts: (a) the prompt orders foreground
+("run synchronously, do not `--background`"), and (b) a job-handle-shaped result
+is detected (`isJobHandle`) and that unit **degrades to Claude** rather than
+returning handle text. Detached `--background` execution is mechanic (i)'s job,
+never this in-engine path.
 
 Never route execution through a general Opus agent that only shells out — the
 most expensive of the three, buying nothing over (i) or (ii).

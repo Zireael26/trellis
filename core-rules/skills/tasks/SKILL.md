@@ -36,6 +36,7 @@ One new file: `specs/<NNN>-<slug>/tasks.md`. No edits to spec.md, plan.md, or an
 1. **Re-read the plan.** Especially section 4 (file-by-file change list) and section 6 (test strategy).
 2. **Decompose into atomic tasks.** Each task ≤4 hours of focused work for a competent engineer who has read the plan. If a "task" is "implement the feature", you haven't decomposed yet.
 3. **Mark dependencies.** Some tasks block others (migration must run before code that reads the new column). Use `Depends: T2` notation in the task line.
+   - **Name the slicing strategy that drives the order.** Beyond ≤4h atoms, decide *how* the work is sliced — **vertical** (a thin end-to-end slice through every layer, shippable on its own), **contract-first** (define and lock the interface/schema, then fill implementations behind it — lets dependent work start in parallel), or **risk-first** (attack the most uncertain / most-likely-to-fail unit first, so a dead end surfaces while it's cheap). Pick per plan: risk-first when there's a big unknown, contract-first when parallel tasks share an interface, vertical by default. (Folded from the `incremental-implementation` pattern.)
 4. **Map back to success criteria.** Every spec success criterion must be referenced by at least one task. If not, either the plan missed it or the task list missed it — surface and fix.
 5. **Order tasks by dependency, not preference.** Reviewer should be able to follow the list top-to-bottom and end up with a working feature.
 6. **Stop after writing.** Implementation is not part of this skill's output.

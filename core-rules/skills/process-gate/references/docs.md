@@ -16,6 +16,8 @@ Authoritative source: `engineering-process.md` §9 (Documentation standards).
 
 Required at project root for every active project. Format: Keep a Changelog 1.1.0 (Unreleased section + dated releases).
 
+The gate enforces the *mechanical floor* (file present; touched when code changed; a new entry line added — the `### Unreleased`/`- ` warn). The *doctrine* behind the number — semver as a promise, the tag as source of truth, entries curated by impact and written with the change — lives in **`core-rules/references/versioning.md`**. Consult it whenever a change involves a version bump or a public-interface change.
+
 Code changes that must update `CHANGELOG.md`:
 
 ```bash

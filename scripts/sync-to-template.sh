@@ -13,6 +13,12 @@
 #   sync-to-template.sh                         # dry-run
 #   sync-to-template.sh --apply                 # write to template working tree
 #   sync-to-template.sh --apply --push          # also commit + push
+#
+# On --apply the mirror is PRUNED of de-listed paths (DELIST_PRUNE) then LINTED
+# for forbidden content — absolute-path leaks and stale antigravity outside the
+# historical record (docs/adr/, docs/specs/, CHANGELOG.md). A lint failure
+# ABORTS before any commit/push, so a drifted public-only file (README/SETUP/
+# AGENT_SETUP) cannot ship stale content.
 
 set -euo pipefail
 
@@ -24,6 +30,8 @@ SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/sed-portable.sh"
 # shellcheck source=lib/sync-coverage.sh
 . "$SCRIPT_DIR/lib/sync-coverage.sh"
+# shellcheck source=lib/mirror-lint.sh
+. "$SCRIPT_DIR/lib/mirror-lint.sh"
 
 # --- Args ------------------------------------------------------------------
 APPLY=false
@@ -71,8 +79,10 @@ SYNC_PATHS=(
   "core-rules/skills/"
   "core-rules/commands/"
   "core-rules/templates/"
+  "core-rules/references/"
   "docs/adr/"
   "docs/primers/"
+  "docs/references/"
   "docs/UPGRADING.md"
   "scheduled-tasks/"
   "scripts/"
@@ -85,7 +95,7 @@ SYNC_PATHS=(
   "core-rules/autonomy.md"
   "core-rules/presets/"
   "docs/opus-4.8-steering.md"
-  "docs/gpt-5.5-steering.md"
+  "docs/gpt-5.x-steering.md"
   "docs/codex-routing.md"
   "docs/specs/2026-05-20-trellis-autonomy-design.md"
   "docs/specs/2026-06-02-trellis-process-enforcement-design.md"
@@ -98,6 +108,19 @@ NEVER_SYNC=(
   "registry.md"
   "blacklist.md"
   "audits/"
+)
+
+# De-listed / removed paths to PRUNE from the mirror on --apply (Workstream D2).
+# The per-subtree `rsync --delete` below only prunes WITHIN wholesale-synced
+# dirs; a file removed from SYNC_PATHS or deleted upstream (e.g. a renamed or
+# retired doc) lingers in the mirror forever otherwise — docs/antigravity-
+# steering.md did exactly that until a manual git rm. This is an explicit
+# append-and-forget register, NOT a blanket "delete anything unsynced" (that
+# would nuke legit public-only files: README.md, SETUP.md, AGENT_SETUP.md,
+# LICENSE, .github/). Add a path here when you de-list or rename it.
+DELIST_PRUNE=(
+  "docs/antigravity-steering.md"   # retired in RC.4 (AntiGravity strip)
+  "docs/gpt-5.5-steering.md"       # renamed → docs/gpt-5.x-steering.md in RC.5
 )
 
 # core-rules/ subdirs deliberately kept instance-private — the explicit
@@ -275,6 +298,42 @@ if $APPLY; then
     fi
   done
   echo "  applied."
+
+  # --- Prune de-listed paths (Workstream D2) --------------------------------
+  echo "==> Pruning de-listed paths from mirror"
+  pruned_any=false
+  for dp in ${DELIST_PRUNE[@]+"${DELIST_PRUNE[@]}"}; do
+    # Path-safety: a typo'd entry (empty, ., .., absolute, tilde, or any path
+    # containing ..) must NEVER reach the destructive rm — it could delete the
+    # mirror root or escape it. Skip loudly (cross-model review finding).
+    case "$dp" in
+      ""|"."|".."|/*|"~"*|*..*)
+        echo "  SKIP unsafe DELIST_PRUNE entry: '$dp'" >&2
+        continue ;;
+    esac
+    if [ -e "$TEMPLATE_DIR/$dp" ]; then
+      git -C "$TEMPLATE_DIR" rm -rf --ignore-unmatch --quiet -- "$dp" 2>/dev/null || rm -rf "${TEMPLATE_DIR:?}/$dp"
+      echo "  pruned: $dp"
+      pruned_any=true
+    fi
+  done
+  $pruned_any || echo "  nothing to prune."
+
+  # --- Post-apply denylist lint (Workstream D1) -----------------------------
+  # Greps the WHOLE mirror — including public-only files the sync never touches
+  # (README/SETUP/AGENT_SETUP/architecture.svg) — for absolute-path leaks and
+  # stale antigravity outside the historical record. Fail-closed: abort before
+  # any commit/push. This is the guard the RC.4 stale-antigravity regression
+  # (in exactly those unsynced files) would have tripped.
+  echo "==> Linting mirror for forbidden content"
+  if lint_out="$(lint_mirror "$TEMPLATE_DIR" "$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME")"; then
+    echo "  mirror clean."
+  else
+    echo "  MIRROR LINT FAILED — forbidden content in the public mirror:" >&2
+    printf '%s\n' "$lint_out" | sed 's|^|    |' >&2
+    echo "  Fix the offending files before publishing. Aborting." >&2
+    exit 1
+  fi
 
   if $PUSH; then
     echo "==> Committing in template repo"

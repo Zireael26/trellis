@@ -72,6 +72,20 @@ ${LOG_CONTENT}
 "
 fi
 
+# --- audit digest (unresolved findings, from daily-project-digest) ---
+# C1: a tiny advisory PUSH — unresolved audit findings surface the moment work
+# begins, instead of the PULL of a separate cron report. The emitter
+# (scheduled-tasks/daily-project-digest) writes a count + top item to this file;
+# kept to head -c 400 so it cannot crowd out real context under the 2000-char
+# $CTX cap below. Advisory only — never blocks or mutates.
+if [ -f "${REPO_ROOT}/.claude/audit-digest.md" ]; then
+  DIGEST_CONTENT=$(head -c 400 "${REPO_ROOT}/.claude/audit-digest.md")
+  CTX="${CTX}--- audit digest (unresolved findings) ---
+${DIGEST_CONTENT}
+
+"
+fi
+
 # --- Autonomy level ---
 # Resolution priority: session override file > project config > preset default > fleet default > 3
 LEVEL=3

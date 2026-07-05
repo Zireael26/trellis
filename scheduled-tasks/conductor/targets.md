@@ -15,6 +15,7 @@ file is config knobs only.
 | Knob | Default | Meaning |
 |---|---|---|
 | `auto_spec_top_n` | **1** | How many top *eligible* backlog items get `spec -> plan -> tasks` overnight. `0` = rank only (pure slate, zero repo mutation). Raise to 2-3 once you trust the ranking. |
+| `auto_execute_top_n` | **0** | **Component-D — default OFF.** How many top *safe* items **whose auto-spec (`spec->plan->tasks`) came out `ready`** get `execute`d to a **HOLD PR** overnight. `surgical` items skip the spec pipeline, so they carry no `ready` spec and are never auto-execute candidates. `0` = the conductor stops at spec and **"kick stops at PR" is fully preserved** — identical to today. When `>0`: those items are executed in an isolated worktree and opened as a `[HOLD]` PR — **never merged** (the merge bright-line is absolute at every value). Runs under its own ceiling (`conductor.wf.js meta.safety`) and needs bypass-perms for an unattended run. Raise only once you trust the pipeline end-to-end. |
 | `default_engine` | `claude` | Executor for spec/plan/tasks. Per-task `engine:` in backlog.yml overrides. |
 | `spec_budget_usd` | `60` | Mirrors the recipe's `meta.safety.budget_ceiling_usd`. Change in both places if you retune. |
 

@@ -2,7 +2,7 @@
 
 Source: the July-2026 community + benchmark consensus on Claude/Opus vs Codex/GPT-5.x (last30days engine + web search, distilled to the figures below), not model recall. This doc carries the **work-type → model** routing policy as durable steering **intent** for Trellis's dual-harness setup. It is not a rule that branches on which harness is running — the load-bearing rules live in `core-rules/CLAUDE.md`, `core-rules/autonomy.md`, `core-rules/loop-safety.md`, and the hooks, and they steer every harness **identically** (byte-identical `CLAUDE.md`/`AGENTS.md` symlinks; ADR 2026-05-08). Routing is applied by the orchestrator when it fans work out; it never re-decides who *is* running. Read on demand.
 
-The per-model prompting levers live next door: `docs/opus-4.8-steering.md` and `docs/gpt-5.5-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
+The per-model prompting levers live next door: `docs/opus-4.8-steering.md` and `docs/gpt-5.x-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
 
 ---
 
@@ -56,6 +56,17 @@ Codex is a **runtime-detected capability**, exactly like the Workflow-tool capab
 - **`log()` the degrade** so a run that silently became Claude-only is visible (no-silent-caps discipline).
 
 Quality is not laundered by routing to Codex: every Codex unit's output flows back into Claude's `code-review-subagent` / verify gate, and the bright-line guardrails (destructive-op, external-message, secrets, DoD receipts) fire on Codex units too.
+
+## 4.5 Dispatch mechanics — the tracked wrapped path is canonical
+
+**There is no wrapper-free way to run Codex as a native agent, and that is fine — the wrapped path is the one to prefer.** Claude Code's agent scheduler spawns **Claude models only** (its `model` enum is sonnet/opus/haiku/fable — no GPT). The `openai-codex` plugin ships **no MCP server**; its only agent is `codex-rescue` (`model: sonnet`, `tools: Bash`), a thin forwarder to `codex-companion.mjs`. So a Codex unit reaches the runtime through a cheap Claude **driver** that shells out — the Sonnet driver is a courier (≈free), Codex/GPT does 100% of the reasoning. This is not overhead to avoid; it is what makes a Codex unit a **first-class, harness-tracked node** in a workflow.
+
+Two mechanics, and the **default is (ii)**:
+
+- **(ii) In-workflow wrapped dispatch — CANONICAL.** From inside a dynamic Workflow, dispatch Codex as `agent(prompt, { agentType: 'codex:codex-rescue' })`. The unit shows up as a tracked node (label, phase, live progress, `TaskOutput`) exactly like a Claude subagent — no shell to babysit, no manual `status`/`result` polling. Inject the routing flags (`--write --effort xhigh`) at the head of the prompt; the forwarder applies them. **This path MUST run synchronous.** The forwarder's own heuristic will background a unit it judges "big/open-ended" and return a **job handle instead of the result** (silently dropping the work from the fan-out). Force foreground in the prompt ("run synchronously, do not `--background`") **and** have the recipe detect a job-handle-shaped result and degrade that unit to Claude — the `codex-executor` recipe does both (its `isJobHandle` guard). Never poll `status`/`result` from inside the engine; the forwarder is contractually barred from them.
+- **(i) Bash-direct from the MAIN loop — fallback + async.** From a `/loop`, a scheduled task, or the main orchestrator thread (where you hold `Bash`), call `node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort xhigh "<prompt>"` directly. Use this only when (a) no Workflow tool is available, or (b) you genuinely want **detached `--background` async** with `status`/`result` polling — which the in-engine forwarder cannot do. It is untracked (you manage the handle yourself), so prefer (ii) whenever the work fits a workflow.
+
+The table's `--background` rows (§2) are the (i) Bash-direct mechanic. Inside a workflow, the same work runs synchronous via (ii).
 
 ## 5. Where this is enforced
 

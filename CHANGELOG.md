@@ -8,6 +8,29 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.5] — 2026-07-05
+
+SE-board modernization, agent-skills fold-in, and automation-first. Spec/plan/tasks: `specs/005-se-modernization-and-skill-foldin/`. Built cross-model (Codex adversarially reviewing Claude's work through the tracked wrapped path) — the P0 review caught a HIGH prune-safety bug before it landed.
+
+### Added
+
+- **Sync-hardening (Workstream D).** `scripts/lib/mirror-lint.sh` greps the **whole** public mirror — including the public-only files the allowlist sync never touches (`README.md`, `SETUP.md`, `AGENT_SETUP.md`) — for absolute-path leaks (hard-fail anywhere) and stale `antigravity` outside the historical record (`docs/adr/`, `docs/specs/`, `CHANGELOG.md`, the removal tooling); maintainer name + github user are deliberately **not** denylisted (legitimate public attribution / clone URLs). `sync-to-template.sh` gains a `DELIST_PRUNE` register (path-safety-guarded `git rm` of renamed/retired paths — never a blanket unsynced-delete) and a fail-closed post-apply lint that aborts before any commit/push. This guards the exact RC.4 stale-AntiGravity regression. Tests: `mirror-lint.bats` (16), `hook-parity.bats` (bidirectional Claude↔Codex).
+- **Cross-model verify-panel recipe** (`core-rules/skills/orchestrate/recipes/verify-panel.wf.js` + reference) — per hard finding, a Claude reviewer and a Codex reviewer judge in parallel and merge into a consensus (`agree-real` / `agree-not-real` / `split` / `single-model`), degrading to single-model when Codex is absent. Realizes the reserved "second-opinion → the other model" routing and the parked `hooks.md` v2 multi-angle reviewers.
+- **Process primitives folded from `addyosmani/agent-skills`** (process-only; domain knowledge stays reference-only, per the lean-spine decision): new `core-rules/references/` — `doubt-driven-development` (CLAIM→EXTRACT→DOUBT→RECONCILE→STOP), `source-driven-development`, `versioning`, `deprecation-and-migration`. Nuggets folded into existing skills: `clarify` (hypothesis + confidence per question, predict-to-stop), `tasks` (vertical / contract-first / risk-first slicing taxonomy), `brainstorming` (idea-refine divergent lenses).
+- **Automation-first, safe tier.** **C1** — the daily digest now emits a tiny `<root>/.claude/audit-digest.md` that the `session-context` SessionStart hook injects (a push of unresolved findings when work begins, not the pull of a cron report); the `daily-project-digest` task is migrated on-disk. **C5** — `execute` capability-gates execution-heavy bounded units to the Codex executor via the tracked wrapped path (verify + review-of-actual-diff + DoD receipt run identically on a Codex diff).
+- **Automation-first, Component-D tier — all default-OFF (current behavior preserved).** **C2** `drift-holdpr` recipe (opt-in, inert until invoked): mechanical drift → a `[HOLD]` PR per project, never merging, never touching project main, refusing non-mechanical divergence, under its own loop-safety ceilings. **C8** conductor `auto_execute_top_n` (default `0` = "kick stops at PR" preserved; `>0` executes top-N safe/surgical READY items to a `[HOLD]` PR). **C7** gotchas-rollup `auto_promote_pr` (default off = recommend-only; on = a clean n≥3 cluster opens a `[HOLD]` rule-of-three PR against core-rules). The **merge bright-line is absolute at every setting** — no knob crosses it.
+
+### Changed
+
+- **Reviewer coverage contract now lives in the prompt string** (A1). The `code-reviewer` prompt gains one explicit line — "report every finding including low-severity/low-confidence; coverage is your job, filtering is not" — in both byte-identical copies, guarded by a new `code-reviewer-parity.bats`. (Grounding found the shipped prompt was already correct on coverage; this makes the contract live in the string, not only the prose.) Five-axis review framing (correctness/readability/architecture/security/performance, review-tests-first, net-health) added to the reviewer **prose**.
+- **Edit-safety rule corrected** (S2): the "Edit fails silently on stale `old_string`" premise is retired (the tool errors loudly and the harness tracks file state); the non-hook-backed post-edit re-read is dropped, the `reread-guard`-enforced before-edit re-read kept. **Debugging** now escalates reasoning effort (`/effort max` / ultracode) at the two-attempts stuck-point (A5). **The "max 7 files per phase" cap is now an autonomy-scoped soft ceiling** that widens at L4/L5 (S4).
+- **`docs/gpt-5.5-steering.md` → `docs/gpt-5.x-steering.md`** (A6/S3): the effort §1 that contradicted `codex-routing` (Codex `xhigh`-default, plan/analyze → Claude) is dropped and deferred to `codex-routing.md`; verbosity, `update_plan`, and the progress-floor survive.
+- **The wrapped tracked path is now Trellis's *prescribed* Codex dispatch** (§4 + `codex-routing.md` §4.5 + `codex-executor.md`): dispatch Codex via `agent(prompt, { agentType: 'codex:codex-rescue' })` inside a Workflow (a first-class harness-tracked node) as the canonical method — there is no wrapper-free path (Claude Code spawns Claude models only; the plugin ships no MCP server). The recipe now **forces synchronous** and detects a background job-handle result to degrade it — closing a real bug where a backgrounded Codex unit silently dropped its result from a fan-out. `check-docs.sh` now implements the advertised "CHANGELOG entry added" warn (closing a reference↔script gap).
+
+### Deferred (to rc.5.1, documented — not dropped)
+
+- **C3** (pr-gate shift-left) + **C6** (primer-capture nudge) — advisory nudge hooks needing dual-manifest wiring. **C4** (L5 auto-append to `gotchas.md`) — a write gate best built after extracting the autonomy-level resolution into a shared lib. Tracked in `specs/005-.../tasks.md` Follow-ups.
+
 ## [v1.0.0-rc.4] — 2026-07-05
 
 ### Added

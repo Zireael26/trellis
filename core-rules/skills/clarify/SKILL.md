@@ -62,6 +62,8 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 - **One answer per question.** If the operator gives two contradictory answers, surface the contradiction — don't pick one.
 - **Deferrals are explicit and labelled.** `Deferred: <reason>` — never just an empty section.
 - **Questions are sequential, not batched.** Asking all five up-front floods the operator; sequential lets answer N inform question N+1.
+- **Attach a hypothesis + confidence to each question.** Before asking, state your own best guess at the answer and a confidence 0–1 — "my hypothesis: rollback = revert the deploy and restore the last snapshot (0.7)." Confirming or correcting a concrete guess is faster for the operator than answering a blank prompt, and it surfaces exactly where your mental model is wrong. The guess **primes** the question; it never **replaces** the answer — the operator's word still wins (see "Don't silently improve answers"). (Folded from the `interview-me` pattern.)
+- **Predict-to-stop.** When you can predict the operator's next three answers with high confidence, the interview has converged — offer to stop early and move to `spec`, rather than walking the remaining questions ritually. A predicted answer is still a hypothesis: state it and let the operator veto.
 - **No solutions in clarify.md.** This is the question pass. Solutions belong in `plan.md`. If the operator's answer to question 1 is a solution, ask "and the problem behind that?".
 
 ## Boundaries

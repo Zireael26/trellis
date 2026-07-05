@@ -93,9 +93,15 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-gotchas-rollup.md` (monthly):
 ## Boundaries
 
 - **Do not modify any project's `gotchas.md`.** Read-only across all project files.
-- **Do not modify `CLAUDE.md` or `deferred.md`** yourself. The user approves rule promotions explicitly — this report's job is to surface them.
+- **Do not modify `CLAUDE.md` or `deferred.md`** yourself, and **never merge**. The user approves rule promotions explicitly — by default this report's job is to surface them. **Opt-in exception (`auto_promote_pr`, default off):** see "Auto-promotion PR" below — even then only a **HOLD PR** is opened; `core-rules` main is never touched and nothing is merged.
 - If a project has no `gotchas.md`, note it but don't flag as an error.
 - If `deferred.md` doesn't exist yet, skip step 5 and note it in the report.
+
+## Auto-promotion PR (Component-D — opt-in, default OFF)
+
+Default behavior is recommend-only (above): a clean n≥3 cluster is surfaced with a drafted rule for the user to apply. When `auto_promote_pr` is enabled (a per-loop / config flag; **default off**, so today's behavior is unchanged), you MAY additionally — for each cluster that is **cleanly** n≥3 (unambiguous, the same lesson across ≥3 projects, with a well-formed proposed rule) — open a **`[HOLD]` PR** against `core-rules` on a fresh branch, adding the drafted rule to `core-rules/CLAUDE.md`. Title prefixed `[HOLD] rule-of-three:`, body citing the ≥3-project evidence and "DO NOT MERGE without human review".
+
+This is a **fleet-blast-radius** change — a `core-rules` rule reaches every project — so the sanctioned form is HOLD-PR-plus-human-merge: **never push to `core-rules` main, never merge.** Anything ambiguous (borderline count, differing lessons, an ill-formed rule) stays a recommendation, not a PR.
 
 ## Sensible failure modes
 

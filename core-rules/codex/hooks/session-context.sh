@@ -69,6 +69,20 @@ ${LOG_CONTENT}
 "
 fi
 
+# --- audit digest (unresolved findings, from daily-project-digest) ---
+# C1: a tiny advisory PUSH — unresolved audit findings surface the moment work
+# begins, instead of the PULL of a separate cron report. The emitter
+# (scheduled-tasks/daily-project-digest) writes a count + top item to this file;
+# kept to head -c 400 so it cannot crowd out real context under the $CTX cap.
+# Advisory only — never blocks or mutates.
+if [ -f "${REPO_ROOT}/.claude/audit-digest.md" ]; then
+  DIGEST_CONTENT=$(head -c 400 "${REPO_ROOT}/.claude/audit-digest.md")
+  CTX="${CTX}--- audit digest (unresolved findings) ---
+${DIGEST_CONTENT}
+
+"
+fi
+
 # --- Unresolved gotchas ---
 # Convention: entry is "unresolved" when anchored at line-start either as a
 # heading (`## Unresolved …`) or a status field (`Status: unresolved`,

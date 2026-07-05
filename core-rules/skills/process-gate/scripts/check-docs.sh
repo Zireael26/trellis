@@ -47,6 +47,16 @@ else
     if ! printf "%s\n" "$changed_files" | grep -Fxq "$CHANGELOG_FILE"; then
       findings+=("$CHANGELOG_FILE: not updated despite code changes under: ${CHANGELOG_PATHS[*]}")
       worst="fail"
+    else
+      # Touched, but did it gain a real entry? docs.md advertises this warn; the
+      # script never implemented it (RC.5 closes the reference↔script gap). An
+      # entry is a new '- ' bullet or a '### ' impact subhead; whitespace- or
+      # heading-only touches don't count. WARN only (never fail) — advisory, and
+      # a diff hiccup must not wedge the gate. Doctrine: core-rules/references/versioning.md.
+      if ! git diff "$RANGE" -- "$CHANGELOG_FILE" 2>/dev/null | grep -Eq '^\+[[:space:]]*(- |### )'; then
+        findings+=("$CHANGELOG_FILE: touched but no new entry added — add a '- ' bullet under the right impact group (Added/Changed/Fixed/Deprecated/Removed/Security); see core-rules/references/versioning.md")
+        [ "$worst" = "pass" ] && worst="warn"
+      fi
     fi
   fi
 fi

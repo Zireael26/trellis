@@ -9,7 +9,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. Flag real problems and wait.
 - For non-trivial features (3+ steps or architectural decisions), interview the user about implementation, UX, and tradeoffs before writing code.
-- Never attempt multi-file refactors in one response. Break into phases of max 7 files. Complete, verify (hooks enforce), get approval, then continue.
+- Never attempt multi-file refactors in one response. Break into phases sized by a **soft, autonomy-scoped ceiling** — ~7 files at L1–L3, widening at L4/L5 where the agent runs less interactively and a larger coherent phase is warranted. The ceiling is a safety rail, not a hard cap: the `code-review-subagent` fires at ≥3 files / ≥200 lines, so review coverage scales up with phase size. Complete, verify (hooks enforce), get approval per the active autonomy level, then continue.
 - Don't hide confusion. If a request has multiple valid interpretations, surface them — don't pick silently. If something is unclear, stop and name what's confusing before guessing.
 - Frame each task as a verifiable goal before writing code: bug → reproducing test that fails then passes; refactor → tests green before and after; new behavior → explicit acceptance check per step. Weak goals ("make it work") force back-and-forth; strong goals let you loop independently.
 
@@ -33,7 +33,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 
 ## Edit safety
 
-- Before every file edit, re-read the file. After editing, read it again. The Edit tool fails silently on stale `old_string` matches.
+- Before editing an existing file, make sure you have read it this turn — the `reread-guard` hook enforces this and blocks an edit to a file you have not read (auto-compaction may have wiped your memory of its contents). The Edit tool errors loudly on a stale `old_string` and the harness tracks file state, so a routine re-read *after* editing is not needed.
 - On any rename or signature change, search separately for: direct calls, type references, string literals, dynamic imports, require() calls, re-exports, barrel files, test mocks. Assume grep missed something.
 - Before adding new code in an unfamiliar area, read the immediate callers, the module's public exports, and any shared utilities it would touch. "Looks orthogonal" is dangerous — if you can't explain why the surrounding code is structured the way it is, ask.
 - Never delete a file without verifying nothing references it.
@@ -52,7 +52,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 
 - Work from raw error data. Don't guess. If a bug report has no output, ask for it. Never claim anything about code you haven't opened — if the user names a file, read it before answering, not after.
 - For any long-running process (dev server, test watcher, build, log tail), use the `monitor` tool — never `tail -f`, polling loops, or repeated Bash calls. Monitor streams stdout lines as notifications with zero token overhead.
-- If a fix doesn't work after two attempts, stop. Read the entire relevant section top-down. State where your mental model was wrong before trying again.
+- If a fix doesn't work after two attempts, stop. Read the entire relevant section top-down, and escalate reasoning effort (`/effort max`, or ultracode if your harness exposes it) before the next attempt — the stuck-point is exactly where the extra reasoning pays for itself. State where your mental model was wrong before trying again.
 - Cloud provisioning: before committing to a region, zone, or machine family, verify the *specific* capability you need is available there — model serving, machine-type/disk support, and the per-region quota bucket. Global signals (`effectiveLimit=-1`) and other regions lie about the target region; `asia-south1` in particular is on limited rollouts. (observed across 3 GCP projects)
 
 ## Self-correction
