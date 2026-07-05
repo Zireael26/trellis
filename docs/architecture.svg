@@ -35,7 +35,7 @@
   <text x="550" y="146" text-anchor="middle" font-size="11" fill="#cbd5e1">presets/ · registry.md · blacklist.md · deferred.md · VERSION</text>
   <text x="550" y="170" text-anchor="middle" font-size="11" fill="#94a3b8" font-style="italic">Rule of Three — n=3 to promote, n=2 stays in deferred</text>
   <text x="550" y="194" text-anchor="middle" font-size="11" fill="#cbd5e1">Autonomy L1–L5 · Presets · Multi-harness</text>
-  <text x="550" y="212" text-anchor="middle" font-size="11" fill="#94a3b8">(Claude · Codex · AntiGravity)</text>
+  <text x="550" y="212" text-anchor="middle" font-size="11" fill="#94a3b8">(Claude · Codex)</text>
 
   <!-- Inheritance arrows -->
   <line x1="440" y1="230" x2="220" y2="300" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>

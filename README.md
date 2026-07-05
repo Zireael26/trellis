@@ -12,7 +12,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-supported-7c3aed.svg)](https://docs.claude.com/en/docs/claude-code)
 [![Codex](https://img.shields.io/badge/Codex-supported-10b981.svg)](https://github.com/openai/codex)
-[![AntiGravity](https://img.shields.io/badge/AntiGravity-supported-4285f4.svg)](https://antigravity.google)
 [![Forkable](https://img.shields.io/badge/Forkable-yes-f97316.svg)](#quick-start)
 [![Shell](https://img.shields.io/badge/Shell-bash-181717.svg)](#requirements)
 
@@ -44,7 +43,7 @@ None of those are bugs in the model. They are gaps in the *process* around the m
 | 🎚 **Autonomy slider (L1–L5)** | Dial how much the agent decides on its own — Pedagogical → Cautious → Standard (default) → Initiative → Autonomous — per session (`/autonomy N`) or per project. Bright-line safety guardrails fire at *every* level. |
 | 🧩 **Presets** | Drop-in policy bundles (`compliance-strict`, `experimental-loose`) that clamp the autonomy ceiling and tune the gates for a project's risk profile. The `preset-drift` audit keeps them honest. |
 | 📐 **Rule of Three for evolution** | New rules wait in `core-rules/deferred.md` until a 3rd independent project adopts them. n=2 is the danger zone. |
-| 🤖 **Multi-harness parity, opt-in or opt-out** | Same policy intent across Claude Code, Codex, and AntiGravity. The `harnesses` array in `trellis.config.json` is the single switch — drop the ones you don't use. AntiGravity inherits via the same `AGENTS.md` / `.agents/` surface as Codex (rules + skills are byte-identical); workflow slash-commands land at `.agents/workflows/`. |
+| 🤖 **Multi-harness parity, opt-in or opt-out** | Same policy intent across Claude Code and Codex. The `harnesses` array in `trellis.config.json` is the single switch — drop the one you don't use. Codex inherits via the shared `AGENTS.md` / `.agents/` surface (rules + skills are byte-identical with Claude Code); its workflow slash-commands land at `.agents/workflows/`. |
 
 ---
 
@@ -226,7 +225,7 @@ Five placeholders. Setup replaces them in-place.
 
 - **macOS or Linux** with `bash`, `git`, and `jq` on `PATH`. Hooks degrade gracefully if `jq` is missing.
 - **Node.js** for projects using husky. (For Unity / Rust / Go / Python-only projects, see [`core-rules/inheritance.md`](core-rules/inheritance.md) → "Native git hooks".)
-- **Claude Code, Codex, and/or AntiGravity.** The `harnesses` array in `trellis.config.json` accepts any combination. AntiGravity inherits via the shared `AGENTS.md` / `.agents/` surface (same as Codex); slash commands land in `.agents/workflows/`. Trellis defers native AntiGravity hook integration today (see `core-rules/inheritance.md` "Known gap: AntiGravity native hooks deferred").
+- **Claude Code and/or Codex.** The `harnesses` array in `trellis.config.json` accepts any combination. Codex inherits via the shared `AGENTS.md` / `.agents/` surface; its slash commands land in `.agents/workflows/`.
 - **Codex hooks opt-in** requires Codex CLI with hooks support and `[features] hooks = true` in `$CODEX_HOME/config.toml` (the older `codex_hooks` key is deprecated as of Codex CLI 0.129+).
 
 ---
@@ -234,9 +233,9 @@ Five placeholders. Setup replaces them in-place.
 ## FAQ
 
 <details>
-<summary><b>Why Claude Code <i>and</i> Codex <i>and</i> AntiGravity?</b></summary>
+<summary><b>Why Claude Code <i>and</i> Codex?</b></summary>
 
-Different harnesses have different strengths and I use whichever fits the project. Forcing a single harness everywhere would mean giving up the others. Trellis keeps the policy intent identical across all three — same rules, same skills, separate hook envelopes where each engine supports them (Claude Code and Codex today; AntiGravity native hooks deferred until Google exposes the API) — so the choice is per-project, not per-process.
+Different harnesses have different strengths and I use whichever fits the project. Forcing a single harness everywhere would mean giving up the other. Trellis keeps the policy intent identical across both — same rules, same skills, each with its own hook envelope — so the choice is per-project, not per-process.
 
 </details>
 
@@ -255,9 +254,9 @@ Fork it, edit `core-rules/CLAUDE.md`, done. The parent layer is yours after you 
 </details>
 
 <details>
-<summary><b>Can I use this without Codex / without Claude Code / without AntiGravity?</b></summary>
+<summary><b>Can I use this without Codex / without Claude Code?</b></summary>
 
-Yes. The `harnesses` array in `trellis.config.json` accepts any subset of `["claude", "codex", "antigravity"]`. Onboarding only seeds artifact trees for enabled harnesses — `.codex/hooks*` only for Codex, `.agents/workflows/` only for AntiGravity, and the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface whenever either Codex or AntiGravity is enabled.
+Yes. The `harnesses` array in `trellis.config.json` accepts any subset of `["claude", "codex"]`. Onboarding only seeds artifact trees for enabled harnesses — `.codex/hooks*` and the shared `AGENTS.md` + `.agents/{rules,skills,primers,workflows}/` surface (including the `.agents/workflows/` slash commands) whenever Codex is enabled.
 
 </details>
 
