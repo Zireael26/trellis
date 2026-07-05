@@ -104,16 +104,15 @@ grep -rn "__TRELLIS_PATH__\|__PROJECTS_ROOT__\|__MAINTAINER_NAME__\|__GITHUB_USE
 The `harnesses` array in `trellis.config.json` accepts any combination of:
 
 ```json
-"harnesses": ["claude", "codex", "antigravity"]
+"harnesses": ["claude", "codex"]
 ```
 
 **What each harness gets:**
 
 - **`claude`** — Claude Code. Seeds `.claude/{rules,skills,commands,primers,hooks}/`, `.claude/settings.json`, and root `CLAUDE.md`.
-- **`codex`** — Codex CLI. Seeds the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface, the Codex-only `.agents/commands/*.md` slash commands, and the Codex-only `.codex/hooks.json` + `.codex/hooks/*.sh` hook envelope.
-- **`antigravity`** — Google AntiGravity (`agy` CLI / standalone desktop app). Seeds the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface and the AntiGravity-only `.agents/workflows/*.md` slash commands. **No native hooks today** — Trellis defers AntiGravity hook integration (see `core-rules/inheritance.md` "Known gap: AntiGravity native hooks deferred"). Rules and skills load identically to Codex; only the slash-command directory name differs (`workflows/` vs `commands/`).
+- **`codex`** — Codex CLI. Seeds the shared `AGENTS.md` + `.agents/{rules,skills,primers,workflows}/` surface, the Codex-only `.agents/commands/*.md` slash commands, and the Codex-only `.codex/hooks.json` + `.codex/hooks/*.sh` hook envelope.
 
-The `AGENTS.md` symlink and the `.agents/{rules,skills,primers}/` content are byte-identical across Codex and AntiGravity — both engines read the same files. Enabling both just adds the harness-specific slash-command dir; the shared surface is seeded once.
+Codex reads the shared `AGENTS.md` symlink and the `.agents/{rules,skills,primers,workflows}/` content; the shared surface is seeded once.
 
 If you intentionally use only one harness, remove the unused entries from `trellis.config.json`.
 
@@ -123,8 +122,6 @@ For Codex hooks, also confirm your user config has:
 [features]
 hooks = true
 ```
-
-(AntiGravity needs no equivalent global flag because Trellis ships no hooks for it.)
 
 ---
 
@@ -144,7 +141,7 @@ Read the script's "Next steps" output carefully — it asks you to:
 4. Run `pnpm install` / `bun install` / `npm install` so husky activates.
 5. Add a row to `registry.md` here in `trellis-instance/`.
 
-With the default `harnesses: ["claude", "codex"]`, onboarding also seeds the shared `.agents/` surface: a root `AGENTS.md` entrypoint when safe plus `.agents/rules/` and `.agents/skills/` symlinks. Adding `"antigravity"` to the array extends that with `.agents/workflows/*.md` slash-command symlinks (AntiGravity-only). After onboarding 1–3 projects, you'll see the system pay off — the `cross-project-process-audit` will start surfacing real findings.
+With the default `harnesses: ["claude", "codex"]`, onboarding also seeds the shared `.agents/` surface for Codex: a root `AGENTS.md` entrypoint when safe plus `.agents/rules/`, `.agents/skills/`, and `.agents/workflows/*.md` slash-command copies. After onboarding 1–3 projects, you'll see the system pay off — the `cross-project-process-audit` will start surfacing real findings.
 
 ---
 

@@ -31,7 +31,7 @@ Use whatever clarification mechanism your tooling provides (multi-choice questio
 - `__MAINTAINER_NAME__` — the user's display name (used in `engineering-process.md`).
 - `__GITHUB_USER__` — the user's GitHub username (referenced in audit examples and registry comments).
 - `__USER_HOME__` — the user's home directory. Auto-detect via `echo $HOME`; confirm.
-- Harness support — ask whether the user wants **Claude + Codex + AntiGravity** (full), **Claude + Codex** (default), **Claude + AntiGravity**, **Claude-only**, **Codex-only**, or **AntiGravity-only**. The default keeps Claude + Codex; only add AntiGravity if the user runs Google's `agy` CLI or the Antigravity 2.0 standalone desktop app. Removing Claude is rare — confirm explicitly if proposed.
+- Harness support — ask whether the user wants **Claude + Codex** (default), **Claude-only**, or **Codex-only**. The default keeps Claude + Codex. Removing Claude is rare — confirm explicitly if proposed.
 
 Echo the five values plus harness choice back to the user in a clear table and ask "Should I proceed with these?" Wait for explicit yes.
 
@@ -76,18 +76,10 @@ If anything matches, fix it before continuing. Report findings to the user.
 
 ### Step 2b — Apply harness choice
 
-The `harnesses` array in `trellis.config.json` accepts any combination of `"claude"`, `"codex"`, and `"antigravity"`. Apply the user's choice. Common combinations:
+The `harnesses` array in `trellis.config.json` accepts any combination of `"claude"` and `"codex"`. Apply the user's choice. Common combinations:
 
 ```json
 "harnesses": ["claude", "codex"]
-```
-
-```json
-"harnesses": ["claude", "codex", "antigravity"]
-```
-
-```json
-"harnesses": ["claude", "antigravity"]
 ```
 
 ```json
@@ -96,10 +88,6 @@ The `harnesses` array in `trellis.config.json` accepts any combination of `"clau
 
 ```json
 "harnesses": ["codex"]
-```
-
-```json
-"harnesses": ["antigravity"]
 ```
 
 For Codex parity, also tell the user that Codex hooks require this user-level config:
@@ -112,8 +100,6 @@ hooks = true
 (The older `codex_hooks` key still works as a deprecated alias but emits a warning on Codex CLI 0.129+.)
 
 If you are running in Codex and the user explicitly wants you to update `$CODEX_HOME/config.toml`, add only `hooks = true` under `[features]`; do not rewrite other settings.
-
-For AntiGravity parity, no global config change is required. Trellis seeds rules, skills, and slash-command workflows via `AGENTS.md` and `.agents/` (shared with Codex) but ships no `.antigravity/` tree because AntiGravity hook integration is deferred (see `core-rules/inheritance.md` "Known gap: AntiGravity native hooks deferred"). If/when Google exposes the hook API, Trellis will add hook support via a future ADR; tell the user this is a known deferred capability.
 
 ### Step 3 — Smoke-test the canonical files
 
