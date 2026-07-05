@@ -2,6 +2,15 @@
 
 You are running a daily scan for process bypasses across the user's active personal projects. **Only emit a report if you find a bypass.** Silent days are expected and correct — they mean the team is following process.
 
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve per-loop override → `.trellis.config.json.loop_safety` → `trellis.config.json.loop_safety` → built-in fallback (`max_iterations` 100 / `no_progress_iterations` 3 / `budget_ceiling_usd` 1000). The loop halts on any one ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done); the halt surfaces in this run's report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default (1000)
+- Progress signal: **new finding** (an audited project surfaces a new bypass).
+
 ## Inputs
 
 1. Read `__TRELLIS_PATH__/registry.md`.
@@ -17,8 +26,23 @@ For each target project, scan the **last 24 hours** of git history and reflog:
 - Also scan `git reflog --since="24 hours ago"` for any command that included `--no-verify`.
 
 ### 2. Direct-to-main pushes
-- If the project has a protected-main convention (default: `main` or `master`), look at commits on main in the last 24h. Any commit whose author != merge-commit author, OR any non-merge commit on main authored directly (i.e., not via PR merge), counts as a direct push. Heuristic: non-merge commit on main whose parent count == 1 AND whose commit message does not match a squash-merge pattern (`\(#\d+\)` or `Merge pull request`).
-- Noisy heuristic — err on the side of flagging and let the user confirm.
+- If the project has a protected-main convention (default: `main` or `master`),
+  inspect commits newly reachable from that branch in the last 24h.
+- Treat a commit as a **confirmed bypass** only when there is corroborating
+  evidence that it landed outside the PR flow: reflog/push evidence, no matching
+  merged PR in GitHub, and no containing merge commit on protected main that
+  references a PR.
+- Do **not** flag a non-merge commit merely because it is reachable from
+  `main`. Squash merges and rebase merges intentionally create single-parent
+  commits on protected branches. Before flagging, check at least one of:
+  `gh pr list --state merged --search <sha>`, commit message PR patterns
+  (`(#123)` / `Merge pull request #123`), or a protected-branch merge commit
+  containing the candidate SHA.
+- Known Trellis automation sync subjects such as `chore(trellis): sync ...`,
+  `chore(codex): sync ...`, and hook-runtime refreshes are not bypass findings
+  unless paired with explicit bypass evidence.
+- If evidence is incomplete, record it as `classification: needs-confirmation`
+  and **warning**, not critical. Critical is reserved for confirmed bypasses.
 
 ### 3. Husky hook bypasses
 - Scan `git log` for commit trailers like `hook-bypass:` or `skip-ci:` from the last 24h.
@@ -29,7 +53,11 @@ For each target project, scan the **last 24 hours** of git history and reflog:
 
 ## Severity
 
-Everything at this cadence is **critical** by construction — that's why we run daily. If you find a benign-looking bypass (e.g., `--no-verify` on a docs-only commit), still include it but mark `classification: low-risk` in the finding.
+Confirmed bypasses at this cadence are **critical** by construction — that's why
+we run daily. If a confirmed bypass is benign-looking (e.g., `--no-verify` on a
+docs-only commit), still include it but mark `classification: low-risk` in the
+finding. Heuristic direct-to-main signals without corroborating evidence are
+warnings with `classification: needs-confirmation`.
 
 ## Output
 

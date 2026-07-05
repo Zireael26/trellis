@@ -193,16 +193,16 @@ EOF
 }
 
 # =========================================================================
-# Both sources null → receipt unverifiable → advisory PASS (0, additionalContext).
+# Both sources null → receipt unverifiable → advisory PASS (0, systemMessage).
 # This is the fail-open half: last_assistant_message null AND no transcript_path.
 # =========================================================================
-@test "receipts: both sources null → advisory-pass (0, additionalContext)" {
+@test "receipts: both sources null → advisory-pass (0, systemMessage)" {
   seed_todos_none
   make_dirty_code
 
   run bash "$HOOK" <<<"$(make_envelope NULL NULL)"
   [ "$status" -eq 0 ]
-  printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("systemMessage")' >/dev/null
 }
 
 # =========================================================================

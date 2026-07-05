@@ -407,7 +407,7 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
     # receipt and a null transcript still BLOCKS — that is a verifiable miss.
     if [ -z "$LAST_MSG" ] && { [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; }; then
       rm -f "$STATE_FILE"
-      jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no last_assistant_message and no transcript_path in this Stop envelope); state your DoD receipt to the user."}'
+      _se_emit_system_message "stop-verify: receipts unverifiable (no last_assistant_message and no transcript_path in this Stop envelope); state your DoD receipt to the user."
       exit 0
     fi
 
@@ -419,7 +419,7 @@ fi
 # --- Pass / no-check advisory ---
 if [ "$CHECKS_RUN" -eq 0 ]; then
   rm -f "$STATE_FILE"
-  jq -nc '{additionalContext: "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."}'
+  _se_emit_system_message "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."
   exit 0
 fi
 

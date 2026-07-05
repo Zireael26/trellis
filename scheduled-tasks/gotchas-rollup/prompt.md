@@ -101,3 +101,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-gotchas-rollup.md` (monthly):
 
 - If `registry.md` is missing, stop with a clear error.
 - If a project's `gotchas.md` is malformed enough to be unparseable, note it and skip — do not abort the rollup.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceiling values resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (`max_iterations` 100 / `no_progress_iterations` 3 / `budget_ceiling_usd` $1000). The loop halts on any one ceiling, hard-stops (never auto-continues), and emits a structured halt report naming which ceiling tripped, the last progress marker, and the work completed so far; running unattended on cron, it surfaces the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default (1000)
+- **Progress signal:** new finding — each iteration must surface a new cluster, promote candidate, or `deferred.md` recommendation; consecutive iterations that add nothing new count as no-progress.

@@ -236,7 +236,7 @@ rollout_one() {
   seed_local_config "$p" "$profile" ".claude"
 
   # Codex parity — first-class when the parent config enables the harness.
-  if pg_has_harness codex || pg_has_harness antigravity; then
+  if pg_has_harness codex; then
     install_symlink "$p" "AGENTS.md" "CLAUDE.md"
     install_symlink "$p" ".agents/rules/trellis.md" "$CANONICAL_RULES"
     install_skill_symlink "$p" ".agents/skills/process-gate"
@@ -252,7 +252,7 @@ rollout_one() {
       seed_local_config "$p" "$profile" ".agents"
     fi
   elif [ -d "$p/.agents" ]; then
-    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex or antigravity enabled if desired"
+    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex enabled if desired"
   fi
 }
 

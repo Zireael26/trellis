@@ -164,3 +164,21 @@ rollout reaches each project.
 - Schema regex doesn't match a project's `trellis_version` → flag as
   `malformed-version` but keep auditing the rest of the registry; one bad
   pin shouldn't abort the whole run.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings
+resolve most-specific-first: this stanza's per-loop override → project-local
+`.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety`
+→ built-in fallback constants (`100` / `3` / `$1000`). The loop halts on **any
+one** ceiling and emits a structured halt report (which ceiling tripped, the
+last progress marker, work done so far); as an unattended cron loop it surfaces
+the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default ($1000)
+- Progress signal: **new finding** — an iteration makes progress when it
+  surfaces a new drift item (a project newly classified as drifted/ahead, or a
+  malformed/unparseable pin). No new finding across `no_progress_iterations`
+  consecutive iterations halts the loop.

@@ -171,3 +171,21 @@ If no results files in the window, replace the table with: "Eval harness landed 
   itself the top finding — surface it prominently.
 - If prior-month rollup is missing, skip the trend comparison and note that
   this is the first rollup.
+
+## Loop safety
+
+This task is a Trellis loop and honors the loop-safety contract
+([`core-rules/loop-safety.md`](../../core-rules/loop-safety.md)). It declares
+and honors three ceilings and **halts on any one** of them; ceiling values
+resolve most-specific-wins: per-loop override → `.trellis.config.json.loop_safety`
+→ `trellis.config.json.loop_safety` → built-in fallback constants
+(100 / 3 / $1000). On a trip the loop hard-stops (never auto-continues) and
+emits a structured halt report (which ceiling tripped, last progress marker,
+work done); as an unattended cron loop it surfaces the halt in its run report
+rather than dying silently.
+
+- `max_iterations`: inherits default (100)
+- `no_progress_iterations`: inherits default (3)
+- `budget_ceiling_usd`: inherits default (1000)
+- **Progress signal**: work-list drain — the remaining set of audit and
+  eval-results files to read shrinks each iteration.

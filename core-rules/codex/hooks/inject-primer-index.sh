@@ -11,7 +11,7 @@
 #     section, runs `git rev-list --count <pinned>..HEAD -- <entry-paths>`,
 #     buckets FRESH (0) / WARM (1-10) / STALE (11+). Verifies each entry
 #     path exists.
-#   - Emits {"additionalContext":"..."}.
+#   - Emits Codex SessionStart hookSpecificOutput additionalContext.
 #   - Output trimmed to ≤ 1500 chars. Never blocks. Exit 0 always.
 #   - Skips silently if .claude/primers/INDEX.md absent (opt-in projects).
 #
@@ -153,6 +153,6 @@ fi
 
 jq -nc \
   --arg ctx "$OUT" \
-  '{additionalContext: $ctx}'
+  '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
 
 exit 0

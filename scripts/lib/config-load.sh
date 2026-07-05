@@ -88,7 +88,7 @@ _pgcfg_validate() {
   # the fallback enforces).
   if [ "$(jq '.harnesses | if type == "array" then length else 0 end' "$cfg")" -lt 1 ]; then
     echo "config-load: missing required field(s) in $cfg:" >&2
-    echo "  - harnesses (must contain at least one of: claude, codex, antigravity)" >&2
+    echo "  - harnesses (must contain at least one of: claude, codex)" >&2
     return 1
   fi
   # Optional-field pattern check: trellis_version, if present, must be

@@ -25,6 +25,20 @@ export const meta = {
     { title: 'Targets', detail: 'resolve the target list from args or the registry' },
     { title: 'Fan-out', detail: 'one worktree-isolated agent per target: change -> verify -> push -> PR -> verdict' },
   ],
+  // Loop-safety contract (`core-rules/loop-safety.md`). This recipe is a
+  // ONE-SHOT FAN-OUT: a single dispatch barrier over the target list, no
+  // rounds. There are no consecutive iterations to measure, so it is exempt
+  // from no_progress and declares `no_progress_iterations: null` — its one
+  // justified override. `max_iterations` and `budget_ceiling_usd` are omitted
+  // so they genuinely inherit the resolved baseline (per-loop > project-local >
+  // central config > built-in fallback); they still bound the run, and omitting
+  // them keeps the ceilings tracking the baseline if it is ever retuned.
+  // `progress_signal` is commit/PR — the natural marker for a fleet-mutation
+  // loop — though with no rounds it is informational rather than a halting input.
+  safety: {
+    no_progress_iterations: null,
+    progress_signal: 'commit/PR',
+  },
 }
 
 // Per-target verdict. additionalProperties:false so nothing unexpected slips in.

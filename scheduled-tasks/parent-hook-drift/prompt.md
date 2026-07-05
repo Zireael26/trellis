@@ -8,10 +8,10 @@ are **byte-identical** to their deployed copies in each registered project.
 The parent layer only has teeth if projects actually inherit the current
 version — silent drift defeats the whole point.
 
-This audit covers two artifact classes:
+This audit covers three artifact classes:
 
 1. **Hook drift** — files copied into `<project>/.claude/hooks/` (must be byte-identical copies of canonical).
-2. **Codex hook drift** — files copied into `<project>/.codex/` (must be byte-identical copies of canonical when Codex is enabled).
+2. **Codex hook drift** — manifest, scripts, and lib files copied into `<project>/.codex/` (must be byte-identical copies of canonical when Codex is enabled).
 3. **Skill drift** — symlinks at `<project>/.claude/skills/<name>/` (and `<project>/.agents/skills/<name>/` if Codex-enabled) MUST resolve to the canonical directory under `__TRELLIS_PATH__/core-rules/skills/<name>/`. Symlink target verification, not byte-content (the symlink IS the inheritance).
 
 ## Inputs
@@ -19,7 +19,11 @@ This audit covers two artifact classes:
 1. Canonical hook source:
    `__TRELLIS_PATH__/core-rules/hooks/*.sh`
 2. Canonical Codex hook source:
-   `__TRELLIS_PATH__/core-rules/codex/hooks.json` and `__TRELLIS_PATH__/core-rules/codex/hooks/*.sh`
+   `__TRELLIS_PATH__/core-rules/codex/hooks.json`,
+   `__TRELLIS_PATH__/core-rules/codex/hooks/*.sh`,
+   `__TRELLIS_PATH__/core-rules/codex/hooks/lib/*.sh`,
+   plus the shared reviewer cores deployed to Codex from
+   `__TRELLIS_PATH__/core-rules/hooks/lib/{code-reviewer.sh,ui-verify-core.sh}`
 3. Canonical skills source:
    `__TRELLIS_PATH__/core-rules/skills/*/`
 4. Read `__TRELLIS_PATH__/registry.md`
@@ -44,20 +48,16 @@ Instead:
 
 1. Enumerate canonical hook scripts from `core-rules/hooks/*.sh` on disk —
    that is the actual canonical set the project must mirror.
-2. Cross-reference `core-rules/hooks/README.md` to identify which scripts
-   are **experimental** (currently `propose-rules.sh`, marked as "Stop
-   (opt-in, experimental)" in the Tier 2 table). Experimental hooks are
-   excluded from the registration check below.
-3. Load `core-rules/templates/claude-settings.json` and treat its `hooks`
+2. Load `core-rules/templates/claude-settings.json` and treat its `hooks`
    block as the authoritative event/matcher wiring. For every
-   non-experimental canonical hook, the template must register it; for
-   every entry the template registers, each project's
+   canonical hook, the template must register it; for every entry the
+   template registers, each project's
    `.claude/settings.json` must match (same event, same matcher, same
    command path under `$CLAUDE_PROJECT_DIR/.claude/hooks/`).
 
-These two enumeration sources should agree by construction: any
-non-experimental script under `core-rules/hooks/*.sh` should appear in
-the template, and vice versa. A divergence between disk and template is
+These two enumeration sources should agree by construction: any script under
+`core-rules/hooks/*.sh` should appear in the template, and vice versa. A
+divergence between disk and template is
 itself a finding — flag it as **critical: canonical manifest disagreement
 between `core-rules/hooks/` and `core-rules/templates/claude-settings.json`**.
 
@@ -65,13 +65,9 @@ The project may have **additional** hooks beyond these — that's fine and
 expected (e.g., msme-neev has `check-module-boundary.sh`). Additional hooks
 are not checked by this task.
 
-**Experimental hooks (opt-in, no registration check):**
-`propose-rules.sh` is shipped to projects by `sync-hooks` automatically, so
-the byte-identity and executable-bit checks still apply, but registration
-in `settings.json` is project-discretion (opt-in via
-`PROCESS_GATE_PROPOSE_RULES=1`). Absence of a settings.json entry for an
-experimental hook is **not** drift. The authoritative experimental list
-lives in the Tier 2 table of `core-rules/hooks/README.md`.
+`propose-rules.sh` is default-on and MUST be wired wherever the canonical
+manifest wires it. Projects that never want proposals opt out with
+`PROCESS_GATE_PROPOSE_RULES=0`; absence of the hook entry is drift.
 
 ## Canonical Codex hook manifest
 
@@ -79,7 +75,11 @@ When parent `trellis.config.json` includes `"codex"` in `harnesses`, each projec
 
 - `<project>/.codex/hooks.json`, byte-identical to `__TRELLIS_PATH__/core-rules/codex/hooks.json`
 - `<project>/.codex/hooks/*.sh`, byte-identical to `__TRELLIS_PATH__/core-rules/codex/hooks/*.sh`
-- all `.sh` files executable
+- `<project>/.codex/hooks/lib/{deps.sh,pm.sh}`, byte-identical to `__TRELLIS_PATH__/core-rules/codex/hooks/lib/`
+- `<project>/.codex/hooks/lib/{code-reviewer.sh,ui-verify-core.sh}`, byte-identical to the shared canonical cores in `__TRELLIS_PATH__/core-rules/hooks/lib/`
+- hook entrypoint scripts under `.codex/hooks/*.sh` executable. Sourced library
+  files under `.codex/hooks/lib/*.sh` must be byte-identical but do not need the
+  executable bit.
 
 The manifest must use environment-relative commands such as `${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/...`; hardcoded project paths are drift.
 
@@ -114,14 +114,13 @@ matcher, command pointing to
 Unregistered canonical hook → **critical: hook file exists but is not wired
 into settings.json** (this is silent failure — the hook will never run).
 
-Experimental hooks (per the Tier 2 table in `core-rules/hooks/README.md`,
-currently `propose-rules.sh`) are excluded from this check — they are
-project-discretion to register.
-
 ### 4. Executable bit
 
-Each deployed `.sh` file must be executable (`chmod +x`). Stat the mode
-bits. Not executable → **warning: hook will fail to run when invoked**.
+Each deployed hook entrypoint under `.claude/hooks/*.sh` must be executable
+(`chmod +x`). Stat the mode bits. Not executable → **warning: hook will fail to
+run when invoked**. Do not apply this executable-bit check to sourced libraries
+under `lib/`; they are loaded by entrypoint scripts and only need readability
+plus byte-identity.
 
 ### 5. Extra hooks (informational)
 
@@ -135,13 +134,20 @@ If Codex is enabled:
 
 - Compare `.codex/hooks.json` to the canonical manifest.
 - Compare each `.codex/hooks/*.sh` to the canonical script with the same filename.
-- Report missing files, byte drift, non-executable scripts, and hardcoded absolute project paths.
+- Compare `.codex/hooks/lib/deps.sh` and `pm.sh` to the canonical Codex lib files.
+- Compare `.codex/hooks/lib/code-reviewer.sh` and `ui-verify-core.sh` to the shared canonical cores in `core-rules/hooks/lib/`.
+- Report missing files, byte drift, non-executable entrypoint scripts, and
+  hardcoded absolute project paths. Do not report `lib/*.sh` mode `0644` as an
+  executable-bit issue when the file is readable and byte-identical.
 
 If Codex is not enabled, this check is `n/a`.
 
 ### 6. Skill symlink presence
 
-Canonical skills currently shipped: `process-gate`.
+Canonical skills currently shipped: enumerate every directory under
+`core-rules/skills/` at runtime. As of this version the set is
+`analyze`, `brainstorming`, `clarify`, `debrief`, `execute`,
+`orchestrate`, `plan`, `process-gate`, `security-gate`, `spec`, `tasks`.
 
 For each canonical skill, verify the project carries the inheritance symlink:
 
@@ -261,3 +267,19 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-parent-hook-drift.md`:
   `cross-project-process-audit`.
 - If the canonical hooks directory itself is missing, stop with a clear
   error — nothing to compare against.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings
+resolve most-specific-first: per-loop override here → project-local
+`.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety`
+→ built-in fallback constants (`100` / `3` / `$1000`). The loop halts on **any
+one** ceiling and emits a structured halt report (which ceiling tripped, the
+last progress marker, work done so far); as an unattended cron loop it surfaces
+the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default ($1000)
+- Progress signal: **new finding** — a new drift/registration/symlink finding
+  surfaced since the prior iteration.

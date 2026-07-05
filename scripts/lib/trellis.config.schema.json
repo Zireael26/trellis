@@ -46,7 +46,7 @@
       "type": "array",
       "minItems": 1,
       "items": {
-        "enum": ["claude", "codex", "antigravity"]
+        "enum": ["claude", "codex"]
       },
       "uniqueItems": true
     },
@@ -157,6 +157,38 @@
             "minLength": 1
           },
           "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "loop_safety": {
+      "description": "Optional. Instance baseline for the loop-safety contract (core-rules/loop-safety.md). Every Trellis loop declares and honors three ceilings and halts on ANY one. Every key is optional; absence of a key or of the whole object falls back to the documented built-in fallback constants identical to these baselines (max_iterations 100; no_progress_iterations 3; budget_ceiling_usd 1000; usd_per_mtok 25.00). The optional codex_usd_per_mtok has no baseline constant: absent, cross-harness Codex spend is attributed at usd_per_mtok (backward compatible). Resolution, most specific wins: per-loop `safety` override → project-local <project>/.trellis.config.json.loop_safety → this central block → built-in fallback constants. Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "type": "object",
+      "properties": {
+        "max_iterations": {
+          "description": "Hard cap on loop iterations / agent-dispatch rounds; the loop halts when reached. Complements (does not replace) the Workflow engine's 1000-agent lifetime backstop. Default 100.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "no_progress_iterations": {
+          "description": "Halt after this many consecutive iterations that make no measurable progress, where 'progress' is the loop's declared progress signal (commit/PR, file delta, new finding, work-list drain, or state-hash change as catch-all). Default 3.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "budget_ceiling_usd": {
+          "description": "Spend ceiling per loop run, in US dollars; the loop halts when reached. Mapped onto the Workflow engine's token-native budget.total via usd_per_mtok. Default 1000.",
+          "type": "number",
+          "minimum": 0
+        },
+        "usd_per_mtok": {
+          "description": "US dollars per million output tokens, used to convert budget_ceiling_usd to the engine's token-native budget (budget_tokens = round(budget_ceiling_usd / usd_per_mtok * 1_000_000)). Tracks the loop model's output price; update here when pricing changes. Default 25.00 (Claude Opus 4.8 output, $25/MTok).",
+          "type": "number",
+          "minimum": 0
+        },
+        "codex_usd_per_mtok": {
+          "description": "Optional. US dollars per million output tokens for the GPT-5.x / Codex model, used by cross-harness loops so Codex-unit spend is attributed at the Codex rate rather than the Opus rate when mapping budget_ceiling_usd onto the engine's token budget. Absent → Codex spend falls back to usd_per_mtok (backward compatible). Note: Codex's per-task cost win is mostly ~3-4x fewer tokens, not a lower per-MTok rate; set this to Codex's real output price, not a fudge factor.",
+          "type": "number",
+          "minimum": 0
         }
       },
       "additionalProperties": true

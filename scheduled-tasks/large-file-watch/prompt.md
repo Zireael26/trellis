@@ -92,3 +92,20 @@ wait until either:
 Turn this on when:
 - Working on any project starts hitting the 2000-line read cap regularly.
 - A retro identifies "this file is too big" as a recurring pain point.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. It
+declares and honors three ceilings and **halts on any one**; ceiling
+values resolve most-specific-wins: per-loop override (this stanza) →
+`.trellis.config.json.loop_safety` → `trellis.config.json.loop_safety` →
+built-in fallback constants (100 / 3 / $1000). On a trip it hard-stops
+(never auto-continues) and emits a structured halt report — which ceiling
+tripped, the last progress marker, work done so far — surfaced in the run
+report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default (1000)
+- Progress signal: **new finding** — a project/file over threshold not
+  flagged in last week's audit.

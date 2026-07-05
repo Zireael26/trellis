@@ -1,16 +1,16 @@
 ---
 name: execute
-description: Harness-neutral builder that walks a task list task-by-task — dispatches each unchecked checkbox to a subagent, verifies it, states the canonical DoD receipt to the transcript, and ticks the box via scripts/tick.sh. Stops at the process-gate; never commits to main and never merges. Sole turn-level enforcement carrier on AntiGravity (advisory there).
+description: Harness-neutral builder that walks a task list task-by-task — dispatches each unchecked checkbox to a subagent, verifies it, states the canonical DoD receipt to the transcript, and ticks the box via scripts/tick.sh. Stops at the process-gate; never commits to main and never merges.
 argument-hint: <path to a specs/NNN/tasks.md OR docs/plans/<topic>.md>
 ---
 
 # execute
 
-The single canonical builder both lineages — Claude Code and Codex / AntiGravity — converge on. It reads a task list and implements it **one unchecked checkbox at a time**, leaving a durable provenance trail. It is the executor; authoritative rules live in `engineering-process.md`, `CLAUDE.md`, and the references this doc points at. When in doubt, those win.
+The single canonical builder both lineages — Claude Code and Codex — converge on. It reads a task list and implements it **one unchecked checkbox at a time**, leaving a durable provenance trail. It is the executor; authoritative rules live in `engineering-process.md`, `CLAUDE.md`, and the references this doc points at. When in doubt, those win.
 
-Loaded identically whether surfaced from `.claude/skills/execute/` (Claude) or `.agents/skills/execute/` (Codex / AntiGravity). Same SKILL.md, same `references/`, same `scripts/`. Resolve your own root with the process-gate precedent: `SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"`.
+Loaded identically whether surfaced from `.claude/skills/execute/` (Claude) or `.agents/skills/execute/` (Codex). Same SKILL.md, same `references/`, same `scripts/`. Resolve your own root with the process-gate precedent: `SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"`.
 
-On Claude Code the Stop hook (`stop-verify.sh`) hard-gates each turn. On AntiGravity a skill body cannot reject a turn, so **execute is the sole turn-level enforcement carrier and its enforcement there is advisory** — it still runs every check below; it just cannot block. Run the checks regardless of harness.
+Where available, the Stop hook (`stop-verify.sh`) hard-gates each turn. Execute still runs every check below; run the checks regardless of harness.
 
 ## When to use
 
@@ -45,11 +45,11 @@ ONE loop. For each unchecked box — a list `- [ ]` checkbox or a table `| … |
 
 Then advance to the next unchecked box. Cadence — when to retry a failed unit, when to stop and escalate, when to keep going unattended — is governed by `autonomy.md`; follow it, do not restate it.
 
-## In-body advisory cores (the AntiGravity enforcement path)
+## In-body advisory cores
 
 Two **separate** concerns live here — keep them distinct:
 
-- **Per-task review (advisory, during the loop).** Within a turn, the pre-tick step 5 can run the canonical review cores in-body — on the just-implemented diff, before the box is ticked — rather than waiting for a Stop hook (which AntiGravity does not have). Each per-task review is **advisory feedback**: its findings inform what execute does for the rest of the loop — they do **not** trigger a marker write. The core resolution, the probe order across `<root>/.claude/hooks/lib/` and `<root>/.codex/hooks/lib/` for `code-reviewer.sh` / `ui-verify-core.sh`, and the advisory-skip when neither core exists are specified in [`references/verification-step.md`](references/verification-step.md). Follow it; do not duplicate the detail here.
+- **Per-task review (advisory, during the loop).** Within a turn, the pre-tick step 5 can run the canonical review cores in-body — on the just-implemented diff, before the box is ticked — rather than waiting for a Stop hook. Each per-task review is **advisory feedback**: its findings inform what execute does for the rest of the loop — they do **not** trigger a marker write. The core resolution, the probe order across `<root>/.claude/hooks/lib/` and `<root>/.codex/hooks/lib/` for `code-reviewer.sh` / `ui-verify-core.sh`, and the advisory-skip when neither core exists are specified in [`references/verification-step.md`](references/verification-step.md). Follow it; do not duplicate the detail here.
 
 - **The `.review-done-<hash>` marker (turn-level, written once, at end-of-loop).** This marker is **not** a per-task artifact and is **not** written by the per-task review (step 5). It is a single, turn-level dedup token meaning *"this exact final diff was reviewed AND cleared in-body,"* which lets the Stop hook skip its one end-of-turn review. Write it **once, after the final task's tick**, hashing `git diff HEAD | head -c 200000` (byte-identical to the hook), and **only if every in-body review that turn was critical-free** (clean or advisory-only). Any unresolved in-body critical → the marker is **not** written, so the armed Stop hook re-reviews and blocks. A legitimate deferral routes through the **exported** `TRELLIS_REVIEW_OVERRIDE=1` escape (logged to the decisions-log) — never a silent marker write. The exact hashing, the harness-matched marker path, and the override mechanics live in [`references/verification-step.md`](references/verification-step.md).
 
@@ -65,4 +65,4 @@ execute refuses, explicitly:
 
 - **Writes only two things:** the implementation diffs its dispatched subagents produce, and the single checkbox / table-cell flip `tick.sh` makes to the task file. Never the task-file prose, and never a receipt — the receipt lives in the transcript, not the file.
 - **`tick.sh` is the sole R1 isolation point** for checkbox drift — every flip is auditable. What it structurally enforces is that **a well-formed receipt is present** before it will flip (it validates the `CLAUDE.md:43` shape, not the verify's *outcome* — the ERE accepts `exit=1` as readily as `exit=0`). Refusing to tick a **red** verify is **loop discipline**, owned by [`references/verification-step.md`](references/verification-step.md), not by `tick.sh`. Re-runs are safe: a locator pointing at an already-checked box is an exit-0 no-op.
-- **Harness-neutral.** Identical behavior under Claude and Codex / AntiGravity; the only difference is whether the turn-level gate is enforcing (Claude Stop hook) or advisory (AntiGravity, via this skill).
+- **Harness-neutral.** Identical behavior under Claude and Codex; execute runs the same checks regardless of harness.

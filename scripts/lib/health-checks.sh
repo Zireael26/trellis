@@ -32,7 +32,7 @@ export HC_OK HC_ERROR HC_WARN HC_INFO
 
 # Canonical sets — the full inheritance surface a healthy project carries.
 # Kept here (not in doctor.sh) so audits share the same definition of "full".
-HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze"
+HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief"
 HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy"
 export HC_CANONICAL_SKILLS HC_CANONICAL_COMMANDS
 
@@ -381,9 +381,7 @@ hc_commands_symlinks() {
 # hc_harness_artifacts <project> <harness>
 # Harness-conditional parity, checked per enabled harness. The caller passes
 # ONE harness name and invokes once per enabled harness.
-#   codex       -> AGENTS.md, .agents/rules, .agents/skills, .codex/hooks
-#   antigravity -> AGENTS.md, .agents/rules, .agents/skills, .agents/workflows
-#                  (no hook surface — AntiGravity has no native hook API)
+#   codex       -> AGENTS.md, .agents/rules, .agents/skills, .agents/workflows, .codex/hooks
 #   claude      -> nothing extra (Claude is the baseline surface)
 # WARN if any required artifact for that harness is missing.
 hc_harness_artifacts() {
@@ -391,16 +389,11 @@ hc_harness_artifacts() {
   local missing=""
   case "$harness" in
     codex)
-      [ -e "$proj/AGENTS.md" ]        || missing="$missing AGENTS.md"
-      [ -e "$proj/.agents/rules" ]    || missing="$missing .agents/rules"
-      [ -e "$proj/.agents/skills" ]   || missing="$missing .agents/skills"
-      [ -e "$proj/.codex/hooks" ]     || missing="$missing .codex/hooks"
-      ;;
-    antigravity)
-      [ -e "$proj/AGENTS.md" ]           || missing="$missing AGENTS.md"
-      [ -e "$proj/.agents/rules" ]       || missing="$missing .agents/rules"
-      [ -e "$proj/.agents/skills" ]      || missing="$missing .agents/skills"
-      [ -e "$proj/.agents/workflows" ]   || missing="$missing .agents/workflows"
+      [ -e "$proj/AGENTS.md" ]         || missing="$missing AGENTS.md"
+      [ -e "$proj/.agents/rules" ]     || missing="$missing .agents/rules"
+      [ -e "$proj/.agents/skills" ]    || missing="$missing .agents/skills"
+      [ -e "$proj/.agents/workflows" ] || missing="$missing .agents/workflows"
+      [ -e "$proj/.codex/hooks" ]      || missing="$missing .codex/hooks"
       ;;
     claude)
       echo "harness[$harness]: baseline surface (no extra artifacts)"
@@ -417,6 +410,36 @@ hc_harness_artifacts() {
   fi
   echo "harness[$harness]: parity artifacts present"
   return "$HC_OK"
+}
+
+# hc_codex_process_gate_local_parity <project>
+# WARN if a Codex-enabled project carries a different process-gate-local config
+# than Claude. These files are intentionally project-owned (not canonical
+# symlinks), but Codex must inherit the same per-project commands, ADR paths,
+# stack profile, and PR-size policy Claude sees.
+hc_codex_process_gate_local_parity() {
+  local proj="$1"
+  local claude_cfg="$proj/.claude/skills/process-gate-local/local.config.sh"
+  local codex_cfg="$proj/.agents/skills/process-gate-local/local.config.sh"
+
+  if [ ! -e "$claude_cfg" ] && [ ! -e "$codex_cfg" ]; then
+    echo "codex-process-gate-local: no project-local config on either harness"
+    return "$HC_OK"
+  fi
+  if [ ! -f "$claude_cfg" ]; then
+    echo "codex-process-gate-local: Codex config exists but Claude baseline is missing"
+    return "$HC_WARN"
+  fi
+  if [ ! -f "$codex_cfg" ]; then
+    echo "codex-process-gate-local: Claude config exists but Codex copy is missing"
+    return "$HC_WARN"
+  fi
+  if cmp -s "$claude_cfg" "$codex_cfg"; then
+    echo "codex-process-gate-local: matches Claude project-local config"
+    return "$HC_OK"
+  fi
+  echo "codex-process-gate-local: differs from Claude project-local config — Codex sees different process gates"
+  return "$HC_WARN"
 }
 
 # hc_hook_freshness <project> <canonical>

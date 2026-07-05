@@ -231,3 +231,17 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-dep-major-upgrade-watch.md`:
 - **First run**: no prior `dep-major-upgrade-watch` audit → "Movement since last run" empty; note in summary.
 
 **Anti-pattern: do NOT** emit "project X has no path" without showing which specific `Read` calls failed. If you find yourself about to emit "path missing" for ALL projects, stop — you almost certainly haven't tried `Read`. Other concurrent audits (`gotchas-rollup`, `cross-project-process-audit`) routinely Read project files in this same runtime and succeed.
+
+## Loop safety
+
+This audit is a Trellis loop and honors `core-rules/loop-safety.md`. It declares and honors three ceilings and **halts on any one**, emitting a structured halt report (which ceiling tripped, last progress marker, work done so far); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+Ceiling values resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (100 / 3 / $1000). This task inherits the defaults:
+
+| Ceiling | Value | Source |
+|---|---|---|
+| `max_iterations` | 100 | inherited default |
+| `no_progress_iterations` | 3 | inherited default |
+| `budget_ceiling_usd` | 1000 | inherited default |
+
+**Progress signal:** `new finding` — an iteration that surfaces no new drift item counts as no-progress.

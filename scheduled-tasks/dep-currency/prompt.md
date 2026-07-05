@@ -207,3 +207,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-dep-currency.md`:
 - **Manifest declares a dep not in the lockfile**: emit `warning` (`install drift`).
 - **A specific `Read` call returns an error**: record `unresolved (read-failed: <path>)` for that single file. Continue with the rest. **Never** roll up to a whole-project skip. If you're about to emit "project X unreadable" for all projects, stop — you almost certainly haven't tried `Read`. `gotchas-rollup` and `cross-project-process-audit` Read project files successfully in this runtime.
 - **First run**: no prior `dep-currency` audit exists → "Drift change since last run" is empty; note "first scheduled run; baseline established" in summary.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-wins: this stanza's per-loop override → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (100 / 3 / $1000). The loop **halts on any one** ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done so far); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+- **`max_iterations`**: inherit default (100).
+- **`no_progress_iterations`**: inherit default (3).
+- **`budget_ceiling_usd`**: inherit default (1000).
+- **Progress signal**: **new finding** — an iteration makes progress when it surfaces a new drift item (a dep newly classified behind, or a manifest/lockfile mismatch). No new finding across `no_progress_iterations` consecutive iterations halts the loop.

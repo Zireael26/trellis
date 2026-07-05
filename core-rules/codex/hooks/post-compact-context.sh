@@ -6,7 +6,7 @@
 #   - Runs only when SessionStart.source == "compact".
 #   - If context-log.md exists at the canonical project root (resolved via
 #     `git rev-parse --git-common-dir` so worktrees still find it), emits it
-#     as additionalContext.
+#     as Codex SessionStart hookSpecificOutput additionalContext.
 #   - Never blocks. Exit 0 always.
 #
 # Dependencies: jq (required).
@@ -48,6 +48,6 @@ fi
 
 jq -nc \
   --arg ctx "$CONTENT" \
-  '{additionalContext: $ctx}'
+  '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
 
 exit 0

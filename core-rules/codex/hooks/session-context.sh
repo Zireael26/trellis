@@ -9,7 +9,7 @@
 #   - context-log.md and gotchas.md are read from the canonical project root
 #     (resolved via `git rev-parse --git-common-dir`) so worktree sessions
 #     still see the repo-level files.
-#   - Emits {"additionalContext":"..."}.
+#   - Emits Codex SessionStart hookSpecificOutput additionalContext.
 #   - Output trimmed to ≤ 2000 chars. Never blocks. Exit 0 always.
 #
 # Dependencies: jq (required), git (optional — skips git section if absent).
@@ -172,6 +172,6 @@ fi
 
 jq -nc \
   --arg ctx "$CTX" \
-  '{additionalContext: $ctx}'
+  '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
 
 exit 0

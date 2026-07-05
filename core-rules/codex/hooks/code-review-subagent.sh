@@ -93,7 +93,7 @@ if [ -n "${TRELLIS_REVIEW_OVERRIDE:-}" ]; then
     # The deferral must never be both un-logged AND un-surfaced. If the
     # decisions-log is unwritable (read-only file/dir/FS), surface a breadcrumb
     # instead of silently swallowing the skip.
-    jq -nc --arg ctx "code-review override applied (TRELLIS_REVIEW_OVERRIDE) but the decisions-log at $REPO_ROOT/decisions-log.md was unwritable — record the deferral manually." '{additionalContext: $ctx}'
+    _se_emit_system_message "code-review override applied (TRELLIS_REVIEW_OVERRIDE) but the decisions-log at $REPO_ROOT/decisions-log.md was unwritable — record the deferral manually."
   fi
   exit 0
 fi
@@ -182,12 +182,12 @@ ${CRITICAL}"
     exit 2
   fi
 
-  # Advisory findings → additionalContext (shown to the model, not blocking).
+  # Advisory findings → Stop-safe systemMessage (shown to the model, not blocking).
   ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -30)
   if [ -n "$ADVISORY" ]; then
-    jq -nc --arg ctx "<review>
+    _se_emit_system_message "<review>
 ${ADVISORY}
-</review>" '{additionalContext: $ctx}'
+</review>"
   fi
 fi
 

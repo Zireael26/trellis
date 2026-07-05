@@ -7,8 +7,9 @@ runtime. Target set = `registry \ blacklist`.
 
 - Weekly, Sunday at 9 PM — deliberately end-of-week and late, so the
   Monday morning audits can act on findings the same week.
-- Compares each project's `.claude/hooks/` against canonical in
-  `__TRELLIS_PATH__/core-rules/hooks/`.
+- Compares each project's `.claude/hooks/`, `.codex/` hook assets, and
+  `.claude/skills` / `.agents/skills` inheritance symlinks against canonical
+  sources in `__TRELLIS_PATH__/core-rules/`.
 
 ## Canonical hook manifest
 

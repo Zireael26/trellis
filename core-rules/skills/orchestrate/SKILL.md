@@ -94,9 +94,10 @@ Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
 
 - **`recipes/template.wf.js`** — the blank, heavily-commented starting skeleton for
   authoring a new recipe. Carries a pure-literal `export const meta` block with
-  labelled fill-in points, a JSON-schema stub for structured agent output, one
-  `phase()` call, one `agent(prompt, {label, phase, schema})` example, and a
-  commented `parallel(...)` fan-out example. Copy it to start a new recipe.
+  labelled fill-in points (including the `safety` loop-safety block), a JSON-schema
+  stub for structured agent output, one `phase()` call, one
+  `agent(prompt, {label, phase, schema})` example, and a commented `parallel(...)`
+  fan-out example. Copy it to start a new recipe.
 - **`recipes/fanout-verify.wf.js`** — the reusable shape extracted from Trellis's
   one-shot fleet scripts:
   **fan-out-per-target → verify-on-host → structured VERDICT → main loop acts on
@@ -116,9 +117,9 @@ hand; the verdict shape above is the contract the caller depends on either way.
 ## Authoring a new recipe
 
 1. Copy `recipes/template.wf.js` to `recipes/<name>.wf.js`.
-2. Fill the labelled points in the `meta` block (name, description, phases) and the
-   output schema. Keep `meta` a **pure literal** — the engine evaluates it
-   statically, so no function calls or computed values inside it.
+2. Fill the labelled points in the `meta` block (name, description, phases, and the
+   `safety` block) and the output schema. Keep `meta` a **pure literal** — the
+   engine evaluates it statically, so no function calls or computed values inside it.
 3. Wire the stages: `phase()` to mark each phase, `agent(prompt, opts)` for a unit
    (pass `{label, phase, schema}`; add `isolation: "worktree"` for any agent that
    touches a repo), `parallel(thunks)` to fan out with a barrier, `pipeline(...)`
@@ -128,7 +129,15 @@ hand; the verdict shape above is the contract the caller depends on either way.
    absolute paths, dates, or per-target specifics. Do **not** use the engine-rejected
    non-deterministic globals (the current-time call, the random call, the argless
    date constructor) — pass any timestamp through `args` instead.
-5. Add a row to `recipes/MANIFEST.md`.
+5. Declare the `safety` block. Every recipe is a loop and **must** honor the
+   loop-safety contract (`core-rules/loop-safety.md`): the three ceilings
+   (`max_iterations`, `no_progress_iterations`, `budget_ceiling_usd`) plus the
+   progress signal, set only to override the resolved baseline and otherwise left
+   to inherit. A one-shot fan-out (single barrier, no rounds) declares
+   `no_progress_iterations: null`. **A recipe with no `safety` declaration is
+   non-compliant** — the `cross-project-process-audit` flags it and it is a
+   `process-gate` / review finding.
+6. Add a row to `recipes/MANIFEST.md`.
 
 Before it lands, grep the new recipe (and any reference it adds) clean of personal
 absolute paths, dated literals, and target-specific lists — the public-mirror scrub

@@ -71,3 +71,19 @@ file is the only write.
 - Primer references files outside the repo: skip and note.
 - `git rev-list` slow on huge histories: cap the entry-point file list at
   10 paths per primer; flag overage and continue.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings
+resolve most-specific-first: per-loop override here → project-local
+`.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety`
+→ built-in fallback constants (`100` / `3` / `$1000`). The loop halts on **any
+one** ceiling and emits a structured halt report (which ceiling tripped, the
+last progress marker, work done so far); as an unattended cron loop it surfaces
+the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default ($1000)
+- Progress signal: **new finding** — a new STALE / UNREACHABLE_PIN /
+  MISSING_PATHS / BROKEN / INDEX_DRIFT primer finding

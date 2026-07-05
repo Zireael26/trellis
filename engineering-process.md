@@ -115,7 +115,7 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
   "user_home":      "/Users/<you>",
   "maintainer_name":"<your name>",
   "github_user":    "<github-username>",
-  "harnesses":      ["claude"],         // any subset of ["claude", "codex", "antigravity"]
+  "harnesses":      ["claude"],         // any subset of ["claude", "codex"]
   "template": {
     "remote": "git@github.com:<you>/trellis.git",
     "branch": "main",
@@ -130,11 +130,31 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
     { "name": "scheduled-tasks",  "purpose": "Trellis weekly + quarterly audits", "scope": "fleet" },
     { "name": "computer-use",     "purpose": "Native-app screenshots + UI control", "scope": "fleet" },
     { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
-  ]
+  ],
+
+  // Optional. The fleet baseline for the loop-safety contract (§5c). Every
+  // Trellis loop honors three halt ceilings; these are their values. Absent
+  // = the documented built-in fallback constants (same numbers) so a loop in
+  // a misconfigured context still halts.
+  "loop_safety": {
+    "max_iterations": 100,           // hard cap on loop iterations / dispatch rounds
+    "no_progress_iterations": 3,     // halt after N consecutive no-progress iterations
+    "budget_ceiling_usd": 1000,      // spend ceiling per loop run, in US dollars
+    "usd_per_mtok": 25.00            // $/MTok output rate for the dollar→token conversion
+  }
 }
 ```
 
-Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders).
+Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders). The `loop_safety` *values* stay deployment-local too; the *policy* (`core-rules/loop-safety.md`) and the schema are public.
+
+**`loop_safety` resolution order (most specific wins).** Modeled on the autonomy resolution (§14.9). The contract is policy; the ceiling values resolve through four layers, so any instance can relax or tighten them without touching code or prose:
+
+1. **Per-loop override** — a recipe's `safety` block or a scheduled-task's "Loop safety" stanza explicitly sets a value.
+2. **Project-local** — `<project>/.trellis.config.json.loop_safety`, for a project that needs different ceilings.
+3. **Central** — this file's `loop_safety` block, the instance baseline.
+4. **Built-in fallback constants** — documented in `core-rules/loop-safety.md` (identical to the baselines above), so a loop in a broken / misconfigured / non-Trellis context still halts. Safe-by-default: a loop authored with no thought still stops.
+
+The block is mirrored in `scripts/lib/trellis.config.schema.json` (types, defaults, descriptions). The dollar ceiling is human-meaningful; the Workflow engine's `budget.total` is output-token-native, so the conversion uses the `usd_per_mtok` rate — itself a `loop_safety` config key (default `25.00`, the Opus 4.8 output price) whose derivation `core-rules/loop-safety.md` documents — to map dollars onto the engine budget.
 
 Cross-machine portability is achieved by:
 
@@ -146,7 +166,7 @@ Cross-machine portability is achieved by:
 
 | Script | Purpose |
 |---|---|
-| `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface when Codex OR AntiGravity is enabled, the Codex-only `.codex/` + `.agents/commands/` trees when Codex is enabled, and the AntiGravity-only `.agents/workflows/` tree when AntiGravity is enabled. AntiGravity hook integration is deferred (see `core-rules/inheritance.md` "Known gap"). |
+| `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface plus the `.codex/` + `.agents/{commands,workflows}/` trees when Codex is enabled (Codex reads `.agents/`, including `.agents/workflows/`). |
 | `scripts/sync-hooks.sh [--dry-run\|--yes]` | Canonical Tier 1+2 hook scripts → all registered projects' `.claude/hooks/`. Skill symlinks update automatically (no rsync needed). |
 | `scripts/sync-codex-hooks.sh [--dry-run\|--yes]` | Canonical Codex hook manifest + scripts → all registered projects' `.codex/` trees when Codex is enabled. |
 | `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
@@ -255,6 +275,27 @@ The directory itself is symlinked, so canonical updates appear automatically. Pr
 
 **Lume carve-out.** Lume (Unity, n=1 native-stack project) declares `PROCESS_GATE_STACK_PROFILE="unity"` with project-local validators only. The canonical six gates still apply. The carve-out is documented in `registry.md` and the extended `parent-hook-drift` audit treats it as expected, not drift.
 
+### 5c. Loop-safety contract
+
+Trellis is a loop system: the scheduled audits in `scheduled-tasks/` are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run unbounded agent loops on infra time. The dominant production failure mode of this generation of agent loops is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend. The **loop-safety contract** is the named guarantee that every Trellis loop halts.
+
+It is **doctrine plus declared fields, not a mechanical kill-switch** — there is no hook that intercepts a running loop at tool-use time (deferred; see `core-rules/loop-safety.md`). The contract is carried by the canonical policy spec, the `loop_safety` config (§3.1), the parent-rules `## Loops` entry that makes it discoverable at runtime, and a drift audit that flags any loop missing its declaration.
+
+**The three ceilings.** Every loop declares and honors three, and **halts on any one**:
+
+- **`max_iterations`** — hard cap on loop iterations / agent-dispatch rounds. Baseline **100**. Complements (does not replace) the Workflow engine's existing 1000-agent lifetime backstop.
+- **`no_progress_iterations`** — halt after N consecutive iterations that make no measurable progress. Baseline **3**. "Progress" is a per-loop **progress signal** drawn from a catalog — commit/PR (fleet-mutation loops), file delta (edit loops), new finding (audit loops), work-list drain (queue/pipeline loops), or a declared state-hash change (catch-all if none is declared). A one-shot fan-out with no rounds is exempt and declares `no_progress_iterations: null`.
+- **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). Baseline **1000**. The Workflow tool's `budget.total` is output-token-native, so `loop-safety.md` documents the dollar→token conversion and maps the ceiling onto the engine budget where exposed; `/loop` and scheduled-tasks track or estimate spend against the declared dollar figure.
+
+**Halt behavior.** On any ceiling trip the loop **hard-stops** — never auto-continues past a tripped ceiling — and emits a **structured halt report**: which ceiling tripped, the last progress marker, and the work done so far. Unattended runs (overnight / cron / `--run-in-background`) surface the halt in their run report (and notification where wired) rather than dying silently.
+
+**Where it's declared.** The policy lives in `core-rules/loop-safety.md`; the ceiling values resolve through the four-layer order in §3.1. Loops carry their declaration where they live:
+
+- **`orchestrate` recipes** — a `safety` block in the recipe scaffold (`recipes/template.wf.js`); authoring a recipe without one is non-compliant. `recipes/fanout-verify.wf.js` declares its block as a worked example of an override.
+- **Scheduled-tasks** — a uniform "Loop safety" stanza in each task's `prompt.md`. Most inherit the baselines; `test-health`'s existing caps (5 min/project, 20-commit bisect) become explicit overrides expressed in the stanza.
+
+This is the foundational sub-project in a sequence: the nesting-depth budget in `orchestrate` extends it (depth is a halting dimension) and the "Mayor" loops-supervising-loops recipe must honor it. Loops are also an autonomy surface (§14.9) — the loop-safety contract is the halting guarantee that lets higher autonomy levels run loops unattended. Full policy, the progress-signal catalog, and the fallback constants: `core-rules/loop-safety.md`. Design spec: `docs/specs/2026-06-09-loop-safety-contract-design.md`.
+
 ### 5.3 Project overrides
 
 Projects can override:
@@ -274,20 +315,18 @@ Overrides live in each project's `.claude/hooks/config.sh` and/or `.codex/hooks/
 
 ### 5.5 Harness coverage matrix
 
-Claude Code is the primary harness. Codex and AntiGravity are secondaries. Different layers cover different harnesses:
+Claude Code is the primary harness. Codex is the secondary. Different layers cover each harness:
 
-| Layer | Claude Code | Codex | AntiGravity | Notes |
-|---|---|---|---|---|
-| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | `AGENTS.md` (same symlink as Codex) or `.agents/rules/trellis.md` | Single canonical source of truth in `core-rules/CLAUDE.md`. `AGENTS.md` and `.agents/rules/` are byte-identical between Codex and AntiGravity — both engines read the same files. |
-| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | `.agents/skills/<name>/` symlink (same as Codex) | Same canonical target; byte-identical across harnesses. |
-| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` | `.agents/workflows/<name>.md` | Different directory names per engine; same canonical targets. |
-| Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | **deferred** (see "Known gap" in `core-rules/inheritance.md`) | Trellis does not seed `.antigravity/` today. |
-| Tier 3 git hooks (husky / native) | runs in all | runs in all | runs in all | Harness-agnostic — git-level enforcement protects every harness. |
-| Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
+| Layer | Claude Code | Codex | Notes |
+|---|---|---|---|
+| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | Single canonical source of truth in `core-rules/CLAUDE.md`. `AGENTS.md` and `.agents/rules/` mirror it byte-for-byte — Codex reads the same files. |
+| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | Same canonical target; byte-identical across harnesses. |
+| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` (also mirrored under `.agents/workflows/<name>.md`) | Same canonical targets; Codex reads `.agents/`, including `.agents/workflows/`. |
+| Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | Turn-level (Tier 1/2) enforcement seeded on both harnesses. |
+| Tier 3 git hooks (husky / native) | runs in both | runs in both | Harness-agnostic — git-level enforcement protects every harness. |
+| Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
 
-Projects opt into the secondaries by adding `"codex"` and/or `"antigravity"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. AntiGravity's deferred native-hook integration is a known gap; turn-level enforcement on AntiGravity sessions relies on parent rules + Tier-3 git hooks only until Trellis ships hook seeding.
-
-**The `execute` skill body compensates — advisory only — on AntiGravity.** Because AntiGravity runs no Tier 1/2 workspace hooks, the `code-review` / `ui-verify` / receipt gates that block at turn end on Claude Code and Codex have no hook to fire from. The canonical builder `execute` partly fills the gap from inside the model turn: its body emits the byte-identical receipt marker (`<!-- dod-receipt … -->`) and runs `code-review` / `ui-verify` in-body as it builds. But this is **advisory only — nothing rejects the turn**: a skill body cannot block its own harness, and `run-all.sh` (the merge gate, §6.4) carries no `code-review` / `ui-verify` / receipt gate to catch them later. So on AntiGravity, **code-review, ui-verify, and receipts are SOFT (advisory, no automated backstop)** — model discipline, not enforcement. The deterministic merge gate still catches secrets / tests / security / PR-shape there (§6.4). Standing mitigation: route risky / UI / edit-heavy runs through Claude or Codex, where the turn-level hooks actually block.
+Projects opt into the secondary by adding `"codex"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. Both harnesses run the full Tier 1/2/3 enforcement stack — the `code-review` / `ui-verify` / receipt gates block at turn end on Claude Code and Codex alike.
 
 ### 5.6 Token-noise filter (`permissions.deny`)
 
@@ -349,7 +388,7 @@ Every Trellis project must have branch protection on `main`:
 
 Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval block means any required-review setting = undeployable). The local `pre-push` guard + CI + the PR window are the functional gate.
 
-**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code, Codex, AND AntiGravity** — because git hooks are harness-agnostic, even on AntiGravity, which runs no workspace (Tier 1/2) hooks. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push, which is itself a logged tripwire caught by the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`), the after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those have no automated merge backstop and, on AntiGravity (no turn-level hooks), are SOFT/advisory (see §5.5 and §7). Branch protection (require-PR) is the remote complement to this local gate.
+**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code and Codex** — because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push, which is itself a logged tripwire caught by the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`), the after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced on both harnesses (§5.5) and carry no separate automated merge backstop. Branch protection (require-PR) is the remote complement to this local gate.
 
 ### 6.5 History hygiene
 
@@ -364,13 +403,13 @@ Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval bloc
 
 A change is done when all of the following are true:
 
-1. **Receipts attached.** The response that claims done includes: the verification command(s) run, their exit codes, and the diff lines (or a summary pointing at the PR) that prove the change. "It works" without receipts is not done. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`; SOFT/advisory on AntiGravity — see the harness note below.)*
-2. **Todos closed.** If `TodoWrite` has `in_progress` or `pending` items, the turn is not done. Complete them, defer with reason, or abandon with reason. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`; SOFT/advisory on AntiGravity — see the harness note below.)*
-3. **Typecheck + lint + fast tests green.** Enforced by `stop-verify` at turn end and by `pre-push` at git boundary (the latter on every harness incl. AntiGravity — tests are in the deterministic merge gate set, §6.4).
-4. **Code review resolved.** On edit-heavy turns (≥ 3 files or ≥ 200 lines), the `code-review-subagent` runs. Findings either get fixed or explicitly acknowledged and deferred. *(Turn-level-enforced on Claude Code + Codex; SOFT/advisory on AntiGravity — see the harness note below.)*
-5. **Visual verification for UI.** For any diff touching UI files, `ui-verify` has run and attached a screenshot. Logically verified is not visually verified. *(Turn-level-enforced on Claude Code + Codex; SOFT/advisory on AntiGravity — see the harness note below.)*
+1. **Receipts attached.** The response that claims done includes: the verification command(s) run, their exit codes, and the diff lines (or a summary pointing at the PR) that prove the change. "It works" without receipts is not done. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`.)*
+2. **Todos closed.** If `TodoWrite` has `in_progress` or `pending` items, the turn is not done. Complete them, defer with reason, or abandon with reason. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`.)*
+3. **Typecheck + lint + fast tests green.** Enforced by `stop-verify` at turn end and by `pre-push` at git boundary (the latter on every harness — tests are in the deterministic merge gate set, §6.4).
+4. **Code review resolved.** On edit-heavy turns (≥ 3 files or ≥ 200 lines), the `code-review-subagent` runs. Findings either get fixed or explicitly acknowledged and deferred. *(Turn-level-enforced on Claude Code + Codex.)*
+5. **Visual verification for UI.** For any diff touching UI files, `ui-verify` has run and attached a screenshot. Logically verified is not visually verified. *(Turn-level-enforced on Claude Code + Codex.)*
 
-**Harness honesty for items 1, 2, 4, and 5.** Receipts, todos-closed, code-review, and ui-verify are turn-level-enforced (a hook blocks the turn) only on **Claude Code and Codex** — receipts and todos-closed by `stop-verify`, code-review and ui-verify by their Stop subagents. On **AntiGravity** they are **SOFT (advisory, no automated backstop)**: AntiGravity runs no Tier 1/2 workspace hooks, the `execute` skill body runs them in-body but cannot reject the turn (§5.5), and the local `pre-push` merge gate has no code-review / ui-verify / receipt / todo gate to catch them (§6.4). They are model discipline there, not enforcement. Standing mitigation: route risky / UI / edit-heavy runs through Claude or Codex, where these gates actually block. (The deterministic gate set — PR-hygiene / secrets / bypass / tests / docs / stack / security-diff / analyze — *is* fail-closed at push on AntiGravity via `pre-push`, so item 3 above (tests) is carried there; item 2 (todos-closed) is `stop-verify`-only and not in the deterministic set, so like items 1/4/5 it is advisory on AntiGravity.)
+**Enforcement.** Items 1, 2, 4, and 5 are turn-level-enforced on both **Claude Code and Codex** (a hook blocks the turn when any is missing) — receipts and todos-closed by `stop-verify`, code-review and ui-verify by their Stop subagents. Item 3 (tests) is additionally carried by the deterministic `pre-push` merge gate (§6.4), which fires on every harness.
 
 Done is a property of the *turn* that claimed done, not of the project. Turn-level done compounds into project-level correctness; don't skip the turn-level gate on the theory that a later turn will catch it.
 
@@ -654,10 +693,9 @@ git push -u origin main
 - [ ] `gotchas.md` exists at project root.
 - [ ] `.gitignore` includes the Trellis symlink fragment (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
 - [ ] `git ls-files .claude/rules/trellis.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
-- [ ] If Codex- or AntiGravity-enabled (shared surface): `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, and `.agents/primers/INDEX.md` are present.
-- [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` are present.
+- [ ] If Codex-enabled (shared surface): `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, and `.agents/primers/INDEX.md` are present.
+- [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` plus `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present (Codex reads `.agents/`, including `.agents/workflows/`).
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] hooks = true` (or the legacy `codex_hooks = true` alias; deprecated as of Codex CLI 0.129+).
-- [ ] If AntiGravity-enabled (AntiGravity-only): `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present. `.antigravity/` directory **must not** exist — AntiGravity hook integration is deferred.
 - [ ] `registry.md` has a row for the new project.
 - [ ] Branch protection enabled on `main`.
 
@@ -688,7 +726,7 @@ If you skip this step, Claude Code and Codex sessions in the project will silent
 | Audit | Cadence | What it catches |
 |---|---|---|
 | `bypass-tripwire` | Daily (Mon–Fri 08:07) | `--no-verify` commits, direct-to-main pushes, husky skips, force-pushes. |
-| `cross-project-process-audit` | Weekly (Mon 10:06) | Missing symlinks, missing hooks, staleness, required-file gaps. |
+| `cross-project-process-audit` | Weekly (Mon 10:06) | Missing symlinks, missing hooks, staleness, required-file gaps, loop-safety stanza presence. |
 | `registry-blacklist-health` | Weekly (Mon 10:36) | Registry vs. filesystem consistency, orphans, overdue blacklist reviews. |
 | `test-health` | Weekly (Mon 11:00) | Each project's fast test suite: pass/fail + last-green bisect on red. |
 | `parent-hook-drift` | Weekly (Sun 21:00) | Byte-identity of deployed hooks vs. canonical; settings.json registration gaps. |
@@ -696,6 +734,8 @@ If you skip this step, Claude Code and Codex sessions in the project will silent
 | `audit-report-rollup` | Monthly (1st 10:00) | Trend analysis across the six audits above. |
 
 All audits write to `~/projects/trellis-instance/audits/YYYY-MM-DD-<name>.md`. All are headless `claude -p` runs driven by the scheduled-tasks MCP (`mcp__scheduled-tasks__*`). Prompt sources live in `scheduled-tasks/<name>/prompt.md`; runtime prompts live inside the MCP and should be kept in sync with disk.
+
+**Loop-safety drift.** The `cross-project-process-audit` also keeps the loop-safety contract (§5c) honest — the way `parent-hook-drift` keeps hooks honest, and without a new 17th cron. It scans `orchestrate` recipes and scheduled-task prompts for a present, non-blank loop-safety declaration and flags any loop missing one as a compliance finding. (Authoring a loop without the stanza is additionally a `process-gate` / review finding at PR time.)
 
 ### 11.2 Remediation workflow
 

@@ -4,7 +4,7 @@ This directory holds prompt + config for every centralized scheduled task
 run out of Trellis. Tasks iterate over
 `registry.md ∖ blacklist.md` unless noted otherwise.
 
-Each task lives in its own subdirectory:
+Each centralized task with a checked-in prompt lives in its own subdirectory:
 
 ```
 <task-name>/
@@ -15,24 +15,30 @@ Each task lives in its own subdirectory:
 The scheduler entry (registered via `mcp__scheduled-tasks__create_scheduled_task`)
 is a **thin wrapper** that reads these two files at run time. That way, the
 prompt can be edited here in version control without reregistering the task.
+`daily-project-digest` is the one legacy exception: its prompt is embedded in
+the scheduler registration and should be migrated to this directory before its
+next substantial edit.
 
 ---
 
 ## Tier 1 — registered and running
 
-Sixteen centralized tasks cover: morning per-project digest, hook compliance, process bypasses, test health,
+Eighteen registered tasks cover: morning per-project digest, conductor slate
+generation, hook compliance, process bypasses, autonomy drift, test health,
 control-plane hygiene, pattern rollup, executive summary, dependency posture
 (security, currency, major-version watch), fleet-wide security baseline, and
 quarterly obsolete-rules pruning.
 
 | Task | Cadence | Cron (local) | Purpose |
 |---|---|---|---|
+| `conductor` | Daily | `0 6 * * *` (every day 06:00) | Ranks the fleet backlog into a slate and auto-specs the top eligible item(s), holding before implementation. |
 | `daily-project-digest` | Daily | `0 8 * * *` (every day 08:00) | Per-project morning status — branch, last commit, 7d activity, open audit hits, suggested next move. Always emits a report (no silent days). |
 | `cross-project-process-audit` | Weekly | `0 10 * * 1` (Mon 10:00) | Compliance snapshot — hook presence, staleness, required files. |
 | `registry-blacklist-health` | Weekly | `30 10 * * 1` (Mon 10:30) | Audits registry ↔ filesystem ↔ blacklist consistency. |
 | `test-health` | Weekly | `0 11 * * 1` (Mon 11:00) | Runs each project's fast test suite; bisects for last-green on red. |
 | `dep-currency` | Weekly | `30 11 * * 1` (Mon 11:30) | Outdated-dep scan: patch / minor / major drift across the registry. |
 | `version-drift` | Weekly | `45 11 * * 1` (Mon 11:45) | `trellis_version` pin drift across the registry; flags major drift as critical. |
+| `autonomy-drift` | Weekly | `30 11 * * 1` (Mon 11:30, before preset drift) | Audits decisions-log format, high-autonomy silence, override churn, and autonomy ceiling friction. |
 | `preset-drift` | Weekly | `0 12 * * 1` (Mon 12:00) | Declared-vs-installed preset symlinks across the registry; flags missing/unknown/divergent presets as critical. |
 | `primer-drift` | Weekly | `15 12 * * 1` (Mon 12:15) | Primer freshness backstop — staleness / missing entry points / unreachable pins across the registry. Cold-path counterpart to the `inject-primer-index` SessionStart hook (v0.3.1). |
 | `bypass-tripwire` | Weekdays | `0 8 * * 1-5` (weekdays 08:00) | Silent-unless-tripped scan for `--no-verify`, force-push, direct-to-main. |
@@ -52,15 +58,16 @@ quarterly obsolete-rules pruning.
   same day's `bypass-tripwire` (08:00 weekdays) or `dep-vulnerabilities`
   (08:30 weekdays) having completed first. Independence by design keeps the
   digest predictable even if the weekday audits run late or skip.
-- Monday morning runs in strict sequence so downstream tasks see a verified
-  target list: `cross-project-process-audit` (10:00) →
+- Monday morning runs in a deliberate sequence so downstream tasks see a
+  verified target list: `cross-project-process-audit` (10:00) →
   `registry-blacklist-health` (10:30) → `test-health` (11:00) →
-  `dep-currency` (11:30) → `version-drift` (11:45) → `preset-drift` (12:00).
-  Currency lands before version-drift so the user reads dependency drift
-  and framework-pin drift in the same mental pass — both are "are we
-  current with upstream?". Preset-drift lands last; preset composition
-  layers on top of the version that the prior audits define as current.
-  primer-drift runs after preset-drift because both are cold-path freshness audits.
+  `dep-currency` / `autonomy-drift` (11:30) → `version-drift` (11:45) →
+  `preset-drift` (12:00) → `primer-drift` (12:15). Currency lands before
+  version-drift so the user reads dependency drift and framework-pin drift in
+  the same mental pass — both are "are we current with upstream?". Autonomy
+  drift lands before preset drift so preset/autonomy interaction surfaces in
+  the same audit window. Primer-drift runs after preset-drift because both are
+  cold-path freshness audits.
 - `parent-hook-drift` is Sunday night so Monday morning can act on findings
   within the same week.
 - `bypass-tripwire` fires early (08:00) and is silent on clean days —

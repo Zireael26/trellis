@@ -116,3 +116,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-registry-blacklist-health.md`:
 - If `registry.md` is missing, stop with a clear error — downstream audits depend on it.
 - If `blacklist.md` is missing, create an empty one and note it (blacklist is allowed to be empty but must exist).
 - If `__PROJECTS_ROOT__/` doesn't exist, note the scan was skipped and proceed with registry-only checks.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (`max_iterations` 100 / `no_progress_iterations` 3 / `budget_ceiling_usd` $1000). It halts on any one ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100).
+- `no_progress_iterations`: inherit default (3).
+- `budget_ceiling_usd`: inherit default (1000).
+- Progress signal: **new finding** — an iteration makes progress when it surfaces a new registry/blacklist health item (an orphan, unregistered project, hygiene gap, or consistency error) not seen in the prior iteration.

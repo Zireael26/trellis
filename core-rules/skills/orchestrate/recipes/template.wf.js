@@ -19,6 +19,9 @@
 //   - Put every specific (targets, paths, dates, scope) in `args` — never bake
 //     literals. This file ships in the public mirror; keep it path-neutral.
 //   - Agents do the work and RETURN a verdict; the main loop decides/merges.
+//   - Declare a `safety` block. Every recipe is a loop and must honor the
+//     loop-safety contract (`core-rules/loop-safety.md`); a recipe with no
+//     `safety` declaration is non-compliant.
 
 export const meta = {
   // <fill-in> short kebab-case identifier, unique across recipes.
@@ -29,6 +32,28 @@ export const meta = {
   phases: [
     { title: 'Work', detail: 'what the agents in this phase do' },
   ],
+  // Loop-safety contract — the three ceilings every loop honors; halt on any
+  // one. Policy + progress-signal catalog + token↔dollar conversion live in
+  // `core-rules/loop-safety.md`; the VALUES live in `trellis.config.json`.
+  // INHERIT-OR-OVERRIDE: set a field only to OVERRIDE the resolved baseline
+  // (per-loop > project-local > central config > built-in fallback). Leave a
+  // field out — or set it to null — to inherit the resolved value. The block
+  // is a per-loop override, not a place to restate the defaults.
+  safety: {
+    // OVERRIDE-ONLY: uncomment a ceiling ONLY to override the resolved baseline;
+    // leave it commented to inherit (per-loop > project-local > central > fallback).
+    // Restating a default here PINS it and defeats a later central retune.
+    // max_iterations: 100,          // hard cap on dispatch rounds (fallback 100)
+    // no_progress_iterations: 3,    // halt after N no-progress rounds (fallback 3)
+    //   NULL-FOR-ONE-SHOT: a one-shot fan-out — a single dispatch barrier, no
+    //   rounds — sets `no_progress_iterations: null` to declare itself exempt
+    //   (see `fanout-verify.wf.js`); `max_iterations`/`budget_ceiling_usd` still apply.
+    // budget_ceiling_usd: 1000,     // spend ceiling per run, USD (fallback 1000)
+    // The progress signal is the one field worth declaring per loop — pick the
+    // catalog entry that fits: commit/PR | file delta | new finding |
+    // work-list drain | state-hash change (catch-all; also the inherited default).
+    progress_signal: 'state-hash change',
+  },
 }
 
 // Structured-output schema for an agent's verdict. Setting opts.schema makes

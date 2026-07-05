@@ -121,3 +121,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-autonomy-drift.md`:
 - Project directory missing → skip the row (registry-blacklist-health will already flag).
 - `core-rules/autonomy.md` missing → stop with a clear error. Audit assumes the canonical doc exists.
 - `decisions-log.md` missing on a high-autonomy project → fold into `silent-high-autonomy` check.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (`max_iterations` 100 / `no_progress_iterations` 3 / `budget_ceiling_usd` $1000). It halts on any one ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100).
+- `no_progress_iterations`: inherit default (3).
+- `budget_ceiling_usd`: inherit default (1000).
+- Progress signal: **new finding** — a per-project check surfaces a new autonomy-drift item.

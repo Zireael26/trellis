@@ -5,7 +5,7 @@
 # Contract:
 #   - Triggers when tool_response length ≥ 100,000 chars OR contains a
 #     "...truncated..." / "Output too large" marker.
-#   - Returns {"additionalContext": "..."} for Claude's awareness.
+#   - Returns Codex PostToolUse hookSpecificOutput additionalContext.
 #   - Always exit 0. Advisory only — the tool already ran.
 #
 # Dependencies: jq (required).
@@ -37,7 +37,7 @@ TOOL_RESPONSE=$(printf '%s' "$INPUT" | jq -r '
 
 emit_advisory() {
   local msg="$1"
-  jq -nc --arg msg "$msg" '{additionalContext: $msg}'
+  _se_emit_hook_context "PostToolUse" "$msg"
 }
 
 # 1) Explicit truncation markers.

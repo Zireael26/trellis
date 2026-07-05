@@ -9,18 +9,18 @@
 # clarify → spec → plan → tasks → analyze pipeline, so they have their own rollout
 # path and are NOT listed in rollout-feature-skills.sh's FEATURE_SKILLS array.
 # The symlinks make them discoverable in each project (Claude Code reads
-# .claude/skills/; Codex/AntiGravity read .agents/skills/); operators invoke them
+# .claude/skills/; Codex reads .agents/skills/); operators invoke them
 # by name. Stateless per-project — no local config is seeded.
 #
 # Reads trellis.config.json for paths. Honors `harnesses` — .agents/ parity is
-# applied only when "codex" or "antigravity" is enabled in the parent config.
+# applied only when "codex" is enabled in the parent config.
 #
 # Behavior per project:
 #   1. If <project>/.claude/skills/<skill>/ is already a symlink to canonical: skip.
 #   2. If a directory exists where the symlink should go: rename to
 #      <skill>.local-backup-YYYYMMDD/ and create the symlink.
 #   3. If neither exists: create the symlink.
-#   4. Same flow under .agents/skills/<skill>/ when Codex/AntiGravity is enabled.
+#   4. Same flow under .agents/skills/<skill>/ when Codex is enabled.
 #   5. Does NOT seed any local config — these skills are stateless per-project.
 #
 # Usage:
@@ -168,12 +168,12 @@ rollout_one() {
     install_skill_symlink "$p" ".claude/skills/$s" "$s"
   done
 
-  if pg_has_harness codex || pg_has_harness antigravity; then
+  if pg_has_harness codex; then
     for s in "${BUILDER_SKILLS[@]}"; do
       install_skill_symlink "$p" ".agents/skills/$s" "$s"
     done
   elif [ -d "$p/.agents" ]; then
-    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex or antigravity enabled if desired"
+    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex enabled if desired"
   fi
 }
 

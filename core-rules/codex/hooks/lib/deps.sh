@@ -35,6 +35,25 @@ _se_project_dir() {
   printf '%s' "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 }
 
+# _se_emit_hook_context <HookEventName> <message>
+#   - emits Codex's current event-specific advisory shape.
+#   - SessionStart/PostToolUse/SubagentStart/UserPromptSubmit context is not a
+#     top-level `additionalContext`; Codex 0.142+ requires it under
+#     `hookSpecificOutput` with the matching hookEventName.
+_se_emit_hook_context() {
+  local event="$1" msg="$2"
+  jq -nc --arg event "$event" --arg msg "$msg" \
+    '{hookSpecificOutput: {hookEventName: $event, additionalContext: $msg}}'
+}
+
+# _se_emit_system_message <message>
+#   - emits a Stop-safe advisory. Codex Stop output does not accept
+#     `additionalContext`; `systemMessage` is part of the Stop output schema.
+_se_emit_system_message() {
+  local msg="$1"
+  jq -nc --arg msg "$msg" '{systemMessage: $msg}'
+}
+
 # _se_repo_root <dir>
 #   - prints the canonical repo root resolved via `git rev-parse --git-common-dir`
 #     (one level up from the common dir), so worktree sessions still see

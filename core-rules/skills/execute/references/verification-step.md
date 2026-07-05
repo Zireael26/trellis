@@ -81,7 +81,7 @@ Quoting note: the literal `…` (U+2026) in the `CLAUDE.md:43` template is a *pl
 
 ## 4. In-body advisory cores
 
-After a task's work is verified — and before its box is ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so review happens per-task instead of once per turn. These are advisory here — on a hook-less / non-onboarded harness (pure AntiGravity) a skill body cannot reject a turn, and the cores may be absent entirely. The per-task reviews feed back into the rest of the loop; the dedup *marker* they relate to is written only once, at turn-end (see *Write the idempotency marker* below).
+After a task's work is verified — and before its box is ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so review happens per-task instead of once per turn. These are advisory here: the per-task reviews feed back into the rest of the loop, and the cores may be absent entirely. The dedup *marker* they relate to is written only once, at turn-end (see *Write the idempotency marker* below).
 
 ### Resolve the canonical root and the core libs
 

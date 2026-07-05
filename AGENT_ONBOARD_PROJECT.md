@@ -98,7 +98,6 @@ Use whatever clarification mechanism your tooling provides (multi-choice questio
   Show the result and let the user override. The script writes this into `.claude/skills/process-gate-local/local.config.sh` as `PROCESS_GATE_STACK_PROFILE`.
 - **`GitHub repo URL`** — for the registry row's notes column. If the user hasn't created a remote yet, that's fine; capture nothing and remind them at the end.
 - **`Codex acknowledgement`** — if `harnesses` in `trellis.config.json` includes `"codex"`, remind the user that Codex hooks require `[features] hooks = true` in `$CODEX_HOME/config.toml` (the older `codex_hooks` key is deprecated as of Codex CLI 0.129+). Don't ask whether to enable Codex — that's a global config choice already made.
-- **`AntiGravity acknowledgement`** — if `harnesses` includes `"antigravity"`, remind the user that Trellis defers AntiGravity native hook integration today (see `core-rules/inheritance.md` "Known gap: AntiGravity native hooks deferred"), so Trellis seeds rules + skills + workflow slash-commands via `AGENTS.md` and `.agents/` but ships no `.antigravity/` hook tree. Project sessions in `agy` (or the standalone Antigravity 2.0 desktop app) still inherit parent rules; hook enforcement is Tier-3-only (husky / native git hooks) on the AntiGravity side. Don't ask whether to enable AntiGravity — also a global config choice already made.
 
 Echo all collected values back as a table. Wait for explicit "yes" before continuing.
 
@@ -120,9 +119,8 @@ What the script does (do not re-implement any of this):
 - Copies `.claude/primers/INDEX.md` from the canonical primer-index template — opt-in feature primer system bootstrap. Empty INDEX = "no primers yet"; primers accumulate via `/primer <slug>` over time. INDEX.md and individual primer files are project-state (tracked in git); the three command symlinks are gitignored per the fragment.
 - Copies Claude hooks → `.claude/hooks/*.sh` and `.claude/settings.json`.
 - If `package.json` exists: seeds `.husky/{pre-commit,commit-msg,pre-push}`.
-- If Codex OR AntiGravity is enabled: seeds the shared `AGENTS.md → CLAUDE.md` relative symlink, `.agents/rules/`, `.agents/skills/`, `.agents/primers/INDEX.md`, and `.agents/skills/process-gate-local/local.config.sh`.
-- If Codex is enabled (in addition to the shared surface): seeds `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/*.md` slash-command symlinks.
-- If AntiGravity is enabled (in addition to the shared surface): seeds `.agents/workflows/*.md` slash-command symlinks. **No** `.antigravity/` tree is created — AntiGravity hook integration is deferred; the gap is tracked in `core-rules/inheritance.md` "Known gap" and `CHANGELOG.md`.
+- If Codex is enabled: seeds the shared `AGENTS.md → CLAUDE.md` relative symlink, `.agents/rules/`, `.agents/skills/`, `.agents/primers/INDEX.md`, and `.agents/skills/process-gate-local/local.config.sh`.
+- If Codex is enabled (in addition to the shared surface): seeds `.codex/hooks.json`, `.codex/hooks/*.sh`, `.agents/commands/*.md` slash-command symlinks, and `.agents/workflows/*.md` slash-command tracked copies (Codex reads `.agents/`, including `.agents/workflows/`; workflow aliases are tracked copies, not symlinks, so they stay portable across teammates).
 - Runs the Mode-1 security-gate baseline unless `TRELLIS_SKIP_SECURITY_BASELINE=1`. The baseline can take 10-60 minutes; tell the user before running. Offer the skip env-var if they want to defer.
 
 Capture the script's stdout. Surface any line starting with `WARN:` to the user — those signal pre-existing files the script didn't overwrite.
@@ -227,6 +225,12 @@ Run these checks against the project. All must pass.
 # Resolves to the canonical rules file
 readlink -f "$PROJECT/.claude/rules/trellis.md" | grep -F "core-rules/CLAUDE.md"
 
+# Inherited rules surface the loop-safety contract: loop-safety.md is reachable as a
+# sibling of the symlink target. Onboarded projects inherit the contract automatically
+# via the parent-rules symlink — there is no per-project copy (post-merge: passes for
+# new / fresh-clone / repair alike).
+test -e "$(dirname "$(readlink -f "$PROJECT/.claude/rules/trellis.md")")/loop-safety.md"
+
 # Symlinks are gitignored, not tracked
 ( cd "$PROJECT" && ! git ls-files --error-unmatch .claude/rules/trellis.md 2>/dev/null )
 ( cd "$PROJECT" && ! git ls-files --error-unmatch .claude/skills/process-gate 2>/dev/null )
@@ -246,7 +250,7 @@ grep -qF "@$CANONICAL_RULES" "$PROJECT/CLAUDE.md" || \
 test -f "$PROJECT/gotchas.md"
 test -f "$PROJECT/context-log.md"
 
-# Shared .agents/ surface (only if "codex" OR "antigravity" in trellis.config.json harnesses)
+# Shared .agents/ surface (only if "codex" in trellis.config.json harnesses)
 test -L "$PROJECT/AGENTS.md"
 test -e "$PROJECT/.agents/rules/trellis.md"
 test -e "$PROJECT/.agents/skills/process-gate/SKILL.md"
@@ -256,12 +260,10 @@ test -f "$PROJECT/.agents/primers/INDEX.md"
 test -f "$PROJECT/.codex/hooks.json"
 ls "$PROJECT/.codex/hooks"/*.sh
 test -L "$PROJECT/.agents/commands/primer.md"
-
-# AntiGravity-only artifacts (only if "antigravity" in harnesses)
-test -L "$PROJECT/.agents/workflows/primer.md"
-test -L "$PROJECT/.agents/workflows/explore.md"
-# No .antigravity/ tree expected — AntiGravity hook integration is deferred.
-test ! -d "$PROJECT/.antigravity"
+# .agents/workflows/ is seeded for Codex too — Codex reads .agents/, including .agents/workflows/
+# (tracked copies, not symlinks, so use test -f)
+test -f "$PROJECT/.agents/workflows/primer.md"
+test -f "$PROJECT/.agents/workflows/explore.md"
 
 # Registry row present (mode `new`)
 grep -nF "$PROJECT" registry.md

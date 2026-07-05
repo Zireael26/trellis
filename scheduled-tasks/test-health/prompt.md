@@ -105,3 +105,14 @@ Anything worth noting across projects — e.g., "all 3 red projects broke in the
 
 - If a project's test command needs env vars or secrets that aren't available, that's a finding — not an error. Report it: "test command requires <X>, skipped."
 - If network access is required for tests and the sandbox doesn't allow it, note the skip reason and continue.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (`max_iterations` 100 / `no_progress_iterations` 3 / `budget_ceiling_usd` $1000). The loop **halts on any one** ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done so far); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+This task carries existing caps — expressed here as **explicit overrides** rather than ad-hoc hardcoded values:
+
+- **`max_iterations`**: inherit default (100) for the per-project sweep. The last-green bisect (Check 4) is itself a bounded inner loop: its **20-commit walk-back is a `max_iterations`-style cap** — stop after 20 detached-HEAD checkouts and report "red for at least 20 commits" rather than walking history unbounded.
+- **`no_progress_iterations`**: inherit default (3).
+- **`budget_ceiling_usd`**: inherit default (1000), **but with a tighter per-project wall-clock override**: the **5-minute-per-project budget** (Check 2) caps each project's test run — kill the process past 5 minutes — so a single hung suite can't exhaust the run.
+- **Progress signal**: **work-list drain** — each iteration makes progress by processing one more target from `registry \ blacklist` (scoreboard row produced); the sweep halts when the work-list is drained.

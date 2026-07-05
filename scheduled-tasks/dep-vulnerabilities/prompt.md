@@ -237,3 +237,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-dep-vulnerabilities.md`:
 - **Empty lockfile**: rare — emit `info`, treat as no-deps-detected.
 - **Budget overrun**: emit `warning` for the project, report partial findings, continue.
 - **Bun binary lockfile** (`bun.lockb` only, no `bun.lock`): emit `info` recommending the user commit the text format alongside.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-first: per-loop override → `.trellis.config.json.loop_safety` → `trellis.config.json.loop_safety` → built-in fallback (`100` / `3` / `$1000`). The loop halts on **any one** ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done so far); an unattended/cron run surfaces the halt in its run report rather than dying silently.
+
+- `max_iterations`: 100 (inherit default)
+- `no_progress_iterations`: 3 (inherit default)
+- `budget_ceiling_usd`: 1000 (inherit default)
+- Progress signal: **work-list drain** — the `registry \ blacklist` target set shrinks as each project is scanned; a sweep of clean projects is progress, not a stall.

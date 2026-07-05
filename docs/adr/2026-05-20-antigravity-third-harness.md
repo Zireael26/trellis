@@ -2,7 +2,20 @@
 
 ## Status
 
-Accepted (2026-05-20)
+Superseded (2026-07-05) by [docs/adr/2026-07-05-dual-harness-orchestration.md](2026-07-05-dual-harness-orchestration.md)
+
+> **Superseded note (2026-07-05).** AntiGravity was removed from Trellis in the
+> RC.4 dual-harness work. In practice it never proved competitive with the
+> Claude Code + Codex pairing, and it was not enabled in this instance
+> (`trellis.config.json` = `["claude","codex"]`), so no live project depended on
+> it. Rather than carry a speculative third harness — whose native-hook story was
+> still deferred (see the Decision below) — the live tree was reduced to the two
+> harnesses actually in use, and orchestration effort was redirected to
+> cross-harness Claude/Codex dispatch. The `antigravity` enum value, its
+> onboard/rollout gates, and its docs were stripped; the shared `.agents/` surface
+> was preserved (it is read by Codex, gated on `codex` alone now). This ADR is
+> kept unaltered below as history; do not treat its Decision/Consequences as the
+> current contract.
 
 ## Context
 

@@ -16,26 +16,21 @@
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
 #   - <project>/.husky/{pre-commit,commit-msg,pre-push}     [if Node project]
 #
-# Shared "agents/" surface (Codex AND AntiGravity both read this):
-#   - <project>/AGENTS.md                     → CLAUDE.md    [if codex OR antigravity enabled, and absent]
-#   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if codex OR antigravity]
+# Shared "agents/" surface (Codex reads this):
+#   - <project>/AGENTS.md                     → CLAUDE.md    [if codex enabled, and absent]
+#   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if codex]
 #   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
-#       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex OR antigravity]
-#   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex OR antigravity]
+#       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex]
+#   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex]
+#   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore}.md
+#       (tracked copies; workflow aliases remain portable across teammates)  [if codex]
 #   - <project>/.agents/skills/process-gate-local/local.config.sh (copy of Claude local config)
-#                                                                     [if codex OR antigravity]
+#                                                                     [if codex]
 #
 # Codex-only surface:
 #   - <project>/.agents/commands/{primer,primer-refresh,primer-check,explore}.md
-#       → canonical commands (Codex reads commands/, AntiGravity reads workflows/)  [if codex]
+#       → canonical commands (Codex reads commands/)  [if codex]
 #   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if codex]
-#
-# AntiGravity-only surface:
-#   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore}.md
-#       → canonical commands (AntiGravity uses workflows/ where Codex uses commands/) [if antigravity]
-#   - NO hooks: AntiGravity 2.0 has no native hook API as of 2026-05-20.
-#     If/when Google ships one, re-open via a fresh ADR. See core-rules/inheritance.md
-#     "Known gap: AntiGravity native hooks deferred".
 #
 # Then runs the initial Mode 1 security-gate baseline (override:
 # TRELLIS_SKIP_SECURITY_BASELINE=1).
@@ -58,6 +53,8 @@ CANONICAL_COMMANDS_DIR="$TRELLIS_ROOT/core-rules/commands"
 CANONICAL_PRIMER_INDEX_TEMPLATE="$TRELLIS_ROOT/core-rules/commands/templates/primer-index-template.md"
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
+CANONICAL_REVIEWER_LIB_DIR="$SOURCE_ROOT/core-rules/hooks/lib"
+REVIEWER_CORES="code-reviewer.sh ui-verify-core.sh"
 CANONICAL_CLAUDE_SETTINGS="$TEMPLATES/claude-settings.json"
 
 # Accumulator: every symlink seed_symlink() creates whose target is an absolute
@@ -87,6 +84,10 @@ PROJECT="$1"
 if pg_has_harness codex; then
   [ -f "$CANONICAL_CODEX_DIR/hooks.json" ] || { echo "canonical Codex hooks manifest missing: $CANONICAL_CODEX_DIR/hooks.json" >&2; exit 1; }
   [ -d "$CANONICAL_CODEX_DIR/hooks" ]      || { echo "canonical Codex hooks dir missing: $CANONICAL_CODEX_DIR/hooks" >&2; exit 1; }
+  [ -d "$CANONICAL_REVIEWER_LIB_DIR" ]     || { echo "canonical reviewer lib dir missing: $CANONICAL_REVIEWER_LIB_DIR" >&2; exit 1; }
+  for core in $REVIEWER_CORES; do
+    [ -f "$CANONICAL_REVIEWER_LIB_DIR/$core" ] || { echo "canonical reviewer core missing: $CANONICAL_REVIEWER_LIB_DIR/$core" >&2; exit 1; }
+  done
 fi
 
 seed_file() {
@@ -108,6 +109,29 @@ seed_executable_file() {
     mkdir -p "$(dirname "$dst")"
     cp "$src" "$dst"
     chmod +x "$dst"
+    echo "created: ${dst#"$PROJECT"/}"
+  fi
+}
+
+seed_tracked_copy() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  if [ -L "$dst" ]; then
+    local cur
+    cur="$(readlink "$dst")"
+    if [ "$cur" = "$src" ]; then
+      rm "$dst"
+      cp "$src" "$dst"
+      echo "copied: ${dst#"$PROJECT"/} (replaced machine-local symlink)"
+      return
+    fi
+    echo "WARN: ${dst#"$PROJECT"/} symlinks to '$cur', expected '$src' — leaving as-is" >&2
+    return
+  fi
+  if [ -e "$dst" ]; then
+    echo "skip (exists): ${dst#"$PROJECT"/}"
+  else
+    cp "$src" "$dst"
     echo "created: ${dst#"$PROJECT"/}"
   fi
 }
@@ -218,6 +242,11 @@ seed_codex_hooks() {
       seed_file "$src" "$PROJECT/.codex/hooks/lib/$(basename "$src")"
     done
   fi
+  # Shared reviewer/UI decision cores live once under the Claude canonical lib
+  # and are deployed beside Codex hooks so Codex Stop hooks can source them.
+  for core in $REVIEWER_CORES; do
+    seed_file "$CANONICAL_REVIEWER_LIB_DIR/$core" "$PROJECT/.codex/hooks/lib/$core"
+  done
 }
 
 seed_claude_hooks() {
@@ -278,7 +307,7 @@ seed_presets() {
       continue
     fi
     seed_symlink "$target" "$PROJECT/.claude/rules/preset-$name.md"
-    if pg_has_harness codex || pg_has_harness antigravity; then
+    if pg_has_harness codex; then
       seed_symlink "$target" "$PROJECT/.agents/rules/preset-$name.md"
     fi
   done
@@ -339,8 +368,8 @@ install_post_checkout_hook() {
 # by seed_symlink) — i.e. only the machine-specific links that must not be tracked
 # (their $TRELLIS_ROOT-absolute targets conflict on cross-machine merges).
 # Everything else Trellis seeds — hooks, settings.json, primers/INDEX.md,
-# skill-local configs, the relative AGENTS.md symlink — is project-state and stays
-# tracked.
+# skill-local configs, tracked workflow copies, the relative AGENTS.md symlink —
+# is project-state and stays tracked.
 #
 # Self-healing + idempotent. Every run STRIPS all prior Trellis-managed blocks
 # (any historical sentinel — they share the begin prefix; each terminated by the
@@ -402,16 +431,26 @@ write_gitignore_block() {
 #
 # This block is GENERATED — it lists only machine-absolute symlinks and is rewritten
 # in full on every onboard run (no skill-count sentinel; no stacking). Everything else
-# Trellis seeds (hooks, settings.json, primers/INDEX.md, skill-local configs, the
-# relative AGENTS.md symlink) is project-state and IS tracked in git.
+# Trellis seeds (hooks, settings.json, primers/INDEX.md, skill-local configs,
+# tracked workflow copies, the relative AGENTS.md symlink) is project-state and
+# IS tracked in git.
 HDR
     printf '%s\n' "${dedup[@]}"
     cat <<'STATE'
 
 # --- Trellis per-session state (autonomy slider) ---
-# Single-integer file written by /autonomy N slash command. Per-developer,
-# per-session — NOT shared across machines. See core-rules/autonomy.md.
+# Per-developer, per-session state written by Trellis commands and hooks.
+# NOT shared across machines. See core-rules/autonomy.md and hooks.md.
 .claude/session-autonomy
+.claude/.fail-counter
+.codex/.fail-counter
+.claude/.reread-state/
+.codex/.reread-state/
+.claude/.review-done-*
+.codex/.review-done-*
+.claude/screenshots/
+.codex/screenshots/
+.claude/scheduled_tasks.lock
 # --- end Trellis per-session state ---
 # --- end Trellis fragment ---
 STATE
@@ -478,10 +517,6 @@ untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
 untrack_if_tracked ".agents/commands/explore.md"
 untrack_if_tracked ".agents/commands/autonomy.md"
-untrack_if_tracked ".agents/workflows/primer.md"
-untrack_if_tracked ".agents/workflows/primer-refresh.md"
-untrack_if_tracked ".agents/workflows/primer-check.md"
-untrack_if_tracked ".agents/workflows/explore.md"
 
 # Claude Code inheritance: rules + skills + hooks.
 # Canonical skills shipped today: process-gate, security-gate (always on),
@@ -540,11 +575,10 @@ fi
 # Eager post-checkout hook for worktree inheritance
 install_post_checkout_hook
 
-# Shared "agents/" surface — Codex AND AntiGravity both read AGENTS.md,
-# .agents/rules/, .agents/skills/, and .agents/primers/. Seed once when either
-# harness is enabled; the file contents are byte-identical across consumers.
-if pg_has_harness codex || pg_has_harness antigravity; then
-  echo "-- shared .agents/ surface enabled (codex and/or antigravity) --"
+# Shared "agents/" surface — Codex reads AGENTS.md, .agents/rules/,
+# .agents/skills/, and .agents/primers/.
+if pg_has_harness codex; then
+  echo "-- shared .agents/ surface enabled (codex) --"
   seed_symlink "CLAUDE.md" "$PROJECT/AGENTS.md"
   seed_symlink "$CANONICAL_RULES"                    "$PROJECT/.agents/rules/trellis.md"
   seed_symlink "$CANONICAL_SKILLS_DIR/process-gate"  "$PROJECT/.agents/skills/process-gate"
@@ -579,17 +613,15 @@ if pg_has_harness codex; then
   seed_codex_hooks
 fi
 
-# AntiGravity-only surface — .agents/workflows/ slash commands. Native hook
-# integration is deferred. See core-rules/inheritance.md "Known gap:
-# AntiGravity native hooks deferred" for the gap rationale; the elaborated
-# evidence (language-server internals, lack of UI exposure as of 2026-05-20)
-# lives in the ADR added by Task 18 of the rollout plan.
-if pg_has_harness antigravity; then
-  echo "-- antigravity harness enabled --"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/workflows/primer.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/workflows/primer-refresh.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/workflows/primer-check.md"
-  seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/workflows/explore.md"
+# Shared workflow aliases — tracked copies, not symlinks. Keeping workflows
+# tracked lets projects commit this part of the Trellis harness without
+# machine-local absolute symlink targets.
+if pg_has_harness codex; then
+  echo "-- shared .agents/workflows/ surface enabled (codex) --"
+  seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer.md"         "$PROJECT/.agents/workflows/primer.md"
+  seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/workflows/primer-refresh.md"
+  seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/workflows/primer-check.md"
+  seed_tracked_copy "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/workflows/explore.md"
 fi
 
 # Optional preset layering — opt-in per project via <project>/.trellis.config.json
@@ -618,11 +650,10 @@ echo "Next:"
 echo "  - add @-import line to project CLAUDE.md if not present:"
 echo "      @$CANONICAL_RULES"
 pg_has_harness codex && echo "  - confirm Codex hooks are enabled in \$CODEX_HOME/config.toml: [features] hooks = true  (legacy 'codex_hooks' is deprecated on Codex CLI 0.129+)"
-pg_has_harness antigravity && echo "  - antigravity: no native hooks deployed (Trellis defers AntiGravity hook integration — see core-rules/inheritance.md \"Known gap: AntiGravity native hooks deferred\"); rules + skills + workflows still inherit via .agents/."
 echo "  - register the project in $TRELLIS_ROOT/registry.md (chore: register <name>)"
 echo "  - configure project-local skill:"
 echo "      $PROJECT/.claude/skills/process-gate-local/local.config.sh"
-{ pg_has_harness codex || pg_has_harness antigravity; } && echo "      $PROJECT/.agents/skills/process-gate-local/local.config.sh"
+pg_has_harness codex && echo "      $PROJECT/.agents/skills/process-gate-local/local.config.sh"
 echo "  - configure security-gate profile + LLM provider:"
 echo "      $PROJECT/.claude/skills/security-gate-local/local.config.sh"
-{ pg_has_harness codex || pg_has_harness antigravity; } && echo "      $PROJECT/.agents/skills/security-gate-local/local.config.sh"
+pg_has_harness codex && echo "      $PROJECT/.agents/skills/security-gate-local/local.config.sh"

@@ -2,9 +2,7 @@
 
 The shared, harness-neutral builder loop. `execute` walks a task list and
 implements it one tickable unit at a time. It is the same loop on Claude and on
-Codex/AntiGravity; only the *enforcement teeth* differ (Stop hooks on the hook
-harnesses; this skill body, advisory-only, on hook-less AntiGravity — a skill
-body cannot reject a turn there). `execute` **never merges**.
+Codex. `execute` **never merges**.
 
 For per-turn cadence and the autonomy slider, see [`autonomy.md`](../../../autonomy.md);
 for the per-unit verify→receipt→tick mechanics, see
@@ -266,8 +264,8 @@ The loop stops on any of **three** conditions:
   and [`verification-step.md`](verification-step.md) *Failed verify*).
 
 **Default autonomy level when none is configured.** If no `autonomy.md` applies
-or no level is set — the hook-less / non-onboarded case, where `execute` is the
-sole advisory carrier — default to the **most conservative** behavior: **surface
+or no level is set — the hook-less / non-onboarded case, where no turn-level
+hooks apply — default to the **most conservative** behavior: **surface
 and wait** for a human decision. Do not auto-retry or auto-defer in the absence
 of an explicit configured level.
 

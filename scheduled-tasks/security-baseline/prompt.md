@@ -140,3 +140,12 @@ For every **new** Critical/High finding, leave a one-line note:
 - Tool versions captured in the rollup header (reproducibility — re-running this rollup must be possible from the recorded versions alone).
 - Quarter-over-quarter delta populated, even when the answer is "no change".
 - For at least one new Critical/High finding (if any): full reproduction step from the per-project audit's `exploit_steps` field surfaced in the rollup.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-wins: this stanza's per-loop override → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (100 / 3 / $1000). The loop **halts on any one** ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done so far); as a cron loop it surfaces the halt in its run report rather than dying silently.
+
+- **`max_iterations`**: inherit default (100).
+- **`no_progress_iterations`**: inherit default (3).
+- **`budget_ceiling_usd`**: inherit default (1000).
+- **Progress signal**: **work-list drain** — this is a sequential per-registry sweep, so an iteration makes progress when it scans a target project and drains it from the remaining set (`(registry ∖ blacklist) ∖ targets-skip-list`). No drain across `no_progress_iterations` consecutive iterations halts the loop.

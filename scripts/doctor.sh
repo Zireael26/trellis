@@ -560,6 +560,16 @@ run_project_checks() {
     fi
   done
 
+  # --- Codex process-gate local config parity (WARN) — REPORT-ONLY ---
+  # process-gate-local is project-owned, so doctor never auto-copies it; it only
+  # flags when Codex would enforce a different local policy than Claude.
+  if pg_has_harness codex; then
+    if emit "  " hc_codex_process_gate_local_parity "$proj"; then :; else
+      add_hint "$name: Codex process-gate-local config diverges from Claude — reconcile .agents/skills/process-gate-local/local.config.sh with .claude/skills/process-gate-local/local.config.sh"
+      plan_add PLAN_MANUAL "Codex process-gate-local config diverges from Claude — reconcile .agents/skills/process-gate-local/local.config.sh with .claude/skills/process-gate-local/local.config.sh"
+    fi
+  fi
+
   # --- hook freshness (WARN) — GATED behind --fix-hooks ---
   if emit "  " hc_hook_freshness "$proj" "$CANON"; then :; else
     add_hint "$name: Claude hook copies drift from canonical — run (gated, changes enforcement): scripts/sync-hooks.sh $name   (preview: scripts/sync-hooks.sh --dry-run $name)"
@@ -587,9 +597,17 @@ run_project_checks() {
   if pg_has_harness codex; then
     if [ -d "$proj/.codex/hooks" ]; then
       # Reuse hook-freshness semantics against the codex surface by passing
-      # the codex paths. We compare each project codex hook to canonical.
+      # the codex paths. We compare each project codex hook to canonical,
+      # including hooks.json and the lib cores sourced by Stop hooks.
       codex_missing=""
       codex_stale=""
+      if [ -f "$CANON/core-rules/codex/hooks.json" ]; then
+        if [ ! -f "$proj/.codex/hooks.json" ]; then
+          codex_missing="$codex_missing hooks.json"
+        elif ! cmp -s "$CANON/core-rules/codex/hooks.json" "$proj/.codex/hooks.json"; then
+          codex_stale="$codex_stale hooks.json"
+        fi
+      fi
       if [ -d "$CANON/core-rules/codex/hooks" ]; then
         for csrc in "$CANON/core-rules/codex/hooks"/*.sh; do
           [ -e "$csrc" ] || continue
@@ -601,6 +619,26 @@ run_project_checks() {
           [ "$csha" != "$dsha" ] && codex_stale="$codex_stale $cfn"
         done
       fi
+      if [ -d "$CANON/core-rules/codex/hooks/lib" ]; then
+        for csrc in "$CANON/core-rules/codex/hooks/lib"/*.sh; do
+          [ -e "$csrc" ] || continue
+          cfn="lib/$(basename "$csrc")"
+          cdst="$proj/.codex/hooks/$cfn"
+          if [ ! -f "$cdst" ]; then codex_missing="$codex_missing $cfn"; continue; fi
+          csha="$(shasum -a 256 "$csrc" | awk '{print $1}')"
+          dsha="$(shasum -a 256 "$cdst" | awk '{print $1}')"
+          [ "$csha" != "$dsha" ] && codex_stale="$codex_stale $cfn"
+        done
+      fi
+      for cfn in code-reviewer.sh ui-verify-core.sh; do
+        csrc="$CANON/core-rules/hooks/lib/$cfn"
+        [ -f "$csrc" ] || continue
+        cdst="$proj/.codex/hooks/lib/$cfn"
+        if [ ! -f "$cdst" ]; then codex_missing="$codex_missing lib/$cfn"; continue; fi
+        csha="$(shasum -a 256 "$csrc" | awk '{print $1}')"
+        dsha="$(shasum -a 256 "$cdst" | awk '{print $1}')"
+        [ "$csha" != "$dsha" ] && codex_stale="$codex_stale lib/$cfn"
+      done
       if [ -n "$codex_missing" ] || [ -n "$codex_stale" ]; then
         codex_detail=""
         [ -n "$codex_missing" ] && codex_detail="missing:${codex_missing}"
@@ -779,7 +817,7 @@ apply_project_fix() {
       # Run onboard ONCE. Absolute project path; skip the security baseline.
       # NOTE: onboard-project.sh's LAST statement is a `{ ... } && echo ...`
       # short-circuit that returns non-zero for a claude-only project (the
-      # trailing `&&` is false when neither codex nor antigravity is enabled),
+      # trailing `&&` is false when codex is not enabled),
       # so onboard can exit non-zero even on a fully successful seed. We
       # therefore DO NOT treat a non-zero onboard exit as failure here — the
       # AFTER-pass re-check is the authoritative verdict on whether the repair

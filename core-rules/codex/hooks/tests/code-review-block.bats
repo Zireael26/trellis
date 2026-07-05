@@ -14,7 +14,7 @@
 # separately in code-reviewer-ladder.bats — here we test the HOOK's wiring):
 #   1. fork-bomb sentinel guard (TRELLIS_REVIEW_IN_PROGRESS=1 → never reviews)
 #   2. block on a critical finding — against the REAL core (rung 3 deterministic)
-#   3. advisory-only finding (exit 0 + {"additionalContext":<review>...})
+#   3. advisory-only finding (exit 0 + {"systemMessage":<review>...})
 #   4. fail-open: missing core → exit 0; empty findings → exit 0
 #   5. TRELLIS_REVIEW_OVERRIDE defers AND logs a dated line to decisions-log.md
 #   6. idempotency (same diff twice → reviewer invoked once)
@@ -278,20 +278,20 @@ setup() {
   [[ "$output" == *'"decision":"block"'* ]]
   [[ "$output" == *'AWS access key'* ]]
   # A blocked turn must NOT advise; it blocks.
-  [[ "$output" != *'additionalContext'* ]]
+  [[ "$output" != *'systemMessage'* ]]
 }
 
 # =========================================================================
 # 3. Advisory only — against the REAL CORE (rung 3). A left-in `debugger;` →
 # the real deterministic_review emits an IMPORTANT (non-critical) finding →
-# exit 0 with {"additionalContext":"<review> ... </review>"} and NO block.
+# exit 0 with {"systemMessage":"<review> ... </review>"} and NO block.
 # =========================================================================
-@test "advisory: real core (rung 3) important finding → exit 0 with <review> additionalContext (no block)" {
+@test "advisory: real core (rung 3) important finding → exit 0 with <review> systemMessage (no block)" {
   setup_triggering_repo_with_debugger
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"additionalContext"'* ]]
+  [[ "$output" == *'"systemMessage"'* ]]
   [[ "$output" == *'<review>'* ]]
   [[ "$output" == *'[important]'* ]]
   [[ "$output" == *'debugger'* ]]
@@ -324,7 +324,7 @@ setup() {
   run_hook
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]]
-  [[ "$output" != *'additionalContext'* ]]
+  [[ "$output" != *'systemMessage'* ]]
 }
 
 # =========================================================================

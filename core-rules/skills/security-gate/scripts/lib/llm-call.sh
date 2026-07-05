@@ -56,7 +56,13 @@ fi
 
 # Try the call. If it fails (auth, network, model unknown), surface a `warn`
 # and write an empty out so the caller falls through to no-LLM mode.
-if ! "${RUNNER[@]}" llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT" < "$INPUT" > "$OUT" 2>/tmp/security-gate-llm.err; then
+if [ "${#RUNNER[@]}" -gt 0 ]; then
+  CMD=("${RUNNER[@]}" llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
+else
+  CMD=(llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
+fi
+
+if ! "${CMD[@]}" < "$INPUT" > "$OUT" 2>/tmp/security-gate-llm.err; then
   echo "warn: llm call failed (model=$MODEL provider=$PROVIDER) — see /tmp/security-gate-llm.err" >&2
   : > "$OUT"
   exit 2

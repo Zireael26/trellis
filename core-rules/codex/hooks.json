@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/block-destructive.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/block-destructive.sh\"",
             "timeout": 5,
             "statusMessage": "Checking command safety..."
           }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/reread-guard.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/reread-guard.sh\"",
             "timeout": 5,
             "statusMessage": "Re-read guard..."
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/post-edit-verify.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/post-edit-verify.sh\"",
             "timeout": 120,
             "statusMessage": "Verifying edit..."
           }
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/truncation-check.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/truncation-check.sh\"",
             "timeout": 5,
             "statusMessage": "Checking for truncation..."
           }
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/track-read.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/track-read.sh\"",
             "timeout": 5,
             "statusMessage": "Recording reads..."
           }
@@ -64,19 +64,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/session-context.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/session-context.sh\"",
             "timeout": 10,
             "statusMessage": "Loading session context..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/post-compact-context.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/post-compact-context.sh\"",
             "timeout": 10,
             "statusMessage": "Restoring context after compact..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/inject-primer-index.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/inject-primer-index.sh\"",
             "timeout": 5,
             "statusMessage": "Loading primer index..."
           }
@@ -88,31 +88,37 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/save-context-log.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/save-context-log.sh\"",
             "timeout": 10,
             "statusMessage": "Saving session context..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stop-verify.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stop-verify.sh\"",
             "timeout": 300,
             "statusMessage": "Running final verification..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/code-review-subagent.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/code-review-subagent.sh\"",
             "timeout": 120,
             "statusMessage": "Code review on diff..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/ui-verify.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/propose-rules.sh\"",
+            "timeout": 60,
+            "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/ui-verify.sh\"",
             "timeout": 120,
             "statusMessage": "UI verification..."
           },
           {
             "type": "command",
-            "command": "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stamp-turn.sh",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stamp-turn.sh\"",
             "timeout": 5,
             "statusMessage": "Stamping turn..."
           }

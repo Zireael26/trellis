@@ -25,7 +25,7 @@ reference files. Projects copy the subset they need into their own
 | `stop-verify.sh` | Stop | upstream, extended |
 | `code-review-subagent.sh` | Stop (skeleton) | new |
 | `ui-verify.sh` | Stop (skeleton) | new |
-| `propose-rules.sh` | Stop (opt-in, experimental) | new |
+| `propose-rules.sh` | Stop (default-on, opt-out) | new |
 
 Tier 3 (husky) lives outside this directory.
 

@@ -6,13 +6,13 @@
 # orchestrate is the dynamic-workflow orchestration skill (the tenth canonical
 # skill). Like the builder skills it is NOT part of the clarify → spec → plan →
 # tasks → analyze pipeline, so it has its own rollout path. The symlink makes it
-# discoverable per project (Claude Code reads .claude/skills/; Codex/AntiGravity
-# read .agents/skills/). It is capability-gated — it lights up only when the
+# discoverable per project (Claude Code reads .claude/skills/; Codex reads
+# .agents/skills/). It is capability-gated — it lights up only when the
 # harness exposes a subagent-spawning workflow tool — and stateless per-project;
 # no local config is seeded.
 #
 # Reads trellis.config.json for paths. Honors `harnesses` — .agents/ parity is
-# applied only when "codex" or "antigravity" is enabled in the parent config.
+# applied only when "codex" is enabled in the parent config.
 #
 # NOTE on gitignore: the new symlinks should be gitignored (they target absolute
 # paths under $TRELLIS_ROOT that conflict on cross-machine merges). Since the
@@ -28,7 +28,7 @@
 #   2. If a directory exists where the symlink should go: rename to
 #      orchestrate.local-backup-YYYYMMDD/ and create the symlink.
 #   3. If neither exists: create the symlink.
-#   4. Same flow under .agents/skills/orchestrate when Codex/AntiGravity is enabled.
+#   4. Same flow under .agents/skills/orchestrate when Codex is enabled.
 #
 # Usage:
 #   rollout-orchestrate-skill.sh                 # interactive, all registered projects
@@ -163,12 +163,12 @@ rollout_one() {
     install_skill_symlink "$p" ".claude/skills/$s" "$s"
   done
 
-  if pg_has_harness codex || pg_has_harness antigravity; then
+  if pg_has_harness codex; then
     for s in "${ORCHESTRATE_SKILLS[@]}"; do
       install_skill_symlink "$p" ".agents/skills/$s" "$s"
     done
   elif [ -d "$p/.agents" ]; then
-    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex or antigravity enabled if desired"
+    echo "  info: $p has .agents/ but harnesses=${HARNESSES[*]} — .agents/ parity NOT applied; rerun with codex enabled if desired"
   fi
 }
 
@@ -207,7 +207,7 @@ echo "== done =="
 echo
 echo "Per-project next steps:"
 echo "  1. /orchestrate is now discoverable in each project (Claude Code reads"
-echo "     .claude/skills/; Codex/AntiGravity read .agents/skills/). It is"
+echo "     .claude/skills/; Codex reads .agents/skills/). It is"
 echo "     capability-gated: it activates only when the harness exposes a"
 echo "     subagent-spawning workflow tool."
 echo "  2. The new symlinks may not yet be gitignored. The generated .gitignore"

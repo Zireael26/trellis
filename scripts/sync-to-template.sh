@@ -86,7 +86,7 @@ SYNC_PATHS=(
   "core-rules/presets/"
   "docs/opus-4.8-steering.md"
   "docs/gpt-5.5-steering.md"
-  "docs/antigravity-steering.md"
+  "docs/codex-routing.md"
   "docs/specs/2026-05-20-trellis-autonomy-design.md"
   "docs/specs/2026-06-02-trellis-process-enforcement-design.md"
 )
@@ -153,9 +153,15 @@ for p in "${SYNC_PATHS[@]}"; do
     # sk_live_… keys) that trip GitHub push protection for anyone cloning
     # the public template. Keep it instance-only; the public skill ships the
     # detector + its other tests without the fixture footgun.
+    # scripts/workflows/*.js and scripts/full-audit-sweep-ledger.mjs are
+    # operator one-off execution artifacts (per-project redis/audit/sweep runs)
+    # with hardcoded instance paths + github user. They are not framework, and
+    # the placeholder pass below does not cover .js/.mjs, so they would leak
+    # live values into the public mirror. Keep them instance-only.
     rsync -a --delete \
       --exclude='__pycache__/' --exclude='.DS_Store' --exclude='*.swp' \
       --exclude='check-secrets.bats' \
+      --exclude='/workflows/' --exclude='/full-audit-sweep-ledger.mjs' \
       "${src}/" "${dst}/"
   else
     mkdir -p "$(dirname "$dst")"
@@ -182,7 +188,7 @@ if [ -f "$TMP_STAGE/trellis.config.json" ]; then
   cat > "$TMP_STAGE/trellis.config.json" <<'EOF'
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity or \"antigravity\" when opting into AntiGravity (Google's agent CLI). Multiple harnesses may be enabled together.",
+  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity. Multiple harnesses may be enabled together.",
 
   "trellis_root": "__TRELLIS_PATH__",
   "projects_root": "__PROJECTS_ROOT__",

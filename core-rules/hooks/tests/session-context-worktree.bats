@@ -207,7 +207,7 @@ extract_ctx() {
 
   printf '%s' "$out" | jq . >/dev/null
 
-  ctx=$(printf '%s' "$out" | jq -r '.additionalContext // ""')
+  ctx="$(extract_ctx "$out")"
   [[ "$ctx" == *"TRELLIS INHERITANCE WAS MISSING"* ]]
 
   destroy_fixture
@@ -217,7 +217,7 @@ extract_ctx() {
   build_fixture
 
   out=$(printf '%s' '{"source":"startup"}' | CLAUDE_PROJECT_DIR="$MAIN" bash "$CODEX_HOOK")
-  ctx=$(printf '%s' "$out" | jq -r '.additionalContext // ""')
+  ctx="$(extract_ctx "$out")"
 
   [[ "$ctx" != *"TRELLIS INHERITANCE WAS MISSING"* ]]
 

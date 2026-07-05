@@ -40,9 +40,8 @@ Every project in `registry.md` must:
 - [ ] Track `.claude/rules/trellis.md` in git (including `.gitignore` exceptions where needed).
 - [ ] Contain the `@`-import line in the project `CLAUDE.md` for interactive fallback.
 - [ ] Contain `.claude/skills/process-gate/` as a symlink to the canonical skills path (see "Skills inheritance" above).
-- [ ] If Codex- or AntiGravity-enabled (`harnesses` includes `"codex"` or `"antigravity"`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, and `.agents/skills/process-gate-local/local.config.sh`.
-- [ ] If Codex-enabled additionally: `.codex/hooks.json`, executable `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` symlinks.
-- [ ] If AntiGravity-enabled additionally: `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` symlinks. **No** `.antigravity/` directory — AntiGravity hook integration is deferred.
+- [ ] If Codex-enabled (`harnesses` includes `"codex"`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, and `.agents/skills/process-gate-local/local.config.sh`.
+- [ ] If Codex-enabled additionally: `.codex/hooks.json`, executable `.codex/hooks/*.sh`, `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` symlinks, and `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` symlinks (workflow-style command surface Codex also reads).
 - [ ] Have GitHub branch protection enabled on `main` (see `registry.md` step 5).
 
 ## Skills inheritance (process-gate + future canonical skills)
@@ -106,21 +105,21 @@ Symmetry with skills:
 
 Removing a preset from the project's config + re-running `rollout-presets.sh` prunes the now-stale symlink automatically.
 
-## Multi-harness support (Claude Code + Codex + AntiGravity)
+## Multi-harness support (Claude Code + Codex)
 
-Claude Code is the primary harness. Codex and AntiGravity are secondaries. Trellis is configured per-clone via the `harnesses` array in `trellis.config.json`; when `"codex"` and/or `"antigravity"` is included, onboarding seeds parallel artifact trees pointing at the same canonical sources.
+Claude Code is the primary harness. Codex is a secondary. Trellis is configured per-clone via the `harnesses` array in `trellis.config.json`; when `"codex"` is included, onboarding seeds parallel artifact trees pointing at the same canonical sources.
 
 **Canonical file layout under `core-rules/`:**
 
 | Path | Purpose | Used by |
 |---|---|---|
 | `core-rules/CLAUDE.md` | Parent rules — single source of truth | Claude Code (`.claude/rules/trellis.md` symlink target) |
-| `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex AND AntiGravity (via project root `AGENTS.md` and `.agents/rules/trellis.md`) |
-| `core-rules/skills/<name>/` | Canonical skills | All three harnesses via parallel project symlinks |
-| `core-rules/commands/<name>.md` | Canonical slash commands | All three harnesses (link target differs per harness: see below) |
+| `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex (via project root `AGENTS.md` and `.agents/rules/trellis.md`) |
+| `core-rules/skills/<name>/` | Canonical skills | Both harnesses via parallel project symlinks |
+| `core-rules/commands/<name>.md` | Canonical slash commands | Both harnesses (link target differs per harness: see below) |
 | `core-rules/hooks/` | Tier 1 + 2 Claude Code hooks | Claude Code only |
 | `core-rules/codex/` | Codex hook manifest + scripts | Codex only |
-| `core-rules/husky/` | Tier 3 git hooks | All three (git-level, harness-agnostic) |
+| `core-rules/husky/` | Tier 3 git hooks | Both (git-level, harness-agnostic) |
 
 **Slash-command directory names differ per engine:**
 
@@ -128,35 +127,35 @@ Claude Code is the primary harness. Codex and AntiGravity are secondaries. Trell
 |---|---|---|
 | Claude Code | `.claude/commands/` | Claude Code convention |
 | Codex | `.agents/commands/` | Codex convention; reuses the `AGENTS.md` companion dir |
-| AntiGravity | `.agents/workflows/` | AntiGravity convention (official Google codelabs reference) |
+| Codex (workflows) | `.agents/workflows/` | workflow-style command surface Codex also reads |
 
-All three point at the same canonical files under `core-rules/commands/`. A project enabling all three harnesses ends up with three symlinks (one per harness directory) pointing at the same `primer.md`, `explore.md`, etc.
+Every one of these points at the same canonical files under `core-rules/commands/`. A project enabling both harnesses ends up with symlinks (one per command directory) pointing at the same `primer.md`, `explore.md`, etc.
 
-**What a fully-configured project (Claude + Codex + AntiGravity) looks like:**
+**What a fully-configured project (Claude + Codex) looks like:**
 
 ```
 <project-root>/
 ├── CLAUDE.md                                                ← Claude Code rules entry
-├── AGENTS.md                                                ← symlink → CLAUDE.md (shared: Codex + AntiGravity)
+├── AGENTS.md                                                ← symlink → CLAUDE.md (Codex)
 ├── .claude/
 │   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md
 │   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
 │   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md
 │   ├── hooks/                                               ← Tier 1+2, Claude-only
 │   └── settings.json
-├── .agents/                                                 ← shared between Codex and AntiGravity
+├── .agents/                                                 ← Codex companion dir
 │   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md   (same target as .claude/rules/)
 │   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
 │   ├── skills/process-gate-local/local.config.sh
 │   ├── primers/INDEX.md                                     ← shared primer index
 │   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md  ← Codex-only
-│   └── workflows/primer.md → /…/trellis/core-rules/commands/primer.md ← AntiGravity-only
-└── .codex/                                                  ← Codex-only; AntiGravity has no analog
+│   └── workflows/primer.md → /…/trellis/core-rules/commands/primer.md ← Codex (workflow-style command surface)
+└── .codex/                                                  ← Codex-only
     ├── hooks.json
     └── hooks/*.sh
 ```
 
-Codex project instructions are loaded from `AGENTS.md`; AntiGravity reads the same `AGENTS.md` plus `.agents/`. Keep `AGENTS.md` as a symlink to `CLAUDE.md` unless a project has a deliberate harness-specific override. Codex hooks require the user-level feature flag in `$CODEX_HOME/config.toml`:
+Codex project instructions are loaded from `AGENTS.md` plus `.agents/`. Keep `AGENTS.md` as a symlink to `CLAUDE.md` unless a project has a deliberate harness-specific override. Codex hooks require the user-level feature flag in `$CODEX_HOME/config.toml`:
 
 ```toml
 [features]
@@ -165,23 +164,9 @@ hooks = true
 
 (The older `[features].codex_hooks` key still works as a deprecated alias but emits a warning on Codex CLI 0.129+. New installs should use `hooks`.)
 
-Tier 3 (husky / native git hooks) covers all three harnesses identically.
+Tier 3 (husky / native git hooks) covers both harnesses identically.
 
 For Claude-Code-only projects (default), `.agents/` is omitted entirely.
-
-### Known gap: AntiGravity native hooks deferred
-
-Trellis defers shipping a workspace hook envelope for AntiGravity as of 2026-05-20. The deferral is empirical rather than architectural — AntiGravity 2.0's standalone desktop app does not expose a workspace hooks UI in its Customizations panel, and the workspace hook config path is not documented in the official Google codelabs. (The Antigravity-IDE bundle does contain hook-related code paths internally — events PreToolUse/PostToolUse/Stop and a `hooks.json` reader — but those entry points are not advertised as a public, supported workspace surface today.)
-
-Consequence: Trellis does not seed `.antigravity/` for AntiGravity-enabled projects. Tier 1 and Tier 2 hook enforcement (`block-destructive`, `post-edit-verify`, `stop-verify`, etc.) is **not available** in AntiGravity sessions. Turn-level enforcement on AntiGravity sessions relies on:
-
-- Parent rules via `AGENTS.md` and `.agents/rules/` (load-bearing on every session).
-- Canonical skills via `.agents/skills/` (process-gate and security-gate, invoked by name).
-- Tier 3 (`husky` / native git hooks) at commit/push boundaries — unaffected by the harness gap.
-
-This gap will be re-evaluated via a fresh ADR when Google publishes a workspace hook API (or formally exposes the existing one). Until then, sessions in `agy` are best treated as Tier-3-gated only; high-risk operations (`rm -rf`, schema mutations) that Tier 1 would normally catch in Claude Code or Codex must be caught at commit time on AntiGravity-only projects.
-
-If a maintainer needs strict tool-call enforcement on AntiGravity, the recommended workaround today is to enable Claude Code alongside (`"harnesses": ["claude", "antigravity"]`) and run risky changes through a Claude session before pushing — Tier 1 + 2 protect the diff before it reaches the AntiGravity branch.
 
 ## Native git hooks (Unity / non-Node projects)
 

@@ -23,7 +23,7 @@
 #
 # Engine quirks pinned down (so the assertions are correct, not lucky):
 #   - onboard exits NON-ZERO even on a fully successful seed for a claude-only
-#     project (its last statement is a `{ codex || antigravity; } && echo` short
+#     project (its last statement is a `{ codex; } && echo` short
 #     circuit). doctor.sh treats the AFTER-pass re-check as authoritative, not
 #     onboard's exit — so a repaired symlink + exit 0 from doctor is the proof.
 #   - onboard NEVER-CLOBBERS: it skips files that already exist. So it will NOT

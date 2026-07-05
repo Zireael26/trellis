@@ -15,9 +15,9 @@
 #   - Maps the core's single-line verdict to a Codex control block (the Codex
 #     Stop output schema is Claude-compatible, so the shapes port verbatim):
 #       skip      → exit 0 silently (not applicable).
-#       advisory  → additionalContext note; exit 0 (fail-open: no visual tool,
+#       advisory  → Stop-safe systemMessage note; exit 0 (fail-open: no visual tool,
 #                   dev server unreachable, probe/timeout error).
-#       pass      → additionalContext note with the screenshot path; exit 0.
+#       pass      → Stop-safe systemMessage note with the screenshot path; exit 0.
 #       block     → {"decision":"block",...}; exit 2. The ONLY blocking path:
 #                   a visual tool IS present, the dev server IS up, yet the
 #                   capture produced no artifact. Net: server-down → advisory.
@@ -89,11 +89,11 @@ case "$VERDICT" in
     exit 0
     ;;
   advisory)
-    jq -nc --arg ctx "$REASON" '{additionalContext: $ctx}'
+    _se_emit_system_message "$REASON"
     exit 0
     ;;
   pass)
-    jq -nc --arg ctx "ui-verify: screenshot saved to ${ARTIFACT}" '{additionalContext: $ctx}'
+    _se_emit_system_message "ui-verify: screenshot saved to ${ARTIFACT}"
     exit 0
     ;;
   block)

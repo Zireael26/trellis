@@ -57,6 +57,21 @@ Format: one row per project, one column per tool, with deltas in parens.
 | ... | | | | |
 ```
 
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings
+resolve per-loop override → `.trellis.config.json.loop_safety` →
+`trellis.config.json.loop_safety` → built-in fallback (100 / 3 / $1000). The
+loop halts on any one and emits a structured halt report (which ceiling tripped,
+last progress marker, work done); as a cron loop it surfaces the halt in its run
+report rather than dying silently.
+
+- `max_iterations`: inherit default (100).
+- `no_progress_iterations`: inherit default (3).
+- `budget_ceiling_usd`: inherit default (1000).
+- Progress signal: **new finding** — a per-project regression or cleanup-win
+  surfaced this iteration.
+
 ## Why Tier 2
 
 This is a nice-to-have. The PostToolUse hooks already prevent new

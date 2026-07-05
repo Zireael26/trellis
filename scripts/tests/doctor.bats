@@ -116,8 +116,8 @@ git_init_canonical_main() {
 }
 
 # Write the fixture trellis.config.json. $1 (optional) = space-separated
-# harness list as a JSON array body; defaults to just "claude" so codex/
-# antigravity parity checks stay silent in the healthy path.
+# harness list as a JSON array body; defaults to just "claude" so codex
+# parity checks stay silent in the healthy path.
 write_config() {
   local harnesses_json="${1:-\"claude\"}"
   cat > "$CFG" <<EOF

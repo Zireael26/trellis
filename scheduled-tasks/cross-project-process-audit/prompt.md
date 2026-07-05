@@ -158,7 +158,7 @@ Severity is **info** (minor drift). Rationale: model-specific steering and skill
 
 ### 13. Pre-push wired to the merge gate (warning)
 
-The local `pre-push` git hook is the **cross-harness merge gate**: it runs `run-all.sh --mode=merge` on every harness — including AntiGravity, which runs no workspace hooks — and is fail-closed at push for the deterministic gate set (PR-hygiene / secrets / bypass / tests / docs / stack / security-diff / analyze). A registered project whose `pre-push` is not wired to `run-all.sh` is not getting that merge gate.
+The local `pre-push` git hook is the **cross-harness merge gate**: it runs `run-all.sh --mode=merge` on every harness and is fail-closed at push for the deterministic gate set (PR-hygiene / secrets / bypass / tests / docs / stack / security-diff / analyze). A registered project whose `pre-push` is not wired to `run-all.sh` is not getting that merge gate.
 
 This check uses the **same detection as doctor's `hc_prepush_wired_runall`** (`scripts/lib/health-checks.sh`) so the two never disagree — doctor and this audit must reach the same verdict on the same project:
 
@@ -168,6 +168,22 @@ This check uses the **same detection as doctor's `hc_prepush_wired_runall`** (`s
 - If a `pre-push` exists but does not reference `run-all.sh` → **warning**: `prepush-wired-runall: pre-push present but not wired to run-all.sh — merge gate bypassed` → re-seed the canonical `pre-push`.
 
 Both failure sub-cases are **warning**, matching `hc_prepush_wired_runall`'s `HC_WARN` return in both — this is a wiring gap, not the §3 PR-flow-guard breach (a project can pass §3's PR-flow guard yet fail this merge-gate-wiring check). Note that the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`) remains the after-the-fact backstop: it catches anyone who bypassed the local hook after the fact (`--no-verify`, direct-push, force-push), so an unwired or bypassed `pre-push` is a proactive nudge here while the daily scan is the reactive net.
+
+### 14. Loop-safety declaration presence (warning)
+
+Every Trellis loop MUST declare and honor the three ceilings of the loop-safety contract (`core-rules/loop-safety.md`). This is the contract's **drift check** — folded in here rather than spun up as a separate cron, the way §parent-hook-drift keeps hooks honest. Unlike the per-project checks above, this one runs **once against the control plane**, not per target project: the loops live in `__TRELLIS_PATH__/`.
+
+Read-only. Scan two loop surfaces for a present, non-blank loop-safety declaration:
+
+- **Orchestrate recipes** — every `core-rules/skills/orchestrate/recipes/*.wf.js`. The recipe MUST carry a non-blank `safety` block (it may override any subset of the three ceilings — `max_iterations`, `no_progress_iterations`, `budget_ceiling_usd` — with omitted ceilings inheriting the resolved baseline; a one-shot fan-out declares `no_progress_iterations: null`). Skip `recipes/template.wf.js` (the scaffold itself, whose `safety` block is the documented placeholder).
+- **Scheduled-task prompts** — every `scheduled-tasks/*/prompt.md`. The prompt MUST carry a `## Loop safety` stanza that names the three ceilings and the task's progress signal.
+
+For each loop surface:
+
+- If a present, non-blank declaration is found (a recipe `safety` block, or a `## Loop safety` stanza) → PASS, emit no finding.
+- If the declaration is missing entirely, or present but blank / placeholder-only → **warning**: `loop-safety: <recipe or scheduled-task name> has no loop-safety declaration — contract not honored` → add the recipe `safety` block (per `recipes/template.wf.js`) or the `## Loop safety` stanza (per any compliant scheduled-task prompt), declaring the three ceilings and the task's progress signal.
+
+Severity is **warning**: an undeclared loop is a contract gap, not a live project-state breach. Authoring a loop without the declaration is additionally a `process-gate` / review finding at write time; this check is the after-the-fact net. Report missing declarations under a single **Control plane** entry in the findings section (these are control-plane loops, not findings against an audited project).
 
 ## Output format
 
@@ -201,7 +217,7 @@ Write a single compliance report to `__TRELLIS_PATH__/audits/YYYY-MM-DD-cross-pr
 ## Severity rubric
 
 - **critical**: hook missing entirely, `--no-verify` bypass in the last 7 days, CLAUDE.md missing
-- **warning**: stale hook (parent has updates not pulled), husky missing a standard hook, long-lived in-progress todos, `pre-push` not wired to the merge gate (check 13)
+- **warning**: stale hook (parent has updates not pulled), husky missing a standard hook, long-lived in-progress todos, `pre-push` not wired to the merge gate (check 13), loop-safety declaration missing (check 14)
 - **info**: gotchas.md not updated in 30 days, minor drift, blacklist overdue-for-review, pipeline-skip nudge (check 11), steering-doc/skill-name drift (check 12)
 
 ## Boundaries
@@ -216,3 +232,12 @@ Write a single compliance report to `__TRELLIS_PATH__/audits/YYYY-MM-DD-cross-pr
 If `registry.md` is missing, stop with a clear error — audit cannot run without it.
 If a project in the registry has no `.git/`, note it and skip git-dependent checks (bypass history, recent commits).
 If `__TRELLIS_PATH__/core-rules/hooks/` doesn't exist yet (pre-Phase-2), skip the staleness check and note "parent hook canonical not yet established."
+
+## Loop safety
+
+This scheduled task is a Trellis loop and honors the loop-safety contract (`core-rules/loop-safety.md`). Ceiling values resolve most-specific-wins: per-loop override (this stanza) → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (100 / 3 / $1000). The loop **halts on any one** ceiling and emits a structured halt report (which ceiling tripped, last progress marker, work done); as an unattended cron loop it surfaces that halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default (1000)
+- **Progress signal:** **new finding** — each iteration over a target project should surface at least one new compliance finding (or a clean pass on a not-yet-audited project); a run that produces no new finding and no newly-cleared project for `no_progress_iterations` consecutive iterations has stalled and halts.

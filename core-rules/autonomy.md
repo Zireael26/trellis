@@ -19,7 +19,7 @@ The autonomy slider controls **who answers Trellis's interactive gates** — use
 3. **External messages to others** — Slack, email, PR comments on existing PRs. (PR creation itself flexes; see below.) Always confirm.
 4. **Secrets** — never disclose, never commit. No overrides.
 5. **Definition-of-Done receipts** — verification command + exit code in every "done" claim. Receipts are the audit; cannot skip.
-6. **Code-review + ui-verify on the turns that warrant them** — always run. Code-review fires on every edit-heavy turn (≥3 files or ≥200 lines); ui-verify fires on every diff that touches UI files. Neither is skipped at any level. At L4/L5 the code-review prompt is expanded to verify decision-log completeness vs diff. *(Level-axis guarantee; turn-level-enforced on Claude Code + Codex, SOFT/advisory on AntiGravity — see engineering-process.md §5.5/§7.)*
+6. **Code-review + ui-verify on the turns that warrant them** — always run. Code-review fires on every edit-heavy turn (≥3 files or ≥200 lines); ui-verify fires on every diff that touches UI files. Neither is skipped at any level. At L4/L5 the code-review prompt is expanded to verify decision-log completeness vs diff. *(Level-axis guarantee; turn-level-enforced on Claude Code + Codex — see engineering-process.md §5.5/§7.)*
 
 ## What flexes with the slider
 
@@ -31,6 +31,10 @@ The autonomy slider controls **who answers Trellis's interactive gates** — use
 - Brainstorming question batching.
 - Spec-Kit phase handoff (clarify → spec → plan → tasks → analyze) — at L5 agent answers clarify questions itself with documented reasoning.
 - PR creation — at L5 agent may auto-open PR after gates pass; at L≤4 confirms.
+
+## Loops as an autonomy surface
+
+Loops are an autonomy surface: higher levels run loops with less consultation, and at L4/L5 a loop may run unattended (overnight, cron, `--run-in-background`). The **loop-safety contract** is the halting guarantee that makes that safe — every loop honors three ceilings (`max_iterations`, `no_progress_iterations`, `budget_ceiling_usd`) and hard-stops on any one, so raising autonomy never trades away the guarantee that a runaway loop halts. Full contract: `core-rules/loop-safety.md`.
 
 ## Opus 4.8 alignment
 

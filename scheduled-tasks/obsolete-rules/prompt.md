@@ -102,3 +102,12 @@ Write to `__TRELLIS_PATH__/audits/YYYY-MM-DD-obsolete-rules.md`:
 ## Cadence
 
 Runs quarterly (Jan 1, Apr 1, Jul 1, Oct 1, at 09:00). Triggered after major model launches as well — coordinate with the user. The first run after a model launch is the highest-yield: most pre-launch workarounds become candidates.
+
+## Loop safety
+
+This task is a Trellis loop and honors `core-rules/loop-safety.md`. Ceilings resolve most-specific-first: per-loop override in this stanza → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → built-in fallback constants (100 / 3 / $1000). The loop halts on **any** one ceiling and emits a structured halt report (which ceiling tripped, the last progress marker, and the work done so far); an unattended/cron run surfaces the halt in its run report rather than dying silently.
+
+- `max_iterations`: inherit default (100)
+- `no_progress_iterations`: inherit default (3)
+- `budget_ceiling_usd`: inherit default (1000)
+- Progress signal: **new finding** — a removal proposal (strong or weak) surfaced this iteration that was not present before.
