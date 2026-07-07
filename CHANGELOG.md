@@ -8,6 +8,19 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.6] — 2026-07-07
+
+Loop-selection doctrine. Integrates the Claude team's *"Getting started with loops"* mental model into Trellis. Spec/plan/tasks: `specs/007-loop-selection-doctrine/`. ADR: `docs/adr/2026-07-07-loop-selection-doctrine.md`. Pure doctrine — no new hook, command, or mechanism.
+
+### Added
+
+- **`core-rules/references/loops.md`** — the loop-*selection* layer Trellis lacked. Maps the four loop types (turn-based / goal-based / time-based / proactive) to Trellis primitives with a decision table, and for each **hands off halting to `loop-safety.md`** rather than restating the ceilings. Grounding confirmed Trellis already *leads* the blog on loop safety (the three-ceiling halting contract, dollar + no-progress ceilings, the merge bright-line) but had no doc answering *which* loop to reach for.
+- **Orchestrate norms** (`orchestrate/SKILL.md`) — the **pilot-before-a-large-fan-out** norm (validate a recipe on a 2-3 target subset before scaling) and the canonical **proactive-loop five-stage shape** (detect → triage → resolve-in-parallel → adversarial-review → respond), cross-referencing the recipes that already embody stages (conductor, `drift-holdpr`, `verify-panel`).
+
+### Changed
+
+- **`loop-safety.md`** gains a cross-link (which-loop → `loops.md`; how-it-halts → itself) and a "start simplest — reach for the simplest primitive with a real stop condition" restraint line, the loop-analogue of surgical-default. The blog's operating practices (verification, adversarial review, encode-the-fix, budget awareness) are folded into `loops.md` as **pointers to machinery Trellis already ships** (`stop-verify`/DoD, `verify-panel`, `gotchas`/`propose-rules`/rule-of-three, the three ceilings), not re-authored.
+
 ## [v1.0.0-rc.5] — 2026-07-05
 
 SE-board modernization, agent-skills fold-in, and automation-first. Spec/plan/tasks: `specs/005-se-modernization-and-skill-foldin/`. Built cross-model (Codex adversarially reviewing Claude's work through the tracked wrapped path) — the P0 review caught a HIGH prune-safety bug before it landed.

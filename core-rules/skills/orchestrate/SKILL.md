@@ -82,6 +82,29 @@ metric) — get worked guidance: when, shape, and an example sketch.
 
 Full catalog: [`references/patterns.md`](references/patterns.md).
 
+## Proactive-loop shape + piloting
+
+Two norms for the heavy end — large fan-outs and proactive loops (see
+[`core-rules/references/loops.md`](../../references/loops.md) for *when* to reach
+for one; this is *how* to run it).
+
+**Pilot before a large fan-out.** A dynamic workflow can spawn many agents; a bad
+recipe multiplied across 100 targets is 100× the waste. Before scaling, run the
+recipe over a **small pilot subset** (2-3 targets), confirm the verdict shape and
+the per-target cost, then fan out. `log()` the pilot cost so the full run's
+`budget_ceiling_usd` is grounded, not guessed.
+
+**The proactive-loop shape** — the five canonical stages of an unattended,
+recurring loop, each mapped to machinery Trellis already ships:
+
+1. **Detect** — a `scheduled-tasks/` entry checks for incoming work (the conductor ranks the backlog; audits surface findings).
+2. **Triage** — fan out one agent per item; classify and route.
+3. **Resolve** — worktree-isolated agents work each item in parallel (`isolation: "worktree"`); `drift-holdpr` is this stage for mechanical drift.
+4. **Review** — an adversarial judge checks each fix before it counts (`verify-panel`: Claude + Codex consensus).
+5. **Respond** — open a **HOLD PR** / update the channel; **never merge** (the Component-D merge bright-line holds at every stage).
+
+Every stage inherits the loop-safety ceilings; a proactive routine declares a conservative `budget_ceiling_usd` and pilots first.
+
 ## Recipe library
 
 The recipes are **generic, parametric skeletons** — not one-shot scripts. Targets,

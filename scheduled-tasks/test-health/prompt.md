@@ -8,6 +8,13 @@ This task **must** run on the user's macOS host. Every registered project's `nod
 
 If the macOS host is unavailable for a run, emit a single `info` finding (`test-health audit could not run: macOS host unavailable`) and stop. Do not fall back to a linux sandbox; the results are uniformly meaningless.
 
+**Preflight host-gate (run this BEFORE the per-project sweep — do not skip it).** Do not rely on the runner knowing it is off-host; probe actively and halt on a mismatch:
+
+1. `uname -sm` — if it is not `Darwin arm64`, you are off-host.
+2. Corroborate against the working trees: spot-check one JS project's `node_modules` for platform bindings (e.g. `@rolldown/binding-linux-*` present, or `@esbuild/darwin-arm64` present while `uname` reports Linux). A darwin-hydrated tree under a Linux kernel is the exact 2026-07-06 failure shape.
+
+If either signal shows you are **not** on the darwin-arm64 host, **STOP immediately** and emit a single wrong-host halt (`info` — `test-health could not run: off-host (uname=<...>); darwin node_modules cannot execute under this kernel`). Do **not** iterate the projects and do **not** emit per-project `unrunnable`/red rows — those read as regressions and are noise (this is exactly what the 2026-07-06 run got wrong: 9 phantom rows instead of one halt).
+
 When sampling worktree state, do NOT invoke `git status` against project worktrees — the audit-sandbox `.git/` permission shape (write-allowed but unlink-denied) leaves a 0-byte `.git/index.lock` behind that the sandbox cannot remove and the host's next `git commit` will block. Use direct reads of `.git/HEAD` and `.git/refs/heads/<branch>` instead.
 
 ## Inputs

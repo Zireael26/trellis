@@ -41,6 +41,13 @@ For each target project, scan the **last 24 hours** of git history and reflog:
 - Known Trellis automation sync subjects such as `chore(trellis): sync ...`,
   `chore(codex): sync ...`, and hook-runtime refreshes are not bypass findings
   unless paired with explicit bypass evidence.
+- **Sanctioned bot / data-only refresh carve-out.** A non-merge commit on `main`
+  authored by a bot identity (`*@users.noreply.github.com`, e.g. `stats-bot`) whose
+  diff touches only generated/data files (e.g. `public/data/*.json`, no source) and
+  is produced by a checked-in workflow is **sanctioned automation, not a bypass** —
+  do not flag it. This suppresses the recurring akaushik.org `chore(stats): daily
+  refresh` false-positive. Flag such a commit only if it also carries explicit
+  bypass evidence (`--no-verify`, force-push, or a source-code diff).
 - If evidence is incomplete, record it as `classification: needs-confirmation`
   and **warning**, not critical. Critical is reserved for confirmed bypasses.
 
