@@ -8,6 +8,23 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.7] — 2026-07-07
+
+Process parity + the mandatory feature pipeline. Makes process enforcement **equal across Claude Code and Codex** and makes the spec pipeline **mandatory for feature-sized changes** — both via one lever: a deterministic pre-push gate keyed on git/filesystem state, so the state (not the model) decides. **Default OFF**; the public template ships off and a fresh install is unchanged. Spec/plan/tasks/clarify: `specs/006-process-parity-and-mandatory-pipeline/`. ADR: `docs/adr/2026-07-07-mandatory-pipeline-and-parity.md`.
+
+### Added
+
+- **The spec-gate** (`core-rules/hooks/lib/spec-gate-core.sh` + `core-rules/hooks/spec-gate.sh` + the byte-identical Codex twin). A pure function of git/fs state: over a size floor, a branch's push is refused unless ONE of — a **spec triad added in this branch's range** (+ an interview artifact), a size-capped **`/surgical`** declaration, or a logged **`/surgical --emergency`** override. Load-bearing teeth at **pre-push** (harness-agnostic git hook = parity by construction); a **Stop-hook** early-warning on both manifests. Fail-**open** on a broken env, fail-**closed** on a present-but-malformed config.
+- **`/surgical` command** (`core-rules/commands/surgical.md`) + the marker writer (`spec-gate.sh --mark` / `--mark-emergency`). Writes a branch-bound, size-capped exemption marker; over-ceiling surgical claims and emergency overrides are appended to a gitignored audit log. Inherits to `.claude/commands` + `.agents/commands` + `.agents/workflows`.
+- **`mandatory_pipeline` config block** (`enabled` default false, `spec_required_diff_lines` 80, `surgical_max_diff_lines` 400) — in the operator config, the template example, and the JSON schema. Resolution: project-local → central → built-in (off).
+- **Doctor Codex-runtime check** (`hc_codex_hooks_enabled`) — warns when Codex is enabled but its runtime hooks are off (`[features] hooks = true`), the condition that would silently no-op the whole Codex enforcement path.
+- **Tests**: `scripts/tests/spec-gate.bats` (25 cases incl. default-off, C-CRIT-1/2, surgical/emergency + audit, branch-bound isolation, L4/5 path, fail-open/closed, determinism, Stop-mode block, harness parity) + `scripts/tests/codex-hooks-enabled.bats` (6 cases).
+
+### Changed
+
+- **Doctrine reconciled across 10 files** to one knob-conditional statement (`engineering-process.md` §14.7 authoritative): the `clarify → spec → plan → tasks → analyze` pipeline is **opt-in by default**; when `mandatory_pipeline` is enabled it is **required for above-floor changes**; sub-floor work stays surgical-default at every setting. The old "always opt-in" assertions in `spec`/`clarify`/`analyze`/`execute`/`README`/`inheritance` were rewritten; `brainstorming`'s always-on design-gate is preserved and gains the gate-interaction clause (recognized form required above the floor — no surgical dodge for real features). `CLAUDE.md` Planning + Autonomy and `autonomy.md` state the pipeline is **not** a bright-line guardrail — *who answers* the intake follows the slider (L1–3 `clarify.md`/waiver, L4/5 `decisions-log`).
+- **Cross-project process audit** — check 11 reconciled to knob-conditional; new **check 11b** surfaces the gate's audit trail (oversized-surgical + open emergency-overrides with no follow-up spec).
+
 ## [v1.0.0-rc.6] — 2026-07-07
 
 Loop-selection doctrine. Integrates the Claude team's *"Getting started with loops"* mental model into Trellis. Spec/plan/tasks: `specs/007-loop-selection-doctrine/`. ADR: `docs/adr/2026-07-07-loop-selection-doctrine.md`. Pure doctrine — no new hook, command, or mechanism.

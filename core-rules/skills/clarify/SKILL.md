@@ -5,7 +5,7 @@ description: Front-load the spec-kit pipeline with a structured question pass. U
 
 # clarify
 
-Front step of the opt-in spec → plan → tasks pipeline. The pipeline only works as well as the spec; the spec only works as well as the question pass that fed it. `clarify` is the question pass.
+Front step of the spec → plan → tasks pipeline (opt-in by default; **required** for above-floor changes when `mandatory_pipeline` is enabled — `engineering-process.md` §14.7). The pipeline only works as well as the spec; the spec only works as well as the question pass that fed it. `clarify` is the question pass.
 
 The skill produces `clarify.md` sitting beside `spec.md`. It does NOT write the spec — that's still the `spec` skill's job downstream. Clarify's deliverable is the answers, captured verbatim, with the operator's voice preserved.
 
@@ -81,5 +81,5 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 
 ## Relationship to the rest of the pipeline
 
-- **Before `spec`.** The spec skill reads `clarify.md` if it exists. If clarify wasn't run, the spec skill suggests running it for non-trivial features but does not hard-block (the pipeline stays opt-in).
+- **Before `spec`.** The spec skill reads `clarify.md` if it exists. If clarify wasn't run, the spec skill suggests running it for non-trivial features but does not itself hard-block (the triad is opt-in by default). When `mandatory_pipeline` is enabled at autonomy L1–L3, the intake interview **is** required for above-floor feature work: `clarify.md` (or a `.claude/spec-waiver`) is the artifact that satisfies the pre-push gate. At L4/L5 the agent self-answers the intake and logs the decisions to `decisions-log.md` instead — same gate, autonomy only changes *who answers* (§14.9).
 - **Before `analyze`.** Not a direct dependency, but `analyze` uses `clarify.md` (when present) as one of the inputs for drift detection — if the spec drifted away from the operator's original intent captured in clarify, that's a major drift finding.

@@ -347,6 +347,10 @@ run_tier0 hc_version_changelog_coherent "$CANON"
 # Canonical-side, single-arg, WARN-class (report-only): the dod-receipt grammar
 # anchor must live in core-rules/CLAUDE.md so execute receipts have a contract.
 run_tier0 hc_receipt_grammar_present "$CANON"
+# Codex-runtime precondition (spec 006 PD8): the Codex hooks — incl. the spec-gate
+# teeth — silently no-op unless the runtime has [features] hooks = true. Global,
+# no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
+run_tier0 hc_codex_hooks_enabled
 
 # Tier-0 runs before any project, so N_ERROR here is purely Tier-0. Capture it:
 # Tier-0 is REPORT-ONLY (--fix never mutates the canonical clone), AND a
@@ -630,7 +634,7 @@ run_project_checks() {
           [ "$csha" != "$dsha" ] && codex_stale="$codex_stale $cfn"
         done
       fi
-      for cfn in code-reviewer.sh ui-verify-core.sh; do
+      for cfn in code-reviewer.sh ui-verify-core.sh spec-gate-core.sh; do
         csrc="$CANON/core-rules/hooks/lib/$cfn"
         [ -f "$csrc" ] || continue
         cdst="$proj/.codex/hooks/lib/$cfn"

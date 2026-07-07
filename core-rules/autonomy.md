@@ -30,6 +30,7 @@ The autonomy slider controls **who answers Trellis's interactive gates** — use
 - Codebase pattern-conflict resolution.
 - Brainstorming question batching.
 - Spec-Kit phase handoff (clarify → spec → plan → tasks → analyze) — at L5 agent answers clarify questions itself with documented reasoning.
+- Mandatory-pipeline intake interview (when `mandatory_pipeline` is enabled, spec 006). The pre-push *gate* is deterministic and fires the same at every level — it is **not** a bright-line guardrail, but the slider does not switch it off. What flexes is *who answers* the feature-intake: at **L1–L3** `clarify` interviews the user and `clarify.md` (or a `.claude/spec-waiver`) satisfies the gate; at **L4/L5** the agent self-answers and a `decisions-log.md` entry naming the branch satisfies it. See `engineering-process.md` §14.7 + `core-rules/hooks.md`.
 - PR creation — at L5 agent may auto-open PR after gates pass; at L≤4 confirms.
 
 ## Loops as an autonomy surface

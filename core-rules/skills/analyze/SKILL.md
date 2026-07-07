@@ -5,7 +5,7 @@ description: Cross-check `spec.md`, `plan.md`, `tasks.md` (and `clarify.md` if p
 
 # analyze
 
-Tail step of the opt-in spec → plan → tasks pipeline. The pipeline produces three (or four, with clarify) artifacts that should mutually reinforce. In practice they drift: a plan mentions a service the spec didn't request; tasks miss a success criterion; clarify captured a constraint the plan ignores. Analyze catches that drift.
+Tail step of the spec → plan → tasks pipeline (opt-in by default; required for above-floor changes when `mandatory_pipeline` is enabled — `engineering-process.md` §14.7). The pipeline produces three (or four, with clarify) artifacts that should mutually reinforce. In practice they drift: a plan mentions a service the spec didn't request; tasks miss a success criterion; clarify captured a constraint the plan ignores. Analyze catches that drift.
 
 Output is `specs/<NNN>-<slug>/analyze.md` — advisory only. Operator reads it and either fixes the artifacts or explicitly notes a finding as "accepted divergence" in a follow-up commit. Skill never modifies any other file.
 

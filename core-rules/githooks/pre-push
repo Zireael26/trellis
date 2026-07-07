@@ -54,6 +54,28 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   esac
 done
 
+# --- spec-gate (mandatory-pipeline, spec 006) — LOAD-BEARING teeth ---
+# Blocks a push whose branch carries over-floor feature code with no spec triad,
+# no size-capped /surgical declaration, and no emergency override. Deterministic
+# (git/fs state only) => equal on Claude + Codex. No-op unless
+# mandatory_pipeline.enabled in trellis.config.json; fail-open on a broken env
+# (the gate returns 'advisory', which does not block). Locate the harness-neutral
+# entrypoint: .claude first, .agents fallback.
+SPECGATE=""
+if [ -f .claude/hooks/spec-gate.sh ]; then
+  SPECGATE=.claude/hooks/spec-gate.sh
+elif [ -f .agents/hooks/spec-gate.sh ]; then
+  SPECGATE=.agents/hooks/spec-gate.sh
+fi
+if [ -n "$SPECGATE" ]; then
+  if bash "$SPECGATE" --gate; then
+    :
+  else
+    echo "[pre-push] spec-gate blocked this push (mandatory pipeline). Resolve per the remedies above, or override for a true emergency with /surgical --emergency." >&2
+    exit 1
+  fi
+fi
+
 echo "[pre-push] Trellis verification starting (mode=$MODE)..."
 
 # --- process-gate merge gate ---

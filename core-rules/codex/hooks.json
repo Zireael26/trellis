@@ -88,6 +88,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/spec-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking spec-gate..."
+          },
+          {
+            "type": "command",
             "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/save-context-log.sh\"",
             "timeout": 10,
             "statusMessage": "Saving session context..."

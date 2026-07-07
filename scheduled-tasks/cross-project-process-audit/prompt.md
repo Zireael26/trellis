@@ -134,7 +134,7 @@ Rationale: large repos pay a per-session exploration cost the agent does not nee
 
 ### 11. Pipeline-skip nudge (advisory)
 
-The `clarify → spec → plan → tasks → analyze` pipeline (`engineering-process.md` §14.7) is **opt-in**. A project is never required to run it, so mere absence of spec/plan artifacts is **not** a finding — flagging it would fire on nearly every project and bury the report in noise. This check fires only on a signal that a **feature-sized** change *should* have used the heavyweight track: a genuinely large landing in the audit window with no corresponding spec/plan artifact alongside it. The bar is deliberately high — ordinary weekly maintenance churn must NOT trip it.
+The `clarify → spec → plan → tasks → analyze` pipeline (`engineering-process.md` §14.7) is **opt-in by default**. For a project **without** `mandatory_pipeline.enabled` in its config, it is never required to run, so mere absence of spec/plan artifacts is **not** a finding — flagging it would fire on nearly every project and bury the report in noise. This nudge fires only on a signal that a **feature-sized** change *should* have used the heavyweight track: a genuinely large landing in the audit window with no corresponding spec/plan artifact alongside it. The bar is deliberately high — ordinary weekly maintenance churn must NOT trip it. (For a project **with** the knob **on**, the pre-push spec-gate already enforces this deterministically at the git boundary, so the nudge is redundant there — but check 11b below surfaces the gate's own audit trail.)
 
 Procedure (read-only). Use the same 8-day window as check 4 (this is the *weekly* audit, not the daily bypass scan). The window is wide, so the threshold must be feature-scale, not per-turn — a project doing normal maintenance (a few hundred lines across several files of routine work) must stay silent:
 
@@ -144,7 +144,16 @@ Procedure (read-only). Use the same 8-day window as check 4 (this is the *weekly
 - If a **feature-sized landing** occurred (primary OR secondary signal) **and** no `docs/specs/` or `docs/plans/` artifact was added/modified in the window → **info**: `pipeline-skip nudge: a feature-sized change landed (<new subsystem / single large landing>) with no spec/plan artifact under docs/specs|plans in the window` → suggest, as a nudge not a block, that a change of this scale is a candidate for the opt-in `clarify → spec → plan` track next time (or a short `docs/plans/<topic>.md` retroactively if the work is still in flight).
 - If no feature-sized landing occurred (only routine churn), or a spec/plan artifact was touched in the window → emit no finding. When in doubt, stay silent — a false nudge is worse than a missed one for an advisory category.
 
-Severity is **info** by design — the pipeline is opt-in, so this is a forward-looking nudge, never a compliance failure. Skip this check if the project has no `.git/` (no window history to measure).
+Severity is **info** by design — the pipeline is opt-in by default, so this is a forward-looking nudge, never a compliance failure. Skip this check if the project has no `.git/` (no window history to measure).
+
+### 11b. Mandatory-pipeline audit trail (spec 006)
+
+Only for a project that has opted in (`mandatory_pipeline.enabled: true` in its `.trellis.config.json`/`trellis.config.json`). The pre-push spec-gate records two kinds of override in `<canonical-root>/.claude/spec-gate-audit.log` (tab-separated: `timestamp  kind  branch  detail  reason`). This is a gitignored, per-machine runtime file — read it read-only where it exists; if absent, emit no finding (the gate has simply never had to log an override). Scope to the same 8-day window as check 4 by the leading ISO timestamp.
+
+- **`oversized-surgical`** — someone declared `/surgical` on a change that exceeded the surgical ceiling (a feature-sized change dressed as mechanical). Each in-window occurrence → **warn**: `oversized-surgical: <branch> declared surgical at <diff> lines over the ceiling — this is feature-scale work; it needs a spec triad, not a surgical declaration`. Include the logged reason.
+- **`emergency-override`** — an any-size `/surgical --emergency` push. Legitimate for a genuine urgent fix, but it **obligates a post-facto spec**. For each in-window emergency-override branch, check whether a `specs/NNN-*/` triad was subsequently added for that work (`git log --name-only -- specs/`). If none → **warn**: `open emergency-override: <branch> pushed under emergency with no follow-up spec — the post-facto spec obligation is outstanding`. If a triad landed → emit no finding (debt cleared). Include the logged reason.
+
+Severity is **warn** (not critical): the gate already let the push through by design; this surfaces the debt so it does not quietly accumulate. Skip entirely if the knob is off or the log is absent.
 
 ### 12. Steering-doc / skill-name drift (advisory)
 

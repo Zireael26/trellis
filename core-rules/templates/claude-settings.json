@@ -140,6 +140,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/spec-gate.sh",
+            "timeout": 15,
+            "statusMessage": "Checking spec-gate..."
+          },
+          {
+            "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-verify.sh",
             "timeout": 300,
             "statusMessage": "Running final verification..."

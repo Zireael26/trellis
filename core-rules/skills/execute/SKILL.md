@@ -20,7 +20,7 @@ Where available, the Stop hook (`stop-verify.sh`) hard-gates each turn. Execute 
 ## When NOT to use
 
 - No task list exists yet. Run `spec` → `plan` → `tasks` (or write the plan) first. Execute builds a list; it does not author one.
-- A one-line surgical fix that never went through the pipeline. Just make the change with a receipt.
+- A one-line surgical fix that never went through the pipeline. Just make the change with a receipt. (When `mandatory_pipeline` is enabled this stays valid **below the size floor**; a larger *mechanical* change over the floor must be declared with `/surgical`, and *feature* work over the floor takes the triad — §14.7.)
 - Crossing the merge boundary. That is the `process-gate` skill, not this one.
 
 ## Input contract — two dialects

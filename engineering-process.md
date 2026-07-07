@@ -926,14 +926,14 @@ Severity contract is shared between `upgrade.sh` and `version-drift`. If you cha
 
 **`doctor` is the verification gate after every update** — it is the deterministic check that adopted rules actually reached the projects, which the version pin alone does not verify. Two lessons this sequence encodes (from the 2026-05-30 drift incidents): a canonical checkout left on a feature branch silently unparents every project, so confirm canonical-is-on-`main` *before* trusting inheritance; and resolve symlink targets rather than assuming a name implies its target, since a stale or cross-machine target drops the rule with no error. See `docs/UPGRADING.md` for the step-by-step runbook and `docs/adr/2026-05-30-trellis-doctor.md` for the rationale.
 
-### 14.7 The clarify → spec → plan → tasks → analyze pipeline (opt-in)
+### 14.7 The clarify → spec → plan → tasks → analyze pipeline (opt-in by default; enforceable via `mandatory_pipeline`)
 
 Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague request through structured questioning, formal specification, technical planning, work breakdown, and a final coherence check. They live as canonical skills under `core-rules/skills/{clarify,spec,plan,tasks,analyze}/` and are seeded into every registered project's `.claude/skills/` (and `.agents/skills/` under Codex) by `onboard-project.sh` / `scripts/rollout-feature-skills.sh`.
 
 **This pipeline is the heavyweight track of a three-track router.** The `brainstorming` front-door (the canonical skill ships under `core-rules/skills/brainstorming/`) sizes every change to one of three tracks before any building begins. The same boundaries are stated in `core-rules/inheritance.md` and the `brainstorming` skill itself:
 
 - **Surgical** — a tiny, obvious change with one clear correct shape (one-line fix, copy tweak, config flip). Skip ideation and skip the pipeline; make the change directly with a receipt, or hand it to `execute` if a checkbox already exists.
-- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author `docs/plans/<topic>.md`, then build it with `execute`.
+- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author `docs/plans/<topic>.md`, then build it with `execute`. *(When `mandatory_pipeline` is enabled, the `docs/plans`-only route satisfies the gate only **below the size floor**. Above the floor a lightweight **feature** escalates to the full triad; genuinely lightweight **mechanical** work over the floor takes the `/surgical` route instead — decision D10, spec 006.)*
 - **Heavyweight** — cross-cutting / load-bearing / multi-subsystem work, vague or contradictory intent, or three-plus acceptance criteria. **This is the pipeline below:** `clarify` → `spec` → `plan` → `tasks` → `analyze`, then build with `execute`.
 
 All three tracks converge on the single canonical builder, **`execute`** (`core-rules/skills/execute/`, shipped Phase 4) — it is the implement/build stage that turns a plan's or `tasks.md`'s checkboxes into shipped, receipted work. The pipeline below produces the design artifacts; `execute` is what runs *after* them. When unsure between two tracks, choose the heavier one — a little extra design is cheap; a wrong "surgical" change is not.
@@ -948,6 +948,12 @@ Trellis's default is surgical scope. The pipeline is for changes that DON'T fit 
 - The operator explicitly says "spec this out first" or asks for a write-up.
 
 If none apply, skip the pipeline. Bug fixes with clear reproductions, refactors with no behaviour change, single-file additions, and operational tasks all stay on the surgical-default path: failing test → fix → PR.
+
+**When `mandatory_pipeline` is enabled, the decision rule above stops being a judgment call above the floor (spec 006).** The canonical statement, one wording across this section and every skill doc:
+
+> By default the pipeline is **opt-in** and the decision rule above is advisory — sub-floor and clearly-surgical work skips it, exactly as before. When the operator sets `mandatory_pipeline.enabled` in `trellis.config.json` (default **off**; the public template ships off), a branch whose **net gated diff exceeds `spec_required_diff_lines`** cannot be pushed without ONE of: a **spec triad** added on this branch (+ the interview artifact), a size-capped **`/surgical`** declaration (≤ `surgical_max_diff_lines`), or a logged **`/surgical --emergency`** override. **Sub-floor work stays surgical-default at every setting.** The gate is deterministic (a pure function of git/filesystem state), so it enforces equally on Claude Code and Codex; with the knob off, behavior is identical to prior Trellis. Full mechanism: `core-rules/hooks.md` (spec-gate) + `specs/006-process-parity-and-mandatory-pipeline/`.
+
+This is **not** a bright-line guardrail and not new `MUST` prose — it is a config-gated, default-off deterministic trigger in front of the already-mandatory-in-prose pipeline (the sanctioned "more automatic" path per ADR 2026-07-05). What flexes with autonomy is only *who answers* the intake interview (§14.9): at L1–L3 `clarify` genuinely interviews the user and writes `clarify.md`; at L4/L5 the agent self-answers and logs to `decisions-log.md`. The gate's block fires the same at every level; the level only changes how you satisfy it.
 
 **Where each skill fits:**
 

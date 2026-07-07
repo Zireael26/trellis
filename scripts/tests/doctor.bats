@@ -31,8 +31,8 @@ LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null
 
 # The full canonical inheritance surface a healthy project carries. Kept in
 # lockstep with HC_CANONICAL_SKILLS / HC_CANONICAL_COMMANDS in health-checks.sh.
-CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze"
-CANON_COMMANDS="primer primer-refresh primer-check explore autonomy"
+CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief"
+CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
   SANDBOX="$(mktemp -d)"

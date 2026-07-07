@@ -55,7 +55,7 @@ CANONICAL_HOOKS_DIR="$CANONICAL_CODEX_DIR/hooks"
 # of truth). The Codex hooks source them from .codex/hooks/lib/, so we deploy
 # them from here rather than duplicating copies under core-rules/codex/.
 CANONICAL_REVIEWER_LIB_DIR="$SOURCE_ROOT/core-rules/hooks/lib"
-REVIEWER_CORES="code-reviewer.sh ui-verify-core.sh"
+REVIEWER_CORES="code-reviewer.sh ui-verify-core.sh spec-gate-core.sh"
 REGISTRY="$TRELLIS_ROOT/registry.md"
 BLACKLIST="$TRELLIS_ROOT/blacklist.md"
 

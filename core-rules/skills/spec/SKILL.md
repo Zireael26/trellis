@@ -5,9 +5,9 @@ description: Turn a vague product or engineering request into a written feature 
 
 # spec
 
-Opt-in companion to Trellis's surgical-default discipline. Surgical scope is right for bug fixes, refactors, and tightly-scoped changes. Greenfield features and behaviour that crosses multiple files benefit from spelling out *what* and *why* before *how*. This skill produces that artifact.
+Opt-in-by-default companion to Trellis's surgical-default discipline — and the **required** path for above-floor changes when `mandatory_pipeline` is enabled (spec 006; canonical statement in `engineering-process.md` §14.7). Surgical scope is right for bug fixes, refactors, and tightly-scoped changes. Greenfield features and behaviour that crosses multiple files benefit from spelling out *what* and *why* before *how*. This skill produces that artifact.
 
-The spec is the load-bearing input to the `plan` skill (technical design) and then `tasks` (work breakdown). Together they form the spec → plan → tasks pipeline borrowed from spec-kit. The triad is **always opt-in**; the agent or operator invokes them deliberately. Day-to-day surgical changes do not use them.
+The spec is the load-bearing input to the `plan` skill (technical design) and then `tasks` (work breakdown). Together they form the spec → plan → tasks pipeline borrowed from spec-kit. The triad is **opt-in by default** — the agent or operator invokes it deliberately for feature-scale work, and day-to-day surgical changes do not use it. When `mandatory_pipeline` is enabled (spec 006, default off), the triad becomes **required** for any change whose net gated diff exceeds the size floor; sub-floor work stays surgical-default either way. Canonical statement: `engineering-process.md` §14.7.
 
 ## When to use
 
@@ -28,7 +28,7 @@ If you're unsure, ask the operator: "Should I spec this first or jump straight t
 
 ## How to use
 
-0. **(Recommended) Run the `clarify` skill first** when the request is vague, contradictory, or leaves any of the five canonical questions (intent, users, success metric, edge cases, rollback plan) unresolved. Clarify writes `clarify.md` beside the (template) spec.md; the spec skill reads it before filling the real content. The pipeline stays opt-in — if the operator has handed you a tight, well-shaped request, skip clarify and go straight to step 1.
+0. **(Recommended) Run the `clarify` skill first** when the request is vague, contradictory, or leaves any of the five canonical questions (intent, users, success metric, edge cases, rollback plan) unresolved. Clarify writes `clarify.md` beside the (template) spec.md; the spec skill reads it before filling the real content. Clarify is recommended, not required, for the triad — if the operator has handed you a tight, well-shaped request, skip clarify and go straight to step 1. (When `mandatory_pipeline` is enabled at autonomy L1–L3, the intake interview **is** required above the size floor: `clarify.md` or a `.claude/spec-waiver` is the artifact that satisfies the gate; at L4/L5 the agent self-answers and logs to `decisions-log.md` instead — §14.9.)
 1. **Pick a slug.** Kebab-case, descriptive, ≤40 chars. Examples: `quote-checkout`, `webhook-replay`, `mobile-offline-cache`. Avoid generic slugs like `new-feature` or `improvements`.
 2. **Run `scripts/new-feature.sh <slug>`.** The script:
    - Refuses to run if the working tree is dirty or the current branch isn't `main`/`master`.
@@ -39,6 +39,16 @@ If you're unsure, ask the operator: "Should I spec this first or jump straight t
    - Prints the file path for the operator (or `$EDITOR` if set + interactive).
 3. **Fill in the template.** If `specs/<NNN>-<slug>/clarify.md` exists from a prior `clarify` invocation, read it first — operator's voice in clarify is the authoritative input to the spec; quote from it where helpful, don't drift from it. Sections, in order: Problem statement, Users + scenario, Success criteria (testable), Non-goals, Constraints, Open questions, Risks, Out of scope (intentional). The skill must complete every section; "TBD" is acceptable for items the operator cannot pin down yet, but the section header stays.
 4. **Stop after writing.** Do not start coding. Do not invoke the `plan` skill in the same turn unless the operator asks. The spec is reviewed before the plan begins.
+
+## Remediation — adding a spec to work already in progress
+
+The intended flow is spec-**first**: scaffold on a clean `main`, then build. But when `mandatory_pipeline` is enabled you can hit the gate *after* already writing feature code on a branch — the pre-push block says "over the floor, no spec." The sanctioned remediation is **commit WIP → author the triad in-place → continue**, not "start over":
+
+1. **Commit the WIP** on your current branch. `new-feature.sh` refuses a dirty tree, and you do not want a scaffold that discards uncommitted work.
+2. **Author the triad in-place, on THIS branch.** `new-feature.sh` assumes greenfield — it creates a *new* `feature/<slug>` branch from `main`, which is wrong when you already have commits on a feature branch. So for remediation, create `specs/<NNN>-<slug>/` directly on your branch (next zero-padded NNN) and write `spec.md`, `plan.md`, `tasks.md` from the templates under `references/` (and `clarify.md` if L1–L3). The gate checks that the triad was **added in this branch's range** and is non-template — where it came from does not matter.
+3. **Commit the triad and continue.** The gate now sees a valid in-range triad + interview artifact and lets the push through.
+
+If the change is genuinely small/mechanical rather than a real feature, do **not** manufacture a spec — declare it with `/surgical "<why>"` instead. Reserve this remediation for work that actually warrants a spec.
 
 ## Output contract
 

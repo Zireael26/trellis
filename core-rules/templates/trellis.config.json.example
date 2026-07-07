@@ -37,5 +37,12 @@
     "free_space_floor_gb": 30,
     "cache_ceiling_gb": 20,
     "skip_projects": []
+  },
+
+  "comment_mandatory_pipeline": "Optional (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff over spec_required_diff_lines cannot be pushed without ONE of: a spec triad added on this branch (+ interview artifact), a size-capped `/surgical` declaration (<= surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push (equal on Claude + Codex by construction) with a Stop-hook early-warning. Default OFF: absence or enabled:false is byte-identical to prior behavior; a present-but-malformed block fails CLOSED. Leave enabled:false until your team is ready to require specs for feature-sized changes.",
+  "mandatory_pipeline": {
+    "enabled": false,
+    "spec_required_diff_lines": 80,
+    "surgical_max_diff_lines": 400
   }
 }

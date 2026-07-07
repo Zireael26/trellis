@@ -192,6 +192,27 @@
         }
       },
       "additionalProperties": true
+    },
+    "mandatory_pipeline": {
+      "description": "Optional. The mandatory feature-pipeline gate (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff vs the protected merge-base (excluding tests/docs/specs/audits/lockfiles/generated/operational paths) exceeds spec_required_diff_lines cannot be pushed unless ONE of three routes is satisfied: a spec triad added on THIS branch (+ an interview artifact), a size-capped `/surgical` declaration (net gated diff ≤ surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push — a pure function of git/filesystem state, so it is equal on Claude and Codex by construction — with a Stop-hook early-warning. Every key is optional; absence of the object, or enabled:false, is byte-identical to prior behavior (default OFF). A present-but-malformed block fails CLOSED (an opted-in project must not be silently disabled by a typo). Resolution, most specific wins: project-local <project>/.trellis.config.json.mandatory_pipeline → this central block → built-in (off, floor 80, ceiling 400).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch for the mandatory-pipeline gate. Default false — absence or false is byte-identical to pre-006 behavior.",
+          "type": "boolean"
+        },
+        "spec_required_diff_lines": {
+          "description": "Size floor: net gated diff (added+deleted, excluded paths removed) at or below this many lines is treated as sub-floor and passes with no spec (surgical-by-default). Above it, the branch must take one of the three routes. Default 80.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "surgical_max_diff_lines": {
+          "description": "Surgical ceiling: a `/surgical` declaration is honored only while the net gated diff stays at or below this many lines. Grow past it and the marker is invalid — the gate re-blocks and audit-logs an `oversized-surgical` line; use `/surgical --emergency` for genuine over-cap urgency. Default 400.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

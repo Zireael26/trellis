@@ -9,8 +9,8 @@
 #       → canonical skills (symlinks; always-on: process-gate + security-gate,
 #         opt-in pipeline: clarify → spec → plan → tasks → analyze,
 #         capability-gated dynamic-workflow kit: orchestrate)
-#   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore}.md
-#       → canonical commands (symlinks; feature primer system + /explore)
+#   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore,autonomy,surgical}.md
+#       → canonical commands (symlinks; feature primer system + /explore + /autonomy + /surgical)
 #   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
@@ -22,13 +22,13 @@
 #   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
 #       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex]
 #   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex]
-#   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore}.md
+#   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore,surgical}.md
 #       (tracked copies; workflow aliases remain portable across teammates)  [if codex]
 #   - <project>/.agents/skills/process-gate-local/local.config.sh (copy of Claude local config)
 #                                                                     [if codex]
 #
 # Codex-only surface:
-#   - <project>/.agents/commands/{primer,primer-refresh,primer-check,explore}.md
+#   - <project>/.agents/commands/{primer,primer-refresh,primer-check,explore,autonomy,surgical}.md
 #       → canonical commands (Codex reads commands/)  [if codex]
 #   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if codex]
 #
@@ -442,6 +442,8 @@ HDR
 # Per-developer, per-session state written by Trellis commands and hooks.
 # NOT shared across machines. See core-rules/autonomy.md and hooks.md.
 .claude/session-autonomy
+.claude/session-surgical
+.claude/spec-gate-audit.log
 .claude/.fail-counter
 .codex/.fail-counter
 .claude/.reread-state/
@@ -500,6 +502,7 @@ untrack_if_tracked ".claude/commands/primer-refresh.md"
 untrack_if_tracked ".claude/commands/primer-check.md"
 untrack_if_tracked ".claude/commands/explore.md"
 untrack_if_tracked ".claude/commands/autonomy.md"
+untrack_if_tracked ".claude/commands/surgical.md"
 untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
 untrack_if_tracked ".agents/skills/security-gate"
@@ -517,6 +520,7 @@ untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
 untrack_if_tracked ".agents/commands/explore.md"
 untrack_if_tracked ".agents/commands/autonomy.md"
+untrack_if_tracked ".agents/commands/surgical.md"
 
 # Claude Code inheritance: rules + skills + hooks.
 # Canonical skills shipped today: process-gate, security-gate (always on),
@@ -552,6 +556,7 @@ seed_symlink "$CANONICAL_COMMANDS_DIR/primer-refresh.md"  "$PROJECT/.claude/comm
 seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"    "$PROJECT/.claude/commands/primer-check.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"         "$PROJECT/.claude/commands/explore.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"        "$PROJECT/.claude/commands/autonomy.md"
+seed_symlink "$CANONICAL_COMMANDS_DIR/surgical.md"        "$PROJECT/.claude/commands/surgical.md"
 
 # Primer INDEX — opt-in feature primer system. INDEX is project-state (copied,
 # not symlinked) so each project owns its primer list. Empty INDEX = "primers
@@ -610,6 +615,7 @@ if pg_has_harness codex; then
   seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/commands/primer-check.md"
   seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/commands/explore.md"
   seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"       "$PROJECT/.agents/commands/autonomy.md"
+  seed_symlink "$CANONICAL_COMMANDS_DIR/surgical.md"       "$PROJECT/.agents/commands/surgical.md"
   seed_codex_hooks
 fi
 
@@ -622,6 +628,7 @@ if pg_has_harness codex; then
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer-refresh.md" "$PROJECT/.agents/workflows/primer-refresh.md"
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/workflows/primer-check.md"
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/workflows/explore.md"
+  seed_tracked_copy "$CANONICAL_COMMANDS_DIR/surgical.md"       "$PROJECT/.agents/workflows/surgical.md"
 fi
 
 # Optional preset layering — opt-in per project via <project>/.trellis.config.json

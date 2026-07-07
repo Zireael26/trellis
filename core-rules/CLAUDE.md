@@ -9,6 +9,7 @@ Cross-cutting rules that apply to every active personal project. Project-specifi
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. Flag real problems and wait.
 - For non-trivial features (3+ steps or architectural decisions), interview the user about implementation, UX, and tradeoffs before writing code.
+- **Mandatory feature pipeline (opt-in, default off).** The `clarify → spec → plan → tasks → analyze` pipeline is opt-in by default. When the operator enables `mandatory_pipeline` in `trellis.config.json` (spec 006), it becomes **required**: a branch whose net gated diff exceeds the size floor cannot be pushed without a spec triad (+ interview artifact), a size-capped `/surgical` declaration, or a logged `/surgical --emergency`. Sub-floor work stays surgical-default. The gate is deterministic (git/fs state), so it enforces equally on Claude Code and Codex; with the knob off, behavior is unchanged. This is not a bright-line guardrail — *who answers* the intake interview follows the autonomy slider (see Autonomy). Canonical statement + mechanism: `engineering-process.md` §14.7, `core-rules/hooks.md`.
 - Never attempt multi-file refactors in one response. Break into phases sized by a **soft, autonomy-scoped ceiling** — ~7 files at L1–L3, widening at L4/L5 where the agent runs less interactively and a larger coherent phase is warranted. The ceiling is a safety rail, not a hard cap: the `code-review-subagent` fires at ≥3 files / ≥200 lines, so review coverage scales up with phase size. Complete, verify (hooks enforce), get approval per the active autonomy level, then continue.
 - Don't hide confusion. If a request has multiple valid interpretations, surface them — don't pick silently. If something is unclear, stop and name what's confusing before guessing.
 - Frame each task as a verifiable goal before writing code: bug → reproducing test that fails then passes; refactor → tests green before and after; new behavior → explicit acceptance check per step. Weak goals ("make it work") force back-and-forth; strong goals let you loop independently.
@@ -76,6 +77,8 @@ Active level resolution (pick → clamp): `trellis.config.json.autonomy_default`
 At L4/L5, agent appends each decision made on user's behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes same block.
 
 **Architectural decisions surface inline mid-turn even at L5** (reversibility cliff). Bright-line guardrails (hard hooks, destructive ops, external messages, secrets, DoD receipts, code-review subagent) remain mandatory at every level.
+
+The **mandatory feature pipeline** (Planning, above) is **not** a bright-line guardrail — it is config-gated and default-off. Its pre-push *block* is deterministic and fires the same at every level; what the slider changes is only *who answers* the feature-intake interview that satisfies it: at **L1–L3** `clarify` genuinely interviews the user and writes `clarify.md`; at **L4/L5** the agent self-answers and records the decisions in `decisions-log.md`.
 
 Default L3 = current Trellis behavior; existing projects see no change.
 

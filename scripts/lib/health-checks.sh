@@ -33,7 +33,7 @@ export HC_OK HC_ERROR HC_WARN HC_INFO
 # Canonical sets — the full inheritance surface a healthy project carries.
 # Kept here (not in doctor.sh) so audits share the same definition of "full".
 HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief"
-HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy"
+HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 export HC_CANONICAL_SKILLS HC_CANONICAL_COMMANDS
 
 # ---------------------------------------------------------------------------
@@ -873,5 +873,40 @@ hc_receipt_grammar_present() {
     return "$HC_OK"
   fi
   echo "receipt-grammar-present: dod-receipt grammar MISSING from core-rules/CLAUDE.md — execute receipts have no canonical contract"
+  return "$HC_WARN"
+}
+
+# Codex runtime hooks-enabled check (spec 006, PD8 / C-2c). The Codex spec-gate
+# and every Codex Stop/PreToolUse hook only fire when the Codex runtime has hooks
+# turned on in $CODEX_HOME/config.toml ([features] hooks = true). If Codex is an
+# enabled harness but that switch is off (or the CLI/config is absent), the whole
+# cross-harness enforcement mechanism silently no-ops on Codex — the exact failure
+# the parity work exists to prevent. WARN, report-only. No project arg: reads the
+# central HARNESSES + the per-machine Codex config.
+hc_codex_hooks_enabled() {
+  if ! pg_has_harness codex 2>/dev/null; then
+    echo "codex-runtime: n/a (codex not an enabled harness)"
+    return "$HC_OK"
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "codex-runtime: codex harness enabled but the codex CLI is not installed — Codex hooks (incl. spec-gate) cannot run"
+    return "$HC_WARN"
+  fi
+  local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  if [ ! -f "$cfg" ]; then
+    echo "codex-runtime: $cfg absent — [features] hooks unset; Codex spec-gate + Stop/PreToolUse hooks will NOT run"
+    return "$HC_WARN"
+  fi
+  # true iff a `hooks = true` line appears inside the [features] table.
+  if awk '
+      /^[[:space:]]*\[features\][[:space:]]*$/ { in_f=1; next }
+      /^[[:space:]]*\[/                        { in_f=0 }
+      in_f && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true/ { found=1 }
+      END { exit(found?0:1) }
+    ' "$cfg"; then
+    echo "codex-runtime: [features] hooks = true (Codex hooks active)"
+    return "$HC_OK"
+  fi
+  echo "codex-runtime: [features] hooks not enabled in $cfg — the Codex spec-gate + every Codex Stop/PreToolUse hook silently NO-OPS (fix: set [features] hooks = true)"
   return "$HC_WARN"
 }
