@@ -93,6 +93,8 @@ SYNC_PATHS=(
   # citation in references/secrets.md was genericized to avoid a dangling ref.
   "recon.md"
   "core-rules/autonomy.md"
+  # published because 13 synced files reference it (CLAUDE.md § Loops, references/loops.md, orchestrate skill+recipes) — spec 009 D9.
+  "core-rules/loop-safety.md"
   "core-rules/presets/"
   "docs/opus-4.8-steering.md"
   "docs/gpt-5.x-steering.md"
@@ -139,6 +141,78 @@ CORE_RULES_NO_SYNC=(
 declare -a SUB_FROM=("$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME" "$MAINTAINER_NAME" "$GITHUB_USER")
 declare -a SUB_TO=("__TRELLIS_PATH__" "__TRELLIS_PATH__" "__PROJECTS_ROOT__" "__USER_HOME__" "__MAINTAINER_NAME__" "__GITHUB_USER__")
 
+sync_path_covers_ref() {
+  local ref sync_path
+  ref="$1"
+  for sync_path in "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}"; do
+    if [ "$sync_path" = "$ref" ]; then
+      return 0
+    fi
+    case "$sync_path" in
+      */)
+        case "$ref" in
+          "$sync_path"*) return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  return 1
+}
+
+core_rules_private_ref() {
+  local ref private_dir
+  ref="$1"
+  for private_dir in "${CORE_RULES_NO_SYNC[@]+"${CORE_RULES_NO_SYNC[@]}"}"; do
+    case "$ref" in
+      "core-rules/$private_dir/"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+ref_integrity_check() {
+  local failed refs_tmp files_tmp sync_path src md_file rel ref
+  failed=0
+  refs_tmp="$(mktemp)"
+  files_tmp="$(mktemp)"
+
+  for sync_path in "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}"; do
+    src="${SOURCE_ROOT}/${sync_path%/}"
+    if [ -f "$src" ]; then
+      case "$src" in
+        *.md) ;;
+        *) continue ;;
+      esac
+      grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$src" 2>/dev/null | sort -u > "$refs_tmp" || true
+      while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        core_rules_private_ref "$ref" && continue
+        if ! sync_path_covers_ref "$ref"; then
+          echo "ref-integrity: $sync_path -> $ref" >&2
+          failed=1
+        fi
+      done < "$refs_tmp"
+    elif [ -d "$src" ]; then
+      find "$src" -type f -name '*.md' -print > "$files_tmp"
+      while IFS= read -r md_file; do
+        rel="${md_file#$SOURCE_ROOT/}"
+        grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$md_file" 2>/dev/null | sort -u > "$refs_tmp" || true
+        while IFS= read -r ref; do
+          [ -n "$ref" ] || continue
+          core_rules_private_ref "$ref" && continue
+          if ! sync_path_covers_ref "$ref"; then
+            echo "ref-integrity: $rel -> $ref" >&2
+            failed=1
+          fi
+        done < "$refs_tmp"
+      done < "$files_tmp"
+    fi
+  done
+
+  rm -f "$refs_tmp" "$files_tmp"
+  [ "$failed" -eq 0 ]
+}
+
 # --- Pre-flight: core-rules/ sync coverage ---------------------------------
 # Fail closed if any core-rules/<name>/ subdir is neither published
 # (SYNC_PATHS) nor explicitly kept private (CORE_RULES_NO_SYNC). Runs in ALL
@@ -157,6 +231,12 @@ if [ -n "$uncovered" ]; then
   exit 1
 fi
 echo "  all core-rules/ subdirs classified."
+
+echo "==> Checking synced markdown references"
+if ! ref_integrity_check; then
+  exit 1
+fi
+echo "  all synced markdown refs covered."
 
 # --- Workspace -------------------------------------------------------------
 TMP_STAGE="$(mktemp -d)"

@@ -8,6 +8,20 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.8] — 2026-07-08
+
+### Added
+- **Interactive executor delegation (spec 009).** Bounded work-order units may route to a cheap executor leg (Codex via companion, or a cheap Claude worker) from any turn, not only inside orchestrated fan-outs — advisory-first pilot with ledger + flip criteria. Route predicate (work-order vs design, ~20-line soft floor, session-tools + bright-line carve-outs; review never delegated), canonical delegation prompt template, per-unit resume + two-failed-rounds takeover with failure taxonomy, per-dispatch tracking receipt. `docs/codex-routing.md §6`, `orchestrate/references/codex-executor.md`.
+- **Ref-integrity guard in `sync-to-template.sh`:** any synced file referencing an unsynced `core-rules/*.md` now fails the sync (dry-run and apply).
+- ADR `2026-07-08-interactive-codex-delegation.md`.
+
+### Changed
+- **Effort doctrine:** dispatch-time effort ladder for interactive units (xhigh hard/verify, high standard implementation, medium/low mechanical) replaces blanket xhigh; workflow recipes keep xhigh (follow-up named). `docs/codex-routing.md §3`.
+- **Routing economics refreshed:** both engines metered; dual-pool quota-headroom rationale; strength claims re-ground only via the 008 model-launch trigger.
+
+### Fixed
+- **`core-rules/loop-safety.md` now ships to the public mirror.** It was referenced by 13 synced files (CLAUDE.md § Loops, `references/loops.md`, orchestrate skill + recipes) but absent from SYNC_PATHS — every public fork saw dangling references.
+
 ## [v1.0.0-rc.7] — 2026-07-07
 
 Process parity + the mandatory feature pipeline. Makes process enforcement **equal across Claude Code and Codex** and makes the spec pipeline **mandatory for feature-sized changes** — both via one lever: a deterministic pre-push gate keyed on git/filesystem state, so the state (not the model) decides. **Default OFF**; the public template ships off and a fresh install is unchanged. Spec/plan/tasks/clarify: `specs/006-process-parity-and-mandatory-pipeline/`. ADR: `docs/adr/2026-07-07-mandatory-pipeline-and-parity.md`.
