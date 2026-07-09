@@ -1,0 +1,17 @@
+First block is short and clean.
+---
+Second block includes a forbidden link: https://example.com/demo
+---
+Third block is short.
+---
+Fourth block is short.
+---
+Fifth block is short.
+---
+Sixth block is short.
+---
+Seventh block is short.
+---
+Eighth block is intentionally long. It keeps adding detail about process, review, handoff, ownership, scope, fixtures, validation, and local proof so that the final trimmed block text clearly exceeds the two hundred and eighty character limit required for this validator test case without relying on a link.
+---
+Ninth block makes the count fail.

@@ -1,0 +1,9 @@
+Start with the specific problem and the audience it affects.
+---
+Name the constraint that changed the decision.
+---
+Show the smallest useful proof, not a tour of the system.
+---
+Close the loop with the next action and owner.
+---
+Keep every block link-free and under the limit.

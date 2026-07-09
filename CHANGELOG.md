@@ -8,6 +8,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.9] — 2026-07-09
+
+### Added
+- **`writing` — twelfth canonical skill (spec 010).** Drafts and publishes blogs + X threads in the author's or project's voice: voice load → draft → self-review → scriptable validation → publish → receipts. Full auto-post on explicit invocation (`disable-model-invocation: true`; invocation = authorization, named targets bound the scope); posting leg capability-gated with paste-ready degrade; never deletes or edits published content. `core-rules/skills/writing/`.
+- **`check-writing.sh` blocking validator** — blog mode (em/en-dashes outside code fences, slop vocabulary, bold-lead-in bullets, antithesis clustering) + thread mode (4–8 tweets, ≤280 chars, no links in tweet bodies — link rides a reply, per the open-sourced ranker). Fixtures + bats. Built by Codex under the 009 pilot (ledger row 2).
+- **Dated references:** `ai-tells.md` (clustering-is-the-signal catalog), `x-thread.md` (ranker weights + composer mechanics), `voice.md` (per-target-repo `docs/voice.md` convention — voice files structurally outside the mirror sync).
+- `scripts/rollout-writing-skill.sh` (debrief-pattern fleet symlink install); ADR `2026-07-09-writing-skill.md`.
+
 ## [v1.0.0-rc.8] — 2026-07-08
 
 ### Added
