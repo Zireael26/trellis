@@ -100,6 +100,8 @@ Until 009, this doc lit up only inside orchestrated fan-outs: a plain interactiv
 
 No new plumbing — every column names a mechanic that already exists per leg.
 
+**Teardown (Claude-worker leg).** A companion-dispatched Codex unit exits with its process; a **named Claude teammate does not** — it stays live (pane + budget) until released. After the review gate passes (or the unit is abandoned), the orchestrator sends the graceful shutdown signal (`shutdown_request` via `SendMessage`), force-stops on no acknowledgment (`TaskStop`), and only then counts the unit closed. See the teammate-teardown section of the `orchestrate` skill and the *Definition of done* teammate clause in `core-rules/CLAUDE.md`.
+
 **Route predicate.** Delegate when the prompt reads as a **work order**: frozen spec, known repro, mechanical refactor, test/coverage fill, dep bump. Keep home when any of:
 
 - **writing the spec IS the work** — ambiguity is design, and design stays on the orchestrator;

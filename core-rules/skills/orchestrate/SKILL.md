@@ -70,6 +70,27 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
+## Teammate teardown — synthesis includes cleanup
+
+Engine-run workflow agents (tier 1) terminate themselves when their unit returns.
+**Named teammates do not** (tier 2 — subagent/teammate spawns, e.g. split panes in a
+multiplexer): they stay live, holding a pane and session budget, until the spawner
+releases them. Teardown is therefore the **last step of the synthesize stage**, not
+an optional courtesy:
+
+1. Collect each teammate's final result and pass it through the verify/review gate.
+2. Once a teammate's output is accepted (or the unit is abandoned), send the
+   harness's graceful shutdown signal — on Claude Code, `SendMessage` with
+   `{type: "shutdown_request"}` to the teammate by name.
+3. If a teammate does not acknowledge shutdown, force-stop it (`TaskStop` by name).
+4. The fan-out is not complete — and the orchestrator must not declare done — while
+   any teammate it spawned is still live. This is the same rule as the
+   *Definition of done* teammate clause in `CLAUDE.md`.
+
+Phrased capability-neutral like the rest of this skill: whatever tool spawned the
+teammate has a paired signal to end it; use that pair. A harness with no persistent
+teammates (tier 3, inline) has nothing to tear down.
+
 ## Pattern catalog
 
 Six orchestration shapes, but the value is the two that are new. Four are already
