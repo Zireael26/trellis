@@ -25,10 +25,12 @@ setup() {
   mkdir -p \
     "$ROOT/core-rules/skills/process-gate" \
     "$ROOT/core-rules/skills/security-gate" \
+    "$ROOT/core-rules/agents" \
     "$ROOT/core-rules/commands"
   printf '# Trellis rules\n' > "$ROOT/core-rules/CLAUDE.md"
   printf 'x\n' > "$ROOT/core-rules/skills/process-gate/SKILL.md"
   printf 'x\n' > "$ROOT/core-rules/skills/security-gate/SKILL.md"
+  printf '# worker\n' > "$ROOT/core-rules/agents/codex-worker.md"
   printf 'x\n' > "$ROOT/core-rules/commands/primer.md"
 
   # ---- Build fake MAIN checkout ----
@@ -41,7 +43,7 @@ setup() {
     git config commit.gpgsign false
 
     # .gitignore — ignore the inheritance symlink directories
-    printf '.claude/rules\n.claude/skills\n.claude/commands\n.agents/rules\n.agents/skills\n' > .gitignore
+    printf '.claude/rules\n.claude/skills\n.claude/commands\n.claude/agents\n.agents/rules\n.agents/skills\n' > .gitignore
 
     # Create a tracked file so git worktree add works
     printf 'tracked\n' > README.md
@@ -53,11 +55,13 @@ setup() {
   mkdir -p \
     "$MAIN/.claude/rules" \
     "$MAIN/.claude/skills" \
-    "$MAIN/.claude/commands"
+    "$MAIN/.claude/commands" \
+    "$MAIN/.claude/agents"
   ln -s "$ROOT/core-rules/CLAUDE.md"              "$MAIN/.claude/rules/trellis.md"
   ln -s "$ROOT/core-rules/skills/process-gate"    "$MAIN/.claude/skills/process-gate"
   ln -s "$ROOT/core-rules/skills/security-gate"   "$MAIN/.claude/skills/security-gate"
   ln -s "$ROOT/core-rules/commands/primer.md"     "$MAIN/.claude/commands/primer.md"
+  ln -s "$ROOT/core-rules/agents/codex-worker.md" "$MAIN/.claude/agents/codex-worker.md"
 
   # Non-inheritance symlink that must NOT be mirrored
   ln -s "/tmp" "$MAIN/.claude/other"
@@ -83,17 +87,19 @@ teardown() {
   run bash "$SCRIPT" --target "$WT" --root "$ROOT"
   [ "$status" -eq 0 ]
 
-  # All four inheritance symlinks exist in the worktree
+  # All five inheritance symlinks exist in the worktree
   [ -L "$WT/.claude/rules/trellis.md" ]
   [ -L "$WT/.claude/skills/process-gate" ]
   [ -L "$WT/.claude/skills/security-gate" ]
   [ -L "$WT/.claude/commands/primer.md" ]
+  [ -L "$WT/.claude/agents/codex-worker.md" ]
 
   # Targets match the originals
   [ "$(readlink "$WT/.claude/rules/trellis.md")"           = "$ROOT/core-rules/CLAUDE.md" ]
   [ "$(readlink "$WT/.claude/skills/process-gate")"        = "$ROOT/core-rules/skills/process-gate" ]
   [ "$(readlink "$WT/.claude/skills/security-gate")"       = "$ROOT/core-rules/skills/security-gate" ]
   [ "$(readlink "$WT/.claude/commands/primer.md")"         = "$ROOT/core-rules/commands/primer.md" ]
+  [ "$(readlink "$WT/.claude/agents/codex-worker.md")"     = "$ROOT/core-rules/agents/codex-worker.md" ]
 
   # Non-inheritance symlink (.claude/other → /tmp) must NOT be mirrored
   [ ! -e "$WT/.claude/other" ]
@@ -186,7 +192,7 @@ teardown() {
 # Test 6: --target = MAIN checkout → exits 0 with info, creates nothing
 # ---------------------------------------------------------------------------
 @test "target is main checkout: exits 0 with info, creates nothing" {
-  # Count existing symlinks in MAIN (should be 4 inheritance + 1 non-inheritance)
+  # Count existing symlinks in MAIN (should be 5 inheritance + 1 non-inheritance)
   main_link_count_before="$(find "$MAIN/.claude" -type l | wc -l | tr -d ' ')"
 
   run bash "$SCRIPT" --target "$MAIN" --root "$ROOT"

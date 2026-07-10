@@ -357,9 +357,30 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
     # this, the unfilled template the block message prints below would itself
     # satisfy the gate. Anchoring on `\+[0-9]` (not the quote char) is agnostic to
     # JSONL-escaped (\") vs unescaped (") quoting. See CLAUDE.md:43.
+    # Follow-ups marker (spec 012): <!-- follow-ups: <count> --> or
+    # <!-- follow-ups: none -->, emitted alongside the DoD receipt. The ERE
+    # requires a FILLED value (`none` or digits) after the literal
+    # `follow-ups: `, so the warn message's deliberately-unfilled template
+    # `<count-or-none>` can never satisfy it (`<` follows the colon-space —
+    # same tightening trick as `exit=[0-9]` above). Distinct literals mean no
+    # cross-collision with dod-receipt parsing in either direction, and the
+    # marker carries no quote characters, so it is immune to JSONL
+    # \"-escaping differences by construction.
+    FOLLOWUPS_RE='<!-- follow-ups: (none|[0-9]+) -->'
     if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
          | grep -Eq '<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'; then
       rm -f "$STATE_FILE"
+      # Follow-ups nudge (spec 012 D4): receipt present — re-scan the SAME
+      # turn-scoped window for the follow-ups marker. Present → silent pass,
+      # byte-identical to pre-012 behaviour. Absent → NON-BLOCKING advisory.
+      # Warn stays warn: never emit_block, never exit 2, on this path.
+      # dod-receipt spans are stripped first (perl non-greedy; the transcript is
+      # JSONL so a receipt quoting the marker inside cmd="…" would otherwise
+      # false-satisfy the scan — 012 review F1).
+      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+        exit 0
+      fi
+      jq -nc --arg m 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->' '{additionalContext: $m}'
       exit 0
     fi
     emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):

@@ -8,54 +8,63 @@
 // This file ships in the public mirror and is INERT without the plugin.
 //
 // Inputs (from `args`, never baked literals):
-//   args.units          [{ name, kind, task }] — the work. `kind` routes it:
-//                        'execute' = execution-heavy bounded SYNCHRONOUS unit
-//                        (large mechanical edit) → Codex when available; 'plan' |
-//                        'review' | 'synthesize' = judgment unit → always the
-//                        orchestrator. Default kind 'execute'. NOTE: genuinely
-//                        long-running / detached (`--background`) Codex units are
-//                        NOT handled by this in-engine recipe — the forwarder is
-//                        synchronous (see DISPATCH MECHANICS (ii)); background is
-//                        a MAIN-LOOP Bash-direct pattern (mechanics (i)), out of
-//                        scope here.
+//   args.units          [{ name, kind, task, effort, justification?, paths?,
+//                        constraints?, nonGoals?, proof? }] — the work. `kind`
+//                        routes it: 'execute' = execution-heavy bounded
+//                        SYNCHRONOUS unit (large mechanical edit) → Codex when
+//                        available; 'plan' | 'review' | 'synthesize' = judgment
+//                        unit → always the orchestrator. Default kind 'execute'.
+//                        `effort` is REQUIRED on every Codex-routable ('execute')
+//                        unit — enum 'medium'|'high'|'xhigh'|'max', declared per
+//                        unit from the docs/codex-routing.md §3 ladder; an
+//                        omitted effort is a validation error, NEVER a default
+//                        (spec 011 D1). 'ultra' is hard-rejected in recipes
+//                        (spec 011 D4a). `justification` is REQUIRED (non-empty)
+//                        when effort is 'max', optional otherwise; it is echoed
+//                        into the receipt. `paths` / `constraints` / `nonGoals` /
+//                        `proof` feed the six-field work-order contract in the
+//                        Codex prompt (spec 011 D5a). The blocking codex-worker
+//                        owns companion launch/poll/result mechanics and never
+//                        returns until the unit completes or fails.
 //   args.codexAvailable  boolean — the presence-gate result, threaded in by the
 //                        main loop (see Presence phase). Absent → a probe agent
 //                        resolves it; unknown ultimately defaults to OFF.
+//   args.supportedEfforts string[] — the accepted --effort set of the installed
+//                        surface, threaded by the main loop from the D6
+//                        preflight (scripts/codex-effort-preflight.sh), same
+//                        pattern as codexAvailable. Absent → conservative
+//                        default ['medium','high','xhigh'] (verified companion
+//                        v1.0.5 reality — the fail-closed direction; a surface-
+//                        capability floor, not an effort default). A unit whose
+//                        validated effort is outside the set FAILS CLOSED:
+//                        logged + degraded to Claude, never clamped (spec 011
+//                        D6b / SC6).
 //   args.branchPrefix    string — branch prefix for repo-mutating units
 //                        (default 'chore/codex-exec'); a per-unit suffix is
 //                        appended. No dates here.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// DISPATCH MECHANICS — TWO paths to Codex; you pick by WHERE the loop runs.
-// Both are documented here with equal weight; the runnable code below is
-// engine code, so it uses (ii), while (i) is the leaner path the MAIN LOOP uses.
+// DISPATCH MECHANICS — TWO paths to Codex; pick by WHERE the loop runs. The
+// runnable code below is engine code, so it uses canonical mechanic (ii).
 //
 //   (i) Bash-direct — from the MAIN ORCHESTRATOR LOOP (a `/loop`, a scheduled
 //       task, or an agent driving this by hand), which HOLDS the Bash tool:
-//         node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort xhigh "<prompt>"
+//         node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort <tier> "<prompt>"
+//       (tier from docs/codex-routing.md §3 — declared per unit, never defaulted)
 //       ZERO wrapper, ZERO extra model — the orchestrator is already running,
-//       so it spends nothing on a middleman. This is the PREFERRED path (the
-//       plan's §3 REFINEMENT: the shipped executor node is Bash-direct). It is
-//       also MANDATORY, not merely preferred, for two operations that cannot go
-//       through the forwarder at all:
-//         • the presence gate — `setup --json` (the forwarder is contractually
-//           task-only and may not call `setup`);
-//         • `--background` async units — the forwarder strips `--background` and
-//           cannot call `status` / `result`, so polling a detached job is
-//           Bash-direct only.
+//       so it spends nothing on a middleman. This is the leanest main-loop path.
+//       It remains mandatory for the presence gate (`setup --json`) and is the
+//       interactive-rescue-only path for a human-managed detached job.
 //
-//  (ii) In-engine forwarder — from INSIDE a `.wf.js` running in the Workflow
-//       engine, which exposes NO shell primitive (only agent/parallel/pipeline/
-//       phase/log/args/budget). The only way to reach Codex from here is a
-//       subagent: `agent(prompt, { agentType: 'codex:codex-rescue' })`. That
-//       forwarder is `model: sonnet` — the CHEAPEST available middleman, cheaper
-//       than making a general Opus agent shell out to Bash. It forwards ONE
-//       `codex-companion task --write` and returns raw stdout. This path is
-//       therefore SYNCHRONOUS, in-engine Codex dispatch only.
+//  (ii) In-engine blocking worker — from INSIDE a `.wf.js`, dispatch with
+//       `agent(prompt, { agentType: 'codex-worker' })`. The worker launches the
+//       companion, polls from the same cwd, applies its bounded stall recovery,
+//       fetches the real result, and only then returns. This is the CANONICAL
+//       in-workflow Codex path. The rescue forwarder remains interactive-only.
 //
 // When each applies: hold the Bash tool (main loop) → (i). Strictly in-engine,
-// synchronous → (ii). Never route execution through a general Opus agent that
-// only shells out — that is the most expensive of the three and buys nothing.
+// Workflow engine → (ii). Never use the interactive rescue forwarder as a
+// producing Workflow node.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const meta = {
@@ -134,37 +143,95 @@ const VERDICT = {
 const branchPrefix = args.branchPrefix ?? 'chore/codex-exec'
 const units = args.units ?? []
 const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
-const branchOf = (u) => branchPrefix + '-' + u.name
-const isEmpty = (r) => r == null || (typeof r === 'string' && r.trim() === '')
-// §4 fix (RC.5): the codex-rescue forwarder's own heuristic may background a
-// unit it judges "big/open-ended" (codex-rescue.md:24) and return a JOB HANDLE
-// string instead of the work result — non-empty, so it slips past isEmpty and
-// would silently replace the real diff with handle text in the fan-out. The
-// in-engine forwarder is contractually barred from `status`/`result`
-// (codex-rescue.md:28), so this recipe cannot poll; it detects the handle shape
-// and degrades that unit to Claude. Background execution is a Bash-direct
-// MAIN-LOOP pattern (mechanics (i)), never this in-engine path.
-const isJobHandle = (r) =>
-  typeof r === 'string' &&
-  /(started in the background|task-[a-z0-9]{6,}|\/codex:status|check .* for progress)/i.test(r)
 
-// The prompt handed to Codex. Leading routing flags (`--write --effort xhigh`)
-// are recognized and applied by the codex-rescue forwarder (codex-cli-runtime
-// contract), giving Codex its xhigh default. Codex's effort CEILING is xhigh —
-// there is no `max` for Codex; do not request a higher tier. The Bash-direct
-// path passes the same flags on the `task` command line instead.
+// --- Unit-schema validation (spec 011 D1/D4a) — runs BEFORE any dispatch ----
+// Every Codex-routable unit (kind 'execute', the default) declares effort
+// explicitly at dispatch; an omitted effort field is a validation error, never
+// a default. 'ultra' is hard-rejected in recipes until the D4a controls exist
+// (actual-token telemetry from the invocation surface, a ×4 concurrency
+// multiplier against the fan-out cap, one instrumented test run with recorded
+// spend). 'max' requires a non-empty justification (echoed into the receipt).
+// A violation THROWS — the run fails before any unit is dispatched; nothing is
+// silently clamped or defaulted.
+const EFFORT_ENUM = ['medium', 'high', 'xhigh', 'max']
+for (const u of units) {
+  if (!routesToCodex(u)) continue
+  if (typeof u.effort !== 'string' || u.effort.trim() === '') {
+    throw new Error('effort required for unit "' + u.name + '" — no default (spec 011 D1)')
+  }
+  if (u.effort === 'ultra') {
+    log(
+      'codex-executor: HARD-REJECT unit=' + u.name +
+        " — effort 'ultra' is forbidden in recipes until the D4a controls exist" +
+        ' (token telemetry, ×4 concurrency multiplier, instrumented spend run) (spec 011 D4a)',
+    )
+    throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes (spec 011 D4a)")
+  }
+  if (!EFFORT_ENUM.includes(u.effort)) {
+    throw new Error(
+      'unit "' + u.name + '": effort \'' + u.effort +
+        "' is not in the enum ['medium','high','xhigh','max'] (spec 011 D1)",
+    )
+  }
+  if (u.effort === 'max' && !(typeof u.justification === 'string' && u.justification.trim() !== '')) {
+    throw new Error('unit "' + u.name + "\": effort 'max' requires a non-empty justification (spec 011 D1)")
+  }
+}
+
+// Surface-capability floor (spec 011 D6b): the accepted --effort set, threaded
+// by the main loop from the D6 preflight (scripts/codex-effort-preflight.sh).
+// Absent → the conservative verified default (companion v1.0.5 rejects >xhigh)
+// — the fail-closed direction. Enforcement lives in the Fan-out router: a
+// Codex-routed unit whose effort is outside this set is logged + degraded to
+// Claude, NEVER clamped to a lower tier.
+const supportedEfforts = args.supportedEfforts ?? ['medium', 'high', 'xhigh']
+const branchOf = (u) => branchPrefix + '-' + u.name
+const workerReceipt = (r) => {
+  if (typeof r !== 'string') return ''
+  const match = r.match(/(?:^|\n)--- CODEX-WORKER RECEIPT ---\s*\n([\s\S]*?)\n--- END RECEIPT ---(?:\n|$)/)
+  return match?.[1] ?? ''
+}
+const isEmpty = (r) =>
+  r == null ||
+  (typeof r === 'string' && (r.trim() === '' || /^STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/im.test(workerReceipt(r))))
+// Defensive assertion: codex-worker is blocking, so a background handle is a
+// contract leak rather than a supported result. Keep the detector as a loud
+// fail-closed assertion while the unit degrades to Claude.
+const isJobHandle = (r) => {
+  if (typeof r !== 'string') return false
+  try {
+    const parsed = JSON.parse(r)
+    if (typeof parsed?.jobId === 'string' && parsed.jobId.trim() !== '' && parsed?.result == null) return true
+  } catch {
+    // Handles are commonly prose rather than standalone JSON.
+  }
+  return /(started in the background|\/codex:status|check .* for progress|^\s*job\s*id\s*[:=])/im.test(r)
+}
+
+// The prompt handed to Codex — the six-field work-order contract (spec 011
+// D5a) plus the honest-reporting clause, verbatim. Leading routing flags
+// (`EFFORT: <tier>`) are consumed by codex-worker; the tier is the unit's OWN
+// validated declaration — recipes take required per-unit effort (spec 011),
+// never a hardcoded or defaulted tier.
 function codexPrompt(u) {
   return [
-    '--write --effort xhigh',
+    'EFFORT: ' + u.effort,
+    'JUSTIFICATION: ' + (u.justification ?? 'n/a'),
+    'TARGET_CWD: . (the Workflow-provided isolated worktree root).',
     'You are the EXECUTOR for the bounded unit "' + u.name + '".',
-    'TASK: ' + (u.task ?? 'apply the requested change'),
-    '',
-    'GIT DISCIPLINE: the checkout may be a dirty WIP branch — NEVER checkout/switch/stash/clean it.',
-    'Work ONLY in an isolated worktree off the LATEST origin/main, on branch ' + branchOf(u) + '.',
-    'Confine every write to that worktree. Do NOT run unbounded `rm` or `$VAR.*` globs.',
-    'Make the change, then leave the branch for the orchestrator to review. Do NOT merge.',
-    'State the branch name and a one-line summary of the diff in your output.',
-    'RUN SYNCHRONOUSLY IN THE FOREGROUND — this is a bounded unit; do NOT use --background. Return the actual branch name and diff summary as your result, never a job handle.',
+    'GOAL: ' + (u.task ?? 'apply the requested change'),
+    'REPO/PATHS: ' + (u.paths ?? 'the isolated worktree root — stay inside it'),
+    'CONSTRAINTS: ' +
+      (u.constraints ? u.constraints + ' ' : '') +
+      'GIT DISCIPLINE: the checkout may be a dirty WIP branch — NEVER checkout/switch/stash/clean it. ' +
+      'Work ONLY in an isolated worktree off the LATEST origin/main, on branch ' + branchOf(u) + '. ' +
+      'Confine every write to that worktree. Do NOT run unbounded `rm` or `$VAR.*` globs. ' +
+      'Make the change, then leave the branch for the orchestrator to review. Do NOT merge.',
+    'NON-GOALS: ' + (u.nonGoals ?? 'anything not named in GOAL'),
+    'PROOF: ' + (u.proof ?? 'state the exact verification command you ran and paste its actual output'),
+    'OUTPUT: the branch name, a one-line summary of the diff, and the PROOF command output.',
+    "Report failures as failures. Never claim completion without the proof command's actual output. A claimed-complete unit without receipts is treated as failed.",
+    'The blocking codex-worker owns launch and polling. Return the completed result and receipt, never a job handle.',
   ].join('\n')
 }
 
@@ -180,26 +247,25 @@ function claudePrompt(u) {
   ].join('\n')
 }
 
-// (ii) In-engine forwarder dispatch. NO `schema`: the forwarder returns raw
-// stdout and "returns nothing" on failure, so an empty/null result IS the
-// degrade trigger — a schema would make the engine try to validate raw text.
+// (ii) In-engine blocking-worker dispatch. NO `schema`: codex-worker returns a
+// completed raw receipt, and an empty/null result is still a degrade trigger.
 // isolation:'worktree' confines the --write to a throwaway checkout (guardrail).
 // A THROWN dispatch error is folded into the same empty signal (return null) so
 // "null/empty/errored" all degrade uniformly — the engine may reject rather
-// than resolve-empty on a hard forwarder failure, and either way must fall to
+// than resolve-empty on a hard worker failure, and either way must fall to
 // Claude. This is a system-boundary guard, not speculative defense.
 async function dispatchCodex(u) {
   try {
     const r = await agent(codexPrompt(u), {
-      agentType: 'codex:codex-rescue',
+      agentType: 'codex-worker',
       label: 'codex:' + u.name,
       phase: 'Fan-out',
       isolation: 'worktree',
     })
     if (isJobHandle(r)) {
-      // Backgrounded despite the foreground directive → the result is a handle,
-      // not the work. Degrade this unit to Claude rather than drop it silently.
-      log('codex:' + u.name + ' returned a background job handle, not a result — degrading to Claude')
+      // A blocking worker must never leak a handle. Log the assertion failure
+      // and degrade rather than treating the handle as completed work.
+      log('codex-executor: ASSERT blocking codex-worker leaked a job handle for unit=' + u.name + ' — degrading to Claude')
       return null
     }
     return r
@@ -219,8 +285,7 @@ function dispatchClaude(u) {
 // --- Phase: Presence ------------------------------------------------------
 // Capability gate. Prefer `args.codexAvailable` (the main loop runs the gate
 // Bash-direct and threads the result in — the engine has no shell). Absent → a
-// GENERAL probe agent (NOT the forwarder, which is contractually barred from
-// `setup`) runs the gate command:
+// GENERAL probe agent runs the gate before any worker dispatch:
 //   node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json
 // Codex is available ONLY if ready && codex.available && auth.loggedIn.
 // Unknown resolves to OFF — the safe degrade, and the public-mirror-inert path.
@@ -265,17 +330,30 @@ log(
 phase('Fan-out')
 const executed = await parallel(
   units.map((u) => async () => {
-    if (!(codexAvailable && routesToCodex(u))) {
+    const receipt = { effort: u.effort ?? '', justification: u.justification ?? '' }
+    if (!routesToCodex(u)) {
       const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: routesToCodex(u) ? branchOf(u) : '', output: out }
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: '', output: out, ...receipt }
+    }
+    // Fail-closed tier gate (spec 011 D6b/SC6): the surface does not accept
+    // this unit's validated tier → log + degrade the UNIT to Claude. Never
+    // rewrite the tier — a silent clamp is the exact failure D1 forbids.
+    if (!supportedEfforts.includes(u.effort)) {
+      log('codex-executor: FAIL-CLOSED unit=' + u.name + ' tier=' + u.effort + ' not supported by surface — degrading to Claude, no clamp')
+      const out = await dispatchClaude(u)
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), output: out, ...receipt }
+    }
+    if (!codexAvailable) {
+      const out = await dispatchClaude(u)
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: branchOf(u), output: out, ...receipt }
     }
     const codexOut = await dispatchCodex(u)
     if (isEmpty(codexOut)) {
-      log('codex-executor: DEGRADE unit=' + u.name + ' — Codex empty/error, re-dispatching to orchestrator')
+      log('codex-executor: DEGRADE unit=' + u.name + ' — codex-worker unavailable/failure/empty/error, re-dispatching to orchestrator')
       const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), output: out }
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), output: out, ...receipt }
     }
-    return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), output: codexOut }
+    return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), output: codexOut, ...receipt }
   }),
 )
 
@@ -300,12 +378,21 @@ const verdicts = await parallel(
   )),
 )
 
+// Receipt echo (spec 011 D1/SC3e): merge `effort` + `justification` from the
+// unit's executed record into each returned verdict RECIPE-SIDE — a
+// deterministic merge, never asked of the reviewer agent (echo-by-agent
+// drifts). parallel() preserves order, so verdicts[i] pairs with artifacts[i].
+const verdictReceipts = verdicts.map((v, i) =>
+  v ? { ...v, effort: artifacts[i].effort, justification: artifacts[i].justification ?? '' } : v,
+)
+
 // Judgment units (plan/review/synthesize) produced no branch — carry their
-// output through as-is for the caller to fold into synthesis.
+// output through as-is for the caller to fold into synthesis (receipt fields
+// echoed for uniform records; judgment units have no required effort).
 const judgments = executed
   .filter((e) => !e.branch)
-  .map((e) => ({ unit: e.unit, harness: e.harness, output: e.output }))
+  .map((e) => ({ unit: e.unit, harness: e.harness, output: e.output, effort: e.effort ?? '', justification: e.justification ?? '' }))
 
 // The main loop acts on these: HOLD every PR for review (Component-D), merge
 // nothing here. Agents never merge — that decision lives in the caller.
-return { codexAvailable, verdicts: verdicts.filter(Boolean), judgments }
+return { codexAvailable, verdicts: verdictReceipts.filter(Boolean), judgments }

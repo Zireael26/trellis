@@ -68,6 +68,7 @@ SYNC_PATHS=(
   "CHANGELOG.md"
   "core-rules/CLAUDE.md"
   "core-rules/AGENTS.md"
+  "core-rules/agents/"
   "core-rules/VERSION"
   "core-rules/codex/"
   "core-rules/hooks.md"

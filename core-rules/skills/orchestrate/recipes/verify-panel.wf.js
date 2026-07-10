@@ -12,9 +12,21 @@
 // Reuses the codex-executor presence-gate + degrade contract.
 //
 // Inputs (from `args`, never baked literals):
-//   args.findings       [{ id, claim, file, line, severity }] — the hard findings to verify.
-//   args.context        string  — the diff / code excerpt / evidence the reviewers judge against.
-//   args.codexAvailable boolean — presence-gate result threaded from the main loop; probed if absent.
+//   args.findings         [{ id, claim, file, line, severity }] — the hard findings to verify.
+//   args.context          string  — the diff / code excerpt / evidence the reviewers judge against.
+//   args.effort           string  — REQUIRED reasoning tier for the Codex leg (enum
+//                          medium|high|xhigh|max; review passes are xhigh-band per
+//                          docs/codex-routing.md §3). Omitted → validation error, never
+//                          a default (spec 011 D1); `ultra` hard-rejected in recipes
+//                          (D4a); `max` requires a non-empty args.justification.
+//   args.justification    string  — required when effort is an exception tier (`max`);
+//                          echoed into every returned verdict record.
+//   args.supportedEfforts [string] — accepted tiers probed from the installed surface,
+//                          threaded from the main loop (D6 preflight); absent →
+//                          conservative ['medium','high','xhigh']. Declared effort ∉
+//                          set → FAIL-CLOSED: whole Codex leg OFF for the run
+//                          (single-model), logged, never clamped (spec 011 D6b).
+//   args.codexAvailable   boolean — presence-gate result threaded from the main loop; probed if absent.
 //
 // This file ships in the public mirror — keep it parametric and path-neutral.
 
@@ -48,6 +60,32 @@ const REVIEW = {
   },
 }
 
+// --- Effort validation (spec 011 D1/D4a) — runs before any dispatch --------
+// Panel units are homogeneous review passes, so effort is declared once per
+// run. Explicit-or-error: an omitted tier is a validation error, never a
+// default (docs/codex-routing.md §3).
+const EFFORT_ENUM = ['medium', 'high', 'xhigh', 'max']
+const effort = args.effort
+if (effort == null || effort === '') {
+  throw new Error('verify-panel: effort required for this run — no default (spec 011 D1)')
+}
+if (effort === 'ultra') {
+  log('verify-panel: HARD-REJECT effort=ultra — recipes reject ultra until the D4a prerequisites exist (actual-token telemetry, x4 concurrency multiplier vs fan-out cap, one instrumented spend run) (spec 011 D4a)')
+  throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes (spec 011 D4a)')
+}
+if (!EFFORT_ENUM.includes(effort)) {
+  throw new Error('verify-panel: effort "' + effort + '" not in enum [' + EFFORT_ENUM.join(', ') + '] (spec 011 D1)')
+}
+const justification = args.justification ?? ''
+if (effort === 'max' && (typeof justification !== 'string' || justification.trim() === '')) {
+  throw new Error('verify-panel: effort "max" requires a non-empty justification (spec 011 D1)')
+}
+// Surface-capability floor (D6b): fail-closed, never clamp. Conservative
+// default = today's verified companion reality, threaded from the D6 preflight
+// when available.
+const supportedEfforts = args.supportedEfforts ?? ['medium', 'high', 'xhigh']
+const effortSupported = supportedEfforts.includes(effort)
+
 const findings = args.findings ?? []
 const context = args.context ?? ''
 const isEmpty = (r) => r == null || (typeof r === 'string' && r.trim() === '')
@@ -74,13 +112,14 @@ function reviewPrompt(f) {
 }
 
 // Codex reviewer via the CANONICAL wrapped tracked path (docs/codex-routing.md
-// §4.5). Read-only (no --write), xhigh, forced foreground. A null/empty/handle
-// result is the degrade signal for THIS reviewer -> the finding falls back to
-// Claude-only. No schema on the Codex leg: the forwarder returns raw stdout, so
-// we parse leniently and treat unusable output as a degrade.
+// §4.5). Read-only (no --write), at the declared per-run tier, forced
+// foreground. A null/empty/handle result is the degrade signal for THIS
+// reviewer -> the finding falls back to Claude-only. No schema on the Codex
+// leg: the forwarder returns raw stdout, so we parse leniently and treat
+// unusable output as a degrade.
 function codexReviewPrompt(f) {
   return [
-    '--effort xhigh',
+    '--effort ' + effort,
     'RUN SYNCHRONOUSLY IN THE FOREGROUND — do NOT use --background. Return your verdict text, never a job handle.',
     'This is a READ-ONLY review; make no edits.',
     reviewPrompt(f),
@@ -102,8 +141,11 @@ function parseCodexReview(raw) {
 
 async function codexReview(f) {
   try {
+    // Blocking codex-worker, not the fire-and-forget rescue path (spec 013):
+    // a review verdict returned as a background handle would silently degrade
+    // the panel to single-model.
     const raw = await agent(codexReviewPrompt(f), {
-      agentType: 'codex:codex-rescue',
+      agentType: 'codex-worker',
       label: 'codex-verify:' + (f.id ?? f.file ?? 'finding'),
       phase: 'Panel',
     })
@@ -134,10 +176,15 @@ function consensusOf(claude, codex) {
 // --- Phase: Presence ------------------------------------------------------
 // Prefer the threaded gate result; else a GENERAL probe agent (NOT the
 // forwarder, which is barred from `setup`) runs the gate. Unknown -> OFF (the
-// safe, public-mirror-inert degrade).
+// safe, public-mirror-inert degrade). A declared tier the surface does not
+// support turns the WHOLE Codex leg off for the run (fail-closed, single-model
+// — the existing degrade shape); the tier is never clamped (spec 011 D6b).
 phase('Presence')
 let codexAvailable = args.codexAvailable
-if (codexAvailable === undefined) {
+if (!effortSupported) {
+  log('verify-panel: FAIL-CLOSED tier=' + effort + ' not supported by surface [' + supportedEfforts.join(', ') + '] — Codex leg OFF for this run (single-model), no clamp')
+  codexAvailable = false
+} else if (codexAvailable === undefined) {
   try {
     const probe = await agent(
       [
@@ -166,11 +213,16 @@ const results = await parallel(
       claudeReview(f),
       codexAvailable ? codexReview(f) : Promise.resolve(null),
     ])
+    // Receipt echo (spec 011 D1/SC3e): the declared tier + justification are
+    // merged recipe-side into every returned record — deterministic, never
+    // asked of the reviewer agents (drift risk).
     return {
       finding: f,
       claude,
       codex,
       consensus: consensusOf(claude, codex),
+      effort,
+      justification,
     }
   }),
 )

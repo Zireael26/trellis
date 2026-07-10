@@ -4,7 +4,7 @@ Source: the Trellis process-enforcement design (`docs/specs/2026-06-02-trellis-p
 
 GPT-5.x is Trellis's secondary harness (Codex). The spine — hooks, the autonomy slider, the context-log/primer system, the merge gates — is model-agnostic and already steers every harness identically. This doc carries only the genuine per-harness reporting/affordance deltas (verbosity, plan tracking, progress cadence). The load-bearing rules live in `core-rules/CLAUDE.md`, `core-rules/autonomy.md`, and the hooks — this is the why and the spare parts for the GPT-5.x deltas.
 
-**Reasoning effort and cross-model routing are NOT restated here — they are governed by `docs/codex-routing.md`.** In brief: Codex runs at **`xhigh` by default** (its ceiling — there is no `max` for Codex), and the reasoning-heavy stages (planning, spec, architecture, the `analyze` gate, synthesis) route to **Claude**, not to a Codex effort-lift. The earlier "raise Codex effort from a medium baseline at plan/analyze" framing was retired in RC.5: it contradicted the xhigh-default routing and implied a medium baseline and a tier above xhigh that Codex does not have.
+**Reasoning effort and cross-model routing are NOT restated here — they are governed by `docs/codex-routing.md`.** In brief: effort is governed by the dispatch-time ladder in `docs/codex-routing.md §3` — an operating band plus exception tiers, with effort declared explicitly per unit at dispatch, never defaulted — and the reasoning-heavy stages (planning, spec, architecture, the `analyze` gate, synthesis) route to **Claude**, not to a Codex effort-lift. The earlier "raise Codex effort from a medium baseline at plan/analyze" framing was retired in RC.5: it implied a medium baseline that contradicted the then-current routing.
 
 ---
 

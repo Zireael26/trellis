@@ -181,3 +181,156 @@ EOF
   PROCESS_GATE_NO_RECEIPTS=1 run bash "$HOOK" <<<"$(make_envelope "$tx")"
   [ "$status" -eq 0 ]
 }
+
+# --- Follow-ups marker fixtures (spec 012) -------------------------------------
+
+# Current-turn receipt AND a follow-ups count marker on the assistant line.
+write_transcript_receipt_and_followups() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":"Done. <!-- dod-receipt cmd=\"node -e 'require(\\\"./app.js\\\")'\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: 2 -->"}}
+EOF
+}
+
+# Current-turn receipt AND an explicit `none` follow-ups marker.
+write_transcript_receipt_and_followups_none() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":"Done. <!-- dod-receipt cmd=\"node -e 'require(\\\"./app.js\\\")'\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: none -->"}}
+EOF
+}
+
+# A follow-ups marker (with a valid receipt) BEFORE the last user line; after
+# it, a fresh valid receipt with NO marker. The stale prior-turn marker must
+# NOT satisfy this turn — the warn should fire.
+write_transcript_stale_followups() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"first task"}}
+{"type":"assistant","message":{"role":"assistant","content":"Prior turn done. <!-- dod-receipt cmd=\"npm test\" exit=0 diff=\"+3/-0 (1 files)\" --> <!-- follow-ups: 1 -->"}}
+{"type":"user","message":{"role":"user","content":"now do a second change"}}
+{"type":"assistant","message":{"role":"assistant","content":"Second change done. <!-- dod-receipt cmd=\"npm test\" exit=0 diff=\"+2/-1 (1 files)\" -->"}}
+EOF
+}
+
+# ONLY a follow-ups marker + a done-claim — no dod-receipt anywhere. Must still
+# BLOCK: the follow-ups marker cannot satisfy dod-receipt parsing (spec 012 §4
+# collision constraint, direction 2).
+write_transcript_followups_no_receipt() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":"All done — the change is complete. <!-- follow-ups: 2 -->"}}
+EOF
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt + count marker → silent clean pass (0, no
+# output at all).
+# =========================================================================
+@test "follow-ups: receipt + count marker → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_receipt_and_followups "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt + explicit `none` marker → silent clean pass
+# (SC2 clause 2: explicit none passes clean).
+# =========================================================================
+@test "follow-ups: receipt + none marker → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_receipt_and_followups_none "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt WITHOUT a marker → NON-BLOCKING warn (SC2
+# clause 3): exit 0, additionalContext, no decision key. Anti-template
+# assertion: the rendered warn text itself must NOT satisfy the detection ERE
+# (its `<count-or-none>` placeholder is deliberately unfilled), so the warn
+# can never self-satisfy a future scan.
+# =========================================================================
+@test "follow-ups: receipt without marker → warn (0, additionalContext, no block)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_current_receipt "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
+  printf '%s' "$output" | jq -r '.additionalContext' | grep -q 'follow-ups'
+  # Anti-template: rendered warn must not match the detection regex.
+  ! printf '%s' "$output" | jq -r '.additionalContext' \
+    | grep -Eq '<!-- follow-ups: (none|[0-9]+) -->'
+}
+
+# =========================================================================
+# Follow-ups (spec 012, turn-scoping load-bearing): a stale prior-turn marker
+# + a fresh current-turn receipt with no marker → the warn still fires.
+# =========================================================================
+@test "follow-ups: stale prior-turn marker does NOT satisfy this turn → warn fires" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_stale_followups "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
+}
+
+# =========================================================================
+# Follow-ups (spec 012, collision direction 2): a follow-ups marker WITHOUT a
+# dod-receipt must still BLOCK — the new marker cannot satisfy dod-receipt
+# parsing.
+# =========================================================================
+@test "follow-ups: marker without receipt → still block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_followups_no_receipt "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+# F1 regression (012 Codex review): a receipt QUOTING the follow-ups marker
+# inside its cmd="…" must NOT satisfy the marker scan — dod-receipt spans are
+# stripped (perl non-greedy) before the FOLLOWUPS_RE grep.
+write_transcript_receipt_quoting_marker() {
+  local path="$1"
+  cat > "$path" <<'INNER'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":"Done. <!-- dod-receipt cmd=\"grep -F '<!-- follow-ups: 1 -->' notes.md\" exit=0 diff=\"+1/-0 (1 files)\" -->"}}
+INNER
+}
+
+@test "follow-ups: receipt quoting marker inside cmd → warn still fires (F1)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_receipt_quoting_marker "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
+}

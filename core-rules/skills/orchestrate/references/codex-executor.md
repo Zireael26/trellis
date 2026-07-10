@@ -51,58 +51,73 @@ works, just single-family.
 Because a `.wf.js` runs inside the Workflow engine, which exposes **no shell
 primitive**, the gate is run by the **main loop** (Bash-direct) and its boolean
 result is threaded into the recipe via `args.codexAvailable`; when that arg is
-absent, a *general* probe agent runs the command (the `codex:codex-rescue`
-forwarder is contractually barred from `setup`).
+absent, a *general* probe agent runs the command. The rescue forwarder is an
+interactive-rescue-only path and is contractually barred from `setup`.
+
+Presence alone is not enough (spec 011 D6). Three further probes run
+alongside it — each main-loop Bash-direct, each **fail-closed**:
+
+- **Model pin** —
+  `grep -E '^model *= *"gpt-5\.6-sol"' ~/.codex/config.toml`. The file is
+  host-global and unversioned, so verify per the 009 network-preflight
+  pattern, never assume; a wrong or absent pin means the unit **stays home**,
+  logged.
+- **Companion effort-enum probe** — the accepted `--effort` set is read from
+  the *installed* companion via the canonical mechanic,
+  `scripts/codex-effort-preflight.sh`. A unit requesting a tier outside the
+  probed set **fails closed with a logged note — never clamps** to a lower
+  tier.
+- **CLI version** — `codex --version` must report ≥ 0.144 wherever
+  per-dispatch `--model` pinning is needed; an older CLI **fails closed**
+  (the upgrade itself, plus killing the stale `codex app-server` and
+  shadowing symlinks, belongs to the 013 handoff — here we only check).
+
+Probe results thread into recipes the same way as presence:
+`args.codexAvailable` plus `args.supportedEfforts` (the probed effort set).
 
 ## Dispatch mechanics — two paths, picked by where you run
 
-The **default is (ii) — the wrapped, harness-tracked path** whenever you are
-inside a workflow. Reach for (i) from the main loop, for detached async, or for
-the presence gate. There is **no wrapper-free way** to run Codex as a native
-agent (Claude Code spawns Claude models only; the plugin ships no MCP server),
-so the Sonnet forwarder is the bridge — and that is a feature, because it makes
-a Codex unit a first-class tracked node instead of a shell you babysit.
+The **default is (ii) — the blocking, harness-tracked worker** whenever you are
+inside a workflow. Reach for (i) from the main loop, for a human-managed
+detached rescue, or for the presence gate. Claude Code still spawns a Claude
+driver for an agent profile, but `codex-worker` keeps that tracked node blocking
+until the companion returns a real terminal result.
 
 **(i) Bash-direct — from the main orchestrator loop** (a `/loop`, a scheduled
 task, or an agent driving the work by hand). The orchestrator is already
 running, so it spends **zero** on a middleman:
 
 ```
-node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort xhigh "<prompt>"
+node "$CODEX_PLUGIN"/scripts/codex-companion.mjs task --write --effort <tier> "<prompt>"
 ```
 
-This is the **leanest** path (zero forwarder cost) and the right choice from the
-main loop, and it is **mandatory** for two operations that cannot go through the
-forwarder at all:
+(`<tier>` from the `docs/codex-routing.md §3` ladder — declared per unit,
+never defaulted.)
 
-- the **presence gate** (`setup --json`) — the forwarder is task-only and may
-  not call `setup`;
-- **`--background` async units** — the forwarder strips `--background` and cannot
-  call `status` / `result`, so polling a detached job is Bash-direct only.
+This is the **leanest** path (zero worker cost) and the right choice from the
+main loop, and it remains mandatory for:
 
-**(ii) In-engine forwarder — from inside a `.wf.js`.** The engine has no shell,
-so the only way to reach Codex is a subagent:
+- the **presence gate** (`setup --json`) before recipe dispatch; and
+- an **interactive rescue** where a human intentionally owns a detached
+  `--background` job and its `status` / `result` polling.
+
+**(ii) In-engine blocking worker — from inside a `.wf.js` — CANONICAL.** Dispatch
+the inherited worker profile as a normal tracked agent node:
 
 ```js
-agent(prompt, { agentType: 'codex:codex-rescue', label: 'codex:<unit>', isolation: 'worktree' })
+agent(prompt, { agentType: 'codex-worker', label: 'codex:<unit>', isolation: 'worktree' })
 ```
 
-`codex:codex-rescue` is `model: sonnet` — the **cheapest available forwarder**,
-cheaper than making a general Opus agent shell out to Bash. It forwards one
-`codex-companion task --write` and returns raw stdout. This is the **canonical
-in-workflow dispatch**: the unit is a tracked node (label, phase, live progress,
-`TaskOutput`), and the Sonnet driver is a courier — Codex/GPT does all the
-reasoning.
+`codex-worker` is `model: sonnet`, launches the companion, polls status from the
+same cwd, applies the bounded no-session/stall recovery, fetches `result`, and
+returns that result plus its diff-stat receipt. The Workflow node therefore
+resolves only on terminal success, unavailability, or failure. Producing recipes
+retain a defensive job-handle assertion: a leaked handle is a worker-contract
+failure and degrades the identical unit to Claude, never a completed result.
 
-**§4 correctness requirement — this path MUST run synchronous.** The forwarder's
-own heuristic (`codex-rescue.md:24`) may background a unit it judges
-"big/open-ended" and return a **job handle instead of the result** — a non-empty
-string that slips past the empty-degrade check and silently drops the work from
-the fan-out. The recipe defends on two fronts: (a) the prompt orders foreground
-("run synchronously, do not `--background`"), and (b) a job-handle-shaped result
-is detected (`isJobHandle`) and that unit **degrades to Claude** rather than
-returning handle text. Detached `--background` execution is mechanic (i)'s job,
-never this in-engine path.
+The legacy rescue forwarder remains documented only for interactive rescue. It
+is fire-and-forget and MUST NOT be used as a producing dispatch path inside a
+Workflow.
 
 Never route execution through a general Opus agent that only shells out — the
 most expensive of the three, buying nothing over (i) or (ii).
@@ -110,7 +125,8 @@ most expensive of the three, buying nothing over (i) or (ii).
 ## The prompt contract
 
 Spec quality decides delegation success. Every dispatch — workflow or
-interactive — carries the six work-order fields:
+interactive — carries the six work-order fields plus the honest-reporting
+clause:
 
 ```
 GOAL:        <one sentence — what done looks like>
@@ -119,9 +135,20 @@ CONSTRAINTS: <don't touch X; APIs and styles to hold>
 NON-GOALS:   <adjacent work explicitly out of scope>
 PROOF:       <the exact command that must run green>
 OUTPUT:      <report files changed + the proof output>
+
+Report failures as failures. Never claim completion without the proof command's actual output. A claimed-complete unit without receipts is treated as failed.
 ```
 
-Six fields alone under-specify the execution environment, so the template
+The honest-reporting clause is the **seventh mandatory template line** —
+character-identical in this template and in every runnable prompt builder,
+never paraphrased. Rationale, stated boundedly: the GPT-5.6 system card
+reports increased agentic-coding overreach vs 5.5 (most pronounced at highest
+reasoning effort under persistence-heavy prompts) alongside a ~30% *decrease*
+in misrepresented completions in simulated traffic, and METR reports its
+highest detected ReAct-harness cheating rate, explicitly prompt/scaffold-dependent
+— so the honesty contract must live in the runnable prompt, not only in prose.
+
+Seven lines alone under-specify the execution environment, so the template
 closes with the operational invariants the recipe already carries:
 
 - **Base ref + branch** — name the commit the unit starts from and the branch
@@ -157,7 +184,8 @@ with `<tier>` set per the §3 effort ladder. Bash-direct is only "untracked" if
 you track nothing, so every interactive dispatch keeps a **tracking receipt**:
 opened at dispatch with the **unit id** (your name for the work order), the
 **thread id** (the `--json` payload's `threadId` — the unit's resume handle),
-the **leg** (Codex or Claude worker), and the **effort tier**; closed at
+the **leg** (Codex or Claude worker), the **effort tier**, and the
+**justification** (required when the effort is an exception tier); closed at
 review with the **diff summary**, the **proof output**, the **review verdict**,
 and any **degrade or takeover** note. Same DoD-receipt discipline as inline
 work — budget attribution and audit survive without the Workflow engine.
@@ -214,18 +242,22 @@ delegating a network-needing unit (dep installs, registry fetches), check
 stays home. Rollback is the same two lines — set `false` or delete the block
 and default-deny returns.
 
-**The escape hatch — Codex-leg-only.** A unit that is genuinely
-sandbox-hostile (out-of-workspace writes, blocked tooling like docker) may run
-raw:
+**The escape hatch — manual, operator-invoked, Codex-leg-only.**
+`workspace-write` is the **default and the only automated posture**: no
+automated recipe may use the hatch. A unit that is genuinely sandbox-hostile
+(out-of-workspace writes, blocked tooling like docker) may run raw:
 
 ```
 codex exec --dangerously-bypass-approvals-and-sandbox "<prompt>"
 ```
 
-only under all of: an **isolated worktree** created via `trellis worktree add`
+only when the operator invokes it by hand, and only under all of: an
+**isolated worktree** created via `trellis worktree add`
 (inheritance-seeded), with a preflight that `.codex/hooks/` exists; **never
 the canonical checkout**; a **trusted prompt** (no untrusted repo content in
-context). Be honest about what this is: sandboxless is **host-wide privilege**
+context). **`max` and `ultra` are forbidden on the hatch** — highest-effort
+persistence risk with no OS sandbox is exactly the compound the 5.6 system
+card warns about. Be honest about what this is: sandboxless is **host-wide privilege**
 — the worktree confines the intended diff surface and makes rollback trivial;
 it does not confine the process. The repo-scoped Codex hooks and the pre-push
 guard still fire, but they are pattern-based — a complementary layer, not a
@@ -234,34 +266,40 @@ rule; the diff is reviewed like any other unit.
 
 ## Effort
 
-Workflow recipes hardcode `xhigh` this cycle (threading per-unit effort
-through `.wf.js` is a named follow-up). Interactive dispatch sets `--effort`
-per unit from the ladder in `docs/codex-routing.md §3` — xhigh for hard
-debugging, design-adjacent edits, and verify/review passes; high for standard
-implementation from a frozen spec; medium/low for mechanical bulk. For the
-forwarder path, the leading `--write --effort xhigh` tokens in the prompt are
-recognized and applied by the codex-cli-runtime contract; for Bash-direct they
-are `task` flags. **Codex's effort ceiling is `xhigh` — there is no `max` for
-Codex**; do not request a higher tier. Claude has session-only tiers above
-xhigh (`max`, `ultracode`) reachable per-session, but those are the
-orchestrator's call, not a Codex knob.
+The ladder — operating band, exception tiers, the explicit-effort-or-error
+rule — lives in `docs/codex-routing.md §3` and is the single source; it is
+not restated here. This section carries only the mechanics:
+
+- **Workflow recipes take a required per-unit `effort`** — enum-validated at
+  the top of the recipe; an omitted tier is a validation error, never a
+  default. `ultra` is excluded from the recipe enum and hard-rejected with a
+  logged note until the D4a controls exist (spec 011).
+- **Interactive dispatch sets `--effort <tier>`** per the §3 ladder on every
+  unit. In a Workflow, `codex-worker` receives the explicit effort field in its
+  work order; for Bash-direct it is a `task` flag.
+- **Exception tiers require a named `justification`** logged in the dispatch
+  receipt, and are invocable only where the preflight (see "The capability
+  gate") proves the installed surface supports them — a tier outside the
+  probed set fails closed with a logged note, never clamps.
 
 ## Degrade-to-Claude
 
 There is **no quota API** in the plugin, so "has limits" is not observable — a
-limit-hit and a task failure are the **same signal**. Both surface as a
-null / empty / errored Codex result (the forwarder "returns nothing" on failure).
+limit-hit and a task failure are the **same signal**. Both surface as a worker
+UNAVAILABLE / FAILURE receipt, a thrown error, or an empty result.
 
 On any such result, the workflow stage **re-dispatches the identical unit to the
-orchestrator** and continues. The Codex dispatch carries **no output schema** for
-exactly this reason: the forwarder returns raw stdout, so empty *is* the degrade
-trigger — a schema would make the engine try to validate raw text and mask the
-signal. Every degrade is `log()`'d so a run that silently became Claude-only
+orchestrator** and continues. The Codex dispatch carries **no output schema** so
+the worker's verbatim terminal receipt remains intact and an empty value stays a
+degrade trigger. Every degrade is `log()`'d so a run that silently became Claude-only
 stays visible (no-silent-caps discipline).
 
 ## Quality is not laundered
 
-Routing a unit to Codex does not lower the bar. Every Codex artifact flows back
+Routing a unit to Codex does not lower the bar. **Review of executor output is
+never delegated to the executor that produced the diff, and never skipped** —
+cross-agent review inside recipes is legitimate; self-review by the producing
+executor is what's banned. Every Codex artifact flows back
 through the orchestrator's **review gate** before it counts: a Claude reviewer
 inspects the **actual diff** (not the executor's stdout self-report), runs the
 on-host install/build/typecheck green check, and applies the bright-line

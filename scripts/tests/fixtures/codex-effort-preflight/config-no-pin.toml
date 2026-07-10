@@ -1,0 +1,2 @@
+# Fixture: config.toml with no model assignment at all.
+approval_policy = "never"

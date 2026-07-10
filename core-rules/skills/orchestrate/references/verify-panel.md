@@ -21,7 +21,8 @@ For each finding, two reviewers judge **independently and in parallel**:
 - **Claude reviewer** — on the orchestrator, with a strict `REVIEW` schema
   (`real`, `confidence`, `reason`). Prompted to *refute*, not rubber-stamp.
 - **Codex reviewer** — via the **canonical wrapped tracked path**
-  (`agent(prompt, { agentType: 'codex:codex-rescue' })`), read-only, `xhigh`,
+  (`agent(prompt, { agentType: 'codex:codex-rescue' })`), read-only, at the
+  **declared per-run tier** (`args.effort` — required, never defaulted),
   **forced foreground** (§4 discipline). No output schema on the Codex leg (the
   forwarder returns raw stdout), so its verdict is parsed leniently.
 
@@ -41,6 +42,16 @@ other missed — exactly the case a single-model verify cannot produce.
 
 - `findings[]` — `{ id, claim, file, line, severity }`, the hard findings to verify.
 - `context` — the diff / code excerpt / evidence the reviewers judge against.
+- `effort` — **required** reasoning tier for the Codex leg (enum
+  `medium|high|xhigh|max`; review passes are xhigh-band per the
+  `docs/codex-routing.md` §3 ladder). Omitted → validation error, never a
+  default; `ultra` is hard-rejected in recipes until the D4a prerequisites
+  exist; `max` requires a non-empty `justification` (spec 011 D1/D4a).
+- `justification` — required when `effort` is an exception tier (`max`); echoed
+  into every returned verdict record alongside `effort`.
+- `supportedEfforts` — accepted tiers probed from the installed surface,
+  threaded from the main loop's D6 preflight; absent → conservative
+  `['medium','high','xhigh']`.
 - `codexAvailable` — presence-gate result threaded from the main loop; probed via
   `setup --json` if absent.
 
@@ -52,6 +63,12 @@ limit-hit/failed reviewer (a null / empty / **job-handle** result) — that
 finding is judged by Claude alone, `consensus = single-model`, and the degrade
 is `log()`'d (no-silent-caps). The panel never blocks on the Codex leg: a
 finding's Codex reviewer degrading does not delay its Claude reviewer.
+
+**Fail-closed tier rejection (spec 011 D6b):** if the declared `effort` is not
+in `supportedEfforts`, the **whole Codex leg is turned OFF for the run** —
+every finding is judged single-model, the refusal is `log()`'d, and the tier is
+**never silently clamped** to a supported one. Same degrade shape as
+Codex-absent; the run still completes.
 
 ## Loop safety
 

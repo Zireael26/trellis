@@ -8,6 +8,17 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.10] — 2026-07-10
+
+### Added
+- **GPT-5.6 effort ladder v2 (spec 011 Phase A).** Explicit-effort-or-error on every Codex unit (enum `medium|high|xhigh|max`; omitted = validation error, never a default); `max`/`ultra` exception tiers, opt-in with receipt-logged justification; `ultra` hard-rejected in recipes until token telemetry + ×4 concurrency accounting + one instrumented run exist. Six-field work-order contract + verbatim honest-reporting clause in both runnable prompt builders (5.6 system-card hardening). `supportedEfforts` fail-closed degrade — reject-and-reroute, never clamp. `scripts/codex-effort-preflight.sh` + executable SC3/SC4 matrix (`wf-stub.mjs`) against the real recipes. §2 strength figures untouched behind a dated stale-banner (Phase B re-grounds on ≥2 independent non-OpenAI evals; expiry 2026-08-15). ADR `2026-07-10-gpt-5-6-effort-reground.md`.
+- **Follow-ups convention (spec 012).** Prioritized follow-ups at completion boundaries (spec status flip, PR open, DoD receipt), derived zero-exploration, captured in per-spec `## Follow-ups` tables + a root `follow-ups.md` ledger; `<!-- follow-ups: N|none -->` marker beside the DoD receipt; both `stop-verify` hooks warn (non-blocking, warn-stays-warn test-asserted) on receipt-without-marker, with dod-receipt spans stripped pre-scan so a receipt quoting the marker cannot false-satisfy.
+- **Blocking `codex-worker` + `codex-fanout` (spec 013).** Canonical agent def under `core-rules/agents/` (inherited via `.claude/agents/` symlinks; new projects wired by onboard; `rollout-codex-worker-agent.sh` for the fleet): explicit-background launch, foreground poll chunks, collaboration-tool-ban preamble, bounded stall recovery (cancel + one annotated retry; one-tier-lower on thread-create wedge), receipts with attempts/downgrades/ids. `codex-fanout.wf.js`: mixed Codex/Claude fan-out, config-knob cap (`codex_fanout.concurrency`, default 4), topological `dependsOn` waves, branch-based conflict isolation, anchored receipt STATUS parsing, leak guard with cancel-on-leak. All Workflow dispatch migrated off the fire-and-forget rescue path (now interactive-only). Speed doctrine reference: race-the-legs, cross-harness pipelined verify, warm-thread pool, primer-fed dispatch, streaming merges, ultra-as-node (locked). `codex-worker-preflight.sh` (CLI ≥0.144, shadowed installs, stale app-servers, pin, companion enum). ADRs `2026-07-10-gpt-5-6-dual-harness-program.md`, `2026-07-10-codex-parallel-orchestration.md`.
+
+### Changed
+- **Fan-out doctrine: dynamic workflows preferred over named teammates** on teams-enabled harnesses — teammates never auto-terminate (probe-verified: graceful `shutdown_request` and `TaskStop` both work when invoked, but nothing invokes them automatically) and teammate panes can spawn with hooks dead (`node` absent from PATH). Lifecycle-by-construction over lifecycle-by-discipline (`orchestrate/SKILL.md`).
+- `docs/codex-routing.md` §1 topology reframed as policy choice (Codex now has native multi-agent surface); §4.5 canonical Workflow dispatch = `codex-worker`; §6 review invariant precise wording ("never delegated to the executor that produced the diff"); loop-safety gains worker-stall/race/ultra accounting.
+
 ## [v1.0.0-rc.9] — 2026-07-09
 
 ### Added

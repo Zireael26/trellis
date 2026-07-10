@@ -233,3 +233,107 @@ EOF
   PROCESS_GATE_NO_RECEIPTS=1 run bash "$HOOK" <<<"$(make_envelope "All done." "$tx")"
   [ "$status" -eq 0 ]
 }
+
+# --- Follow-ups marker fixtures (spec 012) -------------------------------------
+
+# A valid follow-ups count marker (canonical filled form). The detection ERE
+# requires a filled value (`none` or digits) after `follow-ups: `.
+FOLLOWUPS_MARKER='<!-- follow-ups: 2 -->'
+FOLLOWUPS_NONE_MARKER='<!-- follow-ups: none -->'
+
+# Current-turn transcript carrying ONLY a follow-ups marker (no receipt) on the
+# assistant line — used for the cross-source union test (receipt in
+# last_assistant_message, marker only in the transcript).
+write_transcript_followups_only() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":"Follow-ups noted. <!-- follow-ups: 1 -->"}}
+EOF
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt + count marker both in last_assistant_message
+# (transcript null) → silent clean pass (0, no output at all).
+# =========================================================================
+@test "follow-ups: receipt + count marker in last_assistant_message → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER $FOLLOWUPS_MARKER" NULL)"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt + explicit `none` marker in
+# last_assistant_message → silent clean pass (SC2 clause 2).
+# =========================================================================
+@test "follow-ups: receipt + none marker in last_assistant_message → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER $FOLLOWUPS_NONE_MARKER" NULL)"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# =========================================================================
+# Follow-ups (spec 012): receipt in last_assistant_message, NO marker anywhere
+# → NON-BLOCKING warn: exit 0, systemMessage advisory (same idiom as the
+# both-sources-unavailable advisory), no decision key, never a block.
+# =========================================================================
+@test "follow-ups: receipt without marker → warn (0, systemMessage, no block)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER" NULL)"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e 'has("systemMessage")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
+  printf '%s' "$output" | jq -r '.systemMessage' | grep -q 'follow-ups'
+}
+
+# =========================================================================
+# Follow-ups (spec 012, OQ1 cross-source union): receipt in
+# last_assistant_message, follow-ups marker ONLY in the current-turn
+# transcript window → silent clean pass. Cross-source generosity mirrors
+# receipt detection.
+# =========================================================================
+@test "follow-ups: receipt in LAM + marker only in transcript → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_followups_only "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER" "$tx")"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# =========================================================================
+# Follow-ups (spec 012, collision direction 2): a follow-ups marker WITHOUT a
+# dod-receipt in last_assistant_message must still BLOCK — the new marker
+# cannot satisfy dod-receipt parsing.
+# =========================================================================
+@test "follow-ups: marker without receipt → still block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope "All done — the change is complete. $FOLLOWUPS_MARKER" NULL)"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+# F1 regression (012 Codex review): receipt quoting the marker inside cmd="…"
+# in last_assistant_message must not satisfy the scan (receipt span stripped).
+@test "follow-ups: receipt quoting marker inside cmd → warn still fires (F1)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope "Done. <!-- dod-receipt cmd=\"grep -F '<!-- follow-ups: 1 -->' notes.md\" exit=0 diff=\"+1/-0 (1 files)\" -->" NULL)"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e 'has("systemMessage")' >/dev/null
+  printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
+}

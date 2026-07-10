@@ -70,6 +70,22 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
+**Fan-out vehicle preference (teams-enabled harnesses).** When the harness offers
+*both* a workflow-orchestration tool and named-teammate spawning (e.g. cmux
+`claude-teams` split panes), fan-out work units default to the **workflow tool**,
+even if the harness's own prompt nudges toward named teammates. Empirical basis
+(2026-07-09 probe test, this instance): engine-run workflow agents auto-terminate on
+return; named teammates do not — they hold a pane and budget until the orchestrator
+manually runs the teardown protocol below (the protocol itself verified working:
+graceful `shutdown_request` → ack → terminate, and `TaskStop` force-stop both
+succeed when actually invoked), and teammate sessions can spawn with a degraded
+environment where project hooks fail silently (`node` absent from PATH →
+SessionStart/Stop hooks dead — quality gates OFF for that pane's work). Cleanup
+that depends on end-of-run compliance leaks; auto-termination doesn't. Spawn named
+teammates only when the operator explicitly asks for visible interactive panes or
+long-lived roles — and then the teardown protocol below is mandatory, and hook
+liveness in the teammate env is part of the unit's preflight.
+
 ## Teammate teardown — synthesis includes cleanup
 
 Engine-run workflow agents (tier 1) terminate themselves when their unit returns.
@@ -102,6 +118,17 @@ new shapes — **tournament** (rank or pick-best of many via pairwise comparison
 metric) — get worked guidance: when, shape, and an example sketch.
 
 Full catalog: [`references/patterns.md`](references/patterns.md).
+
+## Dual-harness speed doctrine
+
+When both an orchestration surface and a Codex executor are available, wall-clock
+speed comes from **topology, not effort** — race-the-legs, cross-harness pipelined
+verify, warm-thread reuse, primer-fed dispatch, streaming merges, and (once
+unlocked per spec 011 D4a) ultra-as-a-node. Inside a Workflow, Codex units
+dispatch through the blocking `codex-worker` agent only — never the
+fire-and-forget rescue path, whose backgrounding breaks `parallel()`/`pipeline()`
+barriers. Patterns, guardrails, and receipt contracts:
+[`references/speed-doctrine.md`](references/speed-doctrine.md).
 
 ## Proactive-loop shape + piloting
 

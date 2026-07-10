@@ -1,0 +1,2 @@
+# Fixture: config.toml with a stale / wrong model pin.
+model = "gpt-5.5-codex"

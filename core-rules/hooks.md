@@ -82,6 +82,7 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
   3. **Lint** — same detection as `post-edit-verify` but run repo-wide: eslint, ruff, clippy, golangci-lint.
   4. **Test** — auto-detected fast suite: `npm test` (if `test` script), `pytest` (if installed), `cargo test`, `go test ./...`. Skip e2e/integration unless explicitly configured.
 - **Canonical receipt marker:** the single machine-readable anchor the receipts check reads and the `execute` skill emits is `<!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->`, byte-identical to its definition in `core-rules/CLAUDE.md`. Fields map 1:1 to that prose — `cmd`→verification command, `exit`→exit code, `diff`→diff lines that prove the change.
+- **Follow-ups marker (spec 012):** alongside the receipt the agent emits `<!-- follow-ups: <count> -->` or `<!-- follow-ups: none -->` (detection ERE: `<!-- follow-ups: (none|[0-9]+) -->`, filled values only — the unfilled template never matches). A receipt WITHOUT this marker triggers a non-blocking advisory warn (additionalContext / system message), never a block: explicit `none` passes clean, and warn-stays-warn is a design invariant (spec 012 D4).
 - **Block condition:** any step fails OR todos are open
 - **Error slicing on failure:**
   - Typecheck / lint output → **first 30 lines** (compile errors are at the top; the rest is cascade noise)
@@ -268,6 +269,16 @@ The gate that makes "every feature gets specced" enforceable rather than aspirat
 ---
 
 ## Invariants across all tiers
+
+### Codex worker preflight is runtime, not a hook
+
+The blocking `codex-worker` executor runs `scripts/codex-worker-preflight.sh`
+at dispatch time. It is intentionally not registered in either hook manifest:
+the companion state root and sandbox follow the invocation cwd, so the check
+must run from the target checkout. Per-dispatch model pinning requires Codex CLI
+0.144 or newer. After a CLI upgrade, restart any stale `codex app-server`, and
+reconcile competing Homebrew/npm installations or links before dispatch so the
+selected binary is not shadowed.
 
 - **Never skip with `--no-verify`.** If a hook fails, fix the cause. If the hook is wrong, fix the hook and commit that separately.
 - **`stop_hook_active` guard is mandatory** on every `Stop` hook. Missing it causes infinite loops when a blocked hook triggers another stop.

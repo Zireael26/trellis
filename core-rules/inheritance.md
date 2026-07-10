@@ -40,6 +40,7 @@ Every project in `registry.md` must:
 - [ ] Track `.claude/rules/trellis.md` in git (including `.gitignore` exceptions where needed).
 - [ ] Contain the `@`-import line in the project `CLAUDE.md` for interactive fallback.
 - [ ] Contain `.claude/skills/process-gate/` as a symlink to the canonical skills path (see "Skills inheritance" above).
+- [ ] Contain `.claude/agents/codex-worker.md` as a symlink to the canonical blocking Workflow agent definition.
 - [ ] If Codex-enabled (`harnesses` includes `"codex"`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, and `.agents/skills/process-gate-local/local.config.sh`.
 - [ ] If Codex-enabled additionally: `.codex/hooks.json`, executable `.codex/hooks/*.sh`, `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` symlinks, and `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` symlinks (workflow-style command surface Codex also reads).
 - [ ] Have GitHub branch protection enabled on `main` (see `registry.md` step 5).
@@ -56,6 +57,19 @@ The directory itself is symlinked (not individual files) so additions to canonic
 As of 2026-07-09, twelve canonical skills ship: `process-gate`, `security-gate` (always-on), the pipeline `clarify`, `spec`, `plan`, `tasks`, `analyze` (opt-in by default; enforceable above a size floor via `mandatory_pipeline`, spec 006), the canonical builder `execute` (shipped Phase 4), the ideation front-door `brainstorming` (shipped Phase 6), the dynamic-workflow orchestration kit `orchestrate` (capability-gated: runs the recipe's workflow script when the harness exposes a subagent-orchestration tool, otherwise degrades to running the same stages by hand), the explicit teach-it-back skill `debrief` (explicit-invoke-only, never auto-fires: teaches the human the change just made, gated incremental, verifying understanding before advancing), and the publishing skill `writing` (explicit-invoke-only, spec 010: drafts and publishes blogs + X threads in the author's voice, gated by a scriptable anti-AI-tell check; posting leg capability-gated, degrades to draft handoff). (Was eleven before `writing`, 2026-06-05; nine before `orchestrate`; seven as of Phase C, 2026-05-12, before `execute` and `brainstorming`.)
 
 Same silent-drop invariant: if the symlink target moves or breaks, the skill simply does not load — no error. Detected by the extended `parent-hook-drift` audit (skills coverage), not at session time.
+
+## Canonical agents inheritance
+
+Canonical Claude Workflow-agent definitions live under `core-rules/agents/` and
+use the same machine-local symlink pattern as skills and commands:
+
+    <project-root>/.claude/agents/<name>.md  →  __TRELLIS_PATH__/core-rules/agents/<name>.md
+
+The canonical `codex-worker.md` definition is inherited as
+`<project-root>/.claude/agents/codex-worker.md`, which Claude Code resolves as
+the `codex-worker` agent type. This is Claude Workflow-agent wiring only; do not
+invent an `.agents/agents/` mirror for Codex. The absolute symlink is gitignored,
+and the standard inheritance seeder recreates it in fresh worktrees.
 
 ### Skill path-scoping (optional, project-local)
 
@@ -117,6 +131,7 @@ Claude Code is the primary harness. Codex is a secondary. Trellis is configured 
 | `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex (via project root `AGENTS.md` and `.agents/rules/trellis.md`) |
 | `core-rules/skills/<name>/` | Canonical skills | Both harnesses via parallel project symlinks |
 | `core-rules/commands/<name>.md` | Canonical slash commands | Both harnesses (link target differs per harness: see below) |
+| `core-rules/agents/<name>.md` | Canonical blocking Workflow agents | Claude Code via `.claude/agents/<name>.md` symlinks |
 | `core-rules/hooks/` | Tier 1 + 2 Claude Code hooks | Claude Code only |
 | `core-rules/codex/` | Codex hook manifest + scripts | Codex only |
 | `core-rules/husky/` | Tier 3 git hooks | Both (git-level, harness-agnostic) |
@@ -141,6 +156,7 @@ Every one of these points at the same canonical files under `core-rules/commands
 │   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md
 │   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
 │   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md
+│   ├── agents/codex-worker.md → /…/trellis/core-rules/agents/codex-worker.md
 │   ├── hooks/                                               ← Tier 1+2, Claude-only
 │   └── settings.json
 ├── .agents/                                                 ← Codex companion dir
@@ -182,9 +198,9 @@ Reference example: `lume` (Unity 3D) uses `.githooks/pre-push` with `core.hooksP
 
 ### The problem
 
-All Trellis inheritance symlinks — `.claude/rules/trellis.md`, `.claude/rules/preset-*.md`, `.claude/skills/*`, `.claude/commands/*`, and the `.agents/` mirror — are **gitignored** by design: their targets are absolute paths under each developer's `$TRELLIS_ROOT`, which differs per machine. `git worktree add` materializes only tracked content from the commit. Gitignored files are never recreated in a new worktree.
+All Trellis inheritance symlinks — `.claude/rules/trellis.md`, `.claude/rules/preset-*.md`, `.claude/skills/*`, `.claude/commands/*`, `.claude/agents/*`, and the `.agents/` mirror — are **gitignored** by design: their targets are absolute paths under each developer's `$TRELLIS_ROOT`, which differs per machine. `git worktree add` materializes only tracked content from the commit. Gitignored files are never recreated in a new worktree.
 
-The consequence is the canonical silent-drop failure: a fresh worktree of any managed project has no parent rules, no skills, no commands. An agent starts without error, without warning, and runs completely unparented. This is the same silent-drop class as a broken symlink target — undetectable at runtime unless the caller checks explicitly.
+The consequence is the canonical silent-drop failure: a fresh worktree of any managed project has no parent rules, no skills, no commands, and no canonical Workflow agents. An agent starts without error, without warning, and runs completely unparented. This is the same silent-drop class as a broken symlink target — undetectable at runtime unless the caller checks explicitly.
 
 ### The fix: mirror the main checkout
 

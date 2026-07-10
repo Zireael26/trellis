@@ -15,6 +15,9 @@
 #     OR a turn-scoped parse of transcript_path (union; both are NullableString).
 #     No receipt in either source → block. Both sources unavailable → advisory
 #     fail-open. Doc-only turns + PROCESS_GATE_NO_RECEIPTS=1 skip the gate.
+#   - Follow-ups warn (spec 012): a receipt WITHOUT a follow-ups marker
+#     (`<!-- follow-ups: N|none -->`, same two-source union) triggers a
+#     NON-BLOCKING systemMessage advisory — warn stays warn, never a block.
 #   - Fail-counter: emit_block counts consecutive blocks against the same
 #     git-derived changed-file set (cksum of sorted paths, .codex/.fail-counter
 #     state); same set ≥2 injects a "re-read top-down" steer. A clean pass
@@ -374,22 +377,39 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
     # constant, used against BOTH sources, so they cannot drift. See CLAUDE.md:43.
     RECEIPT_RE='<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'
 
+    # Follow-ups marker (spec 012): <!-- follow-ups: <count> --> or
+    # <!-- follow-ups: none -->, emitted alongside the DoD receipt. The ERE
+    # requires a FILLED value (`none` or digits) after the literal
+    # `follow-ups: `, so the warn message's deliberately-unfilled template
+    # `<count-or-none>` can never satisfy it (`<` follows the colon-space —
+    # same tightening trick as `exit=[0-9]` above). Distinct literals mean no
+    # cross-collision with dod-receipt parsing in either direction, and the
+    # marker carries no quote characters, so it is immune to JSONL
+    # \"-escaping differences by construction.
+    FOLLOWUPS_RE='<!-- follow-ups: (none|[0-9]+) -->'
+
     RECEIPT_FOUND=0
+
+    # Turn-scoping line index, computed ONCE for both the receipt scan below
+    # and the follow-ups scan on the pass path. Turn-scoping (load-bearing): a
+    # receipt from a PRIOR turn must not satisfy THIS turn. The transcript is
+    # JSONL. Emit one role per input line (1:1 map, robust to malformed lines
+    # via fromjson? // "null"), find the LAST user-role line, and search ONLY
+    # lines after it. No user line → scope whole file. Same technique as the
+    # Claude hook / save-context-log.sh.
+    LAST_USER=""
+    if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
+        | grep -n '^user$' | tail -1 | cut -d: -f1)
+    fi
 
     # Source (a): last_assistant_message.
     if [ -n "$LAST_MSG" ] && printf '%s' "$LAST_MSG" | grep -Eq "$RECEIPT_RE"; then
       RECEIPT_FOUND=1
     fi
 
-    # Source (b): turn-scoped transcript parse. Turn-scoping (load-bearing): a
-    # receipt from a PRIOR turn must not satisfy THIS turn. The transcript is
-    # JSONL. Emit one role per input line (1:1 map, robust to malformed lines via
-    # fromjson? // "null"), find the LAST user-role line, and search ONLY lines
-    # after it. No user line → scope whole file. Same technique as the Claude
-    # hook / save-context-log.sh.
+    # Source (b): turn-scoped transcript parse.
     if [ "$RECEIPT_FOUND" = "0" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
-        | grep -n '^user$' | tail -1 | cut -d: -f1)
       if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | grep -Eq "$RECEIPT_RE"; then
         RECEIPT_FOUND=1
       fi
@@ -397,6 +417,28 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
 
     if [ "$RECEIPT_FOUND" = "1" ]; then
       rm -f "$STATE_FILE"
+      # Follow-ups nudge (spec 012 D4): receipt present — scan the SAME
+      # two-source union, in the same order, for the follow-ups marker.
+      # Cross-source generosity is deliberate and mirrors receipt detection:
+      # receipt in last_assistant_message + marker only in the transcript (or
+      # vice versa) passes clean. Present → silent pass, byte-identical to
+      # pre-012 behaviour. Absent → NON-BLOCKING advisory. Warn stays warn:
+      # never emit_block, never exit 2, on this path. The fail-counter stays
+      # GIT-derived — this scan never feeds it.
+      # dod-receipt spans stripped first (perl non-greedy) so a receipt quoting
+      # the marker inside cmd="…" cannot false-satisfy the scan (012 review F1).
+      FOLLOWUPS_FOUND=0
+      if [ -n "$LAST_MSG" ] && printf '%s' "$LAST_MSG" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+        FOLLOWUPS_FOUND=1
+      fi
+      if [ "$FOLLOWUPS_FOUND" = "0" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+        if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+          FOLLOWUPS_FOUND=1
+        fi
+      fi
+      if [ "$FOLLOWUPS_FOUND" = "0" ]; then
+        _se_emit_system_message 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->'
+      fi
       exit 0
     fi
 

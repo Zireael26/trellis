@@ -11,6 +11,7 @@
 #         capability-gated dynamic-workflow kit: orchestrate)
 #   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore,autonomy,surgical}.md
 #       → canonical commands (symlinks; feature primer system + /explore + /autonomy + /surgical)
+#   - <project>/.claude/agents/codex-worker.md → canonical blocking worker agent (symlink)
 #   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
@@ -50,6 +51,7 @@ GITHOOKS_CANONICAL="$SOURCE_ROOT/core-rules/githooks"
 CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
 CANONICAL_COMMANDS_DIR="$TRELLIS_ROOT/core-rules/commands"
+CANONICAL_AGENTS_DIR="$TRELLIS_ROOT/core-rules/agents"
 CANONICAL_PRIMER_INDEX_TEMPLATE="$TRELLIS_ROOT/core-rules/commands/templates/primer-index-template.md"
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
@@ -78,6 +80,7 @@ PROJECT="$1"
 [ -f "$CANONICAL_RULES" ]                  || { echo "canonical rules missing: $CANONICAL_RULES" >&2; exit 1; }
 [ -d "$CANONICAL_SKILLS_DIR" ]             || { echo "canonical skills dir missing: $CANONICAL_SKILLS_DIR" >&2; exit 1; }
 [ -d "$CANONICAL_COMMANDS_DIR" ]           || { echo "canonical commands dir missing: $CANONICAL_COMMANDS_DIR" >&2; exit 1; }
+[ -f "$CANONICAL_AGENTS_DIR/codex-worker.md" ] || { echo "canonical agent missing: $CANONICAL_AGENTS_DIR/codex-worker.md" >&2; exit 1; }
 [ -f "$CANONICAL_PRIMER_INDEX_TEMPLATE" ]  || { echo "canonical primer INDEX template missing: $CANONICAL_PRIMER_INDEX_TEMPLATE" >&2; exit 1; }
 [ -d "$CANONICAL_CLAUDE_HOOKS_DIR" ]       || { echo "canonical Claude hooks dir missing: $CANONICAL_CLAUDE_HOOKS_DIR" >&2; exit 1; }
 [ -f "$CANONICAL_CLAUDE_SETTINGS" ]        || { echo "canonical Claude settings template missing: $CANONICAL_CLAUDE_SETTINGS" >&2; exit 1; }
@@ -453,6 +456,7 @@ HDR
 .claude/screenshots/
 .codex/screenshots/
 .claude/scheduled_tasks.lock
+.claude/codex-thread-pool.json
 # --- end Trellis per-session state ---
 # --- end Trellis fragment ---
 STATE
@@ -503,6 +507,7 @@ untrack_if_tracked ".claude/commands/primer-check.md"
 untrack_if_tracked ".claude/commands/explore.md"
 untrack_if_tracked ".claude/commands/autonomy.md"
 untrack_if_tracked ".claude/commands/surgical.md"
+untrack_if_tracked ".claude/agents/codex-worker.md"
 untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
 untrack_if_tracked ".agents/skills/security-gate"
@@ -557,6 +562,10 @@ seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"    "$PROJECT/.claude/comm
 seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"         "$PROJECT/.claude/commands/explore.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"        "$PROJECT/.claude/commands/autonomy.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/surgical.md"        "$PROJECT/.claude/commands/surgical.md"
+
+# Canonical Workflow agents — Claude Code resolves definitions from
+# .claude/agents/. There is deliberately no .agents/agents/ mirror.
+seed_symlink "$CANONICAL_AGENTS_DIR/codex-worker.md" "$PROJECT/.claude/agents/codex-worker.md"
 
 # Primer INDEX — opt-in feature primer system. INDEX is project-state (copied,
 # not symlinked) so each project owns its primer list. Empty INDEX = "primers
