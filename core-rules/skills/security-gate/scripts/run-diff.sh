@@ -242,6 +242,8 @@ def load_jsonl(p):
 known = set()
 try:
     with open(baseline_p) as fh: doc = json.load(fh)
+    # v2 historical_findings are deliberately excluded: only current-tree
+    # findings form the dedupe/pass-fail baseline for a new diff.
     for f in doc.get("findings", []):
         if f.get("triage") == "dropped": continue
         known.add((f.get("tool",""), f.get("rule",""), f.get("file",""), f.get("line", 0)))

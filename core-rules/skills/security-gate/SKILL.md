@@ -39,7 +39,7 @@ OSS-only engines. Pin versions for reproducibility — re-running an unchanged t
 |---|---|---|---|
 | [Semgrep](https://semgrep.dev) | SAST (rule-based, multi-language) | `1.157.0` (≥ 1.140) | `brew install semgrep` |
 | [OSV-scanner](https://github.com/google/osv-scanner) | SCA against OSV.dev | `2.3.8` (≥ 2.0) | `brew install osv-scanner` |
-| [Gitleaks](https://github.com/gitleaks/gitleaks) | Secrets (history-aware) | `8.30.1` (≥ 8.21) | `brew install gitleaks` |
+| [Gitleaks](https://github.com/gitleaks/gitleaks) | Secrets (current-tree gate + separate history) | `8.30.1` (≥ 8.21) | `brew install gitleaks` |
 | [Garak](https://github.com/NVIDIA/garak) | LLM-app probes (prompt injection / jailbreak / leakage) — `web-rag-llm` only | optional | `pipx install garak` |
 | [simonw/llm](https://github.com/simonw/llm) | Provider-neutral LLM driver | `0.31` (≥ 0.31) | `pipx install llm` |
 
@@ -60,7 +60,7 @@ bash core-rules/skills/security-gate/scripts/run-baseline.sh [<project-dir>] [--
 Outputs:
 
 - `<project>/audits/<YYYY-MM-DD>-baseline-<project>.md` — narrative.
-- `<project>/audits/<YYYY-MM-DD>-baseline-<project>.json` — machine-readable findings list. Diff mode reads this to skip already-known findings.
+- `<project>/audits/<YYYY-MM-DD>-baseline-<project>.json` — schema v2 machine-readable output. `findings` is the current-tree gating set; `historical_findings` is separate history visibility with fingerprint-persisted dispositions. Diff mode dedupes against `findings` only.
 
 Wall-clock: 10–60 min depending on project size and LLM provider.
 
@@ -71,7 +71,7 @@ bash core-rules/skills/security-gate/scripts/run-diff.sh [<project-dir>] [--rang
 ```
 
 - Scopes scanners to files changed in the range. Defaults to `origin/main..HEAD`.
-- Reads the latest `<project>/audits/*-baseline-<project>.json` to skip already-known findings. New finding = `(tool, rule, file, line)` not present in the baseline (excluding baseline `dropped` entries).
+- Reads the latest `<project>/audits/*-baseline-<project>.json` to skip already-known current-tree findings. New finding = `(tool, rule, file, line)` not present in `findings` (excluding baseline `dropped` entries); v2 `historical_findings` never suppress a new diff finding.
 - OSV runs only when a manifest changed in the range (deps changed). Gitleaks scopes via `--log-opts`.
 - Emits a verdict block in the same shape as `process-gate`. Exit codes:
   - `0` MERGEABLE — no new Critical/High findings.
@@ -90,7 +90,7 @@ bash core-rules/skills/security-gate/scripts/run-redteam.sh <project-dir> <targe
 
 `target-class` ∈ `data-exfil | priv-esc | account-takeover | tenant-break | model-jailbreak`.
 
-Static chained-exploit reasoning. Loads the latest baseline JSON, asks the LLM to compose its primitives into kill chains targeting the named class. Writes a narrative — chains, reproduction PoCs, cheapest-break patches — to `<project>/audits/<YYYY-MM-DD>-redteam-<project>-<target-class>.md`.
+Static chained-exploit reasoning. Loads retained entries from both `findings` and `historical_findings` in the latest baseline JSON, asks the LLM to compose its primitives into kill chains targeting the named class, and skips dropped dispositions. Writes a narrative — chains, reproduction PoCs, cheapest-break patches — to `<project>/audits/<YYYY-MM-DD>-redteam-<project>-<target-class>.md`.
 
 **Per-run sign-off required.** Output is sensitive (concrete attacker steps). Interactive runs prompt for `yes`; non-interactive runs must pass `--confirm`. Full discipline + runbook: [`references/redteam-runbook.md`](references/redteam-runbook.md).
 
@@ -98,7 +98,7 @@ Static chained-exploit reasoning. Loads the latest baseline JSON, asks the LLM t
 
 ```json
 {
-  "schema": "security-gate.baseline.v1",
+  "schema": "security-gate.baseline.v2",
   "project": "tgsc",
   "profile": "web-next",
   "generated_at": "2026-05-08T12:34:56Z",
@@ -119,11 +119,34 @@ Static chained-exploit reasoning. Loads the latest baseline JSON, asks the LLM t
       "suggested_fix": "Use Response.json() or escape via DOMPurify before string concat."
     }
   ],
-  "summary": {"total": 1, "kept": 1, "dropped": 0, "by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 0}}
+  "historical_findings": [
+    {
+      "id": "gitleaks-history-a1b2c3d4e5f6",
+      "tool": "gitleaks",
+      "rule": "generic-api-key",
+      "severity": "high",
+      "file": "tests/fixtures/client.ts",
+      "line": 17,
+      "message": "Detected a Generic API Key. (commit=abc12345)",
+      "fingerprint": "abc123...:tests/fixtures/client.ts:generic-api-key:17",
+      "triage": "dropped",
+      "triage_reason": "Synthetic fixture credential."
+    }
+  ],
+  "summary": {
+    "total_raw": 1,
+    "kept": 1,
+    "dropped": 0,
+    "no_llm_pass": 0,
+    "by_severity": {"critical": 0, "high": 1, "medium": 0, "low": 0},
+    "historical": {"total_raw": 1, "kept": 0, "dropped": 1, "no_llm_pass": 0, "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0}}
+  }
 }
 ```
 
 `triage` ∈ `kept | dropped | no-llm-pass`. `dropped` findings are written into the JSON for traceability — they were considered and discarded with reason.
+
+Gitleaks emits two JSONL buckets before aggregation: `bucket: findings` from `detect --no-git`, and `bucket: historical_findings` for history results absent from the current-tree scan. Historical entries retain Gitleaks severity (High). Once an LLM produces `kept` or `dropped`, that disposition is copied into later baselines by the exact Gitleaks `fingerprint`; `no-llm-pass` is not a disposition and is eligible for triage on a later run.
 
 ## Adversarial-verification pass
 

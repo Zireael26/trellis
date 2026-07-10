@@ -7,7 +7,7 @@ You are reviewing raw findings from OSS security scanners (Semgrep, OSV-scanner,
 The user message is JSONL — one finding per line. Schema:
 
 ```
-{"id": "...", "tool": "semgrep|osv|gitleaks", "rule": "...", "severity": "critical|high|medium|low", "file": "...", "line": 0, "message": "..."}
+{"id": "...", "tool": "semgrep|osv|gitleaks", "rule": "...", "severity": "critical|high|medium|low", "file": "...", "line": 0, "message": "...", "bucket": "findings|historical_findings (optional)", "fingerprint": "gitleaks fingerprint (optional)"}
 ```
 
 ## Two-pass discipline
@@ -24,6 +24,7 @@ For each finding, classify:
 - **keep** otherwise.
 
 Gitleaks findings: skip Pass A — leaked secrets do not get the FP treatment. Always carry to Pass B.
+For `bucket: historical_findings`, decide whether the credential is actionable or a synthetic/placeholder fixture. The runner persists this disposition by `fingerprint`, keeps the scanner's original High severity, and will not send a dispositioned fingerprint through triage again.
 
 ### Pass B — adversarial verification
 

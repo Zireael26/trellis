@@ -102,18 +102,20 @@ echo "baseline: $(basename "$BASELINE")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Filter findings to kept-or-no-llm-pass (skip dropped FPs) and emit JSONL
-# for the prompt. Append target-class context as a sentinel header line.
+# Filter current and historical findings to kept-or-no-llm-pass (skip dropped
+# dispositions) and emit JSONL for the prompt. History remains relevant to
+# chained-exploit reasoning even though it is excluded from baseline gating.
 INPUT="$WORK/input.jsonl"
 {
   printf '{"_target_class":"%s","_project":"%s"}\n' "$TARGET_CLASS" "$PROJECT_NAME"
   python3 - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
-for f in doc.get("findings", []):
-    if f.get("triage") == "dropped": continue
-    out = {k: f.get(k) for k in ("id","tool","rule","severity","file","line","message","exploit_steps","suggested_fix")}
-    print(json.dumps(out, ensure_ascii=False))
+for bucket in ("findings", "historical_findings"):
+    for f in doc.get(bucket, []):
+        if f.get("triage") == "dropped": continue
+        out = {k: f.get(k) for k in ("id","tool","rule","severity","file","line","message","exploit_steps","suggested_fix")}
+        print(json.dumps(out, ensure_ascii=False))
 PY
 } > "$INPUT"
 
@@ -138,10 +140,11 @@ if [ "$NO_LLM" -eq 1 ]; then
     python3 - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
-for f in doc.get("findings", []):
-    if f.get("triage") == "dropped": continue
-    sev = f.get("severity","")
-    print(f"- **{sev}** `{f.get('tool','')}/{f.get('rule','')}` @ `{f.get('file','')}:{f.get('line','')}` — {f.get('message','')}")
+for bucket in ("findings", "historical_findings"):
+    for f in doc.get(bucket, []):
+        if f.get("triage") == "dropped": continue
+        sev = f.get("severity","")
+        print(f"- **{sev}** `{f.get('tool','')}/{f.get('rule','')}` @ `{f.get('file','')}:{f.get('line','')}` — {f.get('message','')}")
 PY
   } >> "$OUT_MD"
   echo "wrote (no-llm): $OUT_MD"
@@ -157,10 +160,11 @@ if ! bash "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/redteam.md" "
     python3 - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
-for f in doc.get("findings", []):
-    if f.get("triage") == "dropped": continue
-    sev = f.get("severity","")
-    print(f"- **{sev}** `{f.get('tool','')}/{f.get('rule','')}` @ `{f.get('file','')}:{f.get('line','')}` — {f.get('message','')}")
+for bucket in ("findings", "historical_findings"):
+    for f in doc.get(bucket, []):
+        if f.get("triage") == "dropped": continue
+        sev = f.get("severity","")
+        print(f"- **{sev}** `{f.get('tool','')}/{f.get('rule','')}` @ `{f.get('file','')}:{f.get('line','')}` — {f.get('message','')}")
 PY
   } >> "$OUT_MD"
   echo "wrote (no-llm fallback): $OUT_MD"

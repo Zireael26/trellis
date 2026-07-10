@@ -59,13 +59,15 @@ bash __TRELLIS_PATH__/core-rules/skills/security-gate/scripts/run-baseline.sh <P
 
 The script wrote `<P>/audits/<YYYY-MM-DD>-baseline-<P>.json`. The previous baseline (if any) is the next-most-recent file matching `<P>/audits/*-baseline-<P>.json`.
 
-Read both. For each finding identity `(tool, rule, file, line)` excluding baseline `dropped` entries:
+Read both. For each current-tree finding in `findings`, use identity `(tool, rule, file, line)` and exclude baseline `dropped` entries:
 
 - **new** — present this run, absent in prior.
 - **recurring** — present in both.
 - **resolved** — absent this run, present in prior.
 
 Severity is read from the new baseline (or, when only present in prior, from the prior).
+
+Compare `historical_findings` separately by exact `fingerprint`. Report new, recurring, and resolved history-only credentials with their persisted disposition; do not merge them into the current-tree counts or Critical/High gate totals. Their severity remains the scanner's real severity.
 
 ### 4. Per-project artifact
 
@@ -120,7 +122,7 @@ For every **new** Critical/High finding, leave a one-line note:
 
 ## Methodology notes
 
-- Baseline JSON shape: `security-gate.baseline.v1` (`core-rules/skills/security-gate/SKILL.md`).
+- Baseline JSON shape: `security-gate.baseline.v2` (`core-rules/skills/security-gate/SKILL.md`): current-tree `findings` drive gate/delta counts; `historical_findings` is a separate fingerprint-keyed visibility stream.
 - Diff scans (Mode 2) deduplicate against the **newest** baseline JSON per project. This run's baselines become the ground truth until next quarter.
 - FP rate per project: <list, when LLM triage was used>. When `--no-llm`, FP rate is unmeasured.
 ```

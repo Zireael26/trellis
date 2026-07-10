@@ -831,8 +831,9 @@ hc_prepush_wired_runall() {
     elif [ -f "$proj/.git/hooks/pre-push" ]; then
       hook="$proj/.git/hooks/pre-push"
     fi
-  elif [ "$hp" = ".husky/_" ]; then
-    # husky v9 wrapper dir: the real gate body lives at .husky/pre-push.
+  elif [ "$hp" = ".husky/_" ] || [ "${hp%/.husky/_}" != "$hp" ]; then
+    # husky v9 wrapper dir (relative OR absolute — `husky init` writes the
+    # absolute form): the real gate body lives at .husky/pre-push.
     [ -f "$husky" ] && hook="$husky"
   else
     # Native hooks dir. A relative hooksPath is resolved against the worktree
