@@ -33,8 +33,13 @@ below. Full sources live in the research workflow transcript; probe JSONL in
    (codex-worker → companion) therefore physically cap at xhigh regardless of
    doctrine; the D6 preflight fail-close already handles this correctly.
 5. **Telemetry.** `codex exec --json` streams `turn.completed` usage
-   (input/cached/output/reasoning tokens). Subagent aggregation into those
-   totals is unverified — treat as parent-thread lower bound.
+   (input/cached/output/reasoning tokens). *Addendum (same day, source dig):*
+   those totals are **parent-thread-only** — child threads are independent
+   Sessions (`agent/control/spawn.rs`) whose usage never feeds the parent's
+   `TokenUsageInfo` (`session/mod.rs` → `context_manager/history.rs`), and
+   exec drops child `ThreadTokenUsageUpdated` events via a primary-thread-id
+   filter (`exec/src/lib.rs:1328`). True ultra cost is strictly higher than
+   reported; per-child usage lives only in each child's own rollout.
 
 ## Instrumented paired run (D4a prerequisite 3)
 

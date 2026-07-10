@@ -351,6 +351,9 @@ run_tier0 hc_receipt_grammar_present "$CANON"
 # teeth — silently no-op unless the runtime has [features] hooks = true. Global,
 # no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
 run_tier0 hc_codex_hooks_enabled
+# Codex plugin surface: companion enum drift + teammate node/PATH hooks.json
+# patch (re-applies idempotently) — ADR 2026-07-10-sol-ultra-capability-reground.
+run_tier0 hc_codex_plugin_surface
 
 # Tier-0 runs before any project, so N_ERROR here is purely Tier-0. Capture it:
 # Tier-0 is REPORT-ONLY (--fix never mutates the canonical clone), AND a

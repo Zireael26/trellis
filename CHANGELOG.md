@@ -8,6 +8,15 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 *(Nothing yet.)*
 
+## [v1.0.0-rc.11] — 2026-07-10
+
+- **Effort band narrowed: xhigh+max only (PR #136, operator directive, temporary).** `medium`/`high` suspended across `docs/codex-routing.md §3`, the codex-worker input contract, all three recipe `EFFORT_ENUM`s, and MANIFEST; revert text carried in §3 + a `follow-ups.md` ledger row. `supportedEfforts` capability floors untouched (capability ≠ policy).
+- **No-duplicate-work rule — race-the-legs RETIRED (PR #138, operator directive).** Same work order never dispatches to more than one agent/leg; sequential degrade replaces racing; cross-model review of one produced diff stays legitimate. Speed doctrine now five live patterns; prior same-day ADRs annotated partially-superseded.
+- **Sol ultra capability re-ground (PR #138; ADR `2026-07-10-sol-ultra-capability-reground.md`).** Source-verified (`openai/codex` @ rust-v0.144.0): ultra = max effort on the wire + proactive-delegation prompt injection (harness mode, not a deeper tier); CLI default 4 concurrent threads; companion v1.0.5 caps at xhigh so max/ultra are Bash-direct only. Spec 011 D4a prerequisites SATISFIED — telemetry via `turn.completed` usage in `codex exec --json`, ×4 accounting anchored to the 4-thread default in loop-safety, instrumented paired run committed (`specs/011.../research/ultra-probe-2026-07-10/`; ultra vs xhigh 1.38–2.09× tokens). Ultra unlocked for **attended main-loop Bash-direct** dispatch only; recipes keep the hard-reject on surface + visibility grounds.
+- **Sandboxless-hatch ban mechanized.** `block-destructive.sh` (both harnesses) denies codex bypass-sandbox + max/ultra compounds; 4 new bats cases (25/25 green).
+- **Teammate hook env fixed.** GUI-spawned panes lack nvm in PATH → node-invoking hooks were silently dead; fixed with a `~/.local/bin/node` shim + `PATH` prefix on the codex-plugin `hooks.json` commands and the user-level PostToolUse hook (`env -i` verified). Re-apply after plugin updates (ledger row).
+- Adversarial review: 28-agent workflow, 21 confirmed findings (1 blocker: unattended-ultra scoping gap) — all folded pre-merge.
+
 ## [v1.0.0-rc.10] — 2026-07-10
 
 ### Added

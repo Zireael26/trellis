@@ -32,7 +32,7 @@ export HC_OK HC_ERROR HC_WARN HC_INFO
 
 # Canonical sets — the full inheritance surface a healthy project carries.
 # Kept here (not in doctor.sh) so audits share the same definition of "full".
-HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief"
+HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
 HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 export HC_CANONICAL_SKILLS HC_CANONICAL_COMMANDS
 
@@ -908,5 +908,28 @@ hc_codex_hooks_enabled() {
     return "$HC_OK"
   fi
   echo "codex-runtime: [features] hooks not enabled in $cfg — the Codex spec-gate + every Codex Stop/PreToolUse hook silently NO-OPS (fix: set [features] hooks = true)"
+  return "$HC_WARN"
+}
+
+# WARN-class, global: guard the codex plugin surface — companion effort enum
+# (widening unblocks recipe-side max; ADR 2026-07-10-sol-ultra) and the
+# teammate node/PATH hooks.json patch (a plugin update reverts it; the check
+# script re-applies idempotently). Delegates to check-codex-plugin-surface.sh.
+hc_codex_plugin_surface() {
+  local script="$SCRIPT_DIR/check-codex-plugin-surface.sh"
+  if [ ! -x "$script" ]; then
+    echo "codex-plugin-surface: check script missing at $script"
+    return "$HC_WARN"
+  fi
+  local out
+  if out="$(bash "$script" 2>&1)"; then
+    if printf '%s' "$out" | grep -q 'RE-APPLIED\|refreshed'; then
+      echo "codex-plugin-surface: drift auto-repaired — $(printf '%s' "$out" | grep -E 'RE-APPLIED|refreshed' | head -2 | tr '\n' '; ')"
+    else
+      echo "codex-plugin-surface: baseline (companion caps at xhigh; hooks.json patch present)"
+    fi
+    return "$HC_OK"
+  fi
+  echo "codex-plugin-surface: DRIFT needing a human — $(printf '%s' "$out" | grep -E 'WIDENED|CHANGED|manually|cannot' | head -2 | tr '\n' '; ')"
   return "$HC_WARN"
 }

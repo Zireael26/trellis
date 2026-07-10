@@ -5,7 +5,7 @@
 # Seeds:
 #   - <project>/gotchas.md, <project>/context-log.md
 #   - <project>/.claude/rules/trellis.md → canonical CLAUDE.md (symlink)
-#   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
+#   - <project>/.claude/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief,writing}
 #       → canonical skills (symlinks; always-on: process-gate + security-gate,
 #         opt-in pipeline: clarify → spec → plan → tasks → analyze,
 #         capability-gated dynamic-workflow kit: orchestrate)
@@ -20,7 +20,7 @@
 # Shared "agents/" surface (Codex reads this):
 #   - <project>/AGENTS.md                     → CLAUDE.md    [if codex enabled, and absent]
 #   - <project>/.agents/rules/trellis.md   → canonical CLAUDE.md  [if codex]
-#   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief}
+#   - <project>/.agents/skills/{process-gate,security-gate,clarify,spec,plan,tasks,analyze,execute,brainstorming,orchestrate,debrief,writing}
 #       → canonical skills (symlinks; mirrors .claude/skills/)        [if codex]
 #   - <project>/.agents/primers/INDEX.md (copied; mirrors .claude/primers/)  [if codex]
 #   - <project>/.agents/workflows/{primer,primer-refresh,primer-check,explore,surgical}.md
@@ -501,6 +501,7 @@ untrack_if_tracked ".claude/skills/execute"
 untrack_if_tracked ".claude/skills/brainstorming"
 untrack_if_tracked ".claude/skills/orchestrate"
 untrack_if_tracked ".claude/skills/debrief"
+untrack_if_tracked ".claude/skills/writing"
 untrack_if_tracked ".claude/commands/primer.md"
 untrack_if_tracked ".claude/commands/primer-refresh.md"
 untrack_if_tracked ".claude/commands/primer-check.md"
@@ -520,6 +521,7 @@ untrack_if_tracked ".agents/skills/execute"
 untrack_if_tracked ".agents/skills/brainstorming"
 untrack_if_tracked ".agents/skills/orchestrate"
 untrack_if_tracked ".agents/skills/debrief"
+untrack_if_tracked ".agents/skills/writing"
 untrack_if_tracked ".agents/commands/primer.md"
 untrack_if_tracked ".agents/commands/primer-refresh.md"
 untrack_if_tracked ".agents/commands/primer-check.md"
@@ -554,6 +556,7 @@ seed_symlink "$CANONICAL_SKILLS_DIR/execute"          "$PROJECT/.claude/skills/e
 seed_symlink "$CANONICAL_SKILLS_DIR/brainstorming"    "$PROJECT/.claude/skills/brainstorming"
 seed_symlink "$CANONICAL_SKILLS_DIR/orchestrate"      "$PROJECT/.claude/skills/orchestrate"
 seed_symlink "$CANONICAL_SKILLS_DIR/debrief"          "$PROJECT/.claude/skills/debrief"
+seed_symlink "$CANONICAL_SKILLS_DIR/writing"          "$PROJECT/.claude/skills/writing"
 
 # Canonical commands — explicit user invocations (primer system today).
 seed_symlink "$CANONICAL_COMMANDS_DIR/primer.md"          "$PROJECT/.claude/commands/primer.md"
@@ -606,6 +609,7 @@ if pg_has_harness codex; then
   seed_symlink "$CANONICAL_SKILLS_DIR/brainstorming" "$PROJECT/.agents/skills/brainstorming"
   seed_symlink "$CANONICAL_SKILLS_DIR/orchestrate"   "$PROJECT/.agents/skills/orchestrate"
   seed_symlink "$CANONICAL_SKILLS_DIR/debrief"       "$PROJECT/.agents/skills/debrief"
+  seed_symlink "$CANONICAL_SKILLS_DIR/writing"       "$PROJECT/.agents/skills/writing"
   seed_file    "$CANONICAL_PRIMER_INDEX_TEMPLATE"    "$PROJECT/.agents/primers/INDEX.md"
   if [ -f "$PROJECT/.claude/skills/process-gate-local/local.config.sh" ] && [ ! -f "$PROJECT/.agents/skills/process-gate-local/local.config.sh" ]; then
     mkdir -p "$PROJECT/.agents/skills/process-gate-local"
