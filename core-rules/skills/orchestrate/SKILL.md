@@ -122,9 +122,11 @@ Full catalog: [`references/patterns.md`](references/patterns.md).
 ## Dual-harness speed doctrine
 
 When both an orchestration surface and a Codex executor are available, wall-clock
-speed comes from **topology, not effort** — race-the-legs, cross-harness pipelined
-verify, warm-thread reuse, primer-fed dispatch, streaming merges, and (once
-unlocked per spec 011 D4a) ultra-as-a-node. Inside a Workflow, Codex units
+speed comes from **topology, not effort** — cross-harness pipelined verify,
+warm-thread reuse, primer-fed dispatch, streaming merges, and ultra-as-a-node
+(attended main-loop Bash-direct only — D4a satisfied 2026-07-10; still
+hard-rejected inside recipes). Never dispatch the same work order to more
+than one leg (race-the-legs retired 2026-07-10 — no duplicate work). Inside a Workflow, Codex units
 dispatch through the blocking `codex-worker` agent only — never the
 fire-and-forget rescue path, whose backgrounding breaks `parallel()`/`pipeline()`
 barriers. Patterns, guardrails, and receipt contracts:

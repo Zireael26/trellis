@@ -43,10 +43,11 @@ other missed — exactly the case a single-model verify cannot produce.
 - `findings[]` — `{ id, claim, file, line, severity }`, the hard findings to verify.
 - `context` — the diff / code excerpt / evidence the reviewers judge against.
 - `effort` — **required** reasoning tier for the Codex leg (enum
-  `medium|high|xhigh|max`; review passes are xhigh-band per the
-  `docs/codex-routing.md` §3 ladder). Omitted → validation error, never a
-  default; `ultra` is hard-rejected in recipes until the D4a prerequisites
-  exist; `max` requires a non-empty `justification` (spec 011 D1/D4a).
+  `xhigh|max` — medium/high suspended 2026-07-10; review passes are xhigh-band
+  per the `docs/codex-routing.md` §3 ladder). Omitted → validation error, never
+  a default; `ultra` is hard-rejected in recipes (surface caps at xhigh +
+  delegation invisible in a deterministic workflow — `docs/codex-routing.md`
+  §3); `max` requires a non-empty `justification` (spec 011 D1).
 - `justification` — required when `effort` is an exception tier (`max`); echoed
   into every returned verdict record alongside `effort`.
 - `supportedEfforts` — accepted tiers probed from the installed surface,

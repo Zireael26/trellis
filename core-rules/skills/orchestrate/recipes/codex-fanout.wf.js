@@ -8,7 +8,8 @@
 //   args.units       [{ name, leg, task, effort?, justification?, paths,
 //                       proofCmd, conflicts?, dependsOn? }]
 //                    leg is 'codex'|'claude'. Codex effort is REQUIRED and is
-//                    'medium'|'high'|'xhigh'|'max'; ultra is hard-rejected;
+//                    'xhigh'|'max' (medium/high suspended 2026-07-10 per
+//                    docs/codex-routing.md §3); ultra is hard-rejected;
 //                    max requires a non-empty justification. dependsOn is an
 //                    array of unit names. conflicts enables a branch-producing
 //                    generation worktree; later stages consume that branch.
@@ -54,7 +55,8 @@ const VERIFY = {
 const units = args.units ?? []
 const codexCap = args.codexCap ?? 4
 const targetCwd = args.targetCwd ?? '. (the Workflow-provided checkout/worktree root)'
-const EFFORT_ENUM = ['medium', 'high', 'xhigh', 'max']
+// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
+const EFFORT_ENUM = ['xhigh', 'max']
 
 function hasText(value) {
   return typeof value === 'string' && value.trim() !== ''
@@ -138,7 +140,8 @@ async function cancelLeakedJob(unit, value) {
 // --- Unit-schema validation (spec 011 D1/D4a) — runs BEFORE any dispatch ----
 // Every Codex-routable unit declares effort explicitly at dispatch; an omitted
 // effort field is a validation error, never a default. 'ultra' is hard-rejected
-// until the D4a controls exist. 'max' requires a non-empty justification. A
+// (surface caps at xhigh + delegation invisible in a deterministic workflow —
+// docs/codex-routing.md §3). 'max' requires a non-empty justification. A
 // violation THROWS before any agent call; nothing is clamped or defaulted.
 phase('Presence')
 if (!Array.isArray(units)) throw new Error('codex-fanout: args.units must be an array')
@@ -173,15 +176,15 @@ for (const u of units) {
   if (u.effort === 'ultra') {
     log(
       'codex-fanout: HARD-REJECT unit=' + u.name +
-        " — effort 'ultra' is forbidden in recipes until the D4a controls exist" +
-        ' (token telemetry, ×4 concurrency multiplier, instrumented spend run) (spec 011 D4a)',
+        " — effort 'ultra' is forbidden in recipes: the companion dispatch surface caps at xhigh" +
+        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3)',
     )
-    throw new Error('unit "' + u.name + '": effort \'ultra\' is hard-rejected in recipes (spec 011 D4a)')
+    throw new Error('unit "' + u.name + '": effort \'ultra\' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)')
   }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
       'unit "' + u.name + '": effort \'' + u.effort +
-        "' is not in the enum ['medium','high','xhigh','max'] (spec 011 D1)",
+        "' is not in the enum ['xhigh','max'] (medium/high suspended 2026-07-10 — docs/codex-routing.md §3; spec 011 D1)",
     )
   }
   if (u.effort === 'max' && !(typeof u.justification === 'string' && u.justification.trim() !== '')) {

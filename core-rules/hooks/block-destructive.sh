@@ -59,6 +59,15 @@ if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+reset[[:space:]]+--hard[[:s
   exit 0
 fi
 
+# --- codex sandboxless hatch + exception effort (max/ultra) — doctrine ban, mechanized ---
+# docs/codex-routing.md §3: max/ultra are forbidden without an OS sandbox. Match either
+# order of the bypass flag and the effort override on one codex invocation.
+if printf '%s' "$COMMAND" | grep -qE 'codex[[:space:]]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|-s[[:space:]]+danger-full-access|--sandbox[[:space:]]+danger-full-access)' \
+  && printf '%s' "$COMMAND" | grep -qE 'model_reasoning_effort["'"'"'=[:space:]]*(max|ultra)'; then
+  emit_deny "Blocked max/ultra effort on the sandboxless codex hatch — forbidden compound (docs/codex-routing.md §3); run at xhigh or restore the sandbox."
+  exit 0
+fi
+
 # --- SQL: DROP TABLE / DROP DATABASE / TRUNCATE TABLE ---
 if printf '%s' "$COMMAND" | grep -qiE 'DROP[[:space:]]+(TABLE|DATABASE)|TRUNCATE[[:space:]]+TABLE'; then
   emit_deny "Blocked destructive SQL (DROP/TRUNCATE) — run manually if intentional."

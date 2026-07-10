@@ -273,10 +273,15 @@ not restated here. This section carries only the mechanics:
 - **Workflow recipes take a required per-unit `effort`** — enum-validated at
   the top of the recipe; an omitted tier is a validation error, never a
   default. `ultra` is excluded from the recipe enum and hard-rejected with a
-  logged note until the D4a controls exist (spec 011).
+  logged note — the companion dispatch surface caps at xhigh and delegation is
+  invisible/non-resumable in a deterministic workflow (`docs/codex-routing.md
+  §3`; D4a satisfied 2026-07-10).
 - **Interactive dispatch sets `--effort <tier>`** per the §3 ladder on every
   unit. In a Workflow, `codex-worker` receives the explicit effort field in its
-  work order; for Bash-direct it is a `task` flag.
+  work order; for Bash-direct up to xhigh it is a companion `task` flag, and
+  the exception tiers use raw exec:
+  `codex exec --json -c model_reasoning_effort="<max|ultra>" ... </dev/null`
+  (ultra: attended turns only, per §3).
 - **Exception tiers require a named `justification`** logged in the dispatch
   receipt, and are invocable only where the preflight (see "The capability
   gate") proves the installed surface supports them — a tier outside the

@@ -5,26 +5,25 @@ verification, explicit budget accounting, and orchestrator ownership. Each
 pattern has an entry condition and a receipt; none is a reason to weaken scope,
 proof, or review gates.
 
-## Race-the-legs
+## No-duplicate-work rule (race-the-legs RETIRED)
 
-**When to use.** Use on a critical-path, bounded unit when either Claude or
-Codex could produce a valid result and the wall-clock gain justifies spending
-both pools. Run no more than two races per workflow.
+**Rule.** Never dispatch the same work order to more than one agent or leg.
+Every unit runs on exactly one executor; wall-clock speed comes from the
+patterns below — overlapping *different* work — never from redundant
+generation. Operator directive 2026-07-10.
 
-**Mechanics.** Seed separate worktrees, launch the same work order on both legs,
-and independently verify each candidate. The first candidate to pass verification
-wins. Cancel and log the loser with its harness-native cancellation handle. Keep
-the loser diff as a free second opinion for the final review.
+**What replaced racing.** Pick the leg per unit from the routing table
+(`docs/codex-routing.md §2`) and commit to it. If the chosen leg fails or
+degrades, the standard degrade path re-dispatches the unit — sequentially,
+never concurrently — to the other leg. Cross-model *review* of one produced
+diff (verify-panel) is not duplication: generation happens once; only judgment
+is duplicated, at a fraction of the cost.
 
-**Guardrails.** A race spends BOTH metered pools, so both legs count against the
-budget ceiling even when cancelled. The first raw response does not win; the first
-independent verify-pass does. The loser must be cancelled and logged, never left
-running. Agents do not commit or merge.
-
-**Receipt contract.** Record the unit id, both leg/handle/worktree tuples, model
-and effort per leg, both-pools spend, start and verify-pass times, proof and
-verifier verdicts, winner, loser cancellation outcome, both diff stats, and how
-the loser diff informed the second opinion.
+**History.** Race-the-legs (launch both legs, first verify-pass wins) shipped
+in spec 013 and won its one recorded outing (013 plan authoring, pilot-ledger
+row 4) at 2× token cost on the unit. Retired because paying both metered pools
+for one deliverable contradicts the operator's cost posture; the pattern text
+lives in git history if ever re-evaluated.
 
 ## Cross-harness pipelined verify
 
@@ -109,22 +108,41 @@ dependency-ordered landing sequence.
 
 ## Ultra-as-a-node
 
-**When to use.** Currently never: Ultra-as-a-node is LOCKED on spec 011 D4a
-prerequisites. After unlock, it is reserved for coupled, decomposable work where
-one ultra node can replace a wider fan-out without losing verification quality.
+**Status (2026-07-10).** Spec 011 D4a prerequisites are SATISFIED (telemetry
+via `codex exec --json`; ×4 accounting in loop-safety anchored to the CLI's
+default 4-thread cap; instrumented paired run measured 1.38–2.09× spend vs
+xhigh with multi-agent machinery engaged — receipts in
+`docs/adr/2026-07-10-sol-ultra-capability-reground.md`). What remains split:
 
-**Mechanics.** Once spec 011 D4a supplies token telemetry, x4 concurrency-cap
-accounting, and one instrumented run, schedule one ultra node as four concurrency
-slots and pass its output through the same independent verification gate.
+- **ATTENDED main-loop Bash-direct: UNLOCKED.** Reserved for coupled,
+  decomposable work where one ultra node replaces a wider fan-out without
+  losing verification quality, dispatched from a turn the operator is present
+  in — never `/loop`, scheduled tasks, or any unattended context. Dispatch:
+  `codex exec --json -c model_reasoning_effort="ultra" -c model_max_output_tokens=<N> ... </dev/null`
+  (`</dev/null` is mandatory — codex exec wedges on open stdin, gotchas
+  2026-07-10). Declare a per-unit token ceiling and check it against the
+  `turn.completed` usage in the captured full JSONL receipt; a breach halts
+  further ultra dispatch for the run.
+- **Inside `.wf.js` recipes: still hard-reject.** The recipe surface
+  (codex-worker → companion ≤ 1.0.5) caps at xhigh, and ultra's prompt-nudged
+  delegation is invisible and non-resumable inside a deterministic workflow.
+  A workflow agent that holds Bash must never invoke `codex exec` itself at
+  any effort — Codex dispatch belongs to the orchestrator, through
+  codex-worker. Revisit when the companion accepts it AND per-subagent
+  visibility exists.
 
-**Guardrails.** Until every prerequisite is evidenced, reject `ultra` outright;
-do not clamp or translate it. After unlock, it counts x4 against the concurrency
-cap, cannot oversubscribe a wave, and remains subject to ordinary budget, scope,
-proof, retry, and independent-review rules.
+**Guardrails.** Counts ×4 against any concurrency-derived budget arithmetic,
+cannot oversubscribe a wave, requires a named justification, never a default,
+never on the sandboxless hatch. Ultra's injected instruction voids "don't
+spawn subagents" rules and Sol carries a documented overreach record — output
+passes the same independent verification gate as any executor unit, and
+reported usage is the parent-thread lower bound (subagent aggregation
+unverified).
 
-**Receipt contract.** While locked, record the rejected request and spec 011 D4a
-reason. After unlock, record the unlock evidence, unit id, x4 slot accounting,
-token telemetry, model/effort, instrumented-run reference, wall-clock, diff stat,
-proof, verifier verdict, and final cap utilization.
+**Receipt contract.** Record the unlock-evidence pointer (the ADR), unit id,
+×4 slot accounting, token telemetry from the JSONL, model/effort,
+justification, wall-clock, diff stat, proof, verifier verdict, and final cap
+utilization. A recipe-side ultra request still records the rejection and the
+surface reason.
 
 speed comes from topology, not effort — higher effort is slower per unit; spend it only where quality gates demand.

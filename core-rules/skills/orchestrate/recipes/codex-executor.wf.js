@@ -15,7 +15,8 @@
 //                        available; 'plan' | 'review' | 'synthesize' = judgment
 //                        unit → always the orchestrator. Default kind 'execute'.
 //                        `effort` is REQUIRED on every Codex-routable ('execute')
-//                        unit — enum 'medium'|'high'|'xhigh'|'max', declared per
+//                        unit — enum 'xhigh'|'max' (medium/high suspended
+//                        2026-07-10 per docs/codex-routing.md §3), declared per
 //                        unit from the docs/codex-routing.md §3 ladder; an
 //                        omitted effort is a validation error, NEVER a default
 //                        (spec 011 D1). 'ultra' is hard-rejected in recipes
@@ -147,13 +148,16 @@ const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
 // --- Unit-schema validation (spec 011 D1/D4a) — runs BEFORE any dispatch ----
 // Every Codex-routable unit (kind 'execute', the default) declares effort
 // explicitly at dispatch; an omitted effort field is a validation error, never
-// a default. 'ultra' is hard-rejected in recipes until the D4a controls exist
-// (actual-token telemetry from the invocation surface, a ×4 concurrency
-// multiplier against the fan-out cap, one instrumented test run with recorded
-// spend). 'max' requires a non-empty justification (echoed into the receipt).
+// a default. 'ultra' is hard-rejected in recipes — the dispatch surface
+// (codex-worker → companion) caps at xhigh, and ultra's prompt-nudged
+// delegation is invisible/non-resumable inside a deterministic workflow
+// (docs/codex-routing.md §3; D4a satisfied 2026-07-10, reject stands on
+// surface + visibility). 'max' requires a non-empty justification (echoed
+// into the receipt).
 // A violation THROWS — the run fails before any unit is dispatched; nothing is
 // silently clamped or defaulted.
-const EFFORT_ENUM = ['medium', 'high', 'xhigh', 'max']
+// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
+const EFFORT_ENUM = ['xhigh', 'max']
 for (const u of units) {
   if (!routesToCodex(u)) continue
   if (typeof u.effort !== 'string' || u.effort.trim() === '') {
@@ -162,15 +166,15 @@ for (const u of units) {
   if (u.effort === 'ultra') {
     log(
       'codex-executor: HARD-REJECT unit=' + u.name +
-        " — effort 'ultra' is forbidden in recipes until the D4a controls exist" +
-        ' (token telemetry, ×4 concurrency multiplier, instrumented spend run) (spec 011 D4a)',
+        " — effort 'ultra' is forbidden in recipes: the companion dispatch surface caps at xhigh" +
+        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3)',
     )
-    throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes (spec 011 D4a)")
+    throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)")
   }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
       'unit "' + u.name + '": effort \'' + u.effort +
-        "' is not in the enum ['medium','high','xhigh','max'] (spec 011 D1)",
+        "' is not in the enum ['xhigh','max'] (medium/high suspended 2026-07-10 — docs/codex-routing.md §3; spec 011 D1)",
     )
   }
   if (u.effort === 'max' && !(typeof u.justification === 'string' && u.justification.trim() !== '')) {

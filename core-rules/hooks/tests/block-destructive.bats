@@ -116,6 +116,28 @@ run_with_cmd() {
   [[ "$out" == *deny* ]]
 }
 
+# --- codex hatch + max/ultra compound ---
+
+@test "hatch: blocks codex bypass-sandbox + ultra" {
+  out="$(run_with_cmd 'codex exec --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort="ultra" "task"')"
+  [[ "$out" == *deny* ]]
+}
+
+@test "hatch: blocks codex -s danger-full-access + max" {
+  out="$(run_with_cmd 'codex exec -s danger-full-access -c model_reasoning_effort=max "task"')"
+  [[ "$out" == *deny* ]]
+}
+
+@test "hatch: allows sandboxed ultra (workspace-write)" {
+  out="$(run_with_cmd 'codex exec --json -s workspace-write -c model_reasoning_effort="ultra" "task" </dev/null')"
+  [[ "$out" != *deny* ]]
+}
+
+@test "hatch: allows bypass-sandbox at xhigh" {
+  out="$(run_with_cmd 'codex exec --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort="xhigh" "task"')"
+  [[ "$out" != *deny* ]]
+}
+
 # --- P1.5 jq-missing fails closed ---
 
 @test "P1.5: jq missing without env → exit 1 + install help on stderr" {

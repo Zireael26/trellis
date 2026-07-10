@@ -15,7 +15,7 @@
 //   args.findings         [{ id, claim, file, line, severity }] — the hard findings to verify.
 //   args.context          string  — the diff / code excerpt / evidence the reviewers judge against.
 //   args.effort           string  — REQUIRED reasoning tier for the Codex leg (enum
-//                          medium|high|xhigh|max; review passes are xhigh-band per
+//                          xhigh|max — medium/high suspended 2026-07-10; review passes are xhigh-band per
 //                          docs/codex-routing.md §3). Omitted → validation error, never
 //                          a default (spec 011 D1); `ultra` hard-rejected in recipes
 //                          (D4a); `max` requires a non-empty args.justification.
@@ -64,14 +64,15 @@ const REVIEW = {
 // Panel units are homogeneous review passes, so effort is declared once per
 // run. Explicit-or-error: an omitted tier is a validation error, never a
 // default (docs/codex-routing.md §3).
-const EFFORT_ENUM = ['medium', 'high', 'xhigh', 'max']
+// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
+const EFFORT_ENUM = ['xhigh', 'max']
 const effort = args.effort
 if (effort == null || effort === '') {
   throw new Error('verify-panel: effort required for this run — no default (spec 011 D1)')
 }
 if (effort === 'ultra') {
-  log('verify-panel: HARD-REJECT effort=ultra — recipes reject ultra until the D4a prerequisites exist (actual-token telemetry, x4 concurrency multiplier vs fan-out cap, one instrumented spend run) (spec 011 D4a)')
-  throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes (spec 011 D4a)')
+  log('verify-panel: HARD-REJECT effort=ultra — the companion dispatch surface caps at xhigh and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3; D4a satisfied 2026-07-10, reject stands on surface + visibility)')
+  throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)')
 }
 if (!EFFORT_ENUM.includes(effort)) {
   throw new Error('verify-panel: effort "' + effort + '" not in enum [' + EFFORT_ENUM.join(', ') + '] (spec 011 D1)')

@@ -1,6 +1,6 @@
 # ADR 2026-07-10 — GPT-5.6 adoption program: effort re-ground, follow-ups convention, Codex parallel orchestration
 
-**Status:** accepted
+**Status:** accepted — partially superseded by `2026-07-10-sol-ultra-capability-reground.md` (race-the-legs retired; ultra D4a satisfied; band narrowed to xhigh+max by PR #136)
 **Context.** OpenAI shipped GPT-5.6 (Sol/Terra/Luna) publicly 2026-07-09: new `max` reasoning effort and `ultra` multi-subagent mode, ~half Fable-5 token price on Sol, and a system card documenting increased agentic-coding overreach (most pronounced at highest effort under persistence-heavy prompts). Three Trellis doctrine surfaces carried now-false "no max for Codex" ceiling claims; recipes hardcoded blanket xhigh; the fire-and-forget Codex dispatch path broke workflow barriers in production (clusterbid spec 037). Operator directive: gpt-5.6-sol as the Codex model, medium→xhigh operating band, max/ultra as exception tiers, maximum dual-harness parallelization, follow-up suggestions captured automatically.
 
 **Decision.** Three-spec program, one intake:
