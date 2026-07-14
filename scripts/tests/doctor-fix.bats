@@ -51,8 +51,8 @@ WORKTREE_HOOKS="$REPO_ROOT/core-rules/hooks"
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
 LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null || true)"
 
-CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze"
-CANON_COMMANDS="primer primer-refresh primer-check explore autonomy"
+CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
+CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
   SANDBOX="$(mktemp -d)"
@@ -81,8 +81,10 @@ teardown() {
 # per-test canonical augmentation so the committed tree stays clean (a dirty
 # canonical trips Tier-0 ERROR, which gates ALL [auto] repair off).
 build_canonical_tree() {
-  mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands/templates"
+  mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands/templates" \
+    "$CANON/core-rules/agents"
   printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
+  printf '# codex worker fixture\n' > "$CANON/core-rules/agents/codex-worker.md"
   local s c
   for s in $CANON_SKILLS; do
     mkdir -p "$CANON/core-rules/skills/$s"
@@ -131,6 +133,9 @@ EOF
 # a spurious "hooks installed" surface to assert around.
 add_canonical_hooks() {
   cp -R "$WORKTREE_HOOKS" "$CANON/core-rules/hooks"
+  mkdir -p "$CANON/core-rules/templates"
+  cp "$REPO_ROOT/core-rules/templates/claude-settings.json" \
+    "$CANON/core-rules/templates/claude-settings.json"
 }
 
 # git init the canonical on `main` and commit so the tree is clean. Run AFTER
@@ -329,6 +334,30 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
     "$CANON/core-rules/CLAUDE.md" ]
   [ -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
   [[ "$output" == *"✓ rules: trellis.md resolves to canonical"* ]]
+}
+
+@test "--fix preserves a PLAN_RM_LIST path containing spaces as one rm argument" {
+  local spaced_root="$SANDBOX/root with spaces"
+  CANON="$spaced_root/canonical"
+  PROJECTS="$spaced_root/projects"
+  CFG="$spaced_root/trellis.config.json"
+  export TRELLIS_CONFIG="$CFG"
+  mkdir -p "$CANON" "$PROJECTS"
+
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  rm -f "$PROJECTS/healthy/.claude/rules/trellis.md"
+  ln -s "/nonexistent/wrong-target.md" \
+    "$PROJECTS/healthy/.claude/rules/trellis.md"
+
+  run_doctor --fix
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"[auto] rm \"$PROJECTS/healthy/.claude/rules/trellis.md\""* ]]
+  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
+    "$CANON/core-rules/CLAUDE.md" ]
 }
 
 # ===========================================================================

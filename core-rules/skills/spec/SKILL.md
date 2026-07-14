@@ -79,7 +79,7 @@ That's the entire deliverable for this skill. Implementation, schema, file layou
 ## Boundaries
 
 - **Read-only against the rest of the repo.** The skill creates one directory (`specs/<NNN>-<slug>/`) and copies one template into it. It does not edit existing code, configs, or docs.
-- **Branch is mandatory.** The skill refuses to run on `main`/`master`. If the operator wants to spec into the current feature branch (e.g., a sub-feature of work already in flight), they pass `--no-branch` to the script — the script then only creates the directory.
+- **Branch handling is mandatory.** Default mode must start on a clean `main`/`master` and creates `feature/<slug>`; `--no-branch` is the branch-preserving remediation mode.
 - **Never overwrites.** If `specs/<NNN>-<slug>/spec.md` already exists, the script aborts. The operator picks a new slug or removes the existing one explicitly.
 
 ## Sensible failure modes

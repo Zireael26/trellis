@@ -100,7 +100,7 @@ autonomy_default: 3
 ```
 
 - `autonomy_ceiling` (integer 1–5) — clamp ceiling for any session running this preset. If multiple presets are active, the **lowest** ceiling wins (most restrictive). Session overrides via `/autonomy N` are clamped to ceiling and the command warns on clamp.
-- `autonomy_default` (integer 1–5) — the level used when no fleet `autonomy_default` is set and no project-local override exists. Lower priority than project-local `.trellis.config.json.autonomy`.
+- `autonomy_default` (integer 1–5) — overlays the fleet default when the preset is active and no project-local override exists. It remains lower priority than project-local `.trellis.config.json.autonomy` and a session override.
 
 Both fields are optional. A preset without frontmatter has no autonomy effect. See `core-rules/autonomy.md` for the full resolution algorithm.
 
@@ -113,7 +113,7 @@ Both fields are optional. A preset without frontmatter has no autonomy effect. S
 
 ## Drift audit
 
-`scheduled-tasks/preset-drift/` runs weekly. For each registered project, it compares the `presets` array in the project's `trellis.config.json` against the preset symlinks actually present under `.claude/rules/` and `.agents/rules/`. Mismatches are reported:
+An optional operator preset-drift check can compare each registered project's `presets` array against the symlinks actually present under `.claude/rules/` and `.agents/rules/`. Mismatches are reported:
 
 - **critical** — config declares a preset but the symlink is missing (or points somewhere unexpected). The preset's discipline isn't loading.
 - **warning** — symlink exists but the config doesn't list the preset (stale; should be removed by `rollout-presets.sh`).

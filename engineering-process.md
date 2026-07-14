@@ -2,9 +2,9 @@
 
 **Owner:** __MAINTAINER_NAME__ (solo maintainer)
 **Status:** Authoritative. Updates only via PR against `~/projects/trellis-instance/`.
-**Last revised:** 2026-05-02
+**Last revised:** 2026-07-14
 
-This is the single human-readable source of truth for how engineering is done under the Trellis regime. Everything elaborated here is grounded in the machinery that already exists in `~/projects/trellis-instance/` — specs in `core-rules/`, canonical hooks in `core-rules/hooks/`, the project list in `registry.md`, and the scheduled audits in `scheduled-tasks/`. This manual narrates and connects them; it does not duplicate them. When a section points at a sibling file, that file is the deep dive.
+This is the single human-readable source of truth for how engineering is done under the Trellis regime. Everything elaborated here is grounded in the operator clone — specs in `core-rules/`, canonical hooks in `core-rules/hooks/`, and the project list in `registry.md`. Optional audit schedules, prompts, targets, and fleet inventory belong to the operator and are intentionally excluded from the public template. This manual narrates and connects the public contract; when a section points at a sibling file, that file is the deep dive.
 
 ---
 
@@ -20,7 +20,7 @@ This is the single human-readable source of truth for how engineering is done un
 8. [Code quality standards](#8-code-quality-standards)
 9. [Documentation standards](#9-documentation-standards)
 10. [Onboarding a new project](#10-onboarding-a-new-project-full-playbook)
-11. [Scheduled audits & the feedback loop](#11-scheduled-audits--the-feedback-loop)
+11. [Operator audits & the feedback loop](#11-operator-audits--the-feedback-loop)
 12. [Incident response & rollback](#12-incident-response--rollback)
 13. [Secrets & dependency management](#13-secrets--dependency-management)
 14. [Evolving Trellis](#14-evolving-trellis)
@@ -66,7 +66,7 @@ Five principles the manual comes back to:
 
 **3. Receipts over self-reporting.** "Done" means you attach the verification command, the exit code, and the diff lines that prove the change. "It works" without receipts is not done. The `stop-verify` hook enforces the underlying checks; the presentation discipline is on the agent. See [§7](#7-definition-of-done).
 
-**4. Small surface, deep discipline.** The parent layer is intentionally small: <5 KB for `core-rules/CLAUDE.md`, nine canonical hooks, seven scheduled audits. Anything broader than that belongs in a project-local file. This keeps the contract legible and the drift surface narrow. See [§3](#3-the-control-plane).
+**4. Small surface, deep discipline.** The always-loaded parent rules stay compact; deeper procedures live in canonical hooks, skills, and references, while operator-specific automation stays private. Anything project-specific belongs in a project-local file. This keeps the inherited contract legible and the drift surface narrow. See [§3](#3-the-control-plane).
 
 **5. Harness-safe by default.** Every mechanism in the regime should work in Claude Code and Codex, with hook envelopes separated where the tools differ. Claude's primary inheritance path is `.claude/rules/`; Codex's is root `AGENTS.md` plus `.agents/`. See [§4.2](#42-inheritance-symlink--import) and `core-rules/inheritance.md`.
 
@@ -92,17 +92,18 @@ trellis-instance/
 │   ├── hooks/                      ← canonical Claude Code hook implementations
 │   ├── codex/                      ← canonical Codex hooks.json + hook scripts
 │   ├── husky/                      ← canonical Tier-3 git hooks
-│   ├── skills/                     ← canonical agent-invoked skills (process-gate)
+│   ├── skills/                     ← canonical agent-invoked skills and gates
 │   └── templates/                  ← context-log.md, gotchas.md seeds
-├── scheduled-tasks/                ← weekly/monthly audit prompt sources
 ├── scripts/                        ← bootstrap + onboard + sync utilities
 │   ├── lib/                        ← config-load.sh, sed-portable.sh
 │   ├── onboard-project.sh          ← register + seed a project
 │   ├── sync-hooks.sh               ← canonical Claude hooks → projects rsync
 │   ├── sync-codex-hooks.sh         ← canonical Codex hooks → projects rsync
 │   └── sync-to-template.sh         ← live → public template export (with redaction)
-└── audits/                         ← dated output of every audit run
+└── audits/                         ← dated operator-generated audit reports
 ```
+
+Private operator clones may add their own audit-schedule and prompt tree beside these public files. That automation is not part of the published template.
 
 ### 3.1 `trellis.config.json`
 
@@ -127,7 +128,7 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
   // documentation-only — nothing breaks if a project connects something else.
   // The reserved mcp-drift audit (parked) will warn on unapproved servers.
   "approved_mcps": [
-    { "name": "scheduled-tasks",  "purpose": "Trellis weekly + quarterly audits", "scope": "fleet" },
+    { "name": "operator-scheduler", "purpose": "Private recurring operator jobs", "scope": "fleet" },
     { "name": "computer-use",     "purpose": "Native-app screenshots + UI control", "scope": "fleet" },
     { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
   ],
@@ -178,7 +179,7 @@ Cross-machine portability is achieved by:
 
 **Write-infrequently files** (the evolution loop):
 - `core-rules/deferred.md` — modified when a new candidate rule appears or a third witness promotes one.
-- `audits/YYYY-MM-DD-*.md` — write-only; scheduled tasks append; remediation tracked elsewhere.
+- `audits/YYYY-MM-DD-*.md` — write-only operator reports; remediation tracked elsewhere.
 
 **Read-once-for-history files**:
 - `recon.md` — the thesis doc that drove the original lift/leave/defer classification. Don't rewrite it; its value is the historical record of *why* the parent layer looks the way it does.
@@ -233,21 +234,27 @@ Full spec: `core-rules/hooks.md`. Summary follows.
 
 Tier 1 and 2 are harness hook events. Claude Code and Codex use separate JSON envelopes, so Trellis keeps separate canonical script trees while preserving the same policy intent. Tier 3 is husky + lint-staged + commitlint, standard git machinery.
 
-### 5.2 The nine canonical hooks
+### 5.2 The canonical hooks
 
 Canonical inventory (names + tiers + origin) is `core-rules/hooks/README.md`; canonical event/matcher wiring is `core-rules/templates/claude-settings.json` (the `hooks` block each project must register). The table below is narrative — the "Responsibility" column captures what each hook does in plain English; do not treat this table as the authoritative manifest. Add or remove hooks in README.md + the settings.json template first, then update this row if the responsibility changes.
 
 | Script | Tier | Event | Responsibility |
 |---|---|---|---|
 | `block-destructive.sh` | 1 | PreToolUse (Bash) | Deny `rm -rf /`, force-push, hard-reset, DB DROP, `.env` reads. |
+| `reread-guard.sh` | 1 | PreToolUse (Edit/Write/MultiEdit) | Require a fresh read before editing a stale copy. |
 | `post-edit-verify.sh` | 1 | PostToolUse (Write/Edit/MultiEdit) | Per-file lint (eslint/ruff/clippy/golangci-lint). Block on fail. |
 | `truncation-check.sh` | 1 | PostToolUse (Grep/Bash/Read) | Warn when tool output ≥100K chars or truncation marker present. |
+| `track-read.sh` | 1 | PostToolUse (Read/Write/Edit/MultiEdit) | Record file reads for stale-copy protection. |
 | `session-context.sh` | 1 | SessionStart (startup/resume) | Inject branch, last commits, dirty-file count, pending gotchas. |
 | `save-context-log.sh` | 1 | PreCompact | Persist session state to `context-log.md`. |
 | `post-compact-context.sh` | 1 | SessionStart (compact) | Restore `context-log.md` into context after auto-compact. |
+| `inject-primer-index.sh` | 1 | SessionStart | Inject the project primer index when configured. |
+| `spec-gate.sh` | 2 | Stop | Enforce the mandatory feature/spec pipeline when enabled. |
 | `stop-verify.sh` | 2 | Stop | Block if todos open, run typecheck + lint + fast tests. |
 | `code-review-subagent.sh` | 2 | Stop (edit-heavy) | Dispatch a code-review subagent on the diff; findings must resolve or defer. |
+| `propose-rules.sh` | 2 | Stop | Surface Rule-of-Three candidates; configurable and default-on. |
 | `ui-verify.sh` | 2 | Stop (UI diff) | Spin up dev server, take screenshot, attach. |
+| `stamp-turn.sh` | 2 | Stop | Stamp completed turn activity for hook coordination. |
 
 `code-review-subagent` is the *filter*, not the finder: `severity == "critical"` blocks, everything else is advisory. When wiring a project-local reviewer, prompt it for **coverage, not filtering** — report every issue with a confidence and severity, and let the hook rank. Opus 4.8 honors "be conservative / only report high-severity" instructions literally and will otherwise silently drop low-severity findings (precision rises, recall falls). Detail + snippet: the hook's header contract and `docs/opus-4.8-steering.md` §6.
 
@@ -259,25 +266,25 @@ Codex implementations are version-controlled at `core-rules/codex/`. Projects de
 
 Canonical skills live under `core-rules/skills/<name>/` and are inherited by every project via the same symlink mechanism as parent rules. Skills are *agent-invoked* — not run automatically — and supply structured procedures plus harness-agnostic validator scripts.
 
-**Current canonical skill: `process-gate`.** The pre-PR enforcement gate. Six categories (PR hygiene, secrets, bypass markers, tests, docs, stack profile), each with a reference file and a validator script. Returns a single verdict block (`MERGEABLE` / `NEEDS CHANGES` / `BLOCKED`). Spec: `core-rules/skills/process-gate/SKILL.md`. Mandatory before merging to `main`.
+**Current canonical set.** Trellis ships the five-stage spec pipeline (`clarify`, `spec`, `plan`, `tasks`, `analyze`) plus `brainstorming`, `execute`, `process-gate`, `security-gate`, `orchestrate`, `debrief`, and `writing`. `process-gate` runs eight deterministic categories and returns one verdict block (`MERGEABLE` / `NEEDS CHANGES` / `BLOCKED`). The exact inventory is the set of directories under `core-rules/skills/`; each skill's `SKILL.md` is authoritative for its contract.
 
 **Project deployment.** Each registered project carries:
 
 ```
-<project-root>/.claude/skills/process-gate/  →  $TRELLIS_ROOT/core-rules/skills/process-gate/
+<project-root>/.claude/skills/<name>/  →  $TRELLIS_ROOT/core-rules/skills/<name>/
 ```
 
 The directory itself is symlinked, so canonical updates appear automatically. Project-local configuration goes beside the symlink in `<project-root>/.claude/skills/process-gate-local/local.config.sh` (NOT covered by the canonical symlink — project owns it).
 
-**Codex-enabled projects** additionally carry `.agents/skills/process-gate/` pointing at the same canonical target and `.agents/skills/process-gate-local/local.config.sh` for Codex-local overrides. Both symlinks resolve to byte-identical content; `process-gate-local/` is the per-project extension point.
+**Codex-enabled projects** additionally carry `.agents/skills/<name>/` pointing at the same canonical targets and `.agents/skills/process-gate-local/local.config.sh` for Codex-local overrides. Both harnesses resolve to byte-identical skill content; `process-gate-local/` is the per-project extension point.
 
-**Stack profiles.** The canonical six gates apply to every project. Stack-specific validators (design tokens, a11y, module boundaries, asset checks) attach via `PROCESS_GATE_STACK_PROFILE` and `PROCESS_GATE_STACK_VALIDATORS` in `local.config.sh`. See `core-rules/skills/process-gate/references/stack-profiles.md`. Profiles waiting for a third witness queue in `core-rules/deferred.md`.
+**Stack profiles.** The canonical eight gates apply to every project. Stack-specific validators (design tokens, a11y, module boundaries, asset checks) attach via `PROCESS_GATE_STACK_PROFILE` and `PROCESS_GATE_STACK_VALIDATORS` in `local.config.sh`. See `core-rules/skills/process-gate/references/stack-profiles.md`. Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
-**Lume carve-out.** Lume (Unity, n=1 native-stack project) declares `PROCESS_GATE_STACK_PROFILE="unity"` with project-local validators only. The canonical six gates still apply. The carve-out is documented in `registry.md` and the extended `parent-hook-drift` audit treats it as expected, not drift.
+**Lume carve-out.** Lume (Unity, n=1 native-stack project) declares `PROCESS_GATE_STACK_PROFILE="unity"` with project-local validators only. The canonical eight gates still apply. The carve-out is documented in `registry.md` and the extended `parent-hook-drift` audit treats it as expected, not drift.
 
 ### 5c. Loop-safety contract
 
-Trellis is a loop system: the scheduled audits in `scheduled-tasks/` are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run unbounded agent loops on infra time. The dominant production failure mode of this generation of agent loops is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend. The **loop-safety contract** is the named guarantee that every Trellis loop halts.
+Trellis is a loop system: operator-owned recurring audits are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run agent loops on infra time. The dominant production failure mode of this generation of agent loops is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend. The **loop-safety contract** is the named guarantee that every Trellis loop halts.
 
 It is **doctrine plus declared fields, not a mechanical kill-switch** — there is no hook that intercepts a running loop at tool-use time (deferred; see `core-rules/loop-safety.md`). The contract is carried by the canonical policy spec, the `loop_safety` config (§3.1), the parent-rules `## Loops` entry that makes it discoverable at runtime, and a drift audit that flags any loop missing its declaration.
 
@@ -285,14 +292,14 @@ It is **doctrine plus declared fields, not a mechanical kill-switch** — there 
 
 - **`max_iterations`** — hard cap on loop iterations / agent-dispatch rounds. Baseline **100**. Complements (does not replace) the Workflow engine's existing 1000-agent lifetime backstop.
 - **`no_progress_iterations`** — halt after N consecutive iterations that make no measurable progress. Baseline **3**. "Progress" is a per-loop **progress signal** drawn from a catalog — commit/PR (fleet-mutation loops), file delta (edit loops), new finding (audit loops), work-list drain (queue/pipeline loops), or a declared state-hash change (catch-all if none is declared). A one-shot fan-out with no rounds is exempt and declares `no_progress_iterations: null`.
-- **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). Baseline **1000**. The Workflow tool's `budget.total` is output-token-native, so `loop-safety.md` documents the dollar→token conversion and maps the ceiling onto the engine budget where exposed; `/loop` and scheduled-tasks track or estimate spend against the declared dollar figure.
+- **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). Baseline **1000**. The Workflow tool's `budget.total` is output-token-native, so `loop-safety.md` documents the dollar→token conversion and maps the ceiling onto the engine budget where exposed; `/loop` and operator recurring jobs track or estimate spend against the declared dollar figure, and surface that running spend as a `spent_usd / budget_ceiling_usd` line in **every** run report — not only on a ceiling trip — so the ceiling reads as a live gauge, not just a tripwire.
 
-**Halt behavior.** On any ceiling trip the loop **hard-stops** — never auto-continues past a tripped ceiling — and emits a **structured halt report**: which ceiling tripped, the last progress marker, and the work done so far. Unattended runs (overnight / cron / `--run-in-background`) surface the halt in their run report (and notification where wired) rather than dying silently.
+**Halt behavior.** On any ceiling trip the loop **hard-stops** — never auto-continues past a tripped ceiling — and emits a **structured halt report**: which ceiling tripped, the last progress marker, the running `spent_usd / budget_ceiling_usd` cost line, and the work done so far. Unattended runs (overnight / cron / `--run-in-background`) surface the halt in their run report (and notification where wired) rather than dying silently.
 
 **Where it's declared.** The policy lives in `core-rules/loop-safety.md`; the ceiling values resolve through the four-layer order in §3.1. Loops carry their declaration where they live:
 
 - **`orchestrate` recipes** — a `safety` block in the recipe scaffold (`recipes/template.wf.js`); authoring a recipe without one is non-compliant. `recipes/fanout-verify.wf.js` declares its block as a worked example of an override.
-- **Scheduled-tasks** — a uniform "Loop safety" stanza in each task's `prompt.md`. Most inherit the baselines; `test-health`'s existing caps (5 min/project, 20-commit bisect) become explicit overrides expressed in the stanza.
+- **Operator audit loops** — a uniform "Loop safety" stanza in each private prompt. Most inherit the baselines; task-specific runtime caps become explicit overrides.
 
 This is the foundational sub-project in a sequence: the nesting-depth budget in `orchestrate` extends it (depth is a halting dimension) and the "Mayor" loops-supervising-loops recipe must honor it. Loops are also an autonomy surface (§14.9) — the loop-safety contract is the halting guarantee that lets higher autonomy levels run loops unattended. Full policy, the progress-signal catalog, and the fallback constants: `core-rules/loop-safety.md`. Design spec: `docs/specs/2026-06-09-loop-safety-contract-design.md`.
 
@@ -310,7 +317,7 @@ Overrides live in each project's `.claude/hooks/config.sh` and/or `.codex/hooks/
 ### 5.4 Guarantees
 
 - **Rename-proof.** Hooks use `$CLAUDE_PROJECT_DIR` or `$CODEX_PROJECT_DIR`, never hardcoded project paths.
-- **Headless-safe.** Claude hooks work identically in `claude -p` runs and scheduled tasks; Codex hook parity is project-local and gated by the Codex hook feature flag.
+- **Headless-safe.** Claude hooks work identically in interactive and headless runs; Codex hook parity is project-local and gated by the Codex hook feature flag.
 - **Fail closed.** A failed hook blocks; it never logs-and-continues.
 
 ### 5.5 Harness coverage matrix
@@ -324,7 +331,7 @@ Claude Code is the primary harness. Codex is the secondary. Different layers cov
 | Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` (also mirrored under `.agents/workflows/<name>.md`) | Same canonical targets; Codex reads `.agents/`, including `.agents/workflows/`. |
 | Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | Turn-level (Tier 1/2) enforcement seeded on both harnesses. |
 | Tier 3 git hooks (husky / native) | runs in both | runs in both | Harness-agnostic — git-level enforcement protects every harness. |
-| Scheduled audits | `mcp__scheduled-tasks__*` MCP | **N/A** at MCP level | Audit prompts are plain markdown; can be invoked from cron via `claude -p` regardless of which harness the user develops in. |
+| Operator audits (optional) | Harness scheduler or cron | Harness scheduler or cron | Prompts, targets, and schedules are operator-owned; the public template defines report and loop-safety conventions only. |
 
 Projects opt into the secondary by adding `"codex"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. Both harnesses run the full Tier 1/2/3 enforcement stack — the `code-review` / `ui-verify` / receipt gates block at turn end on Claude Code and Codex alike.
 
@@ -388,7 +395,7 @@ Every Trellis project must have branch protection on `main`:
 
 Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval block means any required-review setting = undeployable). The local `pre-push` guard + CI + the PR window are the functional gate.
 
-**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code and Codex** — because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push, which is itself a logged tripwire caught by the daily `bypass-tripwire` audit (`scheduled-tasks/bypass-tripwire/`), the after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced on both harnesses (§5.5) and carry no separate automated merge backstop. Branch protection (require-PR) is the remote complement to this local gate.
+**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code and Codex** — because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push. Operators can add a recurring tripwire audit as an after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced on both harnesses (§5.5) and carry no separate automated merge backstop. Branch protection (require-PR) is the remote complement to this local gate.
 
 ### 6.5 History hygiene
 
@@ -685,7 +692,7 @@ git push -u origin main
 - [ ] Read `~/projects/trellis-instance/engineering-process.md` end-to-end. Everything below this line assumes you have.
 - [ ] `ls -la .claude/rules/trellis.md` — symlink exists, points at canonical path.
 - [ ] `readlink .claude/rules/trellis.md` — target is `__TRELLIS_PATH__/core-rules/CLAUDE.md`.
-- [ ] `ls .claude/hooks/` — all nine canonical `.sh` files present and executable.
+- [ ] `ls .claude/hooks/` — every script named in `core-rules/hooks/README.md` is present and executable.
 - [ ] `ls -la .claude/skills/process-gate` — symlink exists, points at canonical `core-rules/skills/process-gate`.
 - [ ] `readlink .claude/skills/process-gate` — target is `__TRELLIS_PATH__/core-rules/skills/process-gate`.
 - [ ] `grep -q '$CLAUDE_PROJECT_DIR' .claude/settings.json` — no hardcoded project paths.
@@ -701,7 +708,7 @@ git push -u origin main
 
 ### 10.4 Post-onboarding verification
 
-Wait for the next scheduled run of `parent-hook-drift` (Sunday 21:00) and `registry-blacklist-health` (Monday 10:36) — both should come back clean with the new project listed. Or manually trigger them via the scheduled-tasks MCP to verify immediately.
+Run `scripts/doctor.sh` against the new project and, if private operator audits are configured, trigger the hook-drift and registry-health checks. All should return clean with the new project listed.
 
 ### 10.5 Bootstrapping a fresh clone (every developer, every machine)
 
@@ -719,23 +726,25 @@ If you skip this step, Claude Code and Codex sessions in the project will silent
 
 ---
 
-## 11. Scheduled audits & the feedback loop
+## 11. Operator audits & the feedback loop
 
-### 11.1 The seven audits
+### 11.1 Optional audit patterns
 
-| Audit | Cadence | What it catches |
-|---|---|---|
-| `bypass-tripwire` | Daily (Mon–Fri 08:07) | `--no-verify` commits, direct-to-main pushes, husky skips, force-pushes. |
-| `cross-project-process-audit` | Weekly (Mon 10:06) | Missing symlinks, missing hooks, staleness, required-file gaps, loop-safety stanza presence. |
-| `registry-blacklist-health` | Weekly (Mon 10:36) | Registry vs. filesystem consistency, orphans, overdue blacklist reviews. |
-| `test-health` | Weekly (Mon 11:00) | Each project's fast test suite: pass/fail + last-green bisect on red. |
-| `parent-hook-drift` | Weekly (Sun 21:00) | Byte-identity of deployed hooks vs. canonical; settings.json registration gaps. |
-| `gotchas-rollup` | Monthly (1st 09:00) | Clusters each project's gotchas, applies Rule of Three for promotion. |
-| `audit-report-rollup` | Monthly (1st 10:00) | Trend analysis across the six audits above. |
+The public template does not ship an operator's schedules, prompts, targets, or fleet inventory. An operator clone can use `registry.md` to drive private checks such as:
 
-All audits write to `~/projects/trellis-instance/audits/YYYY-MM-DD-<name>.md`. All are headless `claude -p` runs driven by the scheduled-tasks MCP (`mcp__scheduled-tasks__*`). Prompt sources live in `scheduled-tasks/<name>/prompt.md`; runtime prompts live inside the MCP and should be kept in sync with disk.
+| Pattern | What it catches |
+|---|---|
+| bypass tripwire | `--no-verify` commits, direct-to-main pushes, husky skips, force-pushes. |
+| process drift | Missing symlinks, missing hooks, staleness, required-file gaps, loop-safety declarations. |
+| registry health | Registry vs. filesystem consistency, orphans, overdue blacklist reviews. |
+| test health | Each project's fast suite, with a last-green investigation on red. |
+| hook drift | Byte-identity of deployed hooks vs. canonical and registration gaps. |
+| gotchas rollup | Clusters project lessons and applies the Rule of Three for promotion. |
+| report rollup | Trend analysis across the operator's other audits. |
 
-**Loop-safety drift.** The `cross-project-process-audit` also keeps the loop-safety contract (§5c) honest — the way `parent-hook-drift` keeps hooks honest, and without a new 17th cron. It scans `orchestrate` recipes and scheduled-task prompts for a present, non-blank loop-safety declaration and flags any loop missing one as a compliance finding. (Authoring a loop without the stanza is additionally a `process-gate` / review finding at PR time.)
+When configured, audits write to `<trellis-root>/audits/YYYY-MM-DD-<name>.md`. They may run through a harness scheduler, cron, or another headless runner; the private prompt source remains version-controlled in the operator clone and out of the public mirror.
+
+**Loop-safety drift.** Operator process audits should also keep the loop-safety contract (§5c) honest by scanning `orchestrate` recipes and private audit prompts for a present, non-blank declaration. Authoring a loop without the stanza is additionally a `process-gate` / review finding at PR time.
 
 ### 11.2 Remediation workflow
 
@@ -747,14 +756,14 @@ All audits write to `~/projects/trellis-instance/audits/YYYY-MM-DD-<name>.md`. A
 
 ### 11.3 Writing new audit tasks
 
-Audits are written as SKILL-style prompt.md files under `scheduled-tasks/<name>/`. Good audit prompts:
+Keep audit prompts in a private operator-owned directory, using one folder per task and a SKILL-style `prompt.md`. Good audit prompts:
 - Name their inputs (which files to read) and outputs (where to write).
 - Are **reporting only** — they never modify project files. That's a hard boundary.
 - Cap output size (50 lines of diff, 30 lines of log).
 - Degrade gracefully if a project is missing (defer to a sibling audit that owns detection).
 - Include sensible-failure-mode handling.
 
-See `scheduled-tasks/parent-hook-drift/prompt.md` as a template.
+Start from an existing local report under `<trellis-root>/audits/` and the loop-safety contract in `core-rules/loop-safety.md`. Public-template users can instead start from its redacted `examples/audits/`; never publish private targets as examples.
 
 ---
 
@@ -902,14 +911,14 @@ Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently ma
 
 Spec-kit adoption (Phase A, 2026-05-12) introduced a semver pin on the canonical core-rules so downstream consumers can decide when to pull canonical changes instead of getting silently dragged along.
 
-- `core-rules/VERSION` — single-line semver. Authoritative. Bumped intentionally when a meaningful rule, hook, or skill change lands. The version is tagged on the public mirror after `sync-to-template.sh`, never on the private clone.
+- `core-rules/VERSION` — single-line semver. Authoritative. Bumped intentionally when a meaningful rule, hook, or skill change lands. A verified release tags both the source control plane and the published mirror at their corresponding release tips.
 - `trellis.config.json` — optional `trellis_version` field. Downstream forks (and the parent itself, on the canonical clone) pin to a specific version. Absent = "not pinned yet" (the expected pre-rollout state for existing projects).
 - `scripts/upgrade.sh` — consumer-side check. Fetches tags from `origin` (or `template.remote` fallback), compares pinned version to highest `v*.*.*` tag, prints a stat diff of `core-rules/`. Read-only by default; `--opt-in` rewrites the pin and revalidates the config against the schema. `--check` exits non-zero on drift for CI.
-- `scheduled-tasks/version-drift/` — weekly audit. Walks the registry, classifies each project as current / no-pin / patch-drift / minor-drift / major-drift / ahead / malformed. Only major drift is critical; everything else is informational while the rollout reaches each project.
+- An optional operator version-drift audit can walk the registry and classify each project as current / no-pin / patch-drift / minor-drift / major-drift / ahead / malformed. Only major drift is critical; everything else is informational while a rollout reaches each project.
 
 Severity contract is shared between `upgrade.sh` and `version-drift`. If you change tiers, change both in the same commit.
 
-`core-rules/VERSION` is at `0.2.0` after the spec-kit Phase A + rebrand work. `v0.1.0` was already taken by the 2026-05-08 meta-audit Phase 3 wrap-up (commit `b5eb660`); the next release tag is `v0.2.0`, applied on the public mirror after `sync-to-template.sh`. Existing projects that already use the legacy `SE_CORE_*` env vars or `.claude/rules/se-core.md` symlink will be re-linked by `scripts/rollout-rebrand.sh` (one-shot, idempotent); after that pass the audit's `no-pin` rows can convert to real pins on a project-by-project schedule.
+Read `core-rules/VERSION` and the latest `v*.*.*` tag for the current release; this manual intentionally does not duplicate a version number that will drift. Legacy `SE_CORE_*` env vars or `.claude/rules/se-core.md` symlinks can be re-linked by `scripts/rollout-rebrand.sh` (one-shot, idempotent), after which operator version checks can convert `no-pin` rows to real pins project by project.
 
 ### 14.6 Updating Trellis
 
@@ -1023,7 +1032,7 @@ In practice, presets stay additive — they extend the parent with new rules or 
 
 **Authoring new presets** is governed by `core-rules/presets/README.md` — single-purpose, ≤50 lines, additions+carve-outs structure, cite a reason. Two-project minimum before a new preset ships (a scaled-down Rule of Three because presets are opt-in).
 
-**Drift audit.** `scheduled-tasks/preset-drift/` runs weekly (Mon 12:00). For each registered project it compares the declared `presets` array against the symlinks actually present and reports critical findings (unknown preset, missing symlink, harness divergence) plus stale-symlink warnings.
+**Drift audit.** An optional operator preset-drift check can compare each registered project's declared `presets` array against the symlinks actually present and report unknown presets, missing symlinks, harness divergence, and stale links.
 
 **Rollout flow:**
 
@@ -1070,7 +1079,7 @@ Trellis ships an L1–L5 **responsibility slider** that determines who answers t
 
 **Decision log.** At L4/L5, agent appends each decision-on-user's-behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes the same. Code-review subagent at L4/L5 verifies decision-log completeness vs diff — incomplete logs are findings.
 
-**Audit.** `scheduled-tasks/autonomy-drift/` runs weekly. Flags silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), schema issues.
+**Audit.** An optional operator autonomy-drift check can flag silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), and schema issues.
 
 Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/2026-05-20-autonomy-slider.md`. Spec: `docs/specs/2026-05-20-trellis-autonomy-design.md`.
 
@@ -1124,17 +1133,17 @@ Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/202
 
 ## References
 
-- `core-rules/CLAUDE.md` — parent rules (LLM-facing, 76 lines).
-- `core-rules/hooks.md` — three-tier hook spec (159 lines).
-- `core-rules/inheritance.md` — symlink + @-import mechanism (43 lines).
+- `core-rules/CLAUDE.md` — parent rules (LLM-facing).
+- `core-rules/hooks.md` — three-tier hook spec.
+- `core-rules/inheritance.md` — symlink + @-import mechanism.
 - `docs/opus-4.8-steering.md` — Opus 4.8 prompting deltas vs Trellis + reusable snippet library.
-- `core-rules/deferred.md` — n=1 candidates awaiting third witness (71 lines).
+- `core-rules/deferred.md` — n=1 candidates awaiting third witness.
 - `core-rules/hooks/README.md` — canonical hook script index + attribution.
-- `core-rules/hooks/*.sh` — nine canonical hook implementations.
+- `core-rules/hooks/*.sh` — canonical hook implementations; inventory in `core-rules/hooks/README.md`.
 - `registry.md` — active project opt-in list.
 - `blacklist.md` — temporary exemptions.
 - `recon.md` — LIFT/LEAVE/DEFER thesis that seeded the regime.
-- `scheduled-tasks/` — audit prompt sources.
+- operator-private audit automation — schedules, prompts, targets, and fleet inventory are intentionally not published.
 - `audits/` — dated audit output archive.
 
 ## Upstream attribution

@@ -265,6 +265,47 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "cache discovery failure warns, marks the project skipped, and exits nonzero" {
+  build_alpha_with_stale_cache
+  local shim_dir="$SANDBOX/failing-bin"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/find" <<'EOF'
+#!/bin/sh
+exit 73
+EOF
+  chmod +x "$shim_dir/find"
+
+  PATH="$shim_dir:$PATH" run_dj --report --scopes caches
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARNING: cache discovery failed for $PROJECTS/alpha"* ]]
+  [[ "$output" == *"WARNING: scan failed for $PROJECTS/alpha"* ]]
+  [[ "$output" == *"skipped: scan error ($PROJECTS/alpha)"* ]]
+}
+
+@test "worktree discovery failure warns, marks the project skipped, and exits nonzero" {
+  build_alpha_with_stale_cache
+  local shim_dir="$SANDBOX/failing-bin"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/git" <<EOF
+#!/bin/sh
+if [ "\${3-}" = "worktree" ] && [ "\${4-}" = "list" ] && [ "\${5-}" = "--porcelain" ]; then
+  exit 74
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$shim_dir/git"
+
+  PATH="$shim_dir:$PATH" run_dj --report --scopes worktrees
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WARNING: worktree discovery failed for $PROJECTS/alpha"* ]]
+  [[ "$output" == *"WARNING: scan failed for $PROJECTS/alpha"* ]]
+  [[ "$output" == *"skipped: scan error ($PROJECTS/alpha)"* ]]
+}
+
 @test "scopes can be narrowed: --scopes worktrees omits the cache section" {
   build_alpha_with_stale_cache
   run_dj --report --scopes worktrees

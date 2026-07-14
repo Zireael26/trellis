@@ -31,7 +31,7 @@ LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null
 
 # The full canonical inheritance surface a healthy project carries. Kept in
 # lockstep with HC_CANONICAL_SKILLS / HC_CANONICAL_COMMANDS in health-checks.sh.
-CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief"
+CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
@@ -298,8 +298,7 @@ make_no_playwright_path() {
   [[ "$output" == *"✓ import: @-import matches canonical"* ]]
   [[ "$output" == *"✓ skills: full canonical set resolves"* ]]
   [[ "$output" == *"✓ commands: full canonical set resolves"* ]]
-  # No ERROR row anywhere.
-  [[ "$output" != *"✗"* ]]
+  [[ "$output" == *"✓ healthy — no drift detected"* ]]
 }
 
 @test "Tier-1: missing rules symlink => ERROR + non-zero exit" {
@@ -664,4 +663,45 @@ make_no_playwright_path() {
   run_doctor
   [ "$status" -eq 0 ]
   [[ "$output" == *"✓ receipt-grammar-present: dod-receipt grammar present"* ]]
+}
+
+@test "adopt-008 hc_claudemd_budget (Tier-0): canonical CLAUDE.md under line budget => OK" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # The default fixture CLAUDE.md is only a few lines — well under the 200-line
+  # attention budget, so the guardrail is OK.
+  run_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"✓ claudemd-budget: core-rules/CLAUDE.md is"* ]]
+  [[ "$output" == *"(budget: 200)"* ]]
+}
+
+@test "adopt-008 hc_claudemd_budget (Tier-0): canonical CLAUDE.md over line budget => WARN, exit 0" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Grow the canonical rules past the 200-line attention budget while KEEPING the
+  # dod-receipt anchor (so receipt-grammar stays OK and this WARN is isolated),
+  # then re-commit so the canonical tree stays clean (else the Tier-0 dirty check
+  # would also fire and mask the result).
+  {
+    printf '# Parent engineering rules\n\n<!-- dod-receipt cmd= exit=0 diff= -->\n'
+    i=1
+    while [ "$i" -le 250 ]; do
+      printf -- '- rule line %s\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$CANON/core-rules/CLAUDE.md"
+  ( cd "$CANON" && git add -A && git commit -q -m "grow parent rules past budget" )
+
+  run_doctor
+  # Chained terminal assertion (DL-P8a-12): WARN substring is the final
+  # discriminator so the test goes RED under an always-HC_OK mutation.
+  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"⚠ claudemd-budget:"* ]] \
+    && [[ "$output" == *"past the attention cliff"* ]]
 }

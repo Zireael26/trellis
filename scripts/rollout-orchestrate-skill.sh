@@ -48,6 +48,8 @@ done
 
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 
 ORCHESTRATE_SKILLS=(orchestrate)
 
@@ -89,23 +91,10 @@ read_registry() {
     }
   ' "$REGISTRY"
 }
-read_blacklist() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## (Blacklisted|Currently exempt|Active blacklist)/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0; gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-    }
-  ' "$BLACKLIST"
-}
-
 REGISTRY_NAMES=()
 while IFS= read -r line; do [ -n "$line" ] && REGISTRY_NAMES+=("$line"); done < <(read_registry)
 BLACKLIST_NAMES=()
-while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist)
+while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local n="$1" b
@@ -121,7 +110,7 @@ install_skill_symlink() {
   local parent_dir backup_dir cur
 
   parent_dir="$(dirname "$link")"
-  mkdir -p "$parent_dir"
+  $DRY_RUN || mkdir -p "$parent_dir"
 
   if [ -L "$link" ]; then
     cur="$(readlink "$link")"

@@ -110,7 +110,7 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
   if [ -z "${PM:-}" ] && { [ -f "go.work" ] || [ -f "go.mod" ]; } && command -v go >/dev/null 2>&1; then
     # Go workspaces break `go vet ./...` and `go test ./...` from the repo
     # root — prefer a Makefile orchestrator if one exposes vet/lint/test
-    # targets. clusterbid-console established this pattern.
+    # targets. Multi-language monorepos commonly use this pattern.
     if [ -f "Makefile" ] && grep -qE '^(vet|lint|test):' Makefile 2>/dev/null; then
       # PER-TARGET guard (DL-P7-09): the branch enters on ANY ONE of
       # vet/lint/test being a Makefile target, but each `make <target>` command

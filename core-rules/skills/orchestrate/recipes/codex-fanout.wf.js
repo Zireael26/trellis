@@ -1,19 +1,20 @@
 // codex-fanout — mixed Codex/Claude implementation fan-out with independent
-// Claude verification and one bounded repair round. `args.codexCap` overrides
-// the central `trellis.config.json.codex_fanout.concurrency` default of 4.
+// Claude verification and one bounded repair round. `args.codexCap` is required
+// and must be caller-resolved from `trellis.config.json.codex_fanout.concurrency`.
 // Agents only produce and verify diffs. The calling orchestrator alone
 // commits and merges dependency-ready work, in the returned receipt order.
 //
 // Inputs (all specifics come from args):
 //   args.units       [{ name, leg, task, effort?, justification?, paths,
-//                       proofCmd, conflicts?, dependsOn? }]
+//                       proofCmd, conflicts?, targetCwd?, dependsOn? }]
 //                    leg is 'codex'|'claude'. Codex effort is REQUIRED and is
 //                    'xhigh'|'max' (medium/high suspended 2026-07-10 per
 //                    docs/codex-routing.md §3); ultra is hard-rejected;
 //                    max requires a non-empty justification. dependsOn is an
-//                    array of unit names. conflicts enables a branch-producing
-//                    generation worktree; later stages consume that branch.
-//   args.codexCap    optional positive integer override; default 4.
+//                    array of unit names. conflicts requires targetCwd: a
+//                    caller-provisioned stable worktree shared unchanged by
+//                    generate, verify, and fix. Workers never commit it.
+//   args.codexCap    REQUIRED positive integer resolved by the caller.
 //   args.codexAvailable boolean capability-gate result; only true enables the
 //                    Codex leg. Any other value degrades Codex units to Claude.
 //   args.targetCwd   optional target root for worker/verifier prompts; when
@@ -35,7 +36,7 @@ export const meta = {
   // unit. The recipe adds no further repair loops beyond its single fix round.
   safety: {
     // First worker stall retries; a second no-progress iteration halts.
-    no_progress_iterations: 2,
+    no_progress_iterations: 1,
     progress_signal: 'file delta',
   },
 }
@@ -53,8 +54,8 @@ const VERIFY = {
 }
 
 const units = args.units ?? []
-const codexCap = args.codexCap ?? 4
-const targetCwd = args.targetCwd ?? '. (the Workflow-provided checkout/worktree root)'
+const codexCap = args.codexCap
+const defaultTargetCwd = args.targetCwd ?? '. (the Workflow-provided checkout/worktree root)'
 // medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
 const EFFORT_ENUM = ['xhigh', 'max']
 
@@ -70,8 +71,25 @@ function dependencyNames(unit) {
   return unit.dependsOn ?? []
 }
 
-function generateIsolation(unit) {
-  return unit.conflicts ? { isolation: 'worktree' } : {}
+function targetCwdOf(unit) {
+  return unit.targetCwd ?? defaultTargetCwd
+}
+
+function normalizeTargetCwd(value) {
+  const raw = value.trim().replace(/\/{2,}/g, '/')
+  const absolute = raw.startsWith('/')
+  const parts = []
+  for (const part of raw.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
+      else if (!absolute) parts.push(part)
+      continue
+    }
+    parts.push(part)
+  }
+  const normalized = parts.join('/')
+  return absolute ? '/' + normalized : normalized || '.'
 }
 
 function branchOf(unit) {
@@ -124,7 +142,7 @@ async function cancelLeakedJob(unit, value) {
   try {
     await agent([
       'A blocking codex-worker leaked job handle ' + jobId + '.',
-      'From TARGET_CWD ' + targetCwd + ', attempt exactly:',
+      'From TARGET_CWD ' + targetCwdOf(unit) + ', attempt exactly:',
       'node "' + companion + '" cancel ' + jobId + ' --json',
       'Then run status once for the same id and report whether it still shows active. Do not edit files.',
     ].join('\n'), {
@@ -146,9 +164,9 @@ async function cancelLeakedJob(unit, value) {
 phase('Presence')
 if (!Array.isArray(units)) throw new Error('codex-fanout: args.units must be an array')
 if (!Number.isInteger(codexCap) || codexCap <= 0) {
-  throw new Error('codex-fanout: codexCap must be a positive integer')
+  throw new Error('codex-fanout: caller-resolved codexCap is required and must be a positive integer')
 }
-log('codex-fanout: codexCap=' + codexCap + ' source=' + (args.codexCap === undefined ? 'default' : 'args'))
+log('codex-fanout: codexCap=' + codexCap + ' source=args')
 
 const names = new Set()
 for (const u of units) {
@@ -166,6 +184,9 @@ for (const u of units) {
   if (u.conflicts !== undefined && typeof u.conflicts !== 'boolean') {
     throw new Error('unit "' + u.name + '": conflicts must be a boolean when provided')
   }
+  if (u.conflicts === true && !hasText(u.targetCwd)) {
+    throw new Error('unit "' + u.name + '": targetCwd is required for conflicts=true so generate/verify/fix share one stable worktree')
+  }
   if (!Array.isArray(dependencyNames(u)) || !dependencyNames(u).every(hasText)) {
     throw new Error('unit "' + u.name + '": dependsOn must be an array of unit names')
   }
@@ -177,9 +198,9 @@ for (const u of units) {
     log(
       'codex-fanout: HARD-REJECT unit=' + u.name +
         " — effort 'ultra' is forbidden in recipes: the companion dispatch surface caps at xhigh" +
-        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3)',
+        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3; spec 011 D4a)',
     )
-    throw new Error('unit "' + u.name + '": effort \'ultra\' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)')
+    throw new Error('unit "' + u.name + '": effort \'ultra\' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)')
   }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
@@ -226,13 +247,13 @@ log('codex-fanout: codex ' + (codexAvailable ? 'AVAILABLE' : 'UNAVAILABLE — Co
 function workOrder(unit, mode) {
   const conflictDiscipline = unit.conflicts
     ? mode === 'generate'
-      ? 'CONFLICTING UNIT: from base ref origin/main, create branch ' + branchOf(unit) + ', make the bounded change, and commit only the declared paths to that named branch. Do not merge or push.'
-      : 'CONFLICTING UNIT REPAIR: work on existing branch ' + branchOf(unit) + ', inspect git diff origin/main...' + branchOf(unit) + ', apply only the bounded repair, and commit it to that branch. Do not merge or push.'
+      ? 'CONFLICTING UNIT: the caller already provisioned TARGET_CWD as the dedicated stable worktree on branch ' + branchOf(unit) + '. Make the bounded change there; never create/remove a worktree, commit, push, or merge. Leave the diff uncommitted for verification.'
+      : 'CONFLICTING UNIT REPAIR: return to the same TARGET_CWD worktree on branch ' + branchOf(unit) + ', inspect its actual uncommitted state, and apply only the bounded repair. Never create/remove a worktree, commit, push, or merge; the caller commits only after a green reverify.'
     : 'WORKING-TREE UNIT: preserve the current checkout and working-tree semantics; never commit, switch branches, merge, or push.'
   return [
     'TASK_PROMPT: ' + mode + ' the bounded unit "' + unit.name + '".',
     'GOAL: ' + unit.task,
-    'TARGET_CWD: ' + targetCwd,
+    'TARGET_CWD: ' + targetCwdOf(unit),
     'REPO/PATHS: ' + pathText(unit.paths),
     'CONSTRAINTS: change only the declared paths; inspect the current state first. ' + conflictDiscipline,
     'NON-GOALS: unrelated cleanup or any file outside REPO/PATHS.',
@@ -248,11 +269,11 @@ function workOrder(unit, mode) {
 function verifyPrompt(state) {
   const unit = state.unit
   const diffInstruction = unit.conflicts
-    ? 'Inspect the committed branch state with git diff origin/main...' + branchOf(unit) + ' for the declared paths. Do not switch branches and do not substitute the verifier working tree.'
+    ? 'Inspect the REAL uncommitted state in this exact producer worktree: git status --short, git diff, git diff --cached, and any untracked declared files. Do not switch branches or substitute a fresh verifier worktree.'
     : 'Read the REAL working-tree state: run git status --short, inspect git diff and git diff --cached for the declared paths, and read any untracked declared files directly.'
   return [
     'Adversarially verify the bounded unit "' + unit.name + '" after execution by ' + state.harness + '.',
-    'Work from TARGET_CWD: ' + targetCwd + '.',
+    'Work from TARGET_CWD: ' + targetCwdOf(unit) + '.',
     diffInstruction,
     'DECLARED PATHS: ' + pathText(unit.paths),
     'Run the proof command exactly and capture its actual exit/output: ' + unit.proofCmd,
@@ -265,7 +286,6 @@ async function dispatchClaude(unit, mode, degraded) {
   return agent(workOrder(unit, mode), {
     label: (degraded ? 'claude(degraded):' : 'claude:') + mode + ':' + unit.name,
     phase: mode === 'generate' ? 'Fan-out' : 'Fix',
-    ...(mode === 'generate' ? generateIsolation(unit) : {}),
   })
 }
 
@@ -275,7 +295,6 @@ async function dispatchCodex(unit, mode) {
       agentType: 'codex-worker',
       label: 'codex:' + mode + ':' + unit.name,
       phase: mode === 'generate' ? 'Fan-out' : 'Fix',
-      ...(mode === 'generate' ? generateIsolation(unit) : {}),
     })
     if (isJobHandle(output)) {
       log('codex-fanout: ASSERT blocking codex-worker leaked a job handle for unit=' + unit.name + ' — cancelling leaked job and degrading to Claude')
@@ -392,6 +411,25 @@ function dependencyWaves(input) {
 }
 
 const waves = dependencyWaves(units)
+for (let waveIndex = 0; waveIndex < waves.length; waveIndex += 1) {
+  const targetOwners = new Map()
+  for (const unit of waves[waveIndex]) {
+    // The implicit workflow checkout intentionally supports parallel units
+    // with disjoint declared paths. Only explicit targetCwd values claim a
+    // caller-provisioned worktree and therefore must be unique per wave.
+    if (!hasText(unit.targetCwd)) continue
+    const normalizedTargetCwd = normalizeTargetCwd(targetCwdOf(unit))
+    const priorUnit = targetOwners.get(normalizedTargetCwd)
+    if (priorUnit !== undefined) {
+      throw new Error(
+        'codex-fanout: units "' + priorUnit + '" and "' + unit.name +
+          '" share normalized targetCwd "' + normalizedTargetCwd +
+          '" in concurrent wave ' + (waveIndex + 1),
+      )
+    }
+    targetOwners.set(normalizedTargetCwd, unit.name)
+  }
+}
 
 phase('Fan-out')
 phase('Verify')
@@ -411,6 +449,7 @@ function makeReceipt(state) {
     attempts: state.attempts ?? 0,
     retries: state.retries ?? 0,
     worktree: unit.conflicts === true,
+    targetCwd: targetCwdOf(unit),
     proofCmd: unit.proofCmd,
     reviewed: verdict?.reviewed === true,
     green: verdict?.green === true && dependenciesGreen,
@@ -432,6 +471,6 @@ for (const boundedWave of waves) {
 
 const receipts = mergeOrder.map((unit) => receiptByName.get(unit.name))
 
-// Receipts are merge-ready metadata only. The orchestrator commits non-conflict
-// working-tree paths and merges conflict branches serially in this order.
+// Receipts are merge-ready metadata only. The orchestrator commits accepted
+// worktree diffs serially in this dependency order; workers never commit.
 return { codexAvailable, codexCap, receipts }

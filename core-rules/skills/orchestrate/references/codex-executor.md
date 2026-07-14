@@ -105,11 +105,12 @@ main loop, and it remains mandatory for:
 the inherited worker profile as a normal tracked agent node:
 
 ```js
-agent(prompt, { agentType: 'codex-worker', label: 'codex:<unit>', isolation: 'worktree' })
+agent(prompt, { agentType: 'codex-worker', label: 'codex:<unit>' })
 ```
 
-`codex-worker` is `model: sonnet`, launches the companion, polls status from the
-same cwd, applies the bounded no-session/stall recovery, fetches `result`, and
+`codex-worker` is `model: sonnet`, launches the companion in the work order's
+required `TARGET_CWD`, polls status from that same cwd, applies the bounded
+no-session/stall recovery, fetches `result`, and
 returns that result plus its diff-stat receipt. The Workflow node therefore
 resolves only on terminal success, unavailability, or failure. Producing recipes
 retain a defensive job-handle assertion: a leaked handle is a worker-contract
@@ -126,9 +127,10 @@ most expensive of the three, buying nothing over (i) or (ii).
 
 Spec quality decides delegation success. Every dispatch — workflow or
 interactive — carries the six work-order fields plus the honest-reporting
-clause:
+clause. A producing workflow also carries the required execution-root header:
 
 ```
+TARGET_CWD: <caller-provisioned stable worktree root>
 GOAL:        <one sentence — what done looks like>
 REPO/PATHS:  <repo root + the exact files/dirs in scope>
 CONSTRAINTS: <don't touch X; APIs and styles to hold>
@@ -151,11 +153,13 @@ highest detected ReAct-harness cheating rate, explicitly prompt/scaffold-depende
 Seven lines alone under-specify the execution environment, so the template
 closes with the operational invariants the recipe already carries:
 
-- **Base ref + branch** — name the commit the unit starts from and the branch
-  the diff lands on; never "wherever HEAD is".
-- **Worktree + seeding when isolated** — an isolated unit runs in a worktree
-  created via `trellis worktree add` (inheritance-seeded), never a raw
-  `git worktree add`.
+- **Base ref + branch** — the caller provisions the unit worktree from the named
+  commit/branch before dispatch; never "wherever HEAD is".
+- **Stable worktree + seeding** — producer and verifier receive the exact same
+  `TARGET_CWD`, created by the caller via `trellis worktree add`
+  (inheritance-seeded), never by either worker and never with per-stage engine
+  isolation. Workers leave the diff uncommitted; the caller commits only after
+  verification.
 - **Dirty-tree discipline** — the unit starts on a clean tree; a pre-existing
   dirty tree is a stop condition, not something to work around or clean up.
 - **External-op ban** — the executor never pushes, opens PRs, publishes, or
@@ -306,7 +310,8 @@ never delegated to the executor that produced the diff, and never skipped** —
 cross-agent review inside recipes is legitimate; self-review by the producing
 executor is what's banned. Every Codex artifact flows back
 through the orchestrator's **review gate** before it counts: a Claude reviewer
-inspects the **actual diff** (not the executor's stdout self-report), runs the
+inspects the **actual uncommitted diff in the producer's exact `TARGET_CWD`**
+(not the executor's stdout self-report or a fresh isolated worktree), runs the
 on-host install/build/typecheck green check, and applies the bright-line
 guardrails (destructive-op, secrets, external-message, DoD receipts) to the
 Codex output — the same discipline `fanout-verify` applies on-host. This is

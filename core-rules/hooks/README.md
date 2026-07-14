@@ -1,7 +1,7 @@
 # core-rules / hooks
 
 Canonical shell implementations of the spec in `../hooks.md`. These are
-reference files. Projects copy the subset they need into their own
+reference files. Projects copy the canonical set into their own
 `.claude/hooks/` and point Claude Code's `settings.json` hook config at them.
 
 ## Scripts
@@ -11,8 +11,10 @@ reference files. Projects copy the subset they need into their own
 | Script | Event | Origin |
 |---|---|---|
 | `block-destructive.sh` | PreToolUse (Bash) | upstream, extended |
+| `reread-guard.sh` | PreToolUse (Edit/Write/MultiEdit) | new |
 | `post-edit-verify.sh` | PostToolUse (Edit/Write/MultiEdit) | upstream, extended |
 | `truncation-check.sh` | PostToolUse (Grep/Bash/Read) | upstream |
+| `track-read.sh` | PostToolUse (Read/Write/Edit/MultiEdit) | new |
 | `session-context.sh` | SessionStart (startup/resume) | new |
 | `save-context-log.sh` | PreCompact | new |
 | `post-compact-context.sh` | SessionStart (compact) | new |
@@ -22,10 +24,12 @@ reference files. Projects copy the subset they need into their own
 
 | Script | Event | Origin |
 |---|---|---|
+| `spec-gate.sh` | Stop | new |
 | `stop-verify.sh` | Stop | upstream, extended |
-| `code-review-subagent.sh` | Stop (skeleton) | new |
-| `ui-verify.sh` | Stop (skeleton) | new |
+| `code-review-subagent.sh` | Stop (edit-heavy) | new |
 | `propose-rules.sh` | Stop (default-on, opt-out) | new |
+| `ui-verify.sh` | Stop (UI diff) | new |
+| `stamp-turn.sh` | Stop | new |
 
 Tier 3 (husky) lives outside this directory.
 
@@ -37,14 +41,11 @@ Extensions vs upstream are documented in each script's header.
 
 ## How projects pick these up
 
-**Phase 2 (now):** copy the scripts you want into your project's
+Copy the canonical scripts into your project's
 `.claude/hooks/`, make them executable, register them in
 `.claude/settings.json`. Override per-project tooling via a
 `.claude/hooks/config.sh` exporting env vars (`TODOS_FILE`, `UI_PORT`,
 `REVIEW_MIN_FILES`, etc. — see script headers).
-
-**Phase 5 (future):** ship as a Claude Code plugin so projects pull them
-by version instead of copying.
 
 ## Dependencies
 

@@ -14,6 +14,8 @@
 // Inputs (from `args`, never baked literals):
 //   args.findings         [{ id, claim, file, line, severity }] — the hard findings to verify.
 //   args.context          string  — the diff / code excerpt / evidence the reviewers judge against.
+//   args.targetCwd        string  — REQUIRED repo/worktree root for the Codex
+//                          reviewer. Threaded into its work order as TARGET_CWD.
 //   args.effort           string  — REQUIRED reasoning tier for the Codex leg (enum
 //                          xhigh|max — medium/high suspended 2026-07-10; review passes are xhigh-band per
 //                          docs/codex-routing.md §3). Omitted → validation error, never
@@ -66,13 +68,17 @@ const REVIEW = {
 // default (docs/codex-routing.md §3).
 // medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
 const EFFORT_ENUM = ['xhigh', 'max']
+const targetCwd = args.targetCwd
+if (typeof targetCwd !== 'string' || targetCwd.trim() === '') {
+  throw new Error('verify-panel: targetCwd is required for the Codex reviewer work order')
+}
 const effort = args.effort
 if (effort == null || effort === '') {
   throw new Error('verify-panel: effort required for this run — no default (spec 011 D1)')
 }
 if (effort === 'ultra') {
   log('verify-panel: HARD-REJECT effort=ultra — the companion dispatch surface caps at xhigh and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3; D4a satisfied 2026-07-10, reject stands on surface + visibility)')
-  throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)')
+  throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)')
 }
 if (!EFFORT_ENUM.includes(effort)) {
   throw new Error('verify-panel: effort "' + effort + '" not in enum [' + EFFORT_ENUM.join(', ') + '] (spec 011 D1)')
@@ -121,6 +127,7 @@ function reviewPrompt(f) {
 function codexReviewPrompt(f) {
   return [
     '--effort ' + effort,
+    'TARGET_CWD: ' + targetCwd,
     'RUN SYNCHRONOUSLY IN THE FOREGROUND — do NOT use --background. Return your verdict text, never a job handle.',
     'This is a READ-ONLY review; make no edits.',
     reviewPrompt(f),

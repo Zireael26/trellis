@@ -60,6 +60,26 @@ setup_below_threshold_repo() {
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
 }
 
+# A throwaway repo with THREE UNTRACKED (never `git add`ed) non-doc files. They
+# do NOT appear in `git diff HEAD` — this is the M3 regression: without untracked
+# inclusion the threshold gate would see 0 changed files, exit 0, and never
+# review a turn that only CREATED new files (and the reviewer would get a blank
+# diff even if it did run). gamma.py carries a sentinel to assert the reviewer
+# receives real content, not a hollow diff.
+setup_untracked_only_repo() {
+  PROJECT_DIR="$(mktemp -d "$BATS_TMPDIR/projuntr.XXXXXX")"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    git init -q
+    git commit --allow-empty -q -m init
+    printf 'def alpha():\n    return 1\n' > alpha.py
+    printf 'def beta():\n    return 2\n'  > beta.py
+    printf 'SECRET_MARKER = "untracked-content-xyz"\n' > gamma.py
+    # NB: intentionally NOT `git add`ed — these stay untracked.
+  )
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
+}
+
 teardown() {
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
   unset CLAUDE_PROJECT_DIR CODE_REVIEWER_CMD TRELLIS_REVIEW_IN_PROGRESS \
@@ -257,15 +277,24 @@ run_hook() {
 }
 
 # =========================================================================
-# Idempotency: the SAME diff reviewed twice → the reviewer runs only ONCE. The
-# completed-review marker (sha256 of the diff) short-circuits the second run.
+# L2 / idempotency: the SAME diff reviewed twice → the reviewer runs only ONCE.
+# The marker hash is Git-native, so a missing/broken shasum cannot collapse the
+# marker to a global `.review-done-` skip key.
 # The stub must be NON-critical: the block path deliberately does NOT write the
 # marker (a blocked turn must re-review the corrected diff), so a critical stub
 # would (correctly) be invoked twice. We use a minor (advisory) stub.
 # =========================================================================
-@test "idempotency: same diff twice → reviewer invoked exactly once" {
+@test "L2 idempotency: broken shasum still creates a non-empty Git hash marker and reviews once" {
   setup_triggering_repo
   COUNT="$BATS_TEST_TMPDIR/idem.count"; : > "$COUNT"
+  local no_shasum_bin="$BATS_TEST_TMPDIR/no-shasum-bin"
+  mkdir -p "$no_shasum_bin"
+  cat > "$no_shasum_bin/shasum" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+  chmod +x "$no_shasum_bin/shasum"
+  PATH="$no_shasum_bin:$PATH"
   stub="$(make_reviewer_stub \
     'printf "%s\n" "{\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
     "$COUNT")"
@@ -277,6 +306,9 @@ run_hook() {
   [ "$status" -eq 0 ]
 
   [ "$(reviewer_call_count "$COUNT")" -eq 1 ]
+  [ ! -e "$PROJECT_DIR/.claude/.review-done-" ]
+  marker_count=$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
+  [ "$marker_count" -eq 1 ]
 }
 
 # =========================================================================
@@ -310,4 +342,64 @@ run_hook() {
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]]
   [[ "$output" == *'eval injection'* ]]
+}
+
+# =========================================================================
+# M3 REGRESSION — untracked-file blind spot. `git diff HEAD` omits untracked
+# files, so a turn that only CREATES new files used to (a) fall below the
+# threshold and skip review entirely, or (b) if it somehow triggered, hand the
+# reviewer a blank diff. The fix folds `git ls-files --others` + per-file
+# `git diff --no-index` into both the counts AND the reviewer payload.
+# =========================================================================
+@test "M3 untracked-only: 3 new unstaged files → review IS triggered (not skipped)" {
+  setup_untracked_only_repo
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"findings\":[{\"severity\":\"critical\",\"file\":\"gamma.py\",\"line\":1,\"msg\":\"planted\"}]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'planted'* ]]
+}
+
+@test "M3 untracked-only: reviewer receives the untracked file CONTENTS (non-hollow diff)" {
+  setup_untracked_only_repo
+  CAP="$BATS_TEST_TMPDIR/m3.envelope"
+  local bindir="$BATS_TEST_TMPDIR/capbin"; mkdir -p "$bindir"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'cat > %s\n' "$(_shq "$CAP")"
+    printf '%s\n' 'printf "%s\n" "{\"findings\":[]}"'
+  } > "$bindir/rev"
+  chmod +x "$bindir/rev"
+  export CODE_REVIEWER_CMD="$bindir/rev"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ -f "$CAP" ]
+  # The envelope's .diff must carry the NEW file's path AND its actual content.
+  run jq -r '.diff' "$CAP"
+  [[ "$output" == *'gamma.py'* ]]
+  [[ "$output" == *'untracked-content-xyz'* ]]
+}
+
+@test "M3 untracked-only: scanning untracked files is mutation-free (no git add -N)" {
+  setup_untracked_only_repo
+  stub="$(make_reviewer_stub 'printf "%s\n" "{\"findings\":[]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  local before after
+  before="$(cd "$PROJECT_DIR" && git status --porcelain)"
+  run_hook
+  [ "$status" -eq 0 ]
+  after="$(cd "$PROJECT_DIR" && git status --porcelain)"
+
+  # The files stay UNTRACKED (??) before and after — never staged as an
+  # addition (A ). A `git add -N` would flip them to 'A ' / 'AM'.
+  [[ "$before" == *'?? alpha.py'* ]]
+  [[ "$after"  == *'?? alpha.py'* ]]
+  [[ "$after"  == *'?? gamma.py'* ]]
+  [[ "$after" != *'A  alpha.py'* ]]
+  [[ "$after" != *'A  gamma.py'* ]]
 }

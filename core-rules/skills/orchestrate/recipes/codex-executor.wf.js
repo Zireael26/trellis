@@ -8,8 +8,8 @@
 // This file ships in the public mirror and is INERT without the plugin.
 //
 // Inputs (from `args`, never baked literals):
-//   args.units          [{ name, kind, task, effort, justification?, paths?,
-//                        constraints?, nonGoals?, proof? }] — the work. `kind`
+//   args.units          [{ name, kind, task, effort, justification?, targetCwd?,
+//                        paths?, constraints?, nonGoals?, proof? }] — the work. `kind`
 //                        routes it: 'execute' = execution-heavy bounded
 //                        SYNCHRONOUS unit (large mechanical edit) → Codex when
 //                        available; 'plan' | 'review' | 'synthesize' = judgment
@@ -22,7 +22,11 @@
 //                        (spec 011 D1). 'ultra' is hard-rejected in recipes
 //                        (spec 011 D4a). `justification` is REQUIRED (non-empty)
 //                        when effort is 'max', optional otherwise; it is echoed
-//                        into the receipt. `paths` / `constraints` / `nonGoals` /
+//                        into the receipt. `targetCwd` is REQUIRED on execute
+//                        units and names the caller-provisioned stable worktree
+//                        shared by producer + verifier. Workers never commit;
+//                        the caller commits only after a green verdict.
+//                        `paths` / `constraints` / `nonGoals` /
 //                        `proof` feed the six-field work-order contract in the
 //                        Codex prompt (spec 011 D5a). The blocking codex-worker
 //                        owns companion launch/poll/result mechanics and never
@@ -145,6 +149,23 @@ const branchPrefix = args.branchPrefix ?? 'chore/codex-exec'
 const units = args.units ?? []
 const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
 
+function normalizeTargetCwd(value) {
+  const raw = value.trim().replace(/\/{2,}/g, '/')
+  const absolute = raw.startsWith('/')
+  const parts = []
+  for (const part of raw.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (parts.length > 0 && parts[parts.length - 1] !== '..') parts.pop()
+      else if (!absolute) parts.push(part)
+      continue
+    }
+    parts.push(part)
+  }
+  const normalized = parts.join('/')
+  return absolute ? '/' + normalized : normalized || '.'
+}
+
 // --- Unit-schema validation (spec 011 D1/D4a) — runs BEFORE any dispatch ----
 // Every Codex-routable unit (kind 'execute', the default) declares effort
 // explicitly at dispatch; an omitted effort field is a validation error, never
@@ -158,8 +179,21 @@ const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
 // silently clamped or defaulted.
 // medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
 const EFFORT_ENUM = ['xhigh', 'max']
+const concurrentTargetCwds = new Map()
 for (const u of units) {
   if (!routesToCodex(u)) continue
+  if (typeof u.targetCwd !== 'string' || u.targetCwd.trim() === '') {
+    throw new Error('targetCwd required for execute unit "' + u.name + '" — caller must provision one stable producer/verifier worktree')
+  }
+  const normalizedTargetCwd = normalizeTargetCwd(u.targetCwd)
+  const priorUnit = concurrentTargetCwds.get(normalizedTargetCwd)
+  if (priorUnit !== undefined) {
+    throw new Error(
+      'codex-executor: execute units "' + priorUnit + '" and "' + u.name +
+        '" share normalized targetCwd "' + normalizedTargetCwd + '" but execute concurrently',
+    )
+  }
+  concurrentTargetCwds.set(normalizedTargetCwd, u.name)
   if (typeof u.effort !== 'string' || u.effort.trim() === '') {
     throw new Error('effort required for unit "' + u.name + '" — no default (spec 011 D1)')
   }
@@ -167,9 +201,9 @@ for (const u of units) {
     log(
       'codex-executor: HARD-REJECT unit=' + u.name +
         " — effort 'ultra' is forbidden in recipes: the companion dispatch surface caps at xhigh" +
-        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3)',
+        ' and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3; spec 011 D4a)',
     )
-    throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3)")
+    throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)")
   }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
@@ -221,16 +255,16 @@ function codexPrompt(u) {
   return [
     'EFFORT: ' + u.effort,
     'JUSTIFICATION: ' + (u.justification ?? 'n/a'),
-    'TARGET_CWD: . (the Workflow-provided isolated worktree root).',
+    'TARGET_CWD: ' + u.targetCwd,
     'You are the EXECUTOR for the bounded unit "' + u.name + '".',
     'GOAL: ' + (u.task ?? 'apply the requested change'),
     'REPO/PATHS: ' + (u.paths ?? 'the isolated worktree root — stay inside it'),
     'CONSTRAINTS: ' +
       (u.constraints ? u.constraints + ' ' : '') +
-      'GIT DISCIPLINE: the checkout may be a dirty WIP branch — NEVER checkout/switch/stash/clean it. ' +
-      'Work ONLY in an isolated worktree off the LATEST origin/main, on branch ' + branchOf(u) + '. ' +
-      'Confine every write to that worktree. Do NOT run unbounded `rm` or `$VAR.*` globs. ' +
-      'Make the change, then leave the branch for the orchestrator to review. Do NOT merge.',
+      'GIT DISCIPLINE: the caller already provisioned TARGET_CWD as the stable worktree on branch ' + branchOf(u) + '. ' +
+      'Work ONLY there. NEVER checkout/switch/stash/clean, create/remove worktrees, commit, push, or merge. ' +
+      'Confine every write to that worktree and do not run unbounded `rm` or `$VAR.*` globs. ' +
+      'Leave the uncommitted diff for the verifier; the caller alone commits after a green verdict.',
     'NON-GOALS: ' + (u.nonGoals ?? 'anything not named in GOAL'),
     'PROOF: ' + (u.proof ?? 'state the exact verification command you ran and paste its actual output'),
     'OUTPUT: the branch name, a one-line summary of the diff, and the PROOF command output.',
@@ -246,14 +280,16 @@ function claudePrompt(u) {
     'You are the orchestrator handling the unit "' + u.name + '" (kind: ' + (u.kind ?? 'execute') + ').',
     'TASK: ' + (u.task ?? 'apply the requested change'),
     routesToCodex(u)
-      ? 'Work in an isolated worktree off origin/main on branch ' + branchOf(u) + '; do NOT merge.'
+      ? 'TARGET_CWD: ' + u.targetCwd + '\nWork only in that caller-provisioned stable worktree on branch ' + branchOf(u) + '; do not create/remove worktrees, commit, push, or merge. Leave the diff for independent verification.'
       : 'This is a planning/review/synthesis unit — produce the judgment, no repo mutation.',
   ].join('\n')
 }
 
 // (ii) In-engine blocking-worker dispatch. NO `schema`: codex-worker returns a
 // completed raw receipt, and an empty/null result is still a degrade trigger.
-// isolation:'worktree' confines the --write to a throwaway checkout (guardrail).
+// TARGET_CWD confines the write to the caller-provisioned stable worktree. Do
+// not request engine isolation here: each isolated agent gets a different
+// worktree, which would sever the producer from the verifier (H2).
 // A THROWN dispatch error is folded into the same empty signal (return null) so
 // "null/empty/errored" all degrade uniformly — the engine may reject rather
 // than resolve-empty on a hard worker failure, and either way must fall to
@@ -264,7 +300,6 @@ async function dispatchCodex(u) {
       agentType: 'codex-worker',
       label: 'codex:' + u.name,
       phase: 'Fan-out',
-      isolation: 'worktree',
     })
     if (isJobHandle(r)) {
       // A blocking worker must never leak a handle. Log the assertion failure
@@ -282,7 +317,6 @@ function dispatchClaude(u) {
   return agent(claudePrompt(u), {
     label: 'claude:' + u.name,
     phase: 'Fan-out',
-    isolation: routesToCodex(u) ? 'worktree' : undefined,
   })
 }
 
@@ -345,40 +379,41 @@ const executed = await parallel(
     if (!supportedEfforts.includes(u.effort)) {
       log('codex-executor: FAIL-CLOSED unit=' + u.name + ' tier=' + u.effort + ' not supported by surface — degrading to Claude, no clamp')
       const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), output: out, ...receipt }
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
     }
     if (!codexAvailable) {
       const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: branchOf(u), output: out, ...receipt }
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
     }
     const codexOut = await dispatchCodex(u)
     if (isEmpty(codexOut)) {
       log('codex-executor: DEGRADE unit=' + u.name + ' — codex-worker unavailable/failure/empty/error, re-dispatching to orchestrator')
       const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), output: out, ...receipt }
+      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
     }
-    return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), output: codexOut, ...receipt }
+    return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), targetCwd: u.targetCwd, output: codexOut, ...receipt }
   }),
 )
 
 // --- Phase: Verify --------------------------------------------------------
 // Orchestrator review gate — quality is NOT laundered by routing to Codex.
 // One Claude reviewer per unit that produced a branch. It reviews the REAL
-// artifact (the diff on the branch vs origin/main), NOT the executor's stdout
-// self-report, and runs the on-host green check — same discipline as
-// fanout-verify. Bright-line guardrails fire here on Codex output too.
+// uncommitted artifact in the exact same caller-provisioned worktree, NOT the
+// executor's stdout self-report or an empty branch diff, and runs the on-host
+// green check. Bright-line guardrails fire here on Codex output too.
 phase('Verify')
 const artifacts = executed.filter((e) => e.branch)
 const verdicts = await parallel(
   artifacts.map((e) => () => agent(
     [
       'REVIEW the unit "' + e.unit + '" executed by ' + e.harness + ' on branch ' + e.branch + '.',
-      'Inspect the ACTUAL diff (git diff origin/main...' + e.branch + '), not the executor summary.',
+      'TARGET_CWD: ' + e.targetCwd,
+      'From that exact producer worktree inspect git status --short, git diff, git diff --cached, and any untracked declared files. Do not substitute a fresh worktree or trust the executor summary.',
       'On-host: install + build + typecheck (lint where present). green=true only if that passes.',
       'Apply the bright-line guardrails (destructive-op, secrets, external-message) to the diff.',
-      'reviewed=true only if the diff clears code review. Do NOT merge. Return the VERDICT object.',
+      'reviewed=true only if the diff clears code review. Do not edit, create/remove worktrees, commit, push, or merge. The caller commits only after this verdict. Return the VERDICT object.',
     ].join('\n'),
-    { label: 'verify:' + e.unit, phase: 'Verify', schema: VERDICT, isolation: 'worktree' },
+    { label: 'verify:' + e.unit, phase: 'Verify', schema: VERDICT },
   )),
 )
 

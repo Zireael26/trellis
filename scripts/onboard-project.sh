@@ -677,3 +677,5 @@ pg_has_harness codex && echo "      $PROJECT/.agents/skills/process-gate-local/l
 echo "  - configure security-gate profile + LLM provider:"
 echo "      $PROJECT/.claude/skills/security-gate-local/local.config.sh"
 pg_has_harness codex && echo "      $PROJECT/.agents/skills/security-gate-local/local.config.sh"
+
+exit 0

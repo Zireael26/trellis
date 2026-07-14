@@ -188,8 +188,11 @@ dj_build_active() {
 dj_list_worktrees() {
   local repo="$1"
   git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  local porcelain
-  porcelain="$(git -C "$repo" worktree list --porcelain 2>/dev/null || true)"
+  local porcelain rc
+  if porcelain="$(git -C "$repo" worktree list --porcelain 2>/dev/null)"; then :; else
+    rc=$?
+    return "$rc"
+  fi
   [ -n "$porcelain" ] || return 0
 
   local wt="" head="" branch="" prunable=0 first=1 line

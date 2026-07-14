@@ -2,7 +2,7 @@
 
 Projects under the Trellis process regime. Opt-in list. A project is "active" for process purposes if and only if it appears here and is **not** listed in `blacklist.md`.
 
-Centralized scheduled tasks (see `scheduled-tasks/`) default to iterating over this list.
+This registry is also the input for any private operator audits you configure; no audit schedule ships in the public template.
 
 > **Template note:** this file ships empty. As you onboard projects (see [`engineering-process.md` §10](engineering-process.md#10-onboarding-a-new-project-full-playbook)), append rows below.
 
@@ -36,8 +36,8 @@ Full playbook: [`engineering-process.md` §10](engineering-process.md#10-onboard
 
 1. Add a row to the "Active projects" table above with `Path` and `Class`.
 2. Commit in `trellis-instance/` with `chore: register <name>`.
-3. Next scheduled audit run will include the project automatically.
+3. If private operator audits are configured, the project becomes eligible under that operator's own cadence.
 
 ## How to remove a project
 
-Move it to `blacklist.md` with a reason. The audit will skip it. Don't delete the row — we want the history of "this project was active once."
+Move it to `blacklist.md` with a reason. Operator checks should skip it. Don't delete the row — we want the history of "this project was active once."

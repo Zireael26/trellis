@@ -1,6 +1,6 @@
 # Loop safety
 
-Trellis is a loop system: the `scheduled-tasks/` are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run agent loops on infra time. The dominant production failure mode of an agent loop is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend.
+Trellis is a loop system: operator-owned recurring jobs are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run agent loops on infra time. The dominant production failure mode of an agent loop is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend.
 
 This is the canonical **policy** that guarantees every Trellis loop halts. It is **doctrine plus declared fields**, not a mechanical enforcement hook — nothing here intercepts a running loop at tool-use time (that is explicitly out of scope, a possible later sub-project). The guarantee is that every loop *declares* its ceilings and *honors* them, and that a loop authored with no thought still halts because the fallback constants below apply.
 
@@ -12,7 +12,7 @@ Every Trellis loop declares and honors three ceilings and **halts on any one** o
 
 1. **`max_iterations`** — hard cap on loop iterations / agent-dispatch rounds. Complements (does not replace) the Workflow engine's existing 1000-agent lifetime backstop.
 2. **`no_progress_iterations`** — halt after N consecutive iterations that make no measurable progress. "Progress" is the loop's declared **progress signal** (catalog below); when the signal is unchanged for N consecutive iterations, the loop halts. A `codex-worker` stall-cancel-retry cycle counts as a no-progress iteration for the enclosing loop; the worker itself retries at most once per failure mode (spec 013). An `ultra` unit counts ×4 against any concurrency-derived budget arithmetic — the ×4 is anchored to the Codex CLI's default `features.multi_agent_v2.max_concurrent_threads_per_session = 4` (main + 3 subagents; structural default, distinct from the measured token-spend ratio — spec 011 D4a). Because recipes hard-reject ultra, the path an ultra unit can actually hit is the main-loop `budget_ceiling_usd` arithmetic: count an ultra unit's reported `turn.completed` tokens at ×4 against the dollar ceiling — reported usage is parent-thread-only (source-verified 2026-07-10: codex exec never aggregates or emits child-thread usage), so the ×4 also stands in for the invisible child spend. (Race-the-legs both-pools accounting retired with the pattern, 2026-07-10.)
-3. **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). The Workflow tool's `budget.total` is token-native (output tokens), so the dollar ceiling maps onto `budget.total` via the conversion below; `/loop` and scheduled-tasks track or estimate spend against the declared dollar ceiling.
+3. **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). The Workflow tool's `budget.total` is token-native (output tokens), so the dollar ceiling maps onto `budget.total` via the conversion below; `/loop` and operator recurring jobs track or estimate spend against the declared dollar ceiling, and surface that running spend as a `spent_usd / budget_ceiling_usd` line in **every** run report — not only on a ceiling trip — so the ceiling reads as a live gauge, not just a tripwire.
 
 ## Progress-signal catalog
 
@@ -33,7 +33,7 @@ A **one-shot fan-out with no rounds** — a single dispatch barrier, no iteratio
 On any ceiling trip:
 
 - **Hard stop** — never auto-continue past a tripped ceiling.
-- **Structured halt report** — emit which ceiling tripped, the last progress marker, and the work completed so far.
+- **Structured halt report** — emit which ceiling tripped, the last progress marker, the running `spent_usd / budget_ceiling_usd` cost line, and the work completed so far.
 - **Surface for unattended loops** — overnight / cron / `--run-in-background` loops surface the halt in their run report (and notification where wired) rather than dying silently.
 
 ## Resolution order (most specific wins)

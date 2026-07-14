@@ -49,7 +49,7 @@ case "$FILE_PATH" in
     if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
        || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
        || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-      if command -v npx >/dev/null 2>&1; then
+      if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
         OUT=$(npx --no-install eslint --quiet "$FILE_PATH" 2>&1)
         if [ $? -ne 0 ]; then
           ERRORS="${ERRORS}eslint: ${FILE_PATH}

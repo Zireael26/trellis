@@ -42,13 +42,13 @@ emit_deny() {
 # --- rm with force flags targeting any absolute path, ~, $HOME, or .. ---
 # Intent: block `rm -rf <absolute-or-parent>`; allow `rm -rf .`, `rm -rf ./build`, `rm -rf node_modules`.
 # Tail change vs. earlier rooted-at-/ form: the path may be /Users/me/foo, ~/work, $HOME/cache, ../sibling, ../foo/bar — match through to whitespace/EOL.
-if printf '%s' "$COMMAND" | grep -qE 'rm[[:space:]]+(-[a-zA-Z]*f[a-zA-Z]*[[:space:]]+|(-[a-zA-Z]+[[:space:]]+)*)((/|~|\$HOME)[^[:space:]]*|\.\.(/[^[:space:]]*)?)([[:space:]]|$)'; then
+if printf '%s' "$COMMAND" | grep -qE 'rm[[:space:]]+(-[a-zA-Z]*f[a-zA-Z]*[[:space:]]+|(-[a-zA-Z]+[[:space:]]+)*)["]?((/|~|\$HOME)[^[:space:]]*|\.\.(/[^[:space:]]*)?)([[:space:]]|$)'; then
   emit_deny "Blocked destructive rm targeting absolute path, ~, \$HOME, or .. — run manually if intentional."
   exit 0
 fi
 
 # --- git push --force / -f / --force-with-lease on any branch ---
-if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+push([[:space:]]+[^[:space:]]+)*[[:space:]]+(--force(-with-lease)?|-f)([[:space:]]|$)'; then
+if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+push([[:space:]]+[^[:space:]]+)*[[:space:]]+(--force(-with-lease)?(=[^[:space:]]+)?|-f)([[:space:]]|$)'; then
   emit_deny "Blocked force push — run manually if intentional."
   exit 0
 fi
@@ -78,7 +78,7 @@ fi
 # Upstream didn't have this. Trigger on `DELETE FROM <ident>` anywhere; allow if `WHERE` appears anywhere on the same command line.
 # Earlier `[^;]*$` form required no semicolon to EOL — broke on terminated SQL like `DELETE FROM users;`.
 if printf '%s' "$COMMAND" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+["`]?[a-zA-Z_][a-zA-Z0-9_."`]*' \
-   && ! printf '%s' "$COMMAND" | grep -qiE '[[:space:]]+WHERE[[:space:]]+'; then
+   && ! printf '%s' "$COMMAND" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+["`]?[a-zA-Z_][a-zA-Z0-9_."`]*[^;]*[[:space:]]WHERE[[:space:]]'; then
   emit_deny "Blocked DELETE FROM without WHERE — unbounded delete, run manually if intentional."
   exit 0
 fi

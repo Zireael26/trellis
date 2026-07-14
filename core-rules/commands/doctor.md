@@ -5,7 +5,7 @@ argument-hint:
 
 # Trellis doctor
 
-You are running `trellis doctor` to check that every active project is still correctly parented to the canonical Trellis rules. This is the deterministic, on-demand counterpart to the weekly scheduled audits — fast, mechanical, no LLM variance. It catches the silent-drop failure mode: a broken symlink or dead `@`-import drops a project's parent rules with no error and no log line.
+You are running `trellis doctor` to check that every active project is still correctly parented to the canonical Trellis rules. This is the deterministic, on-demand health check — fast, mechanical, no LLM variance — and can also feed private operator audits. It catches the silent-drop failure mode: a broken symlink or dead `@`-import drops a project's parent rules with no error and no log line.
 
 **Read-only by default.** A plain run mutates nothing — it only diagnoses and prints the exact command a repair would need. Repairs happen only when the user explicitly asks, and even then several check classes are reported as manual actions, never auto-applied (see below).
 

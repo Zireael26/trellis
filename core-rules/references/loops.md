@@ -22,10 +22,10 @@ not just a turn cap).
 |---|---|---|---|---|
 | **Turn-based** | a user prompt | self-judged done + DoD receipt | exploring / deciding; one-off work | a normal turn; `stop-verify` enforces the receipt |
 | **Goal-based** | a manual real-time prompt | a deterministic exit criterion, or max turns | you know exactly what "done" looks like | the **verifiable-goal pattern** (`/goal` when your harness has it) |
-| **Time-based** | a clock interval | cancellation, or external completion (PR merges, queue drains) | recurring work, or interfacing with an external system | `scheduled-tasks/` (Trellis cron, durable) · `/loop` only as a local Claude Code surface |
-| **Proactive** | an event or schedule, no human present | each task exits when its goal is met; the routine runs until cancelled | recurring streams of well-defined work (triage, migrations, drift) | `scheduled-tasks/` + `orchestrate` — **+ Component-D only when it writes/opens PRs** |
+| **Time-based** | a clock interval | cancellation, or external completion (PR merges, queue drains) | recurring work, or interfacing with an external system | operator-owned durable scheduler · `/loop` only as a local Claude Code surface |
+| **Proactive** | an event or schedule, no human present | each task exits when its goal is met; the routine runs until cancelled | recurring streams of well-defined work (triage, migrations, drift) | private operator schedule + `orchestrate` — **+ Component-D only when it writes/opens PRs** |
 
-**Harness-neutral note:** `/goal`, `/loop`, `/schedule` are **Claude Code surfaces** — a Codex reader may not have them, so reach for the *pattern* (a verifiable goal; a durable `scheduled-tasks/` cron), not the command. `scheduled-tasks/`, the `orchestrate` recipes, and the Component-D tier are Trellis's own and work under either harness.
+**Harness-neutral note:** `/goal`, `/loop`, `/schedule` are **Claude Code surfaces** — a Codex reader may not have them, so reach for the *pattern* (a verifiable goal; a durable operator cron), not the command. Private schedules, the `orchestrate` recipes, and the Component-D tier can all use either harness.
 
 ## Per type — the primitive, and where it halts
 
@@ -36,7 +36,7 @@ signal from its progress-signal catalog.
 
 - **Turn-based** → just a turn. Stop = you judge it done *and* the Definition-of-Done receipt lands (`stop-verify` blocks a done-claim without one). No ceilings to declare; a turn is one iteration.
 - **Goal-based** → the verifiable-goal pattern. Give it a **deterministic** exit criterion — tests passing, a score threshold, a count reaching zero — not a qualitative one, plus a max-turn cap. Where the harness exposes `/goal`, use it (`/goal … stop after N tries`); the portable part is the criterion, not the command. The goal *is* the progress signal.
-- **Time-based** → a durable `scheduled-tasks/` entry for cron work (this is the Trellis-owned, cross-harness surface); `/loop` is a local Claude Code convenience, not something to build a durable loop on. Match the interval to how often the input actually changes — an hourly routine over a daily-changing input is wasted spend. Progress signal is usually **work-list drain** or **commit/PR**.
+- **Time-based** → a durable operator-owned schedule for cron work; `/loop` is a local Claude Code convenience, not something to build a durable loop on. Match the interval to how often the input actually changes — an hourly routine over a daily-changing input is wasted spend. Progress signal is usually **work-list drain** or **commit/PR**.
 - **Proactive** → the heaviest tier: a schedule that fans out through `orchestrate`. If the loop only **reads** (scheduled audits, digests), that is all it needs. If it **writes** — opens PRs, mutates repos unattended — it runs through **Component-D**, whose every write-capable step stays behind the merge bright-line (opens a PR, never merges). Either way, declare a conservative `budget_ceiling_usd` and **pilot before a large fan-out** (see `orchestrate/SKILL.md`).
 
 ## Practices Trellis already enforces (don't re-invent)

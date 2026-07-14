@@ -33,7 +33,12 @@ for arg in "$@"; do
   esac
 done
 
-# shellcheck source=lib/config-load.sh
+SEMVER_LIB="$SCRIPT_DIR/lib/semver.sh"
+[ -f "$SEMVER_LIB" ] || { echo "upgrade: SemVer helper missing at $SEMVER_LIB" >&2; exit 1; }
+# shellcheck source=lib/semver.sh disable=SC1090,SC1091
+. "$SEMVER_LIB"
+
+# shellcheck source=lib/config-load.sh disable=SC1090,SC1091
 . "$SCRIPT_DIR/lib/config-load.sh"
 
 OPT_IN=false
@@ -87,6 +92,10 @@ if [ -z "$PINNED" ]; then
   echo "upgrade: no pinned version and no core-rules/VERSION — cannot compare" >&2
   exit 1
 fi
+if ! semver_is_valid "$PINNED"; then
+  echo "upgrade: pinned version '$PINNED' is not valid SemVer" >&2
+  exit 1
+fi
 
 # --- Fetch upstream tags, iterating candidates until one yields a tag ----
 fetch_from() {
@@ -99,10 +108,7 @@ fetch_from() {
 }
 
 pick_latest_local_tag() {
-  git -C "$TRELLIS_ROOT" tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
-    | grep -Ev '\-' \
-    | sort -V \
-    | tail -n 1
+  git -C "$TRELLIS_ROOT" tag --list 'v*' | semver_max
 }
 
 UPSTREAM_REMOTE=""
@@ -147,8 +153,11 @@ fi
 # warning ("parent likely needs a tag bump"). Never downgrade an ahead
 # pin via --opt-in — that's silent regression. Exit cleanly with a
 # warning instead.
-SORTED_HIGH="$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -n 1)"
-if [ "$SORTED_HIGH" = "$PINNED" ]; then
+VERSION_ORDER=$(semver_compare "$PINNED" "$LATEST") || {
+  echo "upgrade: unable to compare '$PINNED' and '$LATEST' as SemVer" >&2
+  exit 1
+}
+if [ "$VERSION_ORDER" -gt 0 ]; then
   echo
   echo "ahead-of-canonical: local pin ($PINNED) is newer than latest upstream tag ($LATEST)."
   echo "Likely cause: the canonical repo wasn't tagged after a forward bump."

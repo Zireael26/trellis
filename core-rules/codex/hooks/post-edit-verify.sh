@@ -49,7 +49,7 @@ case "$FILE_PATH" in
     if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
        || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
        || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-      if command -v npx >/dev/null 2>&1; then
+      if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
         OUT=$(npx --no-install eslint --quiet "$FILE_PATH" 2>&1)
         if [ $? -ne 0 ]; then
           ERRORS="${ERRORS}eslint: ${FILE_PATH}
@@ -95,8 +95,32 @@ esac
 # --- Go ---
 case "$FILE_PATH" in
   *.go)
+    if ! ABS_FILE_DIR=$(cd "$FILE_DIR" 2>/dev/null && pwd -P); then
+      echo "post-edit-verify: skipping Go lint for ${FILE_PATH}: file directory not found" >&2
+      exit 0
+    fi
+
+    MODULE_ROOT="$ABS_FILE_DIR"
+    while [ ! -f "$MODULE_ROOT/go.mod" ]; do
+      PARENT_DIR=$(dirname "$MODULE_ROOT")
+      if [ "$PARENT_DIR" = "$MODULE_ROOT" ]; then
+        echo "post-edit-verify: skipping Go lint for ${FILE_PATH}: no owning go.mod found" >&2
+        exit 0
+      fi
+      MODULE_ROOT="$PARENT_DIR"
+    done
+
+    if [ "$ABS_FILE_DIR" = "$MODULE_ROOT" ]; then
+      REL_DIR="."
+      PACKAGE_PATH="./..."
+    else
+      REL_DIR=${ABS_FILE_DIR#"$MODULE_ROOT"/}
+      PACKAGE_PATH="./$REL_DIR/..."
+    fi
+    REL_FILE="./$REL_DIR/$(basename "$FILE_PATH")"
+
     if command -v golangci-lint >/dev/null 2>&1; then
-      OUT=$(golangci-lint run "$FILE_PATH" 2>&1)
+      OUT=$(cd "$MODULE_ROOT" && golangci-lint run "$REL_FILE" 2>&1)
       if [ $? -ne 0 ]; then
         ERRORS="${ERRORS}golangci-lint: ${FILE_PATH}
 ${OUT}
@@ -104,7 +128,7 @@ ${OUT}
 "
       fi
     elif command -v go >/dev/null 2>&1; then
-      OUT=$(go vet "./$FILE_DIR/..." 2>&1)
+      OUT=$(cd "$MODULE_ROOT" && go vet "$PACKAGE_PATH" 2>&1)
       if [ $? -ne 0 ]; then
         ERRORS="${ERRORS}go vet: ${FILE_DIR}
 ${OUT}

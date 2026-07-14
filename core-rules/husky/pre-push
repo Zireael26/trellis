@@ -64,6 +64,8 @@ done
 SPECGATE=""
 if [ -f .claude/hooks/spec-gate.sh ]; then
   SPECGATE=.claude/hooks/spec-gate.sh
+elif [ -f .codex/hooks/spec-gate.sh ]; then
+  SPECGATE=.codex/hooks/spec-gate.sh
 elif [ -f .agents/hooks/spec-gate.sh ]; then
   SPECGATE=.agents/hooks/spec-gate.sh
 fi

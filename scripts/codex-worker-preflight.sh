@@ -72,6 +72,30 @@ resolve_path() {
   printf '%s/%s\n' "$_rp_dir" "$(basename "$_rp_path")"
 }
 
+file_change_epoch() {
+  _fce_path="$1"
+  _fce_epoch="$(stat -f '%c' "$_fce_path" 2>/dev/null || true)"
+  case "$_fce_epoch" in
+    ''|*[!0-9]*) _fce_epoch="$(stat -c '%Z' "$_fce_path" 2>/dev/null || true)" ;;
+  esac
+  case "$_fce_epoch" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$_fce_epoch"
+}
+
+process_start_epoch() {
+  _pse_started="$1"
+  _pse_epoch="$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$_pse_started" '+%s' 2>/dev/null || true)"
+  case "$_pse_epoch" in
+    ''|*[!0-9]*) _pse_epoch="$(LC_ALL=C date -d "$_pse_started" '+%s' 2>/dev/null || true)" ;;
+  esac
+  case "$_pse_epoch" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$_pse_epoch"
+}
+
 version_at_least() {
   awk -v have="$1" -v need="$2" 'BEGIN {
     split(have, h, "."); split(need, n, ".");
@@ -213,7 +237,8 @@ if [ "$WHICH_OK" != true ]; then
   add_finding "Could not inventory Codex installs with which -a codex."
 fi
 
-# App-server inventory. Fixture format is the same as `ps -axo pid=,command=`.
+# App-server inventory. Fixture format is the same as
+# `ps -axo pid=,lstart=,command=`.
 PROCESS_OK=true
 if [ -n "${PREFLIGHT_PROCESS_FILE:-}" ]; then
   if [ -r "$PREFLIGHT_PROCESS_FILE" ]; then
@@ -223,11 +248,12 @@ if [ -n "${PREFLIGHT_PROCESS_FILE:-}" ]; then
     PROCESS_OUTPUT=""
   fi
 else
-  PROCESS_OUTPUT="$(ps -axo pid=,command= 2>/dev/null)" || PROCESS_OK=false
+  PROCESS_OUTPUT="$(LC_ALL=C ps -axo pid=,lstart=,command= 2>/dev/null)" || PROCESS_OK=false
 fi
 
 if [ "$PROCESS_OK" = true ]; then
   STALE_COUNT=0
+  CLI_INSTALL_EPOCH=""
   while IFS= read -r _process_line; do
     case "$_process_line" in
       *codex*app-server*) ;;
@@ -235,7 +261,16 @@ if [ "$PROCESS_OK" = true ]; then
     esac
 
     _process_trimmed="$(printf '%s' "$_process_line" | sed 's/^[[:space:]]*//')"
-    _process_command="${_process_trimmed#* }"
+    # ps lstart and command fields are intentionally split into positional fields.
+    # shellcheck disable=SC2086
+    set -- $_process_trimmed
+    if [ "$#" -lt 7 ]; then
+      PROCESS_OK=false
+      break
+    fi
+    _process_started="$2 $3 $4 $5 $6"
+    shift 6
+    _process_command="$*"
     _process_binary="${_process_command%% *}"
     _process_rest="${_process_command#* }"
     _process_second="${_process_rest%% *}"
@@ -253,6 +288,19 @@ if [ "$PROCESS_OK" = true ]; then
     fi
     if [ "$_process_resolved" != "$CLI_PATH" ]; then
       STALE_COUNT=$((STALE_COUNT + 1))
+      continue
+    fi
+
+    if [ -z "$CLI_INSTALL_EPOCH" ]; then
+      CLI_INSTALL_EPOCH="$(file_change_epoch "$CLI_PATH" 2>/dev/null || true)"
+    fi
+    _process_start_epoch="$(process_start_epoch "$_process_started" 2>/dev/null || true)"
+    if [ -z "$CLI_INSTALL_EPOCH" ] || [ -z "$_process_start_epoch" ]; then
+      PROCESS_OK=false
+      break
+    fi
+    if [ "$_process_start_epoch" -lt "$CLI_INSTALL_EPOCH" ]; then
+      STALE_COUNT=$((STALE_COUNT + 1))
     fi
   done <<EOF
 $PROCESS_OUTPUT
@@ -261,14 +309,14 @@ EOF
   if [ "$PROCESS_OK" = true ]; then
     STALE_APP_SERVERS="$STALE_COUNT"
     if [ "$STALE_COUNT" -gt 0 ]; then
-      add_finding "$STALE_COUNT stale Codex app-server process(es) use a different binary; restart them outside this script."
+      add_finding "$STALE_COUNT stale Codex app-server process(es) use a different binary or predate the selected CLI install; restart them outside this script."
     fi
   fi
 fi
 
 if [ "$PROCESS_OK" != true ]; then
   STALE_APP_SERVERS=unknown
-  add_finding "Could not determine Codex app-server binary paths."
+  add_finding "Could not determine Codex app-server binary paths and start-time provenance."
 fi
 
 # Resolve the companion without changing plugin state.

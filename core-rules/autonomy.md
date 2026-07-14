@@ -92,7 +92,7 @@ End-of-turn assistant message renders a `## Decisions made (L<n>)` block pulling
 
 - Decisions accumulate value over time (architecture audits, ADR cross-references, post-incident review).
 - A team operating Trellis benefits from shared visibility into per-session decisions across developers.
-- Audit-rollup (`scheduled-tasks/autonomy-drift/`) requires the file to persist across weeks; gitignored files don't survive `git clean -fdx`.
+- An operator autonomy-drift rollup requires the file to persist across weeks; gitignored files don't survive `git clean -fdx`.
 
 Operators who want per-developer decision logs (e.g., personal scratch projects with only one author) can opt out by adding `/decisions-log.md` to their project `.gitignore`. The Trellis-canonical `gitignore.fragment` does NOT ignore it by default.
 

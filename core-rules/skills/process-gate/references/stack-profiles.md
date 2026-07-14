@@ -1,6 +1,6 @@
 # Reference — Stack profiles
 
-The canonical six gates (PR hygiene, secrets, bypass, tests, docs, stack profile) apply to every project. Stack-profile validators handle stack-specific concerns the canonical six don't cover.
+The canonical eight gates (PR hygiene, secrets, bypass, tests, docs, stack profile, security diff, analyze) apply to every project. Stack-profile validators handle stack-specific concerns the canonical eight don't cover.
 
 Profiles are project-declared. Setting `PROCESS_GATE_STACK_PROFILE` in `local.config.sh` makes the verdict's "Stack profile" row meaningful.
 
@@ -57,7 +57,7 @@ Same Rule-of-Three caveat: slot exists in the taxonomy so future single-service 
 
 ### `monorepo-polyglot` — multi-language monorepos
 
-Worked example: `clusterbid-console`. Shape: Go workspace (`services/`, `pkg/`, `tools/`) + pnpm workspace (`clients/`, `ts/`) + Python (`py/` + service trees) coordinated by a root Makefile orchestrator. Trellis hits the orchestrator (`make vet|lint|test`) — language-specific tooling stays inside the Makefile, keeping `local.config.sh` language-agnostic.
+Representative shape: Go workspace (`services/`, `pkg/`, `tools/`) + pnpm workspace (`clients/`, `ts/`) + Python (`py/` + service trees) coordinated by a root Makefile orchestrator. Trellis hits the orchestrator (`make vet|lint|test`) — language-specific tooling stays inside the Makefile, keeping `local.config.sh` language-agnostic.
 
 Candidate project-local validators:
 
@@ -65,9 +65,9 @@ Candidate project-local validators:
 - `check-go-work.sh` — every directory under `services/<go-service>/`, `pkg/`, `tools/` has a matching `use` directive in `go.work`, and vice-versa.
 - `check-proto-contract.sh` — generated stubs in Go + TS + Python (`buf generate` outputs) are fresh against `proto/*.proto`; flag if generation lags source.
 - `check-ci-subtree-routing.sh` — every language subtree has a corresponding GH Actions `paths:` filter; cross-language workflow leakage flagged.
-- `check-pyproject-discipline.sh` — Python files only under sanctioned roots (project-specific allowlist; e.g., for clusterbid: `services/inference-runner/`, `services/fine-tuning-orchestrator/`, `py/`).
+- `check-pyproject-discipline.sh` — Python files only under sanctioned project-specific roots (for example `services/inference-runner/`, `services/fine-tuning-orchestrator/`, `py/`).
 
-Lume-style carve-out: single adopter today (clusterbid-console), validators stay project-local until n=2. The canonical six gates still apply.
+As an n=1 carve-out, validators stay project-local until a second independent adopter appears. The canonical eight gates still apply.
 
 Long-form reference: `references/monorepo-polyglot.md`.
 
@@ -145,7 +145,7 @@ Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
 ## Lume carve-out
 
-Lume (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical six gates still apply.
+Lume (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical eight gates still apply.
 
 Lume's row in `registry.md` documents the carve-out. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
 

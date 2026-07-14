@@ -84,6 +84,31 @@ else
   REPO_ROOT="$PROJECT_DIR"
 fi
 
+# --- Untracked-inclusive change set (read-only) -------------------------------
+# `git diff HEAD` omits untracked files, but a turn that only CREATES new files
+# is exactly what needs review — and the reviewer must see their contents, not a
+# blank diff. Fold untracked (non-ignored) files into every count AND into the
+# reviewer payload, all from the same source, so the gate and the diff never
+# disagree. Strictly read-only: `git ls-files --others` and `git diff --no-index`
+# never touch the index (no `git add -N`), so the user's staging/status is
+# unchanged.
+# Exclude harness-state dirs: `.claude/` / `.codex/` hold symlinks, primers, and
+# THIS hook's own idempotency marker — never user code to review. Not excluding
+# them self-poisons idempotency (the marker written this turn would reappear as
+# untracked content next turn, changing the diff hash).
+_cr_untracked() { git ls-files --others --exclude-standard 2>/dev/null | grep -vE '^\.(claude|codex)/'; }
+_cr_changed_names() { { git diff HEAD --name-only 2>/dev/null; _cr_untracked; } | sort -u | sed '/^$/d'; }
+_cr_full_diff() {
+  git diff HEAD 2>/dev/null
+  local f
+  _cr_untracked | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    # --no-index vs /dev/null renders the new file as an all-additions diff. It
+    # exits 1 because the inputs differ — expected here, not an error.
+    git diff --no-index -- /dev/null "$f" 2>/dev/null || true
+  done
+}
+
 # --- TRELLIS_REVIEW_OVERRIDE escape ---
 # Documented, LOGGED deferral — mirrors the TRELLIS_ALLOW_MAIN_PUSH tripwire. When
 # the operator sets this, code-review is skipped for this turn, but NEVER silently:
@@ -92,7 +117,7 @@ fi
 # dated format session-context.sh greps ("^- 20YY-..."). Uses the literal path
 # because DECISIONS_LOG_PATH is exported further below.
 if [ -n "${TRELLIS_REVIEW_OVERRIDE:-}" ]; then
-  OVERRIDE_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+  OVERRIDE_FILES=$(_cr_changed_names | awk 'END{print NR}')
   if printf '%s\n' "- $(date +%Y-%m-%d) code-review deferred via TRELLIS_REVIEW_OVERRIDE on a turn touching ${OVERRIDE_FILES} file(s)" \
        >> "$REPO_ROOT/decisions-log.md" 2>/dev/null; then
     :
@@ -141,11 +166,15 @@ MIN_LINES="${REVIEW_MIN_LINES:-200}"
 
 # Count always outputs a number, never errors. Avoid `grep -c '^' || echo 0` —
 # that doubles output to "0\n0" on empty input and breaks numeric comparisons.
-CHANGED_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+CHANGED_FILES=$(_cr_changed_names | awk 'END{print NR}')
 
-# Sum added+deleted lines from numstat; skip binary rows (marked '-').
-CHANGED_LINES=$(git diff HEAD --numstat 2>/dev/null \
+# Sum added+deleted lines: tracked via numstat (skip binary rows marked '-'),
+# untracked via line count (the whole new file is an addition).
+TRACKED_LINES=$(git diff HEAD --numstat 2>/dev/null \
   | awk '$1 != "-" && $2 != "-" { sum += $1 + $2 } END { print sum+0 }')
+UNTRACKED_LINES=$(_cr_untracked | while IFS= read -r f; do [ -f "$f" ] && wc -l < "$f" 2>/dev/null; done \
+  | awk '{ sum += $1 } END { print sum+0 }')
+CHANGED_LINES=$((TRACKED_LINES + UNTRACKED_LINES))
 
 if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" ]; then
   exit 0
@@ -157,7 +186,7 @@ fi
 # or `docs/examples/app.ts`. The `(^|/)[^/]+\.ext$` anchor matches the final
 # path segment only, so a doc anywhere in the tree (e.g. `src/notes.md`) still
 # counts as a doc and a non-doc under `docs/` still counts as a non-doc.
-NONDOC_COUNT=$(git diff HEAD --name-only 2>/dev/null \
+NONDOC_COUNT=$(_cr_changed_names \
   | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
   | awk 'END{print NR}')
 if [ "$NONDOC_COUNT" -eq 0 ]; then
@@ -165,19 +194,19 @@ if [ "$NONDOC_COUNT" -eq 0 ]; then
 fi
 
 # --- Gather the diff for the reviewer (capped) ---
-DIFF=$(git diff HEAD 2>/dev/null | head -c 200000)
+DIFF=$(_cr_full_diff | head -c 200000)
 if [ -z "$DIFF" ]; then
   exit 0
 fi
 
 # --- Idempotency marker ---
 # A turn can fire this hook AND run the execute-body review over the same diff;
-# we must not double-charge the LLM. Key the marker on a sha256 of the diff
-# (shasum -a 256 — macOS has no sha256sum). If this exact diff was already
-# reviewed this turn, exit 0. The marker is touched only AFTER a completed
+# we must not double-charge the LLM. Key the marker on a content hash of the
+# diff (git hash-object --stdin — always present in a git hook, no coreutils
+# dependency). If this exact diff was already reviewed this turn, exit 0. The marker is touched only AFTER a completed
 # review (clean + advisory paths), NOT on the block path — a blocked turn must
 # re-review once the diff changes via the fix.
-DIFF_HASH=$(printf '%s' "$DIFF" | shasum -a 256 | awk '{print $1}')
+DIFF_HASH=$(printf '%s' "$DIFF" | git hash-object --stdin 2>/dev/null)
 MARKER="$REPO_ROOT/.claude/.review-done-${DIFF_HASH}"
 if [ -f "$MARKER" ]; then
   exit 0

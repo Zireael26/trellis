@@ -62,6 +62,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 # shellcheck source=lib/health-checks.sh
 . "$SCRIPT_DIR/lib/health-checks.sh"
 
@@ -254,34 +256,6 @@ read_registry_names() {
   ' "$REGISTRY"
 }
 
-# Blacklist section 1 (Temporarily excluded): Project column = registry name.
-# Blacklist section 2 (Permanently excluded): Path column = `/personal/<name>`;
-#   map to basename so it can subtract a registry name.
-# The `| — | — |` placeholder rows are skipped: em-dash is not in [a-zA-Z0-9._-].
-read_blacklist_names() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## 1\. Temporarily excluded/ { sec=1; next }
-    /^## 2\. Permanently excluded/ { sec=2; next }
-    /^## Semantics/                { sec=0 }
-    sec==1 && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0
-      gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-      next
-    }
-    sec==2 && /^\| `\/[A-Za-z0-9._\/-]+` \|/ {
-      # Path column wrapped in backticks: `/personal/<name>`
-      path=$0
-      gsub(/^\| `/, "", path); gsub(/` \|.*$/, "", path)
-      n=split(path, parts, "/")
-      base=parts[n]
-      if (base != "" && base != "Path") print base
-    }
-  ' "$BLACKLIST"
-}
-
 # Resolve a registry name to an absolute project dir under PROJECTS_ROOT
 # (mirrors the name-based fix engines: $PROJECTS_ROOT/<name>).
 resolve_project_path() {
@@ -296,7 +270,7 @@ done < <(read_registry_names)
 BLACKLIST_NAMES=()
 while IFS= read -r line; do
   [ -n "$line" ] && BLACKLIST_NAMES+=("$line")
-done < <(read_blacklist_names)
+done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local name="$1" b
@@ -347,6 +321,11 @@ run_tier0 hc_version_changelog_coherent "$CANON"
 # Canonical-side, single-arg, WARN-class (report-only): the dod-receipt grammar
 # anchor must live in core-rules/CLAUDE.md so execute receipts have a contract.
 run_tier0 hc_receipt_grammar_present "$CANON"
+# Canonical-side line-budget guardrail (adopt-loop, spec 008 — digest 2026-07-07
+# hygiene): WARN when core-rules/CLAUDE.md crosses the ~200-line attention cliff
+# where a CLAUDE.md starts being partially ignored. Advisory, future-growth
+# guard; never blocks (WARN-class, report-only).
+run_tier0 hc_claudemd_budget "$CANON"
 # Codex-runtime precondition (spec 006 PD8): the Codex hooks — incl. the spec-gate
 # teeth — silently no-op unless the runtime has [features] hooks = true. Global,
 # no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
@@ -431,16 +410,15 @@ emit() {
 # ---------------------------------------------------------------------------
 # run_project_checks() resets these at entry and fills them as it classifies.
 #   PLAN_NEEDS_ONBOARD  — 1 if any onboard-fixable failure was seen.
-#   PLAN_RM_LIST        — space-joined absolute paths of known-bad trellis-managed
-#                         symlinks to `rm` BEFORE onboard (one path per element;
-#                         these are project paths that contain no spaces).
+#   PLAN_RM_LIST        — indexed array of absolute paths of known-bad
+#                         trellis-managed symlinks to `rm` BEFORE onboard.
 #   PLAN_AUTO           — newline-joined human descriptions of [auto] actions.
 #   PLAN_HOOKS_CLAUDE   — 1 if Claude hook drift needs sync-hooks (gated).
 #   PLAN_HOOKS_CODEX    — 1 if Codex hook drift needs sync-codex-hooks (gated).
 #   PLAN_MANUAL         — newline-joined [manual] descriptions (never auto-applied).
 #   PLAN_INFO           — newline-joined [info] descriptions (report-only).
 PLAN_NEEDS_ONBOARD=0
-PLAN_RM_LIST=""
+PLAN_RM_LIST=()
 PLAN_AUTO=""
 PLAN_HOOKS_CLAUDE=0
 PLAN_HOOKS_CODEX=0
@@ -451,10 +429,10 @@ PLAN_SEED_WORKTREES=""
 # plan_add_rm <abs-path> — queue a known-bad symlink for rm (deduped).
 plan_add_rm() {
   local p="$1" existing
-  for existing in $PLAN_RM_LIST; do
+  for existing in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
     [ "$existing" = "$p" ] && return 0
   done
-  PLAN_RM_LIST="$PLAN_RM_LIST $p"
+  PLAN_RM_LIST+=("$p")
 }
 
 # A literal newline, used to join multi-line plan strings (bash 3.2-safe — no
@@ -488,7 +466,7 @@ run_project_checks() {
 
   # Reset plan for this project (caller reads these after the call).
   PLAN_NEEDS_ONBOARD=0
-  PLAN_RM_LIST=""
+  PLAN_RM_LIST=()
   PLAN_AUTO=""
   PLAN_HOOKS_CLAUDE=0
   PLAN_HOOKS_CODEX=0
@@ -729,7 +707,7 @@ print_project_plan() {
   if [ "$TIER0_ERROR" -eq 1 ] && [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
     echo "  [auto] SKIPPED — Tier-0 ERROR stands; --fix will not onboard against an off-main/dirty canonical."
   elif [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
-    for p in $PLAN_RM_LIST; do
+    for p in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
       echo "  [auto] rm \"$p\""
     done
     echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 scripts/onboard-project.sh \"$proj\""
@@ -817,7 +795,7 @@ apply_project_fix() {
       echo "  [auto] SKIPPED — $proj is not on disk (onboard needs an existing git repo)." >&2
     else
       # rm known-bad trellis-managed symlinks FIRST (onboard never-clobbers).
-      for p in $PLAN_RM_LIST; do
+      for p in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
         echo "  [auto] rm \"$p\""
         run_cmd "rm $p" rm "$p" || true
       done

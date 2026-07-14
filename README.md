@@ -4,7 +4,7 @@
 
 ### Engineering process for AI coding agents.
 
-**One source of truth. Inherited by every project. Enforced by hooks. Audited weekly.**
+**One source of truth. Inherited by every project. Enforced by hooks. Ready for operator audits.**
 
 *A trellis gives a climbing plant the structure to grow on. This one does the same for code an AI agent writes — without it the work sprawls and breaks; with it, it grows tall and clean.*
 
@@ -37,11 +37,11 @@ None of those are bugs in the model. They are gaps in the *process* around the m
 |---|---|
 | 📜 **Parent rules in one place** | `core-rules/CLAUDE.md` is the single source of truth. Every project inherits via symlink — Claude Code through `.claude/rules/`, Codex through `AGENTS.md` + `.agents/`. |
 | 🪝 **Hooks across three tiers** | Fast-local (<3s every turn) · Heavy-gated (on `Stop`, ≤90s) · Git-boundary (husky / native git hooks). Blocks `rm -rf ~`, force-pushes, direct pushes to `main`, secrets reads, and "done" without receipts. |
-| 🧠 **9 canonical skills** | The auto-invoked spec-kit pipeline (`clarify → spec → plan → tasks → analyze`), the surgical-default `execute` skill, the harness-agnostic `process-gate` and `security-gate`, and mandatory pre-creative `brainstorming` — one implementation each, symlinked into every project. |
+| 🧠 **12 canonical skills** | The auto-invoked spec-kit pipeline (`clarify → spec → plan → tasks → analyze`), the surgical-default `execute` skill, harness-agnostic gates, orchestration and debrief workflows, and mandatory pre-creative `brainstorming` — one implementation each, symlinked into every project. |
 | ✅ **A harness-agnostic process-gate** | Runs the same way in Claude Code, Codex, `claude -p`, and CI. Emits a fixed verdict block: `MERGEABLE / NEEDS CHANGES / BLOCKED`. The companion `security-gate` runs semgrep + osv-scanner + gitleaks under a provider-neutral triage layer. |
-| 🔍 **A fleet of 16 scheduled audits** | Daily digest plus weekly/monthly/quarterly sweeps for hook drift, `--no-verify` bypasses, dep CVEs, test rot, version/preset/primer drift, and security baselines. Every report is dated markdown — grep, diff, quote in commits. (Two more are drafted and parked.) |
+| 🔍 **Audit-ready operator surface** | The public template includes the registry, report conventions, hooks, and examples needed to run audits. Instance-specific schedules, prompts, targets, and fleet inventory stay private to each operator. |
 | 🎚 **Autonomy slider (L1–L5)** | Dial how much the agent decides on its own — Pedagogical → Cautious → Standard (default) → Initiative → Autonomous — per session (`/autonomy N`) or per project. Bright-line safety guardrails fire at *every* level. |
-| 🧩 **Presets** | Drop-in policy bundles (`compliance-strict`, `experimental-loose`) that clamp the autonomy ceiling and tune the gates for a project's risk profile. The `preset-drift` audit keeps them honest. |
+| 🧩 **Presets** | Drop-in policy bundles (`compliance-strict`, `experimental-loose`) that clamp the autonomy ceiling and tune the gates for a project's risk profile. Operators can audit installed presets for drift. |
 | 📐 **Rule of Three for evolution** | New rules wait in `core-rules/deferred.md` until a 3rd independent project adopts them. n=2 is the danger zone. |
 | 🤖 **Multi-harness parity, opt-in or opt-out** | Same policy intent across Claude Code and Codex. The `harnesses` array in `trellis.config.json` is the single switch — drop the one you don't use. Codex inherits via the shared `AGENTS.md` / `.agents/` surface (rules + skills are byte-identical with Claude Code); its workflow slash-commands land at `.agents/workflows/`. |
 
@@ -49,7 +49,7 @@ None of those are bugs in the model. They are gaps in the *process* around the m
 
 ## Skills
 
-Trellis ships **9 canonical skills** in `core-rules/skills/` — one implementation each, symlinked into every project so they behave identically across Claude Code, Codex, and CI.
+Trellis ships **12 canonical skills** in `core-rules/skills/` — one implementation each, symlinked into every project so they behave identically across Claude Code, Codex, and CI.
 
 | Skill | When it fires | What it does |
 |---|---|---|
@@ -58,16 +58,19 @@ Trellis ships **9 canonical skills** in `core-rules/skills/` — one implementat
 | **process-gate** | Pre-PR, harness-agnostic | Emits a fixed verdict block: `MERGEABLE / NEEDS CHANGES / BLOCKED`. The same gate in Claude Code, Codex, `claude -p`, and CI. |
 | **security-gate** | On security-relevant changes | semgrep + osv-scanner + gitleaks under a provider-neutral LLM triage layer. |
 | **brainstorming** | Before any creative work | Mandatory exploration of intent, requirements, and design before implementation begins. |
+| **debrief** | Explicitly after a change or PR | Runs a teach-back session: restate-first, quiz understanding tier by tier, and maintain a mastery checklist until the human can explain the problem, solution, and impact. |
+| **orchestrate** | For decomposable multi-agent work | Runs dependency-aware fan-out, verification, recovery, and bounded execution recipes. |
+| **writing** | Explicit blog/X request with named targets | Drafts and optionally publishes blog posts and X threads in the target voice, gated by an anti-AI-tell validator and publish receipts. |
 
 ---
 
 ## Architecture
 
 <div align="center">
-  <img src="docs/architecture.svg" alt="Trellis architecture — parent control plane, project inheritance, skills, three-tier hook enforcement, and scheduled audit feedback loop" width="100%"/>
+  <img src="docs/architecture.svg" alt="Trellis architecture — parent control plane, project inheritance, skills, three-tier hook enforcement, and optional operator audit feedback loop" width="100%"/>
 </div>
 
-The control plane owns the rules, the skills, and the autonomy/preset defaults. Projects inherit through symlinks. Skills shape the work (spec-kit pipeline, `execute`, `process-gate`, `security-gate`). Hooks enforce in the moment. Audits enforce over time. The Rule-of-Three loop keeps the parent layer honest.
+The control plane owns the rules, the skills, and the autonomy/preset defaults. Projects inherit through symlinks. Skills shape the work (spec-kit pipeline, `execute`, `process-gate`, `security-gate`). Hooks enforce in the moment. Optional operator audits enforce over time. The Rule-of-Three loop keeps the parent layer honest.
 
 ---
 
@@ -104,6 +107,8 @@ block-destructive   denies rm -rf ~, git push --force, DROP TABLE, .env reads
 post-edit-verify    lints just the touched file (eslint/ruff/clippy/govet)
 session-context     injects last session's state on SessionStart
 inject-primer-index injects the project's primer index on SessionStart
+track-read          records file reads for stale-copy protection
+stamp-turn          stamps turn activity for hook coordination
 reread-guard        nudges re-reading a file before editing a stale copy
 save-context-log    writes context-log.md on PreCompact / Stop
 post-compact-context  re-injects context-log.md after compaction
@@ -112,9 +117,10 @@ truncation-check    flags >50K-char tool results
 Tier 2 — heavy-gated         ≤ 90s, on Stop
 ─────────────────────────────────────────────────────
 stop-verify             open todos? typecheck? lint? fast tests? → block on any fail
+spec-gate               enforces the mandatory feature/spec pipeline at Stop
 code-review-subagent    dispatches a read-only reviewer on edit-heavy turns (≥3 files)
 ui-verify               boots dev server + screenshots affected route on UI changes
-propose-rules           (experimental, opt-in) surfaces candidate parent rules
+propose-rules           (default-on, configurable) surfaces candidate parent rules
 
 Tier 3 — git-boundary        husky or native git hooks
 ─────────────────────────────────────────────────────
@@ -123,13 +129,13 @@ commit-msg          Conventional Commits, project-configured scope allowlist
 pre-push            blocks direct push to main; runs typecheck/lint/tests
 ```
 
-Every tier has the same escape hatch — `TRELLIS_ALLOW_MAIN_PUSH=1`, `--no-verify`, override env vars — and every escape hatch is **noisy**. The `bypass-tripwire` audit surfaces every use within 8 days, and the audit reports persist in git.
+Every tier has the same escape hatch — `TRELLIS_ALLOW_MAIN_PUSH=1`, `--no-verify`, override env vars — and every escape hatch is **noisy**. Operator-side tripwire audits can surface those uses and persist the resulting reports in git.
 
 ---
 
-## The audit fleet
+## Operator audit integration
 
-Sixteen scheduled tasks, registered as cron jobs, sweep every project in `registry.md`:
+The public template deliberately excludes private schedules, prompts, targets, and fleet inventory. Operators can build a registry-driven audit program from patterns such as:
 
 | Audit | Cadence | What it catches |
 |---|---|---|
@@ -150,9 +156,9 @@ Sixteen scheduled tasks, registered as cron jobs, sweep every project in `regist
 | `security-baseline` | Quarterly | Fleet-wide security baseline (semgrep + osv-scanner + gitleaks) |
 | `obsolete-rules` | Quarterly | Prunes model- / harness-compensating rules that have aged out (removal-only) |
 
-Two more are written and parked, waiting for evidence they're needed: `lint-debt-trend` and `large-file-watch`.
+Additional checks such as `lint-debt-trend` and `large-file-watch` can be added when local evidence justifies them.
 
-Reports land in `audits/YYYY-MM-DD-<task>.md`. Examples (redacted) live in [`examples/audits/`](examples/audits/).
+When configured, reports land in `audits/YYYY-MM-DD-<task>.md`. Examples (redacted) live in [`examples/audits/`](examples/audits/).
 
 ---
 
@@ -163,7 +169,7 @@ A handful of `scripts/` round out the control plane:
 - **`scripts/doctor.sh`** — health check for a Trellis clone or an onboarded project: inheritance wiring, hook presence, drift, required files.
 - **`scripts/worktree.sh`** + **`scripts/seed-inheritance-symlinks.sh`** — git worktrees inherit the parent's rules and hooks automatically, so a worktree is governed the same as its primary checkout.
 - **`scripts/disk-janitor.sh`** + **`scripts/install-disk-janitor-launchd.sh`** — report-first fleet disk reclaim (build caches, package stores), optionally on a `launchd` schedule on macOS.
-- **Primers** — a per-project index of entry points and key files, injected at session start by the `inject-primer-index` hook and kept fresh by the `primer-drift` audit. See [`docs/primers/`](docs/primers/).
+- **Primers** — a per-project index of entry points and key files, injected at session start by the `inject-primer-index` hook. Operators can check freshness with a primer-drift audit. See [`docs/primers/`](docs/primers/).
 
 ---
 
@@ -184,7 +190,7 @@ A handful of `scripts/` round out the control plane:
 │   ├── hooks/                 ← canonical Claude Code hook implementations
 │   ├── codex/                 ← canonical Codex hooks.json + hook scripts
 │   ├── husky/                 ← canonical pre-commit / commit-msg / pre-push
-│   ├── skills/                ← 9 canonical skills (spec-kit, execute, process-gate, security-gate, brainstorming…)
+│   ├── skills/                ← 12 canonical skills (spec-kit, execute, orchestration, gates, writing…)
 │   ├── autonomy.md            ← the L1–L5 autonomy slider
 │   ├── presets/               ← policy bundles (compliance-strict, experimental-loose)
 │   ├── templates/             ← per-project file templates (gotchas, context-log)
@@ -196,9 +202,8 @@ A handful of `scripts/` round out the control plane:
 │
 ├── engineering-process.md     ← THE MANUAL — narrative source of truth
 │
-├── scheduled-tasks/           ← 16 audits + 2 drafts; each is prompt + targets
 ├── scripts/                   ← onboard-project, doctor, worktree, disk-janitor, sync-hooks…
-├── audits/                    ← generated audit reports land here
+├── audits/                    ← operator-generated audit reports land here
 ├── examples/audits/           ← redacted sample reports
 └── docs/                      ← provenance + LIFT/LEAVE/DEFER recon
 ```
@@ -295,7 +300,7 @@ Longer-form blog posts walking through the design decisions, the principles, and
 
 → **[Trellis: An Engineering Process for AI Coding Agents](https://akaushik.org/writing/trellis)** — the original design post.
 
-→ **[Trellis 1.0-rc](https://akaushik.org/writing/trellis-1-0-rc)** — what landed for the release candidate: skills, the autonomy slider, presets, and the wider audit fleet.
+→ **[Trellis 1.0-rc](https://akaushik.org/writing/trellis-1-0-rc)** — the release-candidate story: skills, the autonomy slider, presets, and operator audit patterns.
 
 ---
 

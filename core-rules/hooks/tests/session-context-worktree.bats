@@ -225,6 +225,47 @@ extract_ctx() {
 }
 
 # ---------------------------------------------------------------------------
+# L3 regression: both twins allocate the warning capture with mktemp and clean
+# it up. The audited `/tmp/_trellis_wt_warn_$$` implementation never called the
+# stub, so this test fails against that predictable-temp version.
+# ---------------------------------------------------------------------------
+
+@test "L3: both harnesses use mktemp for worktree warning capture and clean it up" {
+  build_fixture
+  local bindir="$SANDBOX/bin"
+  local tmpdir="$SANDBOX/tmp"
+  local mktemp_log="$SANDBOX/mktemp.log"
+  local generated="$tmpdir/generated-wtwarn"
+  local candidate
+  mkdir -p "$bindir" "$tmpdir"
+  cat > "$bindir/mktemp" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$MKTEMP_LOG"
+(umask 077; : > "$MKTEMP_RESULT") || exit 1
+printf '%s\n' "$MKTEMP_RESULT"
+EOF
+  chmod +x "$bindir/mktemp"
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    : > "$mktemp_log"
+    rm -f "$generated"
+    run env \
+      CLAUDE_PROJECT_DIR="$MAIN" \
+      TMPDIR="$tmpdir" \
+      MKTEMP_LOG="$mktemp_log" \
+      MKTEMP_RESULT="$generated" \
+      PATH="$bindir:$PATH" \
+      bash "$candidate" <<<'{"source":"startup"}'
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq . >/dev/null
+    [ "$(cat "$mktemp_log")" = "$tmpdir/trellis-wtwarn.XXXXXX" ]
+    [ ! -e "$generated" ]
+  done
+
+  destroy_fixture
+}
+
+# ---------------------------------------------------------------------------
 # Test 5: compact source → skipped entirely (no regressions)
 # ---------------------------------------------------------------------------
 

@@ -40,6 +40,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 # shellcheck source=lib/sed-portable.sh
 . "$SCRIPT_DIR/lib/sed-portable.sh"
 # shellcheck source=lib/disk-janitor-lib.sh
@@ -230,8 +232,7 @@ REGISTRY="$CANON/registry.md"
 BLACKLIST="$CANON/blacklist.md"
 
 # ---------------------------------------------------------------------------
-# Registry / blacklist parsing — copied verbatim from doctor.sh (the established
-# fleet-enumeration convention; 10 scripts duplicate this inline). Active set =
+# Registry parsing plus the shared blacklist parser. Active set =
 # registry rows MINUS both blacklist sections MINUS disk_janitor.skip_projects,
 # intersected with [ -e "$proj/.git" ].
 # ---------------------------------------------------------------------------
@@ -251,34 +252,6 @@ read_registry_names() {
   ' "$REGISTRY"
 }
 
-# Blacklist section 1 (Temporarily excluded): Project column = registry name.
-# Blacklist section 2 (Permanently excluded): Path column = `/personal/<name>`;
-#   map to basename so it can subtract a registry name.
-# The `| — | — |` placeholder rows are skipped: em-dash is not in [a-zA-Z0-9._-].
-read_blacklist_names() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## 1\. Temporarily excluded/ { sec=1; next }
-    /^## 2\. Permanently excluded/ { sec=2; next }
-    /^## Semantics/                { sec=0 }
-    sec==1 && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0
-      gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-      next
-    }
-    sec==2 && /^\| `\/[A-Za-z0-9._\/-]+` \|/ {
-      # Path column wrapped in backticks: `/personal/<name>`
-      path=$0
-      gsub(/^\| `/, "", path); gsub(/` \|.*$/, "", path)
-      n=split(path, parts, "/")
-      base=parts[n]
-      if (base != "" && base != "Path") print base
-    }
-  ' "$BLACKLIST"
-}
-
 # Resolve a registry name to an absolute project dir under PROJECTS_ROOT.
 resolve_project_path() {
   printf '%s/%s' "$PROJECTS_ROOT" "$1"
@@ -292,7 +265,7 @@ done < <(read_registry_names)
 BLACKLIST_NAMES=()
 while IFS= read -r line; do
   [ -n "$line" ] && BLACKLIST_NAMES+=("$line")
-done < <(read_blacklist_names)
+done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local name="$1" b
@@ -384,11 +357,17 @@ $name	$tj"
 # ---------------------------------------------------------------------------
 scan_caches() {
   local proj="$1"
-  local kind path bytes mtime rc build_active=0
+  local kind path bytes mtime rc build_active=0 cache_rows
 
   # Running-build guard: if a build is live in this project, do not touch its
   # caches at all (testable via DJ_BUILD_ACTIVE_OVERRIDE).
   if dj_build_active "$proj"; then build_active=1; fi
+
+  if cache_rows="$(dj_find_caches "$proj")"; then :; else
+    rc=$?
+    echo "disk-janitor: WARNING: cache discovery failed for $proj (exit $rc)" >&2
+    return "$rc"
+  fi
 
   while IFS="$(printf '\t')" read -r kind path bytes mtime; do
     [ -n "$path" ] || continue
@@ -403,7 +382,7 @@ scan_caches() {
       plan_row caches skip "$kind" "$path" "$bytes" "-" "younger than ${CACHE_TTL_DAYS}d"
     fi
   done <<EOF
-$(dj_find_caches "$proj")
+$cache_rows
 EOF
 }
 
@@ -414,7 +393,13 @@ EOF
 scan_worktrees() {
   local proj="$1"
   local wt_path head_sha branch is_main prunable
-  local bytes mtime merged_rc clean_rc stale_rc detail verdict
+  local bytes mtime merged_rc clean_rc stale_rc detail verdict worktree_rows rc
+
+  if worktree_rows="$(dj_list_worktrees "$proj")"; then :; else
+    rc=$?
+    echo "disk-janitor: WARNING: worktree discovery failed for $proj (exit $rc)" >&2
+    return "$rc"
+  fi
 
   # head_sha + prunable are consumed only to advance past their TSV columns.
   while IFS="$(printf '\t')" read -r wt_path head_sha branch is_main prunable; do
@@ -459,7 +444,7 @@ scan_worktrees() {
     fi
     plan_row worktrees "$verdict" worktree "$wt_path" "$bytes" "$proj" "$detail"
   done <<EOF
-$(dj_list_worktrees "$proj")
+$worktree_rows
 EOF
 }
 
@@ -516,6 +501,7 @@ if [ "${#TARGETS[@]}" -gt 0 ]; then
       continue
     fi
     if scan_project "$proj"; then :; else
+      echo "disk-janitor: WARNING: scan failed for $proj; results are incomplete" >&2
       plan_row meta skip project "$proj" 0 "-" "skipped: scan error ($proj)"
       EXIT_STATUS=1
     fi
@@ -798,12 +784,18 @@ if scope_enabled caches && [ "${#TARGETS[@]}" -gt 0 ]; then
   for name in "${TARGETS[@]}"; do
     proj="$(resolve_project_path "$name")"
     [ -e "$proj/.git" ] || continue
-    while IFS="$(printf '\t')" read -r kind path bytes mtime; do
-      [ -n "${path:-}" ] || continue
-      remaining_cache_bytes=$((remaining_cache_bytes + bytes))
-    done <<EOF
-$(dj_find_caches "$proj" 2>/dev/null || true)
+    if remaining_cache_rows="$(dj_find_caches "$proj")"; then
+      while IFS="$(printf '\t')" read -r kind path bytes mtime; do
+        [ -n "${path:-}" ] || continue
+        remaining_cache_bytes=$((remaining_cache_bytes + bytes))
+      done <<EOF
+$remaining_cache_rows
 EOF
+    else
+      rc=$?
+      echo "disk-janitor: WARNING: post-apply cache discovery failed for $proj (exit $rc)" >&2
+      EXIT_STATUS=1
+    fi
   done
 fi
 

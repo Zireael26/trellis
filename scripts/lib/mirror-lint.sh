@@ -85,6 +85,23 @@ lint_mirror() {
     done
   done < <(find "$mirror_dir" -type l -not -path '*/.git/*' 2>/dev/null)
 
+  # Catch hardcoded home paths that are not one of the configured tokens. This
+  # closes the cross-machine case where content copied from another operator
+  # contains an unknown macOS/Linux username. A few deliberately generic
+  # documentation and regression-fixture users are safe public examples.
+  local hit line_body
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    line_body="${hit#*:}"
+    case "$line_body" in
+      *'/Users/me/'*|*'/Users/jane/'*|*'/Users/helios/'*|*'/Users/.../'*|*'/home/jane'*) continue ;;
+    esac
+    rel="${hit%%:*}"
+    rel="${rel#"$mirror_dir"/}"
+    echo "$rel: unrecognized absolute home path"
+    rc=1
+  done < <(grep -rInE --exclude-dir='.git' -- '/Users/[[:alnum:]_.-]+/|/home/[[:alnum:]_.-]+(/|$)' "$mirror_dir" 2>/dev/null)
+
   # --- SCOPED token: antigravity, forbidden outside the historical record --
   # Allowlist (paths RELATIVE to mirror_dir where the token is legitimate):
   #   docs/adr/, docs/specs/  — immutable historical design record
@@ -108,6 +125,63 @@ lint_mirror() {
       rc=1
     fi
   done < <(grep -rIliF --exclude-dir='.git' -- 'antigravity' "$mirror_dir" 2>/dev/null)
+
+  # --- INSTANCE-PRIVATE tokens: the local unofficial proxy surface, forbidden
+  # ANYWHERE in the public mirror (never-public; audit 2026-07-13 M20).
+  # Case-insensitive. Only this linter and its own test may name the tokens
+  # (they sync to the mirror, so exempt them or the lint flags its own machinery).
+  local priv_allow_re='^(scripts/lib/mirror-lint\.sh$|scripts/tests/mirror-lint\.bats$)'
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$mirror_dir"/}"
+    if ! printf '%s\n' "$rel" | grep -qE "$priv_allow_re"; then
+      echo "$rel: instance-private token (claudex/cliproxy) must never reach the public mirror"
+      rc=1
+    fi
+  done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+
+  # --- Root private namespaces: whole subtrees that must never publish (audit
+  # 2026-07-13 H1/L17). A bare .gitkeep placeholder is allowed; any real content
+  # under these roots fails the lint. Catches the leak structurally, so a future
+  # SYNC_PATHS slip re-publishing one of them aborts before commit.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$mirror_dir"/}"
+    case "$rel" in
+      .gitkeep|*/.gitkeep) continue ;;
+    esac
+    echo "$rel: private namespace must not publish (audits/ research/ conductor/ local/ scheduled-tasks/)"
+    rc=1
+  done < <(find "$mirror_dir" \
+      \( -path "$mirror_dir/audits/*" -o -path "$mirror_dir/research/*" \
+         -o -path "$mirror_dir/conductor/*" -o -path "$mirror_dir/local/*" \
+         -o -path "$mirror_dir/scheduled-tasks/*" \) \
+      -type f -not -path '*/.git/*' 2>/dev/null)
+
+  # Current operator-facing docs include both synced and public-only files.
+  # Once the scheduled-task subtree is de-listed, none may claim that the
+  # private path, MCP, or numbered fleet ships in the public template. General
+  # guidance about configuring operator-side audits remains valid.
+  local operator_doc
+  for operator_doc in \
+    README.md SETUP.md AGENT_SETUP.md AGENT_ONBOARD_PROJECT.md \
+    registry.md blacklist.md docs/architecture.svg docs/PROVENANCE.md \
+    examples/README.md engineering-process.md \
+    core-rules/CLAUDE.md core-rules/hooks.md \
+    core-rules/inheritance.md core-rules/autonomy.md core-rules/loop-safety.md \
+    core-rules/hooks/README.md core-rules/references/loops.md \
+    core-rules/references/programmatic-tool-calling.md \
+    core-rules/presets/README.md core-rules/templates/trellis.config.json.example \
+    core-rules/skills/orchestrate/SKILL.md \
+    core-rules/skills/security-gate/SKILL.md core-rules/commands/constitution.md \
+    core-rules/commands/doctor.md core-rules/commands/disk-janitor.md \
+    scripts/lib/trellis.config.schema.json; do
+    [ -f "$mirror_dir/$operator_doc" ] || continue
+    if grep -qiE -- 'scheduled-tasks(/|[[:space:]]|$)|mcp__scheduled-tasks__|scheduled[[:space:]]+audit[[:space:]]+fleet|([0-9]+|sixteen)[[:space:]]+scheduled[[:space:]]+(tasks|audits)|([0-9]+|sixteen)[[:space:]]+audits[[:space:]]+(are[[:space:]]+)?(registered|running)|audited[[:space:]]+(weekly|continuously)' "$mirror_dir/$operator_doc" 2>/dev/null; then
+      echo "$operator_doc: claims de-listed scheduled-task content"
+      rc=1
+    fi
+  done
 
   return $rc
 }

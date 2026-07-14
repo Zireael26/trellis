@@ -125,11 +125,21 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 
   # Count always outputs a number, never errors. Avoid `grep -c '^' || echo 0` —
   # that doubles output to "0\n0" on empty input and breaks numeric comparisons.
-  CHANGED_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+  # Untracked-inclusive: a session that only CREATES files must still count
+  # (git diff HEAD omits untracked). Read-only — ls-files never stages anything.
+  # `.claude/` / `.codex/` are harness state, not session work — exclude them
+  # from the untracked scan so they don't inflate the volume gate.
+  CHANGED_FILES=$( { git diff HEAD --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null | grep -vE '^\.(claude|codex)/'; } \
+    | sort -u | sed '/^$/d' | awk 'END{print NR}')
 
-  # Sum added+deleted lines from numstat; skip binary rows (marked '-').
-  CHANGED_LINES=$(git diff HEAD --numstat 2>/dev/null \
+  # Sum added+deleted lines: tracked via numstat (skip binary rows marked '-'),
+  # untracked via line count (the whole new file is an addition).
+  _pr_tracked_lines=$(git diff HEAD --numstat 2>/dev/null \
     | awk '$1 != "-" && $2 != "-" { sum += $1 + $2 } END { print sum+0 }')
+  _pr_untracked_lines=$(git ls-files --others --exclude-standard 2>/dev/null | grep -vE '^\.(claude|codex)/' \
+    | while IFS= read -r f; do [ -f "$f" ] && wc -l < "$f" 2>/dev/null; done \
+    | awk '{ sum += $1 } END { print sum+0 }')
+  CHANGED_LINES=$((_pr_tracked_lines + _pr_untracked_lines))
 
   if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" ]; then
     exit 0

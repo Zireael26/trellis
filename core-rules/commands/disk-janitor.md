@@ -5,7 +5,7 @@ argument-hint:
 
 # Trellis disk-janitor
 
-You are running `trellis disk-janitor` to find and (only when asked) reclaim disk that the active fleet leaks: stale build caches (`.turbo/cache`, `.next/cache`, `.next/dev`), dead git worktrees, and package stores. This is the deterministic, host-side counterpart to the scheduled audits — it measures real disk, which the scheduled-task sandbox cannot do.
+You are running `trellis disk-janitor` to find and (only when asked) reclaim disk that the active fleet leaks: stale build caches (`.turbo/cache`, `.next/cache`, `.next/dev`), dead git worktrees, and package stores. This is a deterministic host-side check — it measures real disk that a sandboxed audit runner may not see.
 
 **Report-only by default.** A plain run mutates nothing — it scans every scope, prints a report, and writes `audits/YYYY-MM-DD-disk-janitor.md`. Deletion happens only when the user explicitly asks, only after a dry-run preview, and even then every destructive category asks for a per-category `y/N` confirmation. The scheduled LaunchAgent runs `--report` only — it never deletes.
 

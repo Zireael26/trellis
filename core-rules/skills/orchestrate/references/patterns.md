@@ -22,7 +22,9 @@ don't re-derive it.
 - **adversarial-verification** — a separate reviewer checks the work product the
   builder cannot mark its own. See the code-review-subagent rule under *Definition
   of done* in `CLAUDE.md` ("you do not self-mark your own homework"). Generalizes
-  beyond code: any generate-then-independently-check loop.
+  beyond code: any generate-then-independently-check loop. For above-solo-reliability
+  builds, sharpen this reviewer into the gated **skeptical evaluator** (defaults to
+  "not done", judges a pre-agreed sprint contract) — `references/skeptical-evaluator.md`.
 - **generate-goal / loop-until-done** — frame the task as a verifiable goal first
   (failing test, green-before-and-after, explicit acceptance check), then iterate
   until that goal is met. See the verifiable-goal bullet under *Planning* in

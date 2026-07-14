@@ -86,7 +86,7 @@ Default L3 = current Trellis behavior; existing projects see no change.
 
 ## Loops
 
-Trellis ships a **loop-safety contract** that guarantees every Trellis loop halts. Every loop — `scheduled-tasks/` cron loops, `orchestrate` fan-out workflows, `/loop` / `/goal` runs — declares and honors **three ceilings** and **halts on any one**: `max_iterations`, `no_progress_iterations`, and `budget_ceiling_usd`. On a trip the loop hard-stops (never auto-continues) and emits a structured halt report; unattended loops surface the halt in their run report. The contract is doctrine plus declared fields, not a mechanical kill hook. Full policy, progress-signal catalog, halt behavior, and the token↔dollar conversion: `core-rules/loop-safety.md`.
+Trellis ships a **loop-safety contract** that guarantees every Trellis loop halts. Every loop — operator cron jobs, `orchestrate` fan-out workflows, `/loop` / `/goal` runs — declares and honors **three ceilings** and **halts on any one**: `max_iterations`, `no_progress_iterations`, and `budget_ceiling_usd`. On a trip the loop hard-stops (never auto-continues) and emits a structured halt report; unattended loops surface the halt in their run report. The contract is doctrine plus declared fields, not a mechanical kill hook. Full policy, progress-signal catalog, halt behavior, and the token↔dollar conversion: `core-rules/loop-safety.md`.
 
 Ceiling value resolution (most specific wins, each ceiling independently): per-loop `safety` override → project-local `.trellis.config.json.loop_safety` → central `trellis.config.json.loop_safety` → documented built-in fallback constants (`core-rules/loop-safety.md`), so a loop in a broken/misconfigured context still halts.
 

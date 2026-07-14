@@ -20,8 +20,6 @@ companion() {
 lower_effort() {
   case "$1" in
     max) echo xhigh ;;
-    xhigh) echo high ;;
-    high) echo medium ;;
     *) return 1 ;;
   esac
 }
@@ -96,7 +94,7 @@ run_worker_contract() {
   [ "$(jq -r '.job | has("logSilentSeconds")' <<<"$status_payload")" = "false" ]
   rm -f "$STATE_FILE" "$STATE_FILE".job-1.log
 
-  run run_worker_contract background-then-complete high
+  run run_worker_contract background-then-complete xhigh
   [ "$status" -eq 0 ]
   [[ "$output" == *"STATUS: SUCCESS"* ]]
   [ "$(jq -r '.launchCount' "$STATE_FILE")" -eq 1 ]
@@ -104,7 +102,7 @@ run_worker_contract() {
 }
 
 @test "stall once launches twice, cancels once, and records retry annotation" {
-  run run_worker_contract stall-once high
+  run run_worker_contract stall-once xhigh
   [ "$status" -eq 0 ]
   [[ "$output" == *"STATUS: SUCCESS"* ]]
   [[ "$output" == *"ATTEMPTS: 2"* ]]
@@ -117,7 +115,7 @@ run_worker_contract() {
 }
 
 @test "stall twice cancels both jobs and returns FAILURE" {
-  run run_worker_contract stall-twice high
+  run run_worker_contract stall-twice xhigh
   [ "$status" -eq 1 ]
   [[ "$output" == *"STATUS: FAILURE"* ]]
   [[ "$output" == *"CODE: SECOND_STALL"* ]]
@@ -129,12 +127,12 @@ run_worker_contract() {
 }
 
 @test "missing session id retries once at one lower effort tier" {
-  run run_worker_contract no-session-id high
+  run run_worker_contract no-session-id max
   [ "$status" -eq 0 ]
   [[ "$output" == *"STATUS: SUCCESS"* ]]
   [[ "$output" == *"DOWNGRADES: 1"* ]]
-  [[ "$output" == *"EFFECTIVE_EFFORT: medium"* ]]
-  [ "$(jq -c '.requestedEfforts' "$STATE_FILE")" = '["high","medium"]' ]
+  [[ "$output" == *"EFFECTIVE_EFFORT: xhigh"* ]]
+  [ "$(jq -c '.requestedEfforts' "$STATE_FILE")" = '["max","xhigh"]' ]
   [ "$(jq -r '.launchCount' "$STATE_FILE")" -eq 2 ]
   [ "$(jq -r '.cancelCalls' "$STATE_FILE")" -eq 1 ]
 }
@@ -146,6 +144,6 @@ run_worker_contract() {
   grep -Fq 'Retry exactly once at one effort tier lower' "$worker"
   grep -Fq 'Relaunch exactly once as a fresh attempt' "$worker"
   grep -Fq "$STALL_ANNOTATION" "$worker"
-  grep -Fq '`max -> xhigh`, `xhigh -> high`' "$worker"
-  grep -Fq '`high -> medium`' "$worker"
+  grep -Fq '`max -> xhigh`' "$worker"
+  grep -Fq '`xhigh` is the lowest permitted input tier' "$worker"
 }

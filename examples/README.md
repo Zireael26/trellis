@@ -1,6 +1,6 @@
 # Examples
 
-Reference output from the upstream Trellis deployment (the framework was named SE Core prior to 2026-05-12). Project names have been redacted to `project-a`, `project-b`, etc. Use these to understand what each scheduled task produces — the structure, severity taxonomy, and level of detail to expect when you run them against your own registry.
+Reference output from an upstream Trellis deployment (the framework was named SE Core prior to 2026-05-12). Project names have been redacted to `project-a`, `project-b`, etc. Use these to understand the report structure, severity taxonomy, and level of detail when designing private operator audits for your own registry.
 
 ## What's here
 
@@ -15,7 +15,7 @@ examples/
 
 ## How to read these
 
-Each audit file lives at `audits/YYYY-MM-DD-<task>.md`. The output schema is governed by the corresponding `scheduled-tasks/<task>/prompt.md`. If you change the prompt, expect the schema to evolve.
+Each audit file lives at `audits/YYYY-MM-DD-<task>.md`. Its schema is governed by the operator-owned prompt that produced it; if you change a private prompt, expect its report schema to evolve.
 
 ## Once you're running your own audits
 

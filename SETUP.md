@@ -141,18 +141,18 @@ Read the script's "Next steps" output carefully — it asks you to:
 4. Run `pnpm install` / `bun install` / `npm install` so husky activates.
 5. Add a row to `registry.md` here in `trellis-instance/`.
 
-With the default `harnesses: ["claude", "codex"]`, onboarding also seeds the shared `.agents/` surface for Codex: a root `AGENTS.md` entrypoint when safe plus `.agents/rules/`, `.agents/skills/`, and `.agents/workflows/*.md` slash-command copies. After onboarding 1–3 projects, you'll see the system pay off — the `cross-project-process-audit` will start surfacing real findings.
+With `harnesses: ["claude", "codex"]`, onboarding also seeds the shared `.agents/` surface for Codex: a root `AGENTS.md` entrypoint when safe plus `.agents/rules/`, `.agents/skills/`, and `.agents/workflows/*.md` slash-command copies. After onboarding 1–3 projects, the shared policy and hooks start paying off; that registry is also the input for any operator audits you configure.
 
 ---
 
-## 6. (Optional) Wire up scheduled audits
+## 6. (Optional) Add operator audits
 
-The `scheduled-tasks/` dir holds prompts and configuration for 10 weekly/monthly audits. To actually *run* them on a schedule, you need either:
+The public template intentionally does not ship instance-specific schedules, prompts, targets, or fleet inventory. If you want recurring audits, keep those private to your operator clone and run them with either:
 
-- **Cowork mode (Claude Code)** — register each task using `mcp__scheduled-tasks__create_scheduled_task`. The thin wrapper reads `prompt.md` + `targets.md` at run time so you can edit them in version control without re-registering. See `scheduled-tasks/README.md` for cron times and the connected-folder requirement.
-- **Plain cron + `claude -p`** — invoke `claude -p < scheduled-tasks/<task>/prompt.md` from cron, redirecting output to `audits/`. You lose the per-run target capture but it works fine for single-machine setups.
+- **Your harness scheduler** — register a private prompt and read targets from your local `registry.md` at run time.
+- **Plain cron + a headless agent** — invoke your private prompt from cron and redirect the dated report to `audits/`.
 
-You don't have to enable any of them on day one. They become useful once you have ≥3 registered projects.
+You do not need recurring audits on day one. They become more useful once several projects share the control plane; [`examples/audits/`](examples/audits/) shows the report shape without exposing an operator fleet.
 
 ---
 

@@ -47,6 +47,20 @@ sg_resolve_cfg() {
       if ! jq -e '.mandatory_pipeline | type == "object"' "$f" >/dev/null 2>&1; then
         echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING malformed"; return
       fi
+      # Threshold keys are optional, but a present value must be a positive JSON
+      # integer. Do not let strings, fractions, zero, negatives, booleans, or
+      # null silently collapse to a built-in default in an opted-in block.
+      if ! jq -e '
+        .mandatory_pipeline
+        | def positive_integer($key):
+            if (has($key) | not) then true
+            else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end)
+            end;
+          positive_integer("spec_required_diff_lines")
+          and positive_integer("surgical_max_diff_lines")
+      ' "$f" >/dev/null 2>&1; then
+        echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING malformed"; return
+      fi
       # First config that declares the block wins (project-local over central).
       # NB: do NOT use `// empty` on `enabled` — jq's `//` treats the boolean
       # `false` as absent, which would collapse `enabled:false` to empty.
@@ -57,15 +71,15 @@ sg_resolve_cfg() {
     fi
   done
   [ "$present" -eq 1 ] || { echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING disabled"; return; }
-  # Validate types: enabled true/false (a missing key defaults to disabled);
-  # thresholds must be integers or fall back to the built-in default.
+  # Validate enabled true/false (a missing key defaults to disabled). Threshold
+  # types were validated above; only genuinely missing optional keys default.
   case "$enabled" in
     true|false) ;;
     null|'') enabled=false ;;
     *) echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING malformed"; return ;;
   esac
-  case "$floor" in ''|*[!0-9]*) floor=$SG_DEFAULT_FLOOR ;; esac
-  case "$ceiling" in ''|*[!0-9]*) ceiling=$SG_DEFAULT_CEILING ;; esac
+  [ -n "$floor" ] || floor=$SG_DEFAULT_FLOOR
+  [ -n "$ceiling" ] || ceiling=$SG_DEFAULT_CEILING
   echo "$enabled $floor $ceiling ok"
 }
 
@@ -158,13 +172,112 @@ sg_nontemplate_ok() {
 }
 
 # --- interview artifact (autonomy-tied, spec §0.6 PD6a / C-4c) ---------------
+sg_valid_autonomy_level() {
+  case "${1:-}" in
+    1|2|3|4|5) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sg_autonomy_frontmatter_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  awk -v wanted="$key" '
+    NR == 1 {
+      sub(/\r$/, "")
+      if ($0 != "---") exit
+      in_frontmatter = 1
+      next
+    }
+    in_frontmatter {
+      sub(/\r$/, "")
+      if ($0 == "---") exit
+      line = $0
+      if (line ~ "^[[:space:]]*" wanted ":[[:space:]]*") {
+        sub("^[[:space:]]*" wanted ":[[:space:]]*", "", line)
+        sub(/[[:space:]]*$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$file" 2>/dev/null
+}
+
 sg_autonomy_level() {
-  local root="$1" lvl=""
-  [ -f "$root/.claude/session-autonomy" ] && lvl=$(tr -dc '0-9' < "$root/.claude/session-autonomy" 2>/dev/null)
-  if [ -z "$lvl" ] && command -v jq >/dev/null 2>&1; then
-    lvl=$(jq -r '.autonomy_default // empty' "$root/.trellis.config.json" "$root/trellis.config.json" 2>/dev/null | grep -m1 -E '^[0-9]+$')
+  local root="$1" project_cfg="" trellis_root="" fleet_cfg=""
+  local lvl=3 project_level="" preset_default="" ceiling=5
+  local candidate preset preset_file value session_file
+
+  command -v jq >/dev/null 2>&1 || { printf '3'; return; }
+
+  # Project-local config selects presets and may provide the project override.
+  # The dotfile is canonical; the non-dot filename remains a compatibility path.
+  for candidate in "$root/.trellis.config.json" "$root/trellis.config.json"; do
+    if [ -f "$candidate" ]; then
+      project_cfg="$candidate"
+      break
+    fi
+  done
+
+  # Locate the fleet config and canonical preset directory. A deployed hook may
+  # receive TRELLIS_ROOT, while project configs carry the same pointer for normal
+  # pre-push use. The Trellis control-plane repo can resolve to itself.
+  if [ -n "${TRELLIS_ROOT:-}" ]; then
+    trellis_root="$TRELLIS_ROOT"
+  elif [ -n "$project_cfg" ]; then
+    trellis_root=$(jq -r '(.trellis_root // empty) | strings' "$project_cfg" 2>/dev/null || true)
   fi
-  case "$lvl" in 1|2|3|4|5) printf '%s' "$lvl" ;; *) printf '3' ;; esac
+  if [ -z "$trellis_root" ] && [ -f "$root/trellis.config.json" ]; then
+    trellis_root="$root"
+  fi
+  if [ -n "$trellis_root" ] && [ -f "$trellis_root/trellis.config.json" ]; then
+    fleet_cfg="$trellis_root/trellis.config.json"
+  fi
+
+  if [ -n "$fleet_cfg" ]; then
+    value=$(jq -r '.autonomy_default // empty' "$fleet_cfg" 2>/dev/null || true)
+    sg_valid_autonomy_level "$value" && lvl="$value"
+  fi
+
+  if [ -n "$project_cfg" ]; then
+    value=$(jq -r '.autonomy // empty' "$project_cfg" 2>/dev/null || true)
+    sg_valid_autonomy_level "$value" && project_level="$value"
+
+    # Preset order is declaration order: first valid default wins, while the
+    # lowest valid ceiling wins across every active preset.
+    while IFS= read -r preset; do
+      [ -n "$preset" ] || continue
+      preset_file="$trellis_root/core-rules/presets/$preset.md"
+      [ -f "$preset_file" ] || continue
+
+      value=$(sg_autonomy_frontmatter_value "$preset_file" autonomy_default)
+      if [ -z "$preset_default" ] && sg_valid_autonomy_level "$value"; then
+        preset_default="$value"
+      fi
+
+      value=$(sg_autonomy_frontmatter_value "$preset_file" autonomy_ceiling)
+      if sg_valid_autonomy_level "$value" && [ "$value" -lt "$ceiling" ]; then
+        ceiling="$value"
+      fi
+    done < <(jq -r '(.presets // [])[]? | strings' "$project_cfg" 2>/dev/null || true)
+  fi
+
+  # Pick phase: fleet -> preset default (only without project override) ->
+  # project -> shared cross-harness session marker at the canonical repo root.
+  if [ -n "$preset_default" ] && [ -z "$project_level" ]; then
+    lvl="$preset_default"
+  fi
+  [ -n "$project_level" ] && lvl="$project_level"
+
+  session_file="$root/.claude/session-autonomy"
+  if [ -f "$session_file" ]; then
+    value=$(head -1 "$session_file" 2>/dev/null | tr -d '[:space:]')
+    sg_valid_autonomy_level "$value" && lvl="$value"
+  fi
+
+  # Clamp phase: presets are additive, so the most restrictive ceiling wins.
+  [ "$lvl" -gt "$ceiling" ] && lvl="$ceiling"
+  printf '%s' "$lvl"
 }
 
 # L1-3: real interview => clarify.md in the triad OR an explicit spec-waiver.

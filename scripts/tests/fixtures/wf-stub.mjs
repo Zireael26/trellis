@@ -12,6 +12,13 @@ function cannedAgentResult(opts = {}) {
   if (required.includes('available')) {
     return { available: true, notes: 'wf-stub canned presence result' }
   }
+  if (required.includes('complete')) {
+    return {
+      complete: true,
+      refs: [{ project: 'repo', repo_path: '/tmp/repo', main_sha: '1111111111111111111111111111111111111111' }],
+      notes: 'wf-stub canned immutable ref receipt',
+    }
+  }
   if (required.includes('real')) {
     return { real: true, confidence: 1, reason: 'wf-stub canned review result' }
   }

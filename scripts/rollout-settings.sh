@@ -36,6 +36,8 @@ done
 
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 
 CANONICAL_TEMPLATE="$TRELLIS_ROOT/core-rules/templates/claude-settings.json"
 [ -f "$CANONICAL_TEMPLATE" ] || {
@@ -73,23 +75,10 @@ read_registry() {
     }
   ' "$REGISTRY"
 }
-read_blacklist() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## (Blacklisted|Currently exempt|Active blacklist)/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0; gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-    }
-  ' "$BLACKLIST"
-}
-
 REGISTRY_NAMES=()
 while IFS= read -r line; do [ -n "$line" ] && REGISTRY_NAMES+=("$line"); done < <(read_registry)
 BLACKLIST_NAMES=()
-while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist)
+while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local n="$1" b
@@ -135,7 +124,14 @@ reconcile_project() {
 
   if $DRY_RUN; then
     echo "  + would update .permissions.deny (deltas below)"
-    diff <(jq -S '.permissions.deny // []' "$settings") <(printf '%s' "$merged" | jq -S '.permissions.deny // []') | sed 's/^/    /'
+    local diff_output diff_status
+    if diff_output="$(diff <(jq -S '.permissions.deny // []' "$settings") <(printf '%s' "$merged" | jq -S '.permissions.deny // []'))"; then
+      diff_status=0
+    else
+      diff_status=$?
+    fi
+    [ "$diff_status" -le 1 ] || return "$diff_status"
+    printf '%s\n' "$diff_output" | sed 's/^/    /'
     return
   fi
 

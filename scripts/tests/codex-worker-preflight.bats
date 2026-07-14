@@ -36,6 +36,52 @@ SH
   printf 'model = "gpt-5.6-sol"\n' > "$CONFIG"
   printf '%s\n' "$CODEX" > "$WHICH_FILE"
   : > "$PROCESS_FILE"
+
+  cat > "$BIN/stat" <<'SH'
+#!/usr/bin/env bash
+case "${PREFLIGHT_TIMESTAMP_STYLE:-}" in
+  bsd)
+    if [ "${1:-}" = "-f" ] && [ "${2:-}" = "%c" ]; then
+      printf '%s\n' "$PREFLIGHT_CLI_INSTALL_EPOCH"
+      exit 0
+    fi
+    ;;
+  gnu)
+    if [ "${1:-}" = "-f" ]; then
+      exit 1
+    fi
+    if [ "${1:-}" = "-c" ] && [ "${2:-}" = "%Z" ]; then
+      printf '%s\n' "$PREFLIGHT_CLI_INSTALL_EPOCH"
+      exit 0
+    fi
+    ;;
+esac
+exec /usr/bin/stat "$@"
+SH
+  chmod +x "$BIN/stat"
+
+  cat > "$BIN/date" <<'SH'
+#!/usr/bin/env bash
+case "${PREFLIGHT_TIMESTAMP_STYLE:-}" in
+  bsd)
+    if [ "${1:-}" = "-j" ]; then
+      printf '%s\n' "$PREFLIGHT_PROCESS_START_EPOCH"
+      exit 0
+    fi
+    ;;
+  gnu)
+    if [ "${1:-}" = "-j" ]; then
+      exit 1
+    fi
+    if [ "${1:-}" = "-d" ]; then
+      printf '%s\n' "$PREFLIGHT_PROCESS_START_EPOCH"
+      exit 0
+    fi
+    ;;
+esac
+exec /bin/date "$@"
+SH
+  chmod +x "$BIN/date"
 }
 
 teardown() {
@@ -65,7 +111,17 @@ run_preflight() {
     NODE_BIN="/bin/bash" \
     CODEX_CONFIG="$CONFIG" \
     PREFLIGHT_TIMEOUT_SECONDS=2 \
+    PREFLIGHT_TIMESTAMP_STYLE="${PREFLIGHT_TIMESTAMP_STYLE:-}" \
+    PREFLIGHT_CLI_INSTALL_EPOCH="${PREFLIGHT_CLI_INSTALL_EPOCH:-}" \
+    PREFLIGHT_PROCESS_START_EPOCH="${PREFLIGHT_PROCESS_START_EPOCH:-}" \
     bash "$SCRIPT" --effort high --model gpt-5.6-sol --json "$@"
+}
+
+set_timestamp_fixture() {
+  PREFLIGHT_TIMESTAMP_STYLE="$1"
+  PREFLIGHT_CLI_INSTALL_EPOCH="$2"
+  PREFLIGHT_PROCESS_START_EPOCH="$3"
+  printf '904 Tue Nov 14 22:13:20 2023 %s app-server\n' "$CODEX" > "$PROCESS_FILE"
 }
 
 json_field() {
@@ -102,7 +158,67 @@ fixture_hash() {
 @test "app-server running from a different Codex binary is stale and red" {
   mkdir -p "$FIXTURE/old-bin"
   cp "$CODEX" "$FIXTURE/old-bin/codex"
-  printf '901 %s app-server\n' "$FIXTURE/old-bin/codex" > "$PROCESS_FILE"
+  printf '901 Thu Jan  1 00:00:01 1970 %s app-server\n' "$FIXTURE/old-bin/codex" > "$PROCESS_FILE"
+
+  run_preflight
+
+  [ "$status" -eq 1 ]
+  [ "$(json_field '.stale_app_servers')" = "1" ]
+  [ "$(json_field '.verdict')" = "environment-red" ]
+}
+
+@test "same-path app-server started before an in-place CLI upgrade is stale and red" {
+  printf '902 Sat Jan  1 00:00:01 2000 %s app-server\n' "$CODEX" > "$PROCESS_FILE"
+
+  run_preflight
+
+  [ "$status" -eq 1 ]
+  [ "$(json_field '.stale_app_servers')" = "1" ]
+  [ "$(json_field '.verdict')" = "environment-red" ]
+}
+
+@test "same-path app-server started after the selected CLI install is current" {
+  printf '903 Thu Jan  1 00:00:01 2099 %s app-server\n' "$CODEX" > "$PROCESS_FILE"
+
+  run_preflight
+
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.stale_app_servers')" = "0" ]
+  [ "$(json_field '.verdict')" = "green" ]
+}
+
+@test "same-second same-path app-server is current through BSD stat and date" {
+  set_timestamp_fixture bsd 1700000000 1700000000
+
+  run_preflight
+
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.stale_app_servers')" = "0" ]
+  [ "$(json_field '.verdict')" = "green" ]
+}
+
+@test "one-second-older same-path app-server is stale through BSD stat and date" {
+  set_timestamp_fixture bsd 1700000000 1699999999
+
+  run_preflight
+
+  [ "$status" -eq 1 ]
+  [ "$(json_field '.stale_app_servers')" = "1" ]
+  [ "$(json_field '.verdict')" = "environment-red" ]
+}
+
+@test "same-second same-path app-server is current through GNU stat and date fallbacks" {
+  set_timestamp_fixture gnu 1700000000 1700000000
+
+  run_preflight
+
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.stale_app_servers')" = "0" ]
+  [ "$(json_field '.verdict')" = "green" ]
+}
+
+@test "one-second-older same-path app-server is stale through GNU stat and date fallbacks" {
+  set_timestamp_fixture gnu 1700000000 1699999999
 
   run_preflight
 

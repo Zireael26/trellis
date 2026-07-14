@@ -37,6 +37,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EVALS_DIR="$ROOT/core-rules/evals"
 PARENT_RULES_FILE="$ROOT/core-rules/CLAUDE.md"
+REGISTRY_FILE="$ROOT/registry.md"
+BLACKLIST_FILE="$ROOT/blacklist.md"
 
 MODE="run"
 FILTER=""
@@ -66,7 +68,6 @@ while [ $# -gt 0 ]; do
 done
 
 log()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*" >&2; }
-warn() { printf 'warn: %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; }
 
 require_tool() {
@@ -86,9 +87,87 @@ fi
 # -----------------------------------------------------------------------------
 
 discover_fixtures() {
-  find "$EVALS_DIR" -mindepth 3 -maxdepth 3 -type f -name 'manifest.yml' 2>/dev/null \
-    | grep -v "^$EVALS_DIR/template/" \
+  find "$EVALS_DIR" -mindepth 3 -maxdepth 3 -type f -name 'manifest.yml' \
+    ! -path "$EVALS_DIR/template/*" 2>/dev/null \
     | sort
+}
+
+registry_projects() {
+  awk -F '|' '
+    /^## Active projects/ { active=1; next }
+    active && /^---$/ { exit }
+    active && /^\|/ {
+      name=$2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name != "" && name != "Project" && name != "—" && name !~ /^-+$/) print name
+    }
+  ' "$REGISTRY_FILE"
+}
+
+blacklisted_projects() {
+  awk -F '|' '
+    /^## 1\./ { section=1; next }
+    /^## 2\./ { section=2; next }
+    section > 0 && /^\|/ {
+      name=$2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      gsub(/`/, "", name)
+      if (section == 2) sub(/^.*\//, "", name)
+      if (name != "" && name != "Project" && name != "Path" && name != "—" && name !~ /^-+$/) print name
+    }
+  ' "$BLACKLIST_FILE" | sort -u
+}
+
+reconcile_eval_projects() {
+  local registry_present=0 blacklist_present=0 evals_present=0
+  [ -e "$REGISTRY_FILE" ] && registry_present=1
+  [ -e "$BLACKLIST_FILE" ] && blacklist_present=1
+  [ -e "$EVALS_DIR" ] && evals_present=1
+
+  # The public template intentionally excludes all three private fleet inputs.
+  # That all-absent shape is valid; any partial shape is drift and must fail
+  # closed before fixture discovery can silently under-count the fleet.
+  if [ "$registry_present" -eq 0 ] && [ "$blacklist_present" -eq 0 ] && [ "$evals_present" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$registry_present" -eq 0 ] || [ ! -r "$REGISTRY_FILE" ]; then
+    err "registry is missing or unreadable: $REGISTRY_FILE"
+    return 1
+  fi
+  if [ "$blacklist_present" -eq 0 ] || [ ! -r "$BLACKLIST_FILE" ]; then
+    err "blacklist is missing or unreadable: $BLACKLIST_FILE"
+    return 1
+  fi
+  if [ "$evals_present" -eq 0 ] || [ ! -d "$EVALS_DIR" ] || [ ! -r "$EVALS_DIR" ]; then
+    err "eval fixture root is missing, unreadable, or not a directory: $EVALS_DIR"
+    return 1
+  fi
+
+  local registered blacklisted fixture_projects missing project
+  registered="$(registry_projects)"
+  blacklisted="$(blacklisted_projects)"
+  fixture_projects="$(discover_fixtures \
+    | sed "s#^$EVALS_DIR/##; s#/.*##" \
+    | sort -u)"
+  missing=0
+
+  while IFS= read -r project; do
+    [ -n "$project" ] || continue
+    if printf '%s\n' "$blacklisted" | grep -Fqx "$project"; then
+      continue
+    fi
+    if ! printf '%s\n' "$fixture_projects" | grep -Fqx "$project"; then
+      err "active project '$project' is missing eval fixture manifests under core-rules/evals/$project/"
+      missing=$((missing + 1))
+    fi
+  done <<EOF
+$registered
+EOF
+
+  if [ "$missing" -gt 0 ]; then
+    err "$missing active non-blacklisted project(s) have no eval fixtures"
+    return 1
+  fi
 }
 
 apply_filter() {
@@ -412,6 +491,14 @@ eval_assertion() {
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+
+case "$MODE" in
+  check|dry-run)
+    if ! reconcile_eval_projects; then
+      exit 4
+    fi
+    ;;
+esac
 
 ALL_FIXTURES=()
 while IFS= read -r line; do ALL_FIXTURES+=("$line"); done < <(discover_fixtures)

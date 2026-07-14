@@ -1,6 +1,6 @@
 # Reference — `monorepo-polyglot` stack profile
 
-Long-form reference for the `monorepo-polyglot` profile sketched in `references/stack-profiles.md`. Worked example throughout: `clusterbid-console`.
+Long-form reference for the `monorepo-polyglot` profile sketched in `references/stack-profiles.md`. Worked example throughout: a representative `polyglot-commerce` monorepo.
 
 Authoritative cross-cutting source: `engineering-process.md` §14 (Rule of Three) and §6 (Git workflow).
 
@@ -31,10 +31,10 @@ If the choice is borderline, default to the single-language profile and promote 
 
 Strict per-language root directories. Each language gets exactly one home; mixing is rejected by the orchestrator-coverage check.
 
-clusterbid layout:
+Representative layout:
 
 ```
-clusterbid-console/
+polyglot-commerce/
 ├── services/                  # one directory per service; service.yaml declares language
 │   ├── auth-service/          # Go
 │   ├── gateway/               # Go
@@ -64,7 +64,7 @@ Per-service `service.yaml` (see §10) carries `language:` so language-aware tool
 - Generated code is checked into git. CI is deterministic; downstream services build without running codegen.
 - Staleness is gated by a project-local `check-proto-contract.sh` validator. It re-runs `buf generate` into a tempdir and diffs against the committed output; non-empty diff fails the gate.
 - Hard rule: no service-to-service JSON contracts outside `proto/`. JSON shapes drift silently — a renamed field becomes a billing bug when the consumer keeps reading the old name and gets the zero value.
-- `buf.yaml` lives at `proto/buf.yaml`; `buf.gen.yaml` at `proto/buf.gen.yaml`. Outputs land under `clients/sdk-ts/`, `pkg/proto/`, and `py/clusterbid_proto/` respectively.
+- `buf.yaml` lives at `proto/buf.yaml`; `buf.gen.yaml` at `proto/buf.gen.yaml`. Outputs land under `clients/sdk-ts/`, `pkg/proto/`, and `py/product_proto/` respectively.
 
 Breaking-change discipline: `buf breaking --against '.git#branch=main'` runs in CI and blocks any field renumber, type narrowing, or removal without a major-version bump.
 
@@ -119,7 +119,7 @@ PROCESS_GATE_TEST_CMD="make test"
 
 - `go.work` at repo root listing every workspace module. Each module has its own `go.mod` with `replace` directives pointing at the local `pkg/*` paths (workspace mode resolves them locally, but the replace block keeps non-workspace builds reproducible).
 - Go 1.22 minimum.
-- `golangci-lint` at `.golangci.yml`. clusterbid's enabled linters: `errcheck`, `revive`, `gosec`, `staticcheck`, `gocritic`, `unparam`, `govet`, `ineffassign`, `gofmt`, `goimports`.
+- `golangci-lint` at `.golangci.yml`. A representative enabled set is `errcheck`, `revive`, `gosec`, `staticcheck`, `gocritic`, `unparam`, `govet`, `ineffassign`, `gofmt`, `goimports`.
 - Per-module `go test ./...`; never `go test ./...` at workspace root (same workspace constraint as `go vet`).
 
 ```
@@ -142,7 +142,7 @@ use (
 
 ### 5.2 TS / Next.js
 
-- `pnpm-workspace.yaml` declares every TS package. clusterbid: `clients/*` and `ts/*`.
+- `pnpm-workspace.yaml` declares every TS package; for example, `clients/*` and `ts/*`.
 - Turborepo (`turbo.json`) for task caching across the workspace. Pipeline stanzas wire `typecheck`, `lint`, `build`, `test`.
 - `tsc --noEmit` for typecheck. ESLint or Biome for lint — pick one and stick with it; mixing produces conflicting autoformat behavior.
 - Every app and every shared lib gets exactly one entry in `pnpm-workspace.yaml`. Nested workspaces are forbidden.
@@ -196,7 +196,7 @@ on:
       - ".github/workflows/svc-gateway.yml"
 ```
 
-clusterbid's `monorepo-ci.yml` + `svc-gateway.yml` is the model. New services start by copying `svc-gateway.yml` and adjusting paths.
+A root `monorepo-ci.yml` plus a service-scoped `svc-gateway.yml` is the model. New services start by copying the service workflow and adjusting paths.
 
 A project-local `check-ci-subtree-routing.sh` validator (see `stack-profiles.md`) verifies every language subtree has a matching `paths:` entry and flags cross-language workflow leakage (e.g., a Go service workflow triggering on `clients/**`).
 
@@ -223,14 +223,14 @@ Pattern reference: Lume's `.githooks/` directory shows the layout, exit-code con
 
 Polyglot PRs trend large because cross-language refactors cross boundaries: a single schema change touches the Go server stub, the TS client, the Python SDK, and at least one consumer in each. Expect to bump the limits over time as the codebase grows.
 
-Starting defaults (clusterbid's current setting):
+Representative starting defaults:
 
 ```bash
 PROCESS_GATE_PR_SIZE_LIMIT=400   # soft
 PROCESS_GATE_PR_SIZE_HARD=800    # hard
 ```
 
-Generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/clusterbid_proto/` should be marked `linguist-generated` in `.gitattributes` so it does not count against the budget. Without that mark, every proto change blows the soft limit.
+Generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/product_proto/` should be marked `linguist-generated` in `.gitattributes` so it does not count against the budget. Without that mark, every proto change blows the soft limit.
 
 When a cross-language refactor legitimately exceeds the hard cap, land an ADR under `docs/adr/` naming the change and explaining why splitting would make review or rollback less clear. The gate accepts the override only when the diff includes a new ADR.
 
@@ -243,7 +243,7 @@ ADRs live at `docs/adr/`, numbered `NNNN-<slug>.md`. Cross-language decisions al
 - "Turborepo vs Nx" — pick-one rationale for the TS task runner.
 - "uv vs poetry" — Python lock-file and env-manager choice.
 
-clusterbid's docs/adr/0001-slice-1-bundle.md and docs/adr/0002-slice-2-bundle.md are the existing pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
+Representative `<repo>/docs/adr/0001-slice-1-bundle.md` and `<repo>/docs/adr/0002-slice-2-bundle.md` files illustrate the pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
 
 Set in `local.config.sh` so the PR-size hard-cap override knows where to look:
 
@@ -285,11 +285,11 @@ Field meanings:
 - `depends_on` — list of upstream services this one calls. Used by the dependency-graph drift check.
 - `db_schemas` — list of schemas this service owns. Used by the migration-safety validator.
 
-Pattern source: docs/engineering/repo-structure.md in clusterbid-console. Extend the schema in that doc, not per-service.
+Keep this schema in `<repo>/docs/engineering/repo-structure.md`; extend it there, not per-service.
 
 ## 11. Promotion path
 
-`monorepo-polyglot` is currently n=1 — Lume-style carve-out, clusterbid-console is the sole adopter. Per `engineering-process.md` §14.1 (Rule of Three), all polyglot-specific validators stay project-local under `<project>/.claude/skills/process-gate-local/scripts/` and `<project>/.agents/skills/process-gate-local/scripts/` until a second polyglot project lands.
+`monorepo-polyglot` is currently an n=1-style carve-out. Per `engineering-process.md` §14.1 (Rule of Three), all polyglot-specific validators stay project-local under `<project>/.claude/skills/process-gate-local/scripts/` and `<project>/.agents/skills/process-gate-local/scripts/` until a second independent adopter lands.
 
 When the second polyglot project onboards:
 
@@ -302,21 +302,21 @@ When the second polyglot project onboards:
    - Run the extended `parent-hook-drift` audit to verify byte-identity across all three adopters.
 4. Track candidate validators in `core-rules/deferred.md` so they are not forgotten between project onboardings.
 
-Canonical six gates (PR hygiene, secrets, bypass, tests, docs, stack profile) apply unchanged in the meantime.
+Canonical eight gates (PR hygiene, secrets, bypass, tests, docs, stack profile, security diff, analyze) apply unchanged in the meantime.
 
 ## 12. Worked example
 
-clusterbid-console exercises every section above. Relevant files (absolute paths):
+The representative example exercises every section above. Relevant repository-relative files:
 
-- `__PROJECTS_ROOT__/clusterbid-console/go.work` — Go workspace, lists every Go module.
-- `__PROJECTS_ROOT__/clusterbid-console/pnpm-workspace.yaml` — TS workspace, declares `clients/*` and `ts/*`.
-- `__PROJECTS_ROOT__/clusterbid-console/turbo.json` — Turborepo task pipeline.
-- `__PROJECTS_ROOT__/clusterbid-console/.golangci.yml` — Go linter config; enables errcheck, revive, gosec, staticcheck, gocritic, unparam, govet, ineffassign, gofmt, goimports.
-- `__PROJECTS_ROOT__/clusterbid-console/Makefile` — root orchestrator; canonical `vet`, `lint`, `test`, `build`, `dev` targets.
-- `__PROJECTS_ROOT__/clusterbid-console/.github/workflows/monorepo-ci.yml` — cross-cutting CI, always runs.
-- `__PROJECTS_ROOT__/clusterbid-console/.github/workflows/svc-gateway.yml` — per-service CI template (copy + retarget for new services).
-- `__PROJECTS_ROOT__/clusterbid-console/proto/` — cross-language contract source of truth (`buf generate` outputs Go + TS + Python stubs).
-- `__PROJECTS_ROOT__/clusterbid-console/docs/engineering/repo-structure.md` — subtree layout spec; service.yaml schema; "Python only where the ecosystem forces it" constraint.
-- `__PROJECTS_ROOT__/clusterbid-console/docs/engineering/coding-standards.md` — Go 1.22, Python 3.12, mypy `--strict`, eng-lead approval for new Python services outside the GPU boundary.
-- `__PROJECTS_ROOT__/clusterbid-console/docs/architecture/service-inventory.md` — current set of services, languages, and owners.
-- `__PROJECTS_ROOT__/clusterbid-console/docs/adr/0001-slice-1-bundle.md` — ADR pattern reference.
+- `go.work` — Go workspace, lists every Go module.
+- `pnpm-workspace.yaml` — TS workspace, declares `clients/*` and `ts/*`.
+- `turbo.json` — Turborepo task pipeline.
+- `.golangci.yml` — Go linter config; enables errcheck, revive, gosec, staticcheck, gocritic, unparam, govet, ineffassign, gofmt, goimports.
+- `Makefile` — root orchestrator; canonical `vet`, `lint`, `test`, `build`, `dev` targets.
+- `<repo>/.github/workflows/monorepo-ci.yml` — cross-cutting CI, always runs.
+- `<repo>/.github/workflows/svc-gateway.yml` — per-service CI template (copy + retarget for new services).
+- `proto/` — cross-language contract source of truth (`buf generate` outputs Go + TS + Python stubs).
+- `<repo>/docs/engineering/repo-structure.md` — subtree layout spec; `service.yaml` schema; language-boundary constraints.
+- `<repo>/docs/engineering/coding-standards.md` — language versions, strictness settings, and approval rules for new runtime choices.
+- `<repo>/docs/architecture/service-inventory.md` — current set of services, languages, and owners.
+- `<repo>/docs/adr/0001-slice-1-bundle.md` — ADR pattern reference.

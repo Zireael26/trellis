@@ -101,6 +101,21 @@ run_with_cmd() {
   [[ "$out" == *deny* ]]
 }
 
+@test "P1.1: blocks rm -rf with quoted absolute path (audit M6a)" {
+  out="$(run_with_cmd 'rm -rf "/tmp/a b"')"
+  [[ "$out" == *deny* ]]
+}
+
+@test "force-push: blocks --force-with-lease=<value> (audit M6b)" {
+  out="$(run_with_cmd 'git push --force-with-lease=main origin main')"
+  [[ "$out" == *deny* ]]
+}
+
+@test "P1.2: blocks unbounded DELETE shielded by an unrelated WHERE (audit M7)" {
+  out="$(run_with_cmd 'SELECT * FROM audit WHERE id=1; DELETE FROM users;')"
+  [[ "$out" == *deny* ]]
+}
+
 @test "P1.2: allows DELETE FROM users WHERE id=1;" {
   out="$(run_with_cmd 'DELETE FROM users WHERE id=1;')"
   [[ "$out" != *deny* ]]

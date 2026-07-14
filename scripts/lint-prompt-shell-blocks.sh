@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # lint-prompt-shell-blocks.sh — extract `bash` / `sh` fenced code blocks
-# from scheduled-task prompt files and `bash -n` syntax-check each.
+# from agent prompt files and `bash -n` syntax-check each.
 #
 # Plan task P3.9 (audit §2.3 fourth bullet).
 #
 # Usage:
 #   scripts/lint-prompt-shell-blocks.sh [path...]
-# Defaults to scheduled-tasks/ if no path given.
+# Defaults to the operator-private prompt tree when present. Public-template
+# clones have no such tree, so a no-argument run scans zero files and succeeds.
 
 set -euo pipefail
 
@@ -14,13 +15,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 paths=("$@")
-[ ${#paths[@]} -eq 0 ] && paths=("$ROOT/scheduled-tasks")
+if [ ${#paths[@]} -eq 0 ] && [ -d "$ROOT/scheduled-tasks" ]; then
+  paths=("$ROOT/scheduled-tasks")
+fi
 
 fail_count=0
 file_count=0
 block_count=0
 
-for p in "${paths[@]}"; do
+for p in ${paths[@]+"${paths[@]}"}; do
   while IFS= read -r md; do
     file_count=$((file_count + 1))
     # Extract bash/sh blocks. awk state machine: enter on ```bash / ```sh,

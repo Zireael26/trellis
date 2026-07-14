@@ -193,9 +193,11 @@ Two separate commits, one in each repo. Do **not** push either — the user push
 git status                                  # see what onboarding produced
 # Stage what's actually changed. Common candidates (only stage what exists + is untracked/modified):
 git add CLAUDE.md gotchas.md context-log.md .gitignore \
-        .claude/hooks .claude/settings.json .claude/skills/security-gate \
+        .claude/hooks .claude/settings.json .claude/primers/ \
+        .claude/skills/security-gate \
         .claude/skills/process-gate-local/local.config.sh \
-        AGENTS.md .agents/skills/security-gate \
+        AGENTS.md .agents/primers/ .agents/workflows/ \
+        .agents/skills/security-gate \
         .agents/skills/process-gate-local/local.config.sh \
         .codex/hooks.json .codex/hooks \
         .husky 2>/dev/null || true
@@ -265,8 +267,8 @@ test -L "$PROJECT/.agents/commands/primer.md"
 test -f "$PROJECT/.agents/workflows/primer.md"
 test -f "$PROJECT/.agents/workflows/explore.md"
 
-# Registry row present (mode `new`)
-grep -nF "$PROJECT" registry.md
+# Registry row present (mode `new`): match absolute path, shorthand, or projects-root-relative form
+grep -nE "\`(${PROJECT}|${PROJ_SHORT}${PROJ_REL:+|${PROJ_REL}})\`" registry.md
 
 # Both repos clean after the commits
 ( cd "$PROJECT" && git status --short )           # should be empty
@@ -275,7 +277,7 @@ git status --short                                # in Trellis canonical repo: s
 
 Report any check that fails. Don't claim success until they all pass.
 
-For mode `repair`, also note that the `parent-hook-drift` scheduled task (Sun 21:00) does a byte-level SHA comparison of hooks vs canonical. If the user wants immediate verification rather than waiting for the next run, suggest triggering it manually via `mcp__scheduled-tasks__*` (the agent tooling exposes this).
+For mode `repair`, also note that operators can configure a private hook-drift check to compare deployed hooks byte-for-byte with canonical. For immediate deterministic verification, run `scripts/doctor.sh`; do not assume an operator scheduler or named audit is installed.
 
 ### Step 8 — Final report
 
@@ -288,7 +290,7 @@ Three short blocks, in order:
    - If `package.json` exists, run `pnpm install` / `bun install` / `npm install` so husky activates `core.hooksPath`.
    - If Codex is enabled, confirm `$CODEX_HOME/config.toml` has `[features] hooks = true` (the older `codex_hooks` key still works but is deprecated as of Codex CLI 0.129+).
    - If the project is Unity / Rust / Go / Python-only, set up `.githooks/` per `core-rules/inheritance.md` "Native git hooks".
-3. **What runs automatically.** The fleet picks up the new project on its next schedule: `cross-project-process-audit` (Mon 10:00), `parent-hook-drift` (Sun 21:00), `registry-blacklist-health` (Mon 10:30). Offer to trigger any of them now via `mcp__scheduled-tasks__*` if available.
+3. **What runs automatically.** The inherited rules and hooks apply immediately. No audit schedule ships by default; if this operator has private registry-driven audits, note that the new project becomes eligible under that operator's own cadence.
 
 Hand off cleanly. Don't write a tutorial — the manual is in `engineering-process.md`.
 

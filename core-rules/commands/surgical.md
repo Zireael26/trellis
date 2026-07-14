@@ -18,8 +18,8 @@ surgical ceiling and the marker stops working — the gate re-blocks and audit-l
 the oversized claim. That cap is the whole point: surgical is for genuinely small
 changes, and the size limit keeps it honest without asking the model to judge.
 
-See `core-rules/references/mandatory-pipeline.md` for the full gate contract and
-`core-rules/hooks.md` for the marker format.
+See `engineering-process.md` (§ mandatory pipeline) / `specs/006-process-parity-and-mandatory-pipeline`
+for the full gate contract and `core-rules/hooks.md` for the marker format.
 
 ## When this is the right call
 
@@ -29,7 +29,7 @@ See `core-rules/references/mandatory-pipeline.md` for the full gate contract and
   AND the net gated diff stays under the surgical ceiling.
 
 If the change introduces or alters real behavior, or is large, this is the wrong
-command — run the spec pipeline instead (`/specify` → plan → tasks). Surgical does
+command — run `clarify -> spec -> plan -> tasks` instead. Surgical does
 not exempt you from the pipeline for a real feature; it just records that *this*
 change is not one.
 
@@ -54,7 +54,8 @@ Codex/agents path:
 
 ```bash
 if [ -f .claude/hooks/spec-gate.sh ]; then SPECGATE=.claude/hooks/spec-gate.sh
-elif [ -f .agents/hooks/spec-gate.sh ]; then SPECGATE=.agents/hooks/spec-gate.sh
+elif [ -f .codex/hooks/spec-gate.sh ]; then SPECGATE=.codex/hooks/spec-gate.sh
+elif [ -f .agents/hooks/spec-gate.sh ]; then SPECGATE=.agents/hooks/spec-gate.sh  # legacy fallback
 else echo "spec-gate not installed (run scripts/onboard-project.sh)"; fi
 ```
 

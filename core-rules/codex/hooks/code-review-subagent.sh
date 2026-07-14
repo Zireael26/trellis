@@ -10,8 +10,8 @@
 #   - Runs only on edit-heavy turns: ≥3 files changed OR ≥200 lines added/changed
 #     in `git diff HEAD`. Threshold overridable via REVIEW_MIN_FILES /
 #     REVIEW_MIN_LINES env vars from project hook config.
-#   - Pipes the RAW staged+unstaged diff (`git diff HEAD`) into the canonical
-#     reviewer ladder lib/code-reviewer.sh; findings are advisory.
+#   - Sends the staged+unstaged diff (`git diff HEAD`) to the canonical reviewer
+#     ladder in {diff, autonomy_level, decisions_log} JSON; findings are advisory.
 #   - Blocks only on severity=critical returned by the ladder.
 #   - Budget: bounded by the ladder's internal perl-alarm timeout (no outer cap).
 #
@@ -22,12 +22,12 @@
 # Status: wired (Phase 2b) — calls lib/code-reviewer.sh ladder; fail-open on
 # infra, fail-closed on a parsed `critical` finding.
 #
-# LEAN VARIANT vs the Claude hook: this hook does NOT build the autonomy /
-# decisions-log JSON envelope. It pipes the raw unified diff straight to the
-# ladder — the ladder's extract_raw_diff treats non-JSON stdin as a raw diff and
-# the reviewer prompt accepts raw-diff stdin. The L4/L5 decisions-log
-# verification clause is intentionally not wired on the Codex side; .autonomy_level
-# simply being absent is the "no decisions-log clause" path.
+# Autonomy payload contract:
+#   - lib/autonomy.sh resolves the canonical fleet -> preset -> project ->
+#     session precedence and lowest-preset ceiling.
+#   - At L4/L5, the reviewer receives up to 50 KiB of decisions-log.md and must
+#     verify decision-log completeness against the diff.
+#   - At L1-L3, decisions_log is an empty string. The findings schema is stable.
 #
 # *** REVIEWER LADDER WIRING — the crux (Phase 2a bug, do NOT repeat) ***
 # The single canonical reviewer is the ladder lib/code-reviewer.sh, invoked as a
@@ -47,9 +47,13 @@ INPUT=$(cat)
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "code-review-subagent: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
-# shellcheck source=lib/deps.sh disable=SC1090
+# shellcheck source=lib/deps.sh disable=SC1090,SC1091
 . "$__se_lib"
 _se_require_jq "code-review-subagent"
+__se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__se_autonomy_lib" ] || { echo "code-review-subagent: missing sibling lib at $__se_autonomy_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__se_autonomy_lib"
 
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
@@ -77,6 +81,31 @@ cd "$PROJECT_DIR" 2>/dev/null || exit 0
 # --- Resolve canonical repo root (worktree-aware; falls back to PROJECT_DIR) ---
 REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 
+# --- Untracked-inclusive change set (read-only) -------------------------------
+# `git diff HEAD` omits untracked files, but a turn that only CREATES new files
+# is exactly what needs review — and the reviewer must see their contents, not a
+# blank diff. Fold untracked (non-ignored) files into every count AND into the
+# reviewer payload, all from the same source, so the gate and the diff never
+# disagree. Strictly read-only: `git ls-files --others` and `git diff --no-index`
+# never touch the index (no `git add -N`), so the user's staging/status is
+# unchanged.
+# Exclude harness-state dirs: `.claude/` / `.codex/` hold symlinks, primers, and
+# THIS hook's own idempotency marker — never user code to review. Not excluding
+# them self-poisons idempotency (the marker written this turn would reappear as
+# untracked content next turn, changing the diff hash).
+_cr_untracked() { git ls-files --others --exclude-standard 2>/dev/null | grep -vE '^\.(claude|codex)/'; }
+_cr_changed_names() { { git diff HEAD --name-only 2>/dev/null; _cr_untracked; } | sort -u | sed '/^$/d'; }
+_cr_full_diff() {
+  git diff HEAD 2>/dev/null
+  local f
+  _cr_untracked | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    # --no-index vs /dev/null renders the new file as an all-additions diff. It
+    # exits 1 because the inputs differ — expected here, not an error.
+    git diff --no-index -- /dev/null "$f" 2>/dev/null || true
+  done
+}
+
 # --- TRELLIS_REVIEW_OVERRIDE escape ---
 # Documented, LOGGED deferral — mirrors the TRELLIS_ALLOW_MAIN_PUSH tripwire. When
 # the operator sets this, code-review is skipped for this turn, but NEVER silently:
@@ -85,7 +114,7 @@ REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 # dated format session-context.sh greps ("- 20YY-..."). The decisions-log stays at
 # the canonical repo root (NOT under .codex) — it is shared across harnesses.
 if [ -n "${TRELLIS_REVIEW_OVERRIDE:-}" ]; then
-  OVERRIDE_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+  OVERRIDE_FILES=$(_cr_changed_names | awk 'END{print NR}')
   if printf '%s\n' "- $(date +%Y-%m-%d) code-review deferred via TRELLIS_REVIEW_OVERRIDE on a turn touching ${OVERRIDE_FILES} file(s)" \
        >> "$REPO_ROOT/decisions-log.md" 2>/dev/null; then
     :
@@ -108,11 +137,15 @@ MIN_LINES="${REVIEW_MIN_LINES:-200}"
 
 # Count always outputs a number, never errors. Avoid `grep -c '^' || echo 0` —
 # that doubles output to "0\n0" on empty input and breaks numeric comparisons.
-CHANGED_FILES=$(git diff HEAD --name-only 2>/dev/null | awk 'END{print NR}')
+CHANGED_FILES=$(_cr_changed_names | awk 'END{print NR}')
 
-# Sum added+deleted lines from numstat; skip binary rows (marked '-').
-CHANGED_LINES=$(git diff HEAD --numstat 2>/dev/null \
+# Sum added+deleted lines: tracked via numstat (skip binary rows marked '-'),
+# untracked via line count (the whole new file is an addition).
+TRACKED_LINES=$(git diff HEAD --numstat 2>/dev/null \
   | awk '$1 != "-" && $2 != "-" { sum += $1 + $2 } END { print sum+0 }')
+UNTRACKED_LINES=$(_cr_untracked | while IFS= read -r f; do [ -f "$f" ] && wc -l < "$f" 2>/dev/null; done \
+  | awk '{ sum += $1 } END { print sum+0 }')
+CHANGED_LINES=$((TRACKED_LINES + UNTRACKED_LINES))
 
 if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" ]; then
   exit 0
@@ -124,7 +157,7 @@ fi
 # or `docs/examples/app.ts`. The `(^|/)[^/]+\.ext$` anchor matches the final
 # path segment only, so a doc anywhere in the tree (e.g. `src/notes.md`) still
 # counts as a doc and a non-doc under `docs/` still counts as a non-doc.
-NONDOC_COUNT=$(git diff HEAD --name-only 2>/dev/null \
+NONDOC_COUNT=$(_cr_changed_names \
   | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
   | awk 'END{print NR}')
 if [ "$NONDOC_COUNT" -eq 0 ]; then
@@ -132,29 +165,45 @@ if [ "$NONDOC_COUNT" -eq 0 ]; then
 fi
 
 # --- Gather the diff for the reviewer (capped) ---
-DIFF=$(git diff HEAD 2>/dev/null | head -c 200000)
+DIFF=$(_cr_full_diff | head -c 200000)
 if [ -z "$DIFF" ]; then
   exit 0
 fi
 
 # --- Idempotency marker ---
 # A turn can fire this hook AND run the execute-body review over the same diff;
-# we must not double-charge the LLM. Key the marker on a sha256 of the diff
-# (shasum -a 256 — macOS has no sha256sum). If this exact diff was already
-# reviewed this turn, exit 0. The marker is touched only AFTER a completed
+# we must not double-charge the LLM. Key the marker on a content hash of the
+# diff (git hash-object --stdin — always present in a git hook, no coreutils
+# dependency). If this exact diff was already reviewed this turn, exit 0. The marker is touched only AFTER a completed
 # review (clean + advisory paths), NOT on the block path — a blocked turn must
 # re-review once the diff changes via the fix. Codex marker lives under .codex/.
-DIFF_HASH=$(printf '%s' "$DIFF" | shasum -a 256 | awk '{print $1}')
+DIFF_HASH=$(printf '%s' "$DIFF" | git hash-object --stdin 2>/dev/null)
 MARKER="$REPO_ROOT/.codex/.review-done-${DIFF_HASH}"
 if [ -f "$MARKER" ]; then
   exit 0
 fi
 
+# --- Build the reviewer envelope ---
+# Resolve once, from the same shared policy interpreter as session-context.sh,
+# so the review clause cannot disagree with the level shown at SessionStart.
+_se_resolve_autonomy "$REPO_ROOT"
+export AUTONOMY_LEVEL
+export DECISIONS_LOG_PATH="$REPO_ROOT/decisions-log.md"
+if [ "$AUTONOMY_LEVEL" -ge 4 ] && [ -f "$DECISIONS_LOG_PATH" ]; then
+  DECISIONS_PAYLOAD=$(head -c 50000 "$DECISIONS_LOG_PATH" 2>/dev/null)
+else
+  DECISIONS_PAYLOAD=""
+fi
+REVIEW_PAYLOAD=$(jq -nc \
+  --arg diff "$DIFF" \
+  --arg level "$AUTONOMY_LEVEL" \
+  --arg decisions "$DECISIONS_PAYLOAD" \
+  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions}')
+
 # --- Invoke the reviewer ladder (sibling lib) ---
 # The 3-rung ladder (operator override → claude -p → deterministic regex) owns
 # rung selection and ALWAYS emits one findings line, fail-open on every infra
-# failure. LEAN: pipe the RAW diff — extract_raw_diff treats non-JSON stdin as a
-# raw diff. Do NOT pre-export TRELLIS_REVIEW_IN_PROGRESS here: the ladder gates
+# failure. Do NOT pre-export TRELLIS_REVIEW_IN_PROGRESS here: the ladder gates
 # rung 2 on that sentinel, so pre-setting it would force every default-path call
 # straight to the rung-3 regex and the built-in `claude -p` reviewer would never
 # run. The ladder exports the sentinel itself before spawning ANY child, so the
@@ -169,7 +218,7 @@ if [ ! -f "$HOOK_DIR/lib/code-reviewer.sh" ]; then
   # Fail-OPEN: the ladder core was not synced beside this hook. Never block.
   exit 0
 fi
-FINDINGS=$(printf '%s' "$DIFF" | bash "$HOOK_DIR/lib/code-reviewer.sh" || true)
+FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$HOOK_DIR/lib/code-reviewer.sh" || true)
 
 if [ -n "$FINDINGS" ]; then
   CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)

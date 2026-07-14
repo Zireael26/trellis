@@ -54,6 +54,7 @@ _make_mg_instance() {
   cp "$CANON_HUSKY" "$MG_ROOT/core-rules/husky/pre-push"
   cp "$CANON_GITHOOKS" "$MG_ROOT/core-rules/githooks/pre-push"
   cp "$SRC_ROOT/scripts/sync-merge-gate.sh" "$MG_ROOT/scripts/sync-merge-gate.sh"
+  cp "$SRC_ROOT/scripts/lib/blacklist-parser.sh" "$MG_ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/config-load.sh" "$MG_ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/prepush-target.sh" "$MG_ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/trellis.config.schema.json" "$MG_ROOT/scripts/lib/"

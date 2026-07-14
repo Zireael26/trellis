@@ -9,7 +9,7 @@ Single **info** finding emitted: `dep-currency requires host execution; sandbox 
 
 ## Why this run was skipped
 
-Per `scheduled-tasks/dep-currency/targets.md` ("Runner requirement"), this task must run on the user's macOS host. The trigger condition was met:
+Per the operator's dependency-currency runner policy, this task must run on the user's macOS host. The trigger condition was met:
 
 1. `uname` is `Linux` (not `Darwin`) — running in the default linux-arm64 scheduled-task sandbox.
 2. Registered project paths (`__PROJECTS_ROOT__/project-a`, `__PROJECTS_ROOT__/project-b`, `__PROJECTS_ROOT__/project-c`, `__PROJECTS_ROOT__/project-d`, `__PROJECTS_ROOT__/project-e`) are unreachable from this sandbox — only `se-core` is mounted.

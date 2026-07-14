@@ -114,7 +114,7 @@ Symmetry with skills:
 | Project symlink (Codex) | `.agents/skills/<name>/` | `.agents/rules/preset-<name>.md` |
 | Opt-in mechanism | Always seeded by `onboard-project.sh` | Only seeded when project's `.trellis.config.json` declares it |
 | Rollout script | `scripts/rollout-feature-skills.sh` | `scripts/rollout-presets.sh` |
-| Drift audit | `parent-hook-drift` (skills section) | `scheduled-tasks/preset-drift/` |
+| Drift audit | operator hook-drift check | operator preset-drift check |
 | Silent-drop invariant | yes — broken symlink → skill doesn't load | yes — broken symlink → preset rules don't load |
 
 Removing a preset from the project's config + re-running `rollout-presets.sh` prunes the now-stale symlink automatically.
@@ -192,7 +192,7 @@ Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot 
 - That directory MUST contain a `pre-push` whose body includes the canonical Trellis PR-flow guard (block direct push to `main`/`master`, `TRELLIS_ALLOW_MAIN_PUSH=1` override).
 - The hooks directory and its scripts MUST be tracked in git so the enforcement is visible in repo state and survives a clone.
 
-Reference example: `lume` (Unity 3D) uses `.githooks/pre-push` with `core.hooksPath = .githooks`. The `cross-project-process-audit` rubric skips the husky-presence check when `package.json` is absent and the native-hooks fallback is in place — see `scheduled-tasks/cross-project-process-audit/prompt.md` §3.
+Reference example: a Unity project using `.githooks/pre-push` with `core.hooksPath = .githooks` should be treated as healthy when `package.json` is absent and the native-hooks fallback is in place. Operator process audits should encode the same exception.
 
 ## Worktree inheritance (`git worktree add` re-seeding)
 

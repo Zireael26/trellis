@@ -45,7 +45,7 @@ The following hook scripts under `core-rules/hooks/` carry "upstream" or "upstre
 - Three-tier hook architecture (`core-rules/hooks.md`)
 - `code-review-subagent.sh` + `ui-verify.sh` hook skeletons (no upstream equivalents)
 - Inheritance mechanism: `.claude/rules/trellis.md` symlink as load-bearing primary, `@`-import as interactive fallback (`core-rules/inheritance.md`)
-- The whole `scheduled-tasks/` stack (10 Tier-1 tasks + 2 Tier-2 drafts)
+- Registry-driven audit/report conventions; operator schedules, prompts, targets, and fleet inventory are deliberately excluded
 - Rule of Three / `core-rules/deferred.md` discipline
 - `engineering-process.md` narrative manual
 

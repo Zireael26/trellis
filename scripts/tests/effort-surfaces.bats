@@ -13,7 +13,7 @@ HONEST="Report failures as failures. Never claim completion without the proof co
 
 _args_for() {
   local recipe="$1" matrix_case="$2"
-  local effort="high" justification="bounded test justification"
+  local effort="xhigh" justification="bounded test justification"
 
   case "$matrix_case" in
     omitted) effort="__OMITTED__" ;;
@@ -21,29 +21,29 @@ _args_for() {
     max-no-justification) effort="max"; justification="" ;;
     ultra) effort="ultra" ;;
     unsupported) effort="max" ;;
-    happy|sc4) effort="high" ;;
+    happy|sc4) effort="xhigh" ;;
   esac
 
   case "$(basename "$recipe")" in
     codex-executor.wf.js)
       if [ "$effort" = "__OMITTED__" ]; then
-        printf '%s' '{"codexAvailable":true,"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change"}]}'
+        printf '%s' '{"codexAvailable":true,"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","targetCwd":"/tmp/unit-alpha"}]}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["medium","high","xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"%s","justification":"%s","paths":"src/alpha.js","constraints":"touch one file","nonGoals":"unrelated cleanup","proof":"node --check src/alpha.js"}]}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"%s","justification":"%s","targetCwd":"/tmp/unit-alpha","paths":"src/alpha.js","constraints":"touch one file","nonGoals":"unrelated cleanup","proof":"node --check src/alpha.js"}]}' "$effort" "$justification"
       fi
       ;;
     verify-panel.wf.js)
       if [ "$effort" = "__OMITTED__" ]; then
-        printf '%s' '{"codexAvailable":true,"findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}'
+        printf '%s' '{"codexAvailable":true,"targetCwd":"/tmp/repo-alpha","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["medium","high","xhigh"],"effort":"%s","justification":"%s","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"targetCwd":"/tmp/repo-alpha","effort":"%s","justification":"%s","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}' "$effort" "$justification"
       fi
       ;;
     fleet-audit-remediation.wf.js)
       if [ "$effort" = "__OMITTED__" ]; then
         printf '%s' '{"codexAvailable":true,"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["medium","high","xhigh"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"%s","justification":"%s","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"%s","justification":"%s","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}' "$effort" "$justification"
       fi
       ;;
   esac
@@ -107,7 +107,7 @@ _json_assert() {
   local recipe
   for recipe in "${RECIPES[@]}"; do
     _run_recipe "$recipe" happy
-    _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === 'high' && r.result.verdicts[0].justification === 'bounded test justification'"
+    _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === 'xhigh' && r.result.verdicts[0].justification === 'bounded test justification'"
   done
 }
 
@@ -119,5 +119,23 @@ _json_assert() {
   done
 
   _run_recipe "$PANEL_RECIPE" sc4
-  _json_assert "!r.error && r.prompts.some((entry) => /codex-verify/.test(entry.opts.label || '') && entry.prompt.includes('--effort high'))"
+  _json_assert "!r.error && r.prompts.some((entry) => /codex-verify/.test(entry.opts.label || '') && entry.prompt.includes('--effort xhigh'))"
+}
+
+@test "H2: codex-executor producer and verifier use the same caller worktree without engine isolation" {
+  run node "$STUB" "$CODEX_RECIPE" '{"codexAvailable":true,"supportedEfforts":["xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"xhigh"}]}'
+  [ "$status" -eq 0 ]
+  _json_assert "r.error && /targetCwd/.test(r.error.message) && /stable producer\/verifier worktree/.test(r.error.message) && r.prompts.length === 0"
+
+  _run_recipe "$CODEX_RECIPE" happy
+  _json_assert "!r.error && (() => { const producer = r.prompts.find((entry) => entry.opts.label === 'codex:unit-alpha'); const verifier = r.prompts.find((entry) => entry.opts.label === 'verify:unit-alpha'); return producer && verifier && producer.prompt.includes('TARGET_CWD: /tmp/unit-alpha') && verifier.prompt.includes('TARGET_CWD: /tmp/unit-alpha') && !('isolation' in producer.opts) && !('isolation' in verifier.opts) && verifier.prompt.includes('git diff --cached') && verifier.prompt.includes('untracked declared files'); })()"
+}
+
+@test "M9: verify-panel requires targetCwd and includes it in the Codex work order" {
+  run node "$STUB" "$PANEL_RECIPE" '{"codexAvailable":true,"supportedEfforts":["xhigh"],"effort":"xhigh","findings":[],"context":"fixture"}'
+  [ "$status" -eq 0 ]
+  _json_assert "r.error && /targetCwd/.test(r.error.message) && r.prompts.length === 0"
+
+  _run_recipe "$PANEL_RECIPE" happy
+  _json_assert "!r.error && r.prompts.some((entry) => entry.opts.label === 'codex-verify:finding-alpha' && entry.prompt.includes('TARGET_CWD: /tmp/repo-alpha'))"
 }

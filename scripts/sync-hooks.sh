@@ -40,6 +40,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 # shellcheck source=lib/settings-hooks-merge.sh
 . "$SCRIPT_DIR/lib/settings-hooks-merge.sh"
 
@@ -153,20 +155,6 @@ read_registry() {
   ' "$REGISTRY"
 }
 
-read_blacklist_names() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## (Blacklisted|Currently exempt|Active blacklist)/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0
-      gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-    }
-  ' "$BLACKLIST"
-}
-
 resolve_project_path() {
   # Map a registry name to absolute path under PROJECTS_ROOT.
   # registry uses paths like `/personal/<name>` — we strip /personal/ and
@@ -183,7 +171,7 @@ done < <(read_registry)
 BLACKLIST_NAMES=()
 while IFS= read -r line; do
   [ -n "$line" ] && BLACKLIST_NAMES+=("$line")
-done < <(read_blacklist_names)
+done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local name="$1" b

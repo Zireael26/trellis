@@ -17,6 +17,7 @@
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 GATE="$REPO/core-rules/hooks/spec-gate.sh"
 CODEX_GATE="$REPO/core-rules/codex/hooks/spec-gate.sh"
+CORE="$REPO/core-rules/hooks/lib/spec-gate-core.sh"
 
 setup() {
   SANDBOX="$(mktemp -d)"
@@ -26,9 +27,12 @@ setup() {
   git init -q -b main
   git config user.email t@t.t
   git config user.name t
+  unset TRELLIS_ROOT
   # base commit on main so a feature branch has a merge-base
   echo "seed" > README.md
   git add -A && git commit -qm "init" >/dev/null
+  TRELLIS_FIXTURE="$SANDBOX/trellis"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
 }
 
 teardown() {
@@ -78,6 +82,29 @@ _real_triad() {
 # run the pre-push gate CLI from inside the fixture repo.
 _gate() {
   ( cd "$REPO_DIR" && bash "$GATE" --gate )
+}
+
+_resolved_cfg() {
+  ( . "$CORE" && sg_resolve_cfg "$REPO_DIR" )
+}
+
+_autonomy_level() {
+  ( . "$CORE" && sg_autonomy_level "$REPO_DIR" )
+}
+
+_write_fleet_autonomy() {
+  printf '{"autonomy_default":%s}\n' "$1" > "$TRELLIS_FIXTURE/trellis.config.json"
+}
+
+_write_project_autonomy() {
+  local autonomy_json="$1" presets_json="${2:-[]}"
+  jq -n \
+    --arg root "$TRELLIS_FIXTURE" \
+    --argjson autonomy "$autonomy_json" \
+    --argjson presets "$presets_json" \
+    '{trellis_root: $root, presets: $presets}
+     + (if $autonomy == null then {} else {autonomy: $autonomy} end)' \
+    > "$REPO_DIR/.trellis.config.json"
 }
 
 # --- default-off invariant (SC5) --------------------------------------------
@@ -240,6 +267,103 @@ _gate() {
 
 # --- L4/L5 interview path ----------------------------------------------------
 
+@test "autonomy resolver preserves every fleet default from L1 through L5" {
+  _write_project_autonomy null '[]'
+  local level
+  for level in 1 2 3 4 5; do
+    _write_fleet_autonomy "$level"
+    run _autonomy_level
+    [ "$status" -eq 0 ]
+    [ "$output" = "$level" ]
+  done
+}
+
+@test "autonomy resolver uses active preset default when project override is absent" {
+  _write_fleet_autonomy 2
+  cat > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md" <<'EOF'
+---
+autonomy_ceiling: 5
+autonomy_default: 4
+---
+EOF
+  _write_project_autonomy null '["experimental"]'
+
+  run _autonomy_level
+  [ "$status" -eq 0 ]
+  [ "$output" = "4" ]
+}
+
+@test "autonomy resolver project override beats fleet and preset defaults" {
+  _write_fleet_autonomy 1
+  cat > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md" <<'EOF'
+---
+autonomy_ceiling: 5
+autonomy_default: 5
+---
+EOF
+  _write_project_autonomy 4 '["experimental"]'
+
+  run _autonomy_level
+  [ "$status" -eq 0 ]
+  [ "$output" = "4" ]
+}
+
+@test "autonomy resolver session override is clamped to lowest active preset ceiling" {
+  _write_fleet_autonomy 3
+  cat > "$TRELLIS_FIXTURE/core-rules/presets/loose.md" <<'EOF'
+---
+autonomy_ceiling: 5
+autonomy_default: 4
+---
+EOF
+  cat > "$TRELLIS_FIXTURE/core-rules/presets/strict.md" <<'EOF'
+---
+autonomy_ceiling: 2
+---
+EOF
+  _write_project_autonomy 1 '["loose","strict"]'
+  mkdir -p "$REPO_DIR/.claude"
+  printf '5\n' > "$REPO_DIR/.claude/session-autonomy"
+
+  run _autonomy_level
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+@test "project L4 selects the decisions-log interview path" {
+  _config true 80 400
+  _write_fleet_autonomy 2
+  _write_project_autonomy 4 '[]'
+  _write_lines src/f.js 200
+  _real_triad 001-feature
+  git checkout -q -b feat/project-l4
+  printf '# decisions\n- feat/project-l4: self-answered intake\n' > "$REPO_DIR/decisions-log.md"
+  git add -A && git commit -qm "feat: project L4 spec" >/dev/null
+
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
+@test "preset ceiling clamps L5 session to L2 interview path" {
+  _config true 80 400
+  _write_fleet_autonomy 3
+  cat > "$TRELLIS_FIXTURE/core-rules/presets/strict.md" <<'EOF'
+---
+autonomy_ceiling: 2
+---
+EOF
+  _write_project_autonomy null '["strict"]'
+  mkdir -p "$REPO_DIR/.claude"
+  printf '5\n' > "$REPO_DIR/.claude/session-autonomy"
+  _write_lines src/f.js 200
+  _real_triad 001-feature with_clarify
+  git checkout -q -b feat/clamped-l2
+  git add -A && git commit -qm "feat: clamped interview path" >/dev/null
+
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
 @test "L5 + in-range triad + decisions-log entry (no clarify.md) -> pass" {
   _config true 80 400
   printf '5\n' > "$REPO_DIR/.claude/session-autonomy" 2>/dev/null || { mkdir -p "$REPO_DIR/.claude"; printf '5\n' > "$REPO_DIR/.claude/session-autonomy"; }
@@ -285,6 +409,30 @@ JSON
   [ "$status" -eq 1 ]
 }
 
+@test "missing optional thresholds use the documented defaults" {
+  cat > "$REPO_DIR/trellis.config.json" <<'JSON'
+{ "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true } }
+JSON
+
+  run _resolved_cfg
+  [ "$status" -eq 0 ]
+  [ "$output" = "true 80 400 ok" ]
+}
+
+@test "malformed: present thresholds must be positive JSON integers" {
+  local key value
+  for key in spec_required_diff_lines surgical_max_diff_lines; do
+    for value in '"80"' -1 0 1.5 null true; do
+      printf '{ "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true, "%s": %s } }\n' \
+        "$key" "$value" > "$REPO_DIR/trellis.config.json"
+
+      run _gate
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"malformed"* ]]
+    done
+  done
+}
+
 # --- fail-open on a broken environment --------------------------------------
 
 @test "detached HEAD -> advisory (fail-open, exit 0)" {
@@ -325,6 +473,18 @@ JSON
   run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$GATE'"
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]]
+}
+
+@test "Stop-hook mode: stop_hook_active=true -> exit 0 (re-entrancy guard, no infinite loop)" {
+  _config true 80 400
+  _write_lines src/f.js 200
+  git checkout -q -b feat/stopguard
+  git add -A && git commit -qm "feat: big" >/dev/null
+  # Same blocking state as above, but the Stop event is already re-entrant:
+  # the guard must exit 0 instead of re-blocking (else infinite Stop loop).
+  run bash -c "cd '$REPO_DIR' && printf '{\"stop_hook_active\":true}' | bash '$GATE'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'"decision":"block"'* ]]
 }
 
 @test "Stop-hook mode: passing state -> exit 0, no block JSON (Claude)" {

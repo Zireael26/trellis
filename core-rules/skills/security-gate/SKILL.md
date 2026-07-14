@@ -1,6 +1,6 @@
 ---
 name: security-gate
-description: Project-wide security baseline scanner for any registered Trellis project. Use to establish ground truth across the entire codebase (SAST, dependency, secret findings) before relying on per-PR diff scans. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer. Phase 1 ships Mode 1 (baseline) only; diff (Phase 2), scheduled re-baseline (Phase 3), LLM-app probes (Phase 4), Unity profile (Phase 5), and red-team (Phase 6) follow.
+description: Security scanner for any registered Trellis project. All three modes ship: project-wide baseline, per-PR diff, and chained-exploit red-team reasoning. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer.
 ---
 
 # security-gate
@@ -20,7 +20,7 @@ When in doubt, that document and `engineering-process.md` win. If a rule here co
 ## When to use
 
 - **At onboarding.** First run after wiring a project into `registry.md` — establishes the ground-truth findings JSON that every later diff scan reads.
-- **On a slow cadence.** Default quarterly via `scheduled-tasks/security-baseline/` (Phase 3). Drift between baselines is normal; the roll-up records new vs. recurring vs. resolved.
+- **On a slow cadence.** Operators should run a private quarterly baseline. Drift between baselines is normal; the roll-up records new vs. recurring vs. resolved.
 - **Pre-release.** Before cutting a major version, re-run baseline to catch latent issues that diff scans skipped because no PR touched them.
 - **Post-incident.** After a CVE disclosure or near-miss, re-run baseline so the next diff has a clean reference.
 

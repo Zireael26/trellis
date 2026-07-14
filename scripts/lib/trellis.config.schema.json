@@ -83,7 +83,7 @@
       "enum": ["auto", "gnu", "bsd"]
     },
     "approved_mcps": {
-      "description": "Optional. Allowlist of MCP server names sanctioned for use across registered projects. Today this is documentation only — projects MAY connect MCPs not listed here. A future audit (mcp-drift) is reserved to warn when a project's .mcp.json references an unapproved server. Names match the server name as exposed to the harness (e.g., the prefix before '__' in mcp__<server>__<tool>). Examples: 'scheduled-tasks' (Trellis audits), 'computer-use', 'claude-in-chrome', 'Vercel', 'Cloudflare', 'obsidian'.",
+      "description": "Optional. Allowlist of MCP server names sanctioned for use across registered projects. Today this is documentation only — projects MAY connect MCPs not listed here. An operator audit may warn when a project's .mcp.json references an unapproved server. Names match the server name as exposed to the harness (e.g., the prefix before '__' in mcp__<server>__<tool>). Examples: 'operator-scheduler', 'computer-use', 'claude-in-chrome', 'Vercel', 'Cloudflare', 'obsidian'.",
       "type": "array",
       "items": {
         "type": "object",
@@ -160,6 +160,19 @@
         }
       },
       "additionalProperties": true
+    },
+    "codex_fanout": {
+      "description": "Optional central configuration for the codex-fanout recipe. Callers resolve concurrency from this block and pass it explicitly as args.codexCap; the recipe has no baked fallback. When this block is present, concurrency is required and must be a positive integer. The public example uses 4 as the fleet baseline.",
+      "type": "object",
+      "required": ["concurrency"],
+      "properties": {
+        "concurrency": {
+          "description": "Maximum Codex generation units admitted to one fan-out wave. Claude units do not consume this cap. Must be resolved by the caller and passed as codexCap.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "loop_safety": {
       "description": "Optional. Instance baseline for the loop-safety contract (core-rules/loop-safety.md). Every Trellis loop declares and honors three ceilings and halts on ANY one. Every key is optional; absence of a key or of the whole object falls back to the documented built-in fallback constants identical to these baselines (max_iterations 100; no_progress_iterations 3; budget_ceiling_usd 1000; usd_per_mtok 25.00). The optional codex_usd_per_mtok has no baseline constant: absent, cross-harness Codex spend is attributed at usd_per_mtok (backward compatible). Resolution, most specific wins: per-loop `safety` override → project-local <project>/.trellis.config.json.loop_safety → this central block → built-in fallback constants. Absence of the object is byte-identical to the defaults — this key is purely additive.",

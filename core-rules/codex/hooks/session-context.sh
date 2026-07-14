@@ -5,7 +5,8 @@
 # Contract:
 #   - Runs on SessionStart with source=startup or source=resume.
 #   - Assembles: current branch, last 5 commits, dirty-file count,
-#     context-log.md (if present), unresolved gotchas.md entries.
+#     context-log.md (if present), resolved autonomy + recent L4/L5 decisions,
+#     unresolved gotchas.md entries.
 #   - context-log.md and gotchas.md are read from the canonical project root
 #     (resolved via `git rev-parse --git-common-dir`) so worktree sessions
 #     still see the repo-level files.
@@ -23,9 +24,13 @@ INPUT=$(cat 2>/dev/null || true)
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "session-context: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
-# shellcheck source=lib/deps.sh disable=SC1090
+# shellcheck source=lib/deps.sh disable=SC1090,SC1091
 . "$__se_lib"
 _se_require_jq "session-context"
+__se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__se_autonomy_lib" ] || { echo "session-context: missing sibling lib at $__se_autonomy_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__se_autonomy_lib"
 
 SOURCE=$(printf '%s' "$INPUT" | jq -r '.source // "startup"')
 
@@ -72,7 +77,7 @@ fi
 # --- audit digest (unresolved findings, from daily-project-digest) ---
 # C1: a tiny advisory PUSH — unresolved audit findings surface the moment work
 # begins, instead of the PULL of a separate cron report. The emitter
-# (scheduled-tasks/daily-project-digest) writes a count + top item to this file;
+# An optional operator digest writes a count + top item to this file;
 # kept to head -c 400 so it cannot crowd out real context under the $CTX cap.
 # Advisory only — never blocks or mutates.
 if [ -f "${REPO_ROOT}/.claude/audit-digest.md" ]; then
@@ -81,6 +86,30 @@ if [ -f "${REPO_ROOT}/.claude/audit-digest.md" ]; then
 ${DIGEST_CONTENT}
 
 "
+fi
+
+# --- Autonomy level + recent decisions ---
+# The shared resolver implements the complete canonical pick/clamp algorithm,
+# including preset defaults and the lowest active preset ceiling.
+_se_resolve_autonomy "$REPO_ROOT"
+CTX="${CTX}--- Autonomy ---
+Level: L${AUTONOMY_LEVEL} (${AUTONOMY_NAME})
+"
+if [ "$AUTONOMY_CLAMPED" -eq 1 ]; then
+  CTX="${CTX}Requested autonomy L${AUTONOMY_REQUESTED_LEVEL}, clamped to L${AUTONOMY_CEILING} (preset ${AUTONOMY_LIMITING_PRESET}).
+"
+fi
+CTX="${CTX}
+"
+
+if [ "$AUTONOMY_LEVEL" -ge 4 ] && [ -f "$REPO_ROOT/decisions-log.md" ]; then
+  RECENT=$(grep -E '^- 20[0-9]{2}-' "$REPO_ROOT/decisions-log.md" 2>/dev/null | tail -10)
+  if [ -n "$RECENT" ]; then
+    CTX="${CTX}--- Recent decisions (L4/L5) ---
+${RECENT}
+
+"
+  fi
 fi
 
 # --- Unresolved gotchas ---
@@ -101,8 +130,14 @@ fi
 # --- Worktree inheritance safety-net ---
 # Detect a linked worktree missing its Trellis inheritance symlinks.
 # Fail-safe: any error is swallowed; hook always continues normally.
-# NOTE: seeder stdout/stderr is suppressed to protect the JSON contract.
+# NOTE: seeder stdout/stderr is suppressed to protect the JSON contract. The
+# subshell also isolates a set -u abort in the detection body, so keep the
+# `( ... ) > file 2>/dev/null || true` structure (capturing via $() would leak
+# the abort and kill the hook). mktemp — not a predictable /tmp/$$ path —
+# avoids a symlink/collision race; if mktemp fails we skip detection rather
+# than let `printf 'WARN'` leak into the JSON on stdout.
 _se_worktree_warn=""
+if _se_wt_tmp=$(mktemp "${TMPDIR:-/tmp}/trellis-wtwarn.XXXXXX" 2>/dev/null); then
 (
   command -v git >/dev/null 2>&1 || exit 0
   common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
@@ -162,9 +197,10 @@ _se_worktree_warn=""
   bash "$seeder" --target "$PWD" --quiet >/dev/null 2>&1 || true
   # Signal that warning should be emitted.
   printf 'WARN'
-) > /tmp/_trellis_wt_warn_$$ 2>/dev/null || true
-_se_worktree_warn=$(cat /tmp/_trellis_wt_warn_$$ 2>/dev/null || true)
-rm -f /tmp/_trellis_wt_warn_$$ 2>/dev/null || true
+) > "$_se_wt_tmp" 2>/dev/null || true
+_se_worktree_warn=$(cat "$_se_wt_tmp" 2>/dev/null || true)
+rm -f "$_se_wt_tmp" 2>/dev/null || true
+fi
 
 if [ "${_se_worktree_warn:-}" = "WARN" ]; then
   _se_wt_msg="⚠️ TRELLIS INHERITANCE WAS MISSING IN THIS WORKTREE. Parent rules + skills (process-gate, etc.) did not load for THIS session — Claude Code enumerates them at startup, before this hook ran. I have re-created the symlinks; RESTART this session (or open a new one in this worktree) to load them. Until then, parent rules/skills are NOT active. Tip: create worktrees with \`trellis worktree add <path>\` to avoid this."

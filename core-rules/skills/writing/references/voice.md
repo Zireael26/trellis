@@ -8,8 +8,8 @@ lives, what it contains, how it is seeded, and what you do when it is missing.
 ## Location — `docs/voice.md` in the target content repo
 
 The voice file lives at `docs/voice.md` in the **repo whose surface you are
-writing for** — akaushik.org for the operator's personal posts, a fleet
-project's own repo for its brand voice.
+writing for** — a personal publishing repo for the operator's posts, or a
+fleet project's own repo for its brand voice.
 
 **Never under trellis `core-rules/`.** The public-mirror sync publishes
 `core-rules/skills/` wholesale; a voice file anywhere inside it would ship on
@@ -22,7 +22,7 @@ their own file.
 
 A personal site and a product do not speak the same voice: first-person
 receipts-and-scars prose is right for the operator's blog and wrong for a
-curat- or neev-class changelog, and the reverse holds too. One central voice
+product changelog, and the reverse holds too. One central voice
 file would be wrong for both, so there is none — only the target repo's own.
 
 ## Schema — the sections a voice.md must have

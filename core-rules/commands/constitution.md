@@ -5,6 +5,12 @@ argument-hint:
 
 # Constitution — render the layered rule stack
 
+> **Control-plane-only diagnostic.** Trellis intentionally does not seed this
+> command into project command directories and does not include it in
+> `HC_CANONICAL_COMMANDS`. The `analyze` skill performs the project-facing
+> constitution check; this command is the canonical operator's full-text
+> renderer for inspecting the layer contract itself.
+
 You are rendering the effective rule "constitution" for THIS repo: the §14.8 layer stack (parent → presets → project-local) exactly as the harness loads it, each rule labelled with the layer it came from. This is a render-only surfacing command. It **assembles, never adjudicates**, and it **writes nothing** — pure stdout, no audit file, git stays clean after a run.
 
 The point is to make the otherwise-invisible composition visible: every session silently concatenates parent rules + any opt-in presets + the project-local `CLAUDE.md`, and an operator can't easily see which layer a given rule lives in. This command prints that stack with `[parent]` / `[preset:<name>]` / `[project]` provenance so a human can read the whole inherited constitution in one place.
@@ -25,7 +31,7 @@ The rules directory is `<canonical-root>/.claude/rules/`. If it does not exist, 
 
 ### 2. Assemble the layers — in §14.8 order
 
-Read the actual files the harness loads, in the layer order from `engineering-process.md` §14.8. Read the rules **directory directly** — that is literally what the engine concatenates. Do **not** read the project's `.trellis.config.json` `presets` array and reconcile it against what's on disk: declared-vs-present is drift detection, which `scheduled-tasks/preset-drift/` owns, and reconciling would drift this command toward adjudication. Render what is loaded, not what is declared.
+Read the actual files the harness loads, in the layer order from `engineering-process.md` §14.8. Read the rules **directory directly** — that is literally what the engine concatenates. Do **not** read the project's `.trellis.config.json` `presets` array and reconcile it against what's on disk: declared-vs-present belongs to an operator drift check, and reconciling would drift this command toward adjudication. Render what is loaded, not what is declared.
 
 **a. `[parent]` — the base layer.**
 `<canonical-root>/.claude/rules/trellis.md` is a symlink into the control plane. Follow it to its target and read the target file's contents. Label everything from it `[parent]`. Render it as-is: if the parent `CLAUDE.md` contains `@`-imports (e.g. to `engineering-process.md`), **do not recursively expand them** — print the parent file's own text and let its internal pointers stand. Expanding would explode the output and isn't the stack the §14.8 contract is talking about.

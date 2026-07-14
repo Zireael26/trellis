@@ -3,6 +3,7 @@
 # Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
+#   - TRELLIS_REVIEW_IN_PROGRESS=1: exit 0 immediately (nested-review guard).
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).
 #   - Pure chat / no edits: exit 0 (skip).
 #   - Runs checks in order. On any failure, emit
@@ -43,6 +44,12 @@
 #   - Subtree scoping (auto-detects nested manifests; PROCESS_GATE_FORCE_ROOT escape).
 
 set -u
+
+# Nested reviewers inherit the parent's dirty worktree. Do not make their Stop
+# event run the parent turn's verifier (or recursively gate reviewer teardown).
+if [ "${TRELLIS_REVIEW_IN_PROGRESS:-0}" = "1" ]; then
+  exit 0
+fi
 
 INPUT=$(cat)
 
@@ -267,7 +274,7 @@ fi
 if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-  if command -v npx >/dev/null 2>&1; then
+  if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
     OUT=$(npx --no-install eslint . --quiet 2>&1)
     if [ $? -ne 0 ]; then

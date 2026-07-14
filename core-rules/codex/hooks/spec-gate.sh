@@ -51,8 +51,14 @@ if [ "$1" = "--gate" ]; then
 fi
 
 # --- Claude Stop-hook early-warning mode ------------------------------------
-# Drain any event JSON on stdin (the verdict is state-based, not stdin-based).
-cat >/dev/null 2>&1 || true
+# Read the event JSON. Mandatory re-entrancy guard (core-rules/hooks.md): if this
+# Stop is already firing because a prior Stop hook blocked, do NOT re-block — exit
+# 0 to break the loop. The verdict itself is state-based, not stdin-based.
+_sg_input=$(cat 2>/dev/null || true)
+if command -v jq >/dev/null 2>&1 \
+  && [ "$(printf '%s' "$_sg_input" | jq -r '.stop_hook_active // false' 2>/dev/null)" = "true" ]; then
+  exit 0
+fi
 case "$verdict" in
   block)
     msg="[spec-gate] $reason"$'\n'"$(sg_remedy_message)"

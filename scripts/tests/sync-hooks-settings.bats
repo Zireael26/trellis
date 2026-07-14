@@ -45,6 +45,7 @@ _make_instance() {
   cp "$SRC_ROOT"/core-rules/hooks/*.sh "$ROOT/core-rules/hooks/" 2>/dev/null || true
   [ -d "$SRC_ROOT/core-rules/hooks/lib" ] && cp "$SRC_ROOT"/core-rules/hooks/lib/*.sh "$ROOT/core-rules/hooks/lib/" 2>/dev/null || true
   cp "$SRC_ROOT/scripts/sync-hooks.sh" "$ROOT/scripts/sync-hooks.sh"
+  cp "$SRC_ROOT/scripts/lib/blacklist-parser.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/config-load.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/settings-hooks-merge.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/trellis.config.schema.json" "$ROOT/scripts/lib/"
@@ -99,6 +100,7 @@ _seed_project() {
 
   # The script + its libs.
   cp "$SRC_ROOT/scripts/sync-hooks.sh" "$ROOT/scripts/sync-hooks.sh"
+  cp "$SRC_ROOT/scripts/lib/blacklist-parser.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/config-load.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/settings-hooks-merge.sh" "$ROOT/scripts/lib/"
   cp "$SRC_ROOT/scripts/lib/trellis.config.schema.json" "$ROOT/scripts/lib/"

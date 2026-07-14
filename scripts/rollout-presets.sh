@@ -40,6 +40,8 @@ done
 
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 
 CANONICAL_PRESETS_DIR="$TRELLIS_ROOT/core-rules/presets"
 [ -d "$CANONICAL_PRESETS_DIR" ] || {
@@ -76,23 +78,10 @@ read_registry() {
     }
   ' "$REGISTRY"
 }
-read_blacklist() {
-  [ -f "$BLACKLIST" ] || return 0
-  awk '
-    /^## (Blacklisted|Currently exempt|Active blacklist)/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0; gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-    }
-  ' "$BLACKLIST"
-}
-
 REGISTRY_NAMES=()
 while IFS= read -r line; do [ -n "$line" ] && REGISTRY_NAMES+=("$line"); done < <(read_registry)
 BLACKLIST_NAMES=()
-while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist)
+while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local n="$1" b
@@ -106,7 +95,14 @@ read_project_presets() {
   local p="$1" cand
   for cand in "$p/.trellis.config.json" "$p/trellis.config.json"; do
     if [ -f "$cand" ]; then
-      jq -r '.presets // [] | .[]' "$cand" 2>/dev/null
+      if ! jq -e 'type == "object" and ((has("presets") | not) or (.presets | type == "array"))' "$cand" >/dev/null 2>&1; then
+        echo "  WARN: invalid preset config $cand (must be valid JSON with .presets array or absent) — skipping project" >&2
+        return 1
+      fi
+      if ! jq -r '.presets // [] | .[]' "$cand" 2>/dev/null; then
+        echo "  WARN: failed to read presets from $cand — skipping project" >&2
+        return 1
+      fi
       return 0
     fi
   done
@@ -194,7 +190,9 @@ rollout_one() {
   echo "== $name =="
 
   local declared
-  declared="$(read_project_presets "$p")"
+  if ! declared="$(read_project_presets "$p")"; then
+    return
+  fi
 
   if [ -z "$declared" ]; then
     echo "  no presets declared (no .trellis.config.json or empty .presets array)"

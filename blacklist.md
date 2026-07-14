@@ -1,6 +1,6 @@
 # Blacklist
 
-Two scopes, both excluded from scheduled-task scans.
+Two scopes, both excluded from registry-driven operator checks.
 
 > **Template note:** this file ships empty. Add entries as you decide which projects to pause or permanently exclude.
 
@@ -16,7 +16,7 @@ Projects listed in `registry.md` that should be **temporarily** excluded from ce
 
 ## 2. Permanently excluded from management
 
-Git repos under `__PROJECTS_ROOT__/` that should **never** be onboarded to Trellis. Scheduled tasks that scan the filesystem skip these paths — no findings, no weekly re-surfacing.
+Git repos under `__PROJECTS_ROOT__/` that should **never** be onboarded to Trellis. Operator checks that scan the filesystem should skip these paths.
 
 If any row becomes an active project, move it to `registry.md` (step 1 of onboarding).
 
@@ -37,5 +37,5 @@ Example rows — uncomment as you blacklist things:
 
 - **Temporarily excluded** (section 1) — for projects that ARE in `registry.md` but need a time-bound pause (refactor freeze, bootstrap period, noisy-audit window). Reason + review-after required.
 - **Permanently excluded** (section 2) — for git repos that are NOT in `registry.md` and never will be unless explicitly moved. No review-after needed.
-- Centralized scheduled tasks read both sections: a project participates iff it is in `registry.md` AND not in either blacklist section. The filesystem scan in `registry-blacklist-health` skips any path listed in section 2.
+- Registry-driven operator checks should read both sections: a project participates iff it is in `registry.md` AND not in either blacklist section. Filesystem checks should skip every path listed in section 2.
 - Temporary entries older than 90 days trigger a prompt to make them permanent or lift them.

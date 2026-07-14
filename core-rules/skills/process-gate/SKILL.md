@@ -1,6 +1,6 @@
 ---
 name: process-gate
-description: Pre-PR enforcement gate for any registered Trellis project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks Conventional Commit format, PR size ceiling, branch-name pattern, secrets scan, bypass-marker scan, todos closure, and stack-specific gates loaded from `local.config.sh`. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
+description: Pre-PR enforcement gate for any registered Trellis project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks PR hygiene, secrets, bypass markers, tests and coverage, docs discipline, stack-specific gates, security diff, and analyze. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
 ---
 
 # process-gate
@@ -24,7 +24,7 @@ When in doubt, those documents win. If a rule here contradicts either, fix the r
 
 ## Gate categories
 
-Six canonical gates, all harness-agnostic. Each has a reference file, a validator, and a `pass / warn / fail` posture.
+Eight canonical gates, all harness-agnostic. Each has a reference file, a validator, and a `pass / warn / fail` posture.
 
 | # | Gate | Reference | Validator |
 |---|---|---|---|
@@ -34,6 +34,8 @@ Six canonical gates, all harness-agnostic. Each has a reference file, a validato
 | 4 | Tests & coverage | [`references/tests.md`](references/tests.md) | [`scripts/check-tests.sh`](scripts/check-tests.sh) |
 | 5 | Docs discipline (CHANGELOG, gotchas, ADRs) | [`references/docs.md`](references/docs.md) | [`scripts/check-docs.sh`](scripts/check-docs.sh) |
 | 6 | Stack-specific gates (design tokens, a11y, forbidden phrases, etc.) | [`references/stack-profiles.md`](references/stack-profiles.md) | project-local — loaded from `local.config.sh` |
+| 7 | Security (diff) | [`../security-gate/SKILL.md`](../security-gate/SKILL.md) | [`../security-gate/scripts/run-diff.sh`](../security-gate/scripts/run-diff.sh) |
+| 8 | Analyze | [`../analyze/SKILL.md`](../analyze/SKILL.md) | orchestrated by [`scripts/run-all.sh`](scripts/run-all.sh) |
 
 ## Project-local configuration
 
@@ -43,7 +45,7 @@ beside the harness symlink. Claude Code uses
 `<project>/.agents/skills/process-gate-local/local.config.sh`. If both exist,
 the active harness's config wins. This is where each project declares
 stack-specific commands, thresholds, and stack-profile validators that don't fit
-the canonical six.
+the canonical eight.
 
 Minimal `local.config.sh`:
 
@@ -55,7 +57,7 @@ PROCESS_GATE_LINT_CMD="pnpm lint"             # used by check-tests.sh
 PROCESS_GATE_PR_SIZE_LIMIT=400                # warn threshold (default 400)
 PROCESS_GATE_PR_SIZE_HARD=800                 # fail threshold (default 800)
 
-# Stack-profile validators (run after the canonical six).
+# Stack-profile validators (run after the canonical eight).
 PROCESS_GATE_STACK_VALIDATORS=(
   "scripts/check-tokens.sh"          # project-local, e.g. design-tokens guard
   "scripts/check-a11y.sh"            # project-local
@@ -71,7 +73,7 @@ If `local.config.sh` is missing the canonical scripts use sensible defaults and 
 
 When invoked, the skill:
 
-1. Reads each of the six reference files so its advice reflects current rules (not stale training data).
+1. Reads each of the eight gate references so its advice reflects current rules (not stale training data).
 2. Sources `local.config.sh` if present.
 3. Inspects the working tree (or the diff range provided) and runs each validator in order.
 4. Emits a verdict section in this exact shape:
@@ -85,6 +87,8 @@ Bypass markers:    ✅ pass | ⚠️ warn | ❌ fail
 Tests & coverage:  ✅ pass | ⚠️ warn | ❌ fail
 Docs discipline:   ✅ pass | ⚠️ warn | ❌ fail
 Stack profile:     ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
+Security (diff):   ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
+Analyze:           ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
 
 Overall: MERGEABLE | NEEDS CHANGES | BLOCKED
 ```
@@ -102,12 +106,7 @@ A `❌ fail` in any category means **BLOCKED** regardless of other rows.
 SKILL_DIR=".claude/skills/process-gate"
 # Codex-enabled projects can use:
 # SKILL_DIR=".agents/skills/process-gate"
-bash "$SKILL_DIR/scripts/check-pr.sh"      --range=main..HEAD
-bash "$SKILL_DIR/scripts/check-secrets.sh" --range=main..HEAD
-bash "$SKILL_DIR/scripts/check-bypass.sh"  --range=main..HEAD
-bash "$SKILL_DIR/scripts/check-tests.sh"
-bash "$SKILL_DIR/scripts/check-docs.sh"    --range=main..HEAD
-# Stack-profile validators — declared in local.config.sh
+bash "$SKILL_DIR/scripts/run-all.sh" --range=main..HEAD
 ```
 
 ### Agent-invoked review
@@ -137,7 +136,7 @@ Some projects don't fit the web-default assumptions baked into the canonical scr
 - `PROCESS_GATE_STACK_PROFILE="native-other"` — generic native stack. Project supplies validators.
 - `PROCESS_GATE_STACK_PROFILE="n-a"` — explicitly opt out of stack profile (gate emits `➖ n/a` for the row). Use sparingly; document in project `gotchas.md`.
 
-The canonical six gates apply regardless of stack profile.
+The canonical eight gates apply regardless of stack profile.
 
 ## Scope boundaries
 

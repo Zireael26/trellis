@@ -34,6 +34,58 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "public operator docs cannot claim a de-listed scheduled-task fleet" {
+  printf 'Includes a fleet of 16 scheduled audits under scheduled-tasks/.\n' > "$M/README.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"README.md: claims de-listed scheduled-task content"* ]]
+}
+
+@test "public architecture visual cannot claim a numbered scheduled-task fleet" {
+  mkdir -p "$M/docs"
+  printf '<text>Scheduled Audit Fleet — 16 running + 2 drafted</text>\n' > "$M/docs/architecture.svg"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs/architecture.svg: claims de-listed scheduled-task content"* ]]
+}
+
+@test "synced current manuals cannot link the private scheduled-task subtree" {
+  printf 'Run the shipped job from scheduled-tasks/example/prompt.md.\n' > "$M/engineering-process.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"engineering-process.md: claims de-listed scheduled-task content"* ]]
+}
+
+@test "public operator surfaces cannot promise an unshipped audit cadence" {
+  printf 'Enforced by hooks. Audited weekly.\n' > "$M/README.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"README.md: claims de-listed scheduled-task content"* ]]
+}
+
+@test "public operator surfaces cannot claim a numbered running audit registry" {
+  printf '18 audits are registered and running.\n' > "$M/README.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"README.md: claims de-listed scheduled-task content"* ]]
+}
+
+@test "every current public onboarding and config surface rejects the private scheduler MCP" {
+  local rel
+  for rel in \
+    AGENT_ONBOARD_PROJECT.md registry.md blacklist.md docs/PROVENANCE.md \
+    examples/README.md core-rules/templates/trellis.config.json.example \
+    core-rules/commands/doctor.md core-rules/commands/disk-janitor.md \
+    scripts/lib/trellis.config.schema.json; do
+    mkdir -p "$M/$(dirname "$rel")"
+    printf 'Invoke mcp__scheduled-tasks__create_scheduled_task.\n' > "$M/$rel"
+    run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"$rel: claims de-listed scheduled-task content"* ]]
+    rm -f "$M/$rel"
+  done
+}
+
 @test "absolute-path leak in README: flagged, rc 1" {
   printf 'clone from %s and go\n' "$TR" > "$M/README.md"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
@@ -92,6 +144,21 @@ teardown() {
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
   [[ "$output" == *"symlink target leaks absolute path"* ]]
+}
+
+@test "absolute home path for an unknown operator is flagged" {
+  mkdir -p "$M/docs"
+  printf '/%s/%s/private/project\n' Users leaked-operator > "$M/docs/setup.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs/setup.md: unrecognized absolute home path"* ]]
+}
+
+@test "generic and cross-machine regression users remain valid public fixtures" {
+  printf 'Examples: /Users/jane/project /Users/me/project /Users/helios/old /home/jane/project\n' > "$M/README.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "antigravity in a live core-rules doc: flagged (operator surface)" {

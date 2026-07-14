@@ -13,8 +13,9 @@
 // HOLD-PR orchestration around it (per the cross-model review of the spec).
 //
 // Inputs (from `args`, never baked literals):
-//   args.drifts        [{ project, path, canonical, fix }] — per-project drift:
-//                      `path` is the file that drifted, `fix` a one-line what/why.
+//   args.drifts        [{ project, path, canonical, fix }] — drift rows. All
+//                      mechanical rows for one project are grouped into the
+//                      same remediation unit / HOLD PR.
 //                      If absent, a discovery agent reads the latest
 //                      parent-hook-drift audit report.
 //   args.branchPrefix  branch name prefix. Defaults to 'chore/drift-sync'.
@@ -76,19 +77,22 @@ const DRIFT_LIST = {
 
 const branchPrefix = args.branchPrefix ?? 'chore/drift-sync'
 
-function remediatePrompt(d) {
+function remediatePrompt(group) {
+  const driftLines = group.drifts.flatMap((d) => [
+    '- DRIFT: ' + d.path + ' — ' + d.fix,
+    d.canonical ? '  CANONICAL SOURCE: ' + d.canonical : '',
+  ]).filter(Boolean)
   return [
-    'You are re-syncing ONE canonical file into the project "' + d.project + '" to clear mechanical drift.',
-    'DRIFT: ' + d.path + ' — ' + d.fix,
-    d.canonical ? 'CANONICAL SOURCE: ' + d.canonical : '',
+    'You are re-syncing ALL listed canonical files into the project "' + group.project + '" to clear mechanical drift.',
+    ...driftLines,
     '',
     'STRICT SCOPE — mechanical only:',
-    '- Re-sync ONLY the drifted file(s) named above from the canonical source. Change NOTHING else.',
+    '- Re-sync EVERY drifted file named above from its canonical source, in this one project worktree. Change NOTHING else.',
     '- This is a byte-level re-sync, not a behavioral edit. If the "drift" turns out to be an intentional',
     '  project-local divergence (not mechanical), STOP and report it — do NOT overwrite it.',
     '',
     'GIT DISCIPLINE: the checkout may be a dirty WIP branch — NEVER checkout/switch/stash/clean it.',
-    'Work ONLY in an isolated worktree off the LATEST origin/main, on branch ' + branchPrefix + '-' + d.project + '.',
+    'Work ONLY in an isolated worktree off the LATEST origin/main, on branch ' + branchPrefix + '-' + group.project + '.',
     'Do NOT run unbounded `rm` or `$VAR.*` globs. Confine every write to that worktree.',
     '',
     'Then VERIFY the re-sync (the file now matches canonical; the project still builds if the file is executable),',
@@ -96,7 +100,7 @@ function remediatePrompt(d) {
     'title prefixed "[HOLD] drift-sync:", body stating what drifted, that this is a mechanical re-sync,',
     'and "DO NOT MERGE without human review". Do NOT merge. Clean up the worktree.',
     '',
-    'Return the VERDICT for project="' + d.project + '". If you refused (non-mechanical), set synced=false, pr_url empty, and say why in notes.',
+    'Return the VERDICT for project="' + group.project + '". synced=true only if every listed file was re-synced and verified. If you refused any row (non-mechanical), set synced=false, pr_url empty, and say why in notes.',
   ].join('\n')
 }
 
@@ -122,24 +126,30 @@ if (!drifts || drifts.length === 0) {
 // each in code — not prose — so a directly-passed `args.drifts` cannot bypass them:
 //   1. mechanical filter: only verified byte-level drift is remediated. A row
 //      without an explicit `mechanical:true` is treated as needs-review and skipped.
-//   2. per-project dedup: one branch/PR per project, so parallel fan-out over
-//      duplicate project rows can't collide on the deterministic branch name.
+//   2. per-project grouping: every mechanical row for a project is retained in
+//      one branch/PR, so parallel units cannot collide or silently drop files.
 //   3. max_iterations cap: bounds the project count so a runaway list can't open
 //      dozens of PRs — the loop-safety ceiling is enforced, not just declared.
 const MAX = meta.safety.max_iterations
-const seenProject = new Set()
-const remediable = drifts
-  .filter((d) => d.mechanical === true)
-  .filter((d) => (seenProject.has(d.project) ? false : (seenProject.add(d.project), true)))
-const skipped = drifts.length - remediable.length
+const mechanical = drifts.filter((d) => d.mechanical === true)
+const grouped = new Map()
+for (const drift of mechanical) {
+  if (!grouped.has(drift.project)) grouped.set(drift.project, [])
+  grouped.get(drift.project).push(drift)
+}
+const remediable = [...grouped.entries()].map(([project, projectDrifts]) => ({
+  project,
+  drifts: projectDrifts,
+}))
+const skipped = drifts.length - mechanical.length
 if (skipped > 0) {
-  log('drift-holdpr: ' + skipped + ' drift(s) skipped (non-mechanical, needs-review, or duplicate project)')
+  log('drift-holdpr: ' + skipped + ' drift(s) skipped (non-mechanical or needs-review)')
 }
 const capped = remediable.slice(0, MAX)
 if (capped.length < remediable.length) {
   log('drift-holdpr: capped at max_iterations=' + MAX + ' — ' + (remediable.length - capped.length) + ' project(s) deferred to a later run')
 }
-log('drift-holdpr: ' + capped.length + ' mechanical drift(s) to remediate as HOLD PRs')
+log('drift-holdpr: ' + mechanical.length + ' mechanical drift file(s) grouped into ' + capped.length + ' project HOLD PR(s)')
 
 // --- Phase: Remediate -----------------------------------------------------
 // One worktree-isolated agent per project. Stays on the orchestrator (Claude):
@@ -150,8 +160,8 @@ log('drift-holdpr: ' + capped.length + ' mechanical drift(s) to remediate as HOL
 // HOLD PR only, never merge, never a project's main.
 phase('Remediate')
 const verdicts = await parallel(
-  capped.map((d) => () => agent(remediatePrompt(d), {
-    label: 'drift:' + d.project,
+  capped.map((group) => () => agent(remediatePrompt(group), {
+    label: 'drift:' + group.project,
     phase: 'Remediate',
     schema: VERDICT,
     isolation: 'worktree',

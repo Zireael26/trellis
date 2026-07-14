@@ -4,7 +4,8 @@
 #
 # Scope (intentionally narrow for the first cut):
 #   - inline-code refs of the form `path/to/file` where path/to looks like
-#     an Trellis directory we control (core-rules/, scheduled-tasks/, scripts/,
+#     a Trellis directory we control (core-rules/, scripts/, optional private
+#     prompt trees,
 #     docs/, audits/, .claude/, .github/, recon.md, engineering-process.md).
 #   - emits one finding per missing reference: source doc, line, broken ref.
 #   - exits non-zero if any miss is found.
@@ -36,11 +37,18 @@ SPEC_DOCS=(
   "$ROOT/engineering-process.md"
   "$ROOT/recon.md"
   "$ROOT/registry.md"
-  "$ROOT/scheduled-tasks/README.md"
   "$ROOT/docs/UPGRADING.md"
   "$ROOT/core-rules/commands/doctor.md"
-  "$ROOT/scheduled-tasks/cross-project-process-audit/prompt.md"
 )
+
+# Operator clones may carry a private prompt tree. Public-template clones do
+# not, so only include these documents when the subtree is actually present.
+if [ -d "$ROOT/scheduled-tasks" ]; then
+  SPEC_DOCS+=(
+    "$ROOT/scheduled-tasks/README.md"
+    "$ROOT/scheduled-tasks/cross-project-process-audit/prompt.md"
+  )
+fi
 
 # Add references/*.md under process-gate
 while IFS= read -r f; do SPEC_DOCS+=("$f"); done < <(find "$ROOT/core-rules/skills/process-gate/references" -name '*.md' -type f 2>/dev/null)

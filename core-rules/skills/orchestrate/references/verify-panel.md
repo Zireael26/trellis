@@ -21,7 +21,7 @@ For each finding, two reviewers judge **independently and in parallel**:
 - **Claude reviewer** — on the orchestrator, with a strict `REVIEW` schema
   (`real`, `confidence`, `reason`). Prompted to *refute*, not rubber-stamp.
 - **Codex reviewer** — via the **canonical wrapped tracked path**
-  (`agent(prompt, { agentType: 'codex:codex-rescue' })`), read-only, at the
+  (`agent(prompt, { agentType: 'codex-worker' })`), read-only, at the
   **declared per-run tier** (`args.effort` — required, never defaulted),
   **forced foreground** (§4 discipline). No output schema on the Codex leg (the
   forwarder returns raw stdout), so its verdict is parsed leniently.
@@ -42,6 +42,10 @@ other missed — exactly the case a single-model verify cannot produce.
 
 - `findings[]` — `{ id, claim, file, line, severity }`, the hard findings to verify.
 - `context` — the diff / code excerpt / evidence the reviewers judge against.
+- `targetCwd` — **required** repo/worktree root for the Codex reviewer. The
+  recipe includes it as `TARGET_CWD` in every Codex work order so the blocking
+  worker launches in the intended checkout instead of degrading on an invalid
+  work order.
 - `effort` — **required** reasoning tier for the Codex leg (enum
   `xhigh|max` — medium/high suspended 2026-07-10; review passes are xhigh-band
   per the `docs/codex-routing.md` §3 ladder). Omitted → validation error, never

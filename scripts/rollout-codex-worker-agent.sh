@@ -13,6 +13,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
+# shellcheck source=lib/blacklist-parser.sh
+. "$SCRIPT_DIR/lib/blacklist-parser.sh"
 
 DRY_RUN=false
 ASSUME_YES=false
@@ -58,7 +60,7 @@ read_table() {
 REGISTRY_NAMES=()
 while IFS= read -r line; do [ -n "$line" ] && REGISTRY_NAMES+=("$line"); done < <(read_table "$REGISTRY" '^## Active projects')
 BLACKLIST_NAMES=()
-while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_table "$BLACKLIST" '^## (Blacklisted|Currently exempt|Active blacklist)')
+while IFS= read -r line; do [ -n "$line" ] && BLACKLIST_NAMES+=("$line"); done < <(read_blacklist_names "$BLACKLIST")
 
 is_blacklisted() {
   local name="$1" item

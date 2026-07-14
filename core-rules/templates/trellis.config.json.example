@@ -24,7 +24,7 @@
   "sed_flavor": "auto",
 
   "approved_mcps": [
-    { "name": "scheduled-tasks", "purpose": "Trellis weekly + quarterly audits", "scope": "fleet" },
+    { "name": "operator-scheduler", "purpose": "Private recurring operator jobs", "scope": "fleet" },
     { "name": "computer-use", "purpose": "Native-app screenshots + UI control for ui-verify fallback", "scope": "fleet" },
     { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
   ],
@@ -37,6 +37,11 @@
     "free_space_floor_gb": 30,
     "cache_ceiling_gb": 20,
     "skip_projects": []
+  },
+
+  "comment_codex_fanout": "Optional. Central concurrency baseline for codex-fanout. The caller must read this positive integer and pass it explicitly as args.codexCap; the recipe has no fallback. Claude legs do not consume the cap.",
+  "codex_fanout": {
+    "concurrency": 4
   },
 
   "comment_mandatory_pipeline": "Optional (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff over spec_required_diff_lines cannot be pushed without ONE of: a spec triad added on this branch (+ interview artifact), a size-capped `/surgical` declaration (<= surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push (equal on Claude + Codex by construction) with a Stop-hook early-warning. Default OFF: absence or enabled:false is byte-identical to prior behavior; a present-but-malformed block fails CLOSED. Leave enabled:false until your team is ready to require specs for feature-sized changes.",

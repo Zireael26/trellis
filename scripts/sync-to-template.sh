@@ -85,7 +85,11 @@ SYNC_PATHS=(
   "docs/primers/"
   "docs/references/"
   "docs/UPGRADING.md"
-  "scheduled-tasks/"
+  # NOTE: scheduled-tasks/ is NOT synced — it is operator-specific automation
+  # whose targets.md / prompt.md files name the private fleet (conductor backlog,
+  # dep-watch versions, audit target lists). Published verbatim it leaked named
+  # infra ops (audit 2026-07-13 H1/M2). See NEVER_SYNC + DELIST_PRUNE below. A
+  # genericized public example set may be re-added deliberately later.
   "scripts/"
   "trellis.config.json"
   # Public-mirror parity (v0.6.0) — formerly instance-only, published on
@@ -111,6 +115,10 @@ NEVER_SYNC=(
   "registry.md"
   "blacklist.md"
   "audits/"
+  "scheduled-tasks/"   # operator-specific automation; names the private fleet (audit 2026-07-13 H1/M2)
+  "conductor/"         # conductor slate/state — private fleet inventory
+  "research/"          # instance research outputs
+  "local/"             # instance-private local tooling — MUST stay private
 )
 
 # De-listed / removed paths to PRUNE from the mirror on --apply (Workstream D2).
@@ -124,15 +132,22 @@ NEVER_SYNC=(
 DELIST_PRUNE=(
   "docs/antigravity-steering.md"   # retired in RC.4 (AntiGravity strip)
   "docs/gpt-5.5-steering.md"       # renamed → docs/gpt-5.x-steering.md in RC.5
+  "scheduled-tasks"                # de-listed 2026-07-13 (audit H1/M2): named private-fleet leak
 )
+
+delist_prune_path_safe() {
+  case "$1" in
+    ""|"."|".."|/*|"~"*|*..*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 # core-rules/ subdirs deliberately kept instance-private — the explicit
 # "do not publish" register that the sync-coverage pre-flight checks against.
 # Each bare basename here is a core-rules/<name>/ subdir that must NEVER reach
 # the public template. Document WHY for every entry:
-#   evals — per-project eval suites; subdirs are named after registered
-#           private projects (akaushik.org, curat.money, lume, neev, tgsc,
-#           vericite). Instance-private, intentionally never published.
+#   evals — per-project eval suites; subdirs identify registered private
+#           projects. Instance-private, intentionally never published.
 # shellcheck disable=SC2034  # consumed via "${CORE_RULES_NO_SYNC[@]}" below
 CORE_RULES_NO_SYNC=(
   "evals"
@@ -280,9 +295,11 @@ find "$TMP_STAGE" -type f \( -name '*.md' -o -name '*.sh' -o -name '*.json' -o -
       for i in "${!SUB_FROM[@]}"; do
         from="${SUB_FROM[$i]}"
         to="${SUB_TO[$i]}"
-        # Escape sed metacharacters in $from
-        from_esc="$(printf '%s\n' "$from" | sed -e 's/[\/&]/\\&/g')"
-        to_esc="$(printf '%s\n' "$to" | sed -e 's/[\/&]/\\&/g')"
+        # Treat configured values as literals. The search side must escape
+        # basic-regex metacharacters; the replacement side must escape '&'
+        # and backslashes as well as the '/' delimiter.
+        from_esc="$(printf '%s\n' "$from" | sed -e 's/[][\/.^$*\\]/\\&/g')"
+        to_esc="$(printf '%s\n' "$to" | sed -e 's/[\/&\\]/\\&/g')"
         sed_inplace -e "s/$from_esc/$to_esc/g" "$f"
       done
     done
@@ -361,6 +378,51 @@ else
   fi
 fi
 
+# --- Dry-run post-sync simulation + lint -----------------------------------
+# Dry-run must validate the state that --apply would produce, not the stale
+# mirror currently on disk. Build that state under TMP_STAGE: start from the
+# full mirror working tree (including public-only files), overlay the staged
+# SYNC_PATHS with apply-equivalent delete semantics, then remove only safe
+# DELIST_PRUNE entries. The real mirror is never touched.
+if ! $APPLY; then
+  SIMULATED_MIRROR="$TMP_STAGE/.simulated-mirror"
+  mkdir -p "$SIMULATED_MIRROR"
+  echo "==> Building simulated post-sync mirror for dry-run lint"
+  rsync -a --delete --exclude='.git/' "$TEMPLATE_DIR/" "$SIMULATED_MIRROR/"
+
+  for p in "${SYNC_PATHS[@]}"; do
+    src_stage="${TMP_STAGE}/${p%/}"
+    dst_simulated="${SIMULATED_MIRROR}/${p%/}"
+    [ -e "$src_stage" ] || continue
+    if [ -d "$src_stage" ]; then
+      mkdir -p "$dst_simulated"
+      rsync -a --delete "${src_stage}/" "${dst_simulated}/"
+    else
+      mkdir -p "$(dirname "$dst_simulated")"
+      cp -P "$src_stage" "$dst_simulated"
+    fi
+  done
+
+  for dp in ${DELIST_PRUNE[@]+"${DELIST_PRUNE[@]}"}; do
+    if ! delist_prune_path_safe "$dp"; then
+      echo "  SKIP unsafe DELIST_PRUNE entry in simulation: '$dp'" >&2
+      continue
+    fi
+    [ -e "$SIMULATED_MIRROR/$dp" ] || continue
+    rm -rf "${SIMULATED_MIRROR:?}/$dp"
+  done
+
+  echo "==> Linting simulated post-sync mirror for forbidden content"
+  if lint_out="$(lint_mirror "$SIMULATED_MIRROR" "$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME")"; then
+    echo "  simulated mirror clean."
+  else
+    echo "  MIRROR LINT FAILED — forbidden content in the simulated post-sync mirror:" >&2
+    printf '%s\n' "$lint_out" | sed 's|^|    |' >&2
+    echo "  Fix the offending files before publishing. Real mirror was not touched. Aborting." >&2
+    exit 1
+  fi
+fi
+
 # --- Apply -----------------------------------------------------------------
 if $APPLY; then
   echo "==> Writing to $TEMPLATE_DIR"
@@ -387,11 +449,10 @@ if $APPLY; then
     # Path-safety: a typo'd entry (empty, ., .., absolute, tilde, or any path
     # containing ..) must NEVER reach the destructive rm — it could delete the
     # mirror root or escape it. Skip loudly (cross-model review finding).
-    case "$dp" in
-      ""|"."|".."|/*|"~"*|*..*)
-        echo "  SKIP unsafe DELIST_PRUNE entry: '$dp'" >&2
-        continue ;;
-    esac
+    if ! delist_prune_path_safe "$dp"; then
+      echo "  SKIP unsafe DELIST_PRUNE entry: '$dp'" >&2
+      continue
+    fi
     if [ -e "$TEMPLATE_DIR/$dp" ]; then
       git -C "$TEMPLATE_DIR" rm -rf --ignore-unmatch --quiet -- "$dp" 2>/dev/null || rm -rf "${TEMPLATE_DIR:?}/$dp"
       echo "  pruned: $dp"

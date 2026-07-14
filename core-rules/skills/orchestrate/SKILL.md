@@ -147,13 +147,38 @@ the per-target cost, then fan out. `log()` the pilot cost so the full run's
 **The proactive-loop shape** — the five canonical stages of an unattended,
 recurring loop, each mapped to machinery Trellis already ships:
 
-1. **Detect** — a `scheduled-tasks/` entry checks for incoming work (the conductor ranks the backlog; audits surface findings).
+1. **Detect** — an operator-owned recurring task checks for incoming work (a conductor can rank the backlog; audits surface findings).
 2. **Triage** — fan out one agent per item; classify and route.
 3. **Resolve** — worktree-isolated agents work each item in parallel (`isolation: "worktree"`); `drift-holdpr` is this stage for mechanical drift.
-4. **Review** — an adversarial judge checks each fix before it counts (`verify-panel`: Claude + Codex consensus).
+4. **Review** — an adversarial judge checks each fix before it counts (`verify-panel`: Claude + Codex consensus). For a build that exceeds solo-model reliability, run this judge as the **skeptical evaluator** (below) against a pre-agreed sprint contract, not the generous default.
 5. **Respond** — open a **HOLD PR** / update the channel; **never merge** (the Component-D merge bright-line holds at every stage).
 
 Every stage inherits the loop-safety ceilings; a proactive routine declares a conservative `budget_ceiling_usd` and pilots first.
+
+## Skeptical evaluator + sprint contract (opt-in, gated)
+
+For builds that sit **beyond what the model does reliably in one solo pass** —
+multi-session work, an unattended L4/L5 run — sharpen the verify stage with a
+**skeptical evaluator**: a *separate* judge (never the generator) tuned skeptical
+rather than generous, that **defaults to "not done" unless the receipt proves
+it**. It realizes the harness-design *planner → generator → skeptical external
+evaluator* pattern. Pair it with a **sprint contract**: before the generator
+writes code, generator and evaluator agree in writing on the **testable
+done-criteria**, frozen up front so the bar cannot be softened to fit the output.
+
+This is **optional and gated** — it fires only above solo-model reliability, per
+the post's cost/benefit rule; on a routine turn the always-on
+`code-review-subagent` is the right tool and the evaluator is pure overhead. It
+**composes with, and never replaces,** the `code-review-subagent` floor, DoD
+receipts (the evidence it demands), and `verify-panel` (one way to run the
+persona cross-model). The gate defaults closed — when in doubt, don't stand it
+up, the same restraint as "start simplest" in
+[`core-rules/references/loops.md`](../../references/loops.md). Unattended runs
+are where it earns its cost: at L4/L5 no human is mid-loop to catch a generous
+self-assessment ([`core-rules/autonomy.md`](../../autonomy.md)).
+
+Full contract — the gate, the sprint-contract handshake, the persona's verdict
+shape, and how it composes: [`references/skeptical-evaluator.md`](references/skeptical-evaluator.md).
 
 ## Recipe library
 
@@ -197,6 +222,9 @@ hand; the verdict shape above is the contract the caller depends on either way.
    (pass `{label, phase, schema}`; add `isolation: "worktree"` for any agent that
    touches a repo), `parallel(thunks)` to fan out with a barrier, `pipeline(...)`
    to stream without one. Return the structured verdicts for the caller to act on.
+   For a verify stage on above-solo-reliability work, the reviewer agent may adopt
+   the **skeptical-evaluator** persona against a pre-agreed sprint contract
+   (`references/skeptical-evaluator.md`) — opt-in and gated, not the default.
 4. Keep it **parametric and path-neutral** — `core-rules/` is the public mirror.
    Take targets, dates, and scope from `args` or a sidecar config; never bake in
    absolute paths, dates, or per-target specifics. Do **not** use the engine-rejected

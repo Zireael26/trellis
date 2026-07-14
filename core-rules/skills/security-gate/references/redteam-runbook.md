@@ -71,4 +71,4 @@ These are observed Mode 3 anti-patterns; this section grows over time.
 
 ## Status (Phase 6)
 
-Phase 6 ships the runbook, the prompt, and the runner. No live integration tests run yet — Mode 3 requires an LLM provider, and the validation host has none configured. The first real run lands once the operator wires `LLM_PROVIDER` + the corresponding `llm` plugin and exercises the script against a project with a kept-findings baseline (vericite is the natural first target — 71 SAST findings + 23 OSV CVEs from Phase 4 give the chain composer real material).
+Phase 6 ships the runbook, the prompt, and the runner. No live integration tests run yet — Mode 3 requires an LLM provider, and the validation host has none configured. The first real run lands once the operator wires `LLM_PROVIDER` + the corresponding `llm` plugin and exercises the script against a project with a representative kept-findings baseline containing both SAST and dependency findings.

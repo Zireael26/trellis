@@ -35,8 +35,8 @@ usage: run-redteam.sh <project-dir> <target-class> [--confirm] [--no-llm]
 target-class ∈ data-exfil | priv-esc | account-takeover | tenant-break | model-jailbreak
 
 Examples:
-  run-redteam.sh /personal/vericite tenant-break --confirm
-  run-redteam.sh /personal/lume     account-takeover --confirm
+  run-redteam.sh /path/to/project-a tenant-break --confirm
+  run-redteam.sh /path/to/project-b account-takeover --confirm
 EOF
   exit 64
 fi

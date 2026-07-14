@@ -21,6 +21,8 @@
 #   7. RUNG-2 REACHABILITY (regression guard for the Phase-2a composition bug):
 #      NO operator CODE_REVIEWER_CMD; fake `claude` on PATH front emits a
 #      critical; assert the BUILT-IN reviewer (rung 2) fires AND blocks.
+#   8. L4 preset resolution sends the decisions log in the JSON envelope.
+#   9. L3 sends the resolved level but deliberately omits decision-log content.
 #
 # PORTABLE / MIRROR-CLEAN: NO absolute machine paths. All sources resolve from
 # $BATS_TEST_DIRNAME; the deployed layout, fixture git repo, stubs and their
@@ -81,6 +83,7 @@ make_claudeless_bindir() {
 #   <deploy>/.codex/hooks/lib/code-reviewer.sh       (the REAL canonical core)
 #   <deploy>/.codex/hooks/lib/deps.sh                (real sibling lib)
 #   <deploy>/.codex/hooks/lib/pm.sh                  (real sibling lib)
+#   <deploy>/.codex/hooks/lib/autonomy.sh            (real Codex resolver)
 # The deploy root is INTENTIONALLY separate from PROJECT_DIR so the deployed
 # core never appears in the reviewed `git diff HEAD`.
 # =========================================================================
@@ -93,6 +96,7 @@ deploy_hook() {
   cp "$CORE_LIB_DIR/code-reviewer.sh"          "$hookdir/lib/code-reviewer.sh"
   cp "$CODEX_HOOK_DIR/lib/deps.sh"             "$hookdir/lib/deps.sh"
   cp "$CODEX_HOOK_DIR/lib/pm.sh"               "$hookdir/lib/pm.sh"
+  cp "$CODEX_HOOK_DIR/lib/autonomy.sh"         "$hookdir/lib/autonomy.sh"
   chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"
   printf '%s' "$hookdir/code-review-subagent.sh"
 }
@@ -172,7 +176,8 @@ setup_triggering_repo_clean() {
 teardown() {
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
   unset CODEX_PROJECT_DIR CLAUDE_PROJECT_DIR CODE_REVIEWER_CMD \
-        TRELLIS_REVIEW_IN_PROGRESS TRELLIS_REVIEW_OVERRIDE
+        TRELLIS_REVIEW_IN_PROGRESS TRELLIS_REVIEW_OVERRIDE TRELLIS_ROOT \
+        CAPTURE_FILE
   return 0
 }
 
@@ -195,6 +200,19 @@ make_fake_claude_bindir() {
   } > "$bindir/claude"
   chmod +x "$bindir/claude"
   printf '%s' "$bindir"
+}
+
+# Build a rung-1 reviewer that captures its untouched stdin envelope and emits
+# a clean findings result. CAPTURE_FILE is supplied by the test environment.
+make_capture_reviewer() {
+  local reviewer="$BATS_TEST_TMPDIR/capture-reviewer.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'cat > "$CAPTURE_FILE"'
+    printf '%s\n' 'printf "%s\n" "{\"findings\":[]}"'
+  } > "$reviewer"
+  chmod +x "$reviewer"
+  printf '%s' "$reviewer"
 }
 
 # Single-quote-escape a path for safe embedding in a generated stub.
@@ -239,6 +257,7 @@ run_hook() {
 setup() {
   HOOK="$(deploy_hook)"
   CLAUDELESS_BIN="$(make_claudeless_bindir)"
+  unset TRELLIS_ROOT
 }
 
 # =========================================================================
@@ -357,7 +376,9 @@ setup() {
 }
 
 # =========================================================================
-# 6. Idempotency: the SAME diff reviewed twice → the reviewer runs only ONCE.
+# 6. L2 / idempotency: the SAME diff reviewed twice → the reviewer runs only
+# ONCE, even when shasum is missing/broken. The completed-review marker must
+# carry a non-empty Git-native hash rather than collapse to `.review-done-`.
 # The completed-review marker (sha256 of the diff, under .codex/) short-circuits
 # the second run. The finding MUST be non-critical: the block path deliberately
 # does NOT write the marker (a blocked turn must re-review the corrected diff),
@@ -365,12 +386,17 @@ setup() {
 # emitting a MINOR finding (advisory → marker IS written) with a countfile,
 # leaving CODE_REVIEWER_CMD unset so rung 2 (the real built-in path) runs it.
 # =========================================================================
-@test "idempotency: same diff twice → reviewer invoked exactly once" {
+@test "L2 idempotency: broken shasum still creates a non-empty Git hash marker and reviews once" {
   setup_triggering_repo
   CLAUDE_COUNT="$BATS_TEST_TMPDIR/idem.count"; : > "$CLAUDE_COUNT"
   EXTRA_BINDIR="$(make_fake_claude_bindir \
     'printf "%s\n" "{\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
     "$CLAUDE_COUNT")"
+  cat > "$EXTRA_BINDIR/shasum" <<'EOF'
+#!/usr/bin/env bash
+exit 127
+EOF
+  chmod +x "$EXTRA_BINDIR/shasum"
 
   run_hook
   [ "$status" -eq 0 ]
@@ -379,6 +405,9 @@ setup() {
   [ "$status" -eq 0 ]
 
   [ "$(call_count "$CLAUDE_COUNT")" -eq 1 ]
+  [ ! -e "$PROJECT_DIR/.codex/.review-done-" ]
+  marker_count=$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
+  [ "$marker_count" -eq 1 ]
 }
 
 # =========================================================================
@@ -407,4 +436,54 @@ setup() {
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]]
   [[ "$output" == *'eval injection'* ]]
+}
+
+# =========================================================================
+# 8. Autonomy envelope: the Codex hook must interpret policy/config using the
+# canonical resolver and send L4/L5 decisions to the reviewer. Fleet L2 is
+# deliberately overridden by the active preset's L4 default (no project-local
+# autonomy), proving this is full contract resolution rather than session-only.
+# =========================================================================
+@test "autonomy: preset-resolved L4 sends decisions-log in reviewer JSON envelope" {
+  setup_triggering_repo
+  TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
+  printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
+    > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
+  jq -n --arg root "$TRELLIS_FIXTURE" \
+    '{trellis_root: $root, presets: ["experimental"]}' \
+    > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '- 2026-07-14T00:00:00Z [L4] [pattern] chose shared resolver. Reasoning: parity. Alternatives considered: duplicate logic.' \
+    > "$PROJECT_DIR/decisions-log.md"
+
+  CAPTURE_FILE="$BATS_TEST_TMPDIR/reviewer-envelope.json"
+  export CAPTURE_FILE
+  CODE_REVIEWER_CMD="$(make_capture_reviewer)"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ -f "$CAPTURE_FILE" ]
+  [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 4 ]
+  jq -e '.diff | contains("alpha.py")' "$CAPTURE_FILE" >/dev/null
+  jq -e '.decisions_log | contains("chose shared resolver")' "$CAPTURE_FILE" >/dev/null
+}
+
+@test "autonomy: L3 reviewer envelope omits decisions-log content" {
+  setup_triggering_repo
+  mkdir -p "$PROJECT_DIR/.claude"
+  printf '3\n' > "$PROJECT_DIR/.claude/session-autonomy"
+  printf '%s\n' '- 2026-07-14T00:00:00Z [L3] [pattern] should stay out of reviewer payload.' \
+    > "$PROJECT_DIR/decisions-log.md"
+
+  CAPTURE_FILE="$BATS_TEST_TMPDIR/reviewer-envelope-l3.json"
+  export CAPTURE_FILE
+  CODE_REVIEWER_CMD="$(make_capture_reviewer)"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 3 ]
+  [ -z "$(jq -r '.decisions_log' "$CAPTURE_FILE")" ]
 }

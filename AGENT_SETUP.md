@@ -183,7 +183,7 @@ Tell the user, in this order:
 
 1. **What you did.** A short paragraph: which placeholders were swapped, which harnesses are enabled, whether you committed, whether the remote was repointed, whether a project was onboarded.
 2. **What's still on them.** Three concrete things: (a) push the customization commit if they want it on a remote, (b) read `engineering-process.md` cover-to-cover for the manual, (c) if they registered a project, run `pnpm install` (or equivalent) inside it so husky activates. If Codex parity is enabled, also confirm `$CODEX_HOME/config.toml` has `[features] hooks = true` (the older `codex_hooks` key is deprecated as of Codex CLI 0.129+).
-3. **Where to look next.** Point them at `core-rules/CLAUDE.md` (the rules), `scheduled-tasks/README.md` (the audit fleet — optional to wire up), and `examples/audits/` (sample reports).
+3. **Where to look next.** Point them at `core-rules/CLAUDE.md` (the rules), `engineering-process.md` (the manual), and `examples/audits/` (sample report shapes for optional operator-side audits).
 
 Don't write a tutorial — they have one in `engineering-process.md`. Just hand off cleanly.
 
