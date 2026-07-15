@@ -11,6 +11,7 @@
 #   - fail-open (reviewer nonzero / empty stdout → exit 0, no block)
 #   - TRELLIS_REVIEW_OVERRIDE defers AND logs a dated line to decisions-log.md
 #   - idempotency (same diff twice → reviewer invoked once)
+#   - canonical autonomy resolution in the reviewer JSON envelope
 #
 # PORTABLE / MIRROR-CLEAN: no absolute machine paths. The hook is located from
 # $HOOKS_DIR (helpers.bash, resolved from $BATS_TEST_DIRNAME). Fixtures live in a
@@ -82,8 +83,9 @@ setup_untracked_only_repo() {
 
 teardown() {
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
+  [ -n "${TRELLIS_FIXTURE:-}" ] && [ -d "$TRELLIS_FIXTURE" ] && rm -rf "$TRELLIS_FIXTURE"
   unset CLAUDE_PROJECT_DIR CODE_REVIEWER_CMD TRELLIS_REVIEW_IN_PROGRESS \
-        TRELLIS_REVIEW_OVERRIDE REVIEWER_COUNT_FILE
+        TRELLIS_REVIEW_OVERRIDE REVIEWER_COUNT_FILE TRELLIS_ROOT CAPTURE_FILE
   return 0
 }
 
@@ -105,6 +107,21 @@ make_reviewer_stub() {
     fi
     printf '%s\n' "$body"
   } > "$stub"
+  chmod +x "$stub"
+  printf '%s' "$stub"
+}
+
+# Write a reviewer stub that records its stdin envelope at $CAPTURE_FILE and
+# returns a clean verdict. The capture lives outside the repo so it cannot alter
+# the diff or idempotency hash being tested.
+make_capture_reviewer() {
+  local stub
+  stub="$(mktemp "$BATS_TEST_TMPDIR/reviewer-capture.XXXXXX")"
+  cat > "$stub" <<'EOF'
+#!/usr/bin/env bash
+cat > "$CAPTURE_FILE"
+printf '%s\n' '{"findings":[]}'
+EOF
   chmod +x "$stub"
   printf '%s' "$stub"
 }
@@ -402,4 +419,84 @@ EOF
   [[ "$after"  == *'?? gamma.py'* ]]
   [[ "$after" != *'A  alpha.py'* ]]
   [[ "$after" != *'A  gamma.py'* ]]
+}
+
+# =========================================================================
+# Autonomy envelope: the Claude hook must use the same canonical resolver as
+# session-context. These regressions exercise preset-over-fleet defaults,
+# project-over-preset precedence, and post-pick preset ceiling clamping.
+# =========================================================================
+@test "autonomy: preset-resolved L4 sends decisions-log in reviewer JSON envelope" {
+  setup_triggering_repo
+  TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
+  printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
+    > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
+  jq -n --arg root "$TRELLIS_FIXTURE" \
+    '{trellis_root: $root, presets: ["experimental"]}' \
+    > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '- 2026-07-15T00:00:00Z [L4] [pattern] chose shared resolver.' \
+    > "$PROJECT_DIR/decisions-log.md"
+
+  CAPTURE_FILE="$BATS_TEST_TMPDIR/reviewer-envelope-preset.json"
+  export CAPTURE_FILE
+  CODE_REVIEWER_CMD="$(make_capture_reviewer)"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 4 ]
+  jq -e '.decisions_log | contains("chose shared resolver")' "$CAPTURE_FILE" >/dev/null
+}
+
+@test "autonomy: project override takes precedence over preset default in reviewer envelope" {
+  setup_triggering_repo
+  TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
+  printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
+    > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
+  jq -n --arg root "$TRELLIS_FIXTURE" \
+    '{trellis_root: $root, presets: ["experimental"], autonomy: 3}' \
+    > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '- 2026-07-15T00:00:00Z [L3] [pattern] must stay out.' \
+    > "$PROJECT_DIR/decisions-log.md"
+
+  CAPTURE_FILE="$BATS_TEST_TMPDIR/reviewer-envelope-project.json"
+  export CAPTURE_FILE
+  CODE_REVIEWER_CMD="$(make_capture_reviewer)"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 3 ]
+  [ -z "$(jq -r '.decisions_log' "$CAPTURE_FILE")" ]
+}
+
+@test "autonomy: session L5 is clamped to L2 in reviewer envelope" {
+  setup_triggering_repo
+  TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets" "$PROJECT_DIR/.claude"
+  printf '%s\n' '{"autonomy_default":3}' > "$TRELLIS_FIXTURE/trellis.config.json"
+  printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
+    > "$TRELLIS_FIXTURE/core-rules/presets/loose.md"
+  printf '%s\n' '---' 'autonomy_ceiling: 2' '---' \
+    > "$TRELLIS_FIXTURE/core-rules/presets/strict.md"
+  jq -n --arg root "$TRELLIS_FIXTURE" \
+    '{trellis_root: $root, presets: ["loose", "strict"], autonomy: 1}' \
+    > "$PROJECT_DIR/.trellis.config.json"
+  printf '5\n' > "$PROJECT_DIR/.claude/session-autonomy"
+  printf '%s\n' '- 2026-07-15T00:00:00Z [L5] [pattern] must be suppressed after clamp.' \
+    > "$PROJECT_DIR/decisions-log.md"
+
+  CAPTURE_FILE="$BATS_TEST_TMPDIR/reviewer-envelope-clamped.json"
+  export CAPTURE_FILE
+  CODE_REVIEWER_CMD="$(make_capture_reviewer)"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 2 ]
+  [ -z "$(jq -r '.decisions_log' "$CAPTURE_FILE")" ]
 }

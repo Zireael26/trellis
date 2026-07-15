@@ -161,6 +161,19 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "allowed example does not hide an unknown home path on the same line" {
+  local leaked_path leaked_user
+  leaked_user="leaked-operator"
+  # Assemble forbidden fixtures at runtime so this public regression test does
+  # not itself contain a literal operator home path that mirror-lint must flag.
+  for leaked_path in "/Users/${leaked_user}/private" "/home/${leaked_user}/private"; do
+    printf 'Example: /Users/jane/project; leaked checkout: %s\n' "$leaked_path" > "$M/README.md"
+    run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"README.md: unrecognized absolute home path"* ]]
+  done
+}
+
 @test "antigravity in a live core-rules doc: flagged (operator surface)" {
   mkdir -p "$M/core-rules/skills/foo"
   printf 'Use the antigravity harness for X.\n' > "$M/core-rules/skills/foo/SKILL.md"

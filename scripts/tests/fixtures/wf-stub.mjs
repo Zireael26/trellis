@@ -88,6 +88,9 @@ export async function runWorkflow(recipePath, recipeArgs = {}) {
     const phase = () => {}
     const log = (line) => { logs.push(String(line)) }
     const budget = () => {}
+    if (Object.prototype.hasOwnProperty.call(recipeArgs, '__budgetSpentTokens')) {
+      budget.spent = () => recipeArgs.__budgetSpentTokens
+    }
 
     const execute = new AsyncFunction(
       'agent',

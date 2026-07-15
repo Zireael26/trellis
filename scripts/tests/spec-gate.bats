@@ -433,6 +433,18 @@ JSON
   done
 }
 
+@test "schema requires positive mandatory-pipeline thresholds" {
+  run node - "$REPO/scripts/lib/trellis.config.schema.json" <<'NODE'
+const fs = require('node:fs')
+const schema = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const mandatory = schema.properties?.mandatory_pipeline?.properties
+for (const key of ['spec_required_diff_lines', 'surgical_max_diff_lines']) {
+  if (mandatory?.[key]?.type !== 'integer' || mandatory[key].minimum !== 1) process.exit(1)
+}
+NODE
+  [ "$status" -eq 0 ]
+}
+
 # --- fail-open on a broken environment --------------------------------------
 
 @test "detached HEAD -> advisory (fail-open, exit 0)" {

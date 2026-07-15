@@ -24,9 +24,13 @@ INPUT=$(cat 2>/dev/null || true)
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "session-context: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
-# shellcheck source=lib/deps.sh disable=SC1090
+# shellcheck source=lib/deps.sh disable=SC1090,SC1091
 . "$__se_lib"
 _se_require_jq "session-context"
+__se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__se_autonomy_lib" ] || { echo "session-context: missing sibling lib at $__se_autonomy_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__se_autonomy_lib"
 
 SOURCE=$(printf '%s' "$INPUT" | jq -r '.source // "startup"')
 
@@ -87,50 +91,25 @@ ${DIGEST_CONTENT}
 fi
 
 # --- Autonomy level ---
-# Resolution priority: session override file > project config > preset default > fleet default > 3
-LEVEL=3
-TRELLIS_CFG=""
-# Find trellis.config.json — search PROJECT_DIR upward, then $TRELLIS_ROOT env.
-if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
-  TRELLIS_CFG="$TRELLIS_ROOT/trellis.config.json"
-fi
-if [ -n "$TRELLIS_CFG" ] && command -v jq >/dev/null 2>&1; then
-  FLEET=$(jq -r '.autonomy_default // empty' "$TRELLIS_CFG" 2>/dev/null)
-  [ -n "$FLEET" ] && LEVEL="$FLEET"
-fi
-# Project-local override
-for cand in "$REPO_ROOT/.trellis.config.json" "$REPO_ROOT/trellis.config.json"; do
-  if [ -f "$cand" ] && command -v jq >/dev/null 2>&1; then
-    PL=$(jq -r '.autonomy // empty' "$cand" 2>/dev/null)
-    [ -n "$PL" ] && LEVEL="$PL"
-    break
-  fi
-done
-# Session-autonomy file (highest priority before clamp)
-SESSION_FILE="$REPO_ROOT/.claude/session-autonomy"
-if [ -f "$SESSION_FILE" ]; then
-  SESS=$(head -1 "$SESSION_FILE" | tr -d '[:space:]')
-  case "$SESS" in 1|2|3|4|5) LEVEL="$SESS" ;; esac
-fi
-# Map to name
-case "$LEVEL" in
-  1) NAME="Pedagogical" ;;
-  2) NAME="Cautious" ;;
-  3) NAME="Standard" ;;
-  4) NAME="Initiative" ;;
-  5) NAME="Autonomous" ;;
-  *) NAME="?"; LEVEL=3 ;;
-esac
-CTX="${CTX}--- Autonomy ---
-Level: L${LEVEL} (${NAME})
-
+# The shared resolver implements the complete canonical pick/clamp algorithm,
+# including preset defaults and the lowest active preset ceiling.
+_se_resolve_autonomy "$REPO_ROOT"
+AUTONOMY_CTX="--- Autonomy ---
+Level: L${AUTONOMY_LEVEL} (${AUTONOMY_NAME})
 "
+if [ "$AUTONOMY_CLAMPED" -eq 1 ]; then
+  AUTONOMY_CTX="${AUTONOMY_CTX}Requested autonomy L${AUTONOMY_REQUESTED_LEVEL}, clamped to L${AUTONOMY_CEILING} (preset ${AUTONOMY_LIMITING_PRESET}).
+"
+fi
+AUTONOMY_CTX="${AUTONOMY_CTX}
+"
+CTX_TAIL=""
 
 # --- Recent decisions (L4/L5 only) ---
-if [ "$LEVEL" -ge 4 ] 2>/dev/null && [ -f "$REPO_ROOT/decisions-log.md" ]; then
+if [ "$AUTONOMY_LEVEL" -ge 4 ] && [ -f "$REPO_ROOT/decisions-log.md" ]; then
   RECENT=$(grep -E '^- 20[0-9]{2}-' "$REPO_ROOT/decisions-log.md" 2>/dev/null | tail -10)
   if [ -n "$RECENT" ]; then
-    CTX="${CTX}--- Recent decisions (L4/L5) ---
+    CTX_TAIL="${CTX_TAIL}--- Recent decisions (L4/L5) ---
 ${RECENT}
 
 "
@@ -145,7 +124,7 @@ fi
 if [ -f "${REPO_ROOT}/gotchas.md" ]; then
   UNRESOLVED=$(grep -inE '^(#{1,6}[[:space:]]+.*unresolved|[[:space:]]*\*\*unresolved\*\*|[[:space:]]*status:[[:space:]]+unresolved)' "${REPO_ROOT}/gotchas.md" 2>/dev/null | head -10 || true)
   if [ -n "$UNRESOLVED" ]; then
-    CTX="${CTX}--- Unresolved gotchas ---
+    CTX_TAIL="${CTX_TAIL}--- Unresolved gotchas ---
 ${UNRESOLVED}
 
 "
@@ -234,15 +213,28 @@ if [ "${_se_worktree_warn:-}" = "WARN" ]; then
 ${CTX}"
 fi
 
-if [ -z "$CTX" ]; then
+FULL_CTX="${CTX}${AUTONOMY_CTX}${CTX_TAIL}"
+if [ -z "$FULL_CTX" ]; then
   exit 0
 fi
 
-# Hard cap at 2000 chars per spec.
-if [ "${#CTX}" -gt 2000 ]; then
-  CTX=$(printf '%s' "$CTX" | head -c 1980)
-  CTX="${CTX}
-...[trimmed]"
+# Hard cap at 2000 bytes per spec. Autonomy is protected because it governs
+# the current session; only the surrounding context may be trimmed. Normal
+# output retains the established section order.
+FULL_CTX_BYTES=$(printf '%s' "$FULL_CTX" | wc -c | tr -d '[:space:]')
+if [ "$FULL_CTX_BYTES" -gt 2000 ]; then
+  TRIM_MARKER="
+...[trimmed]
+
+"
+  AUTONOMY_BYTES=$(printf '%s' "$AUTONOMY_CTX" | wc -c | tr -d '[:space:]')
+  MARKER_BYTES=$(printf '%s' "$TRIM_MARKER" | wc -c | tr -d '[:space:]')
+  NONCRITICAL_BUDGET=$((2000 - AUTONOMY_BYTES - MARKER_BYTES))
+  NONCRITICAL_CTX="${CTX}${CTX_TAIL}"
+  CTX=$(printf '%s' "$NONCRITICAL_CTX" | head -c "$NONCRITICAL_BUDGET")
+  CTX="${CTX}${TRIM_MARKER}${AUTONOMY_CTX}"
+else
+  CTX="$FULL_CTX"
 fi
 
 jq -nc \

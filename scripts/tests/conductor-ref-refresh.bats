@@ -19,6 +19,11 @@ json_assert() {
   json_assert "r.error && /ref refresh incomplete/.test(r.error.message) && r.prompts.map((p) => p.opts.label).join(',') === 'refresh-refs'"
 }
 
+@test "ref refresh fetches main into the exact ref it resolves" {
+  run_recipe '{"today":"2026-07-14"}'
+  json_assert "!r.error && (() => { const refresh=r.prompts.find((p)=>p.opts.label==='refresh-refs'); return refresh.prompt.includes('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main') && refresh.prompt.includes('rev-parse --verify refs/remotes/origin/main^{commit}') && !refresh.prompt.includes('fetch --no-tags origin main'); })()"
+}
+
 @test "ranking and spec creation bind to the immutable refreshed main SHA" {
   local args
   args="$(jq -nc --arg sha "$SHA" '{today:"2026-07-14",backlogPath:"backlog.yml",registryPath:"registry.md",__agentOutputByLabel:{"refresh-refs":{complete:true,refs:[{project:"repo",repo_path:"/tmp/repo",main_sha:$sha}],notes:"ok"},rank:{generated_for:"2026-07-14",ranked:[{id:"alpha",project:"repo",title:"alpha",score:1,reasons:"top",eligible_auto_spec:true,auto_spec:null,delivered_on_main:false,existing_spec_path:"",auto_spec_exclusions:[]}]}}}')"

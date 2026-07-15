@@ -89,13 +89,20 @@ lint_mirror() {
   # closes the cross-machine case where content copied from another operator
   # contains an unknown macOS/Linux username. A few deliberately generic
   # documentation and regression-fixture users are safe public examples.
-  local hit line_body
+  local hit line_body home_path unknown_home
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     line_body="${hit#*:}"
-    case "$line_body" in
-      *'/Users/me/'*|*'/Users/jane/'*|*'/Users/helios/'*|*'/Users/.../'*|*'/home/jane'*) continue ;;
-    esac
+    unknown_home=0
+    while IFS= read -r home_path; do
+      [ -n "$home_path" ] || continue
+      case "$home_path" in
+        /Users/me/|/Users/jane/|/Users/helios/|/Users/.../|/home/jane|/home/jane/) continue ;;
+      esac
+      unknown_home=1
+      break
+    done < <(printf '%s\n' "$line_body" | grep -oE -- '/Users/[[:alnum:]_.-]+/|/home/[[:alnum:]_.-]+(/|$)' 2>/dev/null)
+    [ "$unknown_home" -eq 1 ] || continue
     rel="${hit%%:*}"
     rel="${rel#"$mirror_dir"/}"
     echo "$rel: unrecognized absolute home path"

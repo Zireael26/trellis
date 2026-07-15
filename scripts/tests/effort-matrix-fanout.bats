@@ -15,6 +15,20 @@ _json_assert() {
   CAPTURED_JSON="$output" node -e "const r = JSON.parse(process.env.CAPTURED_JSON); if (!($expression)) { console.error(JSON.stringify(r, null, 2)); process.exit(1) }"
 }
 
+@test "loop safety allows the first stall retry and halts on the second no-progress event" {
+  run node - "$RECIPE" <<'NODE'
+const fs = require('node:fs')
+const source = fs.readFileSync(process.argv[2], 'utf8')
+const threshold = source.match(/no_progress_iterations:\s*(\d+)/)
+if (!threshold || Number(threshold[1]) !== 2) process.exit(1)
+if (!source.includes('First worker stall retries; a second no-progress iteration halts.')) process.exit(2)
+const manifest = fs.readFileSync(process.argv[2].replace(/codex-fanout\.wf\.js$/, 'MANIFEST.md'), 'utf8')
+const row = manifest.split('\n').find((line) => line.startsWith('| `codex-fanout` |')) || ''
+if (!row.includes('`no_progress_iterations: 2`') || !row.includes('halts on the second consecutive no-progress event')) process.exit(3)
+NODE
+  [ "$status" -eq 0 ]
+}
+
 @test "omitted Codex effort throws before dispatch" {
   _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"codex-a","leg":"codex","task":"bounded change","paths":["src/a.js"],"proofCmd":"node --check src/a.js"}]}'
   _json_assert "r.error && r.error.message.includes('codex-a') && r.error.message.includes('effort') && r.error.message.includes('no default') && r.prompts.length === 0"

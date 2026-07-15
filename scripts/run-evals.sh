@@ -94,18 +94,28 @@ discover_fixtures() {
 
 registry_projects() {
   awk -F '|' '
+    /<!--/ { in_comment=1 }
+    in_comment {
+      if (/-->/) in_comment=0
+      next
+    }
     /^## Active projects/ { active=1; next }
     active && /^---$/ { exit }
     active && /^\|/ {
       name=$2
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-      if (name != "" && name != "Project" && name != "—" && name !~ /^-+$/) print name
+      if (name != "" && name != "Project" && name != "—" && name != "_(none yet)_" && name != "(none yet)" && name !~ /^-+$/) print name
     }
   ' "$REGISTRY_FILE"
 }
 
 blacklisted_projects() {
   awk -F '|' '
+    /<!--/ { in_comment=1 }
+    in_comment {
+      if (/-->/) in_comment=0
+      next
+    }
     /^## 1\./ { section=1; next }
     /^## 2\./ { section=2; next }
     section > 0 && /^\|/ {
@@ -113,9 +123,126 @@ blacklisted_projects() {
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
       gsub(/`/, "", name)
       if (section == 2) sub(/^.*\//, "", name)
-      if (name != "" && name != "Project" && name != "Path" && name != "—" && name !~ /^-+$/) print name
+      if (name != "" && name != "Project" && name != "Path" && name != "—" && name != "_(none yet)_" && name != "(none yet)" && name !~ /^-+$/) print name
     }
   ' "$BLACKLIST_FILE" | sort -u
+}
+
+registry_has_public_placeholder_shape() {
+  awk '
+    { sub(/\r$/, "") }
+    /<!--/ { in_comment=1 }
+    in_comment {
+      if (/-->/) in_comment=0
+      next
+    }
+    $0 == "## Active projects" {
+      headings++
+      if (state != 0) bad=1
+      state=1
+      next
+    }
+    state == 1 && $0 == "| Project | Path | Class | Notes |" {
+      headers++
+      state=2
+      next
+    }
+    state == 2 && $0 == "|---|---|---|---|" {
+      separators++
+      state=3
+      next
+    }
+    state == 3 && $0 == "| _(none yet)_ | | | |" {
+      placeholders++
+      state=4
+      next
+    }
+    state > 0 && state < 5 && $0 == "---" {
+      terminators++
+      if (state != 4) bad=1
+      state=5
+      next
+    }
+    state > 0 && state < 5 && ($0 != "" || index($0, "|") > 0) { bad=1 }
+    END {
+      valid = headings == 1 && headers == 1 && separators == 1 \
+        && placeholders == 1 && terminators == 1 && state == 5 \
+        && !in_comment && !bad
+      exit(valid ? 0 : 1)
+    }
+  ' "$REGISTRY_FILE"
+}
+
+blacklist_has_public_placeholder_shape() {
+  awk '
+    { sub(/\r$/, "") }
+    /<!--/ { in_comment=1 }
+    in_comment {
+      if (/-->/) in_comment=0
+      next
+    }
+    $0 == "## 1. Temporarily excluded (registered projects)" {
+      section1++
+      if (state != 0) bad=1
+      state=1
+      next
+    }
+    state == 1 && $0 == "| Project | Reason | Added | Review after |" {
+      headers1++
+      state=2
+      next
+    }
+    state == 2 && $0 == "|---|---|---|---|" {
+      separators1++
+      state=3
+      next
+    }
+    state == 3 && $0 == "| — | — | — | — |" {
+      placeholders1++
+      state=4
+      next
+    }
+    state == 4 && $0 == "*(empty)*" {
+      empty_markers++
+      state=5
+      next
+    }
+    $0 == "## 2. Permanently excluded from management" {
+      section2++
+      if (state != 5) bad=1
+      state=6
+      next
+    }
+    state == 6 && $0 == "| Path | Reason |" {
+      headers2++
+      state=7
+      next
+    }
+    state == 7 && $0 == "|---|---|" {
+      separators2++
+      state=8
+      next
+    }
+    state == 8 && $0 == "| _(none yet)_ | |" {
+      placeholders2++
+      state=9
+      next
+    }
+    state > 5 && state < 10 && $0 == "---" {
+      terminators++
+      if (state != 9) bad=1
+      state=10
+      next
+    }
+    state > 0 && state < 10 && index($0, "|") > 0 { bad=1 }
+    END {
+      valid = section1 == 1 && headers1 == 1 && separators1 == 1 \
+        && placeholders1 == 1 && empty_markers == 1 && section2 == 1 \
+        && headers2 == 1 && separators2 == 1 && placeholders2 == 1 \
+        && terminators == 1 && state == 10 && !in_comment && !bad
+      exit(valid ? 0 : 1)
+    }
+  ' "$BLACKLIST_FILE"
 }
 
 reconcile_eval_projects() {
@@ -124,12 +251,6 @@ reconcile_eval_projects() {
   [ -e "$BLACKLIST_FILE" ] && blacklist_present=1
   [ -e "$EVALS_DIR" ] && evals_present=1
 
-  # The public template intentionally excludes all three private fleet inputs.
-  # That all-absent shape is valid; any partial shape is drift and must fail
-  # closed before fixture discovery can silently under-count the fleet.
-  if [ "$registry_present" -eq 0 ] && [ "$blacklist_present" -eq 0 ] && [ "$evals_present" -eq 0 ]; then
-    return 0
-  fi
   if [ "$registry_present" -eq 0 ] || [ ! -r "$REGISTRY_FILE" ]; then
     err "registry is missing or unreadable: $REGISTRY_FILE"
     return 1
@@ -138,14 +259,35 @@ reconcile_eval_projects() {
     err "blacklist is missing or unreadable: $BLACKLIST_FILE"
     return 1
   fi
-  if [ "$evals_present" -eq 0 ] || [ ! -d "$EVALS_DIR" ] || [ ! -r "$EVALS_DIR" ]; then
+
+  local registered blacklisted
+  registered="$(registry_projects)"
+  blacklisted="$(blacklisted_projects)"
+
+  # The public template excludes the private fixture tree. Its only valid
+  # no-evals state is the shipped placeholder-only control structure plus
+  # semantic emptiness; parser emptiness alone cannot distinguish truncation.
+  if [ "$evals_present" -eq 0 ]; then
+    if [ -n "$registered" ] || [ -n "$blacklisted" ]; then
+      err "eval fixture root is missing, unreadable, or not a directory: $EVALS_DIR"
+      return 1
+    fi
+    if ! registry_has_public_placeholder_shape; then
+      err "registry does not match the shipped placeholder-only structure: $REGISTRY_FILE"
+      return 1
+    fi
+    if ! blacklist_has_public_placeholder_shape; then
+      err "blacklist does not match the shipped placeholder-only structure: $BLACKLIST_FILE"
+      return 1
+    fi
+    return 0
+  fi
+  if [ ! -d "$EVALS_DIR" ] || [ ! -r "$EVALS_DIR" ]; then
     err "eval fixture root is missing, unreadable, or not a directory: $EVALS_DIR"
     return 1
   fi
 
-  local registered blacklisted fixture_projects missing project
-  registered="$(registry_projects)"
-  blacklisted="$(blacklisted_projects)"
+  local fixture_projects missing project
   fixture_projects="$(discover_fixtures \
     | sed "s#^$EVALS_DIR/##; s#/.*##" \
     | sort -u)"

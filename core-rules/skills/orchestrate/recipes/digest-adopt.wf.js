@@ -34,6 +34,11 @@
 //                     route ∈ 'surgical' | 'feature' (validation-only / watch are
 //                     never executed — they are ledger notes).
 //   args.branchPrefix branch prefix for executed items. Defaults to 'feat/adopt'.
+//   args.loopSafety   caller-resolved canonical `loop_safety` config block.
+//                     Its `usd_per_mtok` rate is used for spend reporting when
+//                     no per-run override is supplied.
+//   args.usdPerMTok   optional positive per-run output-token rate override in
+//                     USD per million tokens. Takes precedence over loopSafety.
 //
 // This file ships in the public mirror — keep it parametric and path-neutral.
 
@@ -115,6 +120,50 @@ const branchPrefix = args.branchPrefix ?? 'feat/adopt'
 if (!args.digestPath) {
   throw new Error('digest-adopt: args.digestPath is required (the digest to adopt).')
 }
+const hasUsdPerMTokOverride = args.usdPerMTok !== undefined
+if (hasUsdPerMTokOverride
+  && (typeof args.usdPerMTok !== 'number' || !Number.isFinite(args.usdPerMTok) || args.usdPerMTok <= 0)) {
+  throw new Error('digest-adopt: args.usdPerMTok must be a finite number greater than 0 (USD per million output tokens).')
+}
+const usdPerMTok = hasUsdPerMTokOverride
+  ? args.usdPerMTok
+  : args.loopSafety?.usd_per_mtok
+const usdPerMTokAvailable = typeof usdPerMTok === 'number'
+  && Number.isFinite(usdPerMTok)
+  && usdPerMTok > 0
+
+function currentCostLine() {
+  const ceiling = meta.safety.budget_ceiling_usd.toFixed(2)
+  const rate = usdPerMTokAvailable
+    ? (Number.isInteger(usdPerMTok) ? usdPerMTok.toFixed(2) : String(usdPerMTok))
+    : 'unavailable'
+  let spentTokens = null
+  if (typeof budget !== 'undefined' && typeof budget.spent === 'function') {
+    try {
+      spentTokens = budget.spent()
+    } catch {
+      spentTokens = null
+    }
+  }
+  if (typeof spentTokens !== 'number' || !Number.isFinite(spentTokens) || spentTokens < 0) {
+    return 'spent_usd unavailable / budget_ceiling_usd ' + ceiling
+      + ' (output-token metering unavailable; usd_per_mtok ' + rate + ')'
+  }
+  if (!usdPerMTokAvailable) {
+    return 'spent_usd unavailable / budget_ceiling_usd ' + ceiling
+      + ' (' + spentTokens + ' output tokens metered; usd_per_mtok unavailable)'
+  }
+  const spentUsd = spentTokens * usdPerMTok / 1_000_000
+  return 'spent_usd ' + spentUsd.toFixed(6) + ' / budget_ceiling_usd ' + ceiling
+    + ' (' + spentTokens + ' output tokens at usd_per_mtok ' + rate + ')'
+}
+
+function emitCostLine(summary) {
+  phase('Report')
+  const costLine = currentCostLine()
+  log('digest-adopt report: ' + summary + '; ' + costLine)
+  return costLine
+}
 
 // --- Phase: Ingest --------------------------------------------------------
 // Deterministic parse of the digest's actionable proposals, minus anything the
@@ -136,7 +185,12 @@ const ingest = await agent(
 const candidates = ingest.candidates ?? []
 log('digest-adopt: ' + candidates.length + ' candidate(s); ' + (ingest.skipped_settled ?? 0) + ' already settled in the ledger')
 if (candidates.length === 0) {
-  return { triage: [], note: 'no fresh candidates — the ledger has settled everything in this digest.' }
+  const costLine = emitCostLine('no fresh candidates')
+  return {
+    triage: [],
+    costLine,
+    note: 'no fresh candidates — the ledger has settled everything in this digest.',
+  }
 }
 
 // --- Phase: Triage --------------------------------------------------------
@@ -176,8 +230,10 @@ const triaged = (await parallel(
 // to approve. Nothing is built. Execution requires a second invocation carrying
 // args.approved — the framework is never reshaped by a bare run.
 if (!args.approved || args.approved.length === 0) {
+  const costLine = emitCostLine('PROPOSE-ONLY (human gate)')
   return {
     triage: triaged,
+    costLine,
     ledgerPath,
     note: 'PROPOSE-ONLY (human gate). Review the routes above; re-invoke with '
       + 'args.approved = [{id, route}] for the surgical/feature items to build. '
@@ -243,16 +299,11 @@ const verdicts = (await parallel(
 )).filter(Boolean)
 
 // --- Phase: Report --------------------------------------------------------
-// P3 cost line every run + ledger-update instructions + carryover. The cost line
-// reads the shared token budget; when a dollar ceiling is wired it maps per
-// loop-safety.md's dollar->token conversion. Nothing here merges.
-phase('Report')
+// P3 cost line every run + ledger-update instructions + carryover. budget.spent()
+// is output-token-native, so convert through the resolved USD-per-MTok rate
+// before displaying it beside the USD ceiling. Nothing here merges.
 const opened = verdicts.filter((v) => v.pr_url)
-const spentTok = (typeof budget !== 'undefined' && budget.spent) ? budget.spent() : null
-const costLine = spentTok === null
-  ? 'spent: (token metering unavailable) / budget_ceiling_usd ' + meta.safety.budget_ceiling_usd
-  : 'spent ~' + Math.round(spentTok / 1000) + 'k output tokens / budget_ceiling_usd ' + meta.safety.budget_ceiling_usd + ' (see loop-safety.md dollar->token mapping)'
-log('digest-adopt report: ' + opened.length + '/' + verdicts.length + ' HOLD PRs opened; ' + costLine)
+const costLine = emitCostLine(opened.length + '/' + verdicts.length + ' HOLD PRs opened')
 
 return {
   triage: triaged,

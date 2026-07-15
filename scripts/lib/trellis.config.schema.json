@@ -217,12 +217,12 @@
         "spec_required_diff_lines": {
           "description": "Size floor: net gated diff (added+deleted, excluded paths removed) at or below this many lines is treated as sub-floor and passes with no spec (surgical-by-default). Above it, the branch must take one of the three routes. Default 80.",
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         },
         "surgical_max_diff_lines": {
           "description": "Surgical ceiling: a `/surgical` declaration is honored only while the net gated diff stays at or below this many lines. Grow past it and the marker is invalid — the gate re-blocks and audit-logs an `oversized-surgical` line; use `/surgical --emergency` for genuine over-cap urgency. Default 400.",
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": true

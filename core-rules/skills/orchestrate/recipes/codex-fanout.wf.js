@@ -36,7 +36,7 @@ export const meta = {
   // unit. The recipe adds no further repair loops beyond its single fix round.
   safety: {
     // First worker stall retries; a second no-progress iteration halts.
-    no_progress_iterations: 1,
+    no_progress_iterations: 2,
     progress_signal: 'file delta',
   },
 }

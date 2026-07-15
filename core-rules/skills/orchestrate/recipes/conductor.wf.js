@@ -127,7 +127,7 @@ function refreshPrompt() {
     'Enumerate every unique repo-backed project in the backlog and resolve its registry path.',
     'For each repo run exactly ONE fetch attempt, with no retry:',
     '  timeout runner: prefer `gtimeout`; else `timeout`; else `perl -e \'alarm shift; exec @ARGV\' ' + refreshTimeoutSeconds + ' git ...`.',
-    '  command: git -C <repo_path> fetch --no-tags origin main',
+    '  command: git -C <repo_path> fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main',
     '  ceiling: ' + refreshTimeoutSeconds + ' seconds per repo.',
     'After a successful fetch resolve exactly: git -C <repo_path> rev-parse --verify refs/remotes/origin/main^{commit}',
     'Return one project/repo_path/main_sha row per repo. Set complete=false if enumeration, timeout support, fetch, or SHA resolution fails for ANY repo.',

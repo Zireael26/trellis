@@ -50,9 +50,13 @@ INPUT=$(cat)
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "code-review-subagent: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
-# shellcheck source=lib/deps.sh disable=SC1090
+# shellcheck source=lib/deps.sh disable=SC1090,SC1091
 . "$__se_lib"
 _se_require_jq "code-review-subagent"
+__se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__se_autonomy_lib" ] || { echo "code-review-subagent: missing sibling lib at $__se_autonomy_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__se_autonomy_lib"
 
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
@@ -130,29 +134,9 @@ if [ -n "${TRELLIS_REVIEW_OVERRIDE:-}" ]; then
   exit 0
 fi
 
-# Autonomy resolution mirrors session-context.sh. Used to decide whether the
-# reviewer receives the L4/L5 decision-log verification clause.
-AUTONOMY_LEVEL=3
-TRELLIS_CFG=""
-if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
-  TRELLIS_CFG="$TRELLIS_ROOT/trellis.config.json"
-fi
-if [ -n "$TRELLIS_CFG" ] && command -v jq >/dev/null 2>&1; then
-  FLEET=$(jq -r '.autonomy_default // empty' "$TRELLIS_CFG" 2>/dev/null)
-  [ -n "$FLEET" ] && AUTONOMY_LEVEL="$FLEET"
-fi
-for cand in "$REPO_ROOT/.trellis.config.json" "$REPO_ROOT/trellis.config.json"; do
-  if [ -f "$cand" ] && command -v jq >/dev/null 2>&1; then
-    PL=$(jq -r '.autonomy // empty' "$cand" 2>/dev/null)
-    [ -n "$PL" ] && AUTONOMY_LEVEL="$PL"
-    break
-  fi
-done
-SESSION_FILE="$REPO_ROOT/.claude/session-autonomy"
-if [ -f "$SESSION_FILE" ]; then
-  SESS=$(head -1 "$SESSION_FILE" | tr -d '[:space:]')
-  case "$SESS" in 1|2|3|4|5) AUTONOMY_LEVEL="$SESS" ;; esac
-fi
+# The shared resolver implements the complete canonical pick/clamp algorithm.
+# The effective (post-ceiling) level controls decision-log reviewer context.
+_se_resolve_autonomy "$REPO_ROOT"
 export AUTONOMY_LEVEL
 export DECISIONS_LOG_PATH="$REPO_ROOT/decisions-log.md"
 
