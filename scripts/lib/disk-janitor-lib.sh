@@ -339,6 +339,50 @@ EOF
   return 0
 }
 
+# dj_worktree_porcelain_clean <wt_path>
+# return 0 iff `git status --porcelain` (no --ignored, no -uno) is EMPTY — no
+# staged, unstaged, OR untracked changes. This is the real "no uncommitted work"
+# signal (the one validated by hand during the 2026-07-16 flood) and it REPLACES
+# the ignored-file allowlist (dj_worktree_clean) as the auto-reap cleanliness
+# gate: for a recoverable tree the only residual risk is a gitignored *secret*,
+# which dj_worktree_has_secret_ignored screens separately. A git error yields a
+# non-empty 'ERR' → treated as dirty (fail-closed, never silently reaped).
+dj_worktree_porcelain_clean() {
+  local wt="$1" status
+  status="$(git -C "$wt" status --porcelain 2>/dev/null || echo 'ERR')"
+  [ -z "$status" ]
+}
+
+# dj_worktree_has_secret_ignored <wt_path>
+# return 0 iff any gitignored entry (`git status --porcelain --ignored`, the
+# "!! " lines) has a BASENAME matching a known-secret pattern. Such a file is
+# NOT in git's object store and NOT regenerable, so `git worktree remove` would
+# destroy it irretrievably. A porcelain-clean + recoverable tree that harbors one
+# is downgraded to a manual candidate (reported, never auto-reaped) — this is the
+# minimal fail-closed denylist that lets Decision 1 drop the build-artifact
+# allowlist without ever risking a silent secret loss.
+#
+# Patterns (basename): .env .env.* .dev.vars .npmrc *.pem *.key *.keystore *.jks *.p8
+# return 1 when no ignored entry matches — safe to auto-reap re: secrets.
+dj_worktree_has_secret_ignored() {
+  local wt="$1" entry base
+  # `--ignored` lines look like "!! path/to/.env[/]"; strip the "!! " marker,
+  # drop a trailing slash (ignored dirs report one), and match on the basename.
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    entry="${entry%/}"
+    base="${entry##*/}"
+    case "$base" in
+      .env|.env.*|.dev.vars|.npmrc|*.pem|*.key|*.keystore|*.jks|*.p8)
+        return 0
+        ;;
+    esac
+  done <<EOF
+$(git -C "$wt" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p')
+EOF
+  return 1
+}
+
 # dj_branch_merged <repo_path> <branch>
 # return 0 (merged → reapable), 1 (NOT merged), 2 (UNVERIFIED → never reaped).
 #
@@ -389,6 +433,37 @@ dj_branch_merged() {
   case "$merged_prs" in
     ''|'[]'|'null') return 1 ;;
     *) return 0 ;;
+  esac
+}
+
+# dj_worktree_pushed <wt_path>
+# return 0 iff the worktree's branch has an upstream (on origin) AND the local
+# tip is NOT ahead of it — i.e. every local commit is already on the remote, so
+# a `git worktree remove` loses no committed work. This is the OTHER half of
+# `recoverable` (merged OR pushed) and the key change from the 2026-07-16 flood:
+# it catches the unmerged-but-pushed bulk (open PRs) that a merged-only gate
+# skipped.
+#
+# Test injection: if $DJ_PUSHED_OVERRIDE is set, "pushed"→0, "unpushed"→1. Any
+# other value is treated as unset. This mirrors DJ_MERGED_OVERRIDE — the real
+# check reads remote-tracking state and is not exercised against a live remote.
+#
+#   @{u} resolves (upstream configured) AND `rev-list --count @{u}..HEAD` == 0 → 0
+#   no upstream / local tip ahead of upstream / any git error                  → 1
+dj_worktree_pushed() {
+  local wt="$1" ahead
+  case "${DJ_PUSHED_OVERRIDE:-}" in
+    pushed) return 0 ;;
+    unpushed) return 1 ;;
+  esac
+  # Upstream must be configured (the branch tracks a remote ref). Quote @{u} so
+  # the shell never treats the braces as an expansion.
+  git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1 || return 1
+  # Count local commits not yet on the upstream. 0 => fully pushed (safe).
+  ahead="$(git -C "$wt" rev-list --count '@{u}..HEAD' 2>/dev/null || echo '')"
+  case "$ahead" in
+    0) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -552,11 +627,25 @@ dj_reap_worktree() {
     return 1
   fi
 
-  # Must resolve under PROJECTS_ROOT (or a known worktree home beneath it; the
-  # .claude/worktrees convention lives under each project, hence under root).
+  # Must resolve under a PERMITTED reap root: PROJECTS_ROOT (project homes + the
+  # .claude/worktrees convention beneath each project) OR the ephemeral tmp root
+  # where fan-out stages throwaway worktrees. A /private/tmp tree is the single
+  # biggest reclaim target (audit waves stage 1–3 GB trees there), so refusing it
+  # here would make the delete verdict un-appliable. Widening the root stays safe
+  # by construction: the destructive step below is `git worktree remove`, which
+  # only acts on a path REGISTERED as a linked worktree of THIS repo — an
+  # unrelated tmp dir (a scratchpad, another repo's tree) is not, so it is
+  # refused; the rm -rf fallback likewise fires only for a git-confirmed-prunable
+  # registered entry. `dj__abspath` resolved symlinks (/tmp → /private/tmp), so
+  # compare against the resolved tmp roots.
+  local tmp_root tmpdir_root
+  tmp_root="$(dj__abspath /tmp)"
+  tmpdir_root="$(dj__abspath "${TMPDIR:-/tmp}")"
   case "$real/" in
     "$root"/*) ;;
-    *) echo "dj_reap_worktree: '$real' not under PROJECTS_ROOT ($root) — refusing" >&2; return 1 ;;
+    "$tmp_root"/*) ;;
+    "$tmpdir_root"/*) ;;
+    *) echo "dj_reap_worktree: '$real' not under a permitted reap root (PROJECTS_ROOT=$root, tmp=$tmp_root) — refusing" >&2; return 1 ;;
   esac
 
   if git -C "$repo" worktree remove "$real" >/dev/null 2>&1; then

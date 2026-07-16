@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Trellis disk-janitor NIGHTLY APPLY LaunchAgent template (destructive).
+
+  This file is a TEMPLATE. The placeholder tokens (the trellis root, the user
+  home, and PATH) are substituted with absolute values at install time by
+  scripts/install-disk-janitor-launchd.sh --with-apply. Do not load this file
+  directly — the unrendered tokens are not valid paths.
+
+  Behaviour: runs `trellis disk-janitor --apply --scopes worktrees --yes
+  --safe-only` once a day at 04:00 (after the 03:30 report). UNLIKE the
+  report agent, this one DELETES — but only the unattended-safe set:
+  --safe-only restricts the worktree reap to trees that are merged (PR closed
+  = unit done), porcelain-clean, non-detached, and free of any gitignored
+  secret. Pushed-but-unmerged and ephemeral /private/tmp trees are NEVER
+  reaped by this agent — they are downgraded to manual candidates. A merged PR
+  is the concurrency guarantee: the unit is done, so no live agent is working
+  in the tree. Caches and stores are out of scope here (never auto-pruned).
+
+  This agent is OPT-IN. The default installer run installs only the report
+  agent; you must pass --with-apply explicitly. Do not enable it until the
+  --safe-only predicate is on the host (disk-janitor.sh at or past the
+  worktree-lifecycle change). RunAtLoad is false so installing/loading does
+  not trigger a reap; the first run is at the next 04:00.
+
+  PATH is baked in at install time so jq / git / gh / du / find resolve —
+  launchd's default PATH does not include Homebrew.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.trellis.disk-janitor-apply</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TRELLIS_ROOT__/scripts/trellis</string>
+        <string>disk-janitor</string>
+        <string>--apply</string>
+        <string>--scopes</string>
+        <string>worktrees</string>
+        <string>--yes</string>
+        <string>--safe-only</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__USER_HOME__/Library/Logs/org.trellis.disk-janitor-apply.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__USER_HOME__/Library/Logs/org.trellis.disk-janitor-apply.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

@@ -2,7 +2,11 @@
 // Claude verification and one bounded repair round. `args.codexCap` is required
 // and must be caller-resolved from `trellis.config.json.codex_fanout.concurrency`.
 // Agents only produce and verify diffs. The calling orchestrator alone
-// commits and merges dependency-ready work, in the returned receipt order.
+// commits and merges dependency-ready work, in the returned receipt order —
+// and, per spec 2026-07-16 Layer 1 (worktree reap-at-source), reaps each
+// conflicting unit's caller-provisioned `targetCwd` worktree AFTER it
+// commits+pushes that unit's accepted diff. This recipe provisions no
+// worktrees and never commits/pushes, so it deliberately reaps none itself.
 //
 // Inputs (all specifics come from args):
 //   args.units       [{ name, leg, task, effort?, justification?, paths,
@@ -473,4 +477,15 @@ const receipts = mergeOrder.map((unit) => receiptByName.get(unit.name))
 
 // Receipts are merge-ready metadata only. The orchestrator commits accepted
 // worktree diffs serially in this dependency order; workers never commit.
+//
+// WORKTREE REAP (spec 2026-07-16 Layer 1): this recipe provisions no worktrees
+// and never commits/pushes, so it deliberately reaps nothing — reaping a
+// conflicting unit's caller-provisioned tree here would either destroy its
+// still-uncommitted diff or remove a path this recipe did not create, both
+// barred by the spec's safety model. Reap-at-source for a conflicting unit is
+// the ORCHESTRATOR's job, performed AFTER it commits+pushes that unit's
+// accepted diff: `git worktree remove <targetCwd>`, gated on `git status
+// --porcelain` empty AND HEAD pushed to origin (re-verified at reap time,
+// never --force). Each receipt exposes `worktree`, `targetCwd`, and `branch`
+// so the orchestrator can locate and safely reap the tree.
 return { codexAvailable, codexCap, receipts }

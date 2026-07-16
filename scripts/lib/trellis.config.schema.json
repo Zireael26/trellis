@@ -122,7 +122,7 @@
       "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
     },
     "disk_janitor": {
-      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []). Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []; reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; worktree_count_ceiling 25; worktree_total_gb_ceiling 80). Absence of the object is byte-identical to the defaults — this key is purely additive.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -135,7 +135,7 @@
           "minimum": 0
         },
         "worktree_stale_days": {
-          "description": "A worktree is a reap candidate only when its last commit is older than this many days (one of four gates). Default 30.",
+          "description": "A worktree is a reap candidate only when its last commit is older than this many days. Applies only to the legacy predicate (reap_pushed_worktrees=false); the default Layer-2 predicate drops staleness (age is irrelevant once work is recoverable). Default 30.",
           "type": "integer",
           "minimum": 0
         },
@@ -146,6 +146,25 @@
         },
         "cache_ceiling_gb": {
           "description": "Tripwire: report flags a runaway cache when the largest single build cache exceeds this many GB. Default 20.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reap_pushed_worktrees": {
+          "description": "Layer 2 predicate switch. Default true: a linked worktree auto-reaps when it is porcelain-clean AND recoverable (branch merged via gh OR pushed to origin with the local tip not ahead) AND carries no gitignored secret — age-independent, which is what reclaims the unmerged-but-pushed fan-out flood. Set false to restore the legacy 4-gate predicate (non-main AND stale AND clean(allowlist) AND merged) verbatim.",
+          "type": "boolean"
+        },
+        "ephemeral_tmp_ttl_days": {
+          "description": "Short TTL for porcelain-clean worktrees under /private/tmp (throwaway on reboot): such a tree auto-reaps once its last commit is older than this many days even when recoverability cannot be verified (no upstream), provided the branch is not detached. Only consulted under the default predicate. Default 2.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "worktree_count_ceiling": {
+          "description": "Layer 3 tripwire: the report WARNs when any single repo exceeds this many linked worktrees, so a fan-out flood is visible days before the free-space floor is breached. Default 25.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "worktree_total_gb_ceiling": {
+          "description": "Layer 3 tripwire: the report WARNs when the aggregate footprint of all linked worktrees across the fleet exceeds this many GB. Default 80.",
           "type": "integer",
           "minimum": 0
         },

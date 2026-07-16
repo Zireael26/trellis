@@ -280,6 +280,103 @@ git_init_at() {
 }
 
 # ===========================================================================
+# dj_worktree_porcelain_clean — the Layer-2 cleanliness gate (no allowlist)
+# ===========================================================================
+
+@test "dj_worktree_porcelain_clean: clean -> 0; untracked -> non-zero; gitignored-only -> 0" {
+  local repo="$SANDBOX/repo"
+  git_init_at "$repo"
+  # Clean immediately after the seed commit.
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -eq 0 ]
+  # Untracked WIP is NOT porcelain-clean (no -uno).
+  printf 'wip\n' > "$repo/untracked.txt"
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -ne 0 ]
+  rm -f "$repo/untracked.txt"
+  # Unlike dj_worktree_clean's allowlist, porcelain NEVER inspects gitignored
+  # files: a tree carrying only a gitignored node_modules AND a gitignored .env
+  # is still porcelain-clean. (This is exactly why the secret denylist is a
+  # SEPARATE gate — porcelain alone would let the .env through.)
+  printf 'node_modules/\n.env\n' > "$repo/.gitignore"
+  ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
+  mkdir -p "$repo/node_modules/pkg"
+  printf 'x\n' > "$repo/node_modules/pkg/index.js"
+  printf 'API_KEY=shhh\n' > "$repo/.env"
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -eq 0 ]
+}
+
+# ===========================================================================
+# dj_worktree_has_secret_ignored — minimal fail-closed secret denylist
+# ===========================================================================
+
+@test "dj_worktree_has_secret_ignored: .env / .env.* / .npmrc / *.pem match; recoverable artifacts do not" {
+  local repo="$SANDBOX/repo"
+  git_init_at "$repo"
+  printf 'node_modules/\n.next/\n.vercel/\n.env\n.env.local\n.npmrc\n*.pem\n' > "$repo/.gitignore"
+  ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
+  # Only recoverable build artifacts ignored -> NO secret (safe to auto-reap).
+  mkdir -p "$repo/node_modules/pkg" "$repo/.next/cache" "$repo/.vercel"
+  printf 'x\n' > "$repo/node_modules/pkg/i.js"
+  printf 'x\n' > "$repo/.next/cache/x"
+  printf 'x\n' > "$repo/.vercel/project.json"
+  run dj_worktree_has_secret_ignored "$repo"
+  [ "$status" -ne 0 ]
+  # A gitignored .env -> secret.
+  printf 'S=1\n' > "$repo/.env"
+  run dj_worktree_has_secret_ignored "$repo"
+  [ "$status" -eq 0 ]
+  rm -f "$repo/.env"
+  # .env.local matches the .env.* pattern -> secret.
+  printf 'S=1\n' > "$repo/.env.local"
+  run dj_worktree_has_secret_ignored "$repo"
+  [ "$status" -eq 0 ]
+  rm -f "$repo/.env.local"
+  # .npmrc (npm auth token) -> secret.
+  printf '//registry.npmjs.org/:_authToken=secret\n' > "$repo/.npmrc"
+  run dj_worktree_has_secret_ignored "$repo"
+  [ "$status" -eq 0 ]
+  rm -f "$repo/.npmrc"
+  # A top-level *.pem (basename match) -> secret.
+  printf 'k\n' > "$repo/server.pem"
+  run dj_worktree_has_secret_ignored "$repo"
+  [ "$status" -eq 0 ]
+}
+
+# ===========================================================================
+# dj_worktree_pushed — upstream-on-origin recoverability (override + real check)
+# ===========================================================================
+
+@test "dj_worktree_pushed honors DJ_PUSHED_OVERRIDE: pushed=0, unpushed=1" {
+  DJ_PUSHED_OVERRIDE=pushed   run dj_worktree_pushed "$SANDBOX/wt"
+  [ "$status" -eq 0 ]
+  DJ_PUSHED_OVERRIDE=unpushed run dj_worktree_pushed "$SANDBOX/wt"
+  [ "$status" -eq 1 ]
+}
+
+@test "dj_worktree_pushed real check: no upstream -> 1; pushed+not-ahead -> 0; local tip ahead -> 1" {
+  local repo="$SANDBOX/repo"
+  git_init_at "$repo"
+  local wt="$SANDBOX/wt-feature"
+  ( cd "$repo" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
+  # No upstream configured -> unpushed (the fan-out local-only case).
+  run dj_worktree_pushed "$wt"
+  [ "$status" -ne 0 ]
+  # Stand up a bare origin and push feat/x WITH upstream tracking.
+  local remote="$SANDBOX/remote.git"
+  git init -q --bare "$remote"
+  ( cd "$wt" && git remote add origin "$remote" && git push -q -u origin feat/x )
+  # @{u} now resolves and the tip is not ahead -> pushed (recoverable).
+  run dj_worktree_pushed "$wt"
+  [ "$status" -eq 0 ]
+  # A new un-pushed commit puts the local tip ahead of @{u} -> unpushed again.
+  ( cd "$wt" && git commit --allow-empty -q -m "local ahead" )
+  run dj_worktree_pushed "$wt"
+  [ "$status" -ne 0 ]
+}
+
+# ===========================================================================
 # dj_worktree_mtime — last-commit epoch
 # ===========================================================================
 

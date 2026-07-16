@@ -11,7 +11,7 @@
 #                       never modifies a working tree. This is the ONLY mode
 #                       launchd runs.
 #   --dry-run           Print the EXACT deletion plan (path, human bytes,
-#                       why-safe per row; worktrees show the 4-gate verdict).
+#                       why-safe per row; worktrees show the reap verdict).
 #                       DELETES NOTHING.
 #
 # Note: building the plan (in every mode) calls the merge discriminator, which
@@ -24,9 +24,14 @@
 #                       prompt is mandatory without --yes. Re-scan + report
 #                       reclaimed bytes. launchd NEVER runs --apply.
 #
-# Worktree reap is gated by the FULL 4-gate triad (is_main==0 AND stale AND
-# clean AND branch merged). An UNVERIFIED merge (dj_branch_merged==2) is
-# reported as a candidate and EXCLUDED from apply — never reaped.
+# Worktree reap (default, reap_pushed_worktrees=true) is gated on: is_main==0
+# AND porcelain-clean (no uncommitted work) AND recoverable (branch merged via
+# gh OR pushed to origin with the tip not ahead) AND no gitignored secret. A
+# gitignored secret, or a clean-but-unrecoverable tree, is reported as a manual
+# candidate and EXCLUDED from apply. A porcelain-clean unrecoverable tree under
+# /private/tmp reaps at a short TTL (ephemeral_tmp_ttl_days). Setting
+# reap_pushed_worktrees=false restores the pre-Layer-2 4-gate triad (is_main==0
+# AND stale AND clean(allowlist) AND merged) verbatim.
 #
 # Per-project failure isolation: a project that errors mid-scan is reported as
 # `skipped: <reason>` and the run continues.
@@ -54,6 +59,7 @@ MODE="report"            # report | dry-run | apply
 ONLY_PROJECT=""
 SCOPES="caches,worktrees,stores"
 ASSUME_YES=0
+SAFE_ONLY=0              # --safe-only: unattended-safe worktree reap (merged-only)
 
 print_help() {
   cat <<'EOF'
@@ -65,6 +71,10 @@ Usage:
   disk-janitor.sh --dry-run                Print the exact deletion plan only.
   disk-janitor.sh --apply                  Apply, confirming per category (y/N).
   disk-janitor.sh --apply --yes            Apply without the per-category prompt.
+  disk-janitor.sh --apply --yes --safe-only
+                                           Unattended-safe reap (the nightly
+                                           LaunchAgent): only merged, clean,
+                                           non-detached, non-secret worktrees.
   disk-janitor.sh --project NAME           Limit to one registry project.
   disk-janitor.sh --scopes caches,worktrees,stores
                                            Limit scopes (default: all three).
@@ -76,7 +86,7 @@ Modes (escalating):
              recurrence pre-pass + the disk tripwire (free vs floor, largest
              cache vs ceiling). Deletes nothing. The ONLY mode launchd runs.
   --dry-run  Prints the deletion plan (path, size, why-safe; worktrees show
-             the 4-gate verdict). Deletes nothing.
+             the reap verdict). Deletes nothing.
   --apply    Prints the plan, then per category reads a y/N line from stdin
              before deleting (mandatory unless --yes). Re-scans, reports
              reclaimed bytes.
@@ -86,12 +96,25 @@ branch); it modifies no git refs and deletes nothing, so report/dry-run stay
 non-destructive. A worktree whose merge can't be verified (no gh, detached
 HEAD) is reported as a candidate and never reaped.
 
+--safe-only tightens the worktree reap for unattended use (the nightly apply
+LaunchAgent): a `delete` verdict survives ONLY for a merged, porcelain-clean,
+non-detached, non-secret tree. A merged PR means the unit is done, so no live
+agent is working in the tree — the worktree scan has no live-process guard, so
+"merged" is what carries the concurrency guarantee. Every other auto-delete
+(pushed-but-unmerged, ephemeral /private/tmp) is downgraded to a manual
+candidate; those are in-flight trees owned by the fan-out recipe teardown. The
+flag only ever tightens the plan, so `--dry-run --safe-only` previews exactly
+what the nightly would reap.
+
 Scopes:
   caches      .turbo/cache, .next/cache, .next/dev older than cache_ttl_days,
               skipped when a build is running.
-  worktrees   linked git worktrees that are non-main AND stale AND clean AND
-              whose branch is merged. Unverified-merge worktrees are reported
-              as candidates, never reaped.
+  worktrees   linked git worktrees that are non-main AND porcelain-clean AND
+              recoverable (branch merged OR pushed to origin) AND free of any
+              gitignored secret. Clean-but-unrecoverable trees and secret-bearing
+              trees are reported as candidates, never reaped (see also the
+              /private/tmp short-TTL path). reap_pushed_worktrees=false restores
+              the legacy stale+clean+merged gate.
   stores      pnpm store / npm cache footprint — REPORT-ONLY (best-effort
               estimate; --apply does not prune stores in this release).
 
@@ -116,6 +139,9 @@ while [ "$i" -le "$#" ]; do
       ;;
     --yes|-y)
       ASSUME_YES=1
+      ;;
+    --safe-only)
+      SAFE_ONLY=1
       ;;
     --project)
       i=$((i + 1))
@@ -184,6 +210,11 @@ validate_scopes() {
 }
 validate_scopes
 
+# Header tag so every mode's banner shows when the unattended-safe worktree
+# restriction is active (the nightly apply LaunchAgent runs with --safe-only).
+SAFE_ONLY_TAG=""
+[ "$SAFE_ONLY" -eq 1 ] && SAFE_ONLY_TAG="  (safe-only: merged-clean worktrees only)"
+
 # ---------------------------------------------------------------------------
 # Config — the disk_janitor object via jq with per-key defaults. The whole
 # object (or the whole file's key) being absent must still work: every read is
@@ -199,7 +230,25 @@ cfg_num() {
   printf '%s' "$val"
 }
 
-DJ_ENABLED="$(jq -r '.disk_janitor.enabled // true' "$CFG" 2>/dev/null || echo true)"
+cfg_bool() {
+  # cfg_bool <jq-path> <default true|false> — read a boolean key. jq's `//`
+  # alternative operator coalesces `false` exactly like `null`, so `X // true`
+  # would read an explicit `false` back as `true` (silently defeating a disable
+  # switch). We therefore read the RAW value and treat ONLY an explicit
+  # "true"/"false" as authoritative; null / missing / malformed → the default.
+  local path="$1" def="$2" val
+  val="$(jq -r "$path" "$CFG" 2>/dev/null || echo null)"
+  case "$val" in
+    true) printf 'true' ;;
+    false) printf 'false' ;;
+    *) printf '%s' "$def" ;;
+  esac
+}
+
+# NOTE: read via cfg_bool, NOT `.disk_janitor.enabled // true` — the latter
+# coalesces an explicit `false` back to `true`, so `enabled=false` would fail to
+# block --apply (the documented safety switch). cfg_bool honors an explicit false.
+DJ_ENABLED="$(cfg_bool '.disk_janitor.enabled' true)"
 # disk_janitor.enabled=false hard-blocks the destructive --apply path (report
 # and dry-run remain available for inspection). The default is true.
 if [ "$MODE" = "apply" ] && [ "$DJ_ENABLED" = "false" ]; then
@@ -211,6 +260,14 @@ CACHE_TTL_DAYS="$(cfg_num '.disk_janitor.cache_ttl_days' 14)"
 WORKTREE_STALE_DAYS="$(cfg_num '.disk_janitor.worktree_stale_days' 30)"
 FREE_SPACE_FLOOR_GB="$(cfg_num '.disk_janitor.free_space_floor_gb' 30)"
 CACHE_CEILING_GB="$(cfg_num '.disk_janitor.cache_ceiling_gb' 20)"
+# Layer 2/3 (worktree lifecycle reap). reap_pushed_worktrees is a boolean via
+# cfg_bool (so an explicit false is honored); the rest are numeric via cfg_num.
+# All default-safe: an absent disk_janitor object still yields the documented
+# defaults (reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; ceilings 25/80).
+REAP_PUSHED_WORKTREES="$(cfg_bool '.disk_janitor.reap_pushed_worktrees' true)"
+EPHEMERAL_TMP_TTL_DAYS="$(cfg_num '.disk_janitor.ephemeral_tmp_ttl_days' 2)"
+WORKTREE_COUNT_CEILING="$(cfg_num '.disk_janitor.worktree_count_ceiling' 25)"
+WORKTREE_TOTAL_GB_CEILING="$(cfg_num '.disk_janitor.worktree_total_gb_ceiling' 80)"
 
 SKIP_PROJECTS=()
 while IFS= read -r sp; do
@@ -387,13 +444,28 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Scope B: worktrees. Reap requires the FULL 4-gate triad. dj_branch_merged
-# returns 0 (merged) / 1 (unmerged) / 2 (unverified — never reaped).
+# Scope B: worktrees.
+#
+# Default predicate (reap_pushed_worktrees=true, Layer 2 — the flood reclaimer):
+#   reap iff  is_main==0  AND  porcelain_clean  AND  recoverable  AND  not(secret)
+# where recoverable = merged (gh) OR pushed (upstream on origin, tip not ahead).
+# `stale` is dropped (age is irrelevant once work is recoverable); a gitignored
+# secret downgrades to a manual candidate; a porcelain-clean but unrecoverable
+# tree under /private/tmp reaps at a short TTL. dj_branch_merged returns 0/1/2,
+# dj_worktree_pushed 0/1.
+#
+# Fallback (reap_pushed_worktrees=false): the pre-Layer-2 4-gate triad exactly
+# (is_main==0 AND stale AND clean(allowlist) AND merged) — a clean opt-out.
+#
+# The main-checkout row carries kind `worktree-main` so the Layer 3 tripwire can
+# count LINKED worktrees only (col 3 == "worktree").
 # ---------------------------------------------------------------------------
 scan_worktrees() {
   local proj="$1"
   local wt_path head_sha branch is_main prunable
-  local bytes mtime merged_rc clean_rc stale_rc detail verdict worktree_rows rc
+  local bytes mtime detail verdict worktree_rows rc
+  local merged_rc clean_rc stale_rc porc_rc pushed_rc secret_rc recoverable_rc
+  local real_wt is_tmp tmp_stale_rc is_detached
 
   if worktree_rows="$(dj_list_worktrees "$proj")"; then :; else
     rc=$?
@@ -406,41 +478,129 @@ scan_worktrees() {
     [ -n "$wt_path" ] || continue
     : "${head_sha:-}" "${prunable:-}"
 
-    # Main checkout: never a reap candidate — report and move on.
+    # Main checkout: never a reap candidate — report and move on. Kind
+    # `worktree-main` keeps it out of the linked-worktree tripwire count.
     if [ "$is_main" = "1" ]; then
       bytes="$(dj_dir_bytes "$wt_path")"
-      plan_row worktrees skip worktree "$wt_path" "$bytes" "$proj" "main checkout — never reaped"
+      plan_row worktrees skip worktree-main "$wt_path" "$bytes" "$proj" "main checkout — never reaped"
       continue
     fi
 
     bytes="$(dj_dir_bytes "$wt_path")"
     mtime="$(dj_worktree_mtime "$wt_path")"
 
-    # Gate: staleness.
-    if dj_cache_is_stale "$mtime" "$WORKTREE_STALE_DAYS" "$NOW_EPOCH"; then stale_rc=0; else stale_rc=$?; fi
-    # Gate: clean working tree (untracked counts as dirty).
-    if dj_worktree_clean "$wt_path"; then clean_rc=0; else clean_rc=$?; fi
-    # Gate: branch merged. 0 merged / 1 unmerged / 2 unverified.
-    if dj_branch_merged "$proj" "$branch"; then merged_rc=0; else merged_rc=$?; fi
+    # ---- Fallback: pre-Layer-2 4-gate behavior (opt-out) ----
+    if [ "$REAP_PUSHED_WORKTREES" = "false" ]; then
+      if dj_cache_is_stale "$mtime" "$WORKTREE_STALE_DAYS" "$NOW_EPOCH"; then stale_rc=0; else stale_rc=$?; fi
+      if dj_worktree_clean "$wt_path"; then clean_rc=0; else clean_rc=$?; fi
+      if dj_branch_merged "$proj" "$branch"; then merged_rc=0; else merged_rc=$?; fi
 
-    detail="branch=$branch"
-    case "$stale_rc" in 0) detail="$detail stale" ;; *) detail="$detail fresh" ;; esac
-    case "$clean_rc" in 0) detail="$detail clean" ;; *) detail="$detail dirty" ;; esac
+      detail="branch=$branch"
+      case "$stale_rc" in 0) detail="$detail stale" ;; *) detail="$detail fresh" ;; esac
+      case "$clean_rc" in 0) detail="$detail clean" ;; *) detail="$detail dirty" ;; esac
+      case "$merged_rc" in
+        0) detail="$detail merged" ;;
+        2) detail="$detail merge-unverified" ;;
+        *) detail="$detail unmerged" ;;
+      esac
+
+      if [ "$stale_rc" -eq 0 ] && [ "$clean_rc" -eq 0 ] && [ "$merged_rc" -eq 0 ]; then
+        verdict="delete"
+      elif [ "$stale_rc" -eq 0 ] && [ "$clean_rc" -eq 0 ] && [ "$merged_rc" -eq 2 ]; then
+        verdict="candidate"
+        detail="candidate (unverified merge) — $detail"
+      else
+        verdict="skip"
+      fi
+      plan_row worktrees "$verdict" worktree "$wt_path" "$bytes" "$proj" "$detail"
+      continue
+    fi
+
+    # ---- Default: Layer 2 porcelain-clean + recoverable predicate ----
+
+    # Hard gate: a porcelain-dirty tree (staged, unstaged, OR untracked) holds
+    # real uncommitted work — ALWAYS skip, before any network/gh lookup.
+    if dj_worktree_porcelain_clean "$wt_path"; then porc_rc=0; else porc_rc=1; fi
+    if [ "$porc_rc" -ne 0 ]; then
+      plan_row worktrees skip worktree "$wt_path" "$bytes" "$proj" "dirty (uncommitted work) — branch=$branch"
+      continue
+    fi
+
+    # Recoverable = merged (gh) OR pushed (upstream, tip not ahead).
+    if dj_branch_merged "$proj" "$branch"; then merged_rc=0; else merged_rc=$?; fi
+    if dj_worktree_pushed "$wt_path"; then pushed_rc=0; else pushed_rc=$?; fi
+    recoverable_rc=1
+    if [ "$merged_rc" -eq 0 ] || [ "$pushed_rc" -eq 0 ]; then recoverable_rc=0; fi
+
+    # Secret denylist (only meaningful for a recoverable clean tree).
+    secret_rc=1
+    if [ "$recoverable_rc" -eq 0 ]; then
+      if dj_worktree_has_secret_ignored "$wt_path"; then secret_rc=0; else secret_rc=$?; fi
+    fi
+
+    detail="branch=$branch clean"
     case "$merged_rc" in
       0) detail="$detail merged" ;;
       2) detail="$detail merge-unverified" ;;
       *) detail="$detail unmerged" ;;
     esac
+    case "$pushed_rc" in 0) detail="$detail pushed" ;; *) detail="$detail unpushed" ;; esac
+    case "$recoverable_rc" in 0) detail="$detail recoverable" ;; *) detail="$detail unrecoverable" ;; esac
 
-    # Verdict: delete ONLY when all four gates hold. Unverified merge is a
-    # reported candidate, NEVER reaped.
-    if [ "$stale_rc" -eq 0 ] && [ "$clean_rc" -eq 0 ] && [ "$merged_rc" -eq 0 ]; then
-      verdict="delete"
-    elif [ "$stale_rc" -eq 0 ] && [ "$clean_rc" -eq 0 ] && [ "$merged_rc" -eq 2 ]; then
+    if [ "$recoverable_rc" -eq 0 ] && [ "$secret_rc" -eq 0 ]; then
+      # Recoverable, but a gitignored secret would be destroyed — manual only.
       verdict="candidate"
-      detail="candidate (unverified merge) — $detail"
+      detail="candidate (secret ignored file present) — $detail secret-ignored"
+    elif [ "$recoverable_rc" -eq 0 ]; then
+      verdict="delete"
     else
-      verdict="skip"
+      # Not recoverable. Only /private/tmp (throwaway on reboot) reaps at a short
+      # TTL, and never when detached (no branch ref to fall back on).
+      real_wt="$(dj__abspath "$wt_path")"
+      is_tmp=1
+      case "$real_wt/" in
+        /private/tmp/*) is_tmp=0 ;;
+      esac
+      is_detached=1
+      case "$branch" in ''|detached|HEAD) is_detached=0 ;; esac
+      if dj_cache_is_stale "$mtime" "$EPHEMERAL_TMP_TTL_DAYS" "$NOW_EPOCH"; then tmp_stale_rc=0; else tmp_stale_rc=$?; fi
+      if [ "$is_tmp" -eq 0 ] && [ "$tmp_stale_rc" -eq 0 ] && [ "$is_detached" -ne 0 ]; then
+        # The ephemeral-tmp reap still honors the secret denylist: a gitignored
+        # secret is not in git's object store, so `git worktree remove` would
+        # destroy it irretrievably — the same fail-closed class as the recoverable
+        # path. A tmp tree harboring one is downgraded to a manual candidate.
+        if dj_worktree_has_secret_ignored "$wt_path"; then
+          verdict="candidate"
+          detail="candidate (secret ignored file present) — $detail ephemeral-tmp secret-ignored"
+        else
+          verdict="delete"
+          detail="$detail ephemeral-tmp stale>${EPHEMERAL_TMP_TTL_DAYS}d"
+        fi
+      else
+        verdict="candidate"
+        detail="candidate (not recoverable) — $detail"
+      fi
+    fi
+
+    # --safe-only (the unattended nightly apply): keep a `delete` verdict ONLY
+    # for a merged, non-detached tree. A merged PR means the unit is done, so no
+    # live agent is working in the tree — the worktree scan has no live-process
+    # guard, so "merged" is what carries the concurrency guarantee. Every other
+    # auto-delete (pushed-but-unmerged, ephemeral /private/tmp) is an in-flight
+    # tree owned by the fan-out teardown; downgrade it to a manual candidate.
+    # Only ever tightens the plan. (The reap_pushed_worktrees=false fallback is
+    # already merged-gated, so it reaches its own plan_row without this.)
+    if [ "$SAFE_ONLY" -eq 1 ] && [ "$verdict" = "delete" ]; then
+      case "$branch" in
+        ''|detached|HEAD)
+          verdict="candidate"
+          detail="candidate (safe-only: detached) — $detail" ;;
+        *)
+          if [ "${merged_rc:-1}" -ne 0 ]; then
+            verdict="candidate"
+            detail="candidate (safe-only: not merged) — $detail"
+          fi ;;
+      esac
     fi
     plan_row worktrees "$verdict" worktree "$wt_path" "$bytes" "$proj" "$detail"
   done <<EOF
@@ -534,6 +694,23 @@ TOTAL_RECLAIM_BYTES=$((CACHE_DELETE_BYTES + WT_DELETE_BYTES))
 # Largest single cache (for the ceiling tripwire).
 LARGEST_CACHE_BYTES="$(awk -F'\t' '$1=="caches" && $5>m { m=$5 } END { printf "%.0f", m+0 }' "$PLAN_TMP")"
 
+# Layer 3 tripwire inputs: per-repo LINKED-worktree counts + aggregate bytes,
+# derived from the accumulated plan rows. The main checkout is emitted with kind
+# `worktree-main` (col 3), so filtering col3=="worktree" counts linked trees only.
+# awk prints "<busiest_repo>\t<max_count>\t<total_bytes>"; empty plan → "-\t0\t0".
+WT_TRIPWIRE_STATS="$(awk -F'\t' '
+  $1=="worktrees" && $3=="worktree" { c[$6]++; s += $5 }
+  END {
+    mx = 0; name = "-";
+    for (r in c) if (c[r] > mx) { mx = c[r]; name = r }
+    printf "%s\t%d\t%.0f", name, mx, s+0
+  }
+' "$PLAN_TMP")"
+WT_MAX_REPO="$(printf '%s' "$WT_TRIPWIRE_STATS" | cut -f1)"
+WT_MAX_COUNT="$(printf '%s' "$WT_TRIPWIRE_STATS" | cut -f2)"
+WT_TOTAL_BYTES="$(printf '%s' "$WT_TRIPWIRE_STATS" | cut -f3)"
+WT_TOTAL_CEILING_BYTES=$((WORKTREE_TOTAL_GB_CEILING * 1024 * 1024 * 1024))
+
 # Free space on the projects volume. `df -Pk` forces POSIX output (one physical
 # line per filesystem — no device-name wrap) with sizes in 1024-blocks; the
 # Available column is field 4. Portable across darwin + linux.
@@ -558,8 +735,8 @@ render_report() {
   echo "trellis disk-janitor — disk reclaim report"
   echo "date:          $(date +%F)"
   echo "projects root: $PROJECTS_ROOT"
-  echo "scopes:        $SCOPES"
-  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB"
+  echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
+  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
   echo
 
   # --- recurrence pre-pass ---
@@ -592,6 +769,22 @@ INNER
   else
     printf '  ✓ under ceiling (%s)\n' "$(dj_human_bytes "$CEILING_BYTES")"
   fi
+  # Layer 3: linked-worktree count + aggregate footprint — fires days before the
+  # free-space floor is breached (126 trees on one repo screams early).
+  if scope_enabled worktrees; then
+    printf '  linked worktrees (busiest repo): %s in %s' "$WT_MAX_COUNT" "$WT_MAX_REPO"
+    if [ "$WT_MAX_COUNT" -gt "$WORKTREE_COUNT_CEILING" ]; then
+      printf '  ⚠ OVER ceiling (%s)\n' "$WORKTREE_COUNT_CEILING"
+    else
+      printf '  ✓ under ceiling (%s)\n' "$WORKTREE_COUNT_CEILING"
+    fi
+    printf '  linked-worktree footprint (fleet): %s' "$(dj_human_bytes "$WT_TOTAL_BYTES")"
+    if [ "$WT_TOTAL_BYTES" -gt "$WT_TOTAL_CEILING_BYTES" ]; then
+      printf '  ⚠ OVER ceiling (%s)\n' "$(dj_human_bytes "$WT_TOTAL_CEILING_BYTES")"
+    else
+      printf '  ✓ under ceiling (%s)\n' "$(dj_human_bytes "$WT_TOTAL_CEILING_BYTES")"
+    fi
+  fi
   echo
 
   # --- caches ---
@@ -613,8 +806,8 @@ INNER
       [ "$scope" = "worktrees" ] || continue
       printf '  [%s] %s (%s) — %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done <"$PLAN_TMP"
-    printf '  reclaimable (all 4 gates): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
-    printf '  candidates (unverified merge, NOT reaped): %s\n' "$(dj_human_bytes "$WT_CANDIDATE_BYTES")"
+    printf '  reclaimable (porcelain-clean + recoverable): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
+    printf '  candidates (manual review, NOT reaped): %s\n' "$(dj_human_bytes "$WT_CANDIDATE_BYTES")"
     echo
   fi
 
@@ -676,7 +869,7 @@ fi
 if [ "$MODE" = "dry-run" ]; then
   echo "trellis disk-janitor — DRY RUN (deletion plan; nothing is removed)"
   echo "projects root: $PROJECTS_ROOT"
-  echo "scopes:        $SCOPES"
+  echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
   echo
   if scope_enabled caches; then
     echo "== Caches to delete (stale > ${CACHE_TTL_DAYS}d) =="
@@ -687,12 +880,12 @@ if [ "$MODE" = "dry-run" ]; then
     echo
   fi
   if scope_enabled worktrees; then
-    echo "== Worktrees to reap (is_main==0 AND stale AND clean AND merged) =="
+    echo "== Worktrees to reap (is_main==0 AND porcelain-clean AND recoverable AND not-secret) =="
     awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
       printf '  git worktree remove  %s  (%s) — gates: %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done
     printf '  -> %s reclaimable\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
-    echo "  candidates (unverified merge) — reported, NOT reaped:"
+    echo "  candidates (manual review) — reported, NOT reaped:"
     awk -F'\t' '$1=="worktrees" && $2=="candidate"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
       printf '    %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done
@@ -726,7 +919,7 @@ confirm_category() {
 
 echo "trellis disk-janitor — APPLY"
 echo "projects root: $PROJECTS_ROOT"
-echo "scopes:        $SCOPES"
+echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
 echo
 
 # --- caches ---
@@ -751,11 +944,11 @@ fi
 
 # --- worktrees --- (only verdict==delete; candidate/unverified is excluded)
 if scope_enabled worktrees; then
-  echo "== Worktrees to reap (all 4 gates), $(dj_human_bytes "$WT_DELETE_BYTES") =="
+  echo "== Worktrees to reap (porcelain-clean + recoverable), $(dj_human_bytes "$WT_DELETE_BYTES") =="
   awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
     printf '  %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
   done
-  if [ "$WT_DELETE_BYTES" -gt 0 ] && confirm_category "these merged+clean+stale worktrees"; then
+  if [ "$WT_DELETE_BYTES" -gt 0 ] && confirm_category "these recoverable + porcelain-clean worktrees"; then
     while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
       [ "$scope" = "worktrees" ] && [ "$verdict" = "delete" ] || continue
       if dj_reap_worktree "$repo" "$path"; then

@@ -204,9 +204,23 @@ Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
   **isolated worktree** (`isolation: "worktree"`), verifies the target on its host
   (install / build / typecheck per repo, lint where present), and returns a
   structured verdict of the shape
-  `{target, branch, pushed, green, pr_url, notes}`. **Agents never merge** — the
-  main loop reads the verdicts and auto-merges the GREEN ones, HOLDing the rest for
-  human review.
+  `{target, branch, pushed, green, pr_url, worktree_path, notes}`. **Agents never
+  merge** — the main loop reads the verdicts and auto-merges the GREEN ones,
+  HOLDing the rest for human review. A final **Teardown** phase reaps each unit's
+  worktree once its work is safely on origin (pushed + PR): a bounded reap agent
+  re-verifies porcelain-clean + pushed at reap time before `git worktree remove`
+  — best-effort and failure-isolated, so a reap that can't prove safety leaves the
+  tree in place and never fails the unit (spec `2026-07-16-worktree-lifecycle-reap`).
+
+**Orchestrator reap-after-commit (general rule).** Whenever the main loop — not a
+recipe — commits+pushes a worktree it (or a recipe on its behalf) provisioned,
+it reaps that tree right after the push: `git worktree remove <path>`, re-verifying
+`git status --porcelain` empty AND the tip pushed at reap time, never `--force`.
+This is the `codex-fanout` conflicting-unit case: the recipe leaves those trees
+*uncommitted* for verification, so it cannot reap them — the orchestrator does,
+pre-merge, once it has committed the accepted diff. It is doctrine, not a hard
+hook; the disk-janitor predicate is the mechanical backstop that reaps anything
+missed (ADR `2026-07-16-orchestrator-conflicting-unit-reap`).
 
 When running this under degrade tier 2 (subagents, no workflow tool), read the
 recipe's `meta.phases` and per-agent prompts as the stage spec and dispatch them by

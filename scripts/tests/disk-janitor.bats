@@ -126,6 +126,29 @@ build_alpha_with_stale_cache() {
   touch -t 200001010000 "$proj/.next/cache"
 }
 
+# add_worktree <repo> <wt> <branch> — a linked worktree on its own branch.
+add_worktree() {
+  local repo="$1" wt="$2" branch="$3"
+  ( cd "$repo" && git worktree add -q -b "$branch" "$wt" >/dev/null 2>&1 )
+}
+
+# write_config_dj <disk_janitor-json> — fixture config with a custom disk_janitor
+# object (used to drive the Layer 3 tripwire ceilings).
+write_config_dj() {
+  local dj="$1"
+  cat > "$CFG" <<EOF
+{
+  "trellis_root": "$CANON",
+  "projects_root": "$PROJECTS",
+  "user_home": "$SANDBOX",
+  "maintainer_name": "Test Maintainer",
+  "github_user": "tester",
+  "harnesses": ["claude"],
+  "disk_janitor": $dj
+}
+EOF
+}
+
 # Snapshot a deterministic fingerprint of a tree: each file's path + size +
 # mtime-epoch. Used to assert read-only modes mutate NOTHING.
 fingerprint() {
@@ -312,4 +335,43 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"== Worktrees =="* ]]
   [[ "$output" != *"== Build caches =="* ]]
+}
+
+# ===========================================================================
+# Layer 3 tripwire — linked-worktree count + aggregate footprint
+# ===========================================================================
+
+@test "tripwire WARNs when a repo exceeds worktree_count_ceiling AND fleet exceeds the GB ceiling" {
+  # ceiling of 1 tree / 0 GB -> any 2 linked worktrees + any footprint trip both.
+  write_config_dj '{ "worktree_count_ceiling": 1, "worktree_total_gb_ceiling": 0 }'
+  git_init_at "$PROJECTS/alpha"
+  add_worktree "$PROJECTS/alpha" "$PROJECTS/alpha/.claude/worktrees/a" "feat/a"
+  add_worktree "$PROJECTS/alpha" "$PROJECTS/alpha/.claude/worktrees/b" "feat/b"
+
+  DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  # Count tripwire: 2 linked trees in the busiest repo > ceiling 1 -> WARN.
+  [[ "$output" == *"linked worktrees (busiest repo): 2 in "*"$PROJECTS/alpha"* ]]
+  [[ "$output" == *"linked worktrees (busiest repo)"*"⚠ OVER ceiling (1)"* ]]
+  # Aggregate tripwire: any footprint > 0 GB -> WARN.
+  [[ "$output" == *"linked-worktree footprint (fleet)"*"⚠ OVER ceiling"* ]]
+  # The config line echoes the new keys.
+  [[ "$output" == *"worktree_count_ceiling=1"* ]]
+  [[ "$output" == *"worktree_total_gb_ceiling=0"* ]]
+}
+
+@test "tripwire shows ✓ under ceiling with default ceilings and only a couple of worktrees" {
+  git_init_at "$PROJECTS/alpha"
+  add_worktree "$PROJECTS/alpha" "$PROJECTS/alpha/.claude/worktrees/a" "feat/a"
+
+  DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"linked worktrees (busiest repo): 1 in "* ]]
+  [[ "$output" == *"linked worktrees (busiest repo)"*"✓ under ceiling (25)"* ]]
+  [[ "$output" == *"linked-worktree footprint (fleet)"*"✓ under ceiling (80.0 GB)"* ]]
+  # Default new-key values are echoed on the config line.
+  [[ "$output" == *"reap_pushed_worktrees=true"* ]]
+  [[ "$output" == *"ephemeral_tmp_ttl_days=2"* ]]
+  [[ "$output" == *"worktree_count_ceiling=25"* ]]
+  [[ "$output" == *"worktree_total_gb_ceiling=80"* ]]
 }
