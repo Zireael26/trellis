@@ -1,0 +1,7 @@
+[tool.poetry]
+name = "repo-a"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "0.136.1"

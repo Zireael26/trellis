@@ -14,14 +14,14 @@ json_assert() {
   CAPTURED_JSON="$output" node -e 'const r=JSON.parse(process.env.CAPTURED_JSON); if (!('"$1"')) { console.error(JSON.stringify(r,null,2)); process.exit(1) }'
 }
 
-@test "incomplete ref refresh aborts before ranking" {
-  run_recipe '{"today":"2026-07-14","__agentOutputByLabel":{"refresh-refs":{"complete":false,"refs":[],"notes":"fetch timed out"}}}'
-  json_assert "r.error && /ref refresh incomplete/.test(r.error.message) && r.prompts.map((p) => p.opts.label).join(',') === 'refresh-refs'"
+@test "incomplete ref refresh permits rank-only output and prohibits specs" {
+  run_recipe '{"today":"2026-07-14","__agentOutputByLabel":{"refresh-refs":{"complete":false,"refs":[],"notes":"fetch timed out"},"rank":{"generated_for":"2026-07-14","ranked":[{"id":"alpha","project":"repo","title":"alpha","score":1,"reasons":"backlog only","eligible_auto_spec":false,"auto_spec":null,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":["ref-refresh-incomplete"]}]}}}'
+  json_assert "!r.error && r.result.refresh_complete === false && r.result.specs.length === 0 && r.prompts.map((p) => p.opts.label).join(',') === 'refresh-refs,rank' && r.prompts.find((p)=>p.opts.label==='rank').prompt.includes('REFRESH INCOMPLETE')"
 }
 
 @test "ref refresh fetches main into the exact ref it resolves" {
   run_recipe '{"today":"2026-07-14"}'
-  json_assert "!r.error && (() => { const refresh=r.prompts.find((p)=>p.opts.label==='refresh-refs'); return refresh.prompt.includes('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main') && refresh.prompt.includes('rev-parse --verify refs/remotes/origin/main^{commit}') && !refresh.prompt.includes('fetch --no-tags origin main'); })()"
+  json_assert "!r.error && (() => { const refresh=r.prompts.find((p)=>p.opts.label==='refresh-refs'); return refresh.prompt.includes('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main') && refresh.prompt.includes('rev-parse --verify refs/remotes/origin/main^{commit}') && refresh.prompt.includes('task-secret or Keychain') && !refresh.prompt.includes('fetch --no-tags origin main'); })()"
 }
 
 @test "ranking and spec creation bind to the immutable refreshed main SHA" {

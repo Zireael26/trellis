@@ -73,7 +73,7 @@ and the standard inheritance seeder recreates it in fresh worktrees.
 
 ### Skill path-scoping (optional, project-local)
 
-Canonical skills are global by design — they apply to the whole repo, regardless of which subtree the agent is editing. That works because every canonical skill is workflow-shaped, not language-shaped: `process-gate`, `security-gate`, the two `brainstorming` front-door routes — the lightweight track `brainstorming` → `docs/plans` → `execute`, and the heavyweight spec-kit pipeline `clarify` → `spec` → `plan` → `tasks` → `analyze` → `execute` — and the dynamic-workflow orchestration kit `orchestrate`.
+Canonical skills are global by design — they apply to the whole repo, regardless of which subtree the agent is editing. That works because every canonical skill is workflow-shaped, not language-shaped: `process-gate`, `security-gate`, the two `brainstorming` front-door routes — the lightweight track `brainstorming` → a project-local design plan → `execute`, and the heavyweight spec-kit pipeline `clarify` → `spec` → `plan` → `tasks` → `analyze` → `execute` — and the dynamic-workflow orchestration kit `orchestrate`.
 
 **Project-local skills can opt into path-scoping.** A project-local skill (one that does NOT come from the canonical symlink — typically lives at `<project>/.claude/skills/<custom-name>/` and is project-owned) may carry a `scope.json` next to its `SKILL.md`:
 

@@ -528,6 +528,13 @@ permissions.deny (node_modules, .next, dist, etc.). Example:
 
 Target size: **< 5 KB**. Bloat pushes signal out of context. Long reference material goes in sibling files and gets linked.
 
+**Context budget.** Treat injected scaffolding (`CLAUDE.md` + primers +
+`context-log.md` + system reminders) as a metered per-turn tax. Measure its
+footprint periodically, keep the leanest set that still works, and scale it
+down as models improve; Anthropic already ships leaner system prompts for
+stronger models. Evidence: 2026-07-12 CC-vs-OpenCode token-overhead teardown,
+~33K vs ~7K baseline tokens before the user prompt.
+
 **Codebase map convention.** When a project has fewer than 5 top-level directories, the agent can keep them all in head from a single `ls`. Past that threshold the cost of re-discovering the tree on every fresh session adds up, so the `Codebase map` section becomes mandatory. The audit in §11 enforces this: `cross-project-process-audit` fails any registered project with ≥ 5 top-level directories whose `CLAUDE.md` lacks a `## Codebase map` heading.
 
 The format is deliberately bare: one line per directory, role only. The point is to save an exploration round-trip, not to mirror the README. If a directory needs more than a one-liner to introduce, write a sibling `docs/<dir>.md` and link to it from the map line.
@@ -942,7 +949,7 @@ Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague re
 **This pipeline is the heavyweight track of a three-track router.** The `brainstorming` front-door (the canonical skill ships under `core-rules/skills/brainstorming/`) sizes every change to one of three tracks before any building begins. The same boundaries are stated in `core-rules/inheritance.md` and the `brainstorming` skill itself:
 
 - **Surgical** — a tiny, obvious change with one clear correct shape (one-line fix, copy tweak, config flip). Skip ideation and skip the pipeline; make the change directly with a receipt, or hand it to `execute` if a checkbox already exists.
-- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author `docs/plans/<topic>.md`, then build it with `execute`. *(When `mandatory_pipeline` is enabled, the `docs/plans`-only route satisfies the gate only **below the size floor**. Above the floor a lightweight **feature** escalates to the full triad; genuinely lightweight **mechanical** work over the floor takes the `/surgical` route instead — decision D10, spec 006.)*
+- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author a project-local design plan, then build it with `execute`. *(When `mandatory_pipeline` is enabled, the plan-only route satisfies the gate only **below the size floor**. Above the floor a lightweight **feature** escalates to the full triad; genuinely lightweight **mechanical** work over the floor takes the `/surgical` route instead — decision D10, spec 006.)*
 - **Heavyweight** — cross-cutting / load-bearing / multi-subsystem work, vague or contradictory intent, or three-plus acceptance criteria. **This is the pipeline below:** `clarify` → `spec` → `plan` → `tasks` → `analyze`, then build with `execute`.
 
 All three tracks converge on the single canonical builder, **`execute`** (`core-rules/skills/execute/`, shipped Phase 4) — it is the implement/build stage that turns a plan's or `tasks.md`'s checkboxes into shipped, receipted work. The pipeline below produces the design artifacts; `execute` is what runs *after* them. When unsure between two tracks, choose the heavier one — a little extra design is cheap; a wrong "surgical" change is not.
@@ -1073,7 +1080,7 @@ Trellis ships an L1–L5 **responsibility slider** that determines who answers t
 5. Session: `<canonical-root>/.claude/session-autonomy` (written by `/autonomy N` slash command).
 6. Clamp by lowest active preset `autonomy_ceiling`.
 
-**Bright-line guardrails** (always-on, every level): hard hooks, destructive ops, external messages to others (Slack/email/PR-comments), secrets, DoD receipts, code-review subagent. PR *creation* flexes with level.
+**Bright-line guardrails** (always-on, every level): hard hooks, destructive ops, external messages to others (Slack/email/PR-comments), secrets, DoD receipts, code-review subagent, untrusted-content boundary. PR *creation* flexes with level.
 
 **Reversibility carve-out:** architectural decisions (new dep, new module, auth flow, data store, public API) surface inline mid-turn even at L5. The reversibility cliff is honored.
 
@@ -1089,6 +1096,8 @@ Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/202
 
 **Active project** — appears in `registry.md`, not in `blacklist.md`.
 
+**Aspirational-rules test** — every `CLAUDE.md` line must trace to a real observed failure; if you cannot point to the mistake, delete the line.
+
 **Canonical hook** — the nine `.sh` files under `~/projects/trellis-instance/core-rules/hooks/`. Projects deploy copies; drift is flagged by `parent-hook-drift`.
 
 **Control plane** — the contents of `~/projects/trellis-instance/`. The place where the regime is defined, evolved, and audited.
@@ -1103,6 +1112,8 @@ Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/202
 
 **Parent layer** — the rules and hooks in `~/projects/trellis-instance/core-rules/` that every registered project inherits.
 
+**Ratchet** — `gotchas.md` self-correction: every agent mistake permanently tightens the harness with a rule or sensor, never a one-off fix; Trellis practiced this before the industry's July 2026 "harness engineering" label (O'Reilly Radar; Addy Osmani).
+
 **Receipts** — the verification command + exit code + diff lines required to claim "done."
 
 **Registered** — synonymous with active.
@@ -1112,6 +1123,8 @@ Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/202
 **Trellis** — this regime. The name, the directory, the process.
 
 **Silent drop** — Claude Code's behavior when inheritance breaks: no error, no warning, instruction simply doesn't load. Detection is via the `InstructionsLoaded` hook and periodic audits.
+
+**Sensors vs guides** — hooks and DoD receipts are sensors that verify the agent did it; rules and docs are guides that tell it what to do. Invest in sensors first.
 
 **Tier (hook)** — three tiers: fast-local (every turn), heavy-gated (Stop event), git-boundary (husky).
 

@@ -66,6 +66,10 @@ SYNC_PATHS=(
   "engineering-process.md"
   "AGENT_ONBOARD_PROJECT.md"
   "CHANGELOG.md"
+  # Public bootstrap shells only. The private source files are copied into the
+  # staging area and replaced below before leak checks or mirror writes.
+  "dependency-baseline.json"
+  "audits/fleet-remediation-ledger.json"
   "core-rules/CLAUDE.md"
   "core-rules/AGENTS.md"
   "core-rules/agents/"
@@ -106,6 +110,9 @@ SYNC_PATHS=(
   "docs/codex-routing.md"
   "docs/specs/2026-05-20-trellis-autonomy-design.md"
   "docs/specs/2026-06-02-trellis-process-enforcement-design.md"
+  "docs/specs/2026-06-09-loop-safety-contract-design.md"
+  "docs/specs/2026-07-21-reference-token-handoff-spike.md"
+  "docs/specs/2026-07-21-public-dependency-bootstrap-design.md"
 )
 
 # Files NEVER synced (private / instance-specific) — informational; the
@@ -114,6 +121,8 @@ SYNC_PATHS=(
 NEVER_SYNC=(
   "registry.md"
   "blacklist.md"
+  # audits/ stays private except for the exact sanitized empty ledger shell in
+  # SYNC_PATHS. No source report or private finding row is ever published.
   "audits/"
   "scheduled-tasks/"   # operator-specific automation; names the private fleet (audit 2026-07-13 H1/M2)
   "conductor/"         # conductor slate/state — private fleet inventory
@@ -331,6 +340,42 @@ if [ -f "$TMP_STAGE/trellis.config.json" ]; then
   },
 
   "sed_flavor": "auto"
+}
+EOF
+fi
+
+# Publish schema-valid bootstrap shells, never the instance's fleet policy or
+# finding receipts. A public clone can run `trellis deps check` immediately;
+# maintainers populate their own baseline with `trellis deps snapshot` after
+# registering projects. Keep these deterministic so repeated syncs are clean.
+if [ -f "$TMP_STAGE/dependency-baseline.json" ]; then
+  cat > "$TMP_STAGE/dependency-baseline.json" <<'EOF'
+{
+  "$schema": "./scripts/lib/fleet-dependency-baseline.schema.json",
+  "schema_version": 1,
+  "source_ref": "origin/main",
+  "policy": {
+    "shared_project_minimum": 2,
+    "direct_versions": "exact-per-lane",
+    "peer_versions": "compatible-range",
+    "expired_exceptions": "fail"
+  },
+  "toolchains": [],
+  "packages": [],
+  "security_floors": [],
+  "exceptions": []
+}
+EOF
+fi
+
+if [ -f "$TMP_STAGE/audits/fleet-remediation-ledger.json" ]; then
+  cat > "$TMP_STAGE/audits/fleet-remediation-ledger.json" <<'EOF'
+{
+  "$schema": "../scripts/lib/fleet-remediation-ledger.schema.json",
+  "schema_version": 1,
+  "audit_date": "2026-07-21",
+  "source_reports": [],
+  "findings": []
 }
 EOF
 fi

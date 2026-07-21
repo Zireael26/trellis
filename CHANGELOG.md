@@ -6,7 +6,55 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
-*(Nothing yet.)*
+### Added
+
+- **Post-remediation fleet audit receipts.** Record the private vulnerability,
+  currency, consistency, major-watch, process, hook, host-health, registry,
+  conductor, disk, security, lint, inheritance, autonomy, version, and rollup
+  reports; close the private finding ledger with evidence and dated manual
+  gates. Audit reports and fleet identities remain outside the public mirror.
+- **Fleet dependency baseline and remediation ledger (spec 017).** A single
+  origin-ref-backed validator now enforces exact shared dependency/toolchain
+  lanes, compatible peer ranges, patched transitive security floors, dated
+  exceptions, and evidence-backed finding dispositions across npm, pnpm,
+  Poetry, and uv projects. `trellis deps` exposes check/snapshot/apply-plan and
+  ledger commands; the dependency audits consume the same baseline.
+
+### Changed
+
+- **Public dependency bootstrap is runnable without private fleet data.** The
+  mirror now receives deterministic, schema-valid empty baseline and ledger
+  shells, while sync replaces every private package lane, project name, report,
+  and finding before leak checks. Empty registry/blacklist placeholders no
+  longer parse as projects, HTML-commented example rows remain inert, and
+  executable tests prove `trellis deps check` and `ledger-check` work in a
+  fresh public clone. Synced operator docs now keep every public reference
+  resolvable without exposing private plan directories, and the public test
+  inventory no longer requires deliberately excluded private workflows.
+
+- **Fleet baseline reconciliation.** Pin the published TypeScript 6 compiler-API alias,
+  the Node 24 runtime-matched `@types/node` line, Firebase's Node 22 type lane,
+  shared globals/PyJWT/FastAPI releases, and ignore generated Vercel output so clean
+  remediation heads validate without false drift. Resolve the default projects
+  root relative to Trellis so the public mirror contains no maintainer-specific
+  absolute path.
+- **Fleet audit and conductor fail-closed controls.** `test-health` now halts
+  off-host before project access, uses no-optional-lock git reads, and forbids
+  dependency hydration. Conductor runs rank-only after any ref-refresh failure,
+  blocks all branch/worktree/spec mutation, and accepts credentials only from
+  task secrets or Keychain. Auto-spec is temporarily zero while the backlog is
+  reconciled; delivered rows and the narrowed TGSC Loop 5 scope now match main.
+- **Permanent blacklist reconciled.** `product-videos` is permanently excluded;
+  the obsolete `curat-cc-data` and `DocSynapse` rows were removed while their
+  history remains in git.
+
+- **TypeScript compatibility lane corrected to published registry state.** The
+  native compiler remains 7.0.2; the compiler-API alias is 6.0.2 because
+  `@typescript/typescript6` has no published 6.0.3 release. Fixtures pin the
+  same installable side-by-side arrangement.
+- **Next lint compatibility lane recorded.** Next projects use ESLint 9.39.2
+  while the current `eslint-plugin-react` throws under ESLint 10; non-Next
+  projects remain on the 10.4.1 lane until the upstream plugin converges.
 
 ## [v1.0.0-rc.12] — 2026-07-14
 

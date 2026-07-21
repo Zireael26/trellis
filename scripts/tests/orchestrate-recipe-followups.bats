@@ -30,6 +30,7 @@ _json_assert() {
 }
 
 @test "M12 fleet workflow accepts only xhigh and max" {
+  [ -f "$FLEET_RECIPE" ] || skip "private fleet workflow is not shipped in the public mirror"
   local effort
   for effort in medium high; do
     _run_recipe "$FLEET_RECIPE" "{\"codexAvailable\":true,\"repoLanes\":[{\"repo\":\"repo-alpha\",\"path\":\"/tmp/repo-alpha\",\"base\":\"main\",\"harness\":\"codex\",\"effort\":\"$effort\",\"rows\":[]}]}"

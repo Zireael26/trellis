@@ -341,6 +341,16 @@ install_post_checkout_hook() {
   local hp destdir hp_label
   hp="$(git -C "$PROJECT" config core.hooksPath || true)"
 
+  # An absolute path to this checkout's tracked .githooks directory is
+  # machine-specific and breaks as soon as a linked worktree is created.
+  # Normalize only that exact in-repo target; external paths remain untouched
+  # and continue through the existing fail-safe handling.
+  if [ "$hp" = "$PROJECT/.githooks" ]; then
+    git -C "$PROJECT" config --local core.hooksPath .githooks
+    hp=".githooks"
+    echo "updated: core.hooksPath normalized to portable .githooks"
+  fi
+
   if [ -n "$hp" ]; then
     # hooksPath is set — check if it is gitignored (e.g. .husky/_)
     if git -C "$PROJECT" check-ignore -q "$hp" 2>/dev/null; then

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "shared_project_minimum": 2,
+    "direct_versions": "exact-per-lane",
+    "peer_versions": "compatible-range",
+    "expired_exceptions": "fail"
+  },
+  "toolchains": [
+    { "name": "node", "lanes": [{ "id": "node24", "version": "24.18.0", "projects": ["repo-a", "repo-b"], "match": "exact" }] },
+    { "name": "pnpm", "lanes": [{ "id": "pnpm", "version": "11.9.0", "projects": ["repo-a"], "match": "exact" }] }
+  ],
+  "packages": [
+    { "ecosystem": "npm", "name": "foo", "lanes": [{ "id": "default", "version": "2.0.0", "projects": ["repo-a", "repo-b"] }] },
+    { "ecosystem": "npm", "name": "react", "lanes": [{ "id": "peer", "version": "19.2.7", "projects": ["repo-a", "repo-b"] }] },
+    { "ecosystem": "npm", "name": "typescript", "lanes": [{ "id": "api", "version": "6.0.2", "projects": ["repo-a"] }] },
+    { "ecosystem": "pypi", "name": "fastapi", "lanes": [{ "id": "default", "version": "0.136.1", "projects": ["repo-a", "repo-b"] }] }
+  ],
+  "security_floors": [
+    { "ecosystem": "npm", "name": "brace-expansion", "projects": ["*"], "branches": [{ "major": 1, "minimum": "1.1.16" }, { "major": 2, "minimum": "2.1.2" }, { "major": 5, "minimum": "5.0.7" }] }
+  ],
+  "exceptions": []
+}

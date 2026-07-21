@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "dependencies": {
+    "foo": "2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "npm:@typescript/typescript6@6.0.2"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  }
+}

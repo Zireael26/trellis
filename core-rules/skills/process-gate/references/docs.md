@@ -81,6 +81,8 @@ Per `engineering-process.md` §7, the PR description's "Test plan" + "Receipts" 
 - Exit codes.
 - Diff lines or PR-link summary.
 
+Receipt evidence must come from executing or diffing the artifact, never agent self-report; for skill evals, prefer a judge that runs/diffs the artifact over one that reads the transcript.
+
 This gate's PR-description check (in `pr-hygiene.md`) covers presence; the contributor is responsible for content fidelity.
 
 ## Project README

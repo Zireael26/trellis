@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-07-21",
+  "source_reports": ["fixture.md"],
+  "findings": [
+    {
+      "id": "fixture-fixed",
+      "source": "fixture.md",
+      "project": "repo-a",
+      "category": "dependency",
+      "summary": "A fixed row has a receipt.",
+      "severity": "high",
+      "disposition": "fixed",
+      "evidence": [{ "kind": "command", "value": "fixture check", "recorded_at": "2026-07-21" }]
+    }
+  ]
+}

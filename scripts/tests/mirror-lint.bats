@@ -34,6 +34,19 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "only the public ledger bootstrap is allowed in the audits namespace" {
+  mkdir -p "$M/audits"
+  printf '{"schema_version":1,"audit_date":"2026-07-21","source_reports":[],"findings":[]}\n' > "$M/audits/fleet-remediation-ledger.json"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  printf 'private finding\n' > "$M/audits/report.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"audits/report.md: private namespace must not publish"* ]]
+}
+
 @test "public operator docs cannot claim a de-listed scheduled-task fleet" {
   printf 'Includes a fleet of 16 scheduled audits under scheduled-tasks/.\n' > "$M/README.md"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"

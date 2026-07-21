@@ -1,0 +1,3 @@
+[[package]]
+name = "fastapi"
+version = "0.136.1"
