@@ -120,7 +120,7 @@ run_sync_dry() {
   [ "$(jq '.packages | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
   [ "$(jq '.source_reports | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
   [ "$(jq '.findings | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
-  run rg -n 'private-project-' "$MIRROR/dependency-baseline.json" "$MIRROR/audits/fleet-remediation-ledger.json"
+  run grep -n 'private-project-' "$MIRROR/dependency-baseline.json" "$MIRROR/audits/fleet-remediation-ledger.json"
   [ "$status" -eq 1 ]
 
   run bash "$MIRROR/scripts/lint-prompt-shell-blocks.sh"
