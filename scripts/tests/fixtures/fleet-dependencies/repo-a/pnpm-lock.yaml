@@ -1,0 +1,27 @@
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      foo:
+        specifier: 2.0.0
+        version: 2.0.0
+    devDependencies:
+      typescript:
+        specifier: npm:@typescript/typescript6@6.0.2
+        version: 6.0.2
+
+packages:
+
+  brace-expansion@1.1.16:
+    resolution: {integrity: fixture}
+
+  brace-expansion@2.1.2:
+    resolution: {integrity: fixture}
+
+  brace-expansion@5.0.7:
+    resolution: {integrity: fixture}
+
+  foo@2.0.0:
+    resolution: {integrity: fixture}

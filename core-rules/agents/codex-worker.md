@@ -48,6 +48,19 @@ model during retry or degradation.
 
 ## Capability gate
 
+Subagent sandboxes may start with a shim PATH that omits the node toolchain
+(observed 2026-07-18 on vericite: `setup --json` reported node/npm/codex "not
+found in PATH" while the binaries existed under nvm). Before the gate, repair
+PATH in the same shell that runs every companion command:
+
+```sh
+export PATH="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1):/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v node && command -v codex
+```
+
+Only if node or codex is still missing after this repair does the gate below
+report UNAVAILABLE.
+
 Resolve an explicit companion path when supplied; otherwise resolve only
 `$CODEX_PLUGIN/scripts/codex-companion.mjs`. Before editing, run the companion's
 `setup --json` from `target_cwd`. Capability is ready only when the response says

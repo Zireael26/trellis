@@ -9,7 +9,7 @@ setup() {
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
   PROJECTS="$SANDBOX/projects"
-  mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$MIRROR" "$PROJECTS"
+  mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/audits" "$MIRROR" "$PROJECTS"
 
   cp "$REPO_ROOT/scripts/sync-to-template.sh" "$SOURCE/scripts/"
   cp "$REPO_ROOT/scripts/lint-prompt-shell-blocks.sh" "$SOURCE/scripts/"
@@ -28,6 +28,30 @@ setup() {
   "github_user": "testuser",
   "harnesses": ["claude"],
   "template": { "branch": "main" }
+}
+EOF
+
+  cat > "$SOURCE/dependency-baseline.json" <<EOF
+{
+  "schema_version": 1,
+  "policy": {
+    "shared_project_minimum": 2,
+    "direct_versions": "exact-per-lane",
+    "peer_versions": "compatible-range",
+    "expired_exceptions": "fail"
+  },
+  "toolchains": [{"name":"private-project-$SANDBOX","lanes":[]}],
+  "packages": [],
+  "security_floors": [],
+  "exceptions": []
+}
+EOF
+  cat > "$SOURCE/audits/fleet-remediation-ledger.json" <<EOF
+{
+  "schema_version": 1,
+  "audit_date": "2026-07-21",
+  "source_reports": ["private-project-$SANDBOX"],
+  "findings": []
 }
 EOF
 
@@ -90,6 +114,14 @@ run_sync_dry() {
   [[ "$output" == *"mirror clean."* ]]
   [ ! -e "$MIRROR/scheduled-tasks" ]
   [ -f "$MIRROR/scripts/sync-to-template.sh" ]
+  [ -f "$MIRROR/dependency-baseline.json" ]
+  [ -f "$MIRROR/audits/fleet-remediation-ledger.json" ]
+  [ "$(jq '.toolchains | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
+  [ "$(jq '.packages | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
+  [ "$(jq '.source_reports | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
+  [ "$(jq '.findings | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
+  run rg -n 'private-project-' "$MIRROR/dependency-baseline.json" "$MIRROR/audits/fleet-remediation-ledger.json"
+  [ "$status" -eq 1 ]
 
   run bash "$MIRROR/scripts/lint-prompt-shell-blocks.sh"
   [ "$status" -eq 0 ]

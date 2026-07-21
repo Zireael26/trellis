@@ -44,6 +44,10 @@ The evaluator is **not** a new hook and adds no always-on surface cost: it is a
 persona a recipe or a main-loop verify stage adopts **when the gate opens**, and
 is absent otherwise.
 
+When the gate opens, default to ≥2 **isolated** skeptical reviewers, not one.
+Each judges the same frozen contract without seeing the other's assessment;
+reconcile only after both verdicts return.
+
 ## The sprint contract (pre-build handshake)
 
 Before the generator writes code, generator and evaluator agree — in writing —
@@ -85,6 +89,10 @@ The persona is a prompt tuning, so it is **harness-neutral**: any harness that
 can dispatch a subagent can run it; where none exists, the main loop runs the
 same skeptical judgement inline (the tier-3 degrade in `SKILL.md`), never
 collapsing it into the generate step.
+
+Evaluator sign-off is necessary, not sufficient. Pair it with the Definition of
+done check that tests must fail when business intent changes (`CLAUDE.md`); do
+not accept a green suite as proof of intent.
 
 ## How it composes (does not replace)
 

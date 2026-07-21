@@ -148,14 +148,16 @@ lint_mirror() {
   done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
 
   # --- Root private namespaces: whole subtrees that must never publish (audit
-  # 2026-07-13 H1/L17). A bare .gitkeep placeholder is allowed; any real content
-  # under these roots fails the lint. Catches the leak structurally, so a future
-  # SYNC_PATHS slip re-publishing one of them aborts before commit.
+  # 2026-07-13 H1/L17). A bare .gitkeep placeholder and the one deterministic,
+  # empty public ledger bootstrap are allowed; any other real content under
+  # these roots fails the lint. Catches the leak structurally, so a future
+  # SYNC_PATHS slip re-publishing a report or populated ledger aborts before
+  # commit. The bootstrap's contents are also asserted by sync tests.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
     case "$rel" in
-      .gitkeep|*/.gitkeep) continue ;;
+      .gitkeep|*/.gitkeep|audits/fleet-remediation-ledger.json) continue ;;
     esac
     echo "$rel: private namespace must not publish (audits/ research/ conductor/ local/ scheduled-tasks/)"
     rc=1

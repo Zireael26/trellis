@@ -126,16 +126,17 @@ function refreshPrompt() {
     'Read backlog ' + (args.backlogPath ?? '<the Trellis conductor backlog.yml>') + ' and registry ' + (args.registryPath ?? '<the control-plane registry.md>') + '.',
     'Enumerate every unique repo-backed project in the backlog and resolve its registry path.',
     'For each repo run exactly ONE fetch attempt, with no retry:',
+    '  authentication: use ambient task-secret or Keychain credentials only; never print, persist, or return credentials in notes.',
     '  timeout runner: prefer `gtimeout`; else `timeout`; else `perl -e \'alarm shift; exec @ARGV\' ' + refreshTimeoutSeconds + ' git ...`.',
     '  command: git -C <repo_path> fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main',
     '  ceiling: ' + refreshTimeoutSeconds + ' seconds per repo.',
     'After a successful fetch resolve exactly: git -C <repo_path> rev-parse --verify refs/remotes/origin/main^{commit}',
     'Return one project/repo_path/main_sha row per repo. Set complete=false if enumeration, timeout support, fetch, or SHA resolution fails for ANY repo.',
-    'Do not rank, retry, modify working trees, create branches, or continue on a partial refresh. Return REFRESH.',
+    'Do not retry, modify working trees, or create branches. Return REFRESH; an incomplete receipt permits backlog-only ranking but permanently disables mutation for this run.',
   ].join('\n')
 }
 
-function rankPrompt(refs) {
+function rankPrompt(refs, immutableRefsComplete = true) {
   return [
     'You are the fleet CONDUCTOR ranking agent. Read-only. Produce a ranked slate.',
     '',
@@ -144,7 +145,9 @@ function rankPrompt(refs) {
     '  - Active projects: ' + (args.registryPath ?? '<the control-plane registry.md>') + ' (minus blacklist.md)',
     '  - Today is ' + args.today + '. Use it for all deadline math (no system clock calls).',
     '  - IMMUTABLE_MAIN_REFS_JSON: ' + JSON.stringify(refs),
-    '    For delivery and existing-spec anti-dup checks, inspect ONLY each listed main_sha. Never read mutable origin/main.',
+    immutableRefsComplete
+      ? '    For delivery and existing-spec anti-dup checks, inspect ONLY each listed main_sha. Never read mutable origin/main.'
+      : '    REFRESH INCOMPLETE: rank from backlog fields only. Do not inspect any repo/ref. Set delivered_on_main=false, existing_spec_path="", eligible_auto_spec=false, and include `ref-refresh-incomplete` in every repo-backed row auto_spec_exclusions.',
     '  - WEIGHTS_OVERRIDE_JSON: ' + serializedWeights,
     weights === undefined
       ? '    No args.weights override was supplied; read weights from the backlog.'
@@ -196,23 +199,27 @@ function specPrompt(item, mainSha) {
 // --- Phase: Refresh refs ---------------------------------------------------
 phase('Refresh refs')
 const refreshed = await agent(refreshPrompt(), { label: 'refresh-refs', phase: 'Refresh refs', schema: REFRESH })
-if (refreshed?.complete !== true || !Array.isArray(refreshed.refs)) {
-  throw new Error('conductor: ref refresh incomplete; aborting before rank: ' + (refreshed?.notes ?? 'no receipt'))
-}
 const refByProject = new Map()
-for (const ref of refreshed.refs) {
+let mutationAllowed = refreshed?.complete === true && Array.isArray(refreshed.refs)
+for (const ref of (Array.isArray(refreshed?.refs) ? refreshed.refs : [])) {
   if (typeof ref.project !== 'string' || ref.project.trim() === '' || typeof ref.repo_path !== 'string' || ref.repo_path.trim() === '' || !/^[0-9a-f]{40,64}$/.test(ref.main_sha)) {
-    throw new Error('conductor: invalid immutable ref receipt; aborting before rank')
+    mutationAllowed = false
+    continue
   }
   if (refByProject.has(ref.project)) {
-    throw new Error('conductor: duplicate immutable ref receipt for project "' + ref.project + '"; aborting before rank')
+    mutationAllowed = false
+    continue
   }
   refByProject.set(ref.project, ref.main_sha)
+}
+if (!mutationAllowed) {
+  refByProject.clear()
+  log('conductor: ref refresh incomplete; rank-only mode, all branch/worktree/spec creation disabled: ' + (refreshed?.notes ?? 'invalid receipt'))
 }
 
 // --- Phase: Rank -----------------------------------------------------------
 phase('Rank')
-const slate = await agent(rankPrompt(refreshed.refs), { label: 'rank', phase: 'Rank', schema: SLATE })
+const slate = await agent(rankPrompt(Array.from(refByProject, ([project, main_sha]) => ({ project, main_sha })), mutationAllowed), { label: 'rank', phase: 'Rank', schema: SLATE })
 
 // Select the top N eligible items for tonight's spec pass. Explicit force rows
 // lead regardless of score; explicit false rows are exempt. Hard safety and
@@ -222,7 +229,7 @@ const ranked = slate.ranked ?? []
 const noExclusions = (row) => Array.isArray(row.auto_spec_exclusions) && row.auto_spec_exclusions.length === 0
 const noExistingSpec = (row) => typeof row.existing_spec_path === 'string' && row.existing_spec_path.trim() === ''
 const hasBoundMain = (row) => refByProject.has(row.project)
-const selectable = (row) => row.eligible_auto_spec === true && row.auto_spec !== false && row.delivered_on_main === false && noExistingSpec(row) && noExclusions(row) && hasBoundMain(row)
+const selectable = (row) => mutationAllowed && row.eligible_auto_spec === true && row.auto_spec !== false && row.delivered_on_main === false && noExistingSpec(row) && noExclusions(row) && hasBoundMain(row)
 const orderedCandidates = [
   ...ranked.filter((row) => row.auto_spec === true && selectable(row)),
   ...ranked.filter((row) => row.auto_spec !== true && selectable(row)),
@@ -258,4 +265,4 @@ const specs = selected.length
 
 // Main loop consumes this: render the slate, list the specs waiting for a human
 // to review and dispatch `execute`. Nothing here crosses the merge boundary.
-return { slate, specs }
+return { slate, specs, refresh_complete: mutationAllowed, refresh_notes: refreshed?.notes ?? '' }

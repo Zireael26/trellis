@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "dependencies": {
+    "foo": "2.0.0"
+  },
+  "peerDependencies": {
+    "react": "~19.2.0"
+  }
+}

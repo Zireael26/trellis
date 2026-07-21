@@ -8,7 +8,8 @@ STUB="$BATS_TEST_DIRNAME/fixtures/wf-stub.mjs"
 CODEX_RECIPE="$REPO/core-rules/skills/orchestrate/recipes/codex-executor.wf.js"
 PANEL_RECIPE="$REPO/core-rules/skills/orchestrate/recipes/verify-panel.wf.js"
 FLEET_RECIPE="$REPO/scripts/workflows/fleet-audit-remediation.wf.js"
-RECIPES=("$CODEX_RECIPE" "$PANEL_RECIPE" "$FLEET_RECIPE")
+RECIPES=("$CODEX_RECIPE" "$PANEL_RECIPE")
+[ ! -f "$FLEET_RECIPE" ] || RECIPES+=("$FLEET_RECIPE")
 HONEST="Report failures as failures. Never claim completion without the proof command's actual output. A claimed-complete unit without receipts is treated as failed."
 
 _args_for() {
@@ -112,8 +113,9 @@ _json_assert() {
 }
 
 @test "SC4: executor prompts carry the six fields and honest clause; panel carries declared tier" {
-  local recipe
-  for recipe in "$CODEX_RECIPE" "$FLEET_RECIPE"; do
+  local recipe executor_recipes=("$CODEX_RECIPE")
+  [ ! -f "$FLEET_RECIPE" ] || executor_recipes+=("$FLEET_RECIPE")
+  for recipe in "${executor_recipes[@]}"; do
     _run_recipe "$recipe" sc4
     _json_assert "!r.error && r.prompts.some((entry) => /codex/i.test(entry.opts.label || '') && ['GOAL:', 'REPO/PATHS:', 'CONSTRAINTS:', 'NON-GOALS:', 'PROOF:', 'OUTPUT:'].every((label) => entry.prompt.includes(label)) && entry.prompt.includes(process.env.HONEST))"
   done

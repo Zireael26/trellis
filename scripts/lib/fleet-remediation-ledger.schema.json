@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/fleet-remediation-ledger.schema.json",
+  "title": "Trellis fleet remediation ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "audit_date", "source_reports", "findings"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "audit_date": { "type": "string", "format": "date" },
+    "source_reports": { "type": "array", "items": { "type": "string" } },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source", "project", "category", "summary", "severity", "disposition", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "project": { "type": "string", "minLength": 1 },
+          "workspace": { "type": "string" },
+          "category": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["critical", "high", "moderate", "low", "warning", "info"] },
+          "disposition": { "enum": ["open", "fixed", "false-positive", "accepted-risk", "compatibility-exception", "manual-gated", "duplicate", "superseded"] },
+          "owner": { "type": "string" },
+          "expires_on": { "type": "string", "format": "date" },
+          "replacement_condition": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "value", "recorded_at"],
+              "properties": {
+                "kind": { "enum": ["command", "commit", "pull-request", "risk-receipt", "test", "audit"] },
+                "value": { "type": "string", "minLength": 1 },
+                "recorded_at": { "type": "string", "format": "date" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

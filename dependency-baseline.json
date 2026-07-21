@@ -1,0 +1,15 @@
+{
+  "$schema": "./scripts/lib/fleet-dependency-baseline.schema.json",
+  "schema_version": 1,
+  "source_ref": "origin/main",
+  "policy": {
+    "shared_project_minimum": 2,
+    "direct_versions": "exact-per-lane",
+    "peer_versions": "compatible-range",
+    "expired_exceptions": "fail"
+  },
+  "toolchains": [],
+  "packages": [],
+  "security_floors": [],
+  "exceptions": []
+}

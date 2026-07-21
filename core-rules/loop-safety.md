@@ -6,6 +6,19 @@ This is the canonical **policy** that guarantees every Trellis loop halts. It is
 
 *Which* loop to reach for — turn-based, goal-based, time-based, or proactive — is a separate question, answered by [`references/loops.md`](references/loops.md); this file is *how* any loop halts. And not every task needs a loop: reach for the **simplest primitive that has a real stop condition** (a turn beats a `/goal` beats a scheduled routine beats a proactive fan-out), and climb only when the work demands it.
 
+## Loop taxonomy (ecosystem mapping)
+
+The detailed selection guide remains [`references/loops.md`](references/loops.md); this is the compact mapping from the Claude Code team's [four loop types](https://claude.com/blog/getting-started-with-loops) (2026-06-30) to Trellis.
+
+| Upstream type | Trellis surface |
+|---|---|
+| **Turn-based** | An ordinary prompted turn. Stops when the model judges the work done; verification skills harden that judgment. |
+| **Goal-based** | `/goal` and recipe goal-loops. Stops when the condition is met or the turn cap trips; an evaluator checks each stop attempt. |
+| **Time-based** | `/loop` for local intervals; an operator scheduler for unattended runs. |
+| **Proactive** | Operator-configured research or audit routines composing schedule + goal + skills + workflows. |
+
+Upstream `/usage`, `/goal` with no arguments, and `/workflows` are the first-party mirrors of this contract's `spent_usd / budget_ceiling_usd` report line.
+
 ## The three ceilings
 
 Every Trellis loop declares and honors three ceilings and **halts on any one** of them. The ceiling **values** live in configuration (`trellis.config.json.loop_safety`); only the documented fallback constants are baked into this file.
@@ -40,7 +53,7 @@ On any ceiling trip:
 
 Modeled on the autonomy resolution (`core-rules/CLAUDE.md` § Autonomy, `core-rules/autonomy.md`). Each ceiling resolves independently, most specific wins:
 
-1. **Per-loop `safety` override** — a recipe's `safety` block or a scheduled-task's "Loop safety" stanza explicitly sets a value.
+1. **Per-loop `safety` override** — a recipe's `safety` block or an operator-run loop declaration explicitly sets a value.
 2. **Project-local `.trellis.config.json.loop_safety`** — optional, for a project that needs different ceilings.
 3. **Central `trellis.config.json.loop_safety`** — the instance baseline.
 4. **Built-in fallback constants** (below) — so a loop in a broken / misconfigured / non-Trellis context still halts.
@@ -94,8 +107,8 @@ The ceiling values live in `trellis.config.json` under `loop_safety`; the schema
 }
 ```
 
-A per-loop `safety` override (recipe block or scheduled-task stanza) may set any subset of these keys; unset keys resolve down the order above. `test-health`'s existing caps (5 min/project, 20-commit bisect) are expressed as such overrides rather than as ad-hoc hardcoded values.
+A per-loop `safety` override (recipe block or operator-run declaration) may set any subset of these keys; unset keys resolve down the order above. Project-specific time and search caps are expressed as such overrides rather than as ad-hoc hardcoded values.
 
 ## Verification
 
-The contract stays honest the way `parent-hook-drift` keeps hooks honest: a drift check folded into the weekly `cross-project-process-audit` (no new cron) scans `orchestrate` recipes and scheduled-task prompts for a present, non-blank loop-safety declaration and flags any loop missing one as a compliance finding. Authoring a loop without the declaration is additionally a `process-gate` / review finding.
+The contract stays honest through a process drift check that scans `orchestrate` recipes and configured loop prompts for a present, non-blank loop-safety declaration and flags any loop missing one as a compliance finding. Authoring a loop without the declaration is additionally a `process-gate` / review finding.

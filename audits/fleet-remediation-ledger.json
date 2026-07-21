@@ -1,0 +1,7 @@
+{
+  "$schema": "../scripts/lib/fleet-remediation-ledger.schema.json",
+  "schema_version": 1,
+  "audit_date": "2026-07-21",
+  "source_reports": [],
+  "findings": []
+}
