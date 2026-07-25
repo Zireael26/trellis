@@ -35,7 +35,7 @@ fi
 # Provider-default model selection.
 if [ -z "$MODEL" ]; then
   case "$PROVIDER" in
-    anthropic|"") MODEL="claude-opus-4-7"; PROVIDER="anthropic" ;;
+    anthropic|"") MODEL="claude-opus-5"; PROVIDER="anthropic" ;;
     openai)       MODEL="gpt-4o" ;;
     gemini)       MODEL="gemini-2.0-flash" ;;
     ollama)       MODEL="llama3.1:8b" ;;

@@ -7,7 +7,7 @@ description: Turn a vague product or engineering request into a written feature 
 
 Opt-in-by-default companion to Trellis's surgical-default discipline — and the **required** path for above-floor changes when `mandatory_pipeline` is enabled (spec 006; canonical statement in `engineering-process.md` §14.7). Surgical scope is right for bug fixes, refactors, and tightly-scoped changes. Greenfield features and behaviour that crosses multiple files benefit from spelling out *what* and *why* before *how*. This skill produces that artifact.
 
-The spec is the load-bearing input to the `plan` skill (technical design) and then `tasks` (work breakdown). Together they form the spec → plan → tasks pipeline borrowed from spec-kit. The triad is **opt-in by default** — the agent or operator invokes it deliberately for feature-scale work, and day-to-day surgical changes do not use it. When `mandatory_pipeline` is enabled (spec 006, default off), the triad becomes **required** for any change whose net gated diff exceeds the size floor; sub-floor work stays surgical-default either way. Canonical statement: `engineering-process.md` §14.7.
+The spec is the load-bearing input to the `plan` skill (technical design) and then `tasks` (work breakdown). Together they form the spec → plan → tasks pipeline borrowed from spec-kit — invoked deliberately for feature-scale work, while day-to-day surgical changes do not use it.
 
 ## When to use
 
@@ -66,6 +66,7 @@ That's the entire deliverable for this skill. Implementation, schema, file layou
 - **Non-goals are explicit.** Most spec bloat comes from creep. Spell out what this feature is NOT solving.
 - **Open questions are surfaced, not papered over.** If you don't know whether the cron runs nightly or hourly, write "Open question: cadence?" Don't pick silently.
 - **Specs are reviewable in 5 minutes.** If yours runs longer than two screens, you're conflating spec with plan.
+- **The spec is the clearest artifact, which is not always prose.** `spec.md` stays the entry point and the two-screen rule binds *it*. But a success criterion is often stated best as something executable: a failing test that must go green, a fixture file plus its expected output, a rubric a reviewer or a judge agent scores against, or an HTML mockup of the surface being specified. Put those in `specs/<NNN>-<slug>/` beside `spec.md` and reference them from §3 Success criteria by path. An attached artifact does not count against the two screens — it is what keeps `spec.md` short.
 
 ## Relationship to other artifacts
 

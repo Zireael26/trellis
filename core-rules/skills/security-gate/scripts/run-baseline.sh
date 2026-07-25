@@ -185,7 +185,7 @@ else
   if bash "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/triage.md" "$TRIAGE_INPUT" "$TRIAGE_OUT"; then
     TRIAGE_USED=1
     LLM_PROVIDER_USED="${LLM_PROVIDER:-anthropic}"
-    LLM_MODEL_USED="${LLM_MODEL:-claude-opus-4-7}"
+    LLM_MODEL_USED="${LLM_MODEL:-claude-opus-5}"
     echo "triage: completed via $LLM_PROVIDER_USED ($LLM_MODEL_USED)"
   else
     echo "triage: skipped (no provider available); writing raw findings"

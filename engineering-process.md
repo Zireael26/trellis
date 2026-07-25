@@ -155,7 +155,7 @@ Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJE
 3. **Central** — this file's `loop_safety` block, the instance baseline.
 4. **Built-in fallback constants** — documented in `core-rules/loop-safety.md` (identical to the baselines above), so a loop in a broken / misconfigured / non-Trellis context still halts. Safe-by-default: a loop authored with no thought still stops.
 
-The block is mirrored in `scripts/lib/trellis.config.schema.json` (types, defaults, descriptions). The dollar ceiling is human-meaningful; the Workflow engine's `budget.total` is output-token-native, so the conversion uses the `usd_per_mtok` rate — itself a `loop_safety` config key (default `25.00`, the Opus 4.8 output price) whose derivation `core-rules/loop-safety.md` documents — to map dollars onto the engine budget.
+The block is mirrored in `scripts/lib/trellis.config.schema.json` (types, defaults, descriptions). The dollar ceiling is human-meaningful; the Workflow engine's `budget.total` is output-token-native, so the conversion uses the `usd_per_mtok` rate — itself a `loop_safety` config key, set to the current frontier output price, whose default value and derivation `core-rules/loop-safety.md` documents — to map dollars onto the engine budget. The number lives in `trellis.config.json` and the schema, not in this prose; re-derive it when pricing moves.
 
 Cross-machine portability is achieved by:
 
@@ -256,7 +256,7 @@ Canonical inventory (names + tiers + origin) is `core-rules/hooks/README.md`; ca
 | `ui-verify.sh` | 2 | Stop (UI diff) | Spin up dev server, take screenshot, attach. |
 | `stamp-turn.sh` | 2 | Stop | Stamp completed turn activity for hook coordination. |
 
-`code-review-subagent` is the *filter*, not the finder: `severity == "critical"` blocks, everything else is advisory. When wiring a project-local reviewer, prompt it for **coverage, not filtering** — report every issue with a confidence and severity, and let the hook rank. Opus 4.8 honors "be conservative / only report high-severity" instructions literally and will otherwise silently drop low-severity findings (precision rises, recall falls). Detail + snippet: the hook's header contract and `docs/opus-4.8-steering.md` §6.
+`code-review-subagent` is the *filter*, not the finder: `severity == "critical"` blocks, everything else is advisory. When wiring a project-local reviewer, prompt it for **coverage, not filtering** — report every issue with a confidence and severity, and let the hook rank. Current models follow "be conservative" and "only report high-severity" literally and will silently drop low-severity findings: precision rises, recall falls. Ask for everything and filter in a separate pass. Detail + snippet: the hook's header contract. Per-model specifics: `core-rules/references/model-prompting-deltas.md`.
 
 Claude implementations are version-controlled at `core-rules/hooks/`. Projects deploy by copying into `.claude/hooks/` and wiring into `.claude/settings.json` using `$CLAUDE_PROJECT_DIR` paths.
 
@@ -281,6 +281,23 @@ The directory itself is symlinked, so canonical updates appear automatically. Pr
 **Stack profiles.** The canonical eight gates apply to every project. Stack-specific validators (design tokens, a11y, module boundaries, asset checks) attach via `PROCESS_GATE_STACK_PROFILE` and `PROCESS_GATE_STACK_VALIDATORS` in `local.config.sh`. See `core-rules/skills/process-gate/references/stack-profiles.md`. Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
 **Lume carve-out.** Lume (Unity, n=1 native-stack project) declares `PROCESS_GATE_STACK_PROFILE="unity"` with project-local validators only. The canonical eight gates still apply. The carve-out is documented in `registry.md` and the extended `parent-hook-drift` audit treats it as expected, not drift.
+
+**Project-local verification skills.** Between "a rule written in `CLAUDE.md` and hoped for" and "a canonical hook rolled out to the fleet" there is a middle rung: a small project-local skill that performs one check and fixes what it finds. It is the right shape when the check is deterministic, specific to this project, and something you have found yourself correcting by hand after the fact.
+
+```markdown
+---
+name: verify-log-hygiene
+description: Check error logs include request IDs, never expose request bodies
+allowed-tools: [Read, Edit, Grep]
+---
+Read error-handling paths in diffs.
+For each log call, confirm request ID inclusion and payload stripping.
+Report violations with file:line, then fix each issue.
+```
+
+Three things qualify for encoding this way: corrections you keep making manually after implementation; deterministic rules a generic linter won't catch ("reject a migration that drops a column without a backfill"); and the patterns you'd otherwise explain to every new contributor. Deploy it standalone at first — invoke it deliberately. **If you find yourself running it after every change, that is the signal to promote it**: append it to the producing skill, chain it behind an existing one, or — at the third project that wants it ([§14.1](#141-rule-of-three)) — lift it into a canonical hook.
+
+Chained verification costs tokens on every run. Measure before deploying one broadly.
 
 ### 5c. Loop-safety contract
 
@@ -380,7 +397,7 @@ Commit bodies are optional. When present, use them for *why*, not for *what* (th
 
 Review model for sole-maintainer projects: **self-review discipline + CI gates**. GitHub blocks self-approval so "reviewed by = merged by" is structurally prevented, but the review happens:
 - When you open the PR, write the description as if explaining to a stranger. If it's hard to write, the change is too big or too unclear — split it.
-- Wait at least one session (≥ 30 minutes; overnight is better) before merging. Re-read the diff with fresh eyes. Non-trivial changes benefit from a code-review subagent pass via the Agent tool.
+- Wait at least one session (≥ 30 minutes; overnight is better) before merging. Re-read the diff with fresh eyes. The `code-review-subagent` hook already fires on edit-heavy diffs (≥ 3 files or ≥ 200 lines); you do not need to launch a review pass by hand on top of it.
 - CI must be green. Status checks required at the branch protection level.
 - Merge style: **merge commit** by default — preserve the full per-commit history of every PR (including agent attribution and intermediate review state). Squash-merge is forbidden; rebase-merge only when the branch's commit history is intentionally clean and linear and explicitly approved for that PR. (See `core-rules/skills/process-gate/references/pr-hygiene.md` and `core-rules/hooks.md` for the canonical statements; the `bypass-tripwire` audit treats the `(#NN)` squash marker as a direct-push detection signal, which assumes merge commits are the norm.)
 
@@ -420,6 +437,12 @@ A change is done when all of the following are true:
 
 Done is a property of the *turn* that claimed done, not of the project. Turn-level done compounds into project-level correctness; don't skip the turn-level gate on the theory that a later turn will catch it.
 
+**Receipts are the evidence; they are not the whole message.** When the operator watched the work happen, receipts alone are the right answer — they saw the context, they want the proof. When they did not — an overnight run, a long autonomous stretch, anything at L4/L5 ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)), or simply many tool calls since they last spoke — your final message is the first and possibly only thing they will read about any of it. Write it as a re-grounding rather than a continuation of your working thread.
+
+In practice: open with the outcome in a plain sentence, before any command output. Write in complete sentences. Spell out the names of things instead of the shorthand you developed mid-run — no arrow chains, no stacked-hyphen compounds, no labels you invented three hours ago and never defined. Say what changed, what it means for them, and what still needs their hand. Then attach the receipts and the decision log underneath, where they serve as evidence for the claims above rather than as the claims themselves. If you have to choose between short and clear, choose clear — brevity between tool calls is good discipline; brevity in the one message they actually read is a cost they pay.
+
+None of this relaxes item 1. The receipts still ship, in full, every time. What changes is where they sit: beneath a plain-language account of what happened, not in place of one.
+
 ---
 
 ## 8. Code quality standards
@@ -435,15 +458,18 @@ Full expression in `core-rules/CLAUDE.md`. Summary:
 
 ### 8.2 Edit safety
 
-- Re-read every file before editing it. Re-read it after. The Edit tool fails silently on stale `old_string` matches.
+- Re-read every file before editing it — the `reread-guard` hook enforces this. A routine re-read *after* the edit is not needed: the Edit tool errors loudly on a stale `old_string` and the harness tracks file state.
 - On any rename or signature change, search separately for: direct calls, type refs, string literals, dynamic imports, `require()` calls, re-exports, barrel files, test mocks. Assume grep missed something.
 - Never delete a file without verifying nothing references it.
 
 ### 8.3 Context management
 
-- Dispatch sub-agents in parallel for speed and context-isolation whenever work decomposes into independent units. Wall-clock parallelism beats sequential agent time; each subagent gets a fresh context = higher-quality output. Triggers: (a) ≥2 independent searches/fetches/analyses, (b) >5 files, (c) edit-heavy turns. Single message, multiple `Agent` tool calls. Skip only when one result must inform the next or work is trivially serial.
-- When ctx use ≥40% or after 25 messages (whichever comes first), re-read any file before editing it. Auto-compaction may have destroyed your memory of its contents.
-- If you notice context degradation (referencing nonexistent variables, forgetting file structure), run `/compact` proactively. `save-context-log` captures state to `context-log.md`.
+- Batch independent tool calls — reads, greps, bash — into a single message rather than firing them serially. Fan out reads before you need them; a serial chain of five greps costs five round-trips for no benefit.
+- Delegate to a subagent when the work is genuinely independent, parallelizable, and larger than you would finish in a handful of tool calls — a wide multi-file investigation, an audit spanning several subsystems, a search whose breadth you cannot predict. Do not delegate work you could finish inline, and if one subagent can do it use one rather than several. Whether to spawn a subagent to check your own work depends on run length, not preference: on a short attended run don't, and on a long or multi-window run verify at a declared interval with a fresh-context subagent against the spec. Deterministic gates are exempt either way — they are mechanism, not self-checking. Dispatch and keep working rather than blocking; intervene if a subagent goes off track or is missing context you have, and reuse one that already has the context for a follow-on subtask rather than spawning a fresh one. The payoff is fresh context and wall-clock parallelism — delegation for its own sake costs both. *(Canonical wording: `core-rules/CLAUDE.md` § Context management. Quote it here rather than paraphrasing, or the two layers drift.)*
+- **Why the axis is run length and not attendedness.** Over hours of work a fresh-context verifier outperforms self-critique, because the context that produced the error is the context reviewing it. Whether anyone is watching does not change that; a long *attended* run across several context windows needs the fresh verifier exactly as much as an overnight one. Attendedness governs the consultation surface and the reporting register, not whether verification is worth its cost. This carve-out does not reach the `code-review-subagent` hook, which is threshold-triggered infrastructure reviewing an artifact — the diff — and is not discretionary delegation at all.
+- Re-read a file immediately before editing it. Your memory of a file you read earlier in the session can be stale — the file may have changed, or a compaction may have dropped the detail. The `reread-guard` hook enforces this mechanically; treat a re-read as free.
+- You have ample context. Do not stop, summarize, or suggest a new session on account of context limits, and do not manage your work against a remaining-token budget.
+- If you notice context degradation (referencing nonexistent variables, forgetting file structure), prefer a **fresh session** over `/compact`. State lives on disk, and rediscovering it is cheap and more reliable than a lossy summary. Land your work first — commit or stash, let `save-context-log` capture `context-log.md` — then start clean. A fresh window should open by orienting: `pwd`, read `context-log.md`, read the last few commits, run the fast test suite. Use `/compact` when you must preserve an unlanded in-flight thread that would be expensive to reconstruct.
 - Reads are capped at 2000 lines. For files >1500 LOC, use offset/limit chunks.
 - Tool results over 100K chars truncate to a 2KB preview. Re-run narrower or read the source directly.
 - Before touching an unfamiliar subsystem, run `/explore <subsystem>` to dispatch a read-only subagent that writes a compact map to `.claude/primers/_explore/`. Editing without that map on a sufficiently-large unfamiliar subsystem produces wrong-shaped changes. Promote to a durable `/primer` post-edit if the subsystem is stable enough to warrant it.
@@ -460,8 +486,8 @@ LSP is a recommendation, not a Trellis requirement: single-language repos derive
 
 ### 8.4 Style
 
-- Ignore the default "simplest approach / don't refactor beyond the ask" dogma when it applies. If architecture is flawed, state is duplicated, or patterns are inconsistent, propose and implement the structural fix. Ask "what would a senior perfectionist dev reject in code review?" — fix that.
-- Comments default to none. Comment when the *why* is non-obvious. No robotic comment blocks.
+- Hold a senior-perfectionist bar on the code you are asked to touch: no duplicated state, no inconsistent patterns, no shape a careful reviewer would reject. Deliver what was asked, at the scope intended. If the surrounding architecture is flawed and a structural fix would be the right call, say so in a sentence and continue with the task as asked — don't quietly widen it into a refactor. Make routine judgment calls yourself; check in only when different readings of the request would lead to materially different work.
+- Write code that reads like the code around it — match the surrounding comment density, naming, and idiom. Where the *why* is non-obvious, say it; where the code speaks for itself, let it.
 - Don't build for imaginary scenarios. Simple and correct beats elaborate and speculative.
 
 ### 8.5 Debugging
@@ -477,7 +503,7 @@ Minimum per project (enforced by CI and `stop-verify`):
 - **Type-check** — `tsc --noEmit`, `mypy`, `cargo check`, or `go vet` — whichever fits the stack.
 - **Lint** — project's configured linter runs repo-wide on Stop, per-file on edit.
 - **Integration / E2E** — where the project warrants it; run in CI, not on every turn. Don't mock boundaries that production crosses (DB, queue, auth).
-- **General solutions, not test-gaming** — implement logic that works for all valid inputs, not just the test cases. Don't hard-code values or build workarounds that only pass the specific tests in front of you; tests verify correctness, they don't define the solution. If a test is wrong or a task infeasible, say so rather than working around it. Opus 4.8 is less prone to this than older models, but the bar is stated explicitly — snippet in `docs/opus-4.8-steering.md` §6.
+- **General solutions, not test-gaming** — implement logic that works for all valid inputs, not just the test cases. Don't hard-code values or build workarounds that only pass the specific tests in front of you; tests verify correctness, they don't define the solution. If a test is wrong or a task infeasible, say so rather than working around it.
 
 Playwright is the default E2E framework for web projects. Non-web stacks (games, CLIs, native apps, embedded) bring their own testing and tooling conventions — document those in the project's own `CLAUDE.md` and let the Rule of Three ([§14.1](#141-rule-of-three)) decide whether any of it rises into this manual. The parent layer stays small on purpose.
 
@@ -498,35 +524,41 @@ Each registered project has a `CLAUDE.md` at its root. Structure:
 
 <1–3 sentences: what is this project, who uses it, what's its current phase>
 
+## Gotchas
+<This is the highest-value section in the file and the reason it exists.
+Everything else here, the agent could work out on its own; this is what it
+cannot. Surface the 3–5 live ones inline — the ones that will bite this week —
+and link `gotchas.md` for the full log. A gotcha earns a line here when getting
+it wrong costs more than one round-trip to discover.>
+
 ## Stack
-<language / framework / runtime / deployment>
+<One line. Name only what the manifest doesn't make obvious — the deployment
+target, the runtime version if it's pinned for a non-obvious reason, a framework
+used in a non-default mode.>
 
 ## Architecture
 <high-level shape: monorepo packages, services, main modules>
 
-## Codebase map
-<REQUIRED when the project has ≥ 5 top-level directories. One line per
-top-level dir, ordered by importance. Format:
-`- \`<dir>/\` — <one-line role>`. Skip dirs that are already in
-permissions.deny (node_modules, .next, dist, etc.). Example:
-
-- `services/` — Go microservices (workspace, 5 modules)
-- `clients/web/` — Next.js frontend
-- `py/` — Python ML runners
-- `infra/` — Cloudflare + Vercel config
-- `docs/` — ADRs + onboarding>
+## Codebase map *(optional)*
+<Include only where the directory layout would mislead — a name that doesn't
+mean what it looks like, a directory that is dead, two directories whose split
+is historical rather than logical. If `ls` plus the directory names already
+tells the story, omit this section; the agent will find it faster than you can
+describe it.>
 
 ## Project-specific rules
 <anything that doesn't belong in the parent — e.g., "never import @neev/orders from @neev/inventory">
 
-## Gotchas
-<pointer to gotchas.md + any highlights worth surfacing>
-
 ## Running locally
-<commands: install, dev, test, build>
+<Only the commands that are NOT the obvious ones. If `pnpm dev` works, don't
+write it down. Write down the ones with a precondition: the service that must be
+running first, the env var with no default, the seed step, the port that
+collides.>
 ```
 
 Target size: **< 5 KB**. Bloat pushes signal out of context. Long reference material goes in sibling files and gets linked.
+
+The same discipline binds `core-rules/CLAUDE.md` itself — it is injected into every session of every registered project, so every kilobyte there is multiplied by the fleet. That file states its own target; when it exceeds it, the answer is progressive disclosure (a `references/` sibling loaded on demand), not a bigger budget.
 
 **Context budget.** Treat injected scaffolding (`CLAUDE.md` + primers +
 `context-log.md` + system reminders) as a metered per-turn tax. Measure its
@@ -535,9 +567,13 @@ down as models improve; Anthropic already ships leaner system prompts for
 stronger models. Evidence: 2026-07-12 CC-vs-OpenCode token-overhead teardown,
 ~33K vs ~7K baseline tokens before the user prompt.
 
-**Codebase map convention.** When a project has fewer than 5 top-level directories, the agent can keep them all in head from a single `ls`. Past that threshold the cost of re-discovering the tree on every fresh session adds up, so the `Codebase map` section becomes mandatory. The audit in §11 enforces this: `cross-project-process-audit` fails any registered project with ≥ 5 top-level directories whose `CLAUDE.md` lacks a `## Codebase map` heading.
+**Codebase map convention.** A plain listing of top-level directories is something the agent derives from one `ls` — spending injected tokens on it every turn buys nothing. That trade used to run the other way: when exploration was expensive and context was tight, paying per-turn tokens to save a round-trip was correct. It no longer is. What *is* worth writing down is where the layout misleads: a directory whose name understates or misstates its role, a vestigial tree nobody has deleted, a split that only makes sense historically. Write those lines and skip the rest.
 
-The format is deliberately bare: one line per directory, role only. The point is to save an exploration round-trip, not to mirror the README. If a directory needs more than a one-liner to introduce, write a sibling `docs/<dir>.md` and link to it from the map line.
+Keep the format bare: one line per directory, role only. If a directory needs more than a one-liner to introduce, write a sibling `docs/<dir>.md` and link to it from the map line.
+
+**What changed and what did not.** The rule for *what the section contains* changed. The rule for *whether it exists* did not. At ≥ 5 top-level directories the heading stays, carrying either the misleading-directory lines or a single line stating the layout is self-describing. Below that threshold, omit it when there is nothing to say.
+
+Splitting it this way is deliberate. The `cross-project-process-audit` check that reports any registered project with ≥ 5 top-level directories whose `CLAUDE.md` lacks the heading **still runs**, and whether to retire it is an operator decision that has not been made. Had the content change also removed the heading, every correctly-onboarded project would have become a standing false positive in an advisory report while that decision sat pending — and this repo's own doctrine is that noisy advisory findings decay compliance. Keeping the heading costs one line and keeps the audit honest. Projects that already carry a full inventory stay compliant; trim them to the new content rule when you next touch them, don't sweep.
 
 ### 9.2 README.md
 
@@ -596,7 +632,7 @@ Projects with a public web surface (portfolio, marketing page, SaaS console, app
 
 This is the canonical sequence. Run it manually, or point `scripts/onboard-project.sh` at it once the script exists (not yet).
 
-**Agent-driven shortcut.** `AGENT_ONBOARD_PROJECT.md` at the repo root wraps every step below into a paste-into-agent interview — detect mode (new / fresh-clone / repair), run `scripts/onboard-project.sh`, wire the project's `CLAUDE.md` `@`-import, update `registry.md`, and commit in both repos. Use it unless you specifically want the manual walkthrough.
+**Agent-driven shortcut.** `AGENT_ONBOARD_PROJECT.md` at the repo root wraps every step below into a paste-into-agent interview — detect mode (new / fresh-clone / repair), run `scripts/onboard-project.sh`, wire the project's `CLAUDE.md` `@`-import, collect and write the project's gotchas, update `registry.md`, and commit in both repos. Use it unless you specifically want the manual walkthrough.
 
 ### 10.1 Pre-flight questions (answer before anything)
 
@@ -605,6 +641,7 @@ This is the canonical sequence. Run it manually, or point `scripts/onboard-proje
 - **Stack?** Informs `CLAUDE.md` seed and `.gitignore`.
 - **Class?** Monorepo SaaS, single Next.js app, portfolio site, game, CLI — informs registry.
 - **License?** MIT default; choose something else only with reason.
+- **What will bite an agent working here?** The only question on this list whose answer isn't sitting in the filesystem, and the reason the project `CLAUDE.md` exists at all. Ask what has bitten the owner, what looks like it does one thing and does another, what they explain to every new person, and what is dead or half-migrated despite its name. Skim the README, the last 20 commit subjects, and the `TODO`/`HACK`/`FIXME` comments first so you can ask something specific. Write the answers into `gotchas.md` in the §9.3 entry format and surface the two or three most live ones under `## Gotchas` in the project `CLAUDE.md`. If there are none, record none — don't invent them.
 
 ### 10.2 Scaffold steps
 
@@ -657,11 +694,17 @@ cat > CLAUDE.md <<'EOF'
 
 <1-3 sentence project overview>
 
+## Gotchas
+<the 3-5 live ones, from the pre-flight interview; full log in gotchas.md>
+
 ## Stack
 ...
 EOF
 
-# 8. Write gotchas.md (template in core-rules/templates/gotchas.md)
+# 8. Write gotchas.md (template in core-rules/templates/gotchas.md), then fill it
+#    in from the pre-flight interview (§10.1) using the §9.3 entry format.
+#    The template ships empty on purpose — an unfilled gotchas.md is an
+#    onboarding that skipped its only non-derivable question.
 cp __TRELLIS_PATH__/core-rules/templates/gotchas.md .
 
 # 9. .gitignore — onboard-project.sh generates the Trellis-managed block (the
@@ -716,6 +759,8 @@ git push -u origin main
 ### 10.4 Post-onboarding verification
 
 Run `scripts/doctor.sh` against the new project and, if private operator audits are configured, trigger the hook-drift and registry-health checks. All should return clean with the new project listed.
+
+**Tell the project's future sessions how the file grows.** The seeded `CLAUDE.md` is deliberately thin, and thin is the target. It grows from `gotchas.md`, not from documentation written up front: log corrections as they happen, and the `gotchas-rollup` audit promotes anything that recurs three times ([§14.1](#141-rule-of-three)). Resist the urge to describe the codebase in it; describe what the codebase will get wrong.
 
 ### 10.5 Bootstrapping a fresh clone (every developer, every machine)
 
@@ -886,6 +931,8 @@ The parent layer grows slowly and deliberately. A rule earns parent status only 
 
 This is the discipline that prevents `core-rules/CLAUDE.md` from bloating into a 30 KB kitchen sink (as Neev's did before Trellis extracted it).
 
+**The missing rung between n=1 and n=3.** A check that is *written down* at n=1 is not a check — it is prose the agent may or may not honor, and it sits unenforced until a third project happens to want it. The project-local verification skill ([§5b](#5b-skills-layer)) is the form that is actually *enforced* while it earns its promotion: deterministic, invocable, scoped to one project, and cheap to delete if it turns out not to matter. Prefer it over a `deferred.md` entry when the rule is mechanical enough to run. `deferred.md` remains the right home for rules that are judgment calls rather than checks.
+
 ### 14.2 Demotion
 
 If a parent rule stops applying to one of the registered projects, consider demoting it. Demotion criteria:
@@ -901,7 +948,7 @@ Edits to `core-rules/` affect every registered project immediately (via the syml
 - The Rule-of-Three evidence if it's a lift.
 - A re-run of `parent-hook-drift` after merge to confirm every project's deployed copies are still identical.
 
-**Write rules for the current model.** Opus 4.8 follows instructions literally and does not silently generalize scope from one item to another. When you add or edit a rule: state scope explicitly ("apply to every section, not just the first"), prefer a positive example of the desired behavior over a list of "don't"s, and reserve `CRITICAL:`/`MUST` for genuine bright-lines — 4.5/4.6+ over-trigger on aggressive language, so normal "Use this when…" phrasing usually steers better. Rationale and the full steering map: `docs/opus-4.8-steering.md` §4.
+**Write rules as principles, not prohibitions.** Current models follow instructions literally and do not silently generalize scope from one item to another. When you add or edit a rule: state scope explicitly ("apply to every section, not just the first"), prefer a positive statement of the desired behavior over a list of "don't"s, and reserve `CRITICAL:`/`MUST` for genuine bright-lines — aggressive language over-triggers, so normal "Use this when…" phrasing usually steers better. A rule that describes the shape of good work generalizes; a rule that forbids one specific mistake usually just moves the mistake. Anything genuinely model-divergent belongs in `core-rules/references/model-prompting-deltas.md`, never inline in a rule file.
 
 ### 14.4 Rollout hygiene
 
@@ -954,6 +1001,16 @@ Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague re
 
 All three tracks converge on the single canonical builder, **`execute`** (`core-rules/skills/execute/`, shipped Phase 4) — it is the implement/build stage that turns a plan's or `tasks.md`'s checkboxes into shipped, receipted work. The pipeline below produces the design artifacts; `execute` is what runs *after* them. When unsure between two tracks, choose the heavier one — a little extra design is cheap; a wrong "surgical" change is not.
 
+**Exploration is a different loop from building.** The three tracks size work by *risk*, and all three converge on shipping. For work whose *shape* is undecided — a new surface, a flow with no obvious structure, anything where you'd recognize the right answer but can't specify it — don't take any of the three tracks yet. Explore first, in a separate session, at deliberately low fidelity:
+
+- **Set direction before generating.** Fonts, colors, references, mood, the two products you want it to feel like. Given no direction, the model produces competent defaults, and competent defaults are the thing you'll spend the next three turns trying to escape.
+- **Keep fidelity low while the structure is in question.** Wireframes move faster and keep the conversation on structure instead of on the shade of the button. Mock with fake data; test the layout before wiring anything real to it.
+- **Generate several, then remix.** Ask for a handful of distinct options rather than one polished one. Pick the two that are working and ask for them combined.
+- **Make it interactive when you need buy-in.** A clickable simulation settles arguments that a static mockup extends.
+- **Take the last 5% by hand.** Nudging a margin yourself is faster and cheaper than describing the nudge.
+
+Do this in its own session and treat the output as disposable. What carries forward into the pipeline is the chosen direction and the mockup, not the exploration code — a prototype that gets promoted straight to production is how exploration debt ships.
+
 **Decision rule — when to invoke the pipeline (the heavyweight track):**
 
 Trellis's default is surgical scope. The pipeline is for changes that DON'T fit that mould. Invoke when any of:
@@ -971,6 +1028,12 @@ If none apply, skip the pipeline. Bug fixes with clear reproductions, refactors 
 
 This is **not** a bright-line guardrail and not new `MUST` prose — it is a config-gated, default-off deterministic trigger in front of the already-mandatory-in-prose pipeline (the sanctioned "more automatic" path per ADR 2026-07-05). What flexes with autonomy is only *who answers* the intake interview (§14.9): at L1–L3 `clarify` genuinely interviews the user and writes `clarify.md`; at L4/L5 the agent self-answers and logs to `decisions-log.md`. The gate's block fires the same at every level; the level only changes how you satisfy it.
 
+**The blind-spot pass (before `clarify`).** `clarify` asks the questions we already know to ask. When the work touches a domain you don't know well — a protocol, a regulatory surface, a runtime you've not shipped on — the more valuable pass comes first: ask the agent what you don't know that you don't know.
+
+> "I'm working on [task] but know nothing about [domain]. Can you do a blind spot pass to help me figure out my relevant unknown unknowns?"
+
+Disclose your actual expertise level when you ask — "I've shipped a lot of Postgres but never touched replication" gets a usefully different answer than a blank request. The output is not an artifact and does not need a file; it exists to change what `clarify` asks about. Skip it when you know the territory. It costs one turn and it is the cheapest place in the pipeline to find out that the plan was going to be wrong.
+
 **Where each skill fits:**
 
 - `clarify` — front-step question pass. Use BEFORE `spec` when the operator's request is vague, contradictory, or leaves any of the five canonical intent dimensions unresolved. Optional but recommended for non-trivial requests.
@@ -984,14 +1047,30 @@ This is **not** a bright-line guardrail and not new `MUST` prose — it is a con
 The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scripts/new-feature.sh <slug>` validates the kebab-case slug, checks for a dirty tree, picks the next NNN, creates branch `feature/<slug>` from main/master, and lays down a *template* `spec.md`. After scaffolding, the skills compose:
 
 1. **`clarify` skill** *(optional, recommended for vague requests)* — captures the operator's voice verbatim across five canonical questions (intent, users affected, success metric, edge cases, rollback plan). Writes `specs/<NNN>-<slug>/clarify.md` alongside the template spec.md. Refuses to declare done until every question has an answer or an explicit `Deferred: <reason>` block. The schema lives at `core-rules/skills/clarify/references/question-schema.md`.
+
+   The five canonical questions are the floor, not the ceiling. Before asking them, look at what the change actually touches and add the questions **whose answers would change the architecture** — the data model, the type interfaces, the UX flow, the boundary between two subsystems. Ask those first; they are the ones where a wrong assumption is expensive to unwind later. Where a canonical question is obviously settled by the request itself, record the answer and move on rather than performing the interview.
 2. **`spec` skill** — reads `clarify.md` if it exists, then replaces the template `spec.md` placeholders with real content. Authoring rules forbid implementation detail; the spec answers *what* + *why* only.
 3. **`plan` skill** — reads the reviewed spec, writes `specs/<NNN>-<slug>/plan.md`: technical approach, schema, API surface, file-by-file change list, sequencing + dependencies, test strategy mapping each spec criterion to a test, rollout plan, risks + mitigations, decisions log. Refuses to overwrite.
+
+   When a working implementation of the semantics you want already exists — another repo, a library, a sibling service, an older version of this same system — point the plan at the **code** rather than describing it. "Read `<path>`; reimplement those semantics in our stack, with these three differences" is shorter than a specification and leaves far less room to guess. The same holds for UI: a rough HTML mockup carries more design intent than a paragraph describing the layout.
 4. **`tasks` skill** — reads the reviewed plan, writes `specs/<NNN>-<slug>/tasks.md`: checkbox table of atomic tasks (≤4h each), dependencies, coverage map. `tasks.md` is the source of truth for the feature's work breakdown; `TodoWrite` mirrors the active 3–5-item slice during implementation.
 5. **`analyze` skill** — reads `spec.md` + `plan.md` + `tasks.md` (+ `clarify.md` if present), writes `specs/<NNN>-<slug>/analyze.md`: drift findings across 8 categories (coverage, origin, scope, constraint compliance, intent fidelity, rollback consistency, test strategy completeness, sequencing sanity). Ends with a verdict — PASS / NEEDS-REVISION / BLOCKED. Advisory only; operator owns the call to act or override.
 
+**After the build — package it for the human who wasn't watching.** The five pipeline artifacts are written for the agent doing the work. When the work is done — and especially when it ran unattended ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project) L4/L5) — write one document *for the operator*: lead with what it does (a demo, a screenshot, a worked example, the actual output), then the decisions you made on their behalf, then what you'd want a reviewer to look at hardest. Not a recap of the artifacts; they can read those. An HTML page is a good format here — it renders, it can embed the real thing, and it costs no more to produce than markdown.
+
+Where understanding matters more than approval — a subsystem the operator will maintain, a pattern they'll be asked to extend — run `/debrief` instead of writing the pitch. It asks them to explain the change back and stops when they can't.
+
 **The TodoWrite-vs-tasks.md contract.** `tasks.md` is committed, reviewed, archived alongside the rest of the pipeline — the document of record. `TodoWrite` is the ephemeral in-flight surface: pull the next 3–5 unchecked tasks into TodoWrite as you sit down to work; tick the box in `tasks.md` AND mark TodoWrite items complete in lockstep. If they disagree, `tasks.md` wins.
 
-**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is reviewed before the next is generated. After any skill returns, do not chain to the next in the same turn unless the operator asks. The skills are writers (and one analyst), not builders — building is the `execute` skill's job and begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before. `execute` reads the resulting `tasks.md` checkbox-by-checkbox; the lightweight track points it at a `docs/plans/<topic>.md` instead.
+**Implementation notes.** While building, keep an **untracked `implementation-notes.md` at the repo root of the active checkout** — a running log of every place the code had to depart from the plan, and the choice you made at that fork. Repo root and untracked are both load-bearing and not stylistic: `process-gate` looks for it at the repo root, and it must stay out of the index so it cannot shift a task's `+N/-M` diff stat or the `git diff HEAD` hash that the end-of-turn review rendezvous is keyed on. It must also be **deleted before a worktree is reaped**, because every reap predicate refuses on untracked content by design. One line each: what the plan assumed, what was actually true, what you did, and whether you took the conservative option. This is not a status file and not a summary; it is the record of where the map and the territory disagreed. It is the first thing to read when reviewing the work, and the raw material for `gotchas.md` entries afterward. Delete it when the feature ships, after harvesting the gotchas. It is distinct from `decisions-log.md` ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)), which records decisions taken on the operator's behalf at L4/L5 only; implementation notes apply at every level, because the plan↔build gap exists whether or not anyone was watching.
+
+**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is meant to be reviewed before the next is generated. When the operator is present (L1–L3), stop after each skill returns and let them read it.
+
+When running unattended (L4/L5), stopping between skills just parks the work until morning — nobody is going to read the artifact tonight. Chain through the **mechanical** transitions (`clarify`→`spec`, `tasks`→build) rather than ending the turn on a returned artifact. Pause only where the work genuinely requires the operator: a destructive or irreversible action, a real scope change, or an answer only they can give. If you do pause, say what you need and end the turn — don't end on a promise to continue. Record the decisions you made on their behalf in `decisions-log.md` ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)) so the review that was skipped can happen after the fact instead of blocking.
+
+**The `spec`→`plan` transition is not mechanical.** A plan that settles an architectural question — a new dependency, a new module, an auth flow, a data store, a public API — hits the §14.9 reversibility carve-out, which surfaces inline *even at L5*. Chaining does not override that cliff: the rule against ending a turn on an unfinished promise is not a licence to push past an irreversible decision. Surface the decision, then continue.
+
+The skills are writers (and one analyst), not builders — building is the `execute` skill's job and begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before. `execute` reads the resulting `tasks.md` checkbox-by-checkbox; the lightweight track points it at a `docs/plans/<topic>.md` instead.
 
 **Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). The project `.gitignore`'s Trellis-managed block is **generated** by `onboard-project.sh` (`write_gitignore_block`): it lists exactly the machine-absolute symlinks onboard creates this run — nothing else — and is rewritten in full on every run. The block is version-agnostic (no skill-count sentinel) and self-healing: each run strips all prior Trellis-managed blocks (any historical sentinel, plus the legacy `end SE Core fragment` variant) and any orphaned canonical-symlink lines, so re-onboarding an older project collapses stacked/stale blocks into one clean block. Project-authored `.gitignore` content is preserved.
 
@@ -1005,6 +1084,13 @@ The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scri
 ├── tasks.md            # tasks skill (work-breakdown source of truth)
 └── analyze.md          # analyze skill (advisory verdict before implementation)
 ```
+
+`implementation-notes.md` is deliberately **not** in that tree. It lives untracked
+at the repo root while the build runs and is deleted once its entries are folded
+into the PR description and harvested for `gotchas.md`. Putting it inside the spec
+directory would commit it, which breaks two mechanisms at once: the diff stat and
+`git diff HEAD` hash that the review rendezvous keys on, and the reap predicates
+that refuse to destroy untracked work.
 
 After a feature ships, the directory stays in git as historical record.
 
@@ -1066,7 +1152,7 @@ Trellis ships an L1–L5 **responsibility slider** that determines who answers t
 **Why this exists.** New users routinely report Trellis's interactive surface as the primary friction barrier — plan-approval, ambiguity flagging, pre-implementation interview, per-phase approval, brainstorming, spec-kit phase gates, destructive-action confirmation, PR-creation confirmation. Each gate exists to catch a real failure mode. But experienced operators on chore-grade work pay the same input cost as a novice on a high-stakes refactor. The slider lets them dial it.
 
 **Levels.**
-- L1 Pedagogical — ask + explain reasoning.
+- L1 Pedagogical — ask, and say why you're recommending what you're recommending.
 - L2 Cautious — ask with embedded recommendation.
 - L3 Standard — current behavior.
 - L4 Initiative — single plan-approval, batched questions, architectural decisions still inline.
@@ -1085,6 +1171,8 @@ Trellis ships an L1–L5 **responsibility slider** that determines who answers t
 **Reversibility carve-out:** architectural decisions (new dep, new module, auth flow, data store, public API) surface inline mid-turn even at L5. The reversibility cliff is honored.
 
 **Decision log.** At L4/L5, agent appends each decision-on-user's-behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes the same. Code-review subagent at L4/L5 verifies decision-log completeness vs diff — incomplete logs are findings.
+
+The `## Decisions made (L<n>)` block is a record, not a report. It goes *below* the plain-language summary of what happened ([§7](#7-definition-of-done)), never in place of it. At L4/L5 the operator did not watch any of the work, so the final message is their entire view of it — write the re-grounding first, then attach the decision log and the receipts as evidence beneath it.
 
 **Audit.** An optional operator autonomy-drift check can flag silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), and schema issues.
 
@@ -1149,7 +1237,9 @@ Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/202
 - `core-rules/CLAUDE.md` — parent rules (LLM-facing).
 - `core-rules/hooks.md` — three-tier hook spec.
 - `core-rules/inheritance.md` — symlink + @-import mechanism.
-- `docs/opus-4.8-steering.md` — Opus 4.8 prompting deltas vs Trellis + reusable snippet library.
+- `core-rules/references/model-prompting-deltas.md` — per-model prompting deltas vs Trellis. The one place model-specific claims are allowed to live; the terse table you read when you need the delta and nothing else.
+- `docs/claude-steering.md` — the long-form Claude steering reference and snippet library, generation-neutral with per-model sections. Canonical for effort posture: settings-accepted levels, override precedence, degrade behavior, and the sweep method. Carried the Opus 4.8 name until spec 019 renamed it generation-neutral; the sibling for the other harness is `docs/gpt-5.x-steering.md`, with routing in `docs/codex-routing.md`.
+- `docs/research/2026-07-25-claude-5-prompting-corpus.md` — the primary-source corpus behind the current doctrine.
 - `core-rules/deferred.md` — n=1 candidates awaiting third witness.
 - `core-rules/hooks/README.md` — canonical hook script index + attribution.
 - `core-rules/hooks/*.sh` — canonical hook implementations; inventory in `core-rules/hooks/README.md`.

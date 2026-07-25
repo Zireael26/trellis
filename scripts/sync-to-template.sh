@@ -78,6 +78,9 @@ SYNC_PATHS=(
   "core-rules/hooks.md"
   "core-rules/inheritance.md"
   "core-rules/deferred.md"
+  # the feature-primer system, relocated out of core-rules/CLAUDE.md in 019 —
+  # CLAUDE.md ships a pointer to it, so it must publish or the pointer dangles.
+  "core-rules/primers.md"
   "core-rules/hooks/"
   "core-rules/husky/"
   "core-rules/githooks/"
@@ -105,7 +108,7 @@ SYNC_PATHS=(
   # published because 13 synced files reference it (CLAUDE.md § Loops, references/loops.md, orchestrate skill+recipes) — spec 009 D9.
   "core-rules/loop-safety.md"
   "core-rules/presets/"
-  "docs/opus-4.8-steering.md"
+  "docs/claude-steering.md"
   "docs/gpt-5.x-steering.md"
   "docs/codex-routing.md"
   "docs/specs/2026-05-20-trellis-autonomy-design.md"
@@ -113,6 +116,11 @@ SYNC_PATHS=(
   "docs/specs/2026-06-09-loop-safety-contract-design.md"
   "docs/specs/2026-07-21-reference-token-handoff-spike.md"
   "docs/specs/2026-07-21-public-dependency-bootstrap-design.md"
+  # single file, NOT the docs/research/ dir — the rest of that dir is instance
+  # research. Published because core-rules/references/model-prompting-deltas.md,
+  # engineering-process.md, and docs/claude-steering.md all cite it, and it is a
+  # distillation of published Anthropic sources with nothing instance-private.
+  "docs/research/2026-07-25-claude-5-prompting-corpus.md"
 )
 
 # Files NEVER synced (private / instance-specific) — informational; the
@@ -141,6 +149,7 @@ NEVER_SYNC=(
 DELIST_PRUNE=(
   "docs/antigravity-steering.md"   # retired in RC.4 (AntiGravity strip)
   "docs/gpt-5.5-steering.md"       # renamed → docs/gpt-5.x-steering.md in RC.5
+  "docs/opus-4.8-steering.md"      # renamed → docs/claude-steering.md in 019
   "scheduled-tasks"                # de-listed 2026-07-13 (audit H1/M2): named private-fleet leak
 )
 

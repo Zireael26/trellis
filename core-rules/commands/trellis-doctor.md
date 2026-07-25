@@ -5,6 +5,11 @@ argument-hint:
 
 # Trellis doctor
 
+Invoked as `/trellis-doctor`. The name is deliberate: Claude Code ships its own
+built-in `/doctor` (installation health, skill and `CLAUDE.md` rightsizing), and
+a project-level command of the same name would shadow it. This command is the
+*inheritance* health check, and Trellis wants both available.
+
 You are running `trellis doctor` to check that every active project is still correctly parented to the canonical Trellis rules. This is the deterministic, on-demand health check — fast, mechanical, no LLM variance — and can also feed private operator audits. It catches the silent-drop failure mode: a broken symlink or dead `@`-import drops a project's parent rules with no error and no log line.
 
 **Read-only by default.** A plain run mutates nothing — it only diagnoses and prints the exact command a repair would need. Repairs happen only when the user explicitly asks, and even then several check classes are reported as manual actions, never auto-applied (see below).
@@ -39,7 +44,7 @@ If everything is `✓` (exit `0`), report green and stop — there is nothing to
 
 ### 3. Repair — only if the user asks
 
-Do **not** repair on a plain `/doctor`. If, after seeing the table, the user asks to fix the drift:
+Do **not** repair on a plain `/trellis-doctor`. If, after seeing the table, the user asks to fix the drift:
 
 **a. Preview first.** Always dry-run before mutating anything:
 
@@ -83,9 +88,16 @@ Only add `--fix-hooks` when the user has specifically agreed to update stale hoo
 - It does not enforce remote state (e.g. GitHub branch protection). Anything unfixable locally is reported as a manual action, never guessed at.
 
 <!--
-/doctor is a maintainer command run from the canonical Trellis checkout — it is
-deliberately NOT in the per-project command set that onboard-project.sh
-symlinks ({primer,primer-refresh,primer-check,explore}.md). doctor.sh
-self-resolves $TRELLIS_ROOT from trellis.config.json, so no git-common-dir
-canonical-root ceremony applies here. Design: docs/adr/2026-05-30-trellis-doctor.md.
+/trellis-doctor is a maintainer command run from the canonical Trellis checkout
+— it is deliberately NOT in the per-project command set that onboard-project.sh
+symlinks ({primer,primer-refresh,primer-check,explore,autonomy,surgical}.md),
+and so is intentionally outside HC_CANONICAL_COMMANDS in
+scripts/lib/health-checks.sh. It is reachable because the canonical checkout
+seeds .claude/commands/trellis-doctor.md itself. doctor.sh self-resolves
+$TRELLIS_ROOT from trellis.config.json, so no git-common-dir canonical-root
+ceremony applies here. Design: docs/adr/2026-05-30-trellis-doctor.md.
+
+Renamed from /doctor (spec 019, audit C7): Claude Code ships a bundled /doctor,
+and a same-named project command shadows it. scripts/doctor.sh is a different
+thing — a shell script, not a slash command — and keeps its name.
 -->

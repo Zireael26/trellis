@@ -108,10 +108,9 @@ the inherited worker profile as a normal tracked agent node:
 agent(prompt, { agentType: 'codex-worker', label: 'codex:<unit>' })
 ```
 
-`codex-worker` is `model: sonnet`, launches the companion in the work order's
-required `TARGET_CWD`, polls status from that same cwd, applies the bounded
-no-session/stall recovery, fetches `result`, and
-returns that result plus its diff-stat receipt. The Workflow node therefore
+`codex-worker` launches the companion in the work order's required `TARGET_CWD`,
+polls status from that same cwd, applies the bounded no-session/stall recovery,
+fetches `result`, and returns that result plus its diff-stat receipt. The Workflow node therefore
 resolves only on terminal success, unavailability, or failure. Producing recipes
 retain a defensive job-handle assertion: a leaked handle is a worker-contract
 failure and degrades the identical unit to Claude, never a completed result.
@@ -120,8 +119,9 @@ The legacy rescue forwarder remains documented only for interactive rescue. It
 is fire-and-forget and MUST NOT be used as a producing dispatch path inside a
 Workflow.
 
-Never route execution through a general Opus agent that only shells out — the
-most expensive of the three, buying nothing over (i) or (ii).
+Never route execution through a general-purpose agent whose only job is to shell
+out to the companion — it is the most expensive of the three paths and buys nothing
+over (i) or (ii).
 
 ## The prompt contract
 
@@ -143,12 +143,11 @@ Report failures as failures. Never claim completion without the proof command's 
 
 The honest-reporting clause is the **seventh mandatory template line** —
 character-identical in this template and in every runnable prompt builder,
-never paraphrased. Rationale, stated boundedly: the GPT-5.6 system card
-reports increased agentic-coding overreach vs 5.5 (most pronounced at highest
-reasoning effort under persistence-heavy prompts) alongside a ~30% *decrease*
-in misrepresented completions in simulated traffic, and METR reports its
-highest detected ReAct-harness cheating rate, explicitly prompt/scaffold-dependent
-— so the honesty contract must live in the runnable prompt, not only in prose.
+never paraphrased. It lives in the runnable prompt rather than only in prose
+because executor honesty is scaffold-dependent, not model-inherent: the current
+per-model evidence (overreach rates, misreported-completion rates,
+harness-cheating findings) is tracked in
+`core-rules/references/model-prompting-deltas.md`.
 
 Seven lines alone under-specify the execution environment, so the template
 closes with the operational invariants the recipe already carries:
@@ -260,8 +259,7 @@ only when the operator invokes it by hand, and only under all of: an
 (inheritance-seeded), with a preflight that `.codex/hooks/` exists; **never
 the canonical checkout**; a **trusted prompt** (no untrusted repo content in
 context). **`max` and `ultra` are forbidden on the hatch** — highest-effort
-persistence risk with no OS sandbox is exactly the compound the 5.6 system
-card warns about. Be honest about what this is: sandboxless is **host-wide privilege**
+persistence risk with no OS sandbox. Be honest about what this is: sandboxless is **host-wide privilege**
 — the worktree confines the intended diff surface and makes rollback trivial;
 it does not confine the process. The repo-scoped Codex hooks and the pre-push
 guard still fire, but they are pattern-based — a complementary layer, not a

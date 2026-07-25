@@ -23,7 +23,7 @@ Keep responses concise and low-verbosity. Skip non-essential preamble and traili
 Two named GPT-5.x affordances map onto the dispatch and state-tracking behavior Trellis already expects:
 
 - **`update_plan`** — keep the working plan current as tasks complete. This is the GPT-5.x-native counterpart to the `execute` loop's checkbox-tick discipline (`core-rules/skills/execute/`): the plan is the live state, ticked as each unit lands, not a stale snapshot. Use it so the agent's tracked plan and the on-disk plan/tasks file stay in step across a long run.
-- **`multi_tool_use.parallel`** — issue independent tool calls together. This honors `core-rules/CLAUDE.md` "Context management", which already directs batching independent reads/searches/analyses rather than serializing them. The reusable snippet (shared with `docs/opus-4.8-steering.md §3`):
+- **`multi_tool_use.parallel`** — issue independent tool calls together. This honors `core-rules/CLAUDE.md` "Context management", which already directs batching independent reads/searches/analyses rather than serializing them. The reusable snippet (shared with `docs/claude-steering.md §3`):
 
   ```text
   If you intend to call multiple tools and there are no dependencies between the tool calls, make all of the independent tool calls in parallel. For example, when reading 3 files, run 3 tool calls in parallel. However, if some tool calls depend on previous calls to inform dependent values, do NOT call them in parallel — call them sequentially. Never use placeholders or guess missing parameters in tool calls.
@@ -33,7 +33,7 @@ Use `update_plan` and `multi_tool_use.parallel` by their GPT-5.x names where the
 
 ## 3. Progress floor — surface progress on a cadence
 
-This is the one genuine GPT-5.x delta the design sanctions, and it runs **opposite** to the Opus guidance: `docs/opus-4.8-steering.md` deliberately does **not** add "summarize every N tool calls" scaffolding (4.8 already paces its own updates well). For GPT-5.x the design pins a **progress floor** — surface progress on a regular cadence during a long autonomous run, roughly every **6 steps** or **10 tool calls**, whichever comes first — so a multi-step run stays legible to the operator and to the context-log/primer system rather than going dark for a long stretch.
+This is the one genuine GPT-5.x delta the design sanctions. Both harnesses now scope progress reporting by **attendedness** — see `docs/claude-steering.md §2`, which asks for no narration scaffolding on attended turns and a readable re-grounding message at the end of a long unattended run. The GPT-5.x delta is the *cadence*: the design pins a **progress floor** — surface progress on a regular cadence during a long autonomous run, roughly every **6 steps** or **10 tool calls**, whichever comes first — rather than relying on the model to pace its own updates, so a multi-step run stays legible to the operator and to the context-log/primer system rather than going dark for a long stretch.
 
 This is a per-harness delta, not an override of the spine: it changes only the GPT-5.x reporting cadence, nothing about what work gets done or which gates fire. The intent:
 

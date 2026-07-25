@@ -33,8 +33,9 @@ export HC_OK HC_ERROR HC_WARN HC_INFO
 # Canonical sets — the full inheritance surface a healthy project carries.
 # Kept here (not in doctor.sh) so audits share the same definition of "full".
 HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
-# Project-seeded commands only. `constitution`, `doctor`, and `disk-janitor`
-# are control-plane diagnostics and are intentionally outside this set.
+# Project-seeded commands only. `constitution`, `trellis-doctor`, and
+# `disk-janitor` are control-plane diagnostics run from the canonical checkout
+# and are intentionally outside this set.
 HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 export HC_CANONICAL_SKILLS HC_CANONICAL_COMMANDS
 
@@ -891,9 +892,9 @@ hc_receipt_grammar_present() {
 # METRIC CHOICE (deliberate): this instrument adopts the community ATTENTION-CLIFF
 # finding, which is stated in lines/instructions, so it measures LINES and uses
 # the community's ~200 figure verbatim as the budget. Trellis's SEPARATE "small
-# surface" byte target — `< 5 KB` for core-rules/CLAUDE.md (engineering-process.md
-# §4 and its "Target size: < 5 KB" line) — is a stricter STYLISTIC goal tracked
-# there and in the cross-project audits, and is deliberately NOT what this check
+# surface" byte target — <= 19,000 bytes for core-rules/CLAUDE.md, stated in that
+# file's Control plane section — is a separate goal tracked there and in the
+# cross-project audits, and is deliberately NOT what this check
 # enforces. At the parent's ~130 B/line density a 200-line budget permits ~26 KB
 # (~5× the byte target): byte-bloat and the attention cliff are different
 # concerns, and this check guards only the latter. Missing file => OK (skip):

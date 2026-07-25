@@ -38,7 +38,7 @@ SPEC_DOCS=(
   "$ROOT/recon.md"
   "$ROOT/registry.md"
   "$ROOT/docs/UPGRADING.md"
-  "$ROOT/core-rules/commands/doctor.md"
+  "$ROOT/core-rules/commands/trellis-doctor.md"
 )
 
 # Operator clones may carry a private prompt tree. Public-template clones do

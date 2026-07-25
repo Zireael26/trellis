@@ -147,6 +147,37 @@ lint_mirror() {
     fi
   done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
 
+  # --- OPERATOR-ACCOUNT identifiers: instance-local, never public ------------
+  # Names of the operator's cloud accounts, credential stores, and env vars.
+  # These are not secrets — they are the shape of the operator's infrastructure,
+  # which is exactly what a public template must not carry. A rule like "one
+  # canonical source per shared token" is publishable; the team slug and the
+  # Keychain service name that instantiate it are not.
+  #
+  # The tokens live in an instance-local denylist file rather than in this
+  # script, because this script itself syncs to the public mirror — hardcoding
+  # them here would publish the very strings it exists to withhold. The file
+  # lives under local/, which the private-namespace check below already forbids
+  # from publishing. Absent the file, this check is a no-op: a fresh clone of
+  # the public template has no operator identifiers to protect, and inventing a
+  # default denylist would be guessing at someone else's account names.
+  #
+  # Format: one token per line; blank lines and lines starting with # ignored.
+  # Matching is fixed-string and case-insensitive.
+  local denylist_file="$source_root/local/mirror-denylist.txt"
+  if [ -f "$denylist_file" ]; then
+    local dtok
+    while IFS= read -r dtok || [ -n "$dtok" ]; do
+      case "$dtok" in ''|'#'*) continue ;; esac
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rel="${f#"$mirror_dir"/}"
+        echo "$rel: operator-account identifier must not publish (see local/mirror-denylist.txt)"
+        rc=1
+      done < <(grep -rIliF --exclude-dir='.git' -- "$dtok" "$mirror_dir" 2>/dev/null)
+    done < "$denylist_file"
+  fi
+
   # --- Root private namespaces: whole subtrees that must never publish (audit
   # 2026-07-13 H1/L17). A bare .gitkeep placeholder and the one deterministic,
   # empty public ledger bootstrap are allowed; any other real content under
@@ -183,7 +214,7 @@ lint_mirror() {
     core-rules/presets/README.md core-rules/templates/trellis.config.json.example \
     core-rules/skills/orchestrate/SKILL.md \
     core-rules/skills/security-gate/SKILL.md core-rules/commands/constitution.md \
-    core-rules/commands/doctor.md core-rules/commands/disk-janitor.md \
+    core-rules/commands/trellis-doctor.md core-rules/commands/disk-janitor.md \
     scripts/lib/trellis.config.schema.json; do
     [ -f "$mirror_dir/$operator_doc" ] || continue
     if grep -qiE -- 'scheduled-tasks(/|[[:space:]]|$)|mcp__scheduled-tasks__|scheduled[[:space:]]+audit[[:space:]]+fleet|([0-9]+|sixteen)[[:space:]]+scheduled[[:space:]]+(tasks|audits)|([0-9]+|sixteen)[[:space:]]+audits[[:space:]]+(are[[:space:]]+)?(registered|running)|audited[[:space:]]+(weekly|continuously)' "$mirror_dir/$operator_doc" 2>/dev/null; then

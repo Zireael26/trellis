@@ -2,7 +2,7 @@
 
 Source: the July-2026 community + benchmark consensus on Claude/Opus vs Codex/GPT-5.x (last30days engine + web search, distilled to the figures below), not model recall. This doc carries the **work-type → model** routing policy as durable steering **intent** for Trellis's dual-harness setup. It is not a rule that branches on which harness is running — the load-bearing rules live in `core-rules/CLAUDE.md`, `core-rules/autonomy.md`, `core-rules/loop-safety.md`, and the hooks, and they steer every harness **identically** (byte-identical `CLAUDE.md`/`AGENTS.md` symlinks; ADR 2026-05-08). Routing is applied by the orchestrator when it fans work out — and, since spec 009, when a bounded work-order unit surfaces in any interactive turn (§6); it never re-decides who *is* running. Read on demand.
 
-The per-model prompting levers live next door: `docs/opus-4.8-steering.md` and `docs/gpt-5.x-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
+The per-model prompting levers live next door: `docs/claude-steering.md` and `docs/gpt-5.x-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
 
 ---
 
@@ -67,9 +67,9 @@ Both require a named justification logged in the dispatch receipt, are never a d
 
 **Escape hatch:** max/ultra are forbidden on the sandboxless escape hatch, and no automated recipe may use the hatch (sandbox posture — spec 011 D5b; mechanics in `core-rules/skills/orchestrate/references/codex-executor.md`).
 
-(The Claude *session* default stays xhigh via `core-rules/templates/claude-settings.json`; the ladder governs the explicit effort the orchestrator places in each `codex-worker` work order or Bash-direct dispatch.)
+(The Claude *session* default is governed by `docs/claude-steering.md` §1, which is canonical for Claude effort posture and is where the number and its scoping live; `core-rules/templates/claude-settings.json` enacts it. The ladder here governs only the explicit effort the orchestrator places in each `codex-worker` work order or Bash-direct dispatch.)
 
-- **Claude** has session-only levels **above** xhigh — `max` and `ultracode` — reachable per-session via `/effort` when a task warrants it (they over-think if applied blindly; test first).
+- **Claude** has session-only effort settings the `effortLevel` setting will not take — `max` and `ultracode` — reachable per-session via `/effort` when a task warrants it (`max` over-thinks if applied blindly; test first). `ultracode` is not a level above `xhigh`: it sends `xhigh` and additionally has Claude orchestrate dynamic workflows for substantive tasks (verified 2026-07-25, `code.claude.com/docs/en/model-config`).
 
 ## 4. Presence + degrade contract
 

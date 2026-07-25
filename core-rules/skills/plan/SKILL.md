@@ -39,12 +39,15 @@ One new file: `specs/<NNN>-<slug>/plan.md`. The skill must not modify `spec.md` 
 2. **Read the project's `CLAUDE.md`, `gotchas.md`, and recent `docs/adr/*.md`.** These constrain the plan; cite by filename when a constraint applies.
 3. **Read every file the spec hints at.** If the spec mentions auth, read `src/auth/*`. If it mentions billing, read `src/billing/*`. The plan is grounded in current code, not speculation.
 4. **Draft `plan.md`** using `references/plan-template.md` as the structure: technical approach, data model + schema changes, API surface, file-by-file change list, sequencing + dependencies, test strategy, rollout plan, risks + mitigations, decisions log.
+
+   **Prefer the artifact over the description.** Where a decision is easier to judge as a thing than as a paragraph, put the thing in the plan: a concrete type or interface definition, a sample request/response payload, a migration's actual SQL, a table of fixture rows. Reference source that already implements the semantics you want rather than restating them ("`<path>` implements exactly this ordering; match it"). Prose is the fallback, not the default.
 5. **Cite specifics.** "Add a new endpoint" is not a plan. "Add `POST /api/orders/replay` in `src/api/orders/replay.ts`, route handler delegates to `replayOrder()` in `src/services/orders/replay.ts`, both new" is a plan.
 6. **Surface trade-offs.** When two approaches are viable, name both, pick one, justify in the decisions-log section. Don't paper over the choice.
 7. **Stop after writing.** The plan is reviewed before tasks are generated. Don't invoke `tasks` in the same turn unless the operator asks.
 
 ## Authoring rules
 
+- **Lead with what is most likely to change.** Data models, type interfaces, and UX flows are where a plan gets revised; the file-by-file list is where it gets followed. Open §1 by naming the two or three decisions a reviewer should push back on, and keep mechanical detail terse.
 - **Plan inherits the spec's intent.** Don't widen scope. If you find a tempting adjacent fix, list it under "Out of scope (deferred)" and move on.
 - **Each file in the change list has a one-line purpose.** Reviewer can scan it in 60 seconds.
 - **Schema/API shapes are concrete.** Column types named. Field types named. Status codes named. No "we'll figure it out at implementation".

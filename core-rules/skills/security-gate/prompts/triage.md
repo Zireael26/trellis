@@ -53,7 +53,7 @@ If you cannot construct a concrete step (no controllable input, no reachable cod
 
 ## Calibration
 
-Recall the operator goal (from `security-gate-plan.md` §1): SAST tools have ~98% false-positive rates. Your adversarial pass exists to push that rate down. Be skeptical. Drop aggressively when you cannot construct a concrete step. A `kept` finding without `exploit_steps` is a process violation.
+Operator context (from `security-gate-plan.md` §1): SAST tools run ~98% false-positive rates, which is why the two passes above exist. Apply the Pass A drop classes and the Pass B exploit-path test as written — they are the filter. A `kept` finding without `exploit_steps` is a process violation; a `dropped` finding whose `reason` does not name one of the Pass A classes or "no exploit path constructed" is also a process violation.
 
 When the severity rating from the scanner is wrong (e.g. medium → actually critical because it sits on the auth path), set `severity_override`.
 

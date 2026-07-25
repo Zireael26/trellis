@@ -18,12 +18,6 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Why defer:** valuable in Neev because features span multiple packages and trade-offs are routinely contested. Smaller projects may not benefit from the overhead.
 **Lift when:** two more projects independently find value in the structured two-voice pattern (bringing total sources to 3).
 
-### Fresh-eyes / new-user testing persona
-**Source:** Neev.
-**What:** when asked to test your own output, adopt a new-user persona and walk through as if you've never seen the project.
-**Why defer:** strong testing heuristic but unclear it fits every project class (e.g., an internal CLI tool has no "new user" in the normal sense).
-**Lift when:** two more projects — ideally in different classes from Neev's multi-tenant SaaS — adopt the persona.
-
 ### Bug autopsy after fix
 **Source:** Neev.
 **What:** after fixing a bug, explain root cause and whether a category-level prevention is possible (lint rule, test, type, invariant).

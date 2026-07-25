@@ -57,7 +57,7 @@ The full check matrix lives in [`references/drift-checks.md`](references/drift-c
 1. **Confirm input contract.** All required files exist. List them.
 2. **Run each check category in order.** Don't batch findings — produce them as you go. The operator can stop reading at the first critical and act on it before the rest.
 3. **Quote, don't paraphrase.** When flagging "spec says X but plan says Y", quote both verbatim with line refs.
-4. **Tier severity carefully.** Critical = blocks merge. Warning = revisit before PR. Info = cosmetic, optional. Most findings should be warning or info; over-using critical desensitises.
+4. **Tier by consequence, not by quota.** Critical = blocks merge. Warning = revisit before PR. Info = cosmetic, optional. Tier each finding by what actually happens if it ships unfixed; do not manage the distribution.
 5. **Don't propose fixes inline.** Findings only. The operator decides whether to revise spec, plan, tasks, or override. Proposed fixes belong in the follow-up commit, not in analyze.md.
 
 ## Authoring rules

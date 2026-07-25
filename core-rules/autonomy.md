@@ -33,19 +33,32 @@ The autonomy slider controls **who answers Trellis's interactive gates** — use
 - Spec-Kit phase handoff (clarify → spec → plan → tasks → analyze) — at L5 agent answers clarify questions itself with documented reasoning.
 - Mandatory-pipeline intake interview (when `mandatory_pipeline` is enabled, spec 006). The pre-push *gate* is deterministic and fires the same at every level — it is **not** a bright-line guardrail, but the slider does not switch it off. What flexes is *who answers* the feature-intake: at **L1–L3** `clarify` interviews the user and `clarify.md` (or a `.claude/spec-waiver`) satisfies the gate; at **L4/L5** the agent self-answers and a `decisions-log.md` entry naming the branch satisfies it. See `engineering-process.md` §14.7 + `core-rules/hooks.md`.
 - PR creation — at L5 agent may auto-open PR after gates pass; at L≤4 confirms.
+- End-of-turn reporting register — terse while the operator is watching, plain-prose re-grounding when nobody is (see *Reporting register* below).
 
 ## Loops as an autonomy surface
 
 Loops are an autonomy surface: higher levels run loops with less consultation, and at L4/L5 a loop may run unattended (overnight, cron, `--run-in-background`). The **loop-safety contract** is the halting guarantee that makes that safe — every loop honors three ceilings (`max_iterations`, `no_progress_iterations`, `budget_ceiling_usd`) and hard-stops on any one, so raising autonomy never trades away the guarantee that a runaway loop halts. Full contract: `core-rules/loop-safety.md`.
 
-## Opus 4.8 alignment
+## Unattended runs (L4/L5, cron, background)
 
-Anthropic's Opus 4.8 prompting guidance frames the same tradeoff this slider controls. Two of its system-prompt patterns map directly onto Trellis — the slider implements them as a setting rather than a fixed prompt:
+When the operator is not watching, a question ends the work instead of resolving it. For reversible actions that follow from the original request, proceed and record the decision in `decisions-log.md`. Pause only for what the bright-line guardrails already require, or for input only the operator can provide — and when you do, ask and end the turn rather than ending on a promise.
+
+Before ending the turn, read your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ("I'll…", "once you confirm…"), do that work now with tool calls instead. End only when the task is complete or you are blocked on input only the operator can give.
+
+Ground every progress claim. Before reporting progress, audit each claim against a tool result from this session. Report only what you can point at evidence for; if something is not yet verified, say so. If tests fail, say so and quote the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging. This is the DoD-receipt discipline (`core-rules/CLAUDE.md` § Definition of done) applied to the intermediate claims a long run makes before it reaches a receipt.
+
+## Reporting register
+
+The slider also sets how the final message reads, because it is a proxy for whether anyone is watching. At L1–L3 the operator is in the loop: terse is right, and the diff plus TodoWrite carry the state. At L4/L5 — and in any run that goes unattended regardless of level (cron, overnight, `--run-in-background`) — the final message is the operator's first look at the work, so write it as a re-grounding: complete sentences, outcome first, no shorthand. Where the run produced one, the `## Decisions made (L<n>)` block belongs inside that message, not as an exception to it.
+
+## Alignment with Anthropic's autonomy guidance
+
+Anthropic's prompting guidance frames the same tradeoff this slider controls. Two of its system-prompt patterns map directly onto Trellis — the slider implements them as a setting rather than a fixed prompt:
 
 - **Default-to-action ↔ conservative-action.** The doc ships two opposing snippets (`<default_to_action>` vs `<do_not_act_before_instructions>`). The L1–L5 slider *is* that spectrum: L1–L2 default to research-and-recommend (the conservative snippet), L4–L5 default to implement-and-document (the action snippet), L3 splits on the plan-approval gate. You pick a level, not a snippet.
 - **Balancing autonomy and safety.** The doc recommends confirming before destructive, hard-to-reverse, or externally-visible actions, and never bypassing safety checks (`--no-verify`) as a shortcut. That is exactly the bright-line guardrail set above — enforced at every level including L5 by hooks, not heuristic.
 
-Full mapping and source snippets: `docs/opus-4.8-steering.md`.
+Full mapping and source snippets: `docs/claude-steering.md`.
 
 ## Reversibility carve-out
 

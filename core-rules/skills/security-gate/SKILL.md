@@ -103,7 +103,7 @@ Static chained-exploit reasoning. Loads retained entries from both `findings` an
   "profile": "web-next",
   "generated_at": "2026-05-08T12:34:56Z",
   "tools": {"semgrep": "1.142.0", "osv-scanner": "1.9.2", "gitleaks": "8.21.0"},
-  "llm": {"provider": "anthropic", "model": "claude-opus-4-7"},
+  "llm": {"provider": "anthropic", "model": "claude-opus-5"},
   "findings": [
     {
       "id": "semgrep-001",
@@ -168,7 +168,7 @@ Minimal config:
 ```bash
 SECURITY_GATE_STACK_PROFILE="web-next"     # web-next | web-static | web-rag-llm | monorepo-saas | unity-game
 LLM_PROVIDER="anthropic"                    # anthropic | openai | gemini | ollama | none
-LLM_MODEL="claude-opus-4-7"                 # provider-specific model id
+LLM_MODEL="claude-opus-5"                   # provider-specific model id; keep current
 SECURITY_GATE_AUDIT_DIR="audits"            # default; relative to project root
 SECURITY_GATE_LLM_TIMEOUT_S=120             # per-call ceiling
 

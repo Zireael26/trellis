@@ -8,6 +8,32 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Added
 
+- **Claude 5 alignment (spec 019).** Six parallel audit tracks over the rules,
+  skills, references, commands, narrative manual, and steering docs, against a
+  distillation of eight published Anthropic sources now committed as
+  `docs/research/2026-07-25-claude-5-prompting-corpus.md`. New on-demand
+  references carved out of the constitution: `core-rules/references/delegation.md`,
+  `core-rules/references/follow-ups.md`,
+  `core-rules/references/gotchas-operational.md`, and `core-rules/primers.md`.
+- **Unattended-run doctrine.** `core-rules/autonomy.md` gains a section on the
+  failure mode that actually breaks long L4/L5 work: ending a turn on a question
+  nobody will answer, or on a promise about work not done. It also extends the
+  DoD-receipt discipline to the intermediate progress claims a multi-hour run
+  makes before it reaches a receipt, and a reporting register that scopes
+  terseness by whether anyone is watching.
+- **Blind-spot pass and prototype passes in the builder skills.** `clarify` can
+  now run a blind-spot pass and prioritizes questions whose answer would change
+  the architecture; `brainstorming` permits low-fidelity prototypes with fake
+  data where it previously forbade them; `spec` accepts tests, fixtures, rubrics,
+  and HTML artifacts as the specification; `execute` gains
+  `implementation-notes.md` for logging the conservative choice at each fork,
+  scoped so it cannot perturb the diff stat or content hash the gates check.
+- **Operator-account identifiers are blocked on the publish path.**
+  `scripts/lib/mirror-lint.sh` gains a denylist class reading from
+  `local/mirror-denylist.txt`, which lives in a private namespace so the linter
+  never publishes the strings it exists to withhold. Absent the file the check
+  is a no-op, which is correct for a fresh clone of the public template.
+
 - **Post-remediation fleet audit receipts.** Record the private vulnerability,
   currency, consistency, major-watch, process, hook, host-health, registry,
   conductor, disk, security, lint, inheritance, autonomy, version, and rollup
@@ -21,6 +47,43 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
   ledger commands; the dependency audits consume the same baseline.
 
 ### Changed
+
+- **`core-rules/CLAUDE.md` rightsized: 24,138 → 18,194 bytes, no rule deleted.**
+  Four relocations behind the existing on-demand reference mechanism, each
+  leaving a pointer. The substantive fixes: the inverted claim that this model
+  generation under-dispatches subagents is gone, replaced by a behavior-neutral
+  rule that damps rather than encourages; the context-budget countdown is gone,
+  being both redundant with a hook-enforced rule and the documented trigger for
+  premature wrap-up; "default to no comments" becomes "write code that reads like
+  the surrounding code", which is the sentence Anthropic replaced it with. The
+  file is model-agnostic throughout, because `AGENTS.md` is a symlink to it and
+  every word was reaching the Codex harness as its own instructions. Every
+  deterministic gate is byte-identical.
+- **`core-rules/references/model-prompting-deltas.md` rewritten** for Opus 5,
+  Fable 5 and Mythos 5, Sonnet 5, Haiku 4.5, and the Codex executor path. The
+  Sonnet and Haiku rows state that no primary source covers their deltas rather
+  than inventing guidance. It also resolves the apparent conflict between the
+  Opus 5 instruction to stop using verifier subagents and the Fable 5 finding
+  that fresh-context verifiers beat self-critique: the axis is run length, not
+  model preference, and deterministic gates are exempt either way.
+- **`/doctor` renamed to `/trellis-doctor`.** Claude Code now ships its own
+  `/doctor`, which rightsizes skills and `CLAUDE.md` — something this repo wants.
+  Blast radius verified as zero seeded symlinks across all nine projects.
+- **`docs/opus-4.8-steering.md` renamed to `docs/claude-steering.md`** and made
+  generation-neutral with per-model sections, numbering held stable so inbound
+  pointers survive. Five unsourced claims about harness mechanics were checked
+  against current documentation: four confirmed and sharpened, the fifth deleted
+  as unverifiable. The old path joins `DELIST_PRUNE`.
+- **Loop budget ceilings are metered against the model the loop runs on.** The
+  `usd_per_mtok` constant is correct for Opus 5 at $25/MTok, but Fable 5 and
+  Mythos 5 output at $50/MTok, so a Fable loop metered at the Opus rate believes
+  it has spent half what it has and sails through the ceiling meant to halt it.
+  Also records that Claude 4.7 and later use a tokenizer producing roughly 30
+  percent more tokens for the same text, so inherited ceilings need re-deriving.
+- **The security-gate finder no longer receives an under-reporting instruction.**
+  "Be skeptical, drop aggressively" is gone; current models follow that literally
+  and report less. The filter it was reaching for already exists as that prompt's
+  two-pass architecture, and over-dropping is now policed as hard as over-keeping.
 
 - **Public dependency bootstrap is runnable without private fleet data.** The
   mirror now receives deterministic, schema-valid empty baseline and ledger

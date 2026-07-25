@@ -37,6 +37,18 @@ Eight canonical gates, all harness-agnostic. Each has a reference file, a valida
 | 7 | Security (diff) | [`../security-gate/SKILL.md`](../security-gate/SKILL.md) | [`../security-gate/scripts/run-diff.sh`](../security-gate/scripts/run-diff.sh) |
 | 8 | Analyze | [`../analyze/SKILL.md`](../analyze/SKILL.md) | orchestrated by [`scripts/run-all.sh`](scripts/run-all.sh) |
 
+## Where this sits in the verification chain
+
+The gate is the last of four checks on a change, not the only one. In order:
+**(1)** the `code-review-subagent` fires per edit-heavy turn against the diff
+(`core-rules/hooks.md`); **(2)** `execute` runs the same review core in-body per task,
+advisory, before each tick (`../execute/references/verification-step.md`);
+**(3)** this gate runs the eight categories pre-PR and emits the verdict; **(4)**
+`pre-push` re-runs the security diff and the 006 spec gate at the git boundary. Each
+layer assumes the ones before it ran — if you are invoking this gate directly on a
+diff no reviewer has seen, say so in the verdict, because Gate 4 and Gate 7 are the
+only two categories that re-derive their own evidence.
+
 ## Project-local configuration
 
 The skill loads project-local config from `process-gate-local/local.config.sh`

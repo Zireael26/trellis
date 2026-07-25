@@ -11,12 +11,10 @@ The receipt grammar is canonical and defined once, in `CLAUDE.md:43`. This docum
 1. **Run the task's verification command.** Capture its exit code.
 2. **Compute the diff stat** for the work just done (including any newly-created files — see step 2).
 3. **Assemble the canonical marker** by filling the `CLAUDE.md:43` grammar, and **state it in the turn transcript** (this is the receipt the Stop hook reads).
-4. **Run the in-body advisory cores** over the task's just-implemented diff (code review always; UI verify for UI-affecting tasks), **before the tick**. These reviews are **advisory feedback for the rest of the loop** — they do **not** write any marker. (The `.review-done-<hash>` dedup marker is a *turn-level* artifact written once, after the final task's tick — see §4 *Write the idempotency marker*.)
+4. **Run the in-body advisory cores** over the task's just-implemented diff (code review always; UI verify for UI-affecting tasks), **before the tick**. These reviews are **advisory feedback for the rest of the loop** — they do **not** write any marker (see §4 *Write the idempotency marker*).
 5. **Hand the marker to `scripts/tick.sh`** with the box's section + locator. tick.sh re-validates and (only on a valid receipt) flips the box. It writes nothing else.
 
 Step 5 (the tick) is conditional on step 1: **a failed verify never ticks** (see *Failed verify* below).
-
-These two timings are **separate concerns**: per-task review happens during the loop, on the implemented diff before that task's tick (advisory); the `.review-done-<hash>` marker is written exactly once at turn-end, after the final tick, and only if every in-body review that turn was critical-free (see §4 *Write the idempotency marker*).
 
 ## 1. Run the verification command
 
@@ -81,7 +79,7 @@ Quoting note: the literal `…` (U+2026) in the `CLAUDE.md:43` template is a *pl
 
 ## 4. In-body advisory cores
 
-After a task's work is verified — and before its box is ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so review happens per-task instead of once per turn. These are advisory here: the per-task reviews feed back into the rest of the loop, and the cores may be absent entirely. The dedup *marker* they relate to is written only once, at turn-end (see *Write the idempotency marker* below).
+After a task's work is verified — and before its box is ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so review happens per-task instead of once per turn. These are advisory here: the per-task reviews feed back into the rest of the loop, and the cores may be absent entirely.
 
 ### Resolve the canonical root and the core libs
 
@@ -101,7 +99,7 @@ fi
 
 This `cd … && pwd` resolution assumes **cwd = the project root** (which the harness guarantees), so the relative `git-common-dir` absolutizes correctly; the resulting marker is a *best-effort* dedup — a resolution miss only causes a redundant review, never an incorrect tick — so do **not** mix `git -C <dir>` with this cwd-relative `cd`.
 
-Probing the file with `-f` (presence, not the execute bit) **matches the Codex hook's own `[ ! -f "$HOOK_DIR/lib/code-reviewer.sh" ] → skip` guard, `core-rules/codex/hooks/code-review-subagent.sh:168`**. `-x` would *false-skip* a validly-synced core: a sync may deploy the script without the execute bit, and since the body runs it via `bash "$LIBDIR/code-reviewer.sh"` (below), the execute bit is irrelevant to whether it can run. A half-synced install — the `lib/` dir exists but the script was not deployed — still advisory-skips under `-f`, because the file is genuinely absent. If `LIBDIR` is empty, **advisory skip**: note that in-body review was unavailable and move on. Never fail the task on a missing or partial core.
+Probe with `-f` (presence), not `-x` — the body runs the core via `bash "$LIBDIR/…"`, so the execute bit is irrelevant and `-x` would false-skip a validly-synced core. Matches `core-rules/codex/hooks/code-review-subagent.sh:168`. If `LIBDIR` is empty, **advisory skip**: note that in-body review was unavailable and move on. Never fail the task on a missing or partial core.
 
 ### Code review — every task with a diff
 
@@ -164,32 +162,7 @@ If the verification command failed:
 
 A failing receipt is also legitimate provenance when the *task itself* is "make this failing test pass": you record the marker for the **passing** run that completes the task, not the red one that motivated it.
 
-## Worked example
-
-### Edit an existing file (Dialect A)
-
-Task: ``- [ ] `src/auth/session.ts` — add idle-timeout to session refresh``
-
-1. Verify command (named by the task's test): `pnpm vitest run src/auth/session.test.ts` → exit `0`, captured as `rc=0`.
-2. `git diff --shortstat` → ` 2 files changed, 18 insertions(+), 3 deletions(-)` → `+18/-3 (2 files)`.
-3. Assembled marker (state it in the turn transcript):
-
-   ```
-   <!-- dod-receipt cmd="pnpm vitest run src/auth/session.test.ts" exit=0 diff="+18/-3 (2 files)" -->
-   ```
-
-4. In-body review (advisory), **before the tick**: resolve `ROOT`, find `.claude/hooks/lib/code-reviewer.sh` (via `-f`), pipe `git diff HEAD | head -c 200000` through `bash "$LIBDIR/code-reviewer.sh"`; this task touches no UI, so skip `ui-verify-core.sh`. The review is advisory — **no marker is written here.** The single `.review-done-<hash>` marker is written once at turn-end, after the final tick, only if every in-body review that turn was critical-free (see §4 *Write the idempotency marker*).
-
-5. Tick (section scopes to the phase; locator selects the one unchecked box in it):
-
-   ```bash
-   scripts/tick.sh specs/014/tasks.md 'Phase 2 — Session hardening' 'src/auth/session.ts' \
-     '<!-- dod-receipt cmd="pnpm vitest run src/auth/session.test.ts" exit=0 diff="+18/-3 (2 files)" -->'
-   ```
-
-   tick.sh re-validates the receipt, flips the single unchecked `- [ ]` whose text contains `src/auth/session.ts` to `- [x]`, and writes nothing else.
-
-### Create a new file (the common case — Dialect A, table locus)
+## Worked example — create a new file (the common case; Dialect A, table locus)
 
 Task row (canonical table): `| T7 | Add rate-limiter module `src/mw/ratelimit.ts` | S | T3 | FR-9 | [ ] |`
 
@@ -208,7 +181,7 @@ Task row (canonical table): `| T7 | Add rate-limiter module `src/mw/ratelimit.ts
    <!-- dod-receipt cmd="pnpm vitest run src/mw/ratelimit.test.ts" exit=0 diff="+64/-0 (2 files)" -->
    ```
 
-4. In-body review (advisory), **before the tick**, as above — no marker written per task. The single turn-level `.review-done-<hash>` marker is written once at turn-end, after the final tick, only if every in-body review that turn was critical-free (see §4 *Write the idempotency marker*).
+4. In-body review (advisory), **before the tick**: resolve `ROOT`, find `.claude/hooks/lib/code-reviewer.sh` (via `-f`), pipe `git diff HEAD | head -c 200000` through `bash "$LIBDIR/code-reviewer.sh"`; this task touches no UI, so skip `ui-verify-core.sh`. No marker is written per task (§4).
 5. Tick by table ID (exact first-cell match — `T7`, not a substring; flips the row's Status cell):
 
    ```bash

@@ -134,8 +134,9 @@ xhigh with multi-agent machinery engaged — receipts in
 **Guardrails.** Counts ×4 against any concurrency-derived budget arithmetic,
 cannot oversubscribe a wave, requires a named justification, never a default,
 never on the sandboxless hatch. Ultra's injected instruction voids "don't
-spawn subagents" rules and Sol carries a documented overreach record — output
-passes the same independent verification gate as any executor unit, and
+spawn subagents" rules and high-persistence executors have a documented
+overreach failure mode (see `core-rules/references/model-prompting-deltas.md`)
+— output passes the same independent verification gate as any executor unit, and
 reported usage is the parent-thread lower bound (subagent aggregation
 unverified).
 

@@ -42,6 +42,15 @@ Loaded identically whether surfaced from `.claude/skills/orchestrate/` or
 - Crossing the merge boundary. Orchestrated agents **never merge** — they produce
   verdicts. Mergeability is the `process-gate` skill; merging is a human or main-loop
   decision, not an orchestrated subagent's.
+- **Work you could finish yourself in a handful of tool calls.** Spawn count is a
+  real cost, not a free parallelism win: dispatch, context transfer, and synthesis
+  each cost more than the tool calls they replace on a small task. If one agent can
+  do the unit, use one rather than several. And on a short run inside one context
+  window, do not stand up a verifier subagent to check work you just did — verify
+  it directly. The fresh-context verifier earns its cost on long or multi-window
+  runs (the skeptical-evaluator gate below), not on a turn you can see the whole
+  of. The axis is run length, not whether anyone is watching: a long attended run
+  across several windows needs the fresh verifier as much as an overnight one.
 
 ## Capability gate + two-level graceful degrade
 
@@ -70,42 +79,51 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
+**Prefer async over blocking, and few long-lived agents over many short ones.**
+Where the harness lets you dispatch and keep working, do that rather than blocking on
+each return — and check in on a running agent instead of waiting on it. When several
+subtasks share context, give them to **one agent that keeps that context across
+them** rather than spawning a fresh agent per subtask: the re-read cost of a cold
+agent usually exceeds the parallelism it buys, and a wave of short agents bottlenecks
+on its slowest member. Intervene when an agent goes off track or is missing context;
+do not re-dispatch around it. `references/speed-doctrine.md` specializes this rule
+for the cross-harness case; the `codex-worker` path is deliberately blocking for a
+workflow-engine reason (below), not a violation of it.
+
 **Fan-out vehicle preference (teams-enabled harnesses).** When the harness offers
-*both* a workflow-orchestration tool and named-teammate spawning (e.g. cmux
-`claude-teams` split panes), fan-out work units default to the **workflow tool**,
-even if the harness's own prompt nudges toward named teammates. Empirical basis
-(2026-07-09 probe test, this instance): engine-run workflow agents auto-terminate on
-return; named teammates do not — they hold a pane and budget until the orchestrator
-manually runs the teardown protocol below (the protocol itself verified working:
-graceful `shutdown_request` → ack → terminate, and `TaskStop` force-stop both
-succeed when actually invoked), and teammate sessions can spawn with a degraded
-environment where project hooks fail silently (`node` absent from PATH →
-SessionStart/Stop hooks dead — quality gates OFF for that pane's work). Cleanup
-that depends on end-of-run compliance leaks; auto-termination doesn't. Spawn named
-teammates only when the operator explicitly asks for visible interactive panes or
-long-lived roles — and then the teardown protocol below is mandatory, and hook
-liveness in the teammate env is part of the unit's preflight.
+both a workflow-orchestration tool and named-teammate spawning, default fan-out
+units to the **workflow tool** — its agents auto-terminate, and teammate panes can
+spawn with project hooks silently dead. Spawn named teammates only when the operator
+asks for visible interactive panes or long-lived roles; then hook liveness in the
+teammate env is part of the unit's preflight. Evidence: 2026-07-09 probe, this
+instance.
 
 ## Teammate teardown — synthesis includes cleanup
 
-Engine-run workflow agents (tier 1) terminate themselves when their unit returns.
-**Named teammates do not** (tier 2 — subagent/teammate spawns, e.g. split panes in a
-multiplexer): they stay live, holding a pane and session budget, until the spawner
-releases them. Teardown is therefore the **last step of the synthesize stage**, not
-an optional courtesy:
+Engine-run workflow agents terminate themselves; named teammates do not. Whatever
+tool spawned a teammate has a paired signal to end it — use that pair as the last
+step of synthesis, after the teammate's output has passed the verify gate. The
+fan-out is not complete while any teammate it spawned is still live (`CLAUDE.md` §
+Definition of done, teammate clause).
 
-1. Collect each teammate's final result and pass it through the verify/review gate.
-2. Once a teammate's output is accepted (or the unit is abandoned), send the
-   harness's graceful shutdown signal — on Claude Code, `SendMessage` with
-   `{type: "shutdown_request"}` to the teammate by name.
-3. If a teammate does not acknowledge shutdown, force-stop it (`TaskStop` by name).
-4. The fan-out is not complete — and the orchestrator must not declare done — while
-   any teammate it spawned is still live. This is the same rule as the
-   *Definition of done* teammate clause in `CLAUDE.md`.
+Synthesis also **collects what the units wrote down**. A unit that ran in its own
+worktree may have left an `implementation-notes.md` recording where it deviated from
+the plan (`../execute/SKILL.md`). Concatenate those, unit-labelled, into the PR
+description or the main checkout's file **before** reaping the worktree — a reaped
+tree must never silently discard its notes.
 
-Phrased capability-neutral like the rest of this skill: whatever tool spawned the
-teammate has a paired signal to end it; use that pair. A harness with no persistent
-teammates (tier 3, inline) has nothing to tear down.
+**Then delete the file from the worktree, before you attempt the reap.** This is
+not tidiness, it is the difference between a tree that reaps and one that never
+can. Every reap predicate in Trellis refuses on *any* untracked content —
+`recipes/fanout-verify.wf.js` stops if `git status --porcelain` prints anything,
+and `dj_worktree_clean` in `scripts/lib/disk-janitor-lib.sh` deliberately omits
+`-uno` because untracked work is data we must never silently destroy. An
+`implementation-notes.md` left in place therefore blocks both the orchestrator's
+reap and the disk-janitor backstop, permanently, for exactly those units that had
+something worth recording. Do not reach for `.gitignore` instead:
+`dj_worktree_has_ignored_artifacts` vetoes a tree harboring an unrecognized
+ignored entry, which moves the block rather than removing it. Collect, delete,
+reap — in that order.
 
 ## Pattern catalog
 
@@ -122,15 +140,12 @@ Full catalog: [`references/patterns.md`](references/patterns.md).
 ## Dual-harness speed doctrine
 
 When both an orchestration surface and a Codex executor are available, wall-clock
-speed comes from **topology, not effort** — cross-harness pipelined verify,
-warm-thread reuse, primer-fed dispatch, streaming merges, and ultra-as-a-node
-(attended main-loop Bash-direct only — D4a satisfied 2026-07-10; still
-hard-rejected inside recipes). Never dispatch the same work order to more
-than one leg (race-the-legs retired 2026-07-10 — no duplicate work). Inside a Workflow, Codex units
-dispatch through the blocking `codex-worker` agent only — never the
-fire-and-forget rescue path, whose backgrounding breaks `parallel()`/`pipeline()`
-barriers. Patterns, guardrails, and receipt contracts:
-[`references/speed-doctrine.md`](references/speed-doctrine.md).
+speed comes from **topology, not effort**. Two bright lines hold regardless of
+topology: never dispatch the same work order to more than one leg (no duplicate
+work), and inside a Workflow, Codex units dispatch through the blocking
+`codex-worker` agent only — never the fire-and-forget rescue path, whose
+backgrounding breaks `parallel()`/`pipeline()` barriers. Patterns, guardrails, and
+receipt contracts: [`references/speed-doctrine.md`](references/speed-doctrine.md).
 
 ## Proactive-loop shape + piloting
 
@@ -199,32 +214,22 @@ Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
 - **`recipes/fanout-verify.wf.js`** — the reusable shape extracted from Trellis's
   one-shot fleet scripts:
   **fan-out-per-target → verify-on-host → structured VERDICT → main loop acts on
-  greens.** Targets come from `args.targets` (a list of `{name, path}`) with a
-  documented fallback to reading `registry.md`. Each per-target agent works in an
-  **isolated worktree** (`isolation: "worktree"`), verifies the target on its host
-  (install / build / typecheck per repo, lint where present), and returns a
-  structured verdict of the shape
-  `{target, branch, pushed, green, pr_url, worktree_path, notes}`. **Agents never
-  merge** — the main loop reads the verdicts and auto-merges the GREEN ones,
-  HOLDing the rest for human review. A final **Teardown** phase reaps each unit's
-  worktree once its work is safely on origin (pushed + PR): a bounded reap agent
-  re-verifies porcelain-clean + pushed at reap time before `git worktree remove`
-  — best-effort and failure-isolated, so a reap that can't prove safety leaves the
-  tree in place and never fails the unit (spec `2026-07-16-worktree-lifecycle-reap`).
+  greens.** Each per-target agent works in an isolated worktree and returns the
+  verdict `{target, branch, pushed, green, pr_url, worktree_path, notes}` — the
+  contract the caller depends on at every degrade tier. **Agents never merge**: the
+  main loop auto-merges the GREEN ones and HOLDs the rest. Target resolution and the
+  Teardown reap phase are in its `recipes/MANIFEST.md` row.
 
-**Orchestrator reap-after-commit (general rule).** Whenever the main loop — not a
-recipe — commits+pushes a worktree it (or a recipe on its behalf) provisioned,
-it reaps that tree right after the push: `git worktree remove <path>`, re-verifying
-`git status --porcelain` empty AND the tip pushed at reap time, never `--force`.
-This is the `codex-fanout` conflicting-unit case: the recipe leaves those trees
-*uncommitted* for verification, so it cannot reap them — the orchestrator does,
-pre-merge, once it has committed the accepted diff. It is doctrine, not a hard
-hook; the disk-janitor predicate is the mechanical backstop that reaps anything
-missed (ADR `2026-07-16-orchestrator-conflicting-unit-reap`).
+**Orchestrator reap-after-commit (general rule).** When the main loop — not a
+recipe — commits+pushes a worktree it provisioned, it reaps that tree right after
+the push; the disk-janitor predicate is the mechanical backstop. Full mechanic and
+the `codex-fanout` conflicting-unit case: the `codex-fanout` row in
+[`recipes/MANIFEST.md`](recipes/MANIFEST.md) (ADR
+`2026-07-16-orchestrator-conflicting-unit-reap`).
 
 When running this under degrade tier 2 (subagents, no workflow tool), read the
 recipe's `meta.phases` and per-agent prompts as the stage spec and dispatch them by
-hand; the verdict shape above is the contract the caller depends on either way.
+hand; the structured verdict is the contract either way.
 
 ## Authoring a new recipe
 
@@ -257,15 +262,3 @@ hand; the verdict shape above is the contract the caller depends on either way.
 Before it lands, grep the new recipe (and any reference it adds) clean of personal
 absolute paths, dated literals, and target-specific lists — the public-mirror scrub
 is mandatory for every file under this skill.
-
-## Claude-today (non-load-bearing)
-
-Some harnesses ship CLI ergonomics that *feel* related but are **trigger
-conventions, not agent behavior, and do not capability-gate** anything above. On
-Claude Code today these include `ultracode`, the `/goal` and `/loop` commands, and a
-`~/.claude/workflows` directory. They are convenient ways for a user to *invoke*
-orchestration; they are not what the gate checks (the gate checks for the
-subagent-spawning **tool**, which is the real capability). Mentioned only for
-orientation — never depend on them, and never let a pattern read as requiring one:
-the loop-until-done **pattern** rests on the verifiable-goal rule in `CLAUDE.md`, not
-on a `/loop` command.

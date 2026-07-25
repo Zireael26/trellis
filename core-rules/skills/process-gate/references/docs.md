@@ -85,6 +85,8 @@ Receipt evidence must come from executing or diffing the artifact, never agent s
 
 This gate's PR-description check (in `pr-hygiene.md`) covers presence; the contributor is responsible for content fidelity.
 
+If an untracked `implementation-notes.md` sits at the repo root, an `execute` run deviated from its plan (`../../execute/SKILL.md`). Read it — each line names a fork and the branch taken — and fold the substantive entries into the PR description before the file is deleted. It is temporary and untracked by design; `check-docs.sh` does not look for it and its absence means nothing went off-plan.
+
 ## Project README
 
 Don't gate on `README.md` content quality (out of scope), but **fail** if any of these are inconsistent:

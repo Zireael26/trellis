@@ -1,6 +1,6 @@
 # clarify question schema
 
-The five canonical questions every `clarify.md` must answer (or explicitly defer). These are hardcoded in the skill body; this file is the deep-dive reference that explains the *why* behind each question, what counts as a real answer, and what to push back on.
+The five canonical questions every `clarify.md` must answer (or explicitly defer), plus the conditional blind-spot pass at the end. These are hardcoded in the skill body; this file is the deep-dive reference that explains the *why* behind each question, what counts as a real answer, and what to push back on.
 
 If you edit the question set, also edit `SKILL.md`'s "The canonical five questions" section in the same commit. Drift between the two creates ambiguity about which is authoritative.
 
@@ -78,6 +78,22 @@ If you edit the question set, also edit `SKILL.md`'s "The canonical five questio
 - "Disable it." → ask how, specifically.
 
 **Why this question.** Rollback is the most under-specified part of every spec. Forcing it into clarify catches the schema-migration-with-no-reverse and the no-feature-flag-but-1%-customers-already-using-it scenarios before implementation begins.
+
+---
+
+## Blind spot pass (conditional sixth section — not a sixth canonical question)
+
+> I know nothing about this domain. What are the relevant unknown unknowns?
+
+The five questions above cover **known unknowns** — the gaps the operator already knows exist. They cannot reach the ones nobody thought to ask about. The blind-spot pass is the instrument for those, and it runs only when the feature sits in a domain neither operator nor agent has depth in: a new protocol, an unfamiliar compliance surface, a platform you have not shipped on.
+
+**How it runs.** Ask the operator to state their expertise level in the domain. Then produce a short list of the unknowns *they did not ask about* — constraints, failure modes, and conventions a practitioner would take for granted. Each item is marked `confirmed` (real and in scope), `not applicable` (checked, does not bite here), or `open` (still unknown — carries into the spec's Open questions).
+
+**Real output looks like:** "Webhook receivers: (1) providers retry on any non-2xx, so a slow handler produces duplicate deliveries — `open`; (2) signature validation must run on the raw body before any JSON parse — `confirmed`; (3) delivery ordering is not guaranteed — `confirmed`."
+
+**Handwave output to push back on:** a generic best-practices checklist that would apply to any feature. If the items are not specific to this domain, the pass found nothing — say so.
+
+**When to skip.** The domain is familiar. Record `Not run: <domain is familiar>` in one line; do not manufacture unknowns to fill the section. A skipped pass is a recorded decision, not an omission.
 
 ---
 

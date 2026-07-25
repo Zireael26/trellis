@@ -43,6 +43,8 @@ A **one-shot fan-out with no rounds** — a single dispatch barrier, no iteratio
 
 ## Halt behavior
 
+- **Halt only on a declared stop condition.** A loop ends when a ceiling trips, the goal is met, or a bright-line guardrail fires — not because the context window is filling, the run has gone long, or the work feels like a good place to pause. If context is running short, save state (commit, write the run log, update `context-log.md`) and continue in a fresh window. Stopping early is a silent contract violation: it produces no halt report and looks like success.
+
 On any ceiling trip:
 
 - **Hard stop** — never auto-continue past a tripped ceiling.
@@ -73,9 +75,27 @@ These are the documented defaults a loop falls back to when no `loop_safety` blo
 `budget_ceiling_usd` is human-meaningful; the Workflow engine's `budget.total` is output-token-native. The conversion uses a single documented rate, `usd_per_mtok`, expressed per million output tokens and documented here so it updates in one place as model pricing moves:
 
 ```
-usd_per_mtok = 25.00   # Claude Opus 4.8 output price, $25 / MTok
+usd_per_mtok = 25.00   # Claude Opus 5 output price, $25 / MTok (verified 2026-07-25)
 budget_tokens = round(budget_ceiling_usd / usd_per_mtok * 1_000_000)
 ```
+
+**The rate is per model, and the spread is wide enough to matter.** Opus 5 and
+Opus 4.8 both output at $25 / MTok, so the constant above is correct for the
+usual daily driver. Fable 5 and Mythos 5 output at **$50 / MTok** — double. A
+loop that runs on Fable against an Opus-priced rate believes it has spent half
+what it actually has, and sails through a ceiling it should have tripped. Set
+`usd_per_mtok` to the rate of the model the loop actually runs on, or to the
+most expensive model it may reach.
+
+Two rates worth having in front of you when you set one (verified against
+published pricing on 2026-07-25): Fable 5 and Mythos 5 at $50, Opus 5 and Opus
+4.8 at $25, Sonnet 5 at $10 (rising to $15 on 2026-09-01), Haiku 4.5 at $5.
+
+A second correction applies to any ceiling carried over from before Claude 4.7:
+those models and later use a different tokenizer that produces roughly **30
+percent more tokens for the same text**. A token budget derived under the old
+tokenizer buys correspondingly less work than it did, so re-derive rather than
+inherit.
 
 Worked example — the fallback `budget_ceiling_usd` of **1000**:
 

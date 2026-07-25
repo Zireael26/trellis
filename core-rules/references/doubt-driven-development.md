@@ -49,6 +49,49 @@ artifact (diff, output, input/output pair, doc line) forces it to re-derive the
 conclusion and gives it something to break. It is also what makes the cross-model
 handoff work: the other model gets evidence, not your framing.
 
+## Doubt handles wrong answers; unknowns need a different pass
+
+DDD checks a claim you can *state*. It cannot surface what you never thought to
+claim. The framing that separates the two: your instructions are the **map**, the
+real constraints are the **territory**, and the gap between them is where an
+agent has to guess.
+
+| | you know it | you don't |
+|---|---|---|
+| **you'd write it down** | known knowns — put them in the prompt | known unknowns — ask, or go read |
+| **you wouldn't** | unknown knowns — obvious to you, absent from the prompt, recognized instantly when shown | unknown unknowns — the expensive ones |
+
+DDD covers the left column. The passes below cover the right, and they are
+cheapest *before* the work rather than after it.
+
+- **Blind spot pass** (unknown unknowns). Before starting in an unfamiliar
+  domain, ask for one explicitly: "I'm doing X and know little about Y — do a
+  blind spot pass on my relevant unknown unknowns." Disclose your actual
+  expertise level; it changes the answer.
+- **Interview, ordered by architectural impact** (known unknowns). When the agent
+  questions you, the questions worth asking are the ones **where your answer
+  would change the architecture** — data models, type interfaces, UX flows.
+  Mechanical detail can be decided in-flight. `clarify` and `brainstorming` are
+  the Trellis surfaces; this is the ordering rule they should apply.
+- **Reference over description** (unknown knowns). A working implementation is a
+  better spec than English — "this crate has the exact semantics I want; read it
+  and reimplement in our language" beats a paragraph describing the semantics.
+  This is the same reflex the constitution carries as "working code is a better
+  spec than English"; the addition is that it also surfaces context you would
+  never have thought to write down. Distinct from `source-driven-development`,
+  which verifies claims *about* a dependency rather than borrowing its shape.
+- **Implementation notes, during the work.** For any run long enough to drift
+  from its plan, keep a temporary `implementation-notes.md` — untracked, at the
+  repo root of the active checkout, deleted once folded — logging each
+  deviation and the conservative choice taken at that fork. It is the cheapest
+  possible record of where the map and the territory disagreed — and every entry
+  is a claim, which makes it the natural input to the next DDD pass.
+
+**Instructional balance.** Too specific and the agent follows the instruction
+even when pivoting is right; too vague and it falls back on generic industry
+best practice. Disclose your experience level and your current thinking, and
+treat the agent as a thought partner rather than an executor.
+
 ## Relationship to other surfaces
 
 - `verify-panel` recipe — the parallel, two-model realization of one DOUBT pass.

@@ -62,7 +62,9 @@ way.**
 - `orchestrate` — a **different axis**: it fans out across *agents*, each doing
   its own reasoning; this batches *tool calls* inside *one* pass, where code (not
   the model) processes each result. An orchestrated agent whose unit is a fan-out
-  audit should batch its tool calls this way.
+  audit should batch its tool calls this way. When the work is mechanical and the
+  per-item results need no judgment, prefer this over spawning agents at all —
+  subagents are for genuinely independent, parallelizable investigation.
 - `core-rules/references/loops.md` — the batch pass is one iteration of a
   time-based / proactive audit loop; this keeps that iteration cheap.
 - `core-rules/skills/orchestrate/references/codex-executor.md` — a batched

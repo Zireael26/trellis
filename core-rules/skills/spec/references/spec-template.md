@@ -25,6 +25,8 @@
 - [ ] <criterion>
 - [ ] <criterion>
 
+Where a criterion is better expressed as an artifact than a sentence, name the artifact and its path — e.g. ``- [ ] Ordering matches `fixtures/ordering.expected.json` (see `criteria/test_ordering.py`)``.
+
 ## 4. Non-goals
 
 *What this feature is NOT solving.* Most scope creep is prevented here. Be explicit.
@@ -66,4 +68,5 @@
 - [ ] Constraints cite their source (compliance doc, perf budget, deadline rationale)
 - [ ] Open questions are real questions, not placeholder TODOs
 - [ ] No implementation detail crept in (file names, function names, API shapes — those belong in `plan.md`)
+- [ ] Criteria that could be executable are attached as artifacts, not paraphrased
 - [ ] Spec is readable in under 5 minutes

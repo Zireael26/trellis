@@ -171,11 +171,3 @@ the discipline never does.
 
 Restate-first, gated tiers, drill-the-whys, the checklist doc, the verifiable stop
 condition — identical on every harness. Only the quiz / debugger surface changes.
-
-## Claude-today (non-load-bearing)
-
-Some harnesses ship CLI ergonomics that *feel* related but are conveniences, **not**
-dependencies of anything above. On Claude Code today these include `AskUserQuestion` and
-the `/goal` and `/loop` commands. The quiz degrades cleanly without `AskUserQuestion`; the
-stop condition rests on the verifiable-goal rule in `CLAUDE.md`, not on `/goal` or `/loop`.
-Mentioned only for orientation — never depend on them.

@@ -1,6 +1,6 @@
 # AGENT_ONBOARD_PROJECT.md — paste-into-agent project onboarding
 
-> **For the human:** open an agent (Claude Code, Codex, Cowork, or any agent with filesystem + shell tools) **inside this Trellis canonical repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you, run `scripts/onboard-project.sh`, wire your project's `CLAUDE.md`, update `registry.md`, commit in both repos, and verify.
+> **For the human:** open an agent (Claude Code, Codex, Cowork, or any agent with filesystem + shell tools) **inside this Trellis canonical repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you — including a short pass on what has bitten you in this repo, which is the one thing it cannot work out for itself — run `scripts/onboard-project.sh`, wire your project's `CLAUDE.md`, seed `gotchas.md`, update `registry.md`, commit in both repos, and verify.
 >
 > Works for three entry paths:
 > - **`new`** — a project not yet in `registry.md`. Full onboarding.
@@ -99,7 +99,24 @@ Use whatever clarification mechanism your tooling provides (multi-choice questio
 - **`GitHub repo URL`** — for the registry row's notes column. If the user hasn't created a remote yet, that's fine; capture nothing and remind them at the end.
 - **`Codex acknowledgement`** — if `harnesses` in `trellis.config.json` includes `"codex"`, remind the user that Codex hooks require `[features] hooks = true` in `$CODEX_HOME/config.toml` (the older `codex_hooks` key is deprecated as of Codex CLI 0.129+). Don't ask whether to enable Codex — that's a global config choice already made.
 
-Echo all collected values back as a table. Wait for explicit "yes" before continuing.
+- **`gotchas`** — the only genuinely non-derivable input, and the highest-value thing this interview can collect. Everything above this line, you could work out from the filesystem; this you cannot. Ask, in the user's own words:
+  - "What has bitten you in this repo that you'd warn a new contributor about on day one?"
+  - "What here looks like it does one thing but actually does another?"
+  - "What's the thing you have to explain to every new person?"
+  - "Is there a directory, service, or dependency that is dead, half-migrated, or load-bearing in a way its name doesn't convey?"
+
+  Ask up to four; stop when the answers stop surprising you. If the user has nothing, that is a legitimate answer — say so in the final report and move on. **Do not invent gotchas.**
+
+  Before asking, spend a couple of tool calls looking: skim the README, the last 20 commit subjects, and any `TODO` / `HACK` / `XXX` / `FIXME` comments. Lead with what you found — "I noticed X; is that deliberate?" — rather than a blank prompt. A specific question gets a specific answer; an open one gets "nothing comes to mind."
+
+  ```bash
+  git -C "$PROJECT" log --oneline -20
+  grep -rIn --exclude-dir=node_modules --exclude-dir=.git -E "(TODO|HACK|XXX|FIXME)" "$PROJECT" | head -30
+  ```
+
+  You write these up in Step 4b, once `onboard-project.sh` has seeded `gotchas.md`.
+
+Echo all collected values back as a table, with the gotchas listed underneath it in the user's own phrasing. Wait for explicit "yes" before continuing.
 
 ### Step 3 — Run the onboarding script
 
@@ -150,26 +167,50 @@ Then handle the project's `CLAUDE.md`:
   ```
   Don't invent project-specific rules — that's for the user.
 
-**Codebase map check.** After handling the `@`-import, count top-level directories in the project (ignore dotfiles and anything matched by `permissions.deny`):
+**Layout check.** Skim the top-level directories yourself — you do not need the user to describe them, and asking them to type out what `ls` already tells you wastes the interview:
 
 ```bash
 ls -d "$PROJECT"/*/ 2>/dev/null \
-  | grep -Ev '/(node_modules|\.next|dist|build|out|target|vendor|\.venv|venv|coverage|\.turbo|\.cache)/$' \
-  | wc -l
+  | grep -Ev '/(node_modules|\.next|dist|build|out|target|vendor|\.venv|venv|coverage|\.turbo|\.cache)/$'
 ```
 
-If the count is **≥ 5** and the project `CLAUDE.md` lacks a `## Codebase map` heading, prompt the user for a one-line description per top-level directory, then write a section in this shape (drop it directly under `## Architecture`, or create the section if missing):
+The names plus a glance inside will resolve most of them. Ask about only the ones that *don't* resolve: a name that doesn't match its contents, a tree that looks abandoned, a split you can't account for. Write a `## Codebase map` section holding only those lines, directly under `## Architecture`:
 
 ```markdown
 ## Codebase map
-- `services/` — Go microservices (workspace, 5 modules)
-- `clients/web/` — Next.js frontend
-- `py/` — Python ML runners
-- `infra/` — Cloudflare + Vercel config
-- `docs/` — ADRs + onboarding
+- `py/` — despite the name, only the ML runners; the ingest scripts are in `services/`
+- `legacy-web/` — dead since the Next.js migration; kept for the redirect table only
 ```
 
-If the count is **< 5**, skip — the agent can keep them all in head from a single `ls` and the section would be noise. The scheduled `cross-project-process-audit` enforces the threshold so the rule stays mechanical, not aspirational.
+**Keep the heading when the project has ≥ 5 top-level directories, even if nothing misleads.** In that case the section carries a single line saying so — `- Layout is self-describing; no directory misstates its role.` — which is itself useful information, and it costs one line rather than the full inventory the section used to hold.
+
+Below that threshold, skip the section when there is nothing to say.
+
+This is a deliberate split between *what the section contains* and *whether it exists*. The content rule changed, because a plain listing of top-level directories is something an agent derives from one `ls` and paying injected tokens for it every turn buys nothing. The existence rule did not change, because the scheduled `cross-project-process-audit` still reports any registered project with ≥ 5 top-level directories whose `CLAUDE.md` lacks the heading, and whether to retire that check is an operator decision that has not been made. Keeping the heading means a correctly-onboarded project does not become a standing false positive in an advisory report while that decision is pending — and noisy advisory findings are exactly what decays compliance.
+
+### Step 4b — Write the gotchas (mode `new` only)
+
+`onboard-project.sh` seeds `gotchas.md` from the canonical template, which is **empty**. Without this step every project starts with the file and none of the content, and the `session-context` hook surfaces nothing at session start until someone happens to log the first entry by hand.
+
+Write each gotcha you collected in Step 2 into `$PROJECT/gotchas.md`, replacing the `*(empty — add entries as they surface)*` placeholder. Use the canonical entry format from [`engineering-process.md` §9.3](engineering-process.md#93-gotchasmd), with today's date (`date +%Y-%m-%d`):
+
+```markdown
+## <YYYY-MM-DD> — <short title>
+**Context:** <where this bit us>
+**Gotcha:** <what actually happens>
+**Rule:** <what to do about it>
+```
+
+Keep the user's own phrasing in the **Gotcha** line — that is the part that carries the information. Then surface the two or three most live ones inline under a `## Gotchas` heading in the project `CLAUDE.md`, above `## Stack`, with a pointer to `gotchas.md` for the full log:
+
+```markdown
+## Gotchas
+- <one line each — the ones that will bite this week>
+
+Full log: `gotchas.md`.
+```
+
+If the user had nothing to offer, leave `gotchas.md` as seeded and omit the `## Gotchas` section. Do not invent entries to fill the space.
 
 ### Step 5 — Update `registry.md` (mode `new` only)
 
@@ -283,24 +324,24 @@ For mode `repair`, also note that operators can configure a private hook-drift c
 
 Three short blocks, in order:
 
-1. **What changed.** A short paragraph: mode (new / fresh-clone / repair), paths created, symlinks installed, registry row added, two commit SHAs (if applicable). Quote any `WARN:` lines the script produced.
+1. **What changed.** A short paragraph: mode (new / fresh-clone / repair), paths created, symlinks installed, registry row added, two commit SHAs (if applicable). Say how many gotchas you logged, or state plainly that the user had none. Quote any `WARN:` lines the script produced.
 2. **What's still on the user.**
    - Push the project commit and (mode `new`) the Trellis-repo commit when ready.
    - If GitHub repo doesn't exist yet, create it and enable branch protection on `main` (see `engineering-process.md` §10.2 step 14).
    - If `package.json` exists, run `pnpm install` / `bun install` / `npm install` so husky activates `core.hooksPath`.
    - If Codex is enabled, confirm `$CODEX_HOME/config.toml` has `[features] hooks = true` (the older `codex_hooks` key still works but is deprecated as of Codex CLI 0.129+).
    - If the project is Unity / Rust / Go / Python-only, set up `.githooks/` per `core-rules/inheritance.md` "Native git hooks".
+   - The `CLAUDE.md` we seeded is deliberately thin, and thin is the target — under 5 KB. It grows from `gotchas.md`, not from documentation written up front: log corrections as they happen, and the `gotchas-rollup` audit promotes anything that recurs three times. Resist the urge to describe the codebase in it; describe what the codebase will get wrong.
 3. **What runs automatically.** The inherited rules and hooks apply immediately. No audit schedule ships by default; if this operator has private registry-driven audits, note that the new project becomes eligible under that operator's own cadence.
 
 Hand off cleanly. Don't write a tutorial — the manual is in `engineering-process.md`.
 
 ### Discipline you must follow throughout
 
-- **Read before editing.** Read every file you're about to modify, even one you "know." The Edit tool fails silently on stale `old_string` matches.
-- **Verify after editing.** After Step 4 (`@`-import) and Step 5 (registry row), re-read the file and confirm the change landed where you intended.
+- **Read before editing.** Read every file you're about to modify, even one you "know." Your memory of a file read earlier in the session can be stale.
 - **Don't push without explicit permission.** Step 6 stops at local commits.
 - **Don't create accounts or repos for the user.** Step 8 reminds them to create the GitHub repo themselves.
-- **Don't invent project-specific rules.** When seeding a new project's `CLAUDE.md` in Step 4, keep it minimal — just the `@`-import.
-- **One step at a time.** Wait for "yes" between Steps 2, 3, 5, and 6. The user is in the loop.
+- **Don't invent project-specific rules or gotchas.** When seeding a new project's `CLAUDE.md` in Steps 4 and 4b, keep it to the `@`-import plus whatever the user actually told you in Step 2. An empty `## Gotchas` section is better than a guessed one.
+- **Check in where it costs the user something.** Confirm before Step 3 (the script can run 10–60 minutes on the security baseline) and before Step 6 (commits land in two repos). The steps in between — the registry row, the `@`-import, the gotchas write-up — follow from the interview they already approved; do them and report. If you hit something genuinely ambiguous, ask and end the turn rather than guessing.
 
 ## --- END PROMPT ---

@@ -88,7 +88,7 @@ teardown() {
   for rel in \
     AGENT_ONBOARD_PROJECT.md registry.md blacklist.md docs/PROVENANCE.md \
     examples/README.md core-rules/templates/trellis.config.json.example \
-    core-rules/commands/doctor.md core-rules/commands/disk-janitor.md \
+    core-rules/commands/trellis-doctor.md core-rules/commands/disk-janitor.md \
     scripts/lib/trellis.config.schema.json; do
     mkdir -p "$M/$(dirname "$rel")"
     printf 'Invoke mcp__scheduled-tasks__create_scheduled_task.\n' > "$M/$rel"
@@ -257,4 +257,51 @@ teardown() {
   for ok in "docs/antigravity-steering.md" "docs/gpt-5.5-steering.md" "a/b/c.md"; do
     ! is_unsafe "$ok" || { echo "should be SAFE but rejected: '$ok'"; false; }
   done
+}
+
+# --------------------------------------------------------------------------
+# Operator-account identifier denylist (spec 019). The tokens live in an
+# instance-local file rather than in the linter, because the linter itself syncs
+# to the public mirror. These tests use fake sentinel tokens, never real ones.
+
+@test "operator denylist: absent file is a no-op" {
+  printf 'Trellis public template.\n' > "$M/README.md"
+  SRC="$(mktemp -d)"
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "operator denylist: listed token in the mirror is flagged" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local"
+  printf '# comment line\n\nSENTINEL-team-slug\n' > "$SRC/local/mirror-denylist.txt"
+  printf 'Set the token for SENTINEL-team-slug before deploying.\n' > "$M/core-rules-CLAUDE.md"
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"operator-account identifier must not publish"* ]]
+}
+
+@test "operator denylist: comments and blank lines are not matched as tokens" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local"
+  printf '# SENTINEL-commented-token\n\n\nSENTINEL-real-token\n' > "$SRC/local/mirror-denylist.txt"
+  printf 'This mirror mentions nothing private.\n' > "$M/README.md"
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "operator denylist: matching is case-insensitive" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local"
+  printf 'SENTINEL_ENV_VAR\n' > "$SRC/local/mirror-denylist.txt"
+  printf 'export sentinel_env_var=...\n' > "$M/SETUP.md"
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"SETUP.md"* ]]
 }

@@ -5,7 +5,7 @@ work until a real stop condition is met. Trellis already answers *how any loop
 halts* — `loop-safety.md` is the canonical halting contract (three ceilings, a
 progress-signal catalog, a structured halt report). Pieces of *selection*
 guidance are scattered too — verifiable-goal framing (`CLAUDE.md` § Planning),
-the subagent-dispatch triggers (`CLAUDE.md` § Context management), the
+the delegation rule (`CLAUDE.md` § Context management), the
 `orchestrate` pattern catalog. What was missing is a single **unified taxonomy**
 that names the loop types and maps each to a Trellis primitive. This file is
 that. Consult it when a task looks repetitive, scheduled, goal-shaped, or
@@ -39,6 +39,43 @@ signal from its progress-signal catalog.
 - **Time-based** → a durable operator-owned schedule for cron work; `/loop` is a local Claude Code convenience, not something to build a durable loop on. Match the interval to how often the input actually changes — an hourly routine over a daily-changing input is wasted spend. Progress signal is usually **work-list drain** or **commit/PR**.
 - **Proactive** → the heaviest tier: a schedule that fans out through `orchestrate`. If the loop only **reads** (scheduled audits, digests), that is all it needs. If it **writes** — opens PRs, mutates repos unattended — it runs through **Component-D**, whose every write-capable step stays behind the merge bright-line (opens a PR, never merges). Either way, declare a conservative `budget_ceiling_usd` and **pilot before a large fan-out** (see `orchestrate/SKILL.md`).
 
+## Resuming across context windows
+
+A loop that runs for hours outlives one context window. That is a **loop shape**,
+not an accident, and it has a prescribed form. Do not reach for compaction as the
+default recovery.
+
+- **Prefer a fresh window over compaction.** Modern models rediscover state from
+  the filesystem extremely effectively. A compacted window carries lossy prose
+  where a fresh one can read ground truth.
+- **Keep state on disk, in three layers.** Structured machine state in JSON (the
+  work-list, per-item status); freeform progress in a text note (what was tried,
+  what was decided, what is next); and **git as the state log** — commits are the
+  durable, timestamped record of what actually landed.
+- **The first window builds the framework** — the work-list, the setup script,
+  the check that says "still green." Later windows iterate it. Front-loading that
+  cost is what makes every later window cheap.
+- **Be prescriptive about how a fresh window starts.** Write the resume procedure
+  down where the next window will read it: confirm the working directory, read
+  the progress note, read the git log, run the integration check, then take the
+  next item. A resume that opens with "figure out where we were" wastes the
+  window it just opened.
+- **Check on a long run asynchronously.** For runs measured in hours, a scheduled
+  check-in beats a blocking wait — the orchestrator stays free while the run
+  proceeds. Same discipline for subagents: dispatch, keep working, intervene when
+  one goes off track rather than waiting on each in turn.
+
+## Context budget is the operator's readout, not the loop's stop condition
+
+A loop halts on its three declared ceilings (`loop-safety.md`) — never on a sense
+that context is running short. Do not stop early, summarize early, or propose a
+new session on token-budget grounds: **save state and continue**, and let the
+fresh-window procedure above carry the rest.
+
+Usage readouts are for the **operator** watching the run. Surfacing a
+remaining-context countdown into a working agent's own context is what causes it
+to trim its own work — the failure this section exists to prevent.
+
 ## Practices Trellis already enforces (don't re-invent)
 
 The blog's operating advice maps onto machinery Trellis already ships — reference it, don't duplicate it:
@@ -46,7 +83,7 @@ The blog's operating advice maps onto machinery Trellis already ships — refere
 - **Verification** ("don't hand back partially verified work") → DoD receipts (`CLAUDE.md` § Definition of done) + `stop-verify`; prefer **quantitative** checks (tests, scores) an agent can *observe*, over qualitative ones.
 - **Adversarial review** ("use a fresh second agent") → the `verify-panel` recipe (Claude + Codex consensus) and cross-model review — beyond a single reviewer.
 - **Encode the fix for all future iterations** → `gotchas.md` + the `propose-rules` hook + the rule-of-three promotion; a fix that only patches one iteration is half-done.
-- **Budget / stop awareness** → the three ceilings; `budget_ceiling_usd` is dollar-native. Watch `/usage`, `/workflows`, and `/goal`'s token readout in-run.
+- **Budget / stop awareness** → the three ceilings; `budget_ceiling_usd` is dollar-native. The **operator** watches `/usage`, `/workflows`, and `/goal`'s token readout; the running agent honors the declared ceilings and does not reason about its own remaining context (see § Context budget is the operator's readout).
 
 ## Start simplest
 

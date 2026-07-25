@@ -34,17 +34,19 @@ If the directory does not exist yet, run `new-feature.sh <slug>` (or `<slug> --n
 
 ## Output contract
 
-One new file: `specs/<NNN>-<slug>/clarify.md`. Five sections, one per canonical question. Each section ends with the operator's answer (or, if the operator deferred, an explicit `Deferred: <reason>` block — not silent silence).
+One new file: `specs/<NNN>-<slug>/clarify.md`. Five sections, one per canonical question, plus a conditional sixth `## Blind spots` section. Each section ends with the operator's answer (or, if the operator deferred, an explicit `Deferred: <reason>` block — not silent silence). A blind-spot pass that was not warranted is recorded as `Not run: <domain is familiar>`, not omitted.
 
 ## The canonical five questions
 
-Hardcoded for now. The schema lives at [`references/question-schema.md`](references/question-schema.md); update both in the same commit if either changes.
+Hardcoded for now. The schema lives at [`references/question-schema.md`](references/question-schema.md); update both in the same commit if either changes. The five are the fixed set; the blind-spot pass below is a conditional sixth section, not a sixth canonical question.
 
 1. **Intent.** *What problem are we solving and why now?* Reject "build feature X" — that's a solution, not intent. Push back until the operator names the pain.
 2. **Users affected.** *Who triggers this, who depends on it, who notices when it breaks?* If "everyone", you haven't decomposed; push for at least one concrete persona-in-scenario.
 3. **Success metric.** *How will we know this worked — testable, observable, falsifiable.* Reject vibes ("better", "faster") without a number, a fixture, or a passing test.
 4. **Edge cases.** *What inputs / states / timings make this hard?* Empty inputs, race conditions, rate limits, partial failures, retries.
 5. **Rollback plan.** *If we ship this and it's wrong, how do we undo it cleanly?* Migrations need reverse migrations. Feature flags need a flip path. Schema changes need a stay-shape window.
+
+**6. Blind spot pass (conditional).** Run this when the feature sits in a domain neither of you has depth in — a new protocol, an unfamiliar compliance surface, a platform you have not shipped on. Ask the operator to state their expertise level in the domain, then produce a short list of the unknowns *they did not ask about*: constraints, failure modes, and conventions a practitioner would take for granted. Record it under `## Blind spots` with each item marked `confirmed` / `not applicable` / `open`. Skip the section entirely when the domain is familiar — say so in one line rather than manufacturing unknowns.
 
 Every question gets an answer or a `Deferred: <reason>` block. No silent skipping.
 
@@ -62,6 +64,7 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 - **One answer per question.** If the operator gives two contradictory answers, surface the contradiction — don't pick one.
 - **Deferrals are explicit and labelled.** `Deferred: <reason>` — never just an empty section.
 - **Questions are sequential, not batched.** Asking all five up-front floods the operator; sequential lets answer N inform question N+1.
+- **Order by architectural consequence.** Between two questions, ask first the one whose answer would change the architecture — the data model, an interface shape, a UX flow, a rollback mechanism. A question whose either-way answer produces the same plan is a question for the PR description, not for clarify.
 - **Attach a hypothesis + confidence to each question.** Before asking, state your own best guess at the answer and a confidence 0–1 — "my hypothesis: rollback = revert the deploy and restore the last snapshot (0.7)." Confirming or correcting a concrete guess is faster for the operator than answering a blank prompt, and it surfaces exactly where your mental model is wrong. The guess **primes** the question; it never **replaces** the answer — the operator's word still wins (see "Don't silently improve answers"). (Folded from the `interview-me` pattern.)
 - **Predict-to-stop.** When you can predict the operator's next three answers with high confidence, the interview has converged — offer to stop early and move to `spec`, rather than walking the remaining questions ritually. A predicted answer is still a hypothesis: state it and let the operator veto.
 - **No solutions in clarify.md.** This is the question pass. Solutions belong in `plan.md`. If the operator's answer to question 1 is a solution, ask "and the problem behind that?".
@@ -81,5 +84,5 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 
 ## Relationship to the rest of the pipeline
 
-- **Before `spec`.** The spec skill reads `clarify.md` if it exists. If clarify wasn't run, the spec skill suggests running it for non-trivial features but does not itself hard-block (the triad is opt-in by default). When `mandatory_pipeline` is enabled at autonomy L1–L3, the intake interview **is** required for above-floor feature work: `clarify.md` (or a `.claude/spec-waiver`) is the artifact that satisfies the pre-push gate. At L4/L5 the agent self-answers the intake and logs the decisions to `decisions-log.md` instead — same gate, autonomy only changes *who answers* (§14.9).
+- **Before `spec`.** The spec skill reads `clarify.md` if it exists, and suggests running clarify for non-trivial features without hard-blocking. Under an enabled `mandatory_pipeline`, `clarify.md` (or a `.claude/spec-waiver`) is the artifact that satisfies the intake half of the pre-push gate; autonomy changes only *who answers* it. Canonical: `engineering-process.md` §14.7 and §14.9.
 - **Before `analyze`.** Not a direct dependency, but `analyze` uses `clarify.md` (when present) as one of the inputs for drift detection — if the spec drifted away from the operator's original intent captured in clarify, that's a major drift finding.
