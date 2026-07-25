@@ -546,3 +546,31 @@ NODE
   [ "$claude" -eq 1 ]
   [ "$claude" -eq "$codex" ]
 }
+
+@test "inherited Trellis infrastructure does not count toward the gated diff" {
+  _config true 80 400
+  # A canonical hook sync: far over the floor, but every path is copied from the
+  # Trellis clone rather than authored here, so the project-local triad the gate
+  # would demand cannot meaningfully exist.
+  _write_lines .claude/hooks/stop-verify.sh 300
+  _write_lines .claude/hooks/lib/spec-gate-core.sh 300
+  _write_lines .codex/hooks/spec-gate.sh 300
+  _write_lines .agents/skills/execute/SKILL.md 200
+  git checkout -q -b chore/sync-hooks
+  git add -A && git commit -qm "chore: sync hooks to canonical" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
+@test "inherited-infra exclusion does not shield real feature code beside it" {
+  _config true 80 400
+  # The exclusion is path-scoped, not a blanket pass for the commit: application
+  # code in the same push is still counted and still blocks.
+  _write_lines .claude/hooks/stop-verify.sh 300
+  _write_lines src/billing.ts 200
+  git checkout -q -b feat/mixed
+  git add -A && git commit -qm "hooks plus a real feature" >/dev/null
+  run _gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"over floor"* ]]
+}

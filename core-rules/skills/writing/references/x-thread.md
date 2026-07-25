@@ -1,7 +1,10 @@
 # Reference — X threads: algorithm + posting mechanics
 
 Captured: 2026-07-08 (X ranker open-sourced 2026; posting mechanics observed
-live same day). Re-ground on any X algorithm-repo change or composer redesign.
+live same day). Algorithm section re-confirmed 2026-07-25. **Posting mechanics
+partially superseded 2026-07-25 — see "Composer instability" below before
+attempting the browser leg.** Re-ground on any X algorithm-repo change or
+composer redesign.
 
 Two sections: *why* the thread is shaped this way (the ranker), and *how* it
 gets posted (the browser leg). Draft doctrine and the invocation contract live
@@ -50,6 +53,29 @@ never an unauthenticated retry.
 - **Sequence: thread → verify → link reply.** Post the thread first. VERIFY
   it live on the profile — count the tweets, read the order. Only then post
   the link reply on the LAST tweet (link-in-reply, above).
+- **Composer instability (observed 2026-07-25, three consecutive failures).**
+  The multi-box thread composer no longer survives automation on this surface.
+  Three distinct corruptions, none of which posted anything:
+  1. Clicking a tweet box by element ref while that box is below the modal
+     fold does not focus it, and the subsequent typed text executes as
+     keyboard shortcuts — the page navigated to Explore and a post attempt
+     fired against an empty first box ("The content of your post is invalid").
+     Box 1's text was silently cleared in the process.
+  2. After injecting text with `document.execCommand('insertText')` into a
+     focused box, the **rendered** composer held the text twice while an
+     `innerText` read taken immediately afterward returned the single-length
+     string. The cause is not established — the same call with a short string
+     produced exactly one copy, so this is not a reliable double-apply; a race
+     against the composer's own draft auto-restore fits the evidence equally
+     well. What is established is the divergence: **a DOM read is a claim the
+     editor has not finished making. Verify composer content by screenshot.**
+  3. A `Runtime.evaluate` script holding `await` across several box additions
+     froze the renderer past the 45-second CDP timeout, after which the
+     composer reset to a single empty box and lost everything typed.
+  Practical rule until this is re-grounded: keep any injected script under a
+  few seconds, verify every box by screenshot rather than by DOM read, and if
+  two attempts corrupt the draft, **discard and degrade to the paste-ready
+  handoff**. A thread posted garbled is far worse than a thread handed over.
 - **Anomaly posture: abort and surface.** On any unexpected state, stop and
   report the exact state — screenshot id plus what differed from expectation.
   Never blind-retry a click that may have already posted; a duplicate post is

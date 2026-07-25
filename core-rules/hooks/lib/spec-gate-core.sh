@@ -111,6 +111,13 @@ sg_is_excluded_path() {
   case "$1" in
     *_test.*|*.test.*|*.spec.*|*.bats) return 0 ;;
     docs/*|*/docs/*|specs/*|*/specs/*|audits/*|*/audits/*) return 0 ;;
+    # Inherited Trellis infrastructure: copied from the canonical clone by
+    # sync-hooks.sh / sync-codex-hooks.sh / onboard-project.sh, never authored in
+    # the project. The spec that governs this content lives in the Trellis repo,
+    # so demanding a project-local triad for a mechanical redistribution is a
+    # category error — and one that fires on every fleet hook sync by
+    # construction, since the canonical hook set is far larger than any floor.
+    .claude/*|*/.claude/*|.codex/*|*/.codex/*|.agents/*|*/.agents/*) return 0 ;;
     */generated/*|*.gen.*|*.pb.*|*_pb2.*|*.min.js|*.min.css|*.map) return 0 ;;
     *.svg|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.pdf) return 0 ;;
     *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
