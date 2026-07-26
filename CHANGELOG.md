@@ -8,6 +8,17 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Added
 
+- **Multi-model lane continuity (spec 021).** A foreign model lane going down or hitting
+  its cap no longer ends a delegated unit. `scripts/lane-preflight.sh` is a fail-closed
+  probe — always exits 0, reports only, and resolves unknown/error/timeout to unavailable.
+  `core-rules/agents/lane-worker.md` pins a first-party model in frontmatter and reaches
+  the lane over `Bash`, so the agent works on a stock host instead of hard-failing at
+  dispatch; on an unavailable lane it returns a structured `LANE_UNAVAILABLE` receipt and
+  the caller re-runs the identical unit locally. `core-rules/references/model-lanes.md`
+  carries the proxy-agnostic capability contract. Silent model substitution inside the
+  router was considered and rejected — it spends the first-party subscription invisibly;
+  see `docs/adr/2026-07-26-multi-model-lane-continuity.md`.
+
 - **Claude 5 alignment (spec 019).** Six parallel audit tracks over the rules,
   skills, references, commands, narrative manual, and steering docs, against a
   distillation of eight published Anthropic sources now committed as
@@ -118,6 +129,24 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 - **Next lint compatibility lane recorded.** Next projects use ESLint 9.39.2
   while the current `eslint-plugin-react` throws under ESLint 10; non-Next
   projects remain on the 10.4.1 lane until the upstream plugin converges.
+
+### Fixed
+
+- **The disk janitor no longer reaps a worktree somebody is working in.** The worktree
+  scan had no live-process guard, so `merged`-ness stood in as a proxy for "nobody is in
+  there" — which is why `--safe-only` was merged-only. A default dry-run was observed
+  listing a 1.0 GB clean/unmerged/pushed worktree as reapable while a live process tree
+  sat inside it: exactly the case the 2026-07-16 ADR predicted. One host-wide `lsof`
+  snapshot per scan (0.21s measured) now gates every reap path, fails closed on any probe
+  failure, and is re-taken immediately before each individual removal to close the
+  plan→apply race.
+
+- **An upstream mid-stream error is no longer filed as the client's fault.** A lane that
+  returns 200, starts streaming, then injects an SSE error frame settled as `aborted` —
+  blaming the client that hung up in response — and left the error counter at zero. It now
+  settles as `streamErr` and increments `errors`. The frame match is anchored to SSE
+  framing rather than the bare substring, so a model writing prose *about* streaming
+  cannot mark its own turn as an upstream failure.
 
 ## [v1.0.0-rc.12] — 2026-07-14
 

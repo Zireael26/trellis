@@ -37,6 +37,10 @@ setup() {
 }
 
 teardown() {
+  if [ -n "${LIVE_PID:-}" ]; then
+    kill "$LIVE_PID" 2>/dev/null || true
+    wait "$LIVE_PID" 2>/dev/null || true
+  fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
@@ -276,6 +280,43 @@ JSON
   [ -d "$PROJECTS/alpha/.next/cache" ]
   # dry-run must NOT write an audit file.
   [ ! -f "$CANON/audits/$(date +%F)-disk-janitor.md" ]
+}
+
+@test "live process cwd inside a worktree is a manual candidate absent from the reap plan" {
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  git_init_at "$PROJECTS/alpha"
+  local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+
+  # Real process, real cwd, real lsof predicate — no lsof mocking. Redirect its
+  # inherited descriptors so bats' output capture never waits for the sleeper.
+  ( cd "$wt" && exec sleep 30 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+
+  # Avoid a spawn-vs-snapshot race: require the exact primitive from the safety
+  # contract to observe the cwd before invoking the janitor.
+  local tries=0
+  while [ "$tries" -lt 50 ]; do
+    lsof -a -d cwd -- "$wt" >/dev/null 2>&1 && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  lsof -a -d cwd -- "$wt" >/dev/null 2>&1
+
+  # Both recoverability arms are forced true, so this would be a delete without
+  # the liveness gate. It must instead render a manual row with an explicit reason.
+  DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
+    run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$wt"* ]]
+  [[ "$output" == *"worktree in use"* ]]
+  [[ "$output" == *"live process cwd or open file handle under worktree"* ]]
+
+  DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
+    run_dj --dry-run --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"git worktree remove  $wt"* ]]
+  [ -d "$wt" ]
 }
 
 # ===========================================================================

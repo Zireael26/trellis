@@ -25,13 +25,15 @@
 #                       reclaimed bytes. launchd NEVER runs --apply.
 #
 # Worktree reap (default, reap_pushed_worktrees=true) is gated on: is_main==0
-# AND porcelain-clean (no uncommitted work) AND recoverable (branch merged via
-# gh OR pushed to origin with the tip not ahead) AND no gitignored secret. A
-# gitignored secret, or a clean-but-unrecoverable tree, is reported as a manual
-# candidate and EXCLUDED from apply. A porcelain-clean unrecoverable tree under
-# /private/tmp reaps at a short TTL (ephemeral_tmp_ttl_days). Setting
-# reap_pushed_worktrees=false restores the pre-Layer-2 4-gate triad (is_main==0
-# AND stale AND clean(allowlist) AND merged) verbatim.
+# AND not in use (live cwd/open handles via a fail-safe lsof snapshot) AND
+# porcelain-clean (no uncommitted work) AND recoverable (branch merged via gh OR
+# pushed to origin with the tip not ahead) AND no gitignored secret. An in-use
+# tree, a gitignored secret, or a clean-but-unrecoverable tree is reported as a
+# manual candidate and EXCLUDED from apply. A porcelain-clean
+# unrecoverable tree under /private/tmp reaps at a short TTL
+# (ephemeral_tmp_ttl_days). Setting
+# reap_pushed_worktrees=false restores the pre-Layer-2 stale+clean+merged gates,
+# still behind the shared non-main + not-in-use safety gates.
 #
 # Per-project failure isolation: a project that errors mid-scan is reported as
 # `skipped: <reason>` and the run continues.
@@ -74,7 +76,7 @@ Usage:
   disk-janitor.sh --apply --yes --safe-only
                                            Unattended-safe reap (the nightly
                                            LaunchAgent): only merged, clean,
-                                           non-detached, non-secret worktrees.
+                                           non-detached, non-secret, idle worktrees.
   disk-janitor.sh --project NAME           Limit to one registry project.
   disk-janitor.sh --scopes caches,worktrees,stores
                                            Limit scopes (default: all three).
@@ -98,23 +100,25 @@ HEAD) is reported as a candidate and never reaped.
 
 --safe-only tightens the worktree reap for unattended use (the nightly apply
 LaunchAgent): a `delete` verdict survives ONLY for a merged, porcelain-clean,
-non-detached, non-secret tree. A merged PR means the unit is done, so no live
-agent is working in the tree — the worktree scan has no live-process guard, so
-"merged" is what carries the concurrency guarantee. Every other auto-delete
-(pushed-but-unmerged, ephemeral /private/tmp) is downgraded to a manual
-candidate; those are in-flight trees owned by the fan-out recipe teardown. The
-flag only ever tightens the plan, so `--dry-run --safe-only` previews exactly
-what the nightly would reap.
+non-detached, non-secret, not-in-use tree. Every worktree path is checked for a
+live process cwd or open handle via a bounded lsof snapshot; a missing, failed,
+or timed-out lsof check fails closed and makes the tree a manual candidate.
+Every other auto-delete (pushed-but-unmerged, ephemeral /private/tmp) is
+downgraded to a manual candidate; those are in-flight trees owned by the fan-out
+recipe teardown. The flag only ever tightens the plan, so
+`--dry-run --safe-only` previews exactly what the nightly would reap.
 
 Scopes:
   caches      .turbo/cache, .next/cache, .next/dev older than cache_ttl_days,
               skipped when a build is running.
-  worktrees   linked git worktrees that are non-main AND porcelain-clean AND
-              recoverable (branch merged OR pushed to origin) AND free of any
-              gitignored secret. Clean-but-unrecoverable trees and secret-bearing
-              trees are reported as candidates, never reaped (see also the
-              /private/tmp short-TTL path). reap_pushed_worktrees=false restores
-              the legacy stale+clean+merged gate.
+  worktrees   linked git worktrees that are non-main AND not in use (no live cwd
+              or open handle) AND porcelain-clean AND recoverable (branch merged
+              OR pushed to origin) AND free of any gitignored secret. An lsof
+              failure makes all linked trees manual candidates (fail-safe).
+              Clean-but-unrecoverable and secret-bearing trees are candidates,
+              never reaped (see also the /private/tmp short-TTL path).
+              reap_pushed_worktrees=false restores the legacy
+              stale+clean+merged gates after the liveness gate.
   stores      pnpm store / npm cache footprint — REPORT-ONLY (best-effort
               estimate; --apply does not prune stores in this release).
 
@@ -370,7 +374,15 @@ fi
 # Worktree rows also carry the repo path (col 6) needed by dj_reap_worktree.
 # ---------------------------------------------------------------------------
 PLAN_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor.XXXXXX")"
-trap 'rm -f "$PLAN_TMP"' EXIT
+LSOF_SNAPSHOT_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-lsof.XXXXXX")"
+trap 'rm -f "$PLAN_TMP" "$LSOF_SNAPSHOT_TMP"' EXIT
+
+# One bounded host-wide lsof snapshot feeds every linked-worktree predicate.
+# Failure is recorded in the snapshot itself; dj_worktree_in_use interprets that
+# marker as "in use" so a broken safety check can only close the reap gate.
+if scope_enabled worktrees; then
+  if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
+fi
 
 EXIT_STATUS=0
 NOW_EPOCH="$(date +%s)"
@@ -447,8 +459,11 @@ EOF
 # Scope B: worktrees.
 #
 # Default predicate (reap_pushed_worktrees=true, Layer 2 — the flood reclaimer):
-#   reap iff  is_main==0  AND  porcelain_clean  AND  recoverable  AND  not(secret)
+#   reap iff  is_main==0  AND  not(in_use)  AND  porcelain_clean
+#             AND  recoverable  AND  not(secret)
 # where recoverable = merged (gh) OR pushed (upstream on origin, tip not ahead).
+# not(in_use) is a hard fail-safe gate shared by every default/legacy/tmp/safe-only
+# path; missing/error/timeout from lsof is treated exactly like a live handle.
 # `stale` is dropped (age is irrelevant once work is recoverable); a gitignored
 # secret downgrades to a manual candidate; a porcelain-clean but unrecoverable
 # tree under /private/tmp reaps at a short TTL. dj_branch_merged returns 0/1/2,
@@ -465,7 +480,7 @@ scan_worktrees() {
   local wt_path head_sha branch is_main prunable
   local bytes mtime detail verdict worktree_rows rc
   local merged_rc clean_rc stale_rc porc_rc pushed_rc secret_rc recoverable_rc
-  local real_wt is_tmp tmp_stale_rc is_detached
+  local real_wt is_tmp tmp_stale_rc is_detached in_use_reason
 
   if worktree_rows="$(dj_list_worktrees "$proj")"; then :; else
     rc=$?
@@ -483,6 +498,16 @@ scan_worktrees() {
     if [ "$is_main" = "1" ]; then
       bytes="$(dj_dir_bytes "$wt_path")"
       plan_row worktrees skip worktree-main "$wt_path" "$bytes" "$proj" "main checkout — never reaped"
+      continue
+    fi
+
+    # Hard liveness gate, before every default/legacy/tmp/safe-only reap path.
+    # dj_worktree_in_use also returns 0 when the lsof snapshot is unavailable,
+    # failed, timed out, or malformed: a broken safety check must fail closed.
+    if in_use_reason="$(dj_worktree_in_use "$wt_path" "$LSOF_SNAPSHOT_TMP")"; then
+      bytes="$(dj_dir_bytes "$wt_path")"
+      plan_row worktrees candidate worktree "$wt_path" "$bytes" "$proj" \
+        "candidate (worktree in use) — branch=$branch $in_use_reason in-use"
       continue
     fi
 
@@ -583,11 +608,10 @@ scan_worktrees() {
     fi
 
     # --safe-only (the unattended nightly apply): keep a `delete` verdict ONLY
-    # for a merged, non-detached tree. A merged PR means the unit is done, so no
-    # live agent is working in the tree — the worktree scan has no live-process
-    # guard, so "merged" is what carries the concurrency guarantee. Every other
-    # auto-delete (pushed-but-unmerged, ephemeral /private/tmp) is an in-flight
-    # tree owned by the fan-out teardown; downgrade it to a manual candidate.
+    # for a merged, non-detached tree. The hard lsof liveness gate has already
+    # downgraded any tree with a live cwd/open handle (or a failed safety probe).
+    # Every other auto-delete (pushed-but-unmerged, ephemeral /private/tmp) is an
+    # in-flight tree owned by the fan-out teardown; downgrade it to a manual candidate.
     # Only ever tightens the plan. (The reap_pushed_worktrees=false fallback is
     # already merged-gated, so it reaches its own plan_row without this.)
     if [ "$SAFE_ONLY" -eq 1 ] && [ "$verdict" = "delete" ]; then
@@ -806,7 +830,7 @@ INNER
       [ "$scope" = "worktrees" ] || continue
       printf '  [%s] %s (%s) — %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done <"$PLAN_TMP"
-    printf '  reclaimable (porcelain-clean + recoverable): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
+    printf '  reclaimable (not-in-use + porcelain-clean + recoverable): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
     printf '  candidates (manual review, NOT reaped): %s\n' "$(dj_human_bytes "$WT_CANDIDATE_BYTES")"
     echo
   fi
@@ -880,7 +904,7 @@ if [ "$MODE" = "dry-run" ]; then
     echo
   fi
   if scope_enabled worktrees; then
-    echo "== Worktrees to reap (is_main==0 AND porcelain-clean AND recoverable AND not-secret) =="
+    echo "== Worktrees to reap (is_main==0 AND not-in-use AND porcelain-clean AND recoverable AND not-secret) =="
     awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
       printf '  git worktree remove  %s  (%s) — gates: %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done
@@ -944,13 +968,24 @@ fi
 
 # --- worktrees --- (only verdict==delete; candidate/unverified is excluded)
 if scope_enabled worktrees; then
-  echo "== Worktrees to reap (porcelain-clean + recoverable), $(dj_human_bytes "$WT_DELETE_BYTES") =="
+  echo "== Worktrees to reap (not-in-use + porcelain-clean + recoverable), $(dj_human_bytes "$WT_DELETE_BYTES") =="
   awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
     printf '  %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
   done
   if [ "$WT_DELETE_BYTES" -gt 0 ] && confirm_category "these recoverable + porcelain-clean worktrees"; then
     while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
       [ "$scope" = "worktrees" ] && [ "$verdict" = "delete" ] || continue
+
+      # Close the plan→apply race: refresh lsof immediately before each actual
+      # reap. A process may enter a tree after the planning snapshot; any fresh
+      # hit OR probe failure leaves the directory intact without making the
+      # unattended nightly fail the whole run.
+      if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
+      if in_use_reason="$(dj_worktree_in_use "$path" "$LSOF_SNAPSHOT_TMP")"; then
+        echo "  skipped (worktree in use): $path — $in_use_reason"
+        continue
+      fi
+
       if dj_reap_worktree "$repo" "$path"; then
         echo "  reaped: $path"
       else

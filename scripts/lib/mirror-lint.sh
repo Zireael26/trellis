@@ -142,10 +142,10 @@ lint_mirror() {
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
     if ! printf '%s\n' "$rel" | grep -qE "$priv_allow_re"; then
-      echo "$rel: instance-private token (claudex/cliproxy) must never reach the public mirror"
+      echo "$rel: instance-private token (claudex/gptx/cliproxy) must never reach the public mirror"
       rc=1
     fi
-  done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+  done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|gptx|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
 
   # --- OPERATOR-ACCOUNT identifiers: instance-local, never public ------------
   # Names of the operator's cloud accounts, credential stores, and env vars.

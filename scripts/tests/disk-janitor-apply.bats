@@ -7,8 +7,8 @@
 #   * a fresh `mktemp -d` sandbox per test,
 #   * a fixture trellis.config.json whose projects_root IS the sandbox,
 #   * $TRELLIS_CONFIG exported so config-load resolves the FIXTURE config,
-#   * the injectable overrides DJ_BUILD_ACTIVE_OVERRIDE / DJ_MERGED_OVERRIDE
-#     exported into the child process — NEVER a live process or the network.
+#   * merge/build network checks use injectable overrides; liveness cases use a
+#     real background process whose cwd/open handle stays inside the sandbox.
 #
 # Each negative ("must NOT delete") test asserts the ARTIFACT survives
 # (`[ -d ]`), not merely that some "declined"/"skip" string printed — the
@@ -46,6 +46,10 @@ setup() {
 }
 
 teardown() {
+  if [ -n "${LIVE_PID:-}" ]; then
+    kill "$LIVE_PID" 2>/dev/null || true
+    wait "$LIVE_PID" 2>/dev/null || true
+  fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
@@ -686,6 +690,39 @@ run_dj() { run bash "$DJ" "$@"; }
   [ ! -d "$wt" ]
 }
 
+@test "safe-only PROTECTS a merged + clean tree while a process cwd is inside it" {
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  git_init_at "$PROJECTS/alpha"
+  local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+
+  # The ADR historically used merged-ness as the proxy for "nobody is there."
+  # Exercise the residual case directly: merged + clean, but a real live cwd.
+  ( cd "$wt" && exec sleep 30 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  local tries=0
+  while [ "$tries" -lt 50 ]; do
+    lsof -a -d cwd -- "$wt" >/dev/null 2>&1 && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  lsof -a -d cwd -- "$wt" >/dev/null 2>&1
+
+  DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=unpushed \
+    run_dj --report --safe-only --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$wt"* ]]
+  [[ "$output" == *"candidate (worktree in use)"* ]]
+
+  [ -d "$wt" ]
+  DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=unpushed \
+    run_dj --apply --yes --safe-only --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  # The nightly predicate is unchanged (still merged-only); liveness is an
+  # additive belt-and-braces gate that narrows the result and preserves the tree.
+  [ -d "$wt" ]
+}
+
 @test "safe-only PROTECTS a pushed-but-unmerged clean tree (concurrency guard)" {
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
@@ -722,6 +759,36 @@ run_dj() { run bash "$DJ" "$@"; }
   [[ "$output" == *"safe-only: not merged"* ]]
   # And the banner advertises the restriction.
   [[ "$output" == *"safe-only: merged-clean worktrees only"* ]]
+}
+
+@test "lsof failure fails closed: merged worktree is manual-only in default and safe-only apply" {
+  git_init_at "$PROJECTS/alpha"
+  local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+
+  # Put a real executable named lsof first in PATH and make the probe fail. This
+  # exercises command discovery + the subprocess exit path without replacing the
+  # helper itself; any lsof failure must close, never open, the deletion gate.
+  local shim_dir="$SANDBOX/failing-lsof-bin"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/lsof" <<'EOF'
+#!/bin/sh
+exit 73
+EOF
+  chmod +x "$shim_dir/lsof"
+
+  PATH="$shim_dir:$PATH" DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
+    run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$wt"* ]]
+  [[ "$output" == *"worktree in use"* ]]
+  [[ "$output" == *"lsof failed (exit 73)"* ]]
+
+  PATH="$shim_dir:$PATH" DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
+    run_dj --apply --yes --safe-only --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  # Nightly path: a broken liveness check over-refuses and leaves the tree intact.
+  [ -d "$wt" ]
 }
 
 @test "safe-only still skips a DIRTY tree (porcelain gate wins before any downgrade)" {

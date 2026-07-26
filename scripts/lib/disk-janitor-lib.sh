@@ -383,6 +383,144 @@ EOF
   return 1
 }
 
+# dj_capture_lsof_snapshot <snapshot_path> [timeout_seconds]
+# Capture one host-wide lsof field snapshot for all worktree liveness checks in a
+# scan. A single snapshot is materially faster than recursively walking every
+# worktree with `lsof +D` (and still sees BOTH cwd records and open files below a
+# worktree because every `n<absolute-path>` record is present). The first line is
+# a status marker consumed by dj_worktree_in_use:
+#   ok
+#   error<TAB><fail-safe reason>
+#
+# macOS has neither timeout(1) nor gtimeout(1) by default, so Perl's alarm wraps
+# the exec without adding a platform dependency. Missing lsof/perl, a non-zero
+# lsof exit, or the alarm all write an error marker and return non-zero. Callers
+# MUST still pass the marker to dj_worktree_in_use: a broken safety probe blocks
+# reaping rather than opening the gate.
+dj_capture_lsof_snapshot() {
+  local snapshot="$1" timeout_seconds="${2:-5}" tmp rc reason
+  case "$timeout_seconds" in
+    ''|*[!0-9]*|0) timeout_seconds=5 ;;
+  esac
+
+  # Never leave a prior successful snapshot behind when a refresh fails: the
+  # caller would otherwise mistake stale liveness data for a fresh safe result.
+  rm -f "$snapshot" || return 1
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    printf 'error\tlsof unavailable\n' >"$snapshot" || rm -f "$snapshot"
+    return 1
+  fi
+  if ! command -v perl >/dev/null 2>&1; then
+    printf 'error\tlsof timeout wrapper unavailable\n' >"$snapshot" || rm -f "$snapshot"
+    return 1
+  fi
+
+  tmp="${snapshot}.capture.$$"
+  rm -f "$tmp"
+  rc=0
+  perl -e 'alarm shift; exec @ARGV' "$timeout_seconds" \
+    lsof -n -P -Fn >"$tmp" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$tmp" ]; then
+    rc=65
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    if {
+      printf 'ok\n'
+      cat "$tmp"
+    } >"$snapshot"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp" "$snapshot"
+    return 1
+  fi
+
+  case "$rc" in
+    65) reason="lsof returned an empty snapshot" ;;
+    142) reason="lsof timed out after ${timeout_seconds}s" ;;
+    *) reason="lsof failed (exit $rc)" ;;
+  esac
+  if ! printf 'error\t%s\n' "$reason" >"$snapshot"; then
+    rm -f "$snapshot"
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# dj_worktree_in_use <wt_path> <lsof_snapshot>
+# return 0 iff reaping must be blocked, and print the reason on stdout. This is
+# deliberately fail-safe: a missing/malformed/error snapshot returns 0 exactly
+# like a positive liveness hit. return 1 is the ONLY "no live use observed"
+# result.
+#
+# The host-wide `lsof -Fn` snapshot contains records such as:
+#   fcwd            + n/path       (a process cwd)
+#   f12             + n/path/file  (an open file descriptor)
+# Matching the canonical worktree path exactly or as a slash-delimited prefix
+# catches a cwd anywhere inside the tree and any open handle below it, without a
+# recursive filesystem traversal. Fixed-string grep keeps ~35 checks cheap even
+# when the snapshot contains many thousands of open-file records.
+dj_worktree_in_use() {
+  local wt="$1" snapshot="$2" real_wt header reason grep_rc matches line open_path
+  real_wt="$(dj__abspath "$wt")"
+
+  if [ -z "$snapshot" ] || [ ! -r "$snapshot" ]; then
+    printf 'lsof snapshot unavailable'
+    return 0
+  fi
+  if ! IFS= read -r header <"$snapshot"; then
+    printf 'lsof snapshot unreadable'
+    return 0
+  fi
+  case "$header" in
+    ok) ;;
+    error$'\t'*)
+      reason="${header#*$'\t'}"
+      printf '%s' "${reason:-lsof check failed}"
+      return 0
+      ;;
+    *)
+      printf 'lsof snapshot invalid'
+      return 0
+      ;;
+  esac
+
+  [ -n "$real_wt" ] || {
+    printf 'worktree path could not be resolved'
+    return 0
+  }
+
+  # Pull only fixed-string candidates in one pass, then validate exact/path-prefix
+  # semantics in shell so sibling names ("wt" vs "wt-old") cannot false-positive.
+  # grep status 1 means no match; any other non-zero is a broken check and blocks.
+  if matches="$(LC_ALL=C grep -F "n$real_wt" "$snapshot" 2>/dev/null)"; then
+    while IFS= read -r line; do
+      case "$line" in
+        n*) open_path="${line#n}" ;;
+        *) continue ;;
+      esac
+      case "$open_path" in
+        "$real_wt"|"$real_wt"/*)
+          printf 'live process cwd or open file handle under worktree'
+          return 0
+          ;;
+      esac
+    done <<EOF
+$matches
+EOF
+    return 1
+  else
+    grep_rc=$?
+  fi
+  if [ "$grep_rc" -eq 1 ]; then
+    return 1
+  fi
+  printf 'lsof snapshot search failed (exit %s)' "$grep_rc"
+  return 0
+}
+
 # dj_branch_merged <repo_path> <branch>
 # return 0 (merged → reapable), 1 (NOT merged), 2 (UNVERIFIED → never reaped).
 #

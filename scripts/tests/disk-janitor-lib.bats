@@ -32,6 +32,10 @@ setup() {
 }
 
 teardown() {
+  if [ -n "${HOLDER_PID:-}" ]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+  fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
@@ -389,6 +393,45 @@ git_init_at() {
   [[ "$output" =~ ^[0-9]+$ ]]
   # Far older than a recent epoch (2023-01-01 = 1672531200).
   [ "$output" -lt 1672531200 ]
+}
+
+# ===========================================================================
+# dj_worktree_in_use — one lsof snapshot catches cwd + open-handle liveness
+# ===========================================================================
+
+@test "dj_worktree_in_use detects an open file below the tree even when process cwd is elsewhere" {
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  local repo="$SANDBOX/repo"
+  git_init_at "$repo"
+  local held="$repo/held-open.txt" snapshot="$SANDBOX/lsof.snapshot"
+  printf 'held\n' > "$held"
+
+  # Keep fd 9 open on a file under the tree while sleep itself stays cwd'd in the
+  # bats runner directory. This isolates the open-handle arm from the cwd arm.
+  ( exec 9<"$held"; exec sleep 30 ) >/dev/null 2>&1 &
+  HOLDER_PID=$!
+
+  local tries=0
+  while [ "$tries" -lt 50 ]; do
+    lsof -- "$held" >/dev/null 2>&1 && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  lsof -- "$held" >/dev/null 2>&1
+
+  run dj_capture_lsof_snapshot "$snapshot" 5
+  [ "$status" -eq 0 ]
+  run dj_worktree_in_use "$repo" "$snapshot"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"live process cwd or open file handle under worktree"* ]]
+
+  kill "$HOLDER_PID" 2>/dev/null || true
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=""
+  run dj_capture_lsof_snapshot "$snapshot" 5
+  [ "$status" -eq 0 ]
+  run dj_worktree_in_use "$repo" "$snapshot"
+  [ "$status" -ne 0 ]
 }
 
 # ===========================================================================
