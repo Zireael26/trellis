@@ -133,19 +133,30 @@ lint_mirror() {
     fi
   done < <(grep -rIliF --exclude-dir='.git' -- 'antigravity' "$mirror_dir" 2>/dev/null)
 
-  # --- INSTANCE-PRIVATE tokens: the local unofficial proxy surface, forbidden
-  # ANYWHERE in the public mirror (never-public; audit 2026-07-13 M20).
-  # Case-insensitive. Only this linter and its own test may name the tokens
-  # (they sync to the mirror, so exempt them or the lint flags its own machinery).
-  local priv_allow_re='^(scripts/lib/mirror-lint\.sh$|scripts/tests/mirror-lint\.bats$)'
+  # --- UNOFFICIAL PROXY TOKENS ----------------------------------------------
+  # Spec 022 reverses the old blanket GPTX/CLIProxy ban and publishes that feature
+  # through an exact surface. `claudex` remains instance-private everywhere. GPTX and
+  # CLIProxy names are legal only in the feature's implementation, tests, public
+  # onboarding/docs/history, agent definitions, changelog, and sync/lint machinery.
+  # This is intentionally path-scoped rather than a broad scripts/ or docs/ exemption.
+  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|CHANGELOG\.md$|docs/gptx\.md$|docs/adr/|docs/specs/|core-rules/agents/gpt-[^/]+\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
-    if ! printf '%s\n' "$rel" | grep -qE "$priv_allow_re"; then
-      echo "$rel: instance-private token (claudex/gptx/cliproxy) must never reach the public mirror"
+    if ! printf '%s\n' "$rel" | grep -qE "$gptx_allow_re"; then
+      echo "$rel: unofficial proxy token is outside the approved public GPTX surface"
       rc=1
     fi
-  done < <(grep -rIliE --exclude-dir='.git' -- 'claudex|gptx|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+  done < <(grep -rIliE --exclude-dir='.git' -- 'gptx|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$mirror_dir"/}"
+    case "$rel" in
+      scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
+      *) echo "$rel: instance-private token 'claudex' must never reach the public mirror"; rc=1 ;;
+    esac
+  done < <(grep -rIliF --exclude-dir='.git' -- 'claudex' "$mirror_dir" 2>/dev/null)
 
   # --- OPERATOR-ACCOUNT identifiers: instance-local, never public ------------
   # Names of the operator's cloud accounts, credential stores, and env vars.

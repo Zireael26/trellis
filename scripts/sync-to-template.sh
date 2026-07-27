@@ -65,6 +65,7 @@ done
 SYNC_PATHS=(
   "engineering-process.md"
   "AGENT_ONBOARD_PROJECT.md"
+  "AGENT_ONBOARD_GPTX.md"
   "CHANGELOG.md"
   # Public bootstrap shells only. The private source files are copied into the
   # staging area and replaced below before leak checks or mirror writes.
@@ -92,6 +93,7 @@ SYNC_PATHS=(
   "docs/primers/"
   "docs/references/"
   "docs/UPGRADING.md"
+  "docs/gptx.md"
   # NOTE: scheduled-tasks/ is NOT synced — it is operator-specific automation
   # whose targets.md / prompt.md files name the private fleet (conductor backlog,
   # dep-watch versions, audit target lists). Published verbatim it leaked named

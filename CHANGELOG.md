@@ -8,6 +8,16 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Added
 
+- **Public GPTX model modes (spec 022).** `cmux-trellis-teams` keeps cmux as the
+  session/team surface while exposing `gptx`, `codex`, `hybrid`, and `claude`
+  topologies plus independent advisor selection. The public split router preserves a
+  closed GPT/open Anthropic credential boundary, a maintained CLIProxyAPI fork bridges
+  Claude Code's advisor server tool, and `auto` visibly falls back from Opus to Sol and
+  later restores it. GPT context is resolved from the installed Codex catalog instead
+  of borrowing the API's 1.05M window; the public roster now includes the missing Sol
+  high rung and the fast Terra xhigh implementer. `AGENT_ONBOARD_GPTX.md` provides a
+  reversible, agent-executable install and certification runbook.
+
 - **Multi-model lane continuity (spec 021).** A foreign model lane going down or hitting
   its cap no longer ends a delegated unit. `scripts/lane-preflight.sh` is a fail-closed
   probe — always exits 0, reports only, and resolves unknown/error/timeout to unavailable.

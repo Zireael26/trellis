@@ -10,6 +10,7 @@
 #   trellis upgrade      -> upgrade.sh          (compare/adopt the version pin)
 #   trellis sync         -> sync-hooks.sh       (sync Claude hooks into projects)
 #   trellis deps         -> fleet-dependencies  (check/apply dependency baseline)
+#   trellis model-context -> gptx/model-context  (resolve GPT subscription context)
 #
 # No args / `help` -> list subcommands (stdout, exit 0).
 # Unknown command  -> usage to stderr, exit 2.
@@ -29,6 +30,7 @@ Usage: trellis <command> [args...]
   upgrade       Compare/adopt the canonical version pin
   sync          Sync Claude hooks into managed projects
   deps          Check/snapshot/apply the fleet dependency baseline and ledger
+  model-context Resolve GPT subscription context and compaction limits
   worktree      Create/repair a worktree with Trellis inheritance seeded
 EOF
 }
@@ -41,6 +43,7 @@ case "$cmd" in
   upgrade)      shift; exec "$SCRIPT_DIR/upgrade.sh" "$@" ;;
   sync)         shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
   deps)         shift; exec node "$SCRIPT_DIR/fleet-dependencies.mjs" "$@" ;;
+  model-context) shift; exec node "$SCRIPT_DIR/gptx/model-context.js" "$@" ;;
   worktree)     shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
   help)         usage ;;
   *)            usage >&2; exit 2 ;;

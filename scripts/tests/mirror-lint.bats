@@ -34,6 +34,28 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "GPTX is allowed only on the approved public feature surface" {
+  mkdir -p "$M/scripts/gptx" "$M/docs"
+  printf 'gptx router\n' > "$M/scripts/gptx/router.js"
+  printf 'CLIProxyAPI setup\n' > "$M/docs/gptx.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  printf 'enable gptx here\n' > "$M/scripts/onboard-project.sh"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"scripts/onboard-project.sh: unofficial proxy token"* ]]
+}
+
+@test "claudex remains instance-private even inside the GPTX feature" {
+  mkdir -p "$M/scripts/gptx"
+  printf 'claudex private binding\n' > "$M/scripts/gptx/router.js"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"scripts/gptx/router.js: instance-private token 'claudex'"* ]]
+}
+
 @test "only the public ledger bootstrap is allowed in the audits namespace" {
   mkdir -p "$M/audits"
   printf '{"schema_version":1,"audit_date":"2026-07-21","source_reports":[],"findings":[]}\n' > "$M/audits/fleet-remediation-ledger.json"
