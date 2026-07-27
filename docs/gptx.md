@@ -8,12 +8,15 @@ which subscription supplies the main model and advisor.
 | Mode | Main session | Default advisor | When to use it |
 |---|---|---|---|
 | `gptx` | Claude Opus 1M | Opus | Normal Claude session with selectively addressed GPT agents |
-| `codex` | GPT-5.6 Terra xhigh | GPT-5.6 Sol | Claude quota unavailable or a GPT-only run is desired |
-| `hybrid` | GPT-5.6 Terra xhigh | Opus, then visible Sol fallback | Fast implementation with stronger cross-model advice |
+| `codex` | GPT-5.6 Sol xhigh | GPT-5.6 Sol | Claude quota unavailable or a GPT-only run is desired |
+| `hybrid` | GPT-5.6 Sol xhigh | Opus, then visible Sol fallback | Sol orchestration with stronger cross-model advice |
 | `claude` | Claude Opus 1M, direct | Opus | Codex quota exhausted or no local GPT lane desired |
 
 `--model sol|terra|luna|MODEL` and
 `--advisor auto|opus|fable|sol|none` override the defaults independently.
+Terra is never selected automatically. An explicit `--model terra` remains available,
+but it requires `auto`, Opus, Fable, or Sol advice; pairing Terra with `none` fails
+before cmux starts.
 
 `cmux-trellis-teams` ultimately executes `cmux claude-teams`. It injects only Claude
 Code settings and forwards every other argument in order, so cmux still owns panes,
@@ -98,7 +101,9 @@ Claude headers. Neither credential is persisted in callback state.
 - `gpt-mid`: Sol medium, strong-oracle implementation.
 - `gpt-high`: Sol high, moderately complex cross-file work.
 - `gpt-sol`: Sol xhigh, difficult or weak-oracle work.
-- `gpt-terra`: Terra xhigh, fast bounded implementer paired with a stronger advisor.
+- `gpt-terra`: Terra xhigh, fast bounded teammate paired with a stronger advisor. It
+  must obtain advice before its first mutation and returns blocked without edits when
+  advice is unavailable.
 - `gpt-sol-advisor`: read-only Sol xhigh advisor for a Claude main-session override.
 
 ## Installation and rollback

@@ -23,6 +23,7 @@ Claude arguments.
   --model sol|terra|luna|MODEL     Main model override
   --advisor auto|opus|fable|sol|none
                                    Advisor override
+                                   Terra requires an advisor other than none
   --dry-run                        Print the resolved launch contract as JSON
   -h, --help                       Show this help
 
@@ -63,6 +64,13 @@ model_id() {
     terra) printf '%s\n' gpt-5.6-terra ;;
     luna) printf '%s\n' gpt-5.6-luna ;;
     *) printf '%s\n' "$1" ;;
+  esac
+}
+
+is_terra_model() {
+  case "$1" in
+    gpt-*-terra|gpt-*-terra-*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -127,11 +135,11 @@ case "$mode" in
     default_advisor=auto
     ;;
   codex)
-    default_model=terra
+    default_model=sol
     default_advisor=sol
     ;;
   hybrid)
-    default_model=terra
+    default_model=sol
     default_advisor=auto
     ;;
   claude)
@@ -150,8 +158,13 @@ case "$advisor" in
   *) die "unknown advisor '$advisor' (expected auto, opus, fable, sol, or none)" ;;
 esac
 
+resolved_model="$(model_id "$main_model")"
+if is_terra_model "$resolved_model" && [[ "$advisor" == none ]]; then
+  die "Terra requires advisor auto, opus, fable, or sol; --advisor none is not allowed"
+fi
+
 main_is_gpt=false
-case "$(model_id "$main_model")" in
+case "$resolved_model" in
   gpt-*|codex-*|o[0-9]*)
     main_is_gpt=true
     ;;
@@ -164,7 +177,6 @@ if [[ "$mode" == claude && "$main_is_gpt" == true ]]; then
   die "claude mode requires a Claude main model"
 fi
 
-resolved_model="$(model_id "$main_model")"
 base_url=$ROUTER_URL
 claude_model=$resolved_model
 advisor_transport=server-tool
@@ -216,6 +228,7 @@ case "$advisor" in
     advisor_model=opus
     advisor_transport=disabled
     env_json="$(jq -c '. + {CLAUDE_CODE_DISABLE_ADVISOR_TOOL:"1"}' <<<"$env_json")"
+    append_prompt='Trellis Terra policy: the advisor is disabled for this session, so do not delegate any task to gpt-terra.'
     ;;
   fable)
     advisor_model=claude-fable-5

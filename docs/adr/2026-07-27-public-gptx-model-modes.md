@@ -33,6 +33,9 @@ the global GPT context override was lower than the current Codex subscription ca
    auto-compact override unset.
 7. Keep the prior rule against silent main-model substitution. A mode or advisor change
    is selected at launch or reported visibly; the router does not disguise provider use.
+8. Default both GPT-backed main-session modes to Sol xhigh. Terra remains a fast
+   bounded-work teammate and an explicit `--model terra` escape hatch, but it may not
+   run with advisor `none` and must receive smarter advice before editing.
 
 ## Consequences
 
@@ -44,6 +47,8 @@ the global GPT context override was lower than the current Codex subscription ca
   replacing it.
 - A Claude-main/Sol-advisor session uses a read-only nested agent, because Anthropic
   executes its built-in advisor upstream before a pass-through proxy can replace it.
+- Terra is not chosen automatically as an orchestrator. Explicit operator selection is
+  still supported and fails closed before cmux when advice is disabled.
 - The setup is reversible from an install manifest and settings backup.
 
 ## Alternatives considered

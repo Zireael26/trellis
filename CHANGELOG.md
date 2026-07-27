@@ -69,6 +69,13 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Changed
 
+- **GPTX Terra role correction (spec 022).** `codex` and `hybrid` now default to
+  GPT-5.6 Sol xhigh as the main orchestrator. Terra remains available as the fast
+  bounded-work teammate and through an explicit `--model terra` override, but an
+  explicit Terra main with `--advisor none` is rejected before cmux starts. The
+  `gpt-terra` agent now fails closed without mutations when its configured Opus,
+  Fable, or Sol xhigh advisor is unavailable.
+
 - **`core-rules/CLAUDE.md` rightsized: 24,138 → 18,194 bytes, no rule deleted.**
   Four relocations behind the existing on-demand reference mechanism, each
   leaving a pointer. The substantive fixes: the inverted claim that this model

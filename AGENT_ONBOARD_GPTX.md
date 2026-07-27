@@ -160,10 +160,10 @@ First-class modes use:
 # Claude main loop plus selectively addressed GPT agents
 cmux-trellis-teams --mode gptx --dangerously-skip-permissions
 
-# Terra implementer and Sol advisor; no Claude advisor quota required
+# Sol orchestrator and Sol advisor; no Claude advisor quota required
 cmux-trellis-teams --mode codex --dangerously-skip-permissions
 
-# Terra implementer, Opus advisor, automatic visible fallback to Sol
+# Sol orchestrator, Opus advisor, automatic visible fallback to Sol
 cmux-trellis-teams --mode hybrid --dangerously-skip-permissions
 
 # Direct Claude session when Codex is exhausted
@@ -178,6 +178,18 @@ cmux-trellis-teams --mode hybrid --model terra --advisor sol
 cmux-trellis-teams --mode claude --advisor sol
 cmux-trellis-teams --mode codex --advisor none
 ```
+
+Terra is a fast bounded-work teammate, not an automatic orchestrator. It remains an
+explicit main-model escape hatch:
+
+```bash
+cmux-trellis-teams --mode hybrid --model terra --advisor auto
+```
+
+Do not combine Terra with `--advisor none`. The launcher rejects an explicit Terra main
+model without advice, and the `gpt-terra` teammate stops without editing when the
+configured advisor is absent, disabled, or fails. A Sol session with `--advisor none`
+is valid, but Terra delegation is unavailable in that session.
 
 `--advisor sol` on a Claude main session uses the explicit read-only
 `gpt-sol-advisor` agent. Anthropic executes its own built-in advisor upstream, so a
