@@ -18,9 +18,8 @@ The work order must provide:
 - `task_prompt`: the bounded task, including scope, constraints, proof, and
   expected output;
 - `target_cwd`: the target repository or seeded worktree root; and
-- `effort`: an explicit `xhigh` or `max` value. (`medium` and `high` are
-  SUSPENDED by operator directive 2026-07-10 — `docs/codex-routing.md §3` —
-  and must be refused as unsupported effort, same as any invalid tier.)
+- `effort`: an explicit `medium`, `high`, `xhigh`, or `max` value selected
+  from the unit-level ladder in `docs/codex-routing.md §3`.
 
 `max` additionally requires a non-empty justification. Note the current
 surface reality: companion v1.0.5 rejects `max` at launch, so a contract-valid
@@ -129,13 +128,12 @@ the observed thread-create wedge:
 
 1. Cancel the job from the SAME `target_cwd`, log the cancellation, then poll
    status once more and record whether the job still shows active.
-2. Retry exactly once at one effort tier lower: `max -> xhigh`. Keep the same
-   model and log the requested and effective effort. Never fall back to a
-   different model.
-3. Because `xhigh` is the lowest permitted input tier (medium/high suspended
-   2026-07-10, `docs/codex-routing.md §3`), a wedged `xhigh` job has no legal
-   lower tier: cancel it and return structured FAILURE rather than inventing
-   or silently selecting an effort.
+2. Retry exactly once at one effort tier lower: `max -> xhigh`, `xhigh -> high`,
+   or `high -> medium`. Keep the same model and log the requested and effective
+   effort. Never fall back to a different model.
+3. `medium` is the lowest permitted input tier (`docs/codex-routing.md §3`). A
+   wedged `medium` job has no legal lower tier: cancel it and return structured
+   FAILURE rather than inventing or silently selecting an effort.
 4. If the one lower-tier retry also lacks a session id after five minutes,
    cancel it and return `CODE: NO_SESSION_ID` with both attempts in the receipt.
 

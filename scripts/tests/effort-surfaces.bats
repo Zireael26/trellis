@@ -15,13 +15,22 @@ HONEST="Report failures as failures. Never claim completion without the proof co
 _args_for() {
   local recipe="$1" matrix_case="$2"
   local effort="xhigh" justification="bounded test justification"
+  local supported='["medium","high","xhigh"]'
 
   case "$matrix_case" in
     omitted) effort="__OMITTED__" ;;
     turbo) effort="turbo" ;;
+    # `max` is hard-rejected as of 2026-07-30 regardless of justification, so the matrix
+    # exercises BOTH — with and without — and both must throw.
     max-no-justification) effort="max"; justification="" ;;
+    max-with-justification) effort="max" ;;
     ultra) effort="ultra" ;;
-    unsupported) effort="max" ;;
+    # SC3(d) previously requested `max` against a surface that did not list it. `max` is
+    # no longer a legal enum value, so the fail-closed/no-clamp property (spec 011 D6b) is
+    # re-expressed with a LEGAL effort the surface does not support: xhigh against a
+    # medium/high-only surface. The property under test is unchanged.
+    unsupported) effort="xhigh"; supported='["medium","high"]' ;;
+    medium|high) effort="$matrix_case" ;;
     happy|sc4) effort="xhigh" ;;
   esac
 
@@ -30,21 +39,21 @@ _args_for() {
       if [ "$effort" = "__OMITTED__" ]; then
         printf '%s' '{"codexAvailable":true,"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","targetCwd":"/tmp/unit-alpha"}]}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"%s","justification":"%s","targetCwd":"/tmp/unit-alpha","paths":"src/alpha.js","constraints":"touch one file","nonGoals":"unrelated cleanup","proof":"node --check src/alpha.js"}]}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":%s,"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"%s","justification":"%s","targetCwd":"/tmp/unit-alpha","paths":"src/alpha.js","constraints":"touch one file","nonGoals":"unrelated cleanup","proof":"node --check src/alpha.js"}]}' "$supported" "$effort" "$justification"
       fi
       ;;
     verify-panel.wf.js)
       if [ "$effort" = "__OMITTED__" ]; then
         printf '%s' '{"codexAvailable":true,"targetCwd":"/tmp/repo-alpha","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"targetCwd":"/tmp/repo-alpha","effort":"%s","justification":"%s","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":%s,"targetCwd":"/tmp/repo-alpha","effort":"%s","justification":"%s","findings":[{"id":"finding-alpha","claim":"bounded claim","file":"src/alpha.js","line":1,"severity":"high"}],"context":"fixture context"}' "$supported" "$effort" "$justification"
       fi
       ;;
     fleet-audit-remediation.wf.js)
       if [ "$effort" = "__OMITTED__" ]; then
         printf '%s' '{"codexAvailable":true,"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}'
       else
-        printf '{"codexAvailable":true,"supportedEfforts":["xhigh"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"%s","justification":"%s","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}' "$effort" "$justification"
+        printf '{"codexAvailable":true,"supportedEfforts":%s,"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"%s","justification":"%s","rows":[{"id":"row-alpha","lane":"mechanical","tier":"patch","fix":"apply bounded fix","verifyCmd":"node --check src/alpha.js","autoMergeable":true,"kind":"fix"}]}]}' "$supported" "$effort" "$justification"
       fi
       ;;
   esac
@@ -74,15 +83,17 @@ _json_assert() {
   done
 }
 
-@test "SC3(b): turbo and max without justification throw for every recipe" {
+@test "SC3(b): turbo throws, and max is hard-rejected with OR without justification" {
   local recipe matrix_case
   for recipe in "${RECIPES[@]}"; do
-    for matrix_case in turbo max-no-justification; do
+    for matrix_case in turbo max-no-justification max-with-justification; do
       _run_recipe "$recipe" "$matrix_case"
       if [ "$matrix_case" = turbo ]; then
         _json_assert "r.error && r.error.message.includes('turbo') && r.error.message.includes('enum') && r.prompts.length === 0"
       else
-        _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('justification') && r.prompts.length === 0"
+        # The justification variant is the load-bearing one: it used to PASS. If this
+        # regresses, `max` is admissible again and the xhigh ceiling is decorative.
+        _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('hard-rejected') && r.prompts.length === 0"
       fi
     done
   done
@@ -96,11 +107,11 @@ _json_assert() {
   done
 }
 
-@test "SC3(d): unsupported max fails closed to Claude without clamping for every recipe" {
+@test "SC3(d): an unsupported but legal effort fails closed to Claude without clamping" {
   local recipe
   for recipe in "${RECIPES[@]}"; do
     _run_recipe "$recipe" unsupported
-    _json_assert "!r.error && r.logs.some((line) => /FAIL-CLOSED/i.test(line) && /max/i.test(line) && /no clamp/i.test(line)) && r.prompts.some((entry) => /claude/i.test(entry.opts.label || '')) && !r.prompts.some((entry) => /codex/i.test(entry.opts.label || '') && entry.opts.label !== 'codex-presence') && !r.prompts.some((entry) => entry.prompt.includes('--effort xhigh'))"
+    _json_assert "!r.error && r.logs.some((line) => /FAIL-CLOSED/i.test(line) && /xhigh/i.test(line) && /no clamp/i.test(line)) && r.prompts.some((entry) => /claude/i.test(entry.opts.label || '')) && !r.prompts.some((entry) => /codex/i.test(entry.opts.label || '') && entry.opts.label !== 'codex-presence') && !r.prompts.some((entry) => entry.prompt.includes('--effort xhigh'))"
   done
 }
 
@@ -109,6 +120,16 @@ _json_assert() {
   for recipe in "${RECIPES[@]}"; do
     _run_recipe "$recipe" happy
     _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === 'xhigh' && r.result.verdicts[0].justification === 'bounded test justification'"
+  done
+}
+
+@test "SC3(f): restored medium and high tiers pass policy validation" {
+  local recipe effort
+  for recipe in "${RECIPES[@]}"; do
+    for effort in medium high; do
+      _run_recipe "$recipe" "$effort"
+      _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === '$effort'"
+    done
   done
 }
 
@@ -125,7 +146,7 @@ _json_assert() {
 }
 
 @test "H2: codex-executor producer and verifier use the same caller worktree without engine isolation" {
-  run node "$STUB" "$CODEX_RECIPE" '{"codexAvailable":true,"supportedEfforts":["xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"xhigh"}]}'
+  run node "$STUB" "$CODEX_RECIPE" '{"codexAvailable":true,"supportedEfforts":["medium","high","xhigh"],"units":[{"name":"unit-alpha","kind":"execute","task":"apply bounded change","effort":"xhigh"}]}'
   [ "$status" -eq 0 ]
   _json_assert "r.error && /targetCwd/.test(r.error.message) && /stable producer\/verifier worktree/.test(r.error.message) && r.prompts.length === 0"
 
@@ -134,7 +155,7 @@ _json_assert() {
 }
 
 @test "M9: verify-panel requires targetCwd and includes it in the Codex work order" {
-  run node "$STUB" "$PANEL_RECIPE" '{"codexAvailable":true,"supportedEfforts":["xhigh"],"effort":"xhigh","findings":[],"context":"fixture"}'
+  run node "$STUB" "$PANEL_RECIPE" '{"codexAvailable":true,"supportedEfforts":["medium","high","xhigh"],"effort":"xhigh","findings":[],"context":"fixture"}'
   [ "$status" -eq 0 ]
   _json_assert "r.error && /targetCwd/.test(r.error.message) && r.prompts.length === 0"
 

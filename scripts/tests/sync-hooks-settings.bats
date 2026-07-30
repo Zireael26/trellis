@@ -178,14 +178,14 @@ EOF
 #     DROPPED -> the "check-module-boundary present" assertion flips RED.
 # Both assertions are kept so EITHER mutation is caught.
 # ---------------------------------------------------------------------------
-@test "preserving: PreToolUse has exactly 3 blocks, no duplicate canonical block" {
+@test "preserving: PreToolUse has exactly 4 blocks, no duplicate canonical block" {
   out="$SANDBOX/preserve.json"
   reconcile_settings_hooks "$CANON" "$FIXTURES/neev-settings.json" > "$out"
   # block-destructive (canonical Bash block) must appear exactly once.
   bd_count="$(jq '[.hooks.PreToolUse[]|select(.hooks[].command|endswith("block-destructive.sh"))]|length' "$out")"
   total="$(jq '.hooks.PreToolUse|length' "$out")"
-  # FINAL &&-chain: total==3 AND block-destructive not duplicated.
-  [ "$total" -eq 3 ] && [ "$bd_count" -eq 1 ]
+  # FINAL &&-chain: total==4 AND block-destructive not duplicated.
+  [ "$total" -eq 4 ] && [ "$bd_count" -eq 1 ]
 }
 
 @test "preserving: check-module-boundary present with matcher Edit|Write" {
@@ -239,8 +239,8 @@ EOF
   reconcile_settings_hooks "$CANON" "$r1" > "$r2"
   cmb="$(jq '[.hooks.PreToolUse[]|select(.hooks[].command|endswith("check-module-boundary.sh"))]|length' "$r2")"
   total="$(jq '.hooks.PreToolUse|length' "$r2")"
-  # FINAL: still exactly 3 blocks, check-module-boundary present exactly once.
-  [ "$total" -eq 3 ] && [ "$cmb" -eq 1 ]
+  # FINAL: still exactly 4 blocks, check-module-boundary present exactly once.
+  [ "$total" -eq 4 ] && [ "$cmb" -eq 1 ]
 }
 
 @test "idempotent (akaushik): 2nd run is byte-identical (canonicalized)" {

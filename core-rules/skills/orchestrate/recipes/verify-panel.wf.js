@@ -17,8 +17,8 @@
 //   args.targetCwd        string  — REQUIRED repo/worktree root for the Codex
 //                          reviewer. Threaded into its work order as TARGET_CWD.
 //   args.effort           string  — REQUIRED reasoning tier for the Codex leg (enum
-//                          xhigh|max — medium/high suspended 2026-07-10; review passes are xhigh-band per
-//                          docs/codex-routing.md §3). Omitted → validation error, never
+//                          medium|high|xhigh|max per docs/codex-routing.md §3;
+//                          choose by finding complexity and consequence). Omitted → validation error, never
 //                          a default (spec 011 D1); `ultra` hard-rejected in recipes
 //                          (D4a); `max` requires a non-empty args.justification.
 //   args.justification    string  — required when effort is an exception tier (`max`);
@@ -49,6 +49,36 @@ export const meta = {
   },
 }
 
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return { id, ok: false, value: null, error: typeof error?.message === 'string' ? error.message : String(error) }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) { malformedCount += 1; continue }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({ event: 'workflow_stage_gate', stage, expected_ids: expected, success_ids: successIds, failure_ids: failureIds, unexpected_ids: unexpectedIds, missing_ids: missingIds, expected_count: expected.length, receipt_count: rows.length, success_count: successIds.length, failure_count: failureIds.length, malformed_count: malformedCount, min_success: minSuccess, ok }))
+  if (!ok) throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  return expected.map((id) => byId.get(id))
+}
+
 // A single reviewer's verdict on one finding. additionalProperties:false so the
 // engine rejects anything off-shape.
 const REVIEW = {
@@ -66,8 +96,7 @@ const REVIEW = {
 // Panel units are homogeneous review passes, so effort is declared once per
 // run. Explicit-or-error: an omitted tier is a validation error, never a
 // default (docs/codex-routing.md §3).
-// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
-const EFFORT_ENUM = ['xhigh', 'max']
+const EFFORT_ENUM = ['medium', 'high', 'xhigh']
 const targetCwd = args.targetCwd
 if (typeof targetCwd !== 'string' || targetCwd.trim() === '') {
   throw new Error('verify-panel: targetCwd is required for the Codex reviewer work order')
@@ -80,13 +109,14 @@ if (effort === 'ultra') {
   log('verify-panel: HARD-REJECT effort=ultra — the companion dispatch surface caps at xhigh and delegation is invisible/non-resumable in a deterministic workflow (docs/codex-routing.md §3; D4a satisfied 2026-07-10, reject stands on surface + visibility)')
   throw new Error('verify-panel: effort "ultra" is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)')
 }
+if (effort === 'max') {
+  log('verify-panel: HARD-REJECT effort=max — above xhigh these models spend substantially more reasoning for very little gain, so max is never selected (doctrine: core-rules/references/model-routing.md § Effort). A justification no longer admits it.')
+  throw new Error('verify-panel: effort "max" is hard-rejected in recipes — xhigh is the ceiling (core-rules/references/model-routing.md § Effort)')
+}
 if (!EFFORT_ENUM.includes(effort)) {
   throw new Error('verify-panel: effort "' + effort + '" not in enum [' + EFFORT_ENUM.join(', ') + '] (spec 011 D1)')
 }
 const justification = args.justification ?? ''
-if (effort === 'max' && (typeof justification !== 'string' || justification.trim() === '')) {
-  throw new Error('verify-panel: effort "max" requires a non-empty justification (spec 011 D1)')
-}
 // Surface-capability floor (D6b): fail-closed, never clamp. Conservative
 // default = today's verified companion reality, threaded from the D6 preflight
 // when available.
@@ -138,12 +168,13 @@ function codexReviewPrompt(f) {
 function parseCodexReview(raw) {
   if (isEmpty(raw) || isJobHandle(raw)) return null
   const text = String(raw)
-  const real = /real\s*[:=]\s*true/i.test(text) || (/\breal\b/i.test(text) && !/real\s*[:=]\s*false/i.test(text) && /\b(genuine|confirmed|valid)\b/i.test(text))
-  const reasonMatch = text.match(/reason\s*[:=]\s*(.+)/i)
+  const realMatch = text.match(/(?:^|\n)\s*real\s*[:=]\s*(true|false)\s*(?:\n|$)/i)
+  const reasonMatch = text.match(/(?:^|\n)\s*reason\s*[:=]\s*(\S[^\n]*)/i)
+  if (!realMatch || !reasonMatch) return null
   return {
-    real,
+    real: realMatch[1].toLowerCase() === 'true',
     confidence: 0.7,
-    reason: (reasonMatch ? reasonMatch[1] : text).trim().slice(0, 400),
+    reason: reasonMatch[1].trim().slice(0, 400),
   }
 }
 
@@ -193,20 +224,19 @@ if (!effortSupported) {
   log('verify-panel: FAIL-CLOSED tier=' + effort + ' not supported by surface [' + supportedEfforts.join(', ') + '] — Codex leg OFF for this run (single-model), no clamp')
   codexAvailable = false
 } else if (codexAvailable === undefined) {
-  try {
-    const probe = await agent(
-      [
-        'Run this and report ONLY whether Codex is usable:',
-        '  node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json',
-        'Codex is available ONLY if ready && codex.available && auth.loggedIn.',
-        'Return the single word "yes" or "no".',
-      ].join('\n'),
-      { label: 'codex-presence', phase: 'Presence' },
-    )
-    codexAvailable = typeof probe === 'string' && /\byes\b/i.test(probe)
-  } catch {
-    codexAvailable = false
-  }
+  const presenceReceipt = await settle('codex-presence', () => agent(
+    [
+      'Run this and report ONLY whether Codex is usable:',
+      '  node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json',
+      'Codex is available ONLY if ready && codex.available && auth.loggedIn.',
+      'Return the single word "yes" or "no".',
+    ].join('\n'),
+    { label: 'codex-presence', phase: 'Presence' },
+  ))
+  requireStage('Presence:Codex', ['codex-presence'], [presenceReceipt], 0)
+  codexAvailable = presenceReceipt.ok === true
+    && typeof presenceReceipt.value === 'string'
+    && /\byes\b/i.test(presenceReceipt.value)
 }
 log('verify-panel: ' + findings.length + ' finding(s), codex ' + (codexAvailable ? 'ON' : 'OFF (single-model)'))
 
@@ -215,27 +245,36 @@ log('verify-panel: ' + findings.length + ' finding(s), codex ' + (codexAvailable
 // does not block its Claude leg. Findings are independent, so the whole panel
 // fans out at once.
 phase('Panel')
-const results = await parallel(
-  findings.map((f) => async () => {
-    const [claude, codex] = await Promise.all([
-      claudeReview(f),
-      codexAvailable ? codexReview(f) : Promise.resolve(null),
-    ])
-    // Receipt echo (spec 011 D1/SC3e): the declared tier + justification are
-    // merged recipe-side into every returned record — deterministic, never
-    // asked of the reviewer agents (drift risk).
-    return {
-      finding: f,
-      claude,
-      codex,
-      consensus: consensusOf(claude, codex),
-      effort,
-      justification,
-    }
-  }),
+const findingIds = findings.map((f) => String(f.id ?? f.file ?? 'finding'))
+const claudeReceipts = await parallel(
+  findings.map((f, index) => () => settle(findingIds[index], () => claudeReview(f))),
 )
+requireStage('Panel:Claude', findingIds, claudeReceipts, findingIds.length)
+
+const codexReceipts = await parallel(
+  findings.map((f, index) => () => settle(findingIds[index], () => (
+    codexAvailable ? codexReview(f) : Promise.resolve(null)
+  ))),
+)
+requireStage('Panel:Codex', findingIds, codexReceipts, 0)
+
+const results = findings.map((finding, index) => {
+  const claude = claudeReceipts[index].value
+  const codex = codexReceipts[index].ok ? codexReceipts[index].value : null
+  // Receipt echo (spec 011 D1/SC3e): the declared tier + justification are
+  // merged recipe-side into every returned record — deterministic, never
+  // asked of the reviewer agents (drift risk).
+  return {
+    finding,
+    claude,
+    codex,
+    consensus: consensusOf(claude, codex),
+    effort,
+    justification,
+  }
+})
 
 // The main loop acts on these: act on agree-real, drop agree-not-real, surface
 // every `split` for a human look (the diversity payoff — one model caught what
 // the other missed). Nothing here merges or gates; the caller decides.
-return { codexAvailable, verdicts: results.filter(Boolean) }
+return { codexAvailable, verdicts: results }

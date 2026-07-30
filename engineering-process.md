@@ -352,6 +352,22 @@ Claude Code is the primary harness. Codex is the secondary. Different layers cov
 
 Projects opt into the secondary by adding `"codex"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. Both harnesses run the full Tier 1/2/3 enforcement stack — the `code-review` / `ui-verify` / receipt gates block at turn end on Claude Code and Codex alike.
 
+#### Optional GPTX model lane inside Claude Code
+
+GPTX is separate from Codex harness parity. It keeps Claude Code as the terminal, tool loop, Agent surface, team UI, and permissions boundary while a local Trellis router sends only explicit GPT/Codex model IDs to a maintained CLIProxyAPI translator. Claude and unknown model IDs default to Anthropic. Main mode, main model, advisor, and Agent provider policy resolve independently; explicit selections fail closed.
+
+When GPTX capability is installed, bounded executor units prefer native `gpt-mid`, `gpt-high`, `gpt-sol`, and advice-gated `gpt-terra` Agent profiles. The OpenAI Codex plugin for Claude Code and Trellis `codex-worker` compatibility are not required and never become an automatic fallback. Generic Codex CLI use remains a separate operator-selected surface.
+
+This is native-feeling harness participation, not vendor support. Anthropic documents gateway wire formats but explicitly does not support routing Claude Code to non-Claude models and does not endorse, maintain, or audit third-party gateways. Public setup therefore requires credential separation, loopback binding, exact translator provenance, reversible installation, hermetic gates, and live release certification.
+
+Canonical references:
+
+- [`docs/gptx.md`](docs/gptx.md) — topology, request flow, modes, Agent/team/Workflow participation;
+- [`docs/gptx-security.md`](docs/gptx-security.md) — trust boundaries, failure matrix, residual risks;
+- [`AGENT_ONBOARD_GPTX.md`](AGENT_ONBOARD_GPTX.md) — tested macOS setup and rollback;
+- [`docs/references/gptx-sources.md`](docs/references/gptx-sources.md) — vendor, implementation, license, and prior-art sources;
+- [`specs/027-gptx-public-release/`](specs/027-gptx-public-release/) — certification and publication gates.
+
 ### 5.6 Token-noise filter (`permissions.deny`)
 
 The canonical settings template ships a `permissions.deny` block that blocks the agent from reading generated files, build artifacts, vendored dependencies, and lockfiles. Same payload across every project: `node_modules/`, `.next/`, `dist/`, `build/`, `out/`, `target/`, `vendor/`, `.venv/`, `__pycache__/`, every cache dir, every lockfile. New projects pick it up automatically through `onboard-project.sh`. Existing projects converge via `scripts/rollout-settings.sh` — idempotent jq merge that preserves project-local additions and only ever adds entries, never deletes.

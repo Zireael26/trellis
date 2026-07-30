@@ -11,6 +11,8 @@ reference files. Projects copy the canonical set into their own
 | Script | Event | Origin |
 |---|---|---|
 | `block-destructive.sh` | PreToolUse (Bash) | upstream, extended |
+| `skill-preload-guard.sh` | PreToolUse (Skill) | new |
+| `skill-slash-guard.sh` | UserPromptExpansion (slash command) | new |
 | `reread-guard.sh` | PreToolUse (Edit/Write/MultiEdit) | new |
 | `post-edit-verify.sh` | PostToolUse (Edit/Write/MultiEdit) | upstream, extended |
 | `truncation-check.sh` | PostToolUse (Grep/Bash/Read) | upstream |
@@ -19,6 +21,7 @@ reference files. Projects copy the canonical set into their own
 | `save-context-log.sh` | PreCompact | new |
 | `post-compact-context.sh` | SessionStart (compact) | new |
 | `inject-primer-index.sh` | SessionStart | new |
+| `skill-size-preflight.sh` | SessionStart (advisory) | new |
 
 **Tier 2 — heavy-gated (wrap-up)**
 

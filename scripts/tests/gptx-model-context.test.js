@@ -43,6 +43,15 @@ try {
   assert.equal(sol.claude_code_max_context_tokens, 272000);
   assert.equal(sol.claude_code_estimated_compact_tokens, 239000);
   assert.equal(sol.source, 'codex-catalog');
+  assert.equal(sol.execution_model, 'gpt-5.6-sol');
+
+  const medium = resolveModelContext({
+    model: 'gpt-5.6-sol-medium',
+    cachePath: catalogPath,
+  });
+  assert.equal(medium.model, 'gpt-5.6-sol-medium');
+  assert.equal(medium.execution_model, 'gpt-5.6-sol');
+  assert.equal(medium.raw_context_tokens, 272000);
 
   const terra = resolveModelContext({ model: 'gpt-5.6-terra', cachePath: catalogPath });
   assert.equal(terra.raw_context_tokens, 300000);
@@ -91,7 +100,7 @@ try {
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /absent from/);
 
-  process.stdout.write('gptx-model-context: 12 assertions passed\n');
+  process.stdout.write('gptx-model-context: base and effort-alias contexts passed\n');
 } finally {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 }

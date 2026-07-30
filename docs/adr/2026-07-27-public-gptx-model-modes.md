@@ -1,8 +1,9 @@
 # Publish GPTX as a standard Trellis feature
 
 Date: 2026-07-27
-Status: Accepted
-Spec: `specs/022-multi-model-session-modes/`
+Updated: 2026-07-29
+Status: Accepted; publication gated by Spec 027 live certification
+Specs: `specs/022-multi-model-session-modes/`, `specs/027-gptx-public-release/`
 Supersedes: the private-binding publication decision in
 `docs/adr/2026-07-26-multi-model-lane-continuity.md`
 
@@ -16,6 +17,13 @@ CLIProxyAPI fork, and onboarding precise enough for another LLM to reproduce it.
 The same review also exposed two functional gaps. Claude Code's local advisor eligibility
 check rejected custom GPT IDs even though the gateway speaks the Anthropic contract, and
 the global GPT context override was lower than the current Codex subscription catalog.
+
+Anthropic now documents the product boundary explicitly: supported gateway wire formats do
+not imply support for non-Claude models, and Anthropic does not endorse, maintain, or audit
+third-party gateway products. Public GPTX documentation must quote and link that boundary,
+describe participation as native-feeling rather than Anthropic-native, and hold publication
+until live certification proves every public Agent, team, Workflow, advisor, and rollback
+claim.
 
 ## Decision
 
@@ -36,6 +44,24 @@ the global GPT context override was lower than the current Codex subscription ca
 8. Default both GPT-backed main-session modes to Sol xhigh. Terra remains a fast
    bounded-work teammate and an explicit `--model terra` escape hatch, but it may not
    run with advisor `none` and must receive smarter advice before editing.
+9. Treat advisor recovery as one end-to-end contract: bound callbacks and timeouts in
+   the router, configure reversible proxy retry/cooldown behavior, verify the installed
+   gateway in the doctor, and revive absent installed launch agents before a routed
+   cmux session.
+10. Treat Agent slot aliases as launcher-scoped capability names, not provider identity.
+    Export and version the effective child alias map, classify after resolution, preserve
+    literal full model IDs, and fail closed when inherited mapping and defaults disagree.
+11. Make `gpt-mid`, `gpt-high`, `gpt-sol`, and `gpt-terra` the canonical GPT executor
+    identities wherever GPTX Agent capability exists. Preserve the flat named-teammate and
+    unnamed-subagent lifecycle supplied by Claude Code.
+12. Treat the OpenAI Codex plugin for Claude Code and `codex-worker` as optional legacy
+    compatibility. GPTX setup, certification, architecture, and examples must not depend on
+    plugin installation; generic Codex CLI harness support remains independent.
+13. Describe GPT participation as native-feeling use of existing Claude Code model, Agent,
+    team, and tool surfaces. Never describe non-Claude routing as endorsed, audited,
+    maintained, or supported by Anthropic.
+14. Require Spec 027 live certification and full scratch-mirror inspection before public
+    publication. Hermetic tests cannot substitute for live provider/team/Workflow proof.
 
 ## Consequences
 
@@ -50,6 +76,34 @@ the global GPT context override was lower than the current Codex subscription ca
 - Terra is not chosen automatically as an orchestrator. Explicit operator selection is
   still supported and fails closed before cmux when advice is disabled.
 - The setup is reversible from an install manifest and settings backup.
+- A routed session now fails closed with a reinstall instruction when the local gateway
+  cannot be restored, rather than starting cmux against an unavailable endpoint.
+- Public operators inherit an unsupported integration and must maintain the router,
+  translator pin, credential boundary, live certification, and rollback discipline across
+  Claude Code, Codex, and CLIProxyAPI changes.
+- Native GPT Agent profiles replace plugin-companion delegation as the default GPT path.
+  Existing plugin users may retain their command/job workflow, but its failure never
+  silently selects a GPTX, Claude, or direct Codex lane.
+- Public claims about advisor, named teammates, unnamed subagents, Dynamic Workflows, and
+  reversible install remain release-gated until the corresponding Spec 027 rows pass.
+
+## Review scope rationale
+
+The advisor-recovery follow-up crosses the router, installer, doctor, launcher, tests,
+operator documentation, and spec receipts. Its review diff is slightly larger than the
+normal Trellis hard cap. Splitting those surfaces across separate PRs would temporarily
+publish a partial recovery contract—for example retry behavior without callback cleanup,
+or service revival without the matching install/doctor guidance—and make rollback depend
+on commit ordering. Keeping the contract together gives reviewers one failure/recovery
+story and preserves a single feature-level rollback boundary.
+
+The Spec 025 alias amendment is also intentionally cohesive even though its executable
+matrix pushes the review range above the ordinary hard line cap. Launcher defaults, locked
+child environment, guard resolution, generated policy prose, installer packaging, and
+fail-closed tests form one provider-boundary invariant. Splitting the matrix from the guard
+would permit the same display-alias/provider drift to regress between commits. The branch
+therefore uses this ADR as the explicit size exception and keeps live/service acceptance
+outside the review range until the operator grants a maintenance window.
 
 ## Alternatives considered
 
@@ -65,3 +119,14 @@ compaction of native 1M Claude sessions.
 **Route Claude subscription traffic through the GPT translator.** Rejected. The
 translation layer has no need for the credential and creates an unnecessary account and
 security boundary.
+
+**Require the OpenAI Codex plugin as the GPT execution path.** Rejected. The plugin's
+slash-command, companion, and background-job lifecycle is useful optional prior art, but
+GPTX can route explicit GPT models and register GPT Agent profiles without it. Making the
+plugin mandatory would add a second orchestration boundary and make plugin availability an
+unrelated failure mode for main-model, Agent, team, and Workflow use.
+
+**Publish from hermetic evidence alone.** Rejected. Fixtures prove routing, transforms,
+retry bounds, and fail-closed policy; they do not attest a real provider, named teammate,
+unnamed subagent, Dynamic Workflow, or reversible live installation. Spec 027 makes live
+certification a hard publication dependency.

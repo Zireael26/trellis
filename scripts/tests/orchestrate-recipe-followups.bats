@@ -25,23 +25,26 @@ _json_assert() {
 }
 
 @test "M11 conductor applies force exempt anti-dup controls and serializes args.weights" {
-  _run_recipe "$CONDUCTOR_RECIPE" '{"today":"2026-07-14","backlogPath":"backlog.yml","registryPath":"registry.md","autoSpecTopN":3,"weights":{"deadline":0.7,"impact":0.3},"__agentOutputByLabel":{"rank":{"generated_for":"2026-07-14","ranked":[{"id":"normal","project":"repo","title":"normal","score":0.99,"reasons":"ranked first","eligible_auto_spec":true,"auto_spec":null,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":[]},{"id":"exempt","project":"repo","title":"exempt","score":0.98,"reasons":"explicit exemption","eligible_auto_spec":false,"auto_spec":false,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":["auto-spec-exempt"]},{"id":"delivered","project":"repo","title":"delivered","score":0.97,"reasons":"already done","eligible_auto_spec":false,"auto_spec":true,"delivered_on_main":true,"existing_spec_path":"","auto_spec_exclusions":["delivered-on-main"]},{"id":"existing","project":"repo","title":"existing","score":0.96,"reasons":"already specced","eligible_auto_spec":false,"auto_spec":null,"delivered_on_main":false,"existing_spec_path":"specs/123-existing","auto_spec_exclusions":["existing-spec:specs/123-existing"]},{"id":"forced","project":"repo","title":"forced","score":0.1,"reasons":"operator force","eligible_auto_spec":true,"auto_spec":true,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":[]},{"id":"forced","project":"repo","title":"forced duplicate","score":0.05,"reasons":"duplicate row","eligible_auto_spec":true,"auto_spec":true,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":[]}]}}}'
-  _json_assert "!r.error && (() => { const rank = r.prompts.find((entry) => entry.opts.label === 'rank'); const specs = r.prompts.filter((entry) => (entry.opts.label || '').startsWith('spec:')); return rank.prompt.includes('WEIGHTS_OVERRIDE_JSON: {\"deadline\":0.7,\"impact\":0.3}') && rank.prompt.includes('delivered-on-main') && rank.prompt.includes('existing-spec:<path>') && specs.map((entry) => entry.opts.label).join(',') === 'spec:forced,spec:normal' && !specs.some((entry) => /exempt|delivered|existing/.test(entry.opts.label)) && r.logs.some((line) => line.includes('forced=2') && line.includes('exempt=1') && line.includes('hard-excluded=2') && line.includes('duplicate=1')); })()"
+  _run_recipe "$CONDUCTOR_RECIPE" '{"today":"2026-07-14","backlogPath":"backlog.yml","registryPath":"registry.md","autoSpecTopN":3,"weights":{"deadline":0.7,"impact":0.3},"__agentOutputByLabel":{"rank":{"generated_for":"2026-07-14","ranked":[{"id":"normal","project":"repo","title":"normal","score":0.99,"reasons":"ranked first","eligible_auto_spec":true,"auto_spec":null,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":[]},{"id":"exempt","project":"repo","title":"exempt","score":0.98,"reasons":"explicit exemption","eligible_auto_spec":false,"auto_spec":false,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":["auto-spec-exempt"]},{"id":"delivered","project":"repo","title":"delivered","score":0.97,"reasons":"already done","eligible_auto_spec":false,"auto_spec":true,"delivered_on_main":true,"existing_spec_path":"","auto_spec_exclusions":["delivered-on-main"]},{"id":"existing","project":"repo","title":"existing","score":0.96,"reasons":"already specced","eligible_auto_spec":false,"auto_spec":null,"delivered_on_main":false,"existing_spec_path":"specs/123-existing","auto_spec_exclusions":["existing-spec:specs/123-existing"]},{"id":"forced","project":"repo","title":"forced","score":0.1,"reasons":"operator force","eligible_auto_spec":true,"auto_spec":true,"delivered_on_main":false,"existing_spec_path":"","auto_spec_exclusions":[]}]}}}'
+  _json_assert "!r.error && (() => { const rank = r.prompts.find((entry) => entry.opts.label === 'rank'); const specs = r.prompts.filter((entry) => (entry.opts.label || '').startsWith('spec:')); return rank.prompt.includes('WEIGHTS_OVERRIDE_JSON: {\"deadline\":0.7,\"impact\":0.3}') && rank.prompt.includes('delivered-on-main') && rank.prompt.includes('existing-spec:<path>') && specs.map((entry) => entry.opts.label).join(',') === 'spec:forced,spec:normal' && !specs.some((entry) => /exempt|delivered|existing/.test(entry.opts.label)) && r.logs.some((line) => line.includes('forced=1') && line.includes('exempt=1') && line.includes('hard-excluded=2') && line.includes('duplicate=0')); })()"
 }
 
-@test "M12 fleet workflow accepts only xhigh and max" {
+@test "M12 fleet workflow accepts restored band and hard-rejects max even when justified" {
   [ -f "$FLEET_RECIPE" ] || skip "private fleet workflow is not shipped in the public mirror"
   local effort
-  for effort in medium high; do
+  for effort in medium high xhigh; do
     _run_recipe "$FLEET_RECIPE" "{\"codexAvailable\":true,\"repoLanes\":[{\"repo\":\"repo-alpha\",\"path\":\"/tmp/repo-alpha\",\"base\":\"main\",\"harness\":\"codex\",\"effort\":\"$effort\",\"rows\":[]}]}"
-    _json_assert "r.error && r.error.message.includes('$effort') && r.error.message.includes('enum [xhigh, max]') && r.prompts.length === 0"
+    _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === '$effort'"
   done
 
-  _run_recipe "$FLEET_RECIPE" '{"codexAvailable":true,"supportedEfforts":["xhigh"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"xhigh","rows":[]}]}'
-  _json_assert "!r.error && r.result && r.result.verdicts.length === 1"
-
+  # `max` is hard-rejected at dispatch (0c128e5). This case deliberately admits it at the
+  # schema level via supportedEfforts AND supplies a justification, to prove neither one
+  # re-opens the door: xhigh is the ceiling.
   _run_recipe "$FLEET_RECIPE" '{"codexAvailable":true,"supportedEfforts":["max"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"max","justification":"bounded exception","rows":[]}]}'
-  _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === 'max'"
+  _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('hard-rejected') && r.prompts.length === 0 && r.logs.some((line) => line.includes('HARD-REJECT effort=max'))"
+
+  _run_recipe "$FLEET_RECIPE" '{"codexAvailable":true,"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"turbo","rows":[]}]}'
+  _json_assert "r.error && r.error.message.includes('turbo') && r.error.message.includes('enum [medium, high, xhigh]') && r.prompts.length === 0"
 }
 
 @test "M13 schema and public example define positive codex_fanout concurrency" {
@@ -54,7 +57,7 @@ const concurrency = block?.properties?.concurrency
 if (!block || block.type !== 'object' || block.additionalProperties !== false) process.exit(1)
 if (!block.required?.includes('concurrency')) process.exit(2)
 if (concurrency?.type !== 'integer' || concurrency.minimum !== 1) process.exit(3)
-if (example.codex_fanout?.concurrency !== 4) process.exit(4)
+if (example.codex_fanout?.concurrency !== 2) process.exit(4)
 NODE
   [ "$status" -eq 0 ]
 }

@@ -270,15 +270,17 @@ The gate that makes "every feature gets specced" enforceable rather than aspirat
 
 ## Invariants across all tiers
 
-### Codex worker preflight is runtime, not a hook
+### Optional legacy Codex worker preflight is runtime, not a hook
 
-The blocking `codex-worker` executor runs `scripts/codex-worker-preflight.sh`
-at dispatch time. It is intentionally not registered in either hook manifest:
-the companion state root and sandbox follow the invocation cwd, so the check
-must run from the target checkout. Per-dispatch model pinning requires Codex CLI
-0.144 or newer. After a CLI upgrade, restart any stale `codex app-server`, and
-reconcile competing Homebrew/npm installations or links before dispatch so the
-selected binary is not shadowed.
+A project explicitly configured for the optional legacy OpenAI Codex plugin
+companion runs `scripts/codex-worker-preflight.sh` when it dispatches
+`codex-worker`. This is a legacy runtime check, intentionally not registered in
+either hook manifest: the companion state root and sandbox follow the invocation
+cwd, so the check must run from the target checkout. Per-dispatch model pinning
+requires Codex CLI 0.144 or newer. After a CLI upgrade, restart any stale
+`codex app-server`, and reconcile competing Homebrew/npm installations or links
+before dispatch so the selected binary is not shadowed. Native GPTX Agent
+profiles and generic Codex CLI harness hooks do not depend on this preflight.
 
 - **Never skip with `--no-verify`.** If a hook fails, fix the cause. If the hook is wrong, fix the hook and commit that separately.
 - **`stop_hook_active` guard is mandatory** on every `Stop` hook. Missing it causes infinite loops when a blocked hook triggers another stop.

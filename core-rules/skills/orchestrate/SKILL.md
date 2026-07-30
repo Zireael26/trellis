@@ -79,6 +79,81 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
+**Executor Agent selection.** When GPTX Agent capability is available, generic
+Workflow dispatch uses the native GPT profiles: `gpt-mid` for mechanical or
+strong-oracle units, `gpt-high` for moderately complex cross-file units,
+`gpt-sol` for weak-oracle or consequential units, and `gpt-terra` only with its
+required successful strong-model advice. An explicit provider or model selection
+wins; a rejected, unavailable, null, or failed selected lane fails the receipt and
+stays visible. Never rewrite it or silently substitute the OpenAI Codex plugin
+companion. `codex-worker`-specific recipes and mechanics are optional legacy
+compatibility and run only when the operator explicitly selected and configured
+that route. Generic Codex CLI harness support remains independent.
+
+## Stage receipts and fail-closed gates
+
+Workflow transport failure is represented as `null`: `parallel()` preserves the failed
+thunk's array slot as null, and `pipeline()` nulls a failed item and skips its later
+stages. A recipe must therefore decide stage success from declared identities and
+receipts, never from the length of `results.filter(Boolean)`.
+
+Every recipe carries the engine-compatible inline helper pair shown in
+`recipes/template.wf.js`:
+
+- `settle(id, run)` returns exactly one `{id, ok, value, error}` receipt. A throw or
+  null value is `ok:false`; the declared id and result-array cardinality survive.
+- `requireStage(stage, expectedIds, receipts, minSuccess)` requires one unique receipt
+  for every expected id, emits one JSON `workflow_stage_gate` log with expected,
+  successful, failed, missing, and unexpected ids plus counts, and throws when identity
+  integrity fails or success is below `minSuccess`.
+- Required stages pass `expectedIds.length`. An explicitly optional provider leg may
+  pass `0`, but it still preserves/logs every failed identity. Provider substitution
+  is never implicit: only an operator-declared fallback becomes a new required attempt;
+  otherwise the selected lane's failed receipt fails the stage.
+- Recipe-specific thunks validate the schema's identity field before returning a value.
+  A verdict for the wrong or missing `id`, `target`, `project`, `unit`, or `repo` is
+  null/failure, not another unit's success.
+- Business verdict booleans do not define transport success. `green:false`,
+  `ready:false`, `synced:false`, `real:false`, and a valid HOLD/refusal are successful
+  receipts that the caller must see and act on.
+
+Use no quorum unless the recipe declares one as product semantics and tests it. The
+canonical recipes currently require every non-optional stage identity; Codex review in
+`verify-panel` and provider presence probes are optional degradation only.
+
+## Mutation waves, override receipts, and checkpoints
+
+Canonical repo-writing recipes dispatch mutation/implementation units in engine-compatible
+waves with a default `maxParallel` of **2**. `parallel(...)` remains truthful for bounded
+read-only classification and verification panels; those calls do not pretend to consume a
+mutation slot. One-shot still means one finite work-list pass, not one unbounded barrier.
+
+A caller may request `args.maxParallel > 2` only when all four gates are present before the
+first mutation dispatch:
+
+1. explicit positive-integer `maxParallel`;
+2. non-empty `parallelJustification`;
+3. `args.runId` plus `pilotReceipt: { completed:true, recipe:<current recipe>,
+   run_id:<same runId>, target_ids:[a,b], success_ids:[a,b],
+   scope_fingerprint:<current task/scope> }`, where `[a,b]` is exactly the first two
+   current mutation identities in order and both succeeded; and
+4. a positive existing safety budget — the recipe's own `meta.safety.budget_ceiling_usd`
+   or caller-resolved `args.loopSafety.budget_ceiling_usd` when the recipe inherits it.
+
+Missing, stale, unrelated, reordered, duplicate, or malformed evidence throws before dispatch;
+there is no silent clamp or inferred pilot. Pure read-only/judgment runs do not consume mutation
+slots and therefore do not require mutation-override evidence. Before any mutation starts, the
+recipe also rejects duplicate expected identities. `codex-executor` worktrees must be globally
+unique after path normalization, not merely unique inside one wave; dependency-serialized
+`codex-fanout` worktrees remain collision-checked per actual concurrent wave. After every successful
+mutation wave, recipes emit a structured
+`workflow_checkpoint` JSON log containing stage, one-based wave number, expected/successful
+identities, receipt count, and `ok:true`. The checkpoint is emitted only after strict
+`requireStage` validation. A null, throw, missing identity, duplicate identity, or failed
+required receipt prevents the checkpoint and throws before the next wave starts. Results are
+returned in original input order across waves. Optional provider and teardown semantics stay
+as declared; checkpoints never turn an optional or failed receipt into success.
+
 **Prefer async over blocking, and few long-lived agents over many short ones.**
 Where the harness lets you dispatch and keep working, do that rather than blocking on
 each return — and check in on a running agent instead of waiting on it. When several
@@ -87,8 +162,8 @@ them** rather than spawning a fresh agent per subtask: the re-read cost of a col
 agent usually exceeds the parallelism it buys, and a wave of short agents bottlenecks
 on its slowest member. Intervene when an agent goes off track or is missing context;
 do not re-dispatch around it. `references/speed-doctrine.md` specializes this rule
-for the cross-harness case; the `codex-worker` path is deliberately blocking for a
-workflow-engine reason (below), not a violation of it.
+for the cross-harness case; the optional legacy `codex-worker` path is deliberately
+blocking for a workflow-engine reason (below), not a violation of it.
 
 **Fan-out vehicle preference (teams-enabled harnesses).** When the harness offers
 both a workflow-orchestration tool and named-teammate spawning, default fan-out
@@ -139,11 +214,13 @@ Full catalog: [`references/patterns.md`](references/patterns.md).
 
 ## Dual-harness speed doctrine
 
-When both an orchestration surface and a Codex executor are available, wall-clock
+When both an orchestration surface and a GPT executor are available, wall-clock
 speed comes from **topology, not effort**. Two bright lines hold regardless of
 topology: never dispatch the same work order to more than one leg (no duplicate
-work), and inside a Workflow, Codex units dispatch through the blocking
-`codex-worker` agent only — never the fire-and-forget rescue path, whose
+work), and prefer native `gpt-*` Agent types for generic Workflow units when GPTX
+exposes them. If the operator explicitly selected and configured the optional
+legacy OpenAI Codex plugin companion, its Workflow units dispatch through the
+blocking `codex-worker` agent only — never the fire-and-forget rescue path, whose
 backgrounding breaks `parallel()`/`pipeline()` barriers. Patterns, guardrails, and
 receipt contracts: [`references/speed-doctrine.md`](references/speed-doctrine.md).
 
@@ -154,10 +231,13 @@ Two norms for the heavy end — large fan-outs and proactive loops (see
 for one; this is *how* to run it).
 
 **Pilot before a large fan-out.** A dynamic workflow can spawn many agents; a bad
-recipe multiplied across 100 targets is 100× the waste. Before scaling, run the
-recipe over a **small pilot subset** (2-3 targets), confirm the verdict shape and
-the per-target cost, then fan out. `log()` the pilot cost so the full run's
-`budget_ceiling_usd` is grounded, not guessed.
+recipe multiplied across 100 targets is 100× the waste. The default mutation wave is
+two. Before requesting a larger wave, run exactly two distinct targets, confirm both
+settled successfully with the expected identities and verdict shape, and carry that
+structured, current-run `pilotReceipt` bound to the recipe, exact first two current targets,
+and current task/scope fingerprint, plus the non-empty `parallelJustification` and positive
+resolved safety budget into the larger run. Log pilot cost so the full run's
+`budget_ceiling_usd` is grounded, not guessed. Without all evidence, stay at two.
 
 **The proactive-loop shape** — the five canonical stages of an unattended,
 recurring loop, each mapped to machinery Trellis already ships:
@@ -240,8 +320,10 @@ hand; the structured verdict is the contract either way.
 3. Wire the stages: `phase()` to mark each phase, `agent(prompt, opts)` for a unit
    (pass `{label, phase, schema}`; add `isolation: "worktree"` for any agent that
    touches a repo), `parallel(thunks)` to fan out with a barrier, `pipeline(...)`
-   to stream without one. Return the structured verdicts for the caller to act on.
-   For a verify stage on above-solo-reliability work, the reviewer agent may adopt
+   to stream without one. Wrap every dispatched identity with `settle`, validate its
+   schema identity, and call `requireStage` before consuming required outputs; never
+   use `filter(Boolean)` to define stage success. Return the structured verdicts for
+   the caller to act on. For a verify stage on above-solo-reliability work, the reviewer agent may adopt
    the **skeptical-evaluator** persona against a pre-agreed sprint contract
    (`references/skeptical-evaluator.md`) — opt-in and gated, not the default.
 4. Keep it **parametric and path-neutral** — `core-rules/` is the public mirror.

@@ -4,6 +4,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { executionModelFor } = require('./effort-alias');
 
 const DEFAULT_EFFECTIVE_PERCENT = 95;
 const CODEX_COMPACT_PERCENT = 90;
@@ -45,6 +46,7 @@ const resolveModelContext = ({
     throw new Error('model is required');
   }
 
+  const executionModel = executionModelFor(model);
   let catalog = null;
   let entry = null;
   let raw;
@@ -55,10 +57,10 @@ const resolveModelContext = ({
     source = 'override';
   } else {
     catalog = readCatalog(cachePath);
-    entry = catalog.models.find((candidate) => candidate.slug === model);
+    entry = catalog.models.find((candidate) => candidate.slug === executionModel);
     if (!entry) {
       throw new Error(
-        `model ${model} is absent from ${cachePath}; run Codex once to refresh its catalog `
+        `model ${executionModel} is absent from ${cachePath}; run Codex once to refresh its catalog `
         + 'or set TRELLIS_GPT_CONTEXT_WINDOW explicitly',
       );
     }
@@ -85,6 +87,7 @@ const resolveModelContext = ({
 
   return {
     model,
+    execution_model: executionModel,
     source,
     catalog_path: source === 'codex-catalog' ? cachePath : null,
     catalog_fetched_at: catalog?.fetched_at ?? null,

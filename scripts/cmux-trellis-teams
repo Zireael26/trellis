@@ -9,6 +9,8 @@ while [[ -L "$SOURCE" ]]; do
 done
 ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 CONTEXT_RESOLVER="$ROOT/scripts/gptx/model-context.js"
+POLICY_RESOLVER="$ROOT/scripts/gptx/session-policy.js"
+DELEGATION_GUARD="$ROOT/scripts/gptx/delegation-guard.js"
 ROUTER_URL="${GPTX_BASE_URL:-http://127.0.0.1:8318}"
 ANTHROPIC_URL="${ANTHROPIC_DIRECT_BASE_URL:-https://api.anthropic.com}"
 
@@ -23,22 +25,34 @@ Claude arguments.
   --model sol|terra|luna|MODEL     Main model override
   --advisor auto|opus|fable|sol|none
                                    Advisor override
-                                   Terra requires an advisor other than none
+                                   Terra pairs best with an advisor; --advisor none
+                                   is honoured with a notice, not rejected
+  --delegates auto|gpt|claude|none
+                                   Allowed Agent providers (default: auto)
   --dry-run                        Print the resolved launch contract as JSON
   -h, --help                       Show this help
 
 Examples:
   cmux-trellis-teams --mode gptx --dangerously-skip-permissions
-  cmux-trellis-teams --mode codex --dangerously-skip-permissions
-  cmux-trellis-teams --mode hybrid --model terra --advisor auto
-  cmux-trellis-teams --mode claude --advisor opus
-  cmux-trellis-teams --mode claude --advisor sol
+  cmux-trellis-teams --mode codex --delegates gpt --dangerously-skip-permissions
+  cmux-trellis-teams --mode hybrid --model terra --advisor auto --delegates auto
+  cmux-trellis-teams --mode claude --advisor opus --delegates claude
+  cmux-trellis-teams --mode claude --advisor sol --delegates auto
 EOF
 }
 
 die() {
   printf 'cmux-trellis-teams: %s\n' "$*" >&2
   exit 2
+}
+
+append_prompt_text() {
+  local text="$1"
+  if [[ -n "$append_prompt" ]]; then
+    append_prompt="$append_prompt $text"
+  else
+    append_prompt="$text"
+  fi
 }
 
 resolve_cmux() {
@@ -58,25 +72,74 @@ resolve_cmux() {
   die "cmux was not found; install cmux or set CMUX_BIN"
 }
 
-model_id() {
-  case "$1" in
-    sol) printf '%s\n' gpt-5.6-sol ;;
-    terra) printf '%s\n' gpt-5.6-terra ;;
-    luna) printf '%s\n' gpt-5.6-luna ;;
-    *) printf '%s\n' "$1" ;;
-  esac
+gateway_ready() {
+  # 10s, not 2s. `ensure_local_gateway` kickstarts the router when this returns false,
+  # so a probe that times out under load RESTARTS A HEALTHY GATEWAY and drops every
+  # in-flight request for every other session on the machine. The status handler
+  # serialises behind request accounting, so a busy router can legitimately take
+  # longer than 2s to answer while being perfectly functional. Observed 2026-07-30.
+  curl -fsS --max-time 10 "$ROUTER_URL/__gptx/status" >/dev/null 2>&1
 }
 
-is_terra_model() {
-  case "$1" in
-    gpt-*-terra|gpt-*-terra-*) return 0 ;;
-    *) return 1 ;;
+# Distinguish "not listening" from "listening but slow". Only the former justifies a
+# restart; the latter is a healthy gateway under load.
+gateway_listening() {
+  local port="${ROUTER_URL##*:}"
+  port="${port%%/*}"
+  nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+}
+
+start_launch_agent() {
+  local label="$1" plist="$2" domain
+  domain="gui/$(id -u)"
+  [[ -f "$plist" ]] || die "missing launch agent $plist; rerun scripts/gptx/install.sh"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl kickstart -k "$domain/$label" >/dev/null
+  else
+    launchctl bootstrap "$domain" "$plist"
+  fi
+}
+
+ensure_local_gateway() {
+  gateway_ready && return 0
+  case "$ROUTER_URL" in
+    http://127.0.0.1:*|http://localhost:*) ;;
+    *) die "GPTX gateway is unavailable at $ROUTER_URL" ;;
   esac
+
+  # Something is bound to the port, so a process is alive and the slow probe above was
+  # load, not death. Restarting here would kill other sessions' in-flight requests to
+  # fix nothing. Proceed and let the request itself surface any real failure.
+  if gateway_listening; then
+    printf 'cmux-trellis-teams: gateway at %s is listening but slow to answer; not restarting it.\n' \
+      "$ROUTER_URL" >&2
+    return 0
+  fi
+
+  local launch_dir="${GPTX_LAUNCH_AGENT_DIR:-$HOME/Library/LaunchAgents}"
+  start_launch_agent \
+    dev.trellis.cliproxyapi \
+    "$launch_dir/dev.trellis.cliproxyapi.plist"
+  start_launch_agent \
+    dev.trellis.gptx-router \
+    "$launch_dir/dev.trellis.gptx-router.plist"
+
+  local attempt=0
+  while ((attempt < 20)); do
+    gateway_ready && return 0
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  die "GPTX launch agents were loaded but the gateway did not become ready at $ROUTER_URL"
 }
 
 mode=gptx
 requested_model=
 requested_advisor=
+requested_delegates=
+model_provided=false
+advisor_provided=false
+delegates_provided=false
 dry_run=false
 forwarded=()
 
@@ -94,19 +157,34 @@ while (($#)); do
     --model)
       (($# >= 2)) || die "--model requires a value"
       requested_model=$2
+      model_provided=true
       shift 2
       ;;
     --model=*)
       requested_model=${1#*=}
+      model_provided=true
       shift
       ;;
     --advisor)
       (($# >= 2)) || die "--advisor requires a value"
       requested_advisor=$2
+      advisor_provided=true
       shift 2
       ;;
     --advisor=*)
       requested_advisor=${1#*=}
+      advisor_provided=true
+      shift
+      ;;
+    --delegates)
+      (($# >= 2)) || die "--delegates requires a value"
+      requested_delegates=$2
+      delegates_provided=true
+      shift 2
+      ;;
+    --delegates=*)
+      requested_delegates=${1#*=}
+      delegates_provided=true
       shift
       ;;
     --dry-run)
@@ -129,68 +207,60 @@ while (($#)); do
   esac
 done
 
-case "$mode" in
-  gptx)
-    default_model='opus[1m]'
-    default_advisor=auto
-    ;;
-  codex)
-    default_model=sol
-    default_advisor=sol
-    ;;
-  hybrid)
-    default_model=sol
-    default_advisor=auto
-    ;;
-  claude)
-    default_model='opus[1m]'
-    default_advisor=opus
-    ;;
-  *)
-    die "unknown mode '$mode' (expected gptx, codex, hybrid, or claude)"
-    ;;
-esac
+command -v node >/dev/null 2>&1 || die "missing dependency: node"
+[[ -f "$POLICY_RESOLVER" ]] || die "missing session policy: $POLICY_RESOLVER"
+[[ -f "$DELEGATION_GUARD" ]] || die "missing delegation guard: $DELEGATION_GUARD"
 
-main_model="${requested_model:-$default_model}"
-advisor="${requested_advisor:-$default_advisor}"
-case "$advisor" in
-  auto|opus|fable|sol|none) ;;
-  *) die "unknown advisor '$advisor' (expected auto, opus, fable, sol, or none)" ;;
-esac
-
-resolved_model="$(model_id "$main_model")"
-if is_terra_model "$resolved_model" && [[ "$advisor" == none ]]; then
-  die "Terra requires advisor auto, opus, fable, or sol; --advisor none is not allowed"
+policy_args=(--resolve-launch --mode "$mode")
+$model_provided && policy_args+=(--model "$requested_model")
+$advisor_provided && policy_args+=(--advisor "$requested_advisor")
+$delegates_provided && policy_args+=(--delegates "$requested_delegates")
+policy_json="$(node "$POLICY_RESOLVER" "${policy_args[@]}")" || die "session policy resolution failed"
+if [[ "$(jq -r '.valid' <<<"$policy_json")" != true ]]; then
+  die "$(jq -r '.error' <<<"$policy_json")"
 fi
+
+mode="$(jq -r '.effective.mode' <<<"$policy_json")"
+resolved_model="$(jq -r '.effective.main_model' <<<"$policy_json")"
+main_provider="$(jq -r '.effective.main_provider' <<<"$policy_json")"
+advisor="$(jq -r '.effective.advisor' <<<"$policy_json")"
+advisor_transport="$(jq -r '.effective.advisor_transport' <<<"$policy_json")"
+delegates="$(jq -r '.effective.delegates' <<<"$policy_json")"
+topology="$(jq -r '.effective.topology' <<<"$policy_json")"
+policy_version="$(jq -r '.policy_version' <<<"$policy_json")"
 
 main_is_gpt=false
-case "$resolved_model" in
-  gpt-*|codex-*|o[0-9]*)
-    main_is_gpt=true
-    ;;
-esac
-
-if [[ "$mode" == codex || "$mode" == hybrid ]] && [[ "$main_is_gpt" != true ]]; then
-  die "$mode mode requires a GPT/Codex main model"
-fi
-if [[ "$mode" == claude && "$main_is_gpt" == true ]]; then
-  die "claude mode requires a Claude main model"
-fi
-
+[[ "$main_provider" == gpt ]] && main_is_gpt=true
 base_url=$ROUTER_URL
+[[ "$topology" == direct ]] && base_url=$ANTHROPIC_URL
 claude_model=$resolved_model
-advisor_transport=server-tool
 append_prompt=
 context_json=null
+agent_model_aliases="$(
+  jq -cn \
+    '{
+      opus:"claude-opus-5",
+      sonnet:"claude-sonnet-5",
+      haiku:"claude-haiku-4-5-20251001",
+      fable:"claude-fable-5"
+    }'
+)"
 
 env_json="$(
   jq -cn \
     --arg base "$base_url" \
     --arg mode "$mode" \
     --arg advisor "$advisor" \
+    --arg delegates "$delegates" \
+    --arg policy_version "$policy_version" \
     '{
       ANTHROPIC_BASE_URL: $base,
-      ANTHROPIC_CUSTOM_HEADERS: ("X-Trellis-Mode: " + $mode + "\nX-Trellis-Advisor: " + $advisor)
+      ANTHROPIC_CUSTOM_HEADERS: ("X-Trellis-Mode: " + $mode + "\nX-Trellis-Advisor: " + $advisor + "\nX-Trellis-Delegates: " + $delegates),
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-5",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "claude-haiku-4-5-20251001",
+      TRELLIS_GPTX_DELEGATES: $delegates,
+      TRELLIS_GPTX_POLICY_VERSION: $policy_version
     }'
 )"
 
@@ -198,6 +268,14 @@ if [[ "$main_is_gpt" == true ]]; then
   [[ -x "$CONTEXT_RESOLVER" || -f "$CONTEXT_RESOLVER" ]] || die "missing context resolver: $CONTEXT_RESOLVER"
   context_json="$(node "$CONTEXT_RESOLVER" --model "$resolved_model")"
   context_window="$(jq -er '.claude_code_max_context_tokens' <<<"$context_json")"
+  # Per-session compact window for the GPT lane only. The operator's shell sets a
+  # process-wide CLAUDE_CODE_AUTO_COMPACT_WINDOW sized for Opus's 1M context; left
+  # alone it exceeds this lane's 272K window, so auto-compact would never fire before
+  # the hard limit and the session dies on `Prompt is too long` instead of compacting.
+  # Setting it per session rather than globally is what decisions-log.md rejects a
+  # process-wide value for: a global clamp would shrink Opus's 1M context. This value
+  # is `raw - output reserve - compact reserve`, already computed by model-context.js.
+  compact_window="$(jq -er '.claude_code_estimated_compact_tokens' <<<"$context_json")"
 
   # Claude Code applies advisor eligibility to the selected family before it sends
   # a request. Pinning the official `opus` alias to a gateway model preserves that
@@ -209,26 +287,36 @@ if [[ "$main_is_gpt" == true ]]; then
       --arg model "$resolved_model" \
       --arg display "GPT-5.6 $display_name (Trellis)" \
       --arg context "$context_window" \
+      --arg compact "$compact_window" \
       '. + {
         ANTHROPIC_DEFAULT_OPUS_MODEL: $model,
         ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: $display,
         ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: "Codex subscription model through the local Trellis gateway",
         ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking",
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: $context,
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: $compact,
         CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL: "1"
       }' <<<"$env_json"
   )"
-elif [[ "$mode" == claude && "$advisor" != sol ]]; then
-  base_url=$ANTHROPIC_URL
+  agent_model_aliases="$(
+    jq -c --arg model "$resolved_model" '.opus = $model' <<<"$agent_model_aliases"
+  )"
+elif [[ "$topology" == direct ]]; then
   env_json="$(jq -c --arg base "$base_url" '.ANTHROPIC_BASE_URL = $base | del(.ANTHROPIC_CUSTOM_HEADERS)' <<<"$env_json")"
 fi
+env_json="$(
+  jq -c --arg aliases "$agent_model_aliases" \
+    '. + {TRELLIS_GPTX_MODEL_ALIASES: $aliases}' <<<"$env_json"
+)"
 
 case "$advisor" in
   none)
     advisor_model=opus
-    advisor_transport=disabled
     env_json="$(jq -c '. + {CLAUDE_CODE_DISABLE_ADVISOR_TOOL:"1"}' <<<"$env_json")"
-    append_prompt='Trellis Terra policy: the advisor is disabled for this session, so do not delegate any task to gpt-terra.'
+    # Terra delegation is no longer forbidden here. The advice-before-mutation
+    # invariant was retired 2026-07-30; a delegated Terra unit is arbitrated by the
+    # orchestrator's review gate, which applies whether or not an advisor exists.
+    append_prompt_text 'Trellis Terra policy: the advisor is disabled for this session, so a delegated gpt-terra unit runs unadvised. Keep its scope small enough that tests and your own review can arbitrate it.'
     ;;
   fable)
     advisor_model=claude-fable-5
@@ -238,21 +326,40 @@ case "$advisor" in
     ;;
 esac
 
-if [[ "$main_is_gpt" != true && "$advisor" == sol ]]; then
+if [[ "$advisor_transport" == nested-agent ]]; then
   # A direct Anthropic main request executes Anthropic's server advisor before a
   # local proxy can override it. Use the proven nested-agent path for this one
   # topology and disable the built-in tool so Opus cannot be selected by accident.
-  advisor_transport=nested-agent
   env_json="$(jq -c '. + {CLAUDE_CODE_DISABLE_ADVISOR_TOOL:"1"}' <<<"$env_json")"
-  append_prompt='Trellis advisor override: use the gpt-sol-advisor Agent exactly once whenever advisor review is required. Treat it as read-only advice. Do not call the built-in advisor tool.'
+  append_prompt_text 'Trellis advisor override: use the gpt-sol-advisor Agent exactly once whenever advisor review is required. Treat it as read-only advice. Do not call the built-in advisor tool.'
 fi
 
+append_prompt_text "Trellis delegate policy: --delegates $delegates governs Agent provider selection through a PreToolUse guard. Never change model, subagent_type, or name to hide a disallowed provider; report lane failures to the caller without silent substitution."
+append_prompt_text 'Trellis Agent lifecycle: the root orchestrator may pass name only when intentionally creating a named teammate mailbox. A named teammate or any nested Agent caller must omit name and use an unnamed direct-result subagent. Agent names are mailbox identities, never TaskOutput job IDs: wait for mailbox completion and use SendMessage for follow-up; never use TaskOutput or TaskList to poll them. Unnamed Agent results return directly to their caller. The root calls TaskStop by name as soon as named work is accepted, superseded, failed, or abandoned; do not originate shutdown_request.'
+
+printf -v guard_command '%q %q' "$(command -v node)" "$DELEGATION_GUARD"
 settings="$(
   jq -cn \
     --arg model "$claude_model" \
     --arg advisorModel "$advisor_model" \
+    --arg guardCommand "$guard_command" \
     --argjson env "$env_json" \
-    '{model:$model, advisorModel:$advisorModel, env:$env}'
+    '{
+      model:$model,
+      advisorModel:$advisorModel,
+      env:$env,
+      hooks:{
+        PreToolUse:[{
+          matcher:"Agent",
+          hooks:[{
+            type:"command",
+            command:$guardCommand,
+            timeout:5,
+            statusMessage:"Checking GPTX delegate policy..."
+          }]
+        }]
+      }
+    }'
 )"
 
 cmux_bin="$(resolve_cmux)"
@@ -265,14 +372,17 @@ if ((${#forwarded[@]})); then
 fi
 
 if [[ "$dry_run" == true ]]; then
-  command_json="$(printf '%s\0' "${command[@]}" | jq -Rs 'split("\u0000")[:-1]')"
+  command_json="$(jq -cn --args '$ARGS.positional' -- "${command[@]}")"
   jq -n \
     --arg mode "$mode" \
     --arg main_model "$resolved_model" \
     --arg claude_model "$claude_model" \
     --arg advisor "$advisor" \
     --arg advisor_transport "$advisor_transport" \
+    --arg delegates "$delegates" \
+    --arg topology "$topology" \
     --arg base_url "$base_url" \
+    --argjson policy "$policy_json" \
     --argjson settings "$settings" \
     --argjson context "$context_json" \
     --argjson command "$command_json" \
@@ -282,7 +392,10 @@ if [[ "$dry_run" == true ]]; then
       claude_model:$claude_model,
       advisor:$advisor,
       advisor_transport:$advisor_transport,
+      delegates:$delegates,
+      topology:$topology,
       base_url:$base_url,
+      policy:$policy,
       settings:$settings,
       context:$context,
       command:$command
@@ -290,6 +403,22 @@ if [[ "$dry_run" == true ]]; then
   exit 0
 fi
 
-printf 'Trellis session: mode=%s main=%s advisor=%s (%s)\n' \
-  "$mode" "$resolved_model" "$advisor" "$advisor_transport" >&2
+if [[ "$base_url" == "$ROUTER_URL" ]]; then
+  command -v curl >/dev/null 2>&1 || die "missing dependency: curl"
+  command -v launchctl >/dev/null 2>&1 || die "missing dependency: launchctl"
+  ensure_local_gateway
+fi
+
+printf 'Trellis session: mode=%s main=%s advisor=%s (%s) delegates=%s\n' \
+  "$mode" "$resolved_model" "$advisor" "$advisor_transport" "$delegates" >&2
+
+# Policy notices are the operator's only warning that a recommended-but-not-required
+# safety pairing is off. They were previously produced by session-policy and read by
+# nobody: the launcher never extracted them, so the only place they appeared was inside
+# --dry-run JSON, and the test suite asserted them only there. Cross-model review
+# caught that the live path printed nothing. Print before exec, one per line.
+while IFS= read -r notice; do
+  [[ -n "$notice" ]] && printf 'Trellis notice: %s\n' "$notice" >&2
+done < <(jq -r '.effective.notices[]? // empty' <<<"$policy_json" 2>/dev/null)
+
 exec "${command[@]}"

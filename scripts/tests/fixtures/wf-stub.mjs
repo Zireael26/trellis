@@ -22,6 +22,57 @@ function cannedAgentResult(opts = {}) {
   if (required.includes('real')) {
     return { real: true, confidence: 1, reason: 'wf-stub canned review result' }
   }
+  if (required.includes('generated_for')) {
+    return { generated_for: 'wf-stub', ranked: [] }
+  }
+  if (required.includes('target')) {
+    return {
+      target: label.replace(/^fanout:/, ''),
+      branch: '',
+      pushed: false,
+      green: false,
+      pr_url: '',
+      worktree_path: '',
+      notes: 'wf-stub canned held verdict',
+    }
+  }
+  if (required.includes('project') && required.includes('synced')) {
+    return {
+      project: label.replace(/^drift:/, ''),
+      branch: '',
+      pr_url: '',
+      synced: false,
+      notes: 'wf-stub canned held drift verdict',
+    }
+  }
+  if (required.includes('id') && required.includes('spec_path')) {
+    return {
+      id: label.replace(/^spec:/, ''),
+      branch: '',
+      spec_path: '',
+      ready: false,
+      notes: 'wf-stub canned spec verdict',
+    }
+  }
+  if (required.includes('id') && required.includes('rationale')) {
+    return {
+      id: label.replace(/^triage:/, ''),
+      title: 'wf-stub proposal',
+      route: 'watch',
+      rationale: 'wf-stub canned triage',
+      skeptic_upheld: true,
+    }
+  }
+  if (required.includes('id') && required.includes('gate_green')) {
+    return {
+      id: label.replace(/^build:/, ''),
+      route: 'surgical',
+      branch: '',
+      pr_url: '',
+      gate_green: false,
+      notes: 'wf-stub canned held build verdict',
+    }
+  }
   if (required.includes('unit')) {
     return {
       unit: label.replace(/^verify:/, ''),
@@ -58,6 +109,12 @@ function capturedError(error) {
   }
 }
 
+function injectedLabel(control, label) {
+  if (Array.isArray(control)) return control.includes(label) ? true : undefined
+  if (control && Object.prototype.hasOwnProperty.call(control, label)) return control[label]
+  return undefined
+}
+
 export async function runWorkflow(recipePath, recipeArgs = {}) {
   const prompts = []
   const logs = []
@@ -74,16 +131,34 @@ export async function runWorkflow(recipePath, recipeArgs = {}) {
     const agent = async (prompt, opts = {}) => {
       prompts.push({ prompt: String(prompt), opts })
       const label = String(opts.label ?? '')
+      const injectedThrow = injectedLabel(recipeArgs.__agentThrowByLabel, label)
+      if (injectedThrow !== undefined) {
+        throw new Error(typeof injectedThrow === 'string' ? injectedThrow : `wf-stub injected failure for ${label}`)
+      }
+      if (injectedLabel(recipeArgs.__agentNullByLabel, label) !== undefined) return null
       if (Object.prototype.hasOwnProperty.call(recipeArgs.__agentOutputByLabel ?? {}, label)) {
         return recipeArgs.__agentOutputByLabel[label]
       }
       return cannedAgentResult(opts)
     }
-    const parallel = async (thunks) => Promise.all(thunks.map((thunk) => thunk()))
-    const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => {
-      let value = item
-      for (const stage of stages) value = await stage(value, item)
-      return value
+    const parallel = async (thunks) => Promise.all(thunks.map(async (thunk) => {
+      try {
+        return await thunk()
+      } catch {
+        return null
+      }
+    }))
+    const pipeline = async (items, ...stages) => Promise.all(items.map(async (originalItem, index) => {
+      let value = originalItem
+      for (const stage of stages) {
+        if (value == null) return null
+        try {
+          value = await stage(value, originalItem, index)
+        } catch {
+          return null
+        }
+      }
+      return value == null ? null : value
     }))
     const phase = () => {}
     const log = (line) => { logs.push(String(line)) }

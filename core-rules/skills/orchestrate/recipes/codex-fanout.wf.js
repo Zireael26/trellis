@@ -12,9 +12,9 @@
 //   args.units       [{ name, leg, task, effort?, justification?, paths,
 //                       proofCmd, conflicts?, targetCwd?, dependsOn? }]
 //                    leg is 'codex'|'claude'. Codex effort is REQUIRED and is
-//                    'xhigh'|'max' (medium/high suspended 2026-07-10 per
-//                    docs/codex-routing.md §3); ultra is hard-rejected;
-//                    max requires a non-empty justification. dependsOn is an
+//                    'medium'|'high'|'xhigh' per
+//                    docs/codex-routing.md §3; ultra and max are both hard-rejected
+//                    (xhigh is the ceiling). dependsOn is an
 //                    array of unit names. conflicts requires targetCwd: a
 //                    caller-provisioned stable worktree shared unchanged by
 //                    generate, verify, and fix. Workers never commit it.
@@ -24,6 +24,10 @@
 //   args.targetCwd   optional target root for worker/verifier prompts; when
 //                    absent, the Workflow-provided checkout/worktree is used.
 //   args.companionPath optional explicit companion path passed to codex-worker.
+//   args.maxParallel optional all-leg mutation-wave cap (default 2), distinct
+//                    from codexCap. Values >2 require parallelJustification,
+//                    an exact successful two-target pilotReceipt, and positive
+//                    loopSafety.budget_ceiling_usd.
 
 export const meta = {
   name: 'codex-fanout',
@@ -45,6 +49,74 @@ export const meta = {
   },
 }
 
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return { id, ok: false, value: null, error: typeof error?.message === 'string' ? error.message : String(error) }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) { malformedCount += 1; continue }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({ event: 'workflow_stage_gate', stage, expected_ids: expected, success_ids: successIds, failure_ids: failureIds, unexpected_ids: unexpectedIds, missing_ids: missingIds, expected_count: expected.length, receipt_count: rows.length, success_count: successIds.length, failure_count: failureIds.length, malformed_count: malformedCount, min_success: minSuccess, ok }))
+  if (!ok) throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  return expected.map((id) => byId.get(id))
+}
+
+function assertUniqueExpectedIds(stage, ids) {
+  const expected = ids.map(String)
+  const seen = new Set()
+  for (const id of expected) {
+    if (seen.has(id)) throw new Error('codex-fanout: duplicate expected id "' + id + '" before ' + stage + ' dispatch')
+    seen.add(id)
+  }
+  return expected
+}
+
+function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
+  if (currentTargetIds.length === 0) return 2
+  if (args.maxParallel === undefined) return 2
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) throw new Error('codex-fanout: args.maxParallel must be a positive integer')
+  if (args.maxParallel <= 2) return args.maxParallel
+  const pilot = args.pilotReceipt
+  const expectedPilotIds = currentTargetIds.slice(0, 2).map(String)
+  const targetIds = Array.isArray(pilot?.target_ids) ? pilot.target_ids.map(String) : []
+  const successIds = Array.isArray(pilot?.success_ids) ? pilot.success_ids.map(String) : []
+  const exactTargets = expectedPilotIds.length === 2 && targetIds.length === 2 && targetIds.every((id, index) => id === expectedPilotIds[index])
+  const exactSuccess = successIds.length === 2 && successIds.every((id, index) => id === expectedPilotIds[index])
+  const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
+  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
+  const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
+  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('codex-fanout: maxParallel > 2 requires non-empty args.parallelJustification')
+  if (!pilotComplete) throw new Error('codex-fanout: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
+  if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('codex-fanout: maxParallel > 2 requires a positive existing safety budget')
+  return args.maxParallel
+}
+
+function checkpointWave(stage, waveIndex, expectedIds, receipts) {
+  const checked = requireStage(stage, expectedIds, receipts, expectedIds.length)
+  log(JSON.stringify({ event: 'workflow_checkpoint', stage, wave: waveIndex + 1, expected_ids: expectedIds.map(String), success_ids: checked.map((receipt) => receipt.id), receipt_count: checked.length, ok: true }))
+  return checked
+}
+
 const VERIFY = {
   type: 'object',
   additionalProperties: false,
@@ -60,8 +132,7 @@ const VERIFY = {
 const units = args.units ?? []
 const codexCap = args.codexCap
 const defaultTargetCwd = args.targetCwd ?? '. (the Workflow-provided checkout/worktree root)'
-// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
-const EFFORT_ENUM = ['xhigh', 'max']
+const EFFORT_ENUM = ['medium', 'high', 'xhigh']
 
 function hasText(value) {
   return typeof value === 'string' && value.trim() !== ''
@@ -110,7 +181,10 @@ function isFailedOutput(value) {
   if (value == null) return true
   if (typeof value !== 'string') return false
   if (value.trim() === '') return true
-  return /^STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/im.test(workerReceipt(value))
+  return (
+    /^\s*STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/i.test(value) ||
+    /^STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/im.test(workerReceipt(value))
+  )
 }
 
 function isJobHandle(value) {
@@ -163,7 +237,7 @@ async function cancelLeakedJob(unit, value) {
 // Every Codex-routable unit declares effort explicitly at dispatch; an omitted
 // effort field is a validation error, never a default. 'ultra' is hard-rejected
 // (surface caps at xhigh + delegation invisible in a deterministic workflow —
-// docs/codex-routing.md §3). 'max' requires a non-empty justification. A
+// docs/codex-routing.md §3). 'max' is hard-rejected (xhigh ceiling). A
 // violation THROWS before any agent call; nothing is clamped or defaulted.
 phase('Presence')
 if (!Array.isArray(units)) throw new Error('codex-fanout: args.units must be an array')
@@ -206,14 +280,15 @@ for (const u of units) {
     )
     throw new Error('unit "' + u.name + '": effort \'ultra\' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)')
   }
+  if (u.effort === 'max') {
+    log('codex-fanout: HARD-REJECT effort=max — above xhigh these models spend substantially more reasoning for very little gain, so max is never selected (doctrine: core-rules/references/model-routing.md § Effort). A justification no longer admits it.')
+    throw new Error('codex-fanout: effort "max" is hard-rejected in recipes — xhigh is the ceiling (core-rules/references/model-routing.md § Effort)')
+  }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
       'unit "' + u.name + '": effort \'' + u.effort +
-        "' is not in the enum ['xhigh','max'] (medium/high suspended 2026-07-10 — docs/codex-routing.md §3; spec 011 D1)",
+        "' is not in the enum ['medium','high','xhigh'] (docs/codex-routing.md §3; spec 011 D1)",
     )
-  }
-  if (u.effort === 'max' && !(typeof u.justification === 'string' && u.justification.trim() !== '')) {
-    throw new Error('unit "' + u.name + '": effort \'max\' requires a non-empty justification (spec 011 D1)')
   }
 }
 
@@ -226,6 +301,7 @@ for (const u of units) {
   }
 }
 
+assertUniqueExpectedIds('Fan-out', units.map((unit) => String(unit.name)))
 function topologicalUnits(input) {
   const remaining = input.slice()
   const ordered = []
@@ -245,6 +321,23 @@ function topologicalUnits(input) {
 }
 
 const mergeOrder = topologicalUnits(units)
+const mutationTargetIds = assertUniqueExpectedIds('Fan-out', mergeOrder.map((unit) => String(unit.name)))
+const mutationScopeFingerprint = JSON.stringify({
+  codexCap,
+  units: mergeOrder.map((unit) => ({
+    id: String(unit.name),
+    task: unit.task,
+    paths: unit.paths,
+    proofCmd: unit.proofCmd,
+    targetCwd: normalizeTargetCwd(targetCwdOf(unit)),
+    dependsOn: dependencyNames(unit),
+    leg: unit.leg,
+    conflicts: unit.conflicts === true,
+    effort: unit.effort ?? '',
+  })),
+})
+const mutationCap = resolveMutationParallelism(mutationTargetIds, mutationScopeFingerprint)
+log('codex-fanout: mutation maxParallel=' + mutationCap)
 const codexAvailable = args.codexAvailable === true
 log('codex-fanout: codex ' + (codexAvailable ? 'AVAILABLE' : 'UNAVAILABLE — Codex units degrade to Claude'))
 
@@ -314,34 +407,29 @@ async function dispatchCodex(unit, mode) {
 async function generate(unit) {
   if (unit.leg === 'claude') {
     const output = await dispatchClaude(unit, 'generate', false)
-    return { unit, harness: 'claude', output, attempts: 1, retries: 0, notes: [] }
+    return isFailedOutput(output) ? null : { unit, harness: 'claude', output, attempts: 1, retries: 0, notes: [] }
   }
   if (!codexAvailable) {
     const output = await dispatchClaude(unit, 'generate', true)
-    return { unit, harness: 'claude(degraded)', output, attempts: 1, retries: 0, notes: ['Codex unavailable; identical unit degraded to Claude'] }
+    return isFailedOutput(output) ? null : { unit, harness: 'claude(degraded)', output, attempts: 1, retries: 0, notes: ['Codex unavailable; identical unit degraded to Claude'] }
   }
   const output = await dispatchCodex(unit, 'generate')
   if (isFailedOutput(output)) {
     log('codex-fanout: DEGRADE unit=' + unit.name + ' — codex-worker unavailable/failed/empty; re-dispatching identical unit to Claude')
     const degraded = await dispatchClaude(unit, 'generate', true)
-    return { unit, harness: 'claude(degraded)', output: degraded, attempts: 2, retries: 1, notes: ['codex-worker failed; identical unit degraded to Claude'] }
+    return isFailedOutput(degraded) ? null : { unit, harness: 'claude(degraded)', output: degraded, attempts: 2, retries: 1, notes: ['codex-worker failed; identical unit degraded to Claude'] }
   }
   return { unit, harness: 'codex', output, attempts: 1, retries: 0, notes: [] }
 }
 
 async function verify(state) {
-  let verdict = null
-  try {
-    verdict = await agent(verifyPrompt(state), {
-      agentType: 'general-purpose',
-      label: 'verify:' + state.unit.name,
-      phase: 'Verify',
-      schema: VERIFY,
-    })
-  } catch {
-    verdict = null
-  }
-  return { ...state, verdict }
+  const verdict = await agent(verifyPrompt(state), {
+    agentType: 'general-purpose',
+    label: 'verify:' + state.unit.name,
+    phase: 'Verify',
+    schema: VERIFY,
+  })
+  return verdict?.unit === state.unit.name ? { ...state, verdict } : null
 }
 
 async function fixAndReverify(state) {
@@ -364,6 +452,7 @@ async function fixAndReverify(state) {
   } else {
     output = await dispatchClaude(unit, 'fix', state.harness === 'claude(degraded)')
   }
+  if (isFailedOutput(output)) return null
 
   const repaired = {
     ...state,
@@ -374,6 +463,7 @@ async function fixAndReverify(state) {
     notes: state.notes.concat(fixNotes),
   }
   const reverified = await verify(repaired)
+  if (reverified == null) return null
   return {
     ...reverified,
     notes: reverified.notes.concat('fresh Claude reverify completed after fix'),
@@ -396,7 +486,7 @@ function dependencyWaves(input) {
     let codexInWave = 0
     for (const unit of ready) {
       const consumesCodexSlot = unit.leg === 'codex' && codexAvailable
-      if (consumesCodexSlot && codexInWave === codexCap) {
+      if (bounded.length === mutationCap || (consumesCodexSlot && codexInWave === codexCap)) {
         result.push(bounded)
         bounded = []
         codexInWave = 0
@@ -420,7 +510,7 @@ for (let waveIndex = 0; waveIndex < waves.length; waveIndex += 1) {
   for (const unit of waves[waveIndex]) {
     // The implicit workflow checkout intentionally supports parallel units
     // with disjoint declared paths. Only explicit targetCwd values claim a
-    // caller-provisioned worktree and therefore must be unique per wave.
+    // caller-provisioned worktree and therefore must be unique per actual wave.
     if (!hasText(unit.targetCwd)) continue
     const normalizedTargetCwd = normalizeTargetCwd(targetCwdOf(unit))
     const priorUnit = targetOwners.get(normalizedTargetCwd)
@@ -466,8 +556,29 @@ function makeReceipt(state) {
   }
 }
 
-for (const boundedWave of waves) {
-  const results = await pipeline(boundedWave, generate, verify, fixAndReverify)
+for (let waveIndex = 0; waveIndex < waves.length; waveIndex += 1) {
+  const boundedWave = waves[waveIndex]
+  const waveIds = boundedWave.map((unit) => String(unit.name))
+
+  const generateReceipts = await parallel(
+    boundedWave.map((unit) => () => settle(String(unit.name), () => generate(unit))),
+  )
+  requireStage('Fan-out:wave-' + (waveIndex + 1), waveIds, generateReceipts, waveIds.length)
+  const generated = generateReceipts.map((receipt) => receipt.value)
+
+  const verifyReceipts = await parallel(
+    generated.map((state) => () => settle(String(state.unit.name), () => verify(state))),
+  )
+  requireStage('Verify:wave-' + (waveIndex + 1), waveIds, verifyReceipts, waveIds.length)
+  const verified = verifyReceipts.map((receipt) => receipt.value)
+
+  const fixReceipts = await parallel(
+    verified.map((state) => () => settle(String(state.unit.name), () => fixAndReverify(state))),
+  )
+  requireStage('Fix:wave-' + (waveIndex + 1), waveIds, fixReceipts, waveIds.length)
+  const checkpointReceipts = checkpointWave('Mutation', waveIndex, waveIds, fixReceipts)
+  const results = checkpointReceipts.map((receipt) => receipt.value)
+
   // Materialize receipts before the next wave can start. This is the runtime
   // dependsOn barrier, not merely a final-return sort.
   for (const state of results) receiptByName.set(state.unit.name, makeReceipt(state))

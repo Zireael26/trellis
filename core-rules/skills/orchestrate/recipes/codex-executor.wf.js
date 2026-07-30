@@ -15,13 +15,12 @@
 //                        available; 'plan' | 'review' | 'synthesize' = judgment
 //                        unit → always the orchestrator. Default kind 'execute'.
 //                        `effort` is REQUIRED on every Codex-routable ('execute')
-//                        unit — enum 'xhigh'|'max' (medium/high suspended
-//                        2026-07-10 per docs/codex-routing.md §3), declared per
-//                        unit from the docs/codex-routing.md §3 ladder; an
+//                        unit — enum 'medium'|'high'|'xhigh', declared
+//                        per unit from the docs/codex-routing.md §3 ladder; an
 //                        omitted effort is a validation error, NEVER a default
 //                        (spec 011 D1). 'ultra' is hard-rejected in recipes
 //                        (spec 011 D4a). `justification` is REQUIRED (non-empty)
-//                        when effort is 'max', optional otherwise; it is echoed
+//                        for any unit; it is echoed
 //                        into the receipt. `targetCwd` is REQUIRED on execute
 //                        units and names the caller-provisioned stable worktree
 //                        shared by producer + verifier. Workers never commit;
@@ -47,6 +46,10 @@
 //   args.branchPrefix    string — branch prefix for repo-mutating units
 //                        (default 'chore/codex-exec'); a per-unit suffix is
 //                        appended. No dates here.
+//   args.maxParallel    optional execute-unit mutation-wave cap (default 2).
+//                        Values >2 require parallelJustification, an exact
+//                        successful two-target pilotReceipt, and positive
+//                        loopSafety.budget_ceiling_usd.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // DISPATCH MECHANICS — TWO paths to Codex; pick by WHERE the loop runs. The
@@ -80,8 +83,9 @@ export const meta = {
     { title: 'Fan-out', detail: 'per unit: route by kind, dispatch to Codex or Claude, degrade a null/empty Codex result back to Claude' },
     { title: 'Verify', detail: 'orchestrator review gate over each executed artifact (the real diff, not the executor self-report) → verdicts' },
   ],
-  // Loop-safety contract (`core-rules/loop-safety.md`). ONE-SHOT FAN-OUT: a
-  // single dispatch barrier over the unit list, no rounds — so it is exempt
+  // Loop-safety contract (`core-rules/loop-safety.md`). ONE-SHOT FAN-OUT: one
+  // finite unit-list pass in bounded checkpointed mutation waves, with read-only
+  // judgment units remaining one-shot and no adaptive rounds — so it is exempt
   // from no_progress and declares `no_progress_iterations: null` (its one
   // justified override). `max_iterations` / `budget_ceiling_usd` are omitted so
   // they genuinely inherit the resolved baseline (per-loop > project-local >
@@ -100,6 +104,90 @@ export const meta = {
     no_progress_iterations: null,
     progress_signal: 'commit/PR',
   },
+}
+
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return { id, ok: false, value: null, error: typeof error?.message === 'string' ? error.message : String(error) }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) { malformedCount += 1; continue }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({ event: 'workflow_stage_gate', stage, expected_ids: expected, success_ids: successIds, failure_ids: failureIds, unexpected_ids: unexpectedIds, missing_ids: missingIds, expected_count: expected.length, receipt_count: rows.length, success_count: successIds.length, failure_count: failureIds.length, malformed_count: malformedCount, min_success: minSuccess, ok }))
+  if (!ok) throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  return expected.map((id) => byId.get(id))
+}
+
+function assertUniqueExpectedIds(stage, ids) {
+  const expected = ids.map(String)
+  const seen = new Set()
+  for (const id of expected) {
+    if (seen.has(id)) throw new Error('codex-executor: duplicate expected id "' + id + '" before ' + stage + ' dispatch')
+    seen.add(id)
+  }
+  return expected
+}
+
+function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
+  if (currentTargetIds.length === 0) return 2
+  if (args.maxParallel === undefined) return 2
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) throw new Error('codex-executor: args.maxParallel must be a positive integer')
+  if (args.maxParallel <= 2) return args.maxParallel
+  const pilot = args.pilotReceipt
+  const expectedPilotIds = currentTargetIds.slice(0, 2).map(String)
+  const targetIds = Array.isArray(pilot?.target_ids) ? pilot.target_ids.map(String) : []
+  const successIds = Array.isArray(pilot?.success_ids) ? pilot.success_ids.map(String) : []
+  const exactTargets = expectedPilotIds.length === 2
+    && targetIds.length === 2
+    && targetIds.every((id, index) => id === expectedPilotIds[index])
+  const exactSuccess = successIds.length === 2
+    && successIds.every((id, index) => id === expectedPilotIds[index])
+  const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
+  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
+  const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
+  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('codex-executor: maxParallel > 2 requires non-empty args.parallelJustification')
+  if (!pilotComplete) throw new Error('codex-executor: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
+  if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('codex-executor: maxParallel > 2 requires a positive existing safety budget')
+  return args.maxParallel
+}
+
+function checkpointWave(stage, waveIndex, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const checked = requireStage(stage, expectedIds, receipts, minSuccess)
+  log(JSON.stringify({ event: 'workflow_checkpoint', stage, wave: waveIndex + 1, expected_ids: expectedIds.map(String), success_ids: checked.filter((receipt) => receipt.ok === true && receipt.value != null).map((receipt) => receipt.id), receipt_count: checked.length, ok: true }))
+  return checked
+}
+
+async function runInWaves(items, cap, stage, runItem, idOf, minSuccessPerWave) {
+  const allIds = assertUniqueExpectedIds(stage, items.map((item) => String(idOf(item))))
+  const receipts = []
+  for (let offset = 0, waveIndex = 0; offset < items.length; offset += cap, waveIndex += 1) {
+    const wave = items.slice(offset, offset + cap)
+    const waveIds = allIds.slice(offset, offset + wave.length)
+    const waveReceipts = await parallel(wave.map((item) => () => settle(String(idOf(item)), () => runItem(item))))
+    const minSuccess = minSuccessPerWave === undefined ? waveIds.length : minSuccessPerWave
+    receipts.push(...checkpointWave(stage, waveIndex, waveIds, waveReceipts, minSuccess))
+  }
+  return receipts
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +235,7 @@ const VERDICT = {
 
 const branchPrefix = args.branchPrefix ?? 'chore/codex-exec'
 const units = args.units ?? []
+const UNIT_KINDS = ['execute', 'plan', 'review', 'synthesize']
 const routesToCodex = (u) => (u.kind ?? 'execute') === 'execute'
 
 function normalizeTargetCwd(value) {
@@ -173,27 +262,24 @@ function normalizeTargetCwd(value) {
 // (codex-worker → companion) caps at xhigh, and ultra's prompt-nudged
 // delegation is invisible/non-resumable inside a deterministic workflow
 // (docs/codex-routing.md §3; D4a satisfied 2026-07-10, reject stands on
-// surface + visibility). 'max' requires a non-empty justification (echoed
+// surface + visibility). 'max' is hard-rejected (xhigh ceiling; formerly justification-gated, echoed
 // into the receipt).
 // A violation THROWS — the run fails before any unit is dispatched; nothing is
 // silently clamped or defaulted.
-// medium/high suspended by operator directive 2026-07-10 (docs/codex-routing.md §3)
-const EFFORT_ENUM = ['xhigh', 'max']
-const concurrentTargetCwds = new Map()
+const EFFORT_ENUM = ['medium', 'high', 'xhigh']
+if (!Array.isArray(units)) throw new Error('codex-executor: args.units must be an array')
+for (const u of units) {
+  if (typeof u?.name !== 'string' || u.name.trim() === '') throw new Error('codex-executor: every unit requires a non-empty name')
+  if (!UNIT_KINDS.includes(u.kind ?? 'execute')) {
+    throw new Error('unit "' + u.name + '": kind must be one of execute, plan, review, synthesize')
+  }
+}
+const unitIds = assertUniqueExpectedIds('Fan-out', units.map((u) => String(u.name)))
 for (const u of units) {
   if (!routesToCodex(u)) continue
   if (typeof u.targetCwd !== 'string' || u.targetCwd.trim() === '') {
     throw new Error('targetCwd required for execute unit "' + u.name + '" — caller must provision one stable producer/verifier worktree')
   }
-  const normalizedTargetCwd = normalizeTargetCwd(u.targetCwd)
-  const priorUnit = concurrentTargetCwds.get(normalizedTargetCwd)
-  if (priorUnit !== undefined) {
-    throw new Error(
-      'codex-executor: execute units "' + priorUnit + '" and "' + u.name +
-        '" share normalized targetCwd "' + normalizedTargetCwd + '" but execute concurrently',
-    )
-  }
-  concurrentTargetCwds.set(normalizedTargetCwd, u.name)
   if (typeof u.effort !== 'string' || u.effort.trim() === '') {
     throw new Error('effort required for unit "' + u.name + '" — no default (spec 011 D1)')
   }
@@ -205,16 +291,42 @@ for (const u of units) {
     )
     throw new Error('unit "' + u.name + "\": effort 'ultra' is hard-rejected in recipes — surface caps at xhigh + delegation invisible (docs/codex-routing.md §3; spec 011 D4a)")
   }
+  if (u.effort === 'max') {
+    log('codex-executor: HARD-REJECT effort=max — above xhigh these models spend substantially more reasoning for very little gain, so max is never selected (doctrine: core-rules/references/model-routing.md § Effort). A justification no longer admits it.')
+    throw new Error('codex-executor: effort "max" is hard-rejected in recipes — xhigh is the ceiling (core-rules/references/model-routing.md § Effort)')
+  }
   if (!EFFORT_ENUM.includes(u.effort)) {
     throw new Error(
       'unit "' + u.name + '": effort \'' + u.effort +
-        "' is not in the enum ['xhigh','max'] (medium/high suspended 2026-07-10 — docs/codex-routing.md §3; spec 011 D1)",
+        "' is not in the enum ['medium','high','xhigh'] (docs/codex-routing.md §3; spec 011 D1)",
     )
   }
-  if (u.effort === 'max' && !(typeof u.justification === 'string' && u.justification.trim() !== '')) {
-    throw new Error('unit "' + u.name + "\": effort 'max' requires a non-empty justification (spec 011 D1)")
-  }
 }
+
+const mutationUnits = units.filter(routesToCodex)
+const mutationUnitIds = assertUniqueExpectedIds('Fan-out', mutationUnits.map((u) => String(u.name)))
+const targetOwners = new Map()
+for (const unit of mutationUnits) {
+  const normalizedTargetCwd = normalizeTargetCwd(unit.targetCwd)
+  const priorUnit = targetOwners.get(normalizedTargetCwd)
+  if (priorUnit !== undefined) {
+    throw new Error(
+      'codex-executor: execute units "' + priorUnit + '" and "' + unit.name +
+        '" share normalized targetCwd "' + normalizedTargetCwd + '" across the mutation run',
+    )
+  }
+  targetOwners.set(normalizedTargetCwd, unit.name)
+}
+const mutationScopeFingerprint = JSON.stringify(mutationUnits.map((u) => ({
+  id: String(u.name),
+  task: u.task ?? '',
+  targetCwd: normalizeTargetCwd(u.targetCwd),
+  paths: u.paths ?? '',
+  proof: u.proof ?? '',
+})))
+const mutationCap = mutationUnits.length === 0
+  ? 2
+  : resolveMutationParallelism(mutationUnitIds, mutationScopeFingerprint)
 
 // Surface-capability floor (spec 011 D6b): the accepted --effort set, threaded
 // by the main loop from the D6 preflight (scripts/codex-effort-preflight.sh).
@@ -229,9 +341,14 @@ const workerReceipt = (r) => {
   const match = r.match(/(?:^|\n)--- CODEX-WORKER RECEIPT ---\s*\n([\s\S]*?)\n--- END RECEIPT ---(?:\n|$)/)
   return match?.[1] ?? ''
 }
+const hasWorkerFailure = (r) =>
+  typeof r === 'string' && (
+    /^\s*STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/i.test(r) ||
+    /^STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/im.test(workerReceipt(r))
+  )
 const isEmpty = (r) =>
   r == null ||
-  (typeof r === 'string' && (r.trim() === '' || /^STATUS:\s*(?:FAILURE|UNAVAILABLE)\b/im.test(workerReceipt(r))))
+  (typeof r === 'string' && (r.trim() === '' || hasWorkerFailure(r)))
 // Defensive assertion: codex-worker is blocking, so a background handle is a
 // contract leak rather than a supported result. Keep the detector as a loud
 // fail-closed assertion while the unit degrades to Claude.
@@ -330,26 +447,20 @@ function dispatchClaude(u) {
 phase('Presence')
 let codexAvailable = args.codexAvailable
 if (codexAvailable === undefined) {
-  // A dead/skipped probe agent resolves to null (Workflow semantics); a schema
-  // failure may reject. Either way the gate is UNKNOWN, which must resolve to
-  // OFF (the safe degrade) — never abort the run. So catch the throw and read
-  // `gate?.available`, so a failed probe becomes Claude-only, not a crash.
-  let gate = null
-  try {
-    gate = await agent(
-      [
-        'Check whether the local Codex CLI is callable. Run exactly:',
-        '  node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json',
-        'Parse the JSON. Report available=true ONLY if ready===true AND codex.available===true AND auth.loggedIn===true.',
-        'If $CODEX_PLUGIN is unset, the script is missing, or the command errors, report available=false.',
-        'Do not install anything or change any config. Return the GATE object.',
-      ].join('\n'),
-      { label: 'codex-presence', phase: 'Presence', schema: GATE },
-    )
-  } catch {
-    gate = null
-  }
-  codexAvailable = Boolean(gate?.available)
+  // A dead/skipped probe is an optional provider failure: preserve the receipt,
+  // log the optional gate, and resolve the capability to OFF.
+  const presenceReceipt = await settle('codex-presence', () => agent(
+    [
+      'Check whether the local Codex CLI is callable. Run exactly:',
+      '  node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json',
+      'Parse the JSON. Report available=true ONLY if ready===true AND codex.available===true AND auth.loggedIn===true.',
+      'If $CODEX_PLUGIN is unset, the script is missing, or the command errors, report available=false.',
+      'Do not install anything or change any config. Return the GATE object.',
+    ].join('\n'),
+    { label: 'codex-presence', phase: 'Presence', schema: GATE },
+  ))
+  requireStage('Presence:Codex', ['codex-presence'], [presenceReceipt], 0)
+  codexAvailable = Boolean(presenceReceipt.value?.available)
 }
 codexAvailable = codexAvailable ?? false
 log(
@@ -366,34 +477,41 @@ log(
 // failure are the same signal, and both surface as an empty Codex result.
 // Every degrade is log()'d so a run that silently became Claude-only is visible.
 phase('Fan-out')
-const executed = await parallel(
-  units.map((u) => async () => {
-    const receipt = { effort: u.effort ?? '', justification: u.justification ?? '' }
-    if (!routesToCodex(u)) {
-      const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: '', output: out, ...receipt }
-    }
-    // Fail-closed tier gate (spec 011 D6b/SC6): the surface does not accept
-    // this unit's validated tier → log + degrade the UNIT to Claude. Never
-    // rewrite the tier — a silent clamp is the exact failure D1 forbids.
-    if (!supportedEfforts.includes(u.effort)) {
-      log('codex-executor: FAIL-CLOSED unit=' + u.name + ' tier=' + u.effort + ' not supported by surface — degrading to Claude, no clamp')
-      const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
-    }
-    if (!codexAvailable) {
-      const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
-    }
-    const codexOut = await dispatchCodex(u)
-    if (isEmpty(codexOut)) {
-      log('codex-executor: DEGRADE unit=' + u.name + ' — codex-worker unavailable/failure/empty/error, re-dispatching to orchestrator')
-      const out = await dispatchClaude(u)
-      return { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
-    }
-    return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), targetCwd: u.targetCwd, output: codexOut, ...receipt }
-  }),
-)
+log('codex-executor: mutation maxParallel=' + mutationCap)
+async function executeUnit(u) {
+  const receipt = { effort: u.effort ?? '', justification: u.justification ?? '' }
+  if (!routesToCodex(u)) {
+    const out = await dispatchClaude(u)
+    return isEmpty(out) ? null : { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: '', output: out, ...receipt }
+  }
+  // Fail-closed tier gate (spec 011 D6b/SC6): the surface does not accept
+  // this unit's validated tier → log + degrade the UNIT to Claude. Never
+  // rewrite the tier — a silent clamp is the exact failure D1 forbids.
+  if (!supportedEfforts.includes(u.effort)) {
+    log('codex-executor: FAIL-CLOSED unit=' + u.name + ' tier=' + u.effort + ' not supported by surface — degrading to Claude, no clamp')
+    const out = await dispatchClaude(u)
+    return isEmpty(out) ? null : { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
+  }
+  if (!codexAvailable) {
+    const out = await dispatchClaude(u)
+    return isEmpty(out) ? null : { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
+  }
+  const codexOut = await dispatchCodex(u)
+  if (isEmpty(codexOut)) {
+    log('codex-executor: DEGRADE unit=' + u.name + ' — codex-worker unavailable/failure/empty/error, re-dispatching to orchestrator')
+    const out = await dispatchClaude(u)
+    return isEmpty(out) ? null : { unit: u.name, kind: u.kind ?? 'execute', harness: 'claude(degraded)', branch: branchOf(u), targetCwd: u.targetCwd, output: out, ...receipt }
+  }
+  return { unit: u.name, kind: u.kind ?? 'execute', harness: 'codex', branch: branchOf(u), targetCwd: u.targetCwd, output: codexOut, ...receipt }
+}
+const mutationReceipts = await runInWaves(mutationUnits, mutationCap, 'Fan-out', executeUnit, (u) => u.name)
+const judgmentUnits = units.filter((u) => !routesToCodex(u))
+const judgmentReceipts = await parallel(judgmentUnits.map((u) => () => settle(String(u.name), () => executeUnit(u))))
+requireStage('Fan-out', judgmentUnits.map((u) => String(u.name)), judgmentReceipts, judgmentUnits.length)
+const executionById = new Map([...mutationReceipts, ...judgmentReceipts].map((receipt) => [receipt.id, receipt]))
+const executionReceipts = unitIds.map((id) => executionById.get(id))
+requireStage('Fan-out', unitIds, executionReceipts, unitIds.length)
+const executed = executionReceipts.map((receipt) => receipt.value)
 
 // --- Phase: Verify --------------------------------------------------------
 // Orchestrator review gate — quality is NOT laundered by routing to Codex.
@@ -403,27 +521,34 @@ const executed = await parallel(
 // green check. Bright-line guardrails fire here on Codex output too.
 phase('Verify')
 const artifacts = executed.filter((e) => e.branch)
-const verdicts = await parallel(
-  artifacts.map((e) => () => agent(
-    [
-      'REVIEW the unit "' + e.unit + '" executed by ' + e.harness + ' on branch ' + e.branch + '.',
-      'TARGET_CWD: ' + e.targetCwd,
-      'From that exact producer worktree inspect git status --short, git diff, git diff --cached, and any untracked declared files. Do not substitute a fresh worktree or trust the executor summary.',
-      'On-host: install + build + typecheck (lint where present). green=true only if that passes.',
-      'Apply the bright-line guardrails (destructive-op, secrets, external-message) to the diff.',
-      'reviewed=true only if the diff clears code review. Do not edit, create/remove worktrees, commit, push, or merge. The caller commits only after this verdict. Return the VERDICT object.',
-    ].join('\n'),
-    { label: 'verify:' + e.unit, phase: 'Verify', schema: VERDICT },
-  )),
+const artifactIds = artifacts.map((e) => String(e.unit))
+const reviewReceipts = await parallel(
+  artifacts.map((e) => () => settle(String(e.unit), async () => {
+    const verdict = await agent(
+      [
+        'REVIEW the unit "' + e.unit + '" executed by ' + e.harness + ' on branch ' + e.branch + '.',
+        'TARGET_CWD: ' + e.targetCwd,
+        'From that exact producer worktree inspect git status --short, git diff, git diff --cached, and any untracked declared files. Do not substitute a fresh worktree or trust the executor summary.',
+        'On-host: install + build + typecheck (lint where present). green=true only if that passes.',
+        'Apply the bright-line guardrails (destructive-op, secrets, external-message) to the diff.',
+        'reviewed=true only if the diff clears code review. Do not edit, create/remove worktrees, commit, push, or merge. The caller commits only after this verdict. Return the VERDICT object.',
+      ].join('\n'),
+      { label: 'verify:' + e.unit, phase: 'Verify', schema: VERDICT },
+    )
+    return verdict?.unit === e.unit ? verdict : null
+  })),
 )
+requireStage('Verify', artifactIds, reviewReceipts, artifactIds.length)
 
 // Receipt echo (spec 011 D1/SC3e): merge `effort` + `justification` from the
 // unit's executed record into each returned verdict RECIPE-SIDE — a
 // deterministic merge, never asked of the reviewer agent (echo-by-agent
-// drifts). parallel() preserves order, so verdicts[i] pairs with artifacts[i].
-const verdictReceipts = verdicts.map((v, i) =>
-  v ? { ...v, effort: artifacts[i].effort, justification: artifacts[i].justification ?? '' } : v,
-)
+// drifts). parallel() preserves order, so receipts[i] pairs with artifacts[i].
+const verdictReceipts = reviewReceipts.map((receipt, i) => ({
+  ...receipt.value,
+  effort: artifacts[i].effort,
+  justification: artifacts[i].justification ?? '',
+}))
 
 // Judgment units (plan/review/synthesize) produced no branch — carry their
 // output through as-is for the caller to fold into synthesis (receipt fields
@@ -434,4 +559,4 @@ const judgments = executed
 
 // The main loop acts on these: HOLD every PR for review (Component-D), merge
 // nothing here. Agents never merge — that decision lives in the caller.
-return { codexAvailable, verdicts: verdictReceipts.filter(Boolean), judgments }
+return { codexAvailable, verdicts: verdictReceipts, judgments }

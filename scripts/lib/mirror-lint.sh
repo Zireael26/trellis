@@ -139,7 +139,16 @@ lint_mirror() {
   # CLIProxy names are legal only in the feature's implementation, tests, public
   # onboarding/docs/history, agent definitions, changelog, and sync/lint machinery.
   # This is intentionally path-scoped rather than a broad scripts/ or docs/ exemption.
-  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|CHANGELOG\.md$|docs/gptx\.md$|docs/adr/|docs/specs/|core-rules/agents/gpt-[^/]+\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
+  #
+  # `core-rules/agents/opus-advisor.md` is listed alongside the `gpt-*` agents because the
+  # stated policy above permits AGENT DEFINITIONS, and that file is one: it is the advisor
+  # GPT workers nest into precisely because the built-in advisor tool refuses dispatch under
+  # gptx, so it cannot describe its own reason for existing without naming the feature. Found
+  # 2026-07-30 when the file first entered the mirror and the lint fired — the regex had
+  # encoded "gpt-prefixed agents" while the comment said "agent definitions". Kept as an
+  # explicit filename rather than widening to `agents/[^/]+\.md$`, so a future agent file
+  # still has to be considered on purpose.
+  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/opus-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"

@@ -40,7 +40,6 @@ Every project in `registry.md` must:
 - [ ] Track `.claude/rules/trellis.md` in git (including `.gitignore` exceptions where needed).
 - [ ] Contain the `@`-import line in the project `CLAUDE.md` for interactive fallback.
 - [ ] Contain `.claude/skills/process-gate/` as a symlink to the canonical skills path (see "Skills inheritance" above).
-- [ ] Contain `.claude/agents/codex-worker.md` as a symlink to the canonical blocking Workflow agent definition.
 - [ ] If Codex-enabled (`harnesses` includes `"codex"`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, and `.agents/skills/process-gate-local/local.config.sh`.
 - [ ] If Codex-enabled additionally: `.codex/hooks.json`, executable `.codex/hooks/*.sh`, `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` symlinks, and `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` symlinks (workflow-style command surface Codex also reads).
 - [ ] Have GitHub branch protection enabled on `main` (see `registry.md` step 5).
@@ -65,11 +64,18 @@ use the same machine-local symlink pattern as skills and commands:
 
     <project-root>/.claude/agents/<name>.md  →  __TRELLIS_PATH__/core-rules/agents/<name>.md
 
-The canonical `codex-worker.md` definition is inherited as
-`<project-root>/.claude/agents/codex-worker.md`, which Claude Code resolves as
-the `codex-worker` agent type. This is Claude Workflow-agent wiring only; do not
-invent an `.agents/agents/` mirror for Codex. The absolute symlink is gitignored,
-and the standard inheritance seeder recreates it in fresh worktrees.
+When GPTX capability is installed, its canonical executor profiles are
+`gpt-mid.md`, `gpt-high.md`, `gpt-sol.md`, and `gpt-terra.md`; Claude Code
+resolves the corresponding symlinks as native `gpt-mid`, `gpt-high`, `gpt-sol`,
+and `gpt-terra` Agent types. These are the preferred GPT executor identities.
+
+`codex-worker.md` is optional legacy compatibility for projects whose operator
+explicitly installs and selects the OpenAI Codex plugin companion. Such a project
+may inherit it as `<project-root>/.claude/agents/codex-worker.md`, but its absence
+is not a registered-project drift or audit failure. This is Claude Workflow-agent
+wiring only; do not invent an `.agents/agents/` mirror for Codex. Agent symlinks
+are gitignored, and the standard inheritance seeder recreates those present in
+the main checkout in fresh worktrees.
 
 ### Skill path-scoping (optional, project-local)
 
@@ -156,7 +162,8 @@ Every one of these points at the same canonical files under `core-rules/commands
 │   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md
 │   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
 │   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md
-│   ├── agents/codex-worker.md → /…/trellis/core-rules/agents/codex-worker.md
+│   ├── agents/gpt-{mid,high,sol,terra}.md → /…/trellis/core-rules/agents/…  ← when GPTX is installed
+│   ├── agents/codex-worker.md → /…/trellis/core-rules/agents/codex-worker.md ← optional legacy plugin only
 │   ├── hooks/                                               ← Tier 1+2, Claude-only
 │   └── settings.json
 ├── .agents/                                                 ← Codex companion dir

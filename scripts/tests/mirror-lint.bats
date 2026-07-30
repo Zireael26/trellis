@@ -35,9 +35,24 @@ teardown() {
 }
 
 @test "GPTX is allowed only on the approved public feature surface" {
-  mkdir -p "$M/scripts/gptx" "$M/docs"
+  mkdir -p "$M/scripts/gptx" "$M/docs" "$M/core-rules/references"
   printf 'gptx router\n' > "$M/scripts/gptx/router.js"
   printf 'CLIProxyAPI setup\n' > "$M/docs/gptx.md"
+  printf 'GPTX delegate policy stays caller-owned.\n' > "$M/core-rules/references/model-lanes.md"
+  printf 'gptx session policy matrix\n' > "$M/docs/gptx-session-policy-matrix.md"
+  printf 'gptx model override matrix\n' > "$M/docs/gptx-model-override-matrix.md"
+
+  local rel
+  for rel in \
+    README.md SETUP.md AGENT_SETUP.md engineering-process.md \
+    docs/references/gptx-sources.md docs/legacy/codex-plugin.md \
+    docs/codex-routing.md core-rules/CLAUDE.md core-rules/hooks.md \
+    core-rules/inheritance.md core-rules/references/delegation.md \
+    core-rules/skills/orchestrate/SKILL.md; do
+    mkdir -p "$M/$(dirname "$rel")"
+    printf 'GPTX public guidance.\n' > "$M/$rel"
+  done
+
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -46,6 +61,28 @@ teardown() {
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
   [[ "$output" == *"scripts/onboard-project.sh: unofficial proxy token"* ]]
+}
+
+@test "agent definitions: gpt-* and opus-advisor may name GPTX; other agents may not" {
+  mkdir -p "$M/core-rules/agents"
+
+  # The allowlist encoded "gpt-prefixed agents" while the rule's own comment permits agent
+  # definitions. opus-advisor.md is one, and it cannot describe why it exists — the built-in
+  # advisor refuses dispatch under gptx — without naming the feature. It first entered the
+  # mirror 2026-07-30 and the lint fired.
+  printf 'The bridged advisor refuses dispatch under gptx, so nest this one.\n' \
+    > "$M/core-rules/agents/opus-advisor.md"
+  printf 'gpt-terra throughput lane under gptx\n' > "$M/core-rules/agents/gpt-terra.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  # The widening is one explicit filename, not agents/*. A different agent file still fails,
+  # so a future agent has to be considered on purpose rather than inheriting an exemption.
+  printf 'lane worker talks to cliproxy\n' > "$M/core-rules/agents/lane-worker.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/agents/lane-worker.md: unofficial proxy token"* ]]
 }
 
 @test "claudex remains instance-private even inside the GPTX feature" {

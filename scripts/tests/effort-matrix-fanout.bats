@@ -39,12 +39,20 @@ NODE
   _json_assert "r.error && /ultra/i.test(r.error.message) && /D4a/i.test(r.error.message) && r.logs.some((line) => /ultra/i.test(line) && /D4a/i.test(line)) && r.prompts.length === 0"
 }
 
-@test "unknown effort and max without justification throw before dispatch" {
+@test "unknown effort throws, and max is hard-rejected even with a justification" {
   _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"codex-a","leg":"codex","task":"bounded change","effort":"turbo","paths":["src/a.js"],"proofCmd":"node --check src/a.js"}]}'
   _json_assert "r.error && r.error.message.includes('turbo') && r.error.message.includes('enum') && r.prompts.length === 0"
 
-  _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"codex-a","leg":"codex","task":"bounded change","effort":"max","paths":["src/a.js"],"proofCmd":"node --check src/a.js"}]}'
-  _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('justification') && r.prompts.length === 0"
+  _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"codex-a","leg":"codex","task":"bounded change","effort":"max","justification":"was previously admissible","paths":["src/a.js"],"proofCmd":"node --check src/a.js"}]}'
+  _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('hard-rejected') && r.prompts.length === 0"
+}
+
+@test "restored medium and high tiers dispatch without clamping" {
+  local effort
+  for effort in medium high; do
+    _run_fanout "{\"codexAvailable\":true,\"codexCap\":1,\"units\":[{\"name\":\"codex-a\",\"leg\":\"codex\",\"task\":\"bounded change\",\"effort\":\"$effort\",\"paths\":[\"src/a.js\"],\"proofCmd\":\"node --check src/a.js\"}]}"
+    _json_assert "!r.error && r.prompts.some((entry) => entry.opts.label === 'codex:generate:codex-a' && entry.prompt.includes('EFFORT: $effort')) && r.result.receipts[0].effort === '$effort'"
+  done
 }
 
 @test "Codex generation never exceeds codexCap before the wave completes" {
@@ -52,14 +60,14 @@ NODE
   _json_assert "!r.error && (() => { const labels = r.prompts.map((entry) => entry.opts.label || ''); const thirdCodex = labels.indexOf('codex:generate:codex-c'); const firstVerify = labels.findIndex((label) => label.startsWith('verify:')); const beforeBarrier = labels.slice(0, firstVerify).filter((label) => label.startsWith('codex:generate:')); return labels.filter((label) => label.startsWith('codex:generate:')).length === 3 && beforeBarrier.length === 2 && thirdCodex > firstVerify && r.prompts.filter((entry) => (entry.opts.label || '').startsWith('codex:generate:')).every((entry) => entry.opts.agentType === 'codex-worker'); })()"
 }
 
-@test "Claude units bypass the Codex cap and stay in the current wave" {
+@test "Claude units bypass Codex slots but remain inside the two-unit mutation cap" {
   _run_fanout '{"codexAvailable":true,"codexCap":1,"units":[{"name":"codex-a","leg":"codex","task":"change a","effort":"xhigh","paths":["src/a.js"],"proofCmd":"node --check src/a.js"},{"name":"claude-a","leg":"claude","task":"change b","paths":["src/b.js"],"proofCmd":"node --check src/b.js"},{"name":"claude-b","leg":"claude","task":"change c","paths":["src/c.js"],"proofCmd":"node --check src/c.js"},{"name":"codex-b","leg":"codex","task":"change d","effort":"xhigh","paths":["src/d.js"],"proofCmd":"node --check src/d.js"}]}'
-  _json_assert "!r.error && (() => { const labels = r.prompts.map((entry) => entry.opts.label || ''); const nextCodex = labels.indexOf('codex:generate:codex-b'); return labels.indexOf('claude:generate:claude-a') < nextCodex && labels.indexOf('claude:generate:claude-b') < nextCodex && r.prompts.filter((entry) => (entry.opts.label || '').startsWith('claude:generate:')).every((entry) => !('agentType' in entry.opts)); })()"
+  _json_assert "!r.error && (() => { const labels = r.prompts.map((entry) => entry.opts.label || ''); const nextCodex = labels.indexOf('codex:generate:codex-b'); const checkpoints = r.logs.map((line) => { try { return JSON.parse(line) } catch { return null } }).filter((row) => row?.event === 'workflow_checkpoint' && row.stage === 'Mutation'); return labels.indexOf('claude:generate:claude-a') < nextCodex && labels.indexOf('claude:generate:claude-b') < nextCodex && checkpoints.every((row) => row.expected_ids.length <= 2) && r.prompts.filter((entry) => (entry.opts.label || '').startsWith('claude:generate:')).every((entry) => !('agentType' in entry.opts)); })()"
 }
 
 @test "receipts are green and returned in dependency merge order" {
-  _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"leaf","leg":"claude","task":"change leaf","paths":["src/leaf.js"],"proofCmd":"node --check src/leaf.js","dependsOn":["root"]},{"name":"root","leg":"codex","task":"change root","effort":"max","justification":"critical dependency root","paths":["src/root.js"],"proofCmd":"node --check src/root.js","conflicts":true,"targetCwd":"/tmp/root-worktree"},{"name":"independent","leg":"claude","task":"change independent","paths":["src/independent.js"],"proofCmd":"node --check src/independent.js"}]}'
-  _json_assert "!r.error && r.result && (() => { const receipts = r.result.receipts; const root = receipts.find((receipt) => receipt.name === 'root'); const labels = r.prompts.map((entry) => entry.opts.label || ''); const producer = r.prompts.find((entry) => entry.opts.label === 'codex:generate:root'); const verifier = r.prompts.find((entry) => entry.opts.label === 'verify:root'); return receipts.map((receipt) => receipt.name).join(',') === 'root,independent,leaf' && receipts.every((receipt) => receipt.green && receipt.reviewed) && root.effort === 'max' && root.justification === 'critical dependency root' && root.branch === 'unit/root' && root.targetCwd === '/tmp/root-worktree' && producer.prompt.includes('TARGET_CWD: /tmp/root-worktree') && verifier.prompt.includes('TARGET_CWD: /tmp/root-worktree') && !('isolation' in producer.opts) && !('isolation' in verifier.opts) && !producer.prompt.includes('commit only') && labels.indexOf('claude:generate:leaf') > labels.indexOf('verify:root'); })()"
+  _run_fanout '{"codexAvailable":true,"codexCap":2,"units":[{"name":"leaf","leg":"claude","task":"change leaf","paths":["src/leaf.js"],"proofCmd":"node --check src/leaf.js","dependsOn":["root"]},{"name":"root","leg":"codex","task":"change root","effort":"xhigh","paths":["src/root.js"],"proofCmd":"node --check src/root.js","conflicts":true,"targetCwd":"/tmp/root-worktree"},{"name":"independent","leg":"claude","task":"change independent","paths":["src/independent.js"],"proofCmd":"node --check src/independent.js"}]}'
+  _json_assert "!r.error && r.result && (() => { const receipts = r.result.receipts; const root = receipts.find((receipt) => receipt.name === 'root'); const labels = r.prompts.map((entry) => entry.opts.label || ''); const producer = r.prompts.find((entry) => entry.opts.label === 'codex:generate:root'); const verifier = r.prompts.find((entry) => entry.opts.label === 'verify:root'); return receipts.map((receipt) => receipt.name).join(',') === 'root,independent,leaf' && receipts.every((receipt) => receipt.green && receipt.reviewed) && root.effort === 'xhigh' && root.branch === 'unit/root' && root.targetCwd === '/tmp/root-worktree' && producer.prompt.includes('TARGET_CWD: /tmp/root-worktree') && verifier.prompt.includes('TARGET_CWD: /tmp/root-worktree') && !('isolation' in producer.opts) && !('isolation' in verifier.opts) && !producer.prompt.includes('commit only') && labels.indexOf('claude:generate:leaf') > labels.indexOf('verify:root'); })()"
 }
 
 @test "M8 conflicting units require one targetCwd and reuse it through generate verify and fix" {

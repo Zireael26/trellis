@@ -47,8 +47,8 @@ other missed — exactly the case a single-model verify cannot produce.
   worker launches in the intended checkout instead of degrading on an invalid
   work order.
 - `effort` — **required** reasoning tier for the Codex leg (enum
-  `xhigh|max` — medium/high suspended 2026-07-10; review passes are xhigh-band
-  per the `docs/codex-routing.md` §3 ladder). Omitted → validation error, never
+  `medium|high|xhigh|max`; choose by finding complexity and consequence using
+  the `docs/codex-routing.md` §3 ladder). Omitted → validation error, never
   a default; `ultra` is hard-rejected in recipes (surface caps at xhigh +
   delegation invisible in a deterministic workflow — `docs/codex-routing.md`
   §3); `max` requires a non-empty `justification` (spec 011 D1).

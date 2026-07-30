@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/__GITHUB_USER__/CLIProxyAPI",
-  "branch": "codex/trellis-advisor-tool",
-  "verified_commit": "0748dccf",
+  "branch": "main",
+  "verified_commit": "108b2a535b0241491436149b65cfb78734c61280",
   "upstream": "https://github.com/router-for-me/CLIProxyAPI",
   "license": "MIT",
   "purpose": "Loopback-only Claude advisor server-tool bridge for GPT-backed Claude Code sessions"

@@ -181,12 +181,12 @@
       "additionalProperties": true
     },
     "codex_fanout": {
-      "description": "Optional central configuration for the codex-fanout recipe. Callers resolve concurrency from this block and pass it explicitly as args.codexCap; the recipe has no baked fallback. When this block is present, concurrency is required and must be a positive integer. The public example uses 4 as the fleet baseline.",
+      "description": "Optional central configuration for the codex-fanout recipe. Callers resolve concurrency from this block and pass it explicitly as args.codexCap; the recipe has no baked Codex-slot fallback. When this block is present, concurrency is required and must be a positive integer. The public example uses 2 so the Codex-slot ceiling matches the default two-unit mutation wave.",
       "type": "object",
       "required": ["concurrency"],
       "properties": {
         "concurrency": {
-          "description": "Maximum Codex generation units admitted to one fan-out wave. Claude units do not consume this cap. Must be resolved by the caller and passed as codexCap.",
+          "description": "Maximum Codex generation units admitted to one codex-fanout wave. Must be resolved by the caller and passed as codexCap. The recipe also enforces the canonical mutation-wide maxParallel ceiling (default 2) across Codex and Claude units; increasing that separate ceiling requires justification, a completed two-target pilot receipt, and a positive resolved safety budget.",
           "type": "integer",
           "minimum": 1
         }

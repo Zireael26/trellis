@@ -19,6 +19,9 @@
 //                      If absent, a discovery agent reads the latest
 //                      parent-hook-drift audit report.
 //   args.branchPrefix  branch name prefix. Defaults to 'chore/drift-sync'.
+//   args.maxParallel   optional mutation-wave cap (default 2). Values >2 also
+//                      require parallelJustification and an exact successful
+//                      two-target pilotReceipt; this recipe supplies its own budget.
 //
 // This file ships in the public mirror — keep it parametric and path-neutral.
 
@@ -29,8 +32,9 @@ export const meta = {
     { title: 'Discover', detail: 'resolve drift list from args or the latest parent-hook-drift audit' },
     { title: 'Remediate', detail: 'one worktree-isolated agent per project: re-sync canonical -> verify -> HOLD PR' },
   ],
-  // Component-D loop-safety: one-shot fan-out over the drift list (a single
-  // dispatch barrier, no rounds), so `no_progress_iterations: null`. This recipe
+  // Component-D loop-safety: one finite fan-out pass over the drift list,
+  // dispatched in bounded waves with checkpoints but no adaptive rounds, so
+  // `no_progress_iterations: null`. This recipe
   // OPENS PRs unattended, so it declares a conservative budget ceiling of its
   // own rather than inheriting — a runaway fan-out that opens dozens of PRs is
   // the failure mode to bound. `max_iterations` bounds the project count.
@@ -40,6 +44,90 @@ export const meta = {
     budget_ceiling_usd: 40,
     progress_signal: 'HOLD PR opened',
   },
+}
+
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return { id, ok: false, value: null, error: typeof error?.message === 'string' ? error.message : String(error) }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) { malformedCount += 1; continue }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({ event: 'workflow_stage_gate', stage, expected_ids: expected, success_ids: successIds, failure_ids: failureIds, unexpected_ids: unexpectedIds, missing_ids: missingIds, expected_count: expected.length, receipt_count: rows.length, success_count: successIds.length, failure_count: failureIds.length, malformed_count: malformedCount, min_success: minSuccess, ok }))
+  if (!ok) throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  return expected.map((id) => byId.get(id))
+}
+
+function assertUniqueExpectedIds(stage, ids) {
+  const expected = ids.map(String)
+  const seen = new Set()
+  for (const id of expected) {
+    if (seen.has(id)) throw new Error('drift-holdpr: duplicate expected id "' + id + '" before ' + stage + ' dispatch')
+    seen.add(id)
+  }
+  return expected
+}
+
+function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
+  if (currentTargetIds.length === 0) return 2
+  if (args.maxParallel === undefined) return 2
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) throw new Error('drift-holdpr: args.maxParallel must be a positive integer')
+  if (args.maxParallel <= 2) return args.maxParallel
+  const pilot = args.pilotReceipt
+  const expectedPilotIds = currentTargetIds.slice(0, 2).map(String)
+  const targetIds = Array.isArray(pilot?.target_ids) ? pilot.target_ids.map(String) : []
+  const successIds = Array.isArray(pilot?.success_ids) ? pilot.success_ids.map(String) : []
+  const exactTargets = expectedPilotIds.length === 2
+    && targetIds.length === 2
+    && targetIds.every((id, index) => id === expectedPilotIds[index])
+  const exactSuccess = successIds.length === 2
+    && successIds.every((id, index) => id === expectedPilotIds[index])
+  const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
+  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
+  const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
+  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('drift-holdpr: maxParallel > 2 requires non-empty args.parallelJustification')
+  if (!pilotComplete) throw new Error('drift-holdpr: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
+  if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('drift-holdpr: maxParallel > 2 requires a positive existing safety budget')
+  return args.maxParallel
+}
+
+function checkpointWave(stage, waveIndex, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const checked = requireStage(stage, expectedIds, receipts, minSuccess)
+  log(JSON.stringify({ event: 'workflow_checkpoint', stage, wave: waveIndex + 1, expected_ids: expectedIds.map(String), success_ids: checked.filter((receipt) => receipt.ok === true && receipt.value != null).map((receipt) => receipt.id), receipt_count: checked.length, ok: true }))
+  return checked
+}
+
+async function runInWaves(items, cap, stage, runItem, idOf, minSuccessPerWave) {
+  const allIds = assertUniqueExpectedIds(stage, items.map((item) => String(idOf(item))))
+  const receipts = []
+  for (let offset = 0, waveIndex = 0; offset < items.length; offset += cap, waveIndex += 1) {
+    const wave = items.slice(offset, offset + cap)
+    const waveIds = allIds.slice(offset, offset + wave.length)
+    const waveReceipts = await parallel(wave.map((item) => () => settle(String(idOf(item)), () => runItem(item))))
+    const minSuccess = minSuccessPerWave === undefined ? waveIds.length : minSuccessPerWave
+    receipts.push(...checkpointWave(stage, waveIndex, waveIds, waveReceipts, minSuccess))
+  }
+  return receipts
 }
 
 const DRIFT = {
@@ -108,18 +196,22 @@ function remediatePrompt(group) {
 phase('Discover')
 let drifts = args.drifts
 if (!drifts || drifts.length === 0) {
-  const discovered = await agent(
-    [
-      'Read the most recent parent-hook-drift audit report under the control-plane audits/.',
-      'Return ONLY the MECHANICAL drift rows (a canonical hook/file whose deployed copy',
-      'no longer matches by SHA256) as drifts: [{ project, path, fix, mechanical }].',
-      'Set mechanical:true only for a verified byte-level canonical mismatch. If a row',
-      'looks like an intentional project-local divergence, set mechanical:false (it will',
-      'be excluded) — do NOT silently drop it, so the human can see it was considered.',
-    ].join('\n'),
-    { label: 'discover-drift', phase: 'Discover', schema: DRIFT_LIST },
-  )
-  drifts = discovered.drifts
+  const discoveryReceipt = await settle('discover-drift', async () => {
+    const discovered = await agent(
+      [
+        'Read the most recent parent-hook-drift audit report under the control-plane audits/.',
+        'Return ONLY the MECHANICAL drift rows (a canonical hook/file whose deployed copy',
+        'no longer matches by SHA256) as drifts: [{ project, path, fix, mechanical }].',
+        'Set mechanical:true only for a verified byte-level canonical mismatch. If a row',
+        'looks like an intentional project-local divergence, set mechanical:false (it will',
+        'be excluded) — do NOT silently drop it, so the human can see it was considered.',
+      ].join('\n'),
+      { label: 'discover-drift', phase: 'Discover', schema: DRIFT_LIST },
+    )
+    return Array.isArray(discovered?.drifts) ? discovered : null
+  })
+  requireStage('Discover', ['discover-drift'], [discoveryReceipt], 1)
+  drifts = discoveryReceipt.value.drifts
 }
 
 // Fail-closed gate before any unattended fan-out (Component-D). Three guards,
@@ -159,15 +251,25 @@ log('drift-holdpr: ' + mechanical.length + ' mechanical drift file(s) grouped in
 // leg). The Component-D risk here is the unattended PR-opening, not the executor.
 // HOLD PR only, never merge, never a project's main.
 phase('Remediate')
-const verdicts = await parallel(
-  capped.map((group) => () => agent(remediatePrompt(group), {
+const projectIds = assertUniqueExpectedIds('Remediate', capped.map((group) => String(group.project)))
+const mutationScopeFingerprint = JSON.stringify(capped.map((group) => ({
+  id: String(group.project),
+  drifts: group.drifts.map((drift) => ({ path: drift.path, canonical: drift.canonical ?? '', fix: drift.fix })),
+})))
+const mutationCap = resolveMutationParallelism(projectIds, mutationScopeFingerprint)
+log('drift-holdpr: mutation maxParallel=' + mutationCap)
+const verdictReceipts = await runInWaves(capped, mutationCap, 'Remediate', async (group) => {
+  const verdict = await agent(remediatePrompt(group), {
     label: 'drift:' + group.project,
     phase: 'Remediate',
     schema: VERDICT,
     isolation: 'worktree',
-  })),
-)
+  })
+  return verdict?.project === group.project ? verdict : null
+}, (group) => group.project)
+requireStage('Remediate', projectIds, verdictReceipts, projectIds.length)
+const verdicts = verdictReceipts.map((receipt) => receipt.value)
 
 // Every result is a HOLD PR for the human to review + merge (or a refusal for a
 // non-mechanical divergence). Nothing here merges — the merge bright-line holds.
-return { verdicts: verdicts.filter(Boolean) }
+return { verdicts }

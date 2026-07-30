@@ -92,8 +92,12 @@ SYNC_PATHS=(
   "docs/adr/"
   "docs/primers/"
   "docs/references/"
+  "docs/legacy/"
   "docs/UPGRADING.md"
   "docs/gptx.md"
+  "docs/gptx-security.md"
+  "docs/gptx-session-policy-matrix.md"
+  "docs/gptx-model-override-matrix.md"
   # NOTE: scheduled-tasks/ is NOT synced — it is operator-specific automation
   # whose targets.md / prompt.md files name the private fleet (conductor backlog,
   # dep-watch versions, audit target lists). Published verbatim it leaked named
@@ -209,8 +213,8 @@ core_rules_private_ref() {
 ref_integrity_check() {
   local failed refs_tmp files_tmp sync_path src md_file rel ref
   failed=0
-  refs_tmp="$(mktemp)"
-  files_tmp="$(mktemp)"
+  refs_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-refs.XXXXXX")"
+  files_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-files.XXXXXX")"
 
   for sync_path in "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}"; do
     src="${SOURCE_ROOT}/${sync_path%/}"
@@ -231,7 +235,7 @@ ref_integrity_check() {
     elif [ -d "$src" ]; then
       find "$src" -type f -name '*.md' -print > "$files_tmp"
       while IFS= read -r md_file; do
-        rel="${md_file#$SOURCE_ROOT/}"
+        rel="${md_file#"$SOURCE_ROOT"/}"
         grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$md_file" 2>/dev/null | sort -u > "$refs_tmp" || true
         while IFS= read -r ref; do
           [ -n "$ref" ] || continue
@@ -275,7 +279,7 @@ fi
 echo "  all synced markdown refs covered."
 
 # --- Workspace -------------------------------------------------------------
-TMP_STAGE="$(mktemp -d)"
+TMP_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/trellis-sync.XXXXXX")"
 trap 'rm -rf "$TMP_STAGE"' EXIT
 
 echo "==> Staging in $TMP_STAGE"
@@ -406,7 +410,7 @@ echo "  clean."
 
 # --- Diff against template tree --------------------------------------------
 echo "==> Diff vs $TEMPLATE_DIR"
-DIFF_OUT="$(mktemp)"
+DIFF_OUT="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-diff.XXXXXX")"
 {
   for p in "${SYNC_PATHS[@]}"; do
     src_stage="${TMP_STAGE}/${p%/}"

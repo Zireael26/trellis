@@ -44,6 +44,23 @@ the configured state endpoint answers with HTTP 2xx and reports state `ok`.
 Unknown state, malformed output, missing tools, connection errors, and
 timeouts all report false.
 
+## GPTX delegate policy is a separate gate
+
+`cmux-trellis-teams --delegates auto|gpt|claude|none` controls which providers
+an Agent call may request. It is independent of the main mode, main-model
+override, and advisor selection. Enforcement happens at the Agent caller in a
+`PreToolUse` guard; the router never changes `model`, `subagent_type`, or
+`name` to satisfy the policy.
+
+An explicit Agent model classifies first. When model is absent or `inherit`, a
+registered Agent type supplies the provider. `auto` permits known providers
+and unknown extensions; `gpt` and `claude` fail closed on unknowns; `none`
+rejects every Agent call. Policy permission does not prove that the lane has
+quota or that a direct topology can reach it. A permitted call that encounters
+an unavailable lane still follows the caller-owned degrade tiers below.
+Workflow-engine agents use their own orchestration surface and are outside this
+selector.
+
 The published worker pins a first-party frontmatter model and reaches the
 foreign backend through Bash only after the gate passes. This makes
 `core-rules/agents/lane-worker.md` loadable on a stock harness while keeping

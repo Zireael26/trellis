@@ -6,7 +6,142 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.18] — 2026-07-30
+
+**Version reconciliation.** `core-rules/VERSION` had been advanced to `rc.15`, `rc.16`, and
+`rc.17` by #198, #206, and #207 without a matching CHANGELOG section for any of them, so
+the file's newest released entry was `rc.14` while VERSION read `rc.17`. This section closes
+that gap: it covers everything merged after `rc.14` (#198–#216), including the three
+previously undocumented bumps, and VERSION moves to `rc.18`. Public tags remain
+public-mirror-only.
+
+Live certification for this release: `gptx-doctor --certify` green on all ten checks with
+both lanes exercised end-to-end (Anthropic subscription OAuth intact; GPT completion,
+tool-call round-trip, structured output, and advisor bridge with an actual `gpt-5.6-sol`
+receipt). Deterministic gate at the release SHA: 433 Bats assertions, 7 Node suites,
+conformance, evals, prompt-shell lint, and `shellcheck -S error` all clean.
+
+Scope of that certification, stated precisely: it was run against the **running** router,
+which predates the terra-alias fix below. So the alias fix is proven by unit and
+integration test but carries no live receipt yet — that needs a router restart, which is
+deferred because a user GPTX session is still live (spec 027 T03). Public mirror
+publication remains gated behind T05–T07 for the same reason.
+
 ### Added
+
+- **Public GPTX session modes** (#198) — `gptx`/`codex`/`hybrid`/`claude` as a documented
+  public surface rather than an instance-private arrangement.
+- **Orchestrate-and-mix model routing doctrine** (#211) — `core-rules/references/model-routing.md`.
+  Routes on verifiable properties (context footprint, cross-family review) and requires a
+  deliberate family mix on dual-eligible fan-out, because a free choice between near-parity
+  lanes collapses onto whichever model the orchestrator already holds.
+- **Spec 027** GPTX public-release gates and publication plumbing (#210).
+- **Spec 028** proposal: a global GPTX switch, default off, so Trellis works out of the box
+  for users who do not hold both subscriptions (#212).
+- Shared local-infrastructure spec, plan, and task rollout (#201, #203, #204).
+- Registry and reporting: Duta (#199), provakil competitor (#205), July operations
+  snapshot (#200), disk-janitor reports for 2026-07-28..30 (#208).
+
+### Changed
+
+- **Routing doctrine corrected: family before profile** (#213). An earlier draft consulted a
+  per-shape table before allocating family, so the table decided the lane for most units and
+  the mix rule could never fire. The pool is now recorded with named stage-1 exclusions, which
+  is what makes the 40% mix auditable instead of retro-justifiable.
+- **Terra advice gate rescoped, not removed.** The mandatory advice-before-mutation
+  round-trip is retired for **delegated** Terra units doing reversible in-repo work: the
+  orchestrator's review of the finished diff is the gate, and the blocking call cancelled
+  the throughput advantage that is Terra's only reason to exist. Cross-model review of
+  that retirement (`audits/2026-07-30-terra-gate-cross-review.md`) found it had been
+  applied one step too far, so two parts are restored, one of them stricter than before:
+  - A Terra **main** model now requires a reachable Claude-family oracle — `--advisor
+    auto|opus|fable`, or `--delegates claude|auto` so a Claude reviewer can be spawned.
+    `--advisor sol` no longer qualifies, which the *original* gate accepted; GPT reviewing
+    GPT is not independent review. Previously `--mode codex --model terra --advisor none
+    --delegates none` resolved valid with no advisor, no orchestrator above it, and zero
+    permitted delegate providers — unadvised and structurally unable to spawn a reviewer.
+    Sessions relying on mode defaults are unaffected: `delegates` defaults to `auto`.
+  - Irreversible work — destroying data, writing outside declared paths, externally
+    visible effects — still blocks with zero mutation when advice is unavailable, because
+    reviewing a diff cannot undo an effect that already landed. This one is an **agent
+    instruction, not a mechanized block**: no hook enforces it, so it is recorded as an
+    open follow-up rather than claimed as a rail.
+
+### Fixed
+
+- **`gpt-terra`'s declared `xhigh` effort is now actually enforced.** The alias mechanism
+  held a single hardcoded `EXECUTION_MODEL = 'gpt-5.6-sol'` applied to every alias, and the
+  alias map contained Sol slugs only. `gpt-terra` declared `effort: xhigh` in frontmatter but
+  requested the unaliased `gpt-5.6-terra`, so the router matched no alias, injected no effort,
+  and reported `effort: null` / `effortSource: null` — the rung was cosmetic. Adding a terra
+  key to the old map would have been worse than the gap: it would have executed **Sol** under
+  a terra name. Each alias now carries its own execution model, terra aliases exist for all
+  three rungs, and `gpt-terra` requests `gpt-5.6-terra-xhigh` like every other GPT agent
+  requests its own alias. A new guard reads the agent files and fails if any GPT agent's
+  declared model is not an alias, or if its declared `effort:` disagrees with what the alias
+  injects — the two drifting apart is the defect itself.
+- **Policy notices now reach the operator.** `session-policy` emitted `notices[]` that the
+  launcher never read, so a recommended-but-disabled safety pairing appeared only inside
+  `--dry-run` JSON — and the test suite asserted it only there, so the live gap passed.
+  Real launches now print `Trellis notice: …` to stderr before exec, covered by a
+  non-dry-run test.
+- **`max` is hard-rejected at every dispatch validator** (#214), with or without an operator
+  justification, and removed from the effort enum. Above `xhigh` these models spend
+  substantially more reasoning for very little gain, so the ceiling is now mechanical rather
+  than advisory.
+- **A busy gateway is no longer restarted** (#213). The health probe used a 2s timeout and
+  `launchctl kickstart`ed on timeout, so a healthy-but-loaded router was killed mid-request —
+  dropping in-flight work for every session sharing it. The probe now allows 10s and checks
+  that the port is actually listening before concluding anything is wrong. Alias-derived
+  effort is also pinned as authoritative over an inherited CLI `--effort`.
+- **The installer no longer deletes the operator's Claude compact window** (#209).
+- **Workflows fail closed at stage boundaries** (#206) instead of proceeding past a required
+  stage that did not produce a result.
+- **Oversized skill roots are blocked before load** (#207). A single Skill result had injected
+  ~212K tokens into one session, which auto-compact then preserved, ending in
+  `Prompt is too long`.
+
+### Tests
+
+- Streamed upstream error coverage for the GPT lane (#202).
+- `M12` aligned with the merged `max` hard-reject (#216). It had asserted the pre-`0c128e5`
+  contract and was failing on `main` — found only by running the full 36-file suite rather
+  than the files a given change touches.
+
+## [v1.0.0-rc.14] — 2026-07-28
+
+### Added
+
+- **Oversized Skill pre-load safety (spec 026).** Model-invoked and direct-slash
+  Skills now pass a pre-expansion 65,536-byte UTF-8 root gate. Supported project,
+  user, installed plugin-cache, and marketplace roots resolve by explicit
+  precedence using declared names or basenames; same-tier ambiguity, invalid
+  manifests, and oversized authoritative roots fail closed before `SKILL.md` body
+  injection. SessionStart reports warning-only inventory, canonical roots gain a
+  hard size linter, and Claude/Codex hook trees remain parity-tested. The normal
+  272K GPT context window and auto-compaction policy are unchanged. Unknown future
+  loader sources remain an explicit residual boundary.
+
+## [v1.0.0-rc.13] — 2026-07-28
+
+### Added
+
+- **Orthogonal GPTX delegation controls and worker reliability (spec 025).**
+  `cmux-trellis-teams` adds `--delegates auto|gpt|claude|none` without changing main-model or
+  advisor selection. A session-scoped Agent `PreToolUse` guard resolves launcher-captured
+  slot aliases before provider classification, preserves provider-stable full IDs, rejects
+  stale or mismatched policy without rewriting tool input, and applies at nested Agent depth
+  through inherited settings. Exact GPT worker aliases now enforce `gpt-mid` = medium,
+  `gpt-high` = high, and `gpt-sol` = xhigh at the GPT router boundary while retaining 272K
+  context, exact forwarded byte length, explicit-model precedence, and same-provider routing.
+  Live doctrine and Workflow validators restore medium/high/xhigh with explicit effort and
+  existing attended max/ultra exceptions. Advisor callbacks are deadline-bound, cancelable,
+  idempotent, concurrency-two, and circuit-broken. Sanitized receipts distinguish requested,
+  execution, effort, and pre-spawn provider state without prompt storage or claims of observed
+  runtime provider. Canonical policy data generates checked-in 120-row session and 24-row
+  model-override matrices with byte-parity tests. Agent instructions distinguish root named
+  teammate mailboxes from nested unnamed direct-result subagents while preserving Terra's
+  advice-before-mutation invariant.
 
 - **Public GPTX model modes (spec 022).** `cmux-trellis-teams` keeps cmux as the
   session/team surface while exposing `gptx`, `codex`, `hybrid`, and `claude`
@@ -68,6 +203,29 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
   ledger commands; the dependency audits consume the same baseline.
 
 ### Changed
+
+- **GPTX advisor bridge trust boundary (spec 022/024).** The maintained CLIProxyAPI fork
+  now activates only for the exact built-in advisor declaration, ignores callback headers
+  on ordinary requests, accepts only literal loopback callback IPs with exact high-entropy
+  paths, defers callbacks until the full tool sequence is known, fails closed on mixed or
+  repeated advisor calls, recursively merges usage, and observes cancellation on every
+  output send. Trellis pins the reviewed fork merge commit.
+
+- **GPTX child-advisor inheritance guard (spec 022).** A GPT request that declares the
+  advisor tool but loses its session header now receives a Sol xhigh callback, while
+  explicit advisor selections—including `none`—remain authoritative. Advisor results
+  identify the actual model and selection source. Routed GPT sessions also distinguish
+  Agent mailbox identities from `TaskOutput` job IDs. This is implemented entirely in
+  Trellis; Claude Code is not patched.
+
+- **GPTX advisor recovery hardening (spec 022).** The advisor bridge now sends a bounded
+  active-task context, allows five minutes for Sol xhigh, deduplicates callbacks by
+  session and turn, and clears them on every terminal path. The reversible installer configures
+  CLIProxyAPI for one retry and no credential-wide cooldown on transient 408/5xx while
+  preserving authentication, quota, and rate-limit cooling. The doctor detects obsolete
+  pre-bridge global instructions and verifies a Codex completion immediately after the
+  advisor probe. The session launcher reloads missing local gateway services before
+  starting cmux.
 
 - **GPTX Terra role correction (spec 022).** `codex` and `hybrid` now default to
   GPT-5.6 Sol xhigh as the main orchestrator. Terra remains available as the fast
@@ -148,6 +306,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
   projects remain on the 10.4.1 lane until the upstream plugin converges.
 
 ### Fixed
+
+- **Workflow required stages now fail closed instead of disappearing as nulls.** Canonical recipes preserve one settled receipt per declared identity, emit structured `workflow_stage_gate` JSON with expected/success/failure counts and IDs, and throw before later required stages when a unit is null, throws, or returns the wrong identity. Valid negative/HOLD verdicts still count as completed receipts. Codex remains optional where intended (`verify-panel`), while a Claude fallback is required and can no longer fail silently. The Workflow test stub now matches production parallel/pipeline failure semantics, including per-item stage skipping and `(previous, originalItem, index)` arguments (spec 024).
+
+- **GPTX delegate locks now classify effective child model, not display alias.** Codex and
+  hybrid map Claude Code's `opus` slot to `gpt-5.6-sol`; policy version 2 captures and
+  validates that child mapping before Agent `PreToolUse` enforcement. Full model IDs stay
+  literal, stale/mismatched policy fails closed, and hermetic tests prove zero real platform
+  or service command invocations.
 
 - **The disk janitor no longer reaps a worktree somebody is working in.** The worktree
   scan had no live-process guard, so `merged`-ness stood in as a proxy for "nobody is in

@@ -29,6 +29,14 @@ QUIET=false
 [ "${1:-}" = "--quiet" ] && QUIET=true
 
 # Spec docs to scan (prioritized to the audit's named set).
+# DELIBERATE BOUNDARY: specs/*/ is NOT scanned, and that is not an oversight.
+# Measured 2026-07-30: specs/ carries 1,181 path-shaped references, 374 of which do not
+# resolve — almost entirely legitimate documentation idioms rather than rot (placeholders
+# like `specs/NNN/tasks.md`, subdir-relative paths like `lib/deps.sh`, elisions like
+# `codex/.../reread-guard.bats`). Including them would mean rewriting 374 references
+# across 42 historical spec documents to buy very little: spec docs are records, while the
+# live doctrine surfaces below are the ones an agent actually loads and acts on.
+# If you widen this list, add a path-shape and placeholder heuristic first.
 SPEC_DOCS=(
   "$ROOT/core-rules/CLAUDE.md"
   "$ROOT/core-rules/hooks.md"

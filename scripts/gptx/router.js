@@ -40,10 +40,43 @@ const ADVISOR_STATE_FILE = process.env.GPTX_ADVISOR_STATE_FILE
 const ADVISOR_OPUS_MODEL = process.env.GPTX_ADVISOR_OPUS_MODEL || 'claude-opus-5';
 const ADVISOR_FABLE_MODEL = process.env.GPTX_ADVISOR_FABLE_MODEL || 'claude-fable-5';
 const ADVISOR_SOL_MODEL = process.env.GPTX_ADVISOR_SOL_MODEL || 'gpt-5.6-sol';
+const positiveInteger = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : fallback;
+};
+
 const ADVISOR_TTL_MS = 10 * 60_000;
 const ADVISOR_DEFAULT_RETRY_MS = 15 * 60_000;
+// One wall-clock budget covers callback queueing, advice, and the main-model
+// continuation. The default leaves 30 seconds before the observed 300-second
+// silent ceiling. Keep the former timeout name as a compatibility fallback, but
+// it now configures the whole transaction rather than each stage independently.
+const ADVISOR_TRANSACTION_DEADLINE_MS = positiveInteger(
+  process.env.GPTX_ADVISOR_TRANSACTION_DEADLINE_MS
+    || process.env.GPTX_ADVISOR_TRANSACTION_TIMEOUT_MS
+    || process.env.GPTX_ADVISOR_TIMEOUT_MS,
+  270_000,
+);
+const ADVISOR_CONCURRENCY = positiveInteger(process.env.GPTX_ADVISOR_CONCURRENCY, 2);
+const ADVISOR_BREAKER_THRESHOLD = positiveInteger(
+  process.env.GPTX_ADVISOR_BREAKER_THRESHOLD,
+  3,
+);
+const ADVISOR_BREAKER_WINDOW_MS = positiveInteger(
+  process.env.GPTX_ADVISOR_BREAKER_WINDOW_MS,
+  60_000,
+);
+const ADVISOR_BREAKER_OPEN_MS = positiveInteger(
+  process.env.GPTX_ADVISOR_BREAKER_OPEN_MS,
+  60_000,
+);
+const ADVISOR_INPUT_MAX_BYTES = Number(process.env.GPTX_ADVISOR_INPUT_MAX_BYTES || 64 * 1024);
+const ADVISOR_OUTPUT_MAX_TOKENS = 2048;
+const ADVISOR_MESSAGE_LIMIT = 12;
+const ADVISOR_BLOCK_MAX_BYTES = 12 * 1024;
 const DEBUG = process.env.GPTX_DEBUG === '1';
 
+const { prepareForwardBody } = require('./effort-alias');
 const { laneFor } = require('./lanes');
 const { resolveModelContext } = require('./model-context');
 const HEALTH_TTL_MS = 30_000;
@@ -106,7 +139,18 @@ const stats = {
   // `cut` counts streams that ended without their terminal event; `aborted`, clients that
   // hung up first.
   anthropic: { requests: 0, errors: 0, inflight: 0, cut: 0, streamErr: 0, aborted: 0, retried: 0, maxGapMs: 0 },
-  codex: { requests: 0, errors: 0, inflight: 0, cut: 0, streamErr: 0, aborted: 0, retried: 0, maxGapMs: 0 },
+  codex: {
+    requests: 0,
+    errors: 0,
+    inflight: 0,
+    cut: 0,
+    streamErr: 0,
+    aborted: 0,
+    retried: 0,
+    maxGapMs: 0,
+    effortAliases: 0,
+    lastEffortReceipt: null,
+  },
   failures: [],           // last 10 {t, lane, status, model}
   cliVersion: null,
   cliVersionPrev: null,
@@ -116,6 +160,17 @@ const stats = {
   codexAuthCooling: false,
   codexConsecutiveErrors: 0,
   codexMaxOkBytes: 0,
+  advisorMissingHeaderSolDefaults: 0,
+  advisorLastReceipt: null,
+  advisorTransactions: {
+    queued: 0,
+    inflight: 0,
+    succeeded: 0,
+    failed: 0,
+    canceled: 0,
+    timedOut: 0,
+    replayed: 0,
+  },
   // Does the GPT lane carry the 1m-context beta? Load-bearing: Claude Code resolves a
   // model's context window client-side, and for a model absent from its catalog the
   // `context-1m` beta + a firstParty provider makes it assume 1e6. The agent then never
@@ -148,6 +203,43 @@ try { fs.watch(AUTH_DIR, (_e, f) => { if (f === 'gptx-baseline.json') loadBaseli
 // to api.anthropic.com. A Sol advisor request is built with a fresh proxy-only header
 // set, so Anthropic OAuth cannot cross into the GPT translator.
 const advisorCallbacks = new Map();
+const advisorCallbacksByOwner = new Map();
+const advisorQueue = [];
+const advisorBreakers = new Map();
+let advisorInflight = 0;
+
+class AdvisorTransactionError extends Error {
+  constructor(message, {
+    code = 'ADVISOR_TRANSACTION_FAILED',
+    stage = 'transaction',
+    provider = null,
+    timedOut = false,
+    canceled = false,
+    retryAfterMs = null,
+  } = {}) {
+    super(message);
+    this.name = 'AdvisorTransactionError';
+    this.code = code;
+    this.stage = stage;
+    this.provider = provider;
+    this.timedOut = timedOut;
+    this.canceled = canceled;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+class AdvisorCircuitOpenError extends AdvisorTransactionError {
+  constructor(provider, stage, retryAfterMs) {
+    super(`advisor ${provider} ${stage} circuit is open`, {
+      code: 'ADVISOR_CIRCUIT_OPEN',
+      provider,
+      stage,
+      retryAfterMs,
+    });
+    this.name = 'AdvisorCircuitOpenError';
+  }
+}
+
 let advisorState = {
   fallback: false,
   active: 'opus',
@@ -189,17 +281,244 @@ const advisorContext = () => {
   return result;
 };
 
+const advisorErrorPayload = (error) => ({
+  type: 'error',
+  error: {
+    type: 'overloaded_error',
+    code: error?.code || 'ADVISOR_TRANSACTION_FAILED',
+    stage: error?.stage || 'transaction',
+    ...(error?.provider ? { provider: error.provider } : {}),
+    ...(Number.isFinite(error?.retryAfterMs)
+      ? { retry_after_ms: Math.max(0, Math.ceil(error.retryAfterMs)) }
+      : {}),
+    message: error?.message || 'advisor transaction failed',
+  },
+});
+
+const settleAdvisorTransaction = (callback, status, payload, outcome) => {
+  if (!callback || callback.state === 'settled') return callback?.response || null;
+  if (callback.state === 'dropped') return null;
+  clearTimeout(callback.deadlineTimer);
+  callback.state = 'settled';
+  callback.currentStage = null;
+  callback.response = {
+    status,
+    body: JSON.stringify(payload),
+  };
+  if (outcome && Object.hasOwn(stats.advisorTransactions, outcome)) {
+    stats.advisorTransactions[outcome]++;
+  }
+  return callback.response;
+};
+
+const callbackId = () => crypto.randomBytes(24).toString('base64url');
+
+const remainingAdvisorMs = (callback) => Math.max(0, callback.deadlineAt - Date.now());
+
+const createAdvisorCallback = ({
+  id, advisor, selectionSource, body, headers, who, owner, fingerprint,
+}) => {
+  const createdAt = Date.now();
+  const controller = new AbortController();
+  const callback = {
+    id,
+    advisor,
+    selectionSource,
+    body,
+    headers,
+    who,
+    owner,
+    fingerprint,
+    createdAt,
+    deadlineAt: createdAt + ADVISOR_TRANSACTION_DEADLINE_MS,
+    expiresAt: createdAt + ADVISOR_TTL_MS,
+    controller,
+    deadlineTimer: null,
+    expiryTimer: null,
+    state: 'pending',
+    currentStage: 'pending',
+    deliveryStarted: false,
+    promise: null,
+    response: null,
+    queueEntry: null,
+  };
+  callback.deadlineTimer = setTimeout(() => {
+    const stage = callback.queueEntry ? 'queue' : (callback.currentStage || 'transaction');
+    const error = new AdvisorTransactionError(
+      `advisor transaction deadline exceeded after ${ADVISOR_TRANSACTION_DEADLINE_MS}ms`,
+      {
+        code: 'ADVISOR_TRANSACTION_TIMEOUT',
+        stage,
+        timedOut: true,
+      },
+    );
+    if (!controller.signal.aborted) controller.abort(error);
+    settleAdvisorTransaction(callback, 503, advisorErrorPayload(error), 'timedOut');
+  }, ADVISOR_TRANSACTION_DEADLINE_MS);
+  if (typeof callback.deadlineTimer.unref === 'function') callback.deadlineTimer.unref();
+  callback.expiryTimer = setTimeout(() => {
+    dropAdvisorCallback(id, new AdvisorTransactionError(
+      'advisor callback registry entry expired',
+      {
+        code: 'ADVISOR_CALLBACK_EXPIRED',
+        stage: callback.currentStage || 'transaction',
+        timedOut: true,
+      },
+    ));
+  }, ADVISOR_TTL_MS);
+  if (typeof callback.expiryTimer.unref === 'function') callback.expiryTimer.unref();
+  return callback;
+};
+
+const dropAdvisorCallback = (id, reason = null) => {
+  if (!id) return;
+  const callback = advisorCallbacks.get(id);
+  advisorCallbacks.delete(id);
+  if (!callback) return;
+  if (advisorCallbacksByOwner.get(callback.owner) === id) {
+    advisorCallbacksByOwner.delete(callback.owner);
+  }
+  clearTimeout(callback.deadlineTimer);
+  clearTimeout(callback.expiryTimer);
+  if (callback.state !== 'settled' && callback.state !== 'dropped') {
+    const error = reason instanceof Error ? reason : new AdvisorTransactionError(
+      'advisor transaction canceled with its original request',
+      {
+        code: 'ADVISOR_TRANSACTION_CANCELED',
+        stage: callback.currentStage || 'transaction',
+        canceled: true,
+      },
+    );
+    callback.state = 'dropped';
+    callback.currentStage = null;
+    if (!callback.controller.signal.aborted) callback.controller.abort(error);
+    if (error.timedOut) stats.advisorTransactions.timedOut++;
+    else stats.advisorTransactions.canceled++;
+  }
+};
+
 const pruneAdvisorCallbacks = () => {
   const now = Date.now();
   for (const [id, callback] of advisorCallbacks) {
-    if (callback.expiresAt <= now) advisorCallbacks.delete(id);
+    if (callback.expiresAt <= now) {
+      dropAdvisorCallback(id, new AdvisorTransactionError(
+        'advisor callback registry entry expired',
+        {
+          code: 'ADVISOR_CALLBACK_EXPIRED',
+          stage: callback.currentStage || 'transaction',
+          timedOut: true,
+        },
+      ));
+    }
   }
 };
 
 const declaresAdvisor = (parsedBody) => Array.isArray(parsedBody?.tools)
   && parsedBody.tools.some((tool) => tool?.type === 'advisor_20260301' || tool?.name === 'advisor');
 
-const callbackId = () => crypto.randomBytes(24).toString('base64url');
+// Agent-spawned GPT requests may lose the parent session's custom advisor header.
+// Keep that recovery inside Trellis: only a GPT request that declares the advisor
+// tool gets the Sol default, while every explicit session policy remains authoritative.
+const resolveAdvisorSelection = (headers) => {
+  const raw = headers['x-trellis-advisor'];
+  if (raw === undefined || String(raw).trim() === '') {
+    return {
+      advisor: 'sol',
+      source: 'missing-header-safe-default:sol',
+      missingHeader: true,
+    };
+  }
+  const advisor = String(raw).trim().toLowerCase();
+  return {
+    advisor,
+    source: `session-policy:${advisor}`,
+    missingHeader: false,
+  };
+};
+
+const clipUtf8 = (value, maxBytes) => {
+  const text = String(value || '');
+  const encoded = Buffer.from(text);
+  if (encoded.length <= maxBytes) return text;
+  const clipped = encoded.subarray(0, Math.max(0, maxBytes - 20))
+    .toString('utf8')
+    .replace(/\uFFFD+$/g, '');
+  return `${clipped}\n[truncated]`;
+};
+
+const stripSystemReminders = (value) => String(value || '')
+  .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '')
+  .trim();
+
+const advisorBlockText = (block) => {
+  if (typeof block === 'string') return stripSystemReminders(block);
+  if (!block || typeof block !== 'object') return '';
+  if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
+    return stripSystemReminders(block.text);
+  }
+  if (block.type === 'tool_use' || block.type === 'function_call') {
+    const name = block.name || 'unknown';
+    const input = block.input ?? block.arguments ?? {};
+    return `[tool call: ${name}]\n${clipUtf8(JSON.stringify(input), ADVISOR_BLOCK_MAX_BYTES)}`;
+  }
+  if (block.type === 'tool_result' || block.type === 'function_call_output') {
+    const content = Array.isArray(block.content)
+      ? block.content.map(advisorBlockText).filter(Boolean).join('\n')
+      : String(block.content ?? block.output ?? '');
+    return `[tool result]\n${clipUtf8(content, ADVISOR_BLOCK_MAX_BYTES)}`;
+  }
+  return '';
+};
+
+const advisorMessage = (message) => {
+  if (!message || !['user', 'assistant'].includes(message.role)) return null;
+  const blocks = Array.isArray(message.content) ? message.content : [message.content];
+  const content = blocks.map(advisorBlockText).filter(Boolean).join('\n\n');
+  if (!content) return null;
+  return {
+    role: message.role,
+    content: clipUtf8(content, ADVISOR_BLOCK_MAX_BYTES),
+  };
+};
+
+const mergeAdjacentAdvisorMessages = (messages) => {
+  const merged = [];
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (previous?.role === message.role) {
+      previous.content = clipUtf8(
+        `${previous.content}\n\n${message.content}`,
+        ADVISOR_BLOCK_MAX_BYTES,
+      );
+    } else {
+      merged.push({ ...message });
+    }
+  }
+  return merged;
+};
+
+const compactAdvisorMessages = (original, baseBody) => {
+  const candidates = mergeAdjacentAdvisorMessages(
+    (Array.isArray(original?.messages) ? original.messages : [])
+      .map(advisorMessage)
+      .filter(Boolean)
+      .slice(-ADVISOR_MESSAGE_LIMIT),
+  );
+  const selected = [];
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const trial = [candidates[index], ...selected];
+    if (Buffer.byteLength(JSON.stringify({ ...baseBody, messages: trial })) <= ADVISOR_INPUT_MAX_BYTES) {
+      selected.unshift(candidates[index]);
+    } else if (selected.length) {
+      break;
+    }
+  }
+  if (selected.length) return selected;
+  return [{
+    role: 'user',
+    content: 'Review the active implementation task and provide the next safe action.',
+  }];
+};
 
 const stripInternalHeaders = (headers) => {
   const clean = { ...headers };
@@ -210,59 +529,372 @@ const stripInternalHeaders = (headers) => {
 };
 
 const advisorRequestBody = (original, model) => {
-  const body = JSON.parse(JSON.stringify(original));
-  body.model = model;
-  body.stream = false;
-  body.max_tokens = Math.min(Number(body.max_tokens) || 4096, 8192);
-  delete body.tools;
-  delete body.tool_choice;
-
   const instruction = [
     'You are the read-only advisor for an implementation agent.',
-    'Inspect the conversation and give one concrete recommendation.',
+    'Inspect the bounded active-task context and give one concrete recommendation.',
     'Lead with material risks or defects, then the next action and missing evidence.',
     'Do not claim to edit files or delegate work.',
   ].join(' ');
-  if (Array.isArray(body.system)) {
-    body.system = [{ type: 'text', text: instruction }, ...body.system];
-  } else {
-    body.system = `${instruction}${body.system ? `\n\n${body.system}` : ''}`;
+  const body = {
+    model,
+    stream: false,
+    max_tokens: Math.min(Number(original?.max_tokens) || ADVISOR_OUTPUT_MAX_TOKENS, ADVISOR_OUTPUT_MAX_TOKENS),
+    system: instruction,
+  };
+  for (const name of ['thinking', 'output_config']) {
+    if (original?.[name] && typeof original[name] === 'object') {
+      body[name] = JSON.parse(JSON.stringify(original[name]));
+    }
   }
+  body.messages = compactAdvisorMessages(original, body);
   return Buffer.from(JSON.stringify(body));
 };
 
 class AdvisorUpstreamError extends Error {
-  constructor(status, body, headers) {
+  constructor(status, body, headers, provider, stage) {
     super(`advisor upstream returned HTTP ${status}`);
+    this.name = 'AdvisorUpstreamError';
     this.status = status;
     this.body = body;
     this.headers = headers;
+    this.provider = provider;
+    this.stage = stage;
+    this.code = `ADVISOR_UPSTREAM_HTTP_${status}`;
   }
 }
 
-const requestJson = ({ transport, options, body }) => new Promise((resolve, reject) => {
-  const request = transport.request(options, (response) => {
+const advisorTransportError = (message, code, provider, stage) => {
+  const error = new Error(message);
+  error.name = 'AdvisorTransportError';
+  error.code = code || 'ADVISOR_TRANSPORT_ERROR';
+  error.provider = provider;
+  error.stage = stage;
+  error.advisorTransportFailure = true;
+  return error;
+};
+
+const failureSignature = (error) => {
+  if (error instanceof AdvisorUpstreamError
+    && (error.status === 408 || (error.status >= 500 && error.status <= 599))) {
+    return `http:${error.status}`;
+  }
+  if (error?.advisorTransportFailure) return `transport:${error.code || error.name}`;
+  return null;
+};
+
+const breakerKey = (provider, stage) => `${provider}:${stage}`;
+
+const breakerRecord = (provider, stage) => {
+  const key = breakerKey(provider, stage);
+  let record = advisorBreakers.get(key);
+  if (!record) {
+    record = {
+      provider,
+      stage,
+      state: 'closed',
+      failures: [],
+      openUntil: 0,
+      probeInFlight: false,
+      generation: 0,
+    };
+    advisorBreakers.set(key, record);
+  }
+  return record;
+};
+
+const pruneBreakerFailures = (record, now = Date.now()) => {
+  record.failures = record.failures
+    .filter((failure) => now - failure.at <= ADVISOR_BREAKER_WINDOW_MS)
+    .slice(-(ADVISOR_BREAKER_THRESHOLD * 4));
+};
+
+const acquireBreaker = (provider, stage) => {
+  const record = breakerRecord(provider, stage);
+  const now = Date.now();
+  pruneBreakerFailures(record, now);
+  if (record.state === 'open') {
+    if (now < record.openUntil) {
+      throw new AdvisorCircuitOpenError(provider, stage, record.openUntil - now);
+    }
+    record.state = 'half-open';
+    record.probeInFlight = false;
+    record.generation++;
+  }
+  if (record.state === 'half-open') {
+    if (record.probeInFlight) {
+      throw new AdvisorCircuitOpenError(provider, stage, 0);
+    }
+    record.probeInFlight = true;
+    return { record, probe: true, generation: record.generation };
+  }
+  return { record, probe: false, generation: record.generation };
+};
+
+const closeBreaker = (record) => {
+  record.state = 'closed';
+  record.failures = [];
+  record.openUntil = 0;
+  record.probeInFlight = false;
+  record.generation++;
+};
+
+const resetBreaker = (provider, stage) => {
+  const record = advisorBreakers.get(breakerKey(provider, stage));
+  if (record) closeBreaker(record);
+};
+
+const failBreaker = (token, error) => {
+  const { record, probe, generation } = token;
+  // Requests admitted before an open/half-open transition cannot extend or
+  // overwrite the newer circuit decision when they settle late.
+  if (generation !== record.generation) return;
+  const signature = failureSignature(error);
+  if (!signature) {
+    if (probe && (error?.timedOut || error?.canceled)) {
+      // Local deadline/parent cancellation is not provider evidence. Release the
+      // half-open lease without declaring the provider healthy or extending the
+      // open window; the next caller may take a fresh probe.
+      record.state = 'open';
+      record.openUntil = Date.now();
+      record.probeInFlight = false;
+      record.generation++;
+    } else if (probe) {
+      // A complete non-408/non-5xx response proves the transport is reachable.
+      closeBreaker(record);
+    }
+    return;
+  }
+  const now = Date.now();
+  pruneBreakerFailures(record, now);
+  record.failures.push({ at: now, signature });
+  record.failures = record.failures.slice(-(ADVISOR_BREAKER_THRESHOLD * 4));
+  const matching = record.failures.filter((failure) => failure.signature === signature).length;
+  if (probe || matching >= ADVISOR_BREAKER_THRESHOLD) {
+    record.state = 'open';
+    record.openUntil = now + ADVISOR_BREAKER_OPEN_MS;
+    record.probeInFlight = false;
+    record.generation++;
+  }
+};
+
+const succeedBreaker = (token) => {
+  if (token.probe && token.generation === token.record.generation) {
+    closeBreaker(token.record);
+  }
+};
+
+const breakerIsOpen = (provider, stage) => {
+  const record = advisorBreakers.get(breakerKey(provider, stage));
+  if (!record) return false;
+  return record.state === 'open' && Date.now() < record.openUntil;
+};
+
+const assertBreakerCanQueue = (provider, stage) => {
+  const record = advisorBreakers.get(breakerKey(provider, stage));
+  if (!record) return;
+  const now = Date.now();
+  if (record.state === 'open' && now < record.openUntil) {
+    throw new AdvisorCircuitOpenError(provider, stage, record.openUntil - now);
+  }
+  if (record.state === 'half-open' && record.probeInFlight) {
+    throw new AdvisorCircuitOpenError(provider, stage, 0);
+  }
+};
+
+const withAdvisorBreaker = async (provider, stage, operation) => {
+  const token = acquireBreaker(provider, stage);
+  try {
+    const result = await operation();
+    succeedBreaker(token);
+    return result;
+  } catch (error) {
+    failBreaker(token, error);
+    throw error;
+  }
+};
+
+const requestJson = ({
+  transport, options, body, remainingMs, signal, provider, stage,
+}) => new Promise((resolve, reject) => {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    reject(new AdvisorTransactionError('advisor transaction deadline exceeded', {
+      code: 'ADVISOR_TRANSACTION_TIMEOUT', provider, stage, timedOut: true,
+    }));
+    return;
+  }
+  if (signal?.aborted) {
+    reject(signal.reason || new AdvisorTransactionError('advisor transaction canceled', {
+      code: 'ADVISOR_TRANSACTION_CANCELED', provider, stage, canceled: true,
+    }));
+    return;
+  }
+
+  let settled = false;
+  let response = null;
+  let deadlineTimer = null;
+  const finish = (error, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(deadlineTimer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+    if (error) reject(error);
+    else resolve(value);
+  };
+  const request = transport.request(options, (incoming) => {
+    response = incoming;
     const chunks = [];
     let length = 0;
-    response.on('data', (chunk) => {
+    incoming.on('data', (chunk) => {
       if (length < 2 * 1024 * 1024) {
         chunks.push(chunk);
         length += chunk.length;
       }
     });
-    response.on('end', () => {
+    incoming.once('aborted', () => finish(advisorTransportError(
+      'advisor upstream response aborted',
+      'ECONNRESET',
+      provider,
+      stage,
+    )));
+    incoming.once('error', (error) => finish(advisorTransportError(
+      `advisor upstream response failed: ${error.message}`,
+      error.code,
+      provider,
+      stage,
+    )));
+    incoming.once('end', () => {
       const responseBody = Buffer.concat(chunks).toString('utf8');
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        reject(new AdvisorUpstreamError(response.statusCode, responseBody, response.headers));
+      if (incoming.statusCode < 200 || incoming.statusCode >= 300) {
+        finish(new AdvisorUpstreamError(
+          incoming.statusCode,
+          responseBody,
+          incoming.headers,
+          provider,
+          stage,
+        ));
         return;
       }
-      try { resolve(JSON.parse(responseBody)); }
-      catch (error) { reject(new Error(`advisor upstream returned invalid JSON: ${error.message}`)); }
+      try { finish(null, JSON.parse(responseBody)); }
+      catch (error) {
+        const invalid = new Error(`advisor upstream returned invalid JSON: ${error.message}`);
+        invalid.code = 'ADVISOR_INVALID_JSON';
+        invalid.provider = provider;
+        invalid.stage = stage;
+        finish(invalid);
+      }
     });
   });
-  request.setTimeout(2 * 60_000, () => request.destroy(new Error('advisor upstream timed out')));
-  request.on('error', reject);
-  request.end(body);
+
+  const onAbort = () => {
+    const error = signal.reason || new AdvisorTransactionError('advisor transaction canceled', {
+      code: 'ADVISOR_TRANSACTION_CANCELED', provider, stage, canceled: true,
+    });
+    // Settle with the authoritative cancellation reason before destroying sockets;
+    // destroy() may synchronously emit `aborted`/`error`, which must not be
+    // misclassified as provider transport failure by the breaker.
+    finish(error);
+    if (response && !response.destroyed) response.destroy(error);
+    if (!request.destroyed) request.destroy(error);
+  };
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  deadlineTimer = setTimeout(() => {
+    const error = new AdvisorTransactionError('advisor transaction deadline exceeded', {
+      code: 'ADVISOR_TRANSACTION_TIMEOUT', provider, stage, timedOut: true,
+    });
+    finish(error);
+    if (response && !response.destroyed) response.destroy(error);
+    if (!request.destroyed) request.destroy(error);
+  }, remainingMs);
+  if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+
+  request.once('error', (error) => {
+    if (error instanceof AdvisorTransactionError) finish(error);
+    else finish(advisorTransportError(
+      `advisor upstream request failed: ${error.message}`,
+      error.code,
+      provider,
+      stage,
+    ));
+  });
+  try { request.end(body); }
+  catch (error) {
+    finish(advisorTransportError(
+      `advisor upstream request failed: ${error.message}`,
+      error.code,
+      provider,
+      stage,
+    ));
+  }
+});
+
+const drainAdvisorQueue = () => {
+  while (advisorInflight < ADVISOR_CONCURRENCY && advisorQueue.length) {
+    const entry = advisorQueue.shift();
+    stats.advisorTransactions.queued = Math.max(0, stats.advisorTransactions.queued - 1);
+    entry.callback.queueEntry = null;
+    entry.callback.controller.signal.removeEventListener('abort', entry.onAbort);
+    if (entry.callback.state === 'settled'
+      || entry.callback.state === 'dropped'
+      || entry.callback.controller.signal.aborted) {
+      entry.reject(entry.callback.controller.signal.reason || new AdvisorTransactionError(
+        'advisor transaction canceled while queued',
+        { code: 'ADVISOR_TRANSACTION_CANCELED', stage: 'queue', canceled: true },
+      ));
+      continue;
+    }
+    advisorInflight++;
+    stats.advisorTransactions.inflight = advisorInflight;
+    let released = false;
+    entry.resolve(() => {
+      if (released) return;
+      released = true;
+      advisorInflight = Math.max(0, advisorInflight - 1);
+      stats.advisorTransactions.inflight = advisorInflight;
+      drainAdvisorQueue();
+    });
+  }
+};
+
+const acquireAdvisorSlot = (callback) => new Promise((resolve, reject) => {
+  if (callback.controller.signal.aborted || callback.state === 'settled') {
+    reject(callback.controller.signal.reason || new AdvisorTransactionError(
+      'advisor transaction is no longer runnable',
+      { code: 'ADVISOR_TRANSACTION_CANCELED', stage: 'queue', canceled: true },
+    ));
+    return;
+  }
+  if (advisorInflight < ADVISOR_CONCURRENCY) {
+    advisorInflight++;
+    stats.advisorTransactions.inflight = advisorInflight;
+    let released = false;
+    resolve(() => {
+      if (released) return;
+      released = true;
+      advisorInflight = Math.max(0, advisorInflight - 1);
+      stats.advisorTransactions.inflight = advisorInflight;
+      drainAdvisorQueue();
+    });
+    return;
+  }
+
+  const entry = { callback, resolve, reject, onAbort: null };
+  entry.onAbort = () => {
+    const index = advisorQueue.indexOf(entry);
+    if (index >= 0) {
+      advisorQueue.splice(index, 1);
+      stats.advisorTransactions.queued = Math.max(0, stats.advisorTransactions.queued - 1);
+    }
+    callback.queueEntry = null;
+    reject(callback.controller.signal.reason || new AdvisorTransactionError(
+      'advisor transaction canceled while queued',
+      { code: 'ADVISOR_TRANSACTION_CANCELED', stage: 'queue', canceled: true },
+    ));
+  };
+  callback.currentStage = 'queue';
+  callback.queueEntry = entry;
+  advisorQueue.push(entry);
+  stats.advisorTransactions.queued++;
+  callback.controller.signal.addEventListener('abort', entry.onAbort, { once: true });
 });
 
 const advisorText = (response) => {
@@ -295,40 +927,54 @@ const callClaudeAdvisor = async (callback, kind) => {
   delete headers['content-length'];
   delete headers['accept-encoding'];
   headers['content-type'] = 'application/json';
-  const response = await requestJson({
-    transport: https,
-    options: {
-      hostname: 'api.anthropic.com',
-      port: 443,
-      path: '/v1/messages',
-      method: 'POST',
-      headers,
-      agent: upstreamAgent,
-    },
-    body,
+  callback.currentStage = 'advice';
+  return withAdvisorBreaker(kind, 'advice', async () => {
+    const response = await requestJson({
+      transport: https,
+      options: {
+        hostname: 'api.anthropic.com',
+        port: 443,
+        path: '/v1/messages',
+        method: 'POST',
+        headers,
+        agent: upstreamAgent,
+      },
+      body,
+      remainingMs: remainingAdvisorMs(callback),
+      signal: callback.controller.signal,
+      provider: kind,
+      stage: 'advice',
+    });
+    return { advisor_model: model, content: advisorText(response) };
   });
-  return { advisor_model: model, content: advisorText(response) };
 };
 
 const callSolAdvisor = async (callback) => {
   const body = advisorRequestBody(callback.body, ADVISOR_SOL_MODEL);
-  const response = await requestJson({
-    transport: http,
-    options: {
-      hostname: GPT_HOST,
-      port: GPT_PORT,
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${PROXY_KEY}`,
-        'content-type': 'application/json',
-        'content-length': body.length,
-        'user-agent': 'trellis-gptx-advisor/1',
+  callback.currentStage = 'advice';
+  return withAdvisorBreaker('sol', 'advice', async () => {
+    const response = await requestJson({
+      transport: http,
+      options: {
+        hostname: GPT_HOST,
+        port: GPT_PORT,
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${PROXY_KEY}`,
+          'content-type': 'application/json',
+          'content-length': body.length,
+          'user-agent': 'trellis-gptx-advisor/1',
+        },
       },
-    },
-    body,
+      body,
+      remainingMs: remainingAdvisorMs(callback),
+      signal: callback.controller.signal,
+      provider: 'sol',
+      stage: 'advice',
+    });
+    return { advisor_model: ADVISOR_SOL_MODEL, content: advisorText(response) };
   });
-  return { advisor_model: ADVISOR_SOL_MODEL, content: advisorText(response) };
 };
 
 const continuationRequestBody = (callback, advice) => {
@@ -356,35 +1002,66 @@ const continuationRequestBody = (callback, advice) => {
       },
     ],
   });
-  return Buffer.from(JSON.stringify(body));
+  const encoded = Buffer.from(JSON.stringify(body));
+  return prepareForwardBody({ lane: 'codex', parsedBody: body, body: encoded }).body;
 };
 
 const callMainContinuation = async (callback, advice) => {
   const body = continuationRequestBody(callback, advice);
-  const response = await requestJson({
-    transport: http,
-    options: {
-      hostname: GPT_HOST,
-      port: GPT_PORT,
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${PROXY_KEY}`,
-        'content-type': 'application/json',
-        'content-length': body.length,
-        'user-agent': 'trellis-gptx-advisor-continuation/1',
+  callback.currentStage = 'continuation';
+  return withAdvisorBreaker('codex', 'continuation', async () => {
+    const response = await requestJson({
+      transport: http,
+      options: {
+        hostname: GPT_HOST,
+        port: GPT_PORT,
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${PROXY_KEY}`,
+          'content-type': 'application/json',
+          'content-length': body.length,
+          'user-agent': 'trellis-gptx-advisor-continuation/1',
+        },
       },
-    },
-    body,
+      body,
+      remainingMs: remainingAdvisorMs(callback),
+      signal: callback.controller.signal,
+      provider: 'codex',
+      stage: 'continuation',
+    });
+    if (!Array.isArray(response?.content)) {
+      const invalid = new Error('main-model continuation returned no content blocks');
+      invalid.code = 'ADVISOR_CONTINUATION_EMPTY';
+      invalid.provider = 'codex';
+      invalid.stage = 'continuation';
+      throw invalid;
+    }
+    return {
+      content: response.content,
+      stop_reason: response.stop_reason || 'end_turn',
+      usage: response.usage || {},
+    };
   });
-  if (!Array.isArray(response?.content)) {
-    throw new Error('main-model continuation returned no content blocks');
-  }
-  return {
-    content: response.content,
-    stop_reason: response.stop_reason || 'end_turn',
-    usage: response.usage || {},
+};
+
+const completeAdvisor = async (callback, advice) => {
+  const completed = {
+    ...advice,
+    content: [
+      `Trellis advisor model: ${advice.advisor_model}`,
+      `Trellis advisor selection: ${callback.selectionSource}`,
+      '',
+      advice.content,
+    ].join('\n'),
   };
+  completed.continuation = await callMainContinuation(callback, completed);
+  stats.advisorLastReceipt = {
+    at: new Date().toISOString(),
+    model: completed.advisor_model,
+    selection: callback.selectionSource,
+  };
+  return completed;
 };
 
 const executeAdvisor = async (callback) => {
@@ -394,17 +1071,16 @@ const executeAdvisor = async (callback) => {
   else if (requested === 'opus' || requested === 'fable') {
     advice = await callClaudeAdvisor(callback, requested);
   }
-  if (advice) {
-    advice.continuation = await callMainContinuation(callback, advice);
-    return advice;
+  if (advice) return completeAdvisor(callback, advice);
+  if (requested === 'none') {
+    throw new Error('advisor disabled by explicit session policy');
   }
   if (requested !== 'auto') throw new Error(`unsupported advisor selection: ${requested}`);
 
   const now = Date.now();
   if (advisorState.fallback && advisorState.retryAfter && now < advisorState.retryAfter) {
     advice = await callSolAdvisor(callback);
-    advice.continuation = await callMainContinuation(callback, advice);
-    return advice;
+    return completeAdvisor(callback, advice);
   }
 
   try {
@@ -421,10 +1097,23 @@ const executeAdvisor = async (callback) => {
       response.content = `Trellis advisor restored: Opus is available again.\n\n${response.content}`;
       console.error('gptx-router: advisor auto-restored from Sol to Opus');
     }
-    response.continuation = await callMainContinuation(callback, response);
-    return response;
+    return completeAdvisor(callback, response);
   } catch (error) {
-    if (!isClaudeLimit(error)) throw error;
+    if (!isClaudeLimit(error)) {
+      const circuitFallback = error instanceof AdvisorCircuitOpenError
+        || breakerIsOpen('opus', 'advice');
+      if (!circuitFallback) throw error;
+      const response = await callSolAdvisor(callback);
+      response.content = [
+        'Trellis advisor fallback active: the Opus advice circuit is open after repeated',
+        'transport or upstream failures, so this auto-selected request uses gpt-5.6-sol.',
+        'Explicit advisor selections never substitute providers. See __gptx/status for',
+        'the sanitized breaker state.',
+        '',
+        response.content,
+      ].join('\n');
+      return completeAdvisor(callback, response);
+    }
 
     const firstSwitch = !advisorState.fallback;
     advisorState = {
@@ -451,9 +1140,85 @@ const executeAdvisor = async (callback) => {
         response.content,
       ].join('\n');
     }
-    response.continuation = await callMainContinuation(callback, response);
-    return response;
+    return completeAdvisor(callback, response);
   }
+};
+
+const runAdvisorTransaction = async (callback) => {
+  let release = null;
+  try {
+    if (['opus', 'fable', 'sol'].includes(callback.advisor)) {
+      assertBreakerCanQueue(callback.advisor, 'advice');
+    }
+    release = await acquireAdvisorSlot(callback);
+    if (callback.state === 'settled') return callback.response;
+    if (callback.state === 'dropped') {
+      throw callback.controller.signal.reason || new AdvisorTransactionError(
+        'advisor transaction canceled with its original request',
+        { code: 'ADVISOR_TRANSACTION_CANCELED', canceled: true },
+      );
+    }
+    callback.state = 'running';
+    callback.currentStage = 'advice';
+    const result = await executeAdvisor(callback);
+    if (callback.state === 'settled') return callback.response;
+    return settleAdvisorTransaction(callback, 200, result, 'succeeded');
+  } catch (error) {
+    if (callback.state === 'settled') return callback.response;
+    if (callback.state === 'dropped') {
+      return {
+        status: 503,
+        body: JSON.stringify(advisorErrorPayload(error)),
+      };
+    }
+    if (error?.timedOut && !callback.controller.signal.aborted) {
+      callback.controller.abort(error);
+    }
+    const outcome = error?.timedOut ? 'timedOut' : error?.canceled ? 'canceled' : 'failed';
+    recordFailure('codex', 'advisor', callback.body?.model, error.message, null, callback.who);
+    return settleAdvisorTransaction(callback, 503, advisorErrorPayload(error), outcome);
+  } finally {
+    if (release) release();
+  }
+};
+
+const deliverAdvisorCallback = (callback, preflightError = null) => {
+  if (callback.deliveryStarted) stats.advisorTransactions.replayed++;
+  else callback.deliveryStarted = true;
+
+  if (callback.promise) return callback.promise;
+  if (callback.state === 'settled') {
+    callback.promise = Promise.resolve(callback.response);
+    return callback.promise;
+  }
+  if (preflightError) {
+    recordFailure(
+      'codex',
+      'advisor',
+      callback.body?.model,
+      preflightError.message,
+      null,
+      callback.who,
+    );
+    callback.promise = Promise.resolve(settleAdvisorTransaction(
+      callback,
+      503,
+      advisorErrorPayload(preflightError),
+      'failed',
+    ));
+    return callback.promise;
+  }
+  callback.promise = runAdvisorTransaction(callback);
+  return callback.promise;
+};
+
+const writeAdvisorCallbackResponse = (res, response) => {
+  if (!response || res.destroyed || res.writableEnded) return;
+  res.writeHead(response.status, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+  });
+  res.end(response.body);
 };
 
 const handleAdvisorCallback = (req, res) => {
@@ -468,8 +1233,8 @@ const handleAdvisorCallback = (req, res) => {
   }
   pruneAdvisorCallbacks();
   const callback = advisorCallbacks.get(id);
-  advisorCallbacks.delete(id); // single use even when execution fails
   if (!callback || callback.expiresAt <= Date.now()) {
+    req.resume();
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'unknown or expired advisor callback' }));
     return;
@@ -482,17 +1247,20 @@ const handleAdvisorCallback = (req, res) => {
     if (callbackBytes <= 64 * 1024) callbackBody.push(chunk);
   });
   req.on('end', async () => {
+    let preflightError = null;
     try {
-      if (callbackBytes > 64 * 1024) throw new Error('advisor callback body is too large');
+      if (callbackBytes > 64 * 1024) {
+        throw new Error('advisor callback body is too large');
+      }
       if (callbackBody.length) JSON.parse(Buffer.concat(callbackBody).toString('utf8'));
-      const result = await executeAdvisor(callback);
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify(result));
     } catch (error) {
-      recordFailure('codex', 'advisor', callback.body?.model, error.message, null, callback.who);
-      res.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      res.end(JSON.stringify({ error: error.message }));
+      preflightError = new AdvisorTransactionError(error.message, {
+        code: 'ADVISOR_CALLBACK_INVALID',
+        stage: 'callback',
+      });
     }
+    const response = await deliverAdvisorCallback(callback, preflightError);
+    writeAdvisorCallbackResponse(res, response);
   });
 };
 
@@ -560,8 +1328,30 @@ const refreshHealth = () => {
   }
 };
 
+const advisorBreakerStatus = () => {
+  const now = Date.now();
+  return [...advisorBreakers.values()]
+    .map((record) => {
+      pruneBreakerFailures(record, now);
+      const state = record.state === 'open' && now >= record.openUntil
+        ? 'half-open'
+        : record.state;
+      return {
+        provider: record.provider,
+        stage: record.stage,
+        state,
+        failuresInWindow: record.failures.length,
+        probeInFlight: record.probeInFlight,
+        openUntil: record.openUntil > now ? new Date(record.openUntil).toISOString() : null,
+      };
+    })
+    .sort((left, right) => breakerKey(left.provider, left.stage)
+      .localeCompare(breakerKey(right.provider, right.stage)));
+};
+
 // --- status ----------------------------------------------------------------
 const statusPayload = () => {
+  pruneAdvisorCallbacks();
   refreshHealth();
   const newBetas = baseline?.betas ? stats.betas.filter((b) => !baseline.betas.includes(b)) : [];
   const drift =
@@ -617,6 +1407,19 @@ const statusPayload = () => {
       switchedAt: advisorState.switchedAt,
       reason: advisorState.reason,
       pendingCallbacks: advisorCallbacks.size,
+      transactions: {
+        deadlineMs: ADVISOR_TRANSACTION_DEADLINE_MS,
+        concurrency: ADVISOR_CONCURRENCY,
+        ...stats.advisorTransactions,
+      },
+      breakers: {
+        threshold: ADVISOR_BREAKER_THRESHOLD,
+        windowMs: ADVISOR_BREAKER_WINDOW_MS,
+        openMs: ADVISOR_BREAKER_OPEN_MS,
+        entries: advisorBreakerStatus(),
+      },
+      missingHeaderSolDefaults: stats.advisorMissingHeaderSolDefaults,
+      lastReceipt: stats.advisorLastReceipt,
       context: advisorContext(),
     },
   };
@@ -676,6 +1479,7 @@ const server = http.createServer((req, res) => {
       switchedAt: new Date().toISOString(),
       reason: null,
     };
+    resetBreaker('opus', 'advice');
     persistAdvisorState();
     req.resume();
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -710,6 +1514,7 @@ const server = http.createServer((req, res) => {
     // remedy was to guess and start killing agents. A short prefix of the request's own
     // metadata.user_id is enough to group a burst by origin without keeping the full id.
     let who = '';
+    let sessionOwner = '';
     if (body.length) {
       try {
         parsedBody = JSON.parse(body.toString());
@@ -723,7 +1528,9 @@ const server = http.createServer((req, res) => {
         if (typeof raw === 'string') {
           let inner = null;
           try { inner = JSON.parse(raw); } catch { /* plain string id */ }
-          who = String(inner?.session_id || inner?.account_uuid || raw).slice(0, 8);
+          const identity = String(inner?.session_id || inner?.account_uuid || raw);
+          who = identity.slice(0, 8);
+          sessionOwner = `session:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24)}`;
         }
       } catch { /* not JSON: Anthropic lane */ }
     }
@@ -733,9 +1540,30 @@ const server = http.createServer((req, res) => {
 
     const lane = laneFor(model);
     const toGpt = lane === 'codex';
+    // Keep `model` and `parsedBody` as requested for policy, callback identity, logs, and
+    // failure receipts. Only this separate buffer crosses the execution boundary.
+    const forward = prepareForwardBody({ lane, parsedBody, body });
     stats[lane].requests++;
     stats[lane].inflight++;
-    log(req.method, req.url, 'model=' + (model || '-'), '->', lane);
+    if (forward.rewritten) {
+      stats.codex.effortAliases++;
+      stats.codex.lastEffortReceipt = {
+        at: new Date().toISOString(),
+        requested_model: model,
+        execution_model: forward.executionModel,
+        effective_effort: forward.effort,
+        effort_source: forward.effortSource,
+      };
+    }
+    log(
+      req.method,
+      req.url,
+      'model=' + (model || '-'),
+      'execution=' + (forward.executionModel || '-'),
+      'effort=' + (forward.effort || '-'),
+      '->',
+      lane,
+    );
 
     if (toGpt) {
       if (/context-1m/.test(req.headers['anthropic-beta'] || '')) stats.codex1mBeta++;
@@ -745,6 +1573,7 @@ const server = http.createServer((req, res) => {
     const done = () => { stats[lane].inflight = Math.max(0, stats[lane].inflight - 1); };
 
     let opts, transport;
+    let registeredCallbackId = null;
     if (toGpt) {
       pruneAdvisorCallbacks();
       const h = {
@@ -754,17 +1583,41 @@ const server = http.createServer((req, res) => {
       };
       delete h['x-api-key'];
       delete h['accept-encoding'];   // the proxy re-encodes
-      const advisor = String(req.headers['x-trellis-advisor'] || '').toLowerCase();
-      if (['auto', 'opus', 'fable', 'sol'].includes(advisor) && declaresAdvisor(parsedBody)) {
-        const id = callbackId();
-        advisorCallbacks.set(id, {
-          advisor,
-          body: parsedBody,
-          headers: { ...req.headers },
-          who,
-          expiresAt: Date.now() + ADVISOR_TTL_MS,
-        });
-        h['x-trellis-advisor-callback'] = `http://127.0.0.1:${PORT}/__gptx/advisor/${id}`;
+      h['content-length'] = String(forward.body.length);
+      const advisorDeclared = declaresAdvisor(parsedBody);
+      const advisorSelection = resolveAdvisorSelection(req.headers);
+      if (
+        advisorDeclared
+        && ['auto', 'opus', 'fable', 'sol', 'none'].includes(advisorSelection.advisor)
+      ) {
+        if (advisorSelection.missingHeader) stats.advisorMissingHeaderSolDefaults++;
+        const fingerprint = crypto.createHash('sha256').update(body).digest('hex').slice(0, 24);
+        const owner = sessionOwner
+          ? `${sessionOwner}:turn:${fingerprint}`
+          : `request:${fingerprint}`;
+        const existing = advisorCallbacksByOwner.get(owner);
+        const existingCallback = existing ? advisorCallbacks.get(existing) : null;
+        let callback = existingCallback;
+        if (!callback || callback.expiresAt <= Date.now()) {
+          if (existingCallback) dropAdvisorCallback(existing);
+          const id = callbackId();
+          callback = createAdvisorCallback({
+            id,
+            advisor: advisorSelection.advisor,
+            selectionSource: advisorSelection.source,
+            body: parsedBody,
+            headers: { ...req.headers },
+            who,
+            owner,
+            fingerprint,
+          });
+          advisorCallbacks.set(id, callback);
+          advisorCallbacksByOwner.set(owner, id);
+          // Only the first outer request owns cancellation. Retries receive the same
+          // callback URL but cannot abort or drop its shared transaction.
+          registeredCallbackId = id;
+        }
+        h['x-trellis-advisor-callback'] = `http://127.0.0.1:${PORT}/__gptx/advisor/${callback.id}`;
       }
       opts = { hostname: GPT_HOST, port: GPT_PORT, path: req.url, method: req.method, headers: h };
       transport = http;
@@ -775,6 +1628,35 @@ const server = http.createServer((req, res) => {
         agent: upstreamAgent,
       };
       transport = https;
+    }
+
+    const releaseRegisteredCallback = (reason = null) => {
+      if (!registeredCallbackId) return;
+      const id = registeredCallbackId;
+      registeredCallbackId = null;
+      dropAdvisorCallback(id, reason);
+    };
+    if (registeredCallbackId) {
+      // The callback delivery socket is not cancellation authority. The original outer
+      // request is: if it disappears before any upstream response arrives, abort queued
+      // or running advisor child requests immediately. A normal response emits `finish`
+      // before `close`; mark that path so ordinary keep-alive teardown is not cancellation.
+      let parentResponseFinished = false;
+      res.once('finish', () => {
+        parentResponseFinished = true;
+        releaseRegisteredCallback();
+      });
+      res.once('close', () => {
+        if (parentResponseFinished) return;
+        releaseRegisteredCallback(new AdvisorTransactionError(
+          'advisor transaction canceled because its original request closed',
+          {
+            code: 'ADVISOR_PARENT_CANCELED',
+            stage: 'parent',
+            canceled: true,
+          },
+        ));
+      });
     }
 
     // One retry, and only while nothing has been written to the client yet. A connect-time
@@ -815,7 +1697,7 @@ const server = http.createServer((req, res) => {
             stats.codexAuthCooling = /auth_unavailable|no auth available/.test(head);
             stats.codexConsecutiveErrors++;
           }
-          recordFailure(lane, ur.statusCode, model, detail, body.length, who);
+          recordFailure(lane, ur.statusCode, model, detail, forward.body.length, who);
         });
       } else if (lane === 'codex') {
         stats.codexAuthCooling = false;
@@ -824,7 +1706,9 @@ const server = http.createServer((req, res) => {
         // context-overflow failure this brackets the real ceiling, which is the only way
         // to tell "we genuinely sent too much" from "upstream's window is smaller than
         // the model's advertised one".
-        if (body.length > stats.codexMaxOkBytes) stats.codexMaxOkBytes = body.length;
+        if (forward.body.length > stats.codexMaxOkBytes) {
+          stats.codexMaxOkBytes = forward.body.length;
+        }
       }
       // Watch the stream go past rather than only its start and its error. An SSE body is
       // complete when it carries `message_stop`; anything else that reaches `end` was cut
@@ -837,6 +1721,7 @@ const server = http.createServer((req, res) => {
       const settle = (kind, detail) => {
         if (settled) return;
         settled = true;
+        releaseRegisteredCallback();
         if (kind) {
           stats[lane][kind]++;
           // A mid-stream error is an UPSTREAM failure, so count it where a human looks for
@@ -847,7 +1732,7 @@ const server = http.createServer((req, res) => {
             stats[lane].errors++;
             if (lane === 'codex') stats.codexConsecutiveErrors++;
           }
-          recordFailure(lane, `stream:${kind}`, model, detail, body.length, who);
+          recordFailure(lane, `stream:${kind}`, model, detail, forward.body.length, who);
         }
         done();
       };
@@ -918,7 +1803,8 @@ const server = http.createServer((req, res) => {
       }
 
       stats[lane].errors++;
-      recordFailure(lane, `upstream:${e.code || e.message}`, model, null, body.length, who);
+      recordFailure(lane, `upstream:${e.code || e.message}`, model, null, forward.body.length, who);
+      releaseRegisteredCallback();
       done();
       log('upstream error', lane, e.message);
 
@@ -960,7 +1846,7 @@ const server = http.createServer((req, res) => {
       }));
     });
 
-    if (body.length) up.write(body);
+    if (forward.body.length) up.write(forward.body);
     up.end();
     };
     attempt(0);

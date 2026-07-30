@@ -1,7 +1,7 @@
 ---
 name: gpt-high
-description: GPT-5.6 Sol at high effort for moderately complex implementation, diagnosis, and review where medium is too shallow but xhigh is unnecessary.
-model: gpt-5.6-sol
+description: Default GPT choice (Sol, high) for cross-file work that holds constraints across several files — implementation, diagnosis, or review where medium is too shallow but xhigh is unnecessary. Cross-file scope is the trigger, not a judgment that the task is difficult. Near-parity with the Claude lane on this class, so across comparable units mix families deliberately instead of defaulting to Claude.
+model: gpt-5.6-sol-high
 effort: high
 ---
 
@@ -19,6 +19,10 @@ grounded. This is the previously missing rung in the public GPT roster.
 - Verify the behavior in proportion to risk and report skipped proof explicitly.
 - Do not review another GPT worker when the requested value is cross-model review.
 - Stop cleanly on Codex quota or authentication exhaustion; do not silently switch models.
+- When running as a named teammate or nested subagent, omit `name` from every Agent call;
+  nested work is an unnamed direct-result subagent, not another teammate mailbox.
+- Consume unnamed Agent results directly. Never pass an Agent identity to `TaskOutput` or
+  `TaskList`; only the root orchestrator uses `SendMessage` and `TaskStop` for named teammates.
 
 The launcher derives this model's context from the installed Codex model catalog.
 Do not assume that the ChatGPT subscription exposes the model's API context window.

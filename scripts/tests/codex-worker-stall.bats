@@ -20,6 +20,8 @@ companion() {
 lower_effort() {
   case "$1" in
     max) echo xhigh ;;
+    xhigh) echo high ;;
+    high) echo medium ;;
     *) return 1 ;;
   esac
 }
@@ -137,6 +139,23 @@ run_worker_contract() {
   [ "$(jq -r '.cancelCalls' "$STATE_FILE")" -eq 1 ]
 }
 
+@test "restored xhigh band retries at high" {
+  run run_worker_contract no-session-id xhigh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"EFFECTIVE_EFFORT: high"* ]]
+  [ "$(jq -c '.requestedEfforts' "$STATE_FILE")" = '["xhigh","high"]' ]
+}
+
+@test "medium has no legal lower retry tier" {
+  run run_worker_contract no-session-id medium
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"STATUS: FAILURE"* ]]
+  [[ "$output" == *"CODE: NO_SESSION_ID"* ]]
+  [ "$(jq -c '.requestedEfforts' "$STATE_FILE")" = '["medium"]' ]
+  [ "$(jq -r '.launchCount' "$STATE_FILE")" -eq 1 ]
+  [ "$(jq -r '.cancelCalls' "$STATE_FILE")" -eq 1 ]
+}
+
 @test "worker prose pins the executable polling and retry contract" {
   local worker="$REPO_ROOT/core-rules/agents/codex-worker.md"
   grep -Fq '30-second chunks' "$worker"
@@ -144,6 +163,7 @@ run_worker_contract() {
   grep -Fq 'Retry exactly once at one effort tier lower' "$worker"
   grep -Fq 'Relaunch exactly once as a fresh attempt' "$worker"
   grep -Fq "$STALL_ANNOTATION" "$worker"
-  grep -Fq '`max -> xhigh`' "$worker"
-  grep -Fq '`xhigh` is the lowest permitted input tier' "$worker"
+  grep -Fq '`max -> xhigh`, `xhigh -> high`' "$worker"
+  grep -Fq '`high -> medium`' "$worker"
+  grep -Fq '`medium` is the lowest permitted input tier' "$worker"
 }

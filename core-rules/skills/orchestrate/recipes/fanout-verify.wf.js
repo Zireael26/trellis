@@ -14,6 +14,9 @@
 //   args.branchPrefix string           — branch name prefix (e.g. 'chore/dep-bump').
 //                                        Defaults to 'chore/fanout'. The agent
 //                                        appends a per-target suffix; no dates here.
+//   args.maxParallel  optional mutation-wave cap (default 2). Values >2 also
+//                     require parallelJustification, an exact successful two-target
+//                     pilotReceipt, and positive loopSafety.budget_ceiling_usd.
 //
 // This file ships in the public mirror — keep it parametric and path-neutral.
 // No personal paths, no dated literals, no project names, no per-package lists.
@@ -41,6 +44,115 @@ export const meta = {
     no_progress_iterations: null,
     progress_signal: 'commit/PR',
   },
+}
+
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return {
+      id,
+      ok: false,
+      value: null,
+      error: typeof error?.message === 'string' ? error.message : String(error),
+    }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) {
+      malformedCount += 1
+      continue
+    }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({
+    event: 'workflow_stage_gate',
+    stage,
+    expected_ids: expected,
+    success_ids: successIds,
+    failure_ids: failureIds,
+    unexpected_ids: unexpectedIds,
+    missing_ids: missingIds,
+    expected_count: expected.length,
+    receipt_count: rows.length,
+    success_count: successIds.length,
+    failure_count: failureIds.length,
+    malformed_count: malformedCount,
+    min_success: minSuccess,
+    ok,
+  }))
+  if (!ok) {
+    throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  }
+  return expected.map((id) => byId.get(id))
+}
+
+function assertUniqueExpectedIds(stage, ids) {
+  const expected = ids.map(String)
+  const seen = new Set()
+  for (const id of expected) {
+    if (seen.has(id)) throw new Error('fanout-verify: duplicate expected id "' + id + '" before ' + stage + ' dispatch')
+    seen.add(id)
+  }
+  return expected
+}
+
+function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
+  if (currentTargetIds.length === 0) return 2
+  if (args.maxParallel === undefined) return 2
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) throw new Error('fanout-verify: args.maxParallel must be a positive integer')
+  if (args.maxParallel <= 2) return args.maxParallel
+  const pilot = args.pilotReceipt
+  const expectedPilotIds = currentTargetIds.slice(0, 2).map(String)
+  const targetIds = Array.isArray(pilot?.target_ids) ? pilot.target_ids.map(String) : []
+  const successIds = Array.isArray(pilot?.success_ids) ? pilot.success_ids.map(String) : []
+  const exactTargets = expectedPilotIds.length === 2
+    && targetIds.length === 2
+    && targetIds.every((id, index) => id === expectedPilotIds[index])
+  const exactSuccess = successIds.length === 2
+    && successIds.every((id, index) => id === expectedPilotIds[index])
+  const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
+  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
+  const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
+  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('fanout-verify: maxParallel > 2 requires non-empty args.parallelJustification')
+  if (!pilotComplete) throw new Error('fanout-verify: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
+  if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('fanout-verify: maxParallel > 2 requires a positive existing safety budget')
+  return args.maxParallel
+}
+
+function checkpointWave(stage, waveIndex, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const checked = requireStage(stage, expectedIds, receipts, minSuccess)
+  log(JSON.stringify({ event: 'workflow_checkpoint', stage, wave: waveIndex + 1, expected_ids: expectedIds.map(String), success_ids: checked.filter((receipt) => receipt.ok === true && receipt.value != null).map((receipt) => receipt.id), receipt_count: checked.length, ok: true }))
+  return checked
+}
+
+async function runInWaves(items, cap, stage, runItem, idOf, minSuccessPerWave) {
+  const allIds = assertUniqueExpectedIds(stage, items.map((item) => String(idOf(item))))
+  const receipts = []
+  for (let offset = 0, waveIndex = 0; offset < items.length; offset += cap, waveIndex += 1) {
+    const wave = items.slice(offset, offset + cap)
+    const waveIds = allIds.slice(offset, offset + wave.length)
+    const waveReceipts = await parallel(wave.map((item) => () => settle(String(idOf(item)), () => runItem(item))))
+    const minSuccess = minSuccessPerWave === undefined ? waveIds.length : minSuccessPerWave
+    receipts.push(...checkpointWave(stage, waveIndex, waveIds, waveReceipts, minSuccess))
+  }
+  return receipts
 }
 
 // Per-target verdict. additionalProperties:false so nothing unexpected slips in.
@@ -154,21 +266,25 @@ function reapPrompt(t, worktreePath) {
 }
 
 // Reap ONE unit's worktree — best-effort and failure-isolated. Fires only once
-// the unit's work is provably on origin (pushed + PR URL present). Any error is
-// logged and swallowed: teardown never fails the unit, never mutates the
-// verdict, never aborts the run. Leaving the tree is the safe failure mode.
+// the unit's work is provably on origin (pushed + PR URL present). Deliberate
+// skips are successful teardown outcomes; transport null/throw remains a failed
+// optional receipt. Leaving the tree is always the safe failure mode.
 async function reap(t, verdict) {
-  if (!verdict) return
+  if (!verdict) return { target: t.name, outcome: 'skipped' }
   const worktreePath = hasText(verdict.worktree_path) ? verdict.worktree_path.trim() : ''
-  if (verdict.pushed !== true || !hasText(verdict.pr_url) || worktreePath === '') return
+  if (verdict.pushed !== true || !hasText(verdict.pr_url) || worktreePath === '') {
+    return { target: t.name, outcome: 'skipped' }
+  }
   if (isUnsafeReapPath(worktreePath, t.path)) {
     log('fanout-verify: refusing to reap unsafe path "' + worktreePath + '" for target=' + t.name)
-    return
+    return { target: t.name, outcome: 'skipped' }
   }
   try {
-    await agent(reapPrompt(t, worktreePath), { label: 'reap:' + t.name, phase: 'Teardown' })
-  } catch {
+    const result = await agent(reapPrompt(t, worktreePath), { label: 'reap:' + t.name, phase: 'Teardown' })
+    return result == null ? null : { target: t.name, outcome: 'attempted' }
+  } catch (error) {
     log('fanout-verify: reap step errored for target=' + t.name + ' — worktree left in place')
+    throw error
   }
 }
 
@@ -179,39 +295,62 @@ async function reap(t, verdict) {
 phase('Targets')
 let targets = args.targets
 if (!targets || targets.length === 0) {
-  const discovered = await agent(
-    [
-      'Read the control-plane registry.md "Active projects" table.',
-      'Return its rows as targets: an array of { name, path } using the Project and Path columns.',
-      'Skip any project listed in blacklist.md.',
-    ].join('\n'),
-    { label: 'resolve-targets', phase: 'Targets', schema: TARGET_LIST },
-  )
-  targets = discovered.targets
+  const discoveryReceipt = await settle('resolve-targets', async () => {
+    const discovered = await agent(
+      [
+        'Read the control-plane registry.md "Active projects" table.',
+        'Return its rows as targets: an array of { name, path } using the Project and Path columns.',
+        'Skip any project listed in blacklist.md.',
+      ].join('\n'),
+      { label: 'resolve-targets', phase: 'Targets', schema: TARGET_LIST },
+    )
+    return Array.isArray(discovered?.targets) ? discovered : null
+  })
+  requireStage('Targets', ['resolve-targets'], [discoveryReceipt], 1)
+  targets = discoveryReceipt.value.targets
 }
 log('fanout-verify: ' + targets.length + ' target(s)')
 
 // --- Phase: Fan-out -------------------------------------------------------
 phase('Fan-out')
-const verdicts = await parallel(
-  targets.map((t) => () => agent(workPrompt(t), {
+const targetIds = assertUniqueExpectedIds('Fan-out', targets.map((t) => String(t.name)))
+const mutationScopeFingerprint = JSON.stringify({
+  task,
+  targets: targets.map((t) => ({ id: String(t.name), path: String(t.path ?? '') })),
+})
+const mutationCap = resolveMutationParallelism(targetIds, mutationScopeFingerprint)
+log('fanout-verify: mutation maxParallel=' + mutationCap)
+const verdictReceipts = await runInWaves(targets, mutationCap, 'Fan-out', async (t) => {
+  const verdict = await agent(workPrompt(t), {
     label: 'fanout:' + t.name,
     phase: 'Fan-out',
     schema: VERDICT,
     isolation: 'worktree',
-  })),
-)
+  })
+  return verdict?.target === t.name ? verdict : null
+}, (t) => t.name)
+requireStage('Fan-out', targetIds, verdictReceipts, targetIds.length)
+const verdicts = verdictReceipts.map((receipt) => receipt.value)
 
 // --- Phase: Teardown ------------------------------------------------------
 // Reap each unit's worktree ONCE its work is safely on origin (pushed + PR
 // open). `parallel` aligns verdicts[i] with targets[i]; each reap is scoped to
 // its own repo so concurrent removals across targets don't contend. Teardown is
-// a pure side effect — verdicts are returned UNCHANGED. reap() is best-effort
-// and cannot throw out of here, so a stuck lock / live process / racing remove
-// leaves the tree in place (the safe failure mode) without failing the run.
+// a pure side effect — verdicts are returned UNCHANGED. Failed teardown
+// receipts stay visible in the optional gate, while a stuck lock / live process /
+// racing remove still leaves the tree in place without failing the run.
 phase('Teardown')
-await parallel(targets.map((t, i) => () => reap(t, verdicts[i])))
+const verdictByTarget = new Map(verdicts.map((verdict) => [String(verdict.target), verdict]))
+const teardownReceipts = await runInWaves(
+  targets,
+  mutationCap,
+  'Teardown',
+  (t) => reap(t, verdictByTarget.get(String(t.name))),
+  (t) => t.name,
+  0,
+)
+requireStage('Teardown', targetIds, teardownReceipts, 0)
 
 // The main loop acts on these verdicts: auto-merge the GREEN PRs, HOLD the rest
 // for review. Agents never merge — that decision lives here, in the caller.
-return { verdicts: verdicts.filter(Boolean) }
+return { verdicts }

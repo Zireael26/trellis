@@ -9,7 +9,16 @@ setup() {
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
   PROJECTS="$SANDBOX/projects"
-  mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/audits" "$MIRROR" "$PROJECTS"
+  # Keep the feature token split so this synced fixture remains outside the
+  # exact proxy-token content allowlist it is exercising.
+  SECURITY_REL="docs/g""ptx-security.md"
+  LEGACY_REL="docs/legacy/codex-plugin.md"
+  mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/audits" \
+    "$SOURCE/$(dirname "$SECURITY_REL")" "$SOURCE/$(dirname "$LEGACY_REL")" \
+    "$MIRROR" "$PROJECTS"
+
+  printf 'Public security boundary fixture.\n' > "$SOURCE/$SECURITY_REL"
+  printf 'Public legacy compatibility fixture.\n' > "$SOURCE/$LEGACY_REL"
 
   cp "$REPO_ROOT/scripts/sync-to-template.sh" "$SOURCE/scripts/"
   cp "$REPO_ROOT/scripts/lint-prompt-shell-blocks.sh" "$SOURCE/scripts/"
@@ -116,6 +125,8 @@ run_sync_dry() {
   [ -f "$MIRROR/scripts/sync-to-template.sh" ]
   [ -f "$MIRROR/dependency-baseline.json" ]
   [ -f "$MIRROR/audits/fleet-remediation-ledger.json" ]
+  [ "$(< "$MIRROR/$SECURITY_REL")" = "Public security boundary fixture." ]
+  [ "$(< "$MIRROR/$LEGACY_REL")" = "Public legacy compatibility fixture." ]
   [ "$(jq '.toolchains | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
   [ "$(jq '.packages | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
   [ "$(jq '.source_reports | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]

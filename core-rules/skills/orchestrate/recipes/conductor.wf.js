@@ -14,6 +14,9 @@
 //   args.weights      object  optional scoring-weight override; serialized into
 //                            the rank work order. Else read from backlog.
 //   args.refreshTimeoutSeconds number per-repo fetch ceiling (default 30).
+//   args.maxParallel number optional Auto-spec mutation-wave cap (default 2).
+//                    Values >2 require parallelJustification and an exact
+//                    successful two-target pilotReceipt; this recipe owns a budget.
 //
 // Degrade: with a workflow tool, run as-is. Without, read meta.phases + the
 // prompt builders below and dispatch each stage by hand (SKILL.md tier 2/3).
@@ -27,7 +30,7 @@ export const meta = {
     { title: 'Auto-spec', detail: 'top N eligible items: one worktree-isolated agent each runs spec -> plan -> tasks, holds code, returns a verdict' },
   ],
   // Loop-safety (`core-rules/loop-safety.md`). ONE-SHOT: a single rank pass, then
-  // a single fan-out barrier over the selected items — no rounds. Exempt from
+  // one finite auto-spec pass in bounded checkpointed waves — no adaptive rounds. Exempt from
   // no_progress (declares null). max_iterations inherits the resolved baseline.
   // budget_ceiling_usd is OVERRIDDEN low: this is an unattended nightly writer
   // loop that should spec, not spend — a tight ceiling is a deliberate guardrail.
@@ -36,6 +39,90 @@ export const meta = {
     budget_ceiling_usd: 60,
     progress_signal: 'work-list drain',
   },
+}
+
+async function settle(id, run) {
+  try {
+    const value = await run()
+    if (value == null) return { id, ok: false, value: null, error: 'null result' }
+    return { id, ok: true, value, error: null }
+  } catch (error) {
+    return { id, ok: false, value: null, error: typeof error?.message === 'string' ? error.message : String(error) }
+  }
+}
+
+function requireStage(stage, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const expected = expectedIds.map(String)
+  const rows = Array.isArray(receipts) ? receipts : []
+  const byId = new Map()
+  let malformedCount = 0
+  for (const receipt of rows) {
+    if (!receipt || typeof receipt.id !== 'string' || byId.has(receipt.id)) { malformedCount += 1; continue }
+    byId.set(receipt.id, receipt)
+  }
+  const unexpectedIds = [...byId.keys()].filter((id) => !expected.includes(id))
+  const missingIds = expected.filter((id) => !byId.has(id))
+  const successIds = expected.filter((id) => byId.get(id)?.ok === true && byId.get(id)?.value != null)
+  const failureIds = expected.filter((id) => !successIds.includes(id))
+  const identityOk = rows.length === expected.length && malformedCount === 0 && unexpectedIds.length === 0 && missingIds.length === 0
+  const ok = identityOk && successIds.length >= minSuccess
+  log(JSON.stringify({ event: 'workflow_stage_gate', stage, expected_ids: expected, success_ids: successIds, failure_ids: failureIds, unexpected_ids: unexpectedIds, missing_ids: missingIds, expected_count: expected.length, receipt_count: rows.length, success_count: successIds.length, failure_count: failureIds.length, malformed_count: malformedCount, min_success: minSuccess, ok }))
+  if (!ok) throw new Error('workflow stage "' + stage + '" failed: ' + successIds.length + '/' + expected.length + ' successful; required ' + minSuccess)
+  return expected.map((id) => byId.get(id))
+}
+
+function assertUniqueExpectedIds(stage, ids) {
+  const expected = ids.map(String)
+  const seen = new Set()
+  for (const id of expected) {
+    if (seen.has(id)) throw new Error('conductor: duplicate expected id "' + id + '" before ' + stage + ' dispatch')
+    seen.add(id)
+  }
+  return expected
+}
+
+function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
+  if (currentTargetIds.length === 0) return 2
+  if (args.maxParallel === undefined) return 2
+  if (!Number.isInteger(args.maxParallel) || args.maxParallel < 1) throw new Error('conductor: args.maxParallel must be a positive integer')
+  if (args.maxParallel <= 2) return args.maxParallel
+  const pilot = args.pilotReceipt
+  const expectedPilotIds = currentTargetIds.slice(0, 2).map(String)
+  const targetIds = Array.isArray(pilot?.target_ids) ? pilot.target_ids.map(String) : []
+  const successIds = Array.isArray(pilot?.success_ids) ? pilot.success_ids.map(String) : []
+  const exactTargets = expectedPilotIds.length === 2
+    && targetIds.length === 2
+    && targetIds.every((id, index) => id === expectedPilotIds[index])
+  const exactSuccess = successIds.length === 2
+    && successIds.every((id, index) => id === expectedPilotIds[index])
+  const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
+  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
+  const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
+  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('conductor: maxParallel > 2 requires non-empty args.parallelJustification')
+  if (!pilotComplete) throw new Error('conductor: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
+  if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('conductor: maxParallel > 2 requires a positive existing safety budget')
+  return args.maxParallel
+}
+
+function checkpointWave(stage, waveIndex, expectedIds, receipts, minSuccess = expectedIds.length) {
+  const checked = requireStage(stage, expectedIds, receipts, minSuccess)
+  log(JSON.stringify({ event: 'workflow_checkpoint', stage, wave: waveIndex + 1, expected_ids: expectedIds.map(String), success_ids: checked.filter((receipt) => receipt.ok === true && receipt.value != null).map((receipt) => receipt.id), receipt_count: checked.length, ok: true }))
+  return checked
+}
+
+async function runInWaves(items, cap, stage, runItem, idOf, minSuccessPerWave) {
+  const allIds = assertUniqueExpectedIds(stage, items.map((item) => String(idOf(item))))
+  const receipts = []
+  for (let offset = 0, waveIndex = 0; offset < items.length; offset += cap, waveIndex += 1) {
+    const wave = items.slice(offset, offset + cap)
+    const waveIds = allIds.slice(offset, offset + wave.length)
+    const waveReceipts = await parallel(wave.map((item) => () => settle(String(idOf(item)), () => runItem(item))))
+    const minSuccess = minSuccessPerWave === undefined ? waveIds.length : minSuccessPerWave
+    receipts.push(...checkpointWave(stage, waveIndex, waveIds, waveReceipts, minSuccess))
+  }
+  return receipts
 }
 
 const REFRESH = {
@@ -198,7 +285,12 @@ function specPrompt(item, mainSha) {
 
 // --- Phase: Refresh refs ---------------------------------------------------
 phase('Refresh refs')
-const refreshed = await agent(refreshPrompt(), { label: 'refresh-refs', phase: 'Refresh refs', schema: REFRESH })
+const refreshReceipt = await settle('refresh-refs', async () => {
+  const value = await agent(refreshPrompt(), { label: 'refresh-refs', phase: 'Refresh refs', schema: REFRESH })
+  return value && typeof value.complete === 'boolean' && Array.isArray(value.refs) ? value : null
+})
+requireStage('Refresh refs', ['refresh-refs'], [refreshReceipt], 1)
+const refreshed = refreshReceipt.value
 const refByProject = new Map()
 let mutationAllowed = refreshed?.complete === true && Array.isArray(refreshed.refs)
 for (const ref of (Array.isArray(refreshed?.refs) ? refreshed.refs : [])) {
@@ -219,7 +311,12 @@ if (!mutationAllowed) {
 
 // --- Phase: Rank -----------------------------------------------------------
 phase('Rank')
-const slate = await agent(rankPrompt(Array.from(refByProject, ([project, main_sha]) => ({ project, main_sha })), mutationAllowed), { label: 'rank', phase: 'Rank', schema: SLATE })
+const rankReceipt = await settle('rank', async () => {
+  const value = await agent(rankPrompt(Array.from(refByProject, ([project, main_sha]) => ({ project, main_sha })), mutationAllowed), { label: 'rank', phase: 'Rank', schema: SLATE })
+  return Array.isArray(value?.ranked) ? value : null
+})
+requireStage('Rank', ['rank'], [rankReceipt], 1)
+const slate = rankReceipt.value
 
 // Select the top N eligible items for tonight's spec pass. Explicit force rows
 // lead regardless of score; explicit false rows are exempt. Hard safety and
@@ -234,14 +331,9 @@ const orderedCandidates = [
   ...ranked.filter((row) => row.auto_spec === true && selectable(row)),
   ...ranked.filter((row) => row.auto_spec !== true && selectable(row)),
 ]
-const seenIds = new Set()
-const eligible = orderedCandidates.filter((row) => {
-  if (seenIds.has(row.id)) return false
-  seenIds.add(row.id)
-  return true
-})
-const selected = eligible.slice(0, autoSpecTopN)
-const duplicateCount = orderedCandidates.length - eligible.length
+const selected = orderedCandidates.slice(0, autoSpecTopN)
+assertUniqueExpectedIds('Auto-spec', selected.map((row) => String(row.id)))
+const duplicateCount = orderedCandidates.length - new Set(orderedCandidates.map((row) => String(row.id))).size
 const exemptCount = ranked.filter((row) => row.auto_spec === false).length
 const hardExcludedCount = ranked.filter((row) => !selectable(row) && row.auto_spec !== false).length
 log('conductor: ranked ' + ranked.length + ' tasks; auto-speccing ' + selected.length + ' (top ' + autoSpecTopN + ' eligible; forced=' + orderedCandidates.filter((row) => row.auto_spec === true).length + ', exempt=' + exemptCount + ', hard-excluded=' + hardExcludedCount + ', duplicate=' + duplicateCount + ')')
@@ -250,18 +342,26 @@ log('conductor: ranked ' + ranked.length + ' tasks; auto-speccing ' + selected.l
 // One-shot fan-out. Each agent works in its own worktree and returns a verdict.
 // Agents never merge and never write code — they leave a reviewable spec.
 phase('Auto-spec')
-const specs = selected.length
-  ? await parallel(
-      selected.map((item) => () =>
-        agent(specPrompt(item, refByProject.get(item.project)), {
-          label: 'spec:' + item.id,
-          phase: 'Auto-spec',
-          schema: SPEC_VERDICT,
-          isolation: 'worktree',
-        })
-      )
-    )
+const selectedIds = assertUniqueExpectedIds('Auto-spec', selected.map((item) => String(item.id)))
+const mutationScopeFingerprint = JSON.stringify({
+  today: args.today,
+  selected: selected.map((item) => ({ id: String(item.id), project: item.project, main_sha: refByProject.get(item.project) })),
+})
+const mutationCap = resolveMutationParallelism(selectedIds, mutationScopeFingerprint)
+log('conductor: mutation maxParallel=' + mutationCap)
+const specReceipts = selected.length
+  ? await runInWaves(selected, mutationCap, 'Auto-spec', async (item) => {
+      const verdict = await agent(specPrompt(item, refByProject.get(item.project)), {
+        label: 'spec:' + item.id,
+        phase: 'Auto-spec',
+        schema: SPEC_VERDICT,
+        isolation: 'worktree',
+      })
+      return verdict?.id === item.id ? verdict : null
+    }, (item) => item.id)
   : []
+requireStage('Auto-spec', selectedIds, specReceipts, selectedIds.length)
+const specs = specReceipts.map((receipt) => receipt.value)
 
 // Main loop consumes this: render the slate, list the specs waiting for a human
 // to review and dispatch `execute`. Nothing here crosses the merge boundary.

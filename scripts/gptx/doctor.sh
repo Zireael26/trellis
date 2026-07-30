@@ -11,6 +11,7 @@
 #   4. GPT lane: a tool-call round-trip      <- catches translation drift
 #   5. GPT lane: a structured-output turn    <- catches translation drift
 #   6. GPT lane: advisor server-tool bridge  <- catches fork/router drift
+#   7. GPT lane: immediate post-advisor completion
 #
 # Probes 1-2 alone would go green on a broken upgrade; 4-5 are the ones that bite.
 #
@@ -26,6 +27,8 @@ set -uo pipefail
 ROUTER="http://127.0.0.1:8318"
 MODEL="${GPTX_MODEL:-gpt-5.6-sol}"
 BASELINE="$HOME/.cli-proxy-api/gptx-baseline.json"
+MANIFEST="${TRELLIS_GPTX_MANIFEST:-$HOME/.trellis/gptx-install.json}"
+GLOBAL_CLAUDE="$HOME/.claude/CLAUDE.md"
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   SOURCE_DIR=$(unset CDPATH; cd -P -- "$(dirname -- "$SOURCE")" && pwd)
@@ -42,25 +45,61 @@ QUOTA=0
 ok()    { printf 'OK    %s\n' "$1"; }
 fail()  { printf 'FAIL  %s\n' "$1"; FAIL=1; }
 quota() { printf 'QUOTA %s\n' "$1"; QUOTA=1; }
+warn()  { printf 'WARN  %s\n' "$1"; }
 
 # GPT-lane call. Sets the globals $BODY and $HTTP — deliberately not echoed, because
 # a `BODY=$(gpt_call ...)` capture would run this in a subshell and lose $HTTP.
 BODY=""
 HTTP=""
 gpt_call() {
-  local payload="$1" advisor="${2:-}" out
+  local payload="$1" advisor="${2:-}" timeout="${3:-180}" out
   if [ -n "$advisor" ]; then
-    out=$(curl -s -m 180 -w '\n%{http_code}' -X POST "$ROUTER/v1/messages" \
+    out=$(curl -s -m "$timeout" -w '\n%{http_code}' -X POST "$ROUTER/v1/messages" \
       -H 'content-type: application/json' \
       -H "X-Trellis-Advisor: $advisor" \
       -d "$payload" 2>/dev/null)
   else
-    out=$(curl -s -m 180 -w '\n%{http_code}' -X POST "$ROUTER/v1/messages" \
+    out=$(curl -s -m "$timeout" -w '\n%{http_code}' -X POST "$ROUTER/v1/messages" \
       -H 'content-type: application/json' -d "$payload" 2>/dev/null)
   fi
   HTTP="${out##*$'\n'}"
   BODY="${out%$'\n'*}"
 }
+
+top_level_yaml_value() {
+  local file="$1" key="$2"
+  awk -v key="$key" '$0 ~ ("^" key ":[[:space:]]*") { print $2; exit }' "$file"
+}
+
+# Preflight policy. These checks are local and secret-free.
+PROXY_CONFIG=""
+if [ -f "$MANIFEST" ]; then
+  PROXY_CONFIG=$(jq -r '.proxy_config // empty' "$MANIFEST" 2>/dev/null)
+fi
+if [ -z "$PROXY_CONFIG" ] && [ -f /opt/homebrew/etc/cliproxyapi.conf ]; then
+  PROXY_CONFIG=/opt/homebrew/etc/cliproxyapi.conf
+fi
+if [ -n "$PROXY_CONFIG" ] && [ -f "$PROXY_CONFIG" ]; then
+  PROXY_RETRY=$(top_level_yaml_value "$PROXY_CONFIG" request-retry)
+  PROXY_DISABLE_COOLING=$(top_level_yaml_value "$PROXY_CONFIG" disable-cooling)
+  PROXY_TRANSIENT=$(top_level_yaml_value "$PROXY_CONFIG" transient-error-cooldown-seconds)
+  if [ "$PROXY_RETRY" = 1 ] \
+    && [ "$PROXY_DISABLE_COOLING" = false ] \
+    && [ "$PROXY_TRANSIENT" = -1 ]; then
+    ok "proxy recovery policy (one retry, transient cooldown off, quota cooling on)"
+  else
+    fail "proxy recovery policy is stale — rerun scripts/gptx/install.sh (request-retry=$PROXY_RETRY, disable-cooling=$PROXY_DISABLE_COOLING, transient=$PROXY_TRANSIENT)"
+  fi
+else
+  fail "proxy config not found through $MANIFEST or /opt/homebrew/etc/cliproxyapi.conf"
+fi
+
+if [ -f "$GLOBAL_CLAUDE" ] \
+  && grep -qE "GPT agents cannot use the built-in|Keep orchestration, planning, and merge decisions on Claude" "$GLOBAL_CLAUDE"; then
+  warn "obsolete pre-bridge GPTX policy in $GLOBAL_CLAUDE — follow AGENT_ONBOARD_GPTX.md#upgrade-existing-private-gptx-instructions"
+else
+  ok "global instructions do not disable the bridged GPT advisor"
+fi
 
 # A GPT probe that is unavailable for quota reasons is reported as QUOTA, never FAIL:
 # the translation surface is untested, not broken, and certification must refuse either
@@ -111,7 +150,7 @@ STATUS_JSON=$(curl -s -m 3 "$ROUTER/__gptx/status" 2>/dev/null)
 if [ -n "$STATUS_JSON" ]; then
   ok "router answering on ${ROUTER#http://}"
 else
-  fail "router not answering on ${ROUTER#http://} — launchctl kickstart -k gui/$(id -u)/dev.gptx.router"
+  fail "router not answering on ${ROUTER#http://} — launchctl kickstart -k gui/$(id -u)/dev.trellis.gptx-router"
   echo; echo "Router down: every later probe would be meaningless. Stopping."
   exit 1
 fi
@@ -151,16 +190,22 @@ classify_gpt "GPT lane structured output" "$BODY" 'StructuredOutput'
 gpt_call '{"model":"'"$MODEL"'","max_tokens":512,"stream":true,
   "tools":[{"type":"advisor_20260301","name":"advisor"}],
   "tool_choice":{"type":"tool","name":"advisor"},
-  "messages":[{"role":"user","content":"Use the advisor once, then follow its recommendation."}]}' sol
+  "messages":[{"role":"user","content":"Use the advisor once, then follow its recommendation."}]}' sol 330
 if [ "$HTTP" = "200" ] \
   && printf '%s' "$BODY" | grep -q 'server_tool_use' \
-  && printf '%s' "$BODY" | grep -q 'advisor_tool_result'; then
-  ok "GPT lane advisor server-tool bridge"
+  && printf '%s' "$BODY" | grep -q 'advisor_tool_result' \
+  && printf '%s' "$BODY" | grep -Fq "Trellis advisor model: $MODEL"; then
+  ok "GPT lane advisor server-tool bridge (actual model receipt: $MODEL)"
 elif printf '%s' "$BODY" | grep -qE 'auth_unavailable|no auth available|quota|rate.?limit'; then
   quota "GPT lane advisor server-tool bridge — provider quota unavailable"
 else
   fail "GPT lane advisor server-tool bridge — http=$HTTP $(printf '%s' "$BODY" | head -c 180)"
 fi
+
+# 7. A successful or failed advisor attempt must not make the only Codex credential
+# ineligible for an unrelated turn.
+gpt_call '{"model":"'"$MODEL"'","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"Reply with exactly: RECOVERY_OK"}]}'
+classify_gpt "GPT lane available immediately after advisor" "$BODY" 'content_block_delta\|message_start'
 
 # --- report / certify -------------------------------------------------------
 echo
