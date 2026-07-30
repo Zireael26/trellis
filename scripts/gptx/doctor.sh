@@ -18,9 +18,17 @@
 # `--certify` runs all five and, on green, records the baseline that clears the
 # router's `unverified` state. Read-only without it.
 #
-# Exit: 0 all green (warnings allowed), 1 any check failed, 2 GPT lane unavailable
-# for quota/cooldown reasons (distinct on purpose: that is not an upgrade break and
-# must not be mistaken for one).
+# Exit: 0 all green (warnings allowed), 1 any check failed, 2 GPT lane unavailable —
+# either for quota/cooldown reasons (QUOTA) or because the provider itself returned a
+# service error (UPSTR). Both are distinct from 1 on purpose: neither is an upgrade
+# break and neither must be mistaken for one.
+#
+# The UPSTR arm exists because the provider's failure does not look like a failure.
+# Measured 2026-07-30 during an OpenAI outage: CLIProxyAPI forwards the 503 as an
+# in-band SSE error frame on an already-200 response, so HTTP is 200, `message_start`
+# has already been emitted, and only the absence of the expected block distinguishes
+# it from a translation break. The doctor reported FAIL and exit 1 — "your upgrade
+# broke the lane" — for six consecutive probes that were purely OpenAI being down.
 
 set -uo pipefail
 
@@ -40,12 +48,25 @@ SETTINGS="$REPO_ROOT/scripts/gptx/settings-router.json"
 CERTIFY=0
 FAIL=0
 QUOTA=0
+UPSTREAM=0
 [ "${1:-}" = "--certify" ] && CERTIFY=1
 
-ok()    { printf 'OK    %s\n' "$1"; }
-fail()  { printf 'FAIL  %s\n' "$1"; FAIL=1; }
-quota() { printf 'QUOTA %s\n' "$1"; QUOTA=1; }
-warn()  { printf 'WARN  %s\n' "$1"; }
+ok()       { printf 'OK    %s\n' "$1"; }
+fail()     { printf 'FAIL  %s\n' "$1"; FAIL=1; }
+quota()    { printf 'QUOTA %s\n' "$1"; QUOTA=1; }
+# Kept distinct from quota() on purpose. Both mean "the translation surface went
+# untested", but they send a reader to different places: QUOTA to billing and auth,
+# UPSTREAM to the provider's status page. Folding a 503 into QUOTA would have someone
+# checking a Codex subscription during an OpenAI outage.
+upstream() { printf 'UPSTR %s\n' "$1"; UPSTREAM=1; }
+warn()     { printf 'WARN  %s\n' "$1"; }
+
+# Provider-side failure signatures, anchored to strings observed on the wire rather
+# than to a broad `overloaded|unavailable` that could swallow a genuine content-side
+# break. Measured 2026-07-30: CLIProxyAPI forwards OpenAI's 503 as an in-band SSE
+# error frame on an ALREADY-200 response, so a status-code check reads it as success
+# and only the body reveals it.
+UPSTREAM_RE='service_unavailable_error|currently overloaded|Please include the request ID'
 
 # GPT-lane call. Sets the globals $BODY and $HTTP — deliberately not echoed, because
 # a `BODY=$(gpt_call ...)` capture would run this in a subshell and lose $HTTP.
@@ -70,6 +91,31 @@ top_level_yaml_value() {
   local file="$1" key="$2"
   awk -v key="$key" '$0 ~ ("^" key ":[[:space:]]*") { print $2; exit }' "$file"
 }
+
+# A GPT probe that never reached the model is reported as QUOTA or UPSTR, never FAIL:
+# the translation surface is untested, not broken, and certification must refuse in
+# every case — but only FAIL means "an upgrade broke us".
+#
+# Branch order is load-bearing: success first, then the two not-our-fault signatures,
+# and fail LAST as the fallthrough. Matching upstream before success would let a real
+# translation break hide behind a provider error mentioned in the model's own prose.
+classify_gpt() {
+  local label="$1" body="$2" expect="$3"
+  if [ "$HTTP" = "200" ] && printf '%s' "$body" | grep -q "$expect"; then
+    ok "$label"
+  elif printf '%s' "$body" | grep -qE 'auth_unavailable|no auth available|quota|rate.?limit'; then
+    quota "$label — codex auth unavailable (quota/cooldown), not a translation break"
+  elif printf '%s' "$body" | grep -qE "$UPSTREAM_RE"; then
+    upstream "$label — provider returned a service error mid-stream, not a translation break"
+  else
+    fail "$label — http=$HTTP $(printf '%s' "$body" | head -c 180)"
+  fi
+}
+
+# Sourcing stops here. Everything below makes network calls, so a test that wants the
+# classifier alone must be able to load the definitions without firing eleven probes at
+# a live router. Same shape as core-rules/hooks/lib/spec-gate-core.sh.
+if [ "${GPTX_DOCTOR_LIB_ONLY:-0}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 
 # Preflight policy. These checks are local and secret-free.
 PROXY_CONFIG=""
@@ -100,20 +146,6 @@ if [ -f "$GLOBAL_CLAUDE" ] \
 else
   ok "global instructions do not disable the bridged GPT advisor"
 fi
-
-# A GPT probe that is unavailable for quota reasons is reported as QUOTA, never FAIL:
-# the translation surface is untested, not broken, and certification must refuse either
-# way — but only one of the two means "an upgrade broke us".
-classify_gpt() {
-  local label="$1" body="$2" expect="$3"
-  if [ "$HTTP" = "200" ] && printf '%s' "$body" | grep -q "$expect"; then
-    ok "$label"
-  elif printf '%s' "$body" | grep -qE 'auth_unavailable|no auth available|quota|rate.?limit'; then
-    quota "$label — codex auth unavailable (quota/cooldown), not a translation break"
-  else
-    fail "$label — http=$HTTP $(printf '%s' "$body" | head -c 180)"
-  fi
-}
 
 # 0. routing table, offline. The live probes below all send `gpt-5.6-sol`, so they
 # stay green on a router whose predicate has been broken by an edit. This is the only
@@ -187,10 +219,24 @@ gpt_call '{"model":"'"$MODEL"'","max_tokens":256,"stream":true,
 classify_gpt "GPT lane structured output" "$BODY" 'StructuredOutput'
 
 # 6. GPT lane: force the advisor tool and require the fork's two server-tool blocks.
+#
+# This probe needs a second evidence source. When the advisor's own upstream fails, the
+# router correctly answers the callback with 503 + an error payload and records the
+# failure — but the CLIProxyAPI fork turns that into an EMPTY `advisor_tool_result` and
+# lets the stream finish cleanly. The body therefore carries no error signature at all:
+# both server-tool blocks are present, `message_stop` arrives, and only the missing
+# receipt line distinguishes a provider outage from a genuine bridge break. Counting the
+# router's `advisor` failures across the probe is what tells the two apart.
+ADVISOR_FAILS_BEFORE=$(curl -s -m 3 "$ROUTER/__gptx/status" 2>/dev/null \
+  | jq '[.failures[]? | select(.status=="advisor")] | length' 2>/dev/null || echo 0)
 gpt_call '{"model":"'"$MODEL"'","max_tokens":512,"stream":true,
   "tools":[{"type":"advisor_20260301","name":"advisor"}],
   "tool_choice":{"type":"tool","name":"advisor"},
   "messages":[{"role":"user","content":"Use the advisor once, then follow its recommendation."}]}' sol 330
+ADVISOR_FAILS_AFTER=$(curl -s -m 3 "$ROUTER/__gptx/status" 2>/dev/null \
+  | jq '[.failures[]? | select(.status=="advisor")] | length' 2>/dev/null || echo 0)
+ADVISOR_UPSTREAM_DETAIL=$(curl -s -m 3 "$ROUTER/__gptx/status" 2>/dev/null \
+  | jq -r 'first(.failures[]? | select(.status=="advisor") | .detail) // ""' 2>/dev/null || echo "")
 if [ "$HTTP" = "200" ] \
   && printf '%s' "$BODY" | grep -q 'server_tool_use' \
   && printf '%s' "$BODY" | grep -q 'advisor_tool_result' \
@@ -198,6 +244,13 @@ if [ "$HTTP" = "200" ] \
   ok "GPT lane advisor server-tool bridge (actual model receipt: $MODEL)"
 elif printf '%s' "$BODY" | grep -qE 'auth_unavailable|no auth available|quota|rate.?limit'; then
   quota "GPT lane advisor server-tool bridge — provider quota unavailable"
+elif printf '%s' "$BODY" | grep -qE "$UPSTREAM_RE" \
+  || { [ "$ADVISOR_FAILS_AFTER" -gt "$ADVISOR_FAILS_BEFORE" ] 2>/dev/null \
+       && printf '%s' "$ADVISOR_UPSTREAM_DETAIL" | grep -qE 'HTTP 5[0-9][0-9]'; }; then
+  # The advisor reaches its model over a SEPARATE upstream call, so this arm can trip
+  # while checks 4-5 are green and vice versa. Reclassifying it stops the misdiagnosis
+  # but proves nothing about the bridge — it stays untested until the provider recovers.
+  upstream "GPT lane advisor server-tool bridge — advisor upstream failed ($ADVISOR_UPSTREAM_DETAIL); bridge UNTESTED"
 else
   fail "GPT lane advisor server-tool bridge — http=$HTTP $(printf '%s' "$BODY" | head -c 180)"
 fi
@@ -251,7 +304,10 @@ DRIFT=$(printf '%s' "$STATUS_JSON" | python3 -c 'import json,sys;print(json.load
 echo "router state: $STATE${DRIFT:+  (drift: $DRIFT)}"
 
 if [ "$CERTIFY" -eq 1 ]; then
-  if [ "$FAIL" -ne 0 ] || [ "$QUOTA" -ne 0 ]; then
+  # UPSTREAM belongs in this guard for the same reason QUOTA does: a probe that never
+  # reached the model exercised no translation. Certifying through a provider outage
+  # would write a baseline off probes that never tested tool translation at all.
+  if [ "$FAIL" -ne 0 ] || [ "$QUOTA" -ne 0 ] || [ "$UPSTREAM" -ne 0 ]; then
     echo "NOT CERTIFIED — every probe must pass first. Baseline left unchanged."
   else
     SNAP=$(mktemp -t gptx-status)
@@ -273,4 +329,8 @@ fi
 
 [ "$FAIL" -ne 0 ] && exit 1
 [ "$QUOTA" -ne 0 ] && exit 2
+# Same exit as QUOTA: "the GPT lane was unavailable", which is deliberately NOT exit 1.
+# An operator diagnosing a bad upgrade must be able to tell the two apart by exit code
+# alone, without reading the transcript.
+[ "$UPSTREAM" -ne 0 ] && exit 2
 exit 0

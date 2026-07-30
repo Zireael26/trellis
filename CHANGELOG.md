@@ -6,6 +6,44 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.20] — 2026-07-30
+
+**A provider outage no longer reads as a broken upgrade.** `gptx-doctor` sorted every
+non-success GPT probe into `QUOTA` or `FAIL`. An OpenAI service error matched neither, so
+it fell through to `FAIL` and exit 1 — the code reserved for *an upgrade broke the
+translation surface*. During a live outage this pointed the operator at their own diff for
+a problem entirely on the provider's side.
+
+The failure does not look like a failure. CLIProxyAPI forwards OpenAI's 503 as an in-band
+SSE error frame on an **already-200** response: HTTP is 200, `message_start` has been
+emitted, and only the absence of the expected block separates it from a genuine break.
+
+### Added
+- Third probe classification `UPSTR`, kept deliberately distinct from `QUOTA`. Both mean
+  the translation surface went untested, but they send a reader to different places —
+  `QUOTA` to billing and auth, `UPSTR` to the provider's status page. Folding them would
+  have someone auditing a Codex subscription during an OpenAI outage.
+- `scripts/tests/gptx-doctor-classify.bats` (11) pins all four classifications and, more
+  importantly, the branch order in both directions: an outage signature must not report
+  `FAIL`, and a complete-but-wrong stream must still report `FAIL`. A classifier widened
+  without a test holding its edges is how a gate quietly stops gating.
+- `GPTX_DOCTOR_LIB_ONLY` guard so the classifier can be sourced without firing eleven
+  probes at a live router, matching `core-rules/hooks/lib/spec-gate-core.sh`.
+
+### Changed
+- The advisor probe now correlates against the router's own advisor failure count. When
+  the advisor's upstream fails, the router behaves correctly — 503, error payload,
+  recorded failure — but the CLIProxyAPI fork turns that into an **empty**
+  `advisor_tool_result` and finishes the stream cleanly, leaving no error signature in the
+  body at all. The probe reports the bridge as UNTESTED rather than passing or failing it.
+- `UPSTR` joins the `--certify` refusal guard. A baseline recorded during an outage would
+  be written off probes that never exercised tool translation.
+
+### Known issue
+- Mid-stream errors are not retried, and this is correct rather than missing: once
+  `message_start` is forwarded on a 200 the response is committed, and replaying it would
+  mean lying to the client about what it already received. Recovery belongs to the caller.
+
 ## [v1.0.0-rc.19] — 2026-07-30
 
 **GPTX becomes optional (spec 028).** GPTX assumed the operator held both a Claude and a
