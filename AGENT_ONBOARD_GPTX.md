@@ -240,11 +240,41 @@ gptx-doctor --certify
 - GPT completion, tool translation, and structured output;
 - the advisor server-tool bridge;
 - an immediate post-advisor GPT completion;
-- proxy retry/cooling policy.
+- proxy retry/cooling policy;
+- every `gpt-*` agent slug against the alias table of the **running** router, not the
+  checkout's. A router process older than the checkout serves a profile whose alias it
+  has never loaded, and delegating to it returns `502 unknown provider`.
 
-Exit `0` means every probe passed. Exit `1` means a failed check. Exit `2` means GPT
-translation remained unverified because Codex auth/quota/cooldown was unavailable. Exit
-`2` is not certification.
+Exit `0` means every probe passed. Exit `1` means a failed check — a real break, normally
+an upgrade that changed translation. Exit `2` means GPT translation stayed unverified
+because the lane never reached the model, and the line prefix says which cause:
+
+- `QUOTA` — Codex auth, quota, or cooldown unavailable. Repair billing or login.
+- `UPSTR` — the provider itself returned a service error. Check the provider's status
+  page and wait; nothing local is broken.
+
+Exit `2` is not certification under either prefix. The two are deliberately not folded
+together: they send you to different places.
+
+### Expect `unverified` on day one, and do not chase it
+
+The router records the **union** of every `anthropic-beta` flag it has seen, and reports
+`state: unverified` when a flag appears that the certified baseline lacks. That union
+grows with **session shape**, not only with upgrades — a subagent, a Skill, a headless
+run, and a background task each send a different flag list, and some carry a
+differently-dated variant of a family already certified. So the first session shape you
+did not happen to run before certifying will flip the state and name a flag, with
+nothing wrong.
+
+Re-certify **once after a day of ordinary sessions**, not on each drift notice.
+Certifying again immediately just bakes in another baseline taken before the common
+shapes were observed, and you repeat it tomorrow. A standing `unverified` with the lane
+serving normally is the honest state, not a defect.
+
+Confirm rather than assume before treating drift as a break: send a structured-output
+request carrying the named flag several times. A real translation break is deterministic;
+provider flake is not, which is why a single failing probe proves nothing in either
+direction.
 
 Then run the deterministic repository suites:
 
@@ -329,6 +359,9 @@ release named teammates with `TaskStop` when accepted or abandoned.
 | `router not answering` | Router launch agent absent or unhealthy | Start no new routed session. Inspect launch-agent status; reinstall only after active sessions exit. |
 | Anthropic probe fails | Subscription login, beta/header forwarding, or Anthropic lane broke | Hold GPTX use. Never route Claude traffic through the translator. |
 | GPT probe returns `QUOTA` | Codex auth/quota/cooldown unavailable | Wait or repair Codex login. Do not count as translation PASS. |
+| GPT probe returns `UPSTR` | Provider returned a service error; the lane never reached the model | Check the provider's status page and wait. Nothing local is broken; do not reinstall or re-auth. Do not count as translation PASS. |
+| `state: unverified` with a flag named | A session shape sent an `anthropic-beta` flag the baseline lacks | Normal, and the lane keeps serving. Re-certify once after a day of ordinary sessions, not on each notice. |
+| `NOT CERTIFIED — every probe must pass first. Baseline left unchanged.` | Any probe failed, or the lane returned `QUOTA`/`UPSTR` | Correct behavior. Clear that condition first; a baseline written off probes that never reached the model would certify nothing. |
 | Advisor callback fails or remains pending | Fork/router mismatch, timeout, or provider failure | Capture sanitized status. Do not retry indefinitely or restart under an active session. |
 | Explicit advisor/provider fails | Selected lane unavailable | Report that lane and stop. Do not substitute another provider. |
 | Agent guard reports stale policy | Session predates installed policy/alias map | Exit naturally and relaunch through `cmux-trellis-teams`. |

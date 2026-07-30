@@ -286,6 +286,15 @@ Run `trellis model-context gpt-5.6-sol` to inspect the current machine's catalog
 | Real auth/quota/rate limit | Normal cooling remains enabled |
 | Required Workflow stage returns null/wrong identity | Fail stage closed; no filtered false-success |
 
+`unverified` is a tripwire, not an outage: the lane keeps serving and the named flag is
+reported so an operator can judge it. Expect it within a day of certifying, because the
+router accumulates the union of every `anthropic-beta` flag it sees and that union grows
+with session shape — subagents, Skills, headless runs, and background tasks each send a
+different list. Re-certify once after a day of ordinary sessions rather than on each
+notice, and confirm a suspected break with repeated probes: a real translation break is
+deterministic, provider flake is not. Full procedure:
+[GPTX onboarding §7](../AGENT_ONBOARD_GPTX.md).
+
 Detailed controls, residual risks, and incident guidance:
 [GPTX security](gptx-security.md).
 

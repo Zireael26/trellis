@@ -6,6 +6,43 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.22] — 2026-07-31
+
+**The operator-facing surfaces caught up with rc.20 and rc.21.** Both prior releases fixed
+the reasoning and the internal runbook; neither reached the two documents a new operator
+actually reads before certifying. The result was a published contract that described a
+world two releases out of date.
+
+`AGENT_ONBOARD_GPTX.md` §7 still said exit `2` meant Codex auth, quota, or cooldown — the
+`UPSTR` classification rc.20 added for provider outages had no entry. It now names both
+causes, states that the line prefix distinguishes them, and says where each one sends you:
+`QUOTA` to billing and auth, `UPSTR` to the provider's status page. Folding them together
+would have someone re-authenticating through an outage.
+
+The same section listed six concerns but omitted the agent-slug check entirely — the one
+that compares every `gpt-*` profile against the alias table of the **running** router
+rather than the checkout's. That check exists because a router process older than the
+checkout serves a profile whose alias it never loaded, and delegating to it returns
+`502 unknown provider`. Undocumented, its failure reads as a broken agent definition.
+
+### Added
+
+- Day-one `unverified` guidance on both public surfaces. A freshly certified router
+  reports `unverified` within hours with nothing wrong, because the `anthropic-beta`
+  union grows with **session shape** — subagent, Skill, headless and background runs each
+  send a different flag list — not only with upgrades. The published rule is now to
+  re-certify **once after a day of ordinary sessions**, not on each drift notice. Without
+  it the documentation drove exactly the behavior rc.21 was written to prevent.
+- Troubleshooting rows for `UPSTR`, for a standing `unverified`, and for the
+  `NOT CERTIFIED — every probe must pass first. Baseline left unchanged.` refusal, which
+  is correct behavior rather than a fault: a baseline written off probes that never
+  reached the model would certify nothing.
+
+### Fixed
+
+- Exit `2` semantics in the onboarding guide, which described only one of its two causes.
+- The `--certify` check list, which omitted the agent-slug-versus-running-router probe.
+
 ## [v1.0.0-rc.21] — 2026-07-30
 
 **Documentation caught up with rc.20, and `unverified` got an explanation.** rc.20 added a
