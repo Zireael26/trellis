@@ -292,8 +292,10 @@ router accumulates the union of every `anthropic-beta` flag it sees and that uni
 with session shape — subagents, Skills, headless runs, and background tasks each send a
 different list. Re-certify once after a day of ordinary sessions rather than on each
 notice, and confirm a suspected break with repeated probes: a real translation break is
-deterministic, provider flake is not. Full procedure:
-[GPTX onboarding §7](../AGENT_ONBOARD_GPTX.md).
+deterministic, provider flake is not. The observed union lives in the router process while
+the baseline lives on disk, so a restart empties the union and `state: ok` on a
+freshly-started router means only that nothing unseen has arrived yet — read it next to
+`uptimeSeconds`. Full procedure: [GPTX onboarding §7](../AGENT_ONBOARD_GPTX.md).
 
 Detailed controls, residual risks, and incident guidance:
 [GPTX security](gptx-security.md).

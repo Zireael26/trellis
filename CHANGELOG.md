@@ -6,6 +6,35 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.23] — 2026-07-31
+
+**The drift tripwire re-arms from empty, and rc.22's rule did not say so.** rc.22 published
+"re-certify once after a day of ordinary sessions". Correct, but stated in elapsed time
+when the mechanism tracks router uptime.
+
+Observed directly: the router restarted overnight, and `state` read `ok` with `drift`
+absent — on a baseline that had been reporting drift the night before. Nothing was fixed.
+The baseline persists to disk (`gptx-baseline.json`); the observed `anthropic-beta` union
+does not. It is a `Set` in the router process, so a restart empties it and the router
+re-accumulates from zero. The union had refilled to 15 flags against a 16-flag baseline —
+a subset, so no flag was unseen, so no drift. Accurate, and easy to misread as a clean
+bill of health.
+
+Two consequences now documented on both public surfaces:
+
+- `state: ok` shortly after a restart means "no unseen flag in the last few minutes", not
+  "certified clean". It must be read next to `uptimeSeconds`.
+- Restarting does not clear drift, it postpones it. Certifying in that window writes a
+  baseline off a union thinner than the one that was running — the same error as
+  certifying too early, reached by a different route.
+
+Guidance is to compare `betaCount` against the baseline's before certifying; fewer flags
+than the baseline means the union is still refilling.
+
+Behavior is unchanged and deliberately so: a tripwire that re-arms from empty is honest
+about what it has actually observed. Persisting the union across restarts would let one
+stale session shape suppress a real signal indefinitely.
+
 ## [v1.0.0-rc.22] — 2026-07-31
 
 **The operator-facing surfaces caught up with rc.20 and rc.21.** Both prior releases fixed

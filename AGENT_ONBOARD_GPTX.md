@@ -271,6 +271,20 @@ Certifying again immediately just bakes in another baseline taken before the com
 shapes were observed, and you repeat it tomorrow. A standing `unverified` with the lane
 serving normally is the honest state, not a defect.
 
+Read that as a day of **router uptime**, not a day on the calendar. The baseline persists
+to disk but the observed union does not — it lives in the router process, so a restart
+empties it and the router re-accumulates from zero. Two consequences:
+
+- `state: ok` shortly after a restart means "no unseen flag in the last few minutes", not
+  "certified clean". Check `uptimeSeconds` alongside `state` before reading anything into
+  it.
+- Restarting does not clear drift, it postpones it. The flag returns the next time a
+  session sends it. Certifying during that window writes a baseline off a union thinner
+  than the one that was running, which is the same mistake as certifying too early.
+
+Compare `betaCount` against the baseline's before certifying. Fewer flags than the
+baseline means the union is still refilling; wait.
+
 Confirm rather than assume before treating drift as a break: send a structured-output
 request carrying the named flag several times. A real translation break is deterministic;
 provider flake is not, which is why a single failing probe proves nothing in either
