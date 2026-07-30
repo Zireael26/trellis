@@ -6,6 +6,63 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.21] — 2026-07-30
+
+**Documentation caught up with rc.20, and `unverified` got an explanation.** rc.20 added a
+third certification classification and a third reason to exit 2, but the published failure
+contract still described only `QUOTA`. An operator reading the docs would have had no entry
+for the case the release existed to handle.
+
+Certifying also surfaced a benign drift report worth documenting rather than fixing. The
+baseline records the `anthropic-beta` union as of the moment of certification, and that
+union grows with **session shape** — headless runs, subagents, Skills and background tasks
+each send a different flag list — not only with upgrades. So the first unobserved shape
+after certification flips the router to `unverified` and prints "run `gptx-doctor
+--certify`" with nothing wrong.
+
+Measured on 2026-07-30: drift fired on `structured-outputs-2025-11-13` against a baseline
+already holding `structured-outputs-2025-12-15` — an older-dated variant of a certified
+family. Probed 4 runs per variant, 8/8 translated correctly, so the flag is not a
+translation break. Notably the first single-shot comparison pointed the other way, which is
+the same trap as diagnosing an outage from one probe.
+
+The union is deliberately left **not** family-aware. Collapsing dated flags into families
+would suppress precisely the signal the tripwire exists for, since a real capability change
+can ship under an existing prefix. Noisier and honest beats quieter and wrong.
+
+**The ops runbook named a launchd job that no longer exists.** The instance-private GPTX
+runbook documented the router as `dev.gptx.router` in four places, including the
+incident-time restart command.
+The live job is `dev.trellis.gptx-router`; the older plist was found still installed on
+2026-07-30 and renamed `.plist.disabled`. Following the runbook during an incident would
+restart the wrong job — and with both installed, restart one while the other holds the port,
+which is a fix that looks like it worked.
+
+### Fixed
+- `docs/gptx.md` failure table gains the provider-outage row (`UPSTR`, exit 2, no baseline
+  recorded) and the post-certification drift row, and marks the existing `QUOTA` row exit 2.
+- Instance-private runbook — router identity: correct launchd label, correct script path
+  (`scripts/gptx/router.js`; `local/gptx-router.js` is a `require` shim, not what launchd
+  runs), and the correct log path — the documented `~/.cli-proxy-api/logs/` subdirectory
+  does not exist, and `log()` is `DEBUG`-gated so a healthy router writes almost nothing.
+- Instance-private runbook — the exit-code section said exit 2 meant quota/cooldown only;
+  it now names both causes and where each one sends the reader.
+- Instance-private runbook — described `--certify` as "five probes". There are nine (0–8);
+  the alias, advisor-bridge and credential-survival checks were missing.
+
+### Added
+- Instance-private runbook — guidance to re-certify **once after a day of ordinary
+  sessions** rather than on each drift notice, with the rule for telling a benign union
+  growth from a real upgrade break: a break is deterministic, provider flake is not.
+- Instance-private runbook — records the checkout-update ordering rule, which was
+  operational knowledge held nowhere in the repo. The main checkout feeds two consumers on different
+  schedules — `~/.claude/agents/*.md` symlink into its working tree and are re-read live,
+  while the router `require`s `scripts/gptx/router.js` from the same tree and node caches it
+  at load. Advancing the checkout therefore moves every agent instantly and the router not
+  at all; the gap is a window where agents declare a slug the running router 502s, which is
+  how `gpt-terra` broke fleet-wide. Advance, then kickstart, back to back — restarting first
+  reloads the same old code.
+
 ## [v1.0.0-rc.20] — 2026-07-30
 
 **A provider outage no longer reads as a broken upgrade.** `gptx-doctor` sorted every

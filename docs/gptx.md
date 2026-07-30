@@ -277,7 +277,9 @@ Run `trellis model-context gpt-5.6-sol` to inspect the current machine's catalog
 | Locked Agent provider mismatch/unknown | Reject before spawn |
 | Stale alias policy | Reject before spawn; relaunch required |
 | Terra advice absent/fails | Proceed; report missing advice as residual risk |
-| GPT quota/auth unavailable | Visible GPT-lane failure; certification returns `QUOTA` |
+| GPT quota/auth unavailable | Visible GPT-lane failure; certification returns `QUOTA` (exit 2) |
+| GPT provider outage | Certification returns `UPSTR` (exit 2), never `FAIL`; no baseline recorded |
+| New `anthropic-beta` flag after certification | Router reports `unverified` with the flag named; lane keeps serving |
 | Advisor duplicate callback | Share pending transaction or replay settled response |
 | Advisor transaction deadline | Settle bounded failure; no indefinite retry |
 | Transient proxy 408/5xx | Request fails; credential-wide cooldown disabled |
