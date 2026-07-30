@@ -7,164 +7,80 @@ delegate it. Read it before choosing a `subagent_type`, before assigning a
 teammate, and before picking models inside a dynamic workflow.
 
 The short version: the orchestrator holds the large context and delegates
-execution; the two frontier lanes are close enough in capability that capability
-alone cannot pick between them, so route on properties you can verify and
-deliberately mix the rest.
+execution; route on properties you can verify rather than on a general belief
+about which model is smarter.
+
+> **Cross-family routing is a separate, opt-in layer.** Everything below applies
+> to a single-model-family Trellis, which is the default. If `gptx.enabled` is
+> true in `trellis.config.json` — which requires both a Claude subscription and a
+> Codex subscription, plus `scripts/gptx/install.sh` — then
+> `core-rules/references/model-routing-cross-family.md` also applies and adds
+> family allocation on top of this file. With the switch off, that file is not in
+> force and nothing in Trellis routes to a second family.
 
 ## Why this file exists
 
-Given a free choice between comparable lanes, an orchestrator collapses onto
-whichever model it already holds. That is measured behaviour, not a hypothesis,
-and it is why the sections below prefer verifiable properties and an explicit
-mix requirement over "use the best model for the job". On units where nothing
-distinguishes fit, "best fit" is not a decision procedure — it is a preference,
-and preference collapses.
+Given a free choice between comparable options, an orchestrator collapses onto
+whichever one it already holds. That is measured behaviour, not a hypothesis, and
+it is why the sections below prefer verifiable properties over "use the best model
+for the job". On units where nothing distinguishes fit, "best fit" is not a
+decision procedure — it is a preference, and preference collapses.
 
-## The two workhorses are near-parity
+So: decide on properties that are checkable before the work starts, and be
+explicit when nothing distinguishes the candidates.
 
-On Artificial Analysis Intelligence Index v4.1 — one methodology, nine
-evaluations (GDPval-AA v2, τ³-Banking, Terminal-Bench v2.1, SciCode, Humanity's
-Last Exam, GPQA Diamond, CritPt, AA-Omniscience, AA-LCR), all at max effort:
+## Route on verifiable properties
 
-| model | Index | output tok/s | time to first token | $/1M blended |
-|---|---|---|---|---|
-| Claude Opus 5 | 61 | 53.7 | 65.1s | $3.85 |
-| GPT-5.6 Sol | 59 | 66.7 | 145.7s | $4.35 |
-| GPT-5.6 Terra | 55 | 142.7 | 153.0s | $2.17 |
+Three properties are decidable before any work begins, and they are the ones that
+should carry a routing decision.
 
-Three consequences:
+1. **Context footprint.** A unit that must *hold* a large surface — more than
+   roughly 200K of it — needs a large-window model and in practice stays close to
+   the orchestrator seat. This is a hard property: below the ceiling the choice is
+   open, above it there is no choice to make. Treat the ceiling as a property of
+   the lane you operate rather than a claim about a model's maximum; vendor pages
+   may quote a larger window, and what governs is what your router enforces.
 
-- **Opus 5 and Sol are near-parity.** A two-point gap on a nine-eval composite
-  is not a routing signal. Do not reach for one over the other on a general
-  belief that it is smarter.
-- **Terra is a throughput tier, not a downgrade tier** — roughly 90% of Opus's
-  index at about 2.6× its output rate. It used to be gated behind a mandatory
-  advisory call before it could mutate anything; that was retired 2026-07-30 for
-  **delegated** units, because a blocking round-trip cancels the throughput advantage
-  that is the only reason to select Terra, and because the orchestrator's review gate
-  already arbitrates the finished diff. Pair it with an advisor when one is available
-  and say so when one is not.
+2. **Output shape.** Long sustained generation and short interactive turns are
+   different problems. Time-to-first-token and total throughput trade against each
+   other, so "fast" is a property of the task shape, not of the model: a latency
+   sensitive turn a human is waiting on and a bulk mechanical migration want
+   opposite ends of that trade.
 
-  Two limits, from cross-model review of that retirement. The review-gate substitution
-  assumes an orchestrator exists above the unit, which is false when Terra is the *main*
-  model — so a Terra main loop must be able to reach a Claude-family oracle. And reviewing
-  a finished diff cannot undo an irreversible effect, so advice is still required before
-  destroying data, writing outside declared paths, or causing externally visible effects.
+3. **Oracle authorship.** If the only check on a unit would be one the worker
+   itself wrote, that is a reason to add a real oracle, or to keep the unit where
+   you can review it directly. It is **weighed, not enforced** — the published
+   rate behind this concern is scaffold-dependent, so it does not decide anything
+   on its own. Do not treat it as a hard exclusion.
 
-  Note what the 55-vs-61 index does and does not establish. It is a *capability* composite
-  at max effort; `gpt-terra` runs at `xhigh`, and no local evidence bears on Terra safety
-  at all — `audits/2026-07-30-model-routing-baseline.md` records zero Terra selections in
-  the measured window. The ratio justifies routing bulk generation to Terra. It does not
-  establish that a pre-mutation check was redundant, because selecting the wrong workspace
-  or issuing a destructive command is not the kind of error a nine-eval capability score
-  predicts. Treat the retirement as a throughput decision with a named residual risk.
-- **Time-to-first-token inverts the speed story.** Opus begins responding in
-  about a third the time either GPT model takes, while Terra finishes fastest.
-  Long sustained generation favours Terra; short interactive turns favour Opus.
-  "Fast" is a property of the task shape, not of the model.
+## Never review work with the context that produced it
 
-Numbers above are max-effort published figures, quoted for *relative* standing.
-They are not the configuration we run — see § Effort.
+Review must come from a context that did not author the work. In a single-family
+install this means a **fresh-context subagent** reviewing against the spec — not
+the same session continuing on, and not a reviewer handed the author's reasoning.
+A reviewer that shares the author's context shares the author's assumptions, and
+the failure it is most likely to miss is the one the author already talked itself
+past.
 
-## Context is the asymmetry that structures everything
+This is the single-family form of a rule that has a stronger form when a second
+model family is available; see the cross-family file when the switch is on. The
+rule does not lapse when only one family is present — it changes shape.
 
-The GPT lane is capped at **272,000 tokens** for the whole request including
-output. The Claude lane reaches **1,000,000** on the `[1m]` variants. That is
-the reason the orchestrator seat is Claude: it must hold the entire task surface
-while the work happens elsewhere.
+Deterministic gates are exempt: a hook, a type checker, or a test suite is
+mechanism, not self-review.
 
-It is also a hard routing rule rather than a preference. A unit that must *hold*
-more than roughly 200K of surface cannot go to the GPT lane at all — not because
-the model is weaker, but because the request will not fit. Below that ceiling
-both lanes are eligible.
+## Profile and effort
 
-Treat the ceiling as a property of the lane we operate, not a claim about the
-model's maximum. Vendor and aggregator pages may quote a larger window; what
-governs is what the router enforces.
-
-## Route in three stages
-
-Family first, profile second. That order matters: an earlier draft consulted a
-per-shape table *before* allocating family, which meant the table decided the lane
-for most units and the mix rule below could never fire — or fired and contradicted
-it. Cross-model review caught that. Family is decided in stage 2; nothing before it
-may name a specific agent.
-
-### Stage 1 — hard exclusions
-
-Only two properties exclude a lane outright. Both are decidable before any work.
-
-1. **Context footprint.** A unit that must *hold* more than ~200K of surface cannot
-   go to the GPT lane — the request will not fit. Claude only. Below that, both
-   lanes remain eligible.
-2. **Review crosses model families, always.** Claude's work is reviewed by a GPT
-   reviewer; GPT's work is reviewed by Claude. Never GPT-on-GPT — a same-family
-   reviewer shares the author's assumptions, and on this lane there is a measured
-   propensity to get another instance to conceal misbehaviour. Not negotiable, and
-   it fixes the family by the author's family rather than by choice.
-
-Nothing else is a hard exclusion. In particular **oracle authorship is not**: if
-the only check would be one the worker wrote, that is a reason to prefer Claude or
-to add a real oracle, but the published rate is scaffold-dependent, so it is weighed
-rather than enforced. Do not treat it as deciding the lane — it was previously
-listed among "decidable" properties while its own text said to weigh it, which
-decides nothing and let either choice claim compliance.
-
-### Stage 2 — allocate family across the pool
-
-Everything not excluded in stage 1 is **dual-eligible**. For the large middle class
-— ordinary implementation, bounded refactoring, bounded debugging — the lanes are at
-near-parity and no scenario evidence separates them.
-
-Given a fan-out of three or more dual-eligible units:
-
-> **Record the pool. Send `ceil(0.4 x pool size)` units to a family other than the
-> one you reached for first. Record why any unit was excluded from the pool.**
-
-The recorded pool is what makes this auditable, and it exists because "at least 40%
-of *comparable* units" without a definition let the denominator be chosen after the
-fact: six dual-eligible units — API, UI, schema, config, tests, docs — can each be
-called a different shape, leaving no group of three, after which everything routes
-one way while every checkable rule is satisfied. Exclusions must come from stage 1
-and be named. "Not comparable" is not an exclusion.
-
-Worked: 5 dual-eligible units, first reach was GPT → `ceil(0.4 x 5) = 2` go to
-Claude. 3 units → `ceil(1.2) = 2`. 4 units → `ceil(1.6) = 2`.
-
-This is structural, not a tiebreak. A rule that says "choose the best fit" where fit
-is indistinguishable reproduces the single-lane collapse in § Why this file exists.
-It also buys cross-family signal for free: two families with different failure modes
-on comparable work diverge informatively, which is a review pass you would otherwise
-pay for.
-
-The 40% figure is a starting point, expected to be tuned against observed usage
-rather than defended on principle. The *mechanism* — recorded pool, named exclusions
-— is not the tunable part.
-
-### Stage 3 — pick profile and effort within the allocated family
-
-Family is now fixed. These rows choose *how* to spend it, never *which lane*.
-
-| unit shape | within Claude | within GPT | evidence |
-|---|---|---|---|
-| high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | Opus | `gpt-terra` | verified: throughput |
-| bounded implementation against a pre-existing oracle | Opus | `gpt-mid` / `gpt-high` | published eval, inverse |
-| difficult design, weak-oracle debugging, security-sensitive, high-consequence | Opus at `xhigh` | `gpt-sol` | tier definition |
-| reviewing the other family's work | Opus 5 | `gpt-sol-reviewer` | stage 1 rule 2 |
-| short interactive turn, latency felt by a human | Opus | — | verified: TTFT |
-| very cheap read-only fan-out — grep-shaped codebase search | Haiku | — | operator decision |
-
-Where a row offers only Claude, that shape should not have been allocated to GPT in
-stage 2 — a short latency-sensitive turn is not fan-out work, so it never enters the
-pool.
+| unit shape | choose | evidence |
+|---|---|---|
+| high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | the frontier model, at a low rung | verified: throughput |
+| bounded implementation against a pre-existing oracle | the frontier model | published eval |
+| difficult design, weak-oracle debugging, security-sensitive, high-consequence | the frontier model at `xhigh` | tier definition |
+| short interactive turn, latency felt by a human | the frontier model | verified: TTFT |
+| very cheap read-only fan-out — grep-shaped codebase search | Haiku | operator decision |
 
 Sonnet and Haiku are not general-purpose choices. Haiku takes cheap read-only
 fan-out; neither takes judgement or implementation work.
-
-Residual preferences that do **not** decide a lane, for use when stage 2 leaves a
-genuine choice within a family: abstract reasoning, novel-problem design, front-end
-and visual work, and life sciences favour Opus on vendor benchmarks; long sustained
-generation favours Terra on measured throughput.
 
 ## Effort
 
@@ -183,4 +99,5 @@ or instruction-following. The question is never "is this task important" — it 
 
 Related: `core-rules/references/delegation.md` (staging, teammate lifecycle),
 `core-rules/references/model-lanes.md` (name → lane, degrade tiers),
-`core-rules/references/model-prompting-deltas.md` (per-family prompting).
+`core-rules/references/model-prompting-deltas.md` (per-family prompting),
+`core-rules/references/model-routing-cross-family.md` (opt-in, requires `gptx`).

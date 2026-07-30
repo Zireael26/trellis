@@ -306,7 +306,32 @@ const observed = [];
     });
     assert.match(statusResponse.body.lanes.codex.lastEffortReceipt.at, /^\d{4}-/);
 
-    process.stdout.write('gptx-effort-alias: exact aliases, lengths, passthrough, and receipts passed\n');
+    // The status endpoint must name the alias slugs THIS process serves, so a
+    // checker can tell a stale-but-healthy router from a current one. Without it
+    // the only symptom of drift is a 502 at delegation time, and `state: ok`
+    // reports fine throughout — the 2026-07-30 gpt-5.6-terra-xhigh case.
+    assert.ok(
+      Array.isArray(statusResponse.body.aliases),
+      'status must expose an aliases array for the stale-router check',
+    );
+    assert.deepEqual(
+      statusResponse.body.aliases,
+      Object.keys(ALIAS_TABLE).sort(),
+      'reported aliases must be exactly what this build can serve',
+    );
+    // Every gpt-* agent profile must declare a slug this build serves. This is the
+    // drift guard in the direction that actually broke: agent file moves first.
+    const agentDir = path.join(ROOT, 'core-rules', 'agents');
+    for (const file of fs.readdirSync(agentDir).filter((n) => /^gpt-.*\.md$/.test(n))) {
+      const slug = fs.readFileSync(path.join(agentDir, file), 'utf8')
+        .match(/^model:\s*(\S+)\s*$/m)?.[1];
+      assert.ok(
+        statusResponse.body.aliases.includes(slug),
+        `${file} declares ${slug}, which this build's router does not serve — delegating to it would 502`,
+      );
+    }
+
+    process.stdout.write('gptx-effort-alias: exact aliases, lengths, passthrough, receipts, and status alias reporting passed\n');
   } catch (error) {
     if (router?.logs()) error.message += `\n--- isolated router log ---\n${router.logs()}`;
     throw error;

@@ -28,7 +28,9 @@ holding a live teammate.
 - **This is a capability gate, not a model-identity branch.** Inspect the
   dispatch surfaces the session actually exposes; do not infer them from which
   model owns the main loop.
-- When GPTX Agent capability is available, the canonical GPT executor path is a
+- When GPTX Agent capability is available **and** `gptx.enabled` is set (spec 028;
+  capability means the installer ran, the switch means the doctrine is in force —
+  an install may legitimately be switched off), the canonical GPT executor path is a
   native profile: `gpt-mid` for mechanical or strong-oracle work, `gpt-high` for
   moderately complex cross-file work, `gpt-sol` for weak-oracle or consequential
   work, and `gpt-terra` as the throughput lane for large sustained output against a

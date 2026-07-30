@@ -6,6 +6,58 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+## [v1.0.0-rc.19] — 2026-07-30
+
+**GPTX becomes optional (spec 028).** GPTX assumed the operator held both a Claude and a
+Codex subscription. Most users hold one, and for them the cross-family doctrine was worse
+than dead weight — it was doctrine they could not satisfy. `model-routing.md` stated a
+≥40% cross-family mix as a *requirement* and named `gpt-*` profiles as the routing target
+for five task classes; `core-rules/CLAUDE.md`, which loads in every session of every
+project, pointed at all of it unconditionally.
+
+The machinery was already opt-in — spec 020 built the router behind an installer and no
+hook depends on it. The **doctrine** was not, and that is what this fixes.
+
+### Added
+- `gptx` block in `trellis.config.json` and its schema. Default **off**; absent, `false`,
+  and malformed all resolve to off. Off is the safe direction: it can only withdraw an
+  instruction to use a lane, never invent one.
+- `core-rules/references/model-routing-cross-family.md` — the quarantine target for
+  two-subscription doctrine (near-parity table, the mix quota, `gpt-*` rows, the Terra
+  throughput tier), opening with its switch predicate.
+- `scripts/tests/gptx-switch.bats` (15) and `scripts/tests/gptx-off-state.bats` (10). The
+  latter asserts the off-state as a deterministic property rather than a promise.
+- `/__gptx/status` now reports `aliases[]`, and `gptx-doctor` compares every `gpt-*`
+  agent's declared `model:` against what the **running** router serves.
+
+### Changed
+- `model-routing.md` reduced to single-family doctrine, including the single-family form
+  of never-self-review: a fresh-context subagent, since the cross-family reviewer is not
+  available. The rule changes shape rather than lapsing.
+- One shared config reader serves both `mandatory_pipeline` and `gptx`. The two consumers
+  read a `false` differently on purpose — for a gate, closed means blocking; for a feature
+  handing out routing instructions, closed means off.
+- `core-rules/CLAUDE.md`: two unconditional pointers became one conditional pointer, and
+  prose was tightened across a dozen non-GPTX bullets. **20,317 → 18,996 bytes**, clearing
+  the standing ≤19,000 target that had been over budget for some time. No rule changed
+  meaning; many changed wording (recorded as a deviation in `specs/028/tasks.md`).
+- `orchestrate/SKILL.md` still required Terra's pre-mutation advisory call, retired
+  2026-07-30. It contradicted the routing doctrine beside it; corrected.
+
+### Fixed
+- **A router running stale code was indistinguishable from a current one** — `state: ok`,
+  `drift: null`, no loaded-source version. This is the class behind rc.18's
+  `gpt-5.6-terra-xhigh` returning `502 unknown provider` while every `sol` alias answered
+  200: the agent file moved and the running process did not. Now detected, with the
+  kickstart command in the failure message.
+
+### Known issue
+- `gpt-terra` requests `gpt-5.6-terra-xhigh`, which a router process predating the terra
+  aliases does not serve. `~/.claude/agents/` symlinks into the main checkout, so the
+  breakage arrives when that checkout advances — **restart the router before pulling.**
+  Exactly one of seven profiles is affected; `gpt-mid`, `gpt-high`, `gpt-sol`,
+  `gpt-sol-reviewer`, and `gpt-sol-advisor` are unaffected.
+
 ## [v1.0.0-rc.18] — 2026-07-30
 
 **Version reconciliation.** `core-rules/VERSION` had been advanced to `rc.15`, `rc.16`, and

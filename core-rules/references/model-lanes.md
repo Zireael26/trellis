@@ -46,6 +46,11 @@ timeouts all report false.
 
 ## GPTX delegate policy is a separate gate
 
+> Applies only where GPTX is enabled (`gptx.enabled` in `trellis.config.json`,
+> spec 028, default off). With the switch off there is no GPT lane to delegate
+> to and this whole section is inert — `--delegates` still parses, but every
+> value other than `claude` and `none` describes providers that do not exist.
+
 `cmux-trellis-teams --delegates auto|gpt|claude|none` controls which providers
 an Agent call may request. It is independent of the main mode, main-model
 override, and advisor selection. Enforcement happens at the Agent caller in a

@@ -1,5 +1,7 @@
 # GPTX: GPT models inside the Trellis Claude Code harness
 
+> **Requires two subscriptions.** GPTX routes selected requests to GPT models through a local gateway, so it needs BOTH a Claude subscription and a Codex subscription. It is off by default (`gptx.enabled` in `trellis.config.json`, spec 028), and nothing else in Trellis depends on it — a single-subscription install is fully functional without ever enabling GPTX.
+
 GPTX keeps Claude Code as the terminal, tool loop, Agent surface, and team UI while
 routing explicitly selected GPT model requests through a local translation lane. cmux
 keeps managing workspaces and panes. Trellis owns mode resolution, provider policy,
@@ -14,6 +16,31 @@ Code. It is still unofficial. Anthropic's official gateway documentation says:
 Source: [Other LLM gateways](https://code.claude.com/docs/en/llm-gateway), accessed
 2026-07-29. “Native” in this documentation means **native-feeling harness participation**,
 not Anthropic support for GPT models.
+
+## Turning GPTX on
+
+Two independent things have to be true, and they are deliberately separate:
+
+1. **Capability** — run `scripts/gptx/install.sh`. This installs the router and is
+   what makes the GPT lane physically reachable.
+2. **Doctrine** — set the switch in `trellis.config.json` (or a project-local
+   `.trellis.config.json`, which wins):
+
+   ```json
+   "gptx": { "enabled": true }
+   ```
+
+Resolution is most-specific-wins: project-local → central → built-in *off*. Absent,
+`false`, and malformed all resolve to **off**; malformed fails closed on purpose,
+since off can only withdraw an instruction to use a lane and never invent one.
+
+With the switch off, `core-rules/references/model-routing.md` is the whole of routing
+doctrine: no inherited file names a `gpt-*` profile as a routing target and no
+cross-family mix quota binds. Turning it on additionally puts
+`core-rules/references/model-routing-cross-family.md` in force. Spec: `specs/028`.
+
+The split exists because an install can legitimately be switched off — capability
+means the installer ran; the switch means the doctrine applies.
 
 ## Architecture
 

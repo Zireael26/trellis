@@ -79,11 +79,15 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
-**Executor Agent selection.** When GPTX Agent capability is available, generic
-Workflow dispatch uses the native GPT profiles: `gpt-mid` for mechanical or
-strong-oracle units, `gpt-high` for moderately complex cross-file units,
-`gpt-sol` for weak-oracle or consequential units, and `gpt-terra` only with its
-required successful strong-model advice. An explicit provider or model selection
+**Executor Agent selection.** When GPTX Agent capability is available *and*
+`gptx.enabled` is set (spec 028; default off — with it off there are no GPT
+profiles to dispatch to and this paragraph is inert), generic Workflow dispatch
+uses the native GPT profiles: `gpt-mid` for mechanical or strong-oracle units,
+`gpt-high` for moderately complex cross-file units, `gpt-sol` for weak-oracle or
+consequential units, and `gpt-terra` for large sustained output against a
+pre-existing oracle. Terra's mandatory pre-mutation advisory call was retired
+2026-07-30 for delegated units — pair it with an advisor when one is available
+and say so when one is not. An explicit provider or model selection
 wins; a rejected, unavailable, null, or failed selected lane fails the receipt and
 stays visible. Never rewrite it or silently substitute the OpenAI Codex plugin
 companion. `codex-worker`-specific recipes and mechanics are optional legacy

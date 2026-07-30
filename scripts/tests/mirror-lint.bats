@@ -85,6 +85,31 @@ teardown() {
   [[ "$output" == *"core-rules/agents/lane-worker.md: unofficial proxy token"* ]]
 }
 
+@test "spec 028: the config schema and the cross-family routing file may name GPTX" {
+  mkdir -p "$M/scripts/lib" "$M/core-rules/references"
+
+  # The switch that makes GPTX optional cannot be documented without naming it. A
+  # public single-subscription user must be able to see the knob exists and ships
+  # off; hiding it would defeat spec 028. Added 2026-07-30 when the schema entry
+  # tripped the lint on the very PR that introduced the switch.
+  printf '{"gptx":{"description":"GPTX cross-family routing switch, default off"}}\n' \
+    > "$M/scripts/lib/trellis.config.schema.json"
+  # The cross-family file is the quarantine target for two-subscription doctrine —
+  # it names gpt-* profiles by design, which is what keeps the always-loaded files clean.
+  printf 'Applies only when gptx.enabled is true. Route gpt-sol for weak-oracle work.\n' \
+    > "$M/core-rules/references/model-routing-cross-family.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  # Still scoped: a sibling reference file does not inherit the exemption.
+  printf 'this reference mentions cliproxy in passing\n' \
+    > "$M/core-rules/references/model-prompting-deltas.md"
+  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/references/model-prompting-deltas.md: unofficial proxy token"* ]]
+}
+
 @test "claudex remains instance-private even inside the GPTX feature" {
   mkdir -p "$M/scripts/gptx"
   printf 'claudex private binding\n' > "$M/scripts/gptx/router.js"

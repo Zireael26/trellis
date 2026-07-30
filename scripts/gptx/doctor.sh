@@ -207,6 +207,43 @@ fi
 gpt_call '{"model":"'"$MODEL"'","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"Reply with exactly: RECOVERY_OK"}]}'
 classify_gpt "GPT lane available immediately after advisor" "$BODY" 'content_block_delta\|message_start'
 
+# 8. Agent slug vs running router. Every gpt-* profile declares a `model:` slug in
+# its frontmatter; the RUNNING router must know it. These drift apart silently: the
+# repo can gain an alias (making a profile's effort real rather than cosmetic) while
+# the installed router predates it, and the only symptom is a 502 at the moment an
+# operator delegates. Observed 2026-07-30: gpt-terra.md moved to
+# `gpt-5.6-terra-xhigh` in rc.18, and the running router answered
+# `502 unknown provider for model gpt-5.6-terra-xhigh` while every sol alias was fine.
+# Checked offline against the router's own alias table — no provider call, so this
+# stays green on a quota cooldown and costs nothing.
+AGENTS_DIR="$(cd "$(dirname "$0")/../.." && pwd)/core-rules/agents"
+LIVE_ALIASES=$(printf '%s' "$STATUS_JSON" | python3 -c \
+  'import json,sys;d=json.load(sys.stdin);print(" ".join(d["aliases"]) if isinstance(d.get("aliases"),list) else "")' 2>/dev/null || echo "")
+if [ ! -d "$AGENTS_DIR" ]; then
+  :
+elif [ -z "$LIVE_ALIASES" ]; then
+  # The running process predates alias reporting, so the comparison is impossible
+  # rather than failing. Warn — this is precisely the stale-but-healthy state that
+  # `state: ok` cannot distinguish from current.
+  warn "running router does not report its alias table — it predates this check, so agent slugs cannot be verified against it. Restart to enable: launchctl kickstart -k gui/$(id -u)/dev.trellis.gptx-router"
+else
+  UNKNOWN=""
+  for af in "$AGENTS_DIR"/gpt-*.md; do
+    [ -f "$af" ] || continue
+    slug=$(sed -n 's/^model:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$af" | head -1)
+    [ -n "$slug" ] || continue
+    case " $LIVE_ALIASES " in
+      *" $slug "*) ;;
+      *) UNKNOWN="$UNKNOWN $(basename "$af")=$slug" ;;
+    esac
+  done
+  if [ -n "$UNKNOWN" ]; then
+    fail "agent slug unknown to the RUNNING router —$UNKNOWN. Delegating to that profile returns 502 'unknown provider'. The router process is older than the checkout; restart it: launchctl kickstart -k gui/$(id -u)/dev.trellis.gptx-router"
+  else
+    ok "every gpt-* agent slug is served by the running router"
+  fi
+fi
+
 # --- report / certify -------------------------------------------------------
 echo
 STATE=$(printf '%s' "$STATUS_JSON" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])' 2>/dev/null || echo unknown)

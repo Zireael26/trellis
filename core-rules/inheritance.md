@@ -64,10 +64,13 @@ use the same machine-local symlink pattern as skills and commands:
 
     <project-root>/.claude/agents/<name>.md  →  __TRELLIS_PATH__/core-rules/agents/<name>.md
 
-When GPTX capability is installed, its canonical executor profiles are
-`gpt-mid.md`, `gpt-high.md`, `gpt-sol.md`, and `gpt-terra.md`; Claude Code
-resolves the corresponding symlinks as native `gpt-mid`, `gpt-high`, `gpt-sol`,
-and `gpt-terra` Agent types. These are the preferred GPT executor identities.
+When GPTX capability is installed and `gptx.enabled` is set (spec 028; default
+off), its canonical executor profiles are `gpt-mid.md`, `gpt-high.md`,
+`gpt-sol.md`, and `gpt-terra.md`; Claude Code resolves the corresponding symlinks
+as native `gpt-mid`, `gpt-high`, `gpt-sol`, and `gpt-terra` Agent types. These are
+the preferred GPT executor identities. The definitions are inert with the switch
+off — a profile nothing routes to is unused, not broken — so a single-subscription
+project inheriting them is harmless.
 
 `codex-worker.md` is optional legacy compatibility for projects whose operator
 explicitly installs and selects the OpenAI Codex plugin companion. Such a project

@@ -148,7 +148,21 @@ lint_mirror() {
   # encoded "gpt-prefixed agents" while the comment said "agent definitions". Kept as an
   # explicit filename rather than widening to `agents/[^/]+\.md$`, so a future agent file
   # still has to be considered on purpose.
-  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/opus-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
+  #
+  # `scripts/lib/trellis.config.schema.json` and `model-routing-cross-family.md` joined
+  # 2026-07-30 with spec 028, and for the same reason as opus-advisor: the switch that
+  # makes GPTX optional cannot be documented without naming GPTX. A public user has to be
+  # able to see that the knob exists and ships off — hiding it would defeat the spec. The
+  # cross-family file is the quarantine target for the two-subscription doctrine, so it
+  # names the profiles by design; that is what keeps the always-loaded files clean.
+  #
+  # `core-rules/hooks/lib/spec-gate-core.sh` joined for the same reason: spec 028 resolves
+  # the `gptx` block through the SHARED reader that already serves `mandatory_pipeline`
+  # (one parser, two blocks), so the reader necessarily names the block it resolves.
+  # Writing a second reader purely to keep the token out of this file would be worse code
+  # for a lint's benefit. Caught 2026-07-30 by the throwaway-mirror probe, not by the
+  # in-repo suite — the lint only runs against an assembled mirror.
+  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/hooks/lib/spec-gate-core\.sh$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/references/model-routing(-cross-family)?\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/opus-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/lib/trellis\.config\.schema\.json$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"

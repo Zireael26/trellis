@@ -1,5 +1,7 @@
 # Agent onboarding: GPTX session modes
 
+> **Requires two subscriptions.** GPTX routes selected requests to GPT models through a local gateway, so it needs BOTH a Claude subscription and a Codex subscription. It is off by default (`gptx.enabled` in `trellis.config.json`, spec 028), and nothing else in Trellis depends on it — a single-subscription install is fully functional without ever enabling GPTX.
+
 This runbook is for an LLM or human installing GPTX from a Trellis checkout on a
 Mac. Follow it in order, show every state-changing command before it runs, and stop
 on a failed gate. Never ask anyone to paste a credential into chat.

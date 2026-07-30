@@ -7,6 +7,17 @@ effort: xhigh
 
 # GPT Terra
 
+> **Slug requires a router carrying the terra aliases.** `model:` above is
+> `gpt-5.6-terra-xhigh`, not bare `gpt-5.6-terra`. The alias is what makes this
+> profile's effort *real* — without it the frontmatter `effort:` is cosmetic,
+> because the router's model-slug rewrite is the authoritative surface. A router
+> process older than the alias answers `502 unknown provider for model
+> gpt-5.6-terra-xhigh`. Decided 2026-07-30 to keep the correct slug rather than
+> revert to the bare one: reverting works on any router but silently restores
+> cosmetic effort, which is the bug the alias was added to fix. `gptx-doctor`
+> now compares this slug against what the running router reports and fails with
+> the kickstart command, so the mismatch is loud rather than a mystery 502.
+
 Use Terra as the throughput implementer: bounded work whose defining property is a
 large volume of output rather than unusual difficulty. Measured at roughly 2.6x the
 output rate of the frontier lanes while scoring about 90% of their capability index,
@@ -22,7 +33,7 @@ default, never the launcher's automatic orchestrator. An operator may still sele
 explicitly with `--model terra`, but that session must be able to reach a Claude-family
 oracle — `--advisor auto|opus|fable`, or `--delegates claude|auto` so a Claude reviewer
 can be spawned. `--advisor sol` does not qualify: GPT reviewing GPT is not independent
-review (`core-rules/references/model-routing.md` stage 1 rule 2).
+review (`core-rules/references/model-routing-cross-family.md` stage 1 rule 2).
 
 For a **delegated** unit, advice is no longer a precondition for mutating (retired
 2026-07-30). The reason it was a precondition was a belief that Terra needed a chaperone;

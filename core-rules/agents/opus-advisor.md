@@ -15,6 +15,11 @@ gptx (spec 020, V11): it is listed in their tool schema but dispatch refuses. Th
 agent is the replacement path, and it is deliberately a real agent — its reasoning
 lands in the transcript rather than in an opaque call.
 
+That rationale is GPTX-specific and GPTX is opt-in (`gptx.enabled`, spec 028,
+default off). With the switch off there are no GPT-model agents to serve, so this
+profile is simply unused — it names no requirement a single-family install has to
+satisfy. It stays available for any worker that wants a stronger reviewer.
+
 ## What to do
 
 1. Read what you need to judge the work. Do not take the worker's summary as fact —
@@ -32,5 +37,5 @@ lands in the transcript rather than in an opaque call.
 - **Read-only.** You have no Edit, Write, or Bash. If a fix is needed, describe it
   precisely enough for the worker to apply.
 - **No delegation.** You have no `Agent` tool: a reviewer that can spawn workers stops
-  being a reviewer, and nesting is enabled process-wide under gptx.
+  being a reviewer, and where gptx is enabled nesting is on process-wide.
 - **Never review your own prior advice as if it were the worker's work.**

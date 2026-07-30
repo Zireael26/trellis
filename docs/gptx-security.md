@@ -1,5 +1,7 @@
 # GPTX security and trust boundaries
 
+> **Requires two subscriptions.** GPTX routes selected requests to GPT models through a local gateway, so it needs BOTH a Claude subscription and a Codex subscription. It is off by default (`gptx.enabled` in `trellis.config.json`, spec 028), and nothing else in Trellis depends on it — a single-subscription install is fully functional without ever enabling GPTX.
+
 GPTX is a local, unofficial gateway integration. It changes where selected Claude Code
 requests travel, so its security claim is narrower than “local proxy equals safe.” This
 document states what GPTX protects, what each component can see, how failures behave, and

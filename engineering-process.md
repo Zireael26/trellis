@@ -142,6 +142,26 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
     "no_progress_iterations": 3,     // halt after N consecutive no-progress iterations
     "budget_ceiling_usd": 1000,      // spend ceiling per loop run, in US dollars
     "usd_per_mtok": 25.00            // $/MTok output rate for the dollar→token conversion
+  },
+
+  // Optional. The mandatory feature-pipeline gate (spec 006, §14.7). Default OFF.
+  // A present-but-malformed block fails CLOSED — an opted-in project must not be
+  // silently disabled by a typo.
+  "mandatory_pipeline": {
+    "enabled": false,
+    "spec_required_diff_lines": 80,  // size floor: at or below this, no spec needed
+    "surgical_max_diff_lines": 400   // ceiling a /surgical declaration is honored to
+  },
+
+  // Optional. The GPTX cross-family routing switch (spec 028). Default OFF.
+  // Requires BOTH a Claude and a Codex subscription plus scripts/gptx/install.sh.
+  // When on, core-rules/references/model-routing-cross-family.md is in force:
+  // gpt-* profiles become routing targets and the >=40% cross-family mix binds.
+  // Absent, false, and malformed are all OFF and byte-identical to a Trellis that
+  // never shipped GPTX — off can only withdraw an instruction to use a lane,
+  // never invent one.
+  "gptx": {
+    "enabled": false
   }
 }
 ```

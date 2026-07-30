@@ -76,7 +76,7 @@ const ADVISOR_MESSAGE_LIMIT = 12;
 const ADVISOR_BLOCK_MAX_BYTES = 12 * 1024;
 const DEBUG = process.env.GPTX_DEBUG === '1';
 
-const { prepareForwardBody } = require('./effort-alias');
+const { prepareForwardBody, ALIAS_TABLE } = require('./effort-alias');
 const { laneFor } = require('./lanes');
 const { resolveModelContext } = require('./model-context');
 const HEALTH_TTL_MS = 30_000;
@@ -1379,6 +1379,15 @@ const statusPayload = () => {
     drift,
     uptimeSeconds: Math.round((Date.now() - started) / 1000),
     port: PORT,
+    // The alias slugs THIS PROCESS knows. A running router and the checkout can
+    // drift apart silently — the repo gains an alias, the process predates it, and
+    // the only symptom is a 502 'unknown provider' the moment someone delegates.
+    // `state: ok` does not catch it, because the router is genuinely healthy; it
+    // just has no idea a newer slug exists. Reporting the table lets a checker
+    // compare what agents ask for against what this process can serve.
+    // (2026-07-30: gpt-terra.md moved to gpt-5.6-terra-xhigh; the running router
+    // 502'd it while every sol alias was fine, and nothing surfaced the mismatch.)
+    aliases: Object.keys(ALIAS_TABLE).sort(),
     lanes: { anthropic: stats.anthropic, codex: stats.codex },
     failures: stats.failures,
     cliVersion: stats.cliVersion,
