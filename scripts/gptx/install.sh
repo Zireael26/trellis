@@ -291,7 +291,13 @@ ln -sfn "$ROOT/scripts/gptx/doctor.sh" "$BIN_DIR/gptx-doctor"
 agent_links=()
 # gpt-sol-reviewer and opus-advisor were both historically absent from this loop, so both
 # lived in ~/.claude/agents/ as hand-placed regular files that drifted from the repo.
-for agent in gpt-mid gpt-high gpt-sol gpt-terra gpt-sol-advisor gpt-sol-reviewer opus-advisor; do
+# Deliberately an explicit list and not a glob over core-rules/agents/: that directory is a
+# superset, holding profiles distributed by other rollouts (codex-worker, lane-worker) that
+# must not be linked by a GPTX install. gptx-install.bats asserts the list against the
+# directory so a profile added later fails a test instead of silently going undistributed —
+# which is the drift the previous two lines describe.
+for agent in gpt-mid gpt-high gpt-sol gpt-terra gpt-sol-advisor gpt-sol-reviewer \
+  opus-advisor fable-advisor; do
   target="$AGENTS_DIR/$agent.md"
   ln -sfn "$ROOT/core-rules/agents/$agent.md" "$target"
   agent_links+=("$target")

@@ -109,6 +109,24 @@ run_installer() {
     = gpt-5.6-sol-xhigh ]
   # opus-advisor had the same problem and additionally had no canonical file at all.
   [ -L "$TEST_HOME/.claude/agents/opus-advisor.md" ]
+  # fable-advisor pins a LITERAL claude-fable-5, not the `fable` alias slot. opus-advisor
+  # declares the `opus` slot and was measured resolving to gpt-5.6-sol on 2 of 111 calls
+  # (2026-07-31), which turns a cross-family reviewer into same-family review under a name
+  # that still says otherwise. A literal has no alias step to lose.
+  [ -L "$TEST_HOME/.claude/agents/fable-advisor.md" ]
+  [ "$(awk '/^model:/{print $2; exit}' "$TEST_HOME/.claude/agents/fable-advisor.md")" \
+    = claude-fable-5 ]
+  # The install loop is an explicit list over a directory that is a superset, so a profile
+  # added to core-rules/agents/ can be silently left undistributed. Pin the exception list:
+  # anything canonical and not named here must be a deliberate non-GPTX rollout.
+  for canonical in "$BATS_TEST_DIRNAME"/../../core-rules/agents/*.md; do
+    name="$(basename "$canonical" .md)"
+    case "$name" in
+      codex-worker|lane-worker) continue ;;  # shipped by their own rollout scripts
+    esac
+    [ -L "$TEST_HOME/.claude/agents/$name.md" ] \
+      || { echo "canonical agent not installed by gptx: $name"; false; }
+  done
   # Every profile the loop installs must be a symlink; a regular file here means a
   # hand-placed copy that will drift from the repo, which is how both of the above began.
   for installed in "$TEST_HOME"/.claude/agents/*.md; do

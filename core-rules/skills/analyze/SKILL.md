@@ -36,7 +36,7 @@ If any required file is missing, the skill stops and tells the operator what to 
 
 One new file: `specs/<NNN>-<slug>/analyze.md`. No edits to spec.md, plan.md, tasks.md, clarify.md, or anything else.
 
-If a prior `analyze.md` exists, the skill refuses to overwrite. Operator removes explicitly; re-analysis lands as a new file (`analyze-2.md`, `analyze-pre-impl.md`) at the operator's discretion.
+If a prior `analyze.md` exists, the skill refuses to overwrite. Operator removes explicitly; re-analysis lands as a new file (`analyze-2.md`, `analyze-pre-impl.md`) at the operator's discretion. For the running verdict, `analyze.md` is round 1 and digits-only `analyze-<N>.md` is round N; the highest N numerically is authoritative. Named variants such as `analyze-pre-impl.md` are situational and never replace the running verdict.
 
 ## Drift checks
 

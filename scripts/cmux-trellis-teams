@@ -11,6 +11,7 @@ ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 CONTEXT_RESOLVER="$ROOT/scripts/gptx/model-context.js"
 POLICY_RESOLVER="$ROOT/scripts/gptx/session-policy.js"
 DELEGATION_GUARD="$ROOT/scripts/gptx/delegation-guard.js"
+FAMILY_CHECK="$ROOT/scripts/gptx/family-check.js"
 ROUTER_URL="${GPTX_BASE_URL:-http://127.0.0.1:8318}"
 ANTHROPIC_URL="${ANTHROPIC_DIRECT_BASE_URL:-https://api.anthropic.com}"
 
@@ -338,11 +339,19 @@ append_prompt_text "Trellis delegate policy: --delegates $delegates governs Agen
 append_prompt_text 'Trellis Agent lifecycle: the root orchestrator may pass name only when intentionally creating a named teammate mailbox. A named teammate or any nested Agent caller must omit name and use an unnamed direct-result subagent. Agent names are mailbox identities, never TaskOutput job IDs: wait for mailbox completion and use SendMessage for follow-up; never use TaskOutput or TaskList to poll them. Unnamed Agent results return directly to their caller. The root calls TaskStop by name as soon as named work is accepted, superseded, failed, or abandoned; do not originate shutdown_request.'
 
 printf -v guard_command '%q %q' "$(command -v node)" "$DELEGATION_GUARD"
+printf -v family_check_command '%q %q' "$(command -v node)" "$FAMILY_CHECK"
+# The PreToolUse guard authorizes a provider from the REQUEST; when an Agent is chosen by
+# subagent_type it has no resolved model to check yet. The PostToolUse pass closes that by
+# comparing what the agent actually got against the family its type declares. It reports
+# and never blocks — the work is already done by then — but the 2026-07-31 audit found 19
+# Claude-named agents that had silently run on GPT, including opus-advisor, so the value
+# is entirely in saying it out loud.
 settings="$(
   jq -cn \
     --arg model "$claude_model" \
     --arg advisorModel "$advisor_model" \
     --arg guardCommand "$guard_command" \
+    --arg familyCheckCommand "$family_check_command" \
     --argjson env "$env_json" \
     '{
       model:$model,
@@ -356,6 +365,15 @@ settings="$(
             command:$guardCommand,
             timeout:5,
             statusMessage:"Checking GPTX delegate policy..."
+          }]
+        }],
+        PostToolUse:[{
+          matcher:"Agent",
+          hooks:[{
+            type:"command",
+            command:$familyCheckCommand,
+            timeout:5,
+            statusMessage:"Checking Agent family match..."
           }]
         }]
       }

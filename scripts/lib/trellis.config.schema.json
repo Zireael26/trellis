@@ -247,12 +247,32 @@
       "additionalProperties": true
     },
     "gptx": {
-      "description": "Optional. The GPTX cross-family routing switch (spec 028). When enabled, cross-family routing doctrine applies: core-rules/references/model-routing-cross-family.md is in force, gpt-* profiles are valid routing targets, and the >=40% cross-family mix requirement binds. GPTX assumes the operator holds BOTH a Claude subscription and a Codex subscription and has run scripts/gptx/install.sh; for a single-subscription operator the doctrine is unsatisfiable, which is why it is gated. Default OFF: absence of the object, or enabled:false, is byte-identical to a single-subscription Trellis — no inherited file names a gpt-* routing target and no unsatisfiable numeric quota is stated. A present-but-malformed block fails CLOSED (off); off is the safe direction because it can only withdraw an instruction to use a lane, never invent one. Resolution, most specific wins: project-local <project>/.trellis.config.json.gptx → this central block → built-in (off).",
+      "description": "Optional. The GPTX cross-family routing switch (spec 028). When enabled, cross-family routing doctrine applies: core-rules/references/model-routing-cross-family.md is in force, gpt-* profiles are valid routing targets, and the family allocation declared in the nested routing block binds (spec 030). With routing absent or malformed, allocation falls back to the spec-028 symmetric >=40% cross-family mix. GPTX assumes the operator holds BOTH a Claude subscription and a Codex subscription and has run scripts/gptx/install.sh; for a single-subscription operator the doctrine is unsatisfiable, which is why it is gated. Default OFF: absence of the object, or enabled:false, is byte-identical to a single-subscription Trellis — no inherited file names a gpt-* routing target and no unsatisfiable numeric quota is stated. A present-but-malformed block fails CLOSED (off); off is the safe direction because it can only withdraw an instruction to use a lane, never invent one. Resolution, most specific wins: project-local <project>/.trellis.config.json.gptx → this central block → built-in (off).",
       "type": "object",
       "properties": {
         "enabled": {
           "description": "Master switch for GPTX cross-family routing doctrine. Default false — absence or false is byte-identical to a Trellis that never shipped GPTX.",
           "type": "boolean"
+        },
+        "routing": {
+          "description": "Optional. Directional family allocation while GPTX is enabled (spec 030). Absent or malformed resolves CLOSED to default_family: \"balanced\", share_floor: 0.4, and orchestrator_inline_max_lines absent — behavior byte-identical to a spec-028 Trellis.",
+          "type": "object",
+          "required": ["default_family", "share_floor"],
+          "properties": {
+            "default_family": {
+              "enum": ["gpt", "claude", "balanced"]
+            },
+            "share_floor": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
+            },
+            "orchestrator_inline_max_lines": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": true
         }
       },
       "additionalProperties": true

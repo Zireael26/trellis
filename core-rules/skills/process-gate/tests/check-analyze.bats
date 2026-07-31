@@ -107,6 +107,64 @@ commit_and_check() {
   [[ "$output" == *"no recognizable"* ]]
 }
 
+# --- multi-round resolution ---
+
+@test "later analyze round PASS supersedes analyze.md NEEDS-REVISION -> pass (exit 0)" {
+  commit_and_check \
+    "specs/005-rounds/analyze.md"   $'## Verdict: NEEDS-REVISION\n' \
+    "specs/005-rounds/analyze-8.md" $'## Verdict: PASS\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"analyze-8.md"* ]]
+}
+
+@test "analyze round selection compares numerically -> analyze-10.md wins over analyze-2.md" {
+  commit_and_check \
+    "specs/006-numeric/analyze-2.md"  $'## Verdict: NEEDS-REVISION\n' \
+    "specs/006-numeric/analyze-10.md" $'## Verdict: PASS\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"analyze-10.md"* ]]
+}
+
+@test "named analyze variant is ignored -> analyze.md remains authoritative" {
+  commit_and_check \
+    "specs/007-named/analyze.md"          $'## Verdict: PASS\n' \
+    "specs/007-named/analyze-pre-impl.md" $'## Verdict: BLOCKED\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"analyze.md"* ]]
+}
+
+@test "numbered analyze round without analyze.md -> pass (exit 0)" {
+  commit_and_check \
+    "specs/008-numbered-only/analyze-2.md" $'## Verdict: PASS\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"analyze-2.md"* ]]
+}
+
+@test "newest analyze round without Verdict line -> warn (exit 2)" {
+  commit_and_check \
+    "specs/009-malformed/analyze.md"   $'## Verdict: PASS\n' \
+    "specs/009-malformed/analyze-3.md" $'# Analyze\n\nsome notes, no verdict header\n'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"analyze-3.md"* ]]
+}
+
+@test "leading-zero analyze round suffix normalizes numerically -> warn (exit 2)" {
+  commit_and_check \
+    "specs/010-leading-zero/analyze.md"    $'## Verdict: PASS\n' \
+    "specs/010-leading-zero/analyze-07.md" $'## Verdict: NEEDS-REVISION\n'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"analyze-07.md"* ]]
+}
+
+@test "multi-round resolution -> NEVER exits 1 (authoritative-report invariant)" {
+  commit_and_check \
+    "specs/011-never-one/analyze.md"   $'## Verdict: PASS\n' \
+    "specs/011-never-one/analyze-2.md" $'## Verdict: BLOCKED\n'
+  [ "$status" -eq 2 ]
+  [ "$status" -ne 1 ]
+  [[ "$output" == *"analyze-2.md"* ]]
+}
+
 # --- worst-across-dirs ---
 
 @test "two spec dirs, one PASS one missing -> warn (worst wins)" {

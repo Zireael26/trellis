@@ -162,7 +162,17 @@ lint_mirror() {
   # Writing a second reader purely to keep the token out of this file would be worse code
   # for a lint's benefit. Caught 2026-07-30 by the throwaway-mirror probe, not by the
   # in-repo suite — the lint only runs against an assembled mirror.
-  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/hooks/lib/spec-gate-core\.sh$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/references/model-routing(-cross-family)?\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/opus-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/lib/trellis\.config\.schema\.json$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
+  #
+  # `fable-advisor.md` joined `opus-advisor.md` on 2026-07-31 for a reason worth stating,
+  # because two gates pull in opposite directions on this one file. It names
+  # `gpt-sol-reviewer` as the cross-model-review target, so `gptx-off-state.bats` REQUIRES
+  # it to carry a literal `gptx.enabled` predicate — otherwise a single-subscription
+  # install inherits a routing target it cannot satisfy. Carrying that predicate is
+  # precisely what makes it match this lint's token grep. Satisfying one gate necessarily
+  # trips the other, so the file must be allowlisted; the alternative is a profile that
+  # names a GPT target with no predicate, which is the worse of the two failures. Also
+  # caught by the throwaway-mirror probe rather than the in-repo suite.
+  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/hooks/lib/spec-gate-core\.sh$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/references/model-routing(-cross-family)?\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/(opus|fable)-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/lib/trellis\.config\.schema\.json$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"

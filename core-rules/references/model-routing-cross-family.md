@@ -5,10 +5,20 @@
 > central `trellis.config.json.gptx` → built-in *off*). GPTX assumes the operator
 > holds **both** a Claude subscription and a Codex subscription and has run
 > `scripts/gptx/install.sh`. With the switch off, nothing here applies: no
-> `gpt-*` profile is a routing target, the mix requirement below does not bind,
+> `gpt-*` profile is a routing target, the allocation floor below does not bind,
 > and `core-rules/references/model-routing.md` is the whole of routing doctrine.
 >
 > Turn it on by setting `"gptx": { "enabled": true }`. See `specs/028`.
+>
+> **Tunables.** Three keys under `gptx.routing` govern allocation, resolved with
+> the same precedence as the switch itself:
+> `default_family` (`gpt` | `claude` | `balanced`) is the lane a dual-eligible unit
+> takes without a named reason; `share_floor` (0 < x <= 1) is a **tripwire** — the
+> minimum fraction of the candidate set that must stay unreserved, not a quota to
+> allocate; `orchestrator_inline_max_lines` is the size above which the
+> orchestrator delegates instead of editing inline. Absent or
+> malformed, all three fall back to `balanced` / `0.4` / no threshold — which is
+> behaviour identical to a spec-028 Trellis. See `specs/030`.
 
 This file adds one stage to `model-routing.md`: **which family** a unit goes to.
 Everything in that file — verifiable-property routing, the effort ceiling, the
@@ -17,10 +27,11 @@ here.
 
 The short version: the two frontier lanes are close enough in capability that
 capability alone cannot pick between them, so route on properties you can verify
-and deliberately mix the rest. Given a free choice between comparable *lanes*, an
-orchestrator collapses onto whichever family it already holds — measured
-behaviour, not a hypothesis, and the reason this file states an explicit mix
-requirement rather than "use the best model for the job".
+and send the rest to a **named default lane**. Given a free choice between
+comparable *lanes*, an orchestrator collapses onto whichever family it already
+holds — measured behaviour, not a hypothesis, and the reason this file names a
+default and a floor rather than saying "use the best model for the job". The
+default exists so that the lane chosen when nobody decides is the lane you meant.
 
 ## The two workhorses are near-parity
 
@@ -114,34 +125,131 @@ decides nothing and let either choice claim compliance.
 
 ### Stage 2 — allocate family across the pool
 
-Everything not excluded in stage 1 is **dual-eligible**. For the large middle class
-— ordinary implementation, bounded refactoring, bounded debugging — the lanes are at
+Everything not excluded in stage 1 is **dual-eligible**, and the dual-eligible units
+of one piece of work are its **candidate set** — the two terms name the same thing,
+the second when you are counting it. For the large middle class — ordinary
+implementation, bounded refactoring, bounded debugging — the lanes are at
 near-parity and no scenario evidence separates them.
 
-Given a fan-out of three or more dual-eligible units:
+The default lane is `gptx.routing.default_family` in `trellis.config.json`. Where it
+names a family:
 
-> **Record the pool. Send `ceil(0.4 x pool size)` units to a family other than the
-> one you reached for first. Record why any unit was excluded from the pool.**
+> **1. Form the candidate set** — every unit that survived stage 1. Record it.
+> **2. Each candidate is either reserved or not.** A candidate is reserved only if a
+> named domain from the closed list below applies. Name the domain.
+> **3. Every unreserved candidate goes to `default_family`.** All of them, not a
+> quota of them.
+> **4. Check the floor:** unreserved candidates must number at least
+> `ceil(share_floor x candidate set size)`. If they do not, the reservations are
+> over-claimed — re-examine them rather than proceeding.
 
-The recorded pool is what makes this auditable, and it exists because "at least 40%
+Worked, at the shipped `default_family: gpt` / `share_floor: 0.7`. Five candidates,
+one reserved under R1 (a UI unit): four unreserved → four to GPT. Floor check
+`ceil(0.7 x 5) = 4`; four unreserved passes. Had three of the five been claimed as
+reserved, only two would be unreserved, `2 < 4`, and the rule says stop and
+re-examine the reservations — not route the difference to GPT anyway.
+
+**The floor is a tripwire, not an allocation.** It does not schedule units to
+Claude and it does not create a 70/30 split. Step 3 is what allocates, and where no
+reservation applies it sends *everything* to GPT. The floor exists solely to catch
+the failure mode this whole file is about: reservations quietly expanding until the
+default means nothing. Compliance is checkable from the spawn record — count
+candidates, count reservations, verify each names a domain.
+
+### Why this is directional and not a mix
+
+An earlier form of this rule read "send `ceil(0.4 x pool)` to a family other than
+the one you reached for first". That is **symmetric**: it puts a floor under the
+minority family, whichever that turns out to be, so raising the number does not
+lean either way — it only makes the split more even. It was also unauditable,
+because "the family you reached for first" leaves no artifact in a transcript, so
+no reviewer could check it and any allocation could be justified after the fact.
+
+The directional form fixes both. There is one named default, the allocation rule has
+a sign, and compliance is checkable from the spawn record alone.
+
+The recorded candidate set still matters, and for the original reason: "at least 40%
 of *comparable* units" without a definition let the denominator be chosen after the
-fact: six dual-eligible units — API, UI, schema, config, tests, docs — can each be
-called a different shape, leaving no group of three, after which everything routes
-one way while every checkable rule is satisfied. Exclusions must come from stage 1
-and be named. "Not comparable" is not an exclusion.
-
-Worked: 5 dual-eligible units, first reach was GPT → `ceil(0.4 x 5) = 2` go to
-Claude. 3 units → `ceil(1.2) = 2`. 4 units → `ceil(1.6) = 2`.
+fact. Six candidates — API, UI, schema, config, tests, docs — can each be called a
+different shape, leaving no group of three, after which everything routes one way
+while every checkable rule is satisfied. **Departures from the default must come
+from stage 1 or from the reserved list below, and must be named. "Not comparable" is
+not a reason.**
 
 This is structural, not a tiebreak. A rule that says "choose the best fit" where fit
 is indistinguishable reproduces the single-lane collapse in `model-routing.md`
-§ Why this file exists. It also buys cross-family signal for free: two families with
-different failure modes on comparable work diverge informatively, which is a review
-pass you would otherwise pay for.
+§ Why this file exists.
 
-The 40% figure is a starting point, expected to be tuned against observed usage
-rather than defended on principle. The *mechanism* — recorded pool, named exclusions
-— is not the tunable part.
+**What this costs, stated plainly.** The symmetric rule guaranteed cross-family
+divergence signal — two families with different failure modes disagreeing
+informatively on comparable work — because it always left units on both lanes. The
+directional rule does not. A fan-out with no applicable reservation goes entirely to
+GPT, and that signal is simply gone. It is a real loss and it is accepted
+deliberately: the operator's constraint is subscription headroom, and buying
+divergence on every fan-out is not worth the Claude tokens it costs. Where you want
+it on a specific fan-out, get it by asking for cross-family review of the result
+(R3), which is cheaper than splitting the work.
+
+`default_family` and `share_floor` are both starting points, expected to be tuned
+against observed usage rather than defended on principle. The *mechanism* —
+recorded candidate set, named reservations, a default with a sign — is not the
+tunable part.
+
+### When `default_family` is `balanced`
+
+`balanced` is not a family. It selects the pre-030 symmetric rule, which is what an
+install with no `routing` block gets, and it is stated here in full rather than left
+to be reconstructed from history:
+
+> **Given a fan-out of three or more dual-eligible units: record the pool, and send
+> `ceil(share_floor x pool size)` units to a family other than the one you reached
+> for first. Record why any unit was excluded from the pool.**
+
+Under `balanced` the fallback `share_floor` is `0.4`, the reserved list below does
+not apply as a closed set, and front-end/visual work returns to being a residual
+preference rather than R1. Note the fan-out threshold: below three units the rule
+imposes nothing, which the directional form does not replicate.
+
+### The Claude reservation is closed
+
+First, two things that are **not** reservations because they never reach step 2:
+review of GPT-authored work and units holding >200K of surface are *stage 1
+exclusions*. They are removed before the candidate set is formed. Listing them as
+reservations would double-count them and inflate the denominator.
+
+What remains — while `default_family` is `gpt`, these are the **only** reasons an
+unreserved candidate becomes a reserved one. The list is closed.
+
+| # | reserved domain | test | why |
+|---|---|---|---|
+| R1 | Front-end, visual, and interaction design | Does the unit decide what a human sees or interacts with? | Operator decision, supported by vendor benchmarks. |
+| R2 | Stand-alone planning or advisory output, and the named advisor seat | Is the deliverable *itself* advice — plan, decomposition, review, recommendation, or normative doctrine — **and does it change nothing that executes?** | Operator decision; this is the orchestrator's own function. |
+| R5 | Short interactive turn with a human waiting | Is a person watching this specific turn complete? | Verified TTFT: Opus first-token is roughly a third of either GPT lane. |
+| R6 | Cheap read-only fan-out | Grep-shaped search, no mutation. | Goes to **Haiku**, not Opus — see the delegation note below. |
+
+**R2 is bounded by output, not by subject.** The test is whether the deliverable is
+advice, not whether the topic is planning. A unit that plans *and then implements*
+is not R2 — split it: Claude may produce or review the plan, and the implementation
+returns to step 3 and goes to GPT. "Decompose the auth migration, then make the
+edits" is two units, one reserved and one not.
+
+The checkable line is **does the artifact execute?** A doctrine file, a spec, a
+plan, a review — read by humans and agents, run by nothing — can be R2. Code,
+config, schema, and shell are executed or parsed by machinery, and are never R2 no
+matter how architectural the work feels. So authoring *this file* is R2; authoring
+the config block and shell resolver that back it is not, and goes to GPT.
+
+Without that bound R2 becomes a subject-matter category, and subject-matter
+categories are exactly how a reservation list stops being closed. "It's really a
+design problem" is available for almost any unit, which is why it is not a test.
+
+**Not reserved.** "Security-sensitive", "high-consequence", "difficult design", and
+"weak-oracle debugging" do **not** send a unit to Claude. `gpt-sol` at `xhigh` is
+the answer for that shape, and stage 3 already says so. This matters more than it
+looks: those four phrases describe most non-trivial work, so admitting any of them
+as a reservation swallows the default and reproduces exactly the collapse this file
+exists to prevent. If a unit feels like it needs Claude for one of those reasons,
+the honest reading is that it needs *more effort*, not another family.
 
 ### Stage 3 — pick profile and effort within the allocated family
 
@@ -164,9 +272,59 @@ Sonnet and Haiku are not general-purpose choices. Haiku takes cheap read-only
 fan-out; neither takes judgement or implementation work.
 
 Residual preferences that do **not** decide a lane, for use when stage 2 leaves a
-genuine choice within a family: abstract reasoning, novel-problem design, front-end
-and visual work, and life sciences favour Opus on vendor benchmarks; long sustained
-generation favours Terra on measured throughput.
+genuine choice within a family: abstract reasoning, novel-problem design, and life
+sciences favour Opus on vendor benchmarks; long sustained generation favours Terra
+on measured throughput.
+
+Front-end and visual work used to sit in that list. It does not any more — it is
+R1, a reserved domain that decides the lane in stage 2. Listing it in both places
+stated a contradiction, and the residual list is the weaker of the two claims.
+
+## The main loop is in the pool
+
+Stages 1–3 allocate *delegated* units. On a Claude-orchestrated install that is not
+where most of the tokens are, and a family rule that only governs delegation cannot
+move the total by much.
+
+Measured on this instance (`audits/2026-07-30-model-routing-baseline.md`,
+post-cutoff): the main loop was **55.6%** of all output tokens and **99.4% Claude**
+by construction — the orchestrator seat is Claude because it holds the >200K
+surface the GPT lane cannot accept (stage 1 rule 1). Only the remaining 44.4% is
+allocable at all.
+
+The arithmetic that follows is the whole point: **even a perfect 100%-GPT
+delegation policy caps GPT near 44% of output tokens.** No value of `share_floor`
+changes that, because the main loop never enters the pool. The lever that raises
+the ceiling is not the ratio — it is how much the orchestrator implements inline
+instead of delegating.
+
+So, while `gptx.routing.orchestrator_inline_max_lines` is set:
+
+> **A unit of work whose expected net change exceeds
+> `orchestrator_inline_max_lines` is delegated, not implemented in the
+> orchestrator's own context.**
+
+The orchestrator keeps planning, decomposition, review of returned work, and
+synthesis. Absent the key, there is no threshold and the orchestrator may implement
+inline freely, which is the pre-030 behaviour.
+
+**"Reserved to Claude" and "stays inline" are different questions.** A reservation
+names a *family*; the threshold names *who executes*. R6 is the clearest case: cheap
+read-only fan-out is reserved to the Claude family and is nonetheless **delegated**,
+to Haiku, because delegating it is the entire point of that row. R1 work is
+similarly delegable to a Claude-family executor. Do not read a reservation as a
+licence to do the work inline — that would route the reserved domains straight back
+into the 55.6% this section exists to shrink.
+
+Two costs, stated here rather than discovered later:
+
+- **Latency.** A delegated 50-line edit is slower end-to-end than an inline one —
+  spawn, cold context, return. R5 does not cover this; R5 is about turn latency,
+  not unit size. Interactive work gets genuinely slower, and that is accepted
+  deliberately rather than overlooked.
+- **Context cost.** The orchestrator pays to describe the unit and to read the
+  result back. Below some size, delegating costs more total tokens than doing the
+  work. The shipped threshold is an estimate of that crossover, not a measurement.
 
 Related: `core-rules/references/model-routing.md` (single-family doctrine — the
 base this file extends), `core-rules/references/delegation.md` (staging, teammate

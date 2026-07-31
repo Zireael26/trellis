@@ -61,6 +61,7 @@ const AGENT_TYPE_PROVIDERS = Object.freeze({
   'feature-dev:code-explorer': 'claude',
   'feature-dev:code-reviewer': 'claude',
   'opus-advisor': 'claude',
+  'fable-advisor': 'claude',
   'statusline-setup': 'claude',
 });
 
