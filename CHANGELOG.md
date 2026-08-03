@@ -6,6 +6,18 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## Unreleased
 
+### Added
+
+- **Shared local-development infrastructure contract (spec 023).** Trellis now supports an optional configured shared-infra root. When present, it requires registry/manifest parity for every active project (including explicit `services: {}` declarations), coordinates review-gated infrastructure registration through `./scripts/onboard-project.sh --infra-entry`, seeds fixed-port startup preflight, and extends the read-only `./scripts/doctor.sh` surface with shared path, allocation, registry-parity, and port checks.
+- Operator documentation for the shared-infrastructure ownership boundary, the external repository contract, onboarding, verification, and recovery.
+
+### Changed
+
+- Local applications remain native on macOS; Docker owns shared or project-specific infrastructure only. Project shutdown may stop only project-owned infrastructure and native process helpers, never the shared Compose project.
+- Shared-service provisioning is declarative and idempotent on every start rather than first-volume-only. Static onboarding discovery produces evidence and a reviewable proposal but cannot execute project code, read secret values, choose credentials/allocations silently, or mutate the manifest before explicit review.
+- Shared local-infrastructure integration now validates optional external manifests, reviewed empty declarations, and fixed-port uniqueness without publishing an operator fleet inventory or allocation map.
+- Infrastructure publication now requires dependency-ordered repository receipts: scoped commit, local gates, PR, merge SHA, and synchronized local `main`.
+
 ## [v1.0.0-rc.23] — 2026-07-31
 
 **The drift tripwire re-arms from empty, and rc.22's rule did not say so.** rc.22 published

@@ -111,9 +111,10 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
 
 ```jsonc
 {
-  "trellis_root":   "/abs/path/to/trellis-instance",
-  "projects_root":  "/abs/path/to/projects/personal",
-  "user_home":      "/Users/<you>",
+  "trellis_root":      "/abs/path/to/trellis-instance",
+  "projects_root":     "/abs/path/to/projects/personal",
+  "shared_infra_root": "/abs/path/to/operator-managed-shared-infra", // optional; omit to disable
+  "user_home":         "/Users/<you>",
   "maintainer_name":"<your name>",
   "github_user":    "<github-username>",
   "harnesses":      ["claude"],         // any subset of ["claude", "codex"]
@@ -237,6 +238,21 @@ To add a project: follow [§10](#10-onboarding-a-new-project-full-playbook).
 To temporarily exempt a project: move its row to `blacklist.md` with a reason and a revisit date. The `bypass-tripwire` and `cross-project-process-audit` skip blacklisted projects. Don't delete the row from `registry.md` — preserve the history of "this project was active once."
 
 To permanently deregister: delete the row from `registry.md` and note the reason in the commit message. Rare — blacklisting is almost always the right move instead.
+
+### 4.4 Local development infrastructure ownership
+
+Local applications run natively on the host. Docker is the local infrastructure boundary, not the normal application runtime. Deployment images, CI services, testcontainers, UAT stacks, and remote managed services remain independent.
+
+An operator may separately configure a shared-infrastructure repository by setting the optional `trellis.config.json.shared_infra_root` key. When configured, that external repository owns its runtime and manifest; Trellis delegates proposal, registration, reconciliation, preflight, and read-only checks through the repository's Make contract. Every registered project then has a machine-readable `services` + `ports` entry, including explicit `services: {}` when it consumes no shared service. When the key is absent, integration is disabled, no external manifest declaration is required, and ordinary onboarding plus doctor behavior remain intact. The public capability and ownership boundaries are documented in [`docs/local-development-infrastructure.md`](docs/local-development-infrastructure.md).
+
+Ownership is asymmetric:
+
+- Shared-infra owns shared service lifecycle, global reconciliation, shared logs, shared `down`, and disposable-volume reset.
+- A project may preflight its declared ports, ensure and reconcile its own shared allocation, run its own migrations, and start infrastructure unique to that project.
+- A project shutdown stops only its native processes and project-owned infrastructure. It must never stop the shared Compose project, delete shared volumes, or reset another project's allocation.
+- Every concurrently runnable fixed host listener receives one central allocation before it is wired into startup. Dynamic ephemeral and isolated test-only ports are excluded.
+
+When the optional integration is enabled, onboarding and later service adoption use the same conservative proposal flow. Static discovery may present evidence from recognized configuration but may not execute project code, read secret values, choose credentials or allocations silently, or mutate the external manifest before an operator reviews a `services` + `ports` fragment. The exact operational contract lives in the configured external Makefile; Trellis invokes only repo-local `./scripts/onboard-project.sh` and `./scripts/doctor.sh` surfaces. Without `shared_infra_root`, these shared-infrastructure steps are skipped.
 
 ---
 
@@ -457,6 +473,21 @@ Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval bloc
 - **Don't amend published commits** without force-with-lease on the feature branch. Never force-push `main` under any condition (blocked anyway).
 - **`git revert` over `git reset`** for rolling back merged work. Preserves history.
 
+### 6.6 Cross-repository infrastructure publication receipts
+
+A local-infrastructure change is not complete when files merely agree in working trees. Publish in dependency order: shared runtime first, Trellis registry/validation second, then consuming projects. A downstream PR may be prepared early but must not merge before the contract it consumes is available on the upstream target branch.
+
+For every changed repository, retain these receipts:
+
+1. scoped branch name and commit SHA;
+2. exact local gate commands, exit status, and any explicit skip or external-CI limitation;
+3. ready PR URL and reviewed final diff;
+4. merge SHA;
+5. fetch/fast-forward receipt showing the canonical local `main` matches its remote;
+6. for runtime changes, the relevant schema, preflight, reconcile/doctor, native startup, and lifecycle-isolation evidence.
+
+Local gates remain the authority where remote jobs cannot start for account reasons; record that condition without describing the remote checks as green. Configuration rollback uses a revert PR in dependency-reverse order. Do not preserve an undocumented alternate infrastructure path as a hidden fallback.
+
 ---
 
 ## 7. Definition of done
@@ -623,10 +654,10 @@ Project-level README is for *humans landing on the repo for the first time*. Ort
 <one-paragraph what/why>
 
 ## Requirements
-<node version, pnpm, docker, etc.>
+<host toolchain plus infrastructure prerequisites; keep application runtimes native and distinguish shared from project-owned infrastructure>
 
 ## Quick start
-<the 3-5 commands that get someone productive>
+<the 3-5 commands that preflight fixed ports, ensure declared shared services when needed, start unique infrastructure, and run the application natively>
 
 ## Documentation
 <links to deeper docs if any>
@@ -666,7 +697,7 @@ Projects with a public web surface (portfolio, marketing page, SaaS console, app
 
 ## 10. Onboarding a new project — full playbook
 
-This is the canonical sequence. Run it manually, or point `scripts/onboard-project.sh` at it once the script exists (not yet).
+This is the canonical sequence. Run it manually, or use the existing `./scripts/onboard-project.sh` flow. Resolve `shared_infra_root` with `jq -r '.shared_infra_root // empty'`: when non-empty, new projects require an explicitly reviewed external manifest fragment before registration; when absent, use ordinary one-argument onboarding with no `--infra-entry`. One-argument reruns remain idempotent in both modes.
 
 **Agent-driven shortcut.** `AGENT_ONBOARD_PROJECT.md` at the repo root wraps every step below into a paste-into-agent interview — detect mode (new / fresh-clone / repair), run `scripts/onboard-project.sh`, wire the project's `CLAUDE.md` `@`-import, collect and write the project's gotchas, update `registry.md`, and commit in both repos. Use it unless you specifically want the manual walkthrough.
 
@@ -677,9 +708,47 @@ This is the canonical sequence. Run it manually, or point `scripts/onboard-proje
 - **Stack?** Informs `CLAUDE.md` seed and `.gitignore`.
 - **Class?** Monorepo SaaS, single Next.js app, portfolio site, game, CLI — informs registry.
 - **License?** MIT default; choose something else only with reason.
+- **Local infrastructure?** First resolve `SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"`. If empty, shared-infrastructure integration is disabled and this question is skipped. If non-empty, generate a static proposal through the external repository, review every detected shared service and fixed host port, and resolve ambiguous credentials or allocations. A no-service project still records `services: {}`. Discovery supplies evidence only: it never runs project code, reads secret values, invents an allocation or credential, or mutates the external manifest before review. See [`docs/local-development-infrastructure.md`](docs/local-development-infrastructure.md).
 - **What will bite an agent working here?** The only question on this list whose answer isn't sitting in the filesystem, and the reason the project `CLAUDE.md` exists at all. Ask what has bitten the owner, what looks like it does one thing and does another, what they explain to every new person, and what is dead or half-migrated despite its name. Skim the README, the last 20 commit subjects, and the `TODO`/`HACK`/`FIXME` comments first so you can ask something specific. Write the answers into `gotchas.md` in the §9.3 entry format and surface the two or three most live ones under `## Gotchas` in the project `CLAUDE.md`. If there are none, record none — don't invent them.
 
 ### 10.2 Scaffold steps
+
+**Preferred repo-local flow.** From the Trellis canonical repository, resolve the optional integration first:
+
+```bash
+PROJECT=/absolute/path/to/project
+PROJECT_NAME="$(basename "$PROJECT")"
+SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
+```
+
+When `SHARED_INFRA_ROOT` is non-empty, generate a reviewable proposal through the external repository and stop for operator review before registration:
+
+```bash
+make -C "$SHARED_INFRA_ROOT" propose \
+  PROJECT="$PROJECT_NAME" SOURCE="$PROJECT" \
+  OUTPUT=/absolute/path/to/reviewed-infra-entry.yaml
+```
+
+The proposal contains only `services` and `ports`. Review and complete it; preserve an explicit `services: {}` when no shared service is needed. Then run the enabled path. If the key is absent, run ordinary onboarding without `--infra-entry` and skip every shared-infrastructure-specific check:
+
+```bash
+if [ -n "$SHARED_INFRA_ROOT" ]; then
+  ./scripts/onboard-project.sh "$PROJECT" \
+    --infra-entry /absolute/path/to/reviewed-infra-entry.yaml
+else
+  ./scripts/onboard-project.sh "$PROJECT"
+fi
+
+./scripts/doctor.sh --project "$PROJECT_NAME"
+if [ -n "$SHARED_INFRA_ROOT" ]; then
+  make -C "$SHARED_INFRA_ROOT" doctor \
+    PROJECT="$PROJECT_NAME" REGISTRY_FILE="$PWD/registry.md"
+fi
+```
+
+With integration enabled, onboarding atomically delegates registration of the reviewed fragment, reconciles only that allocation, and seeds `scripts/local-infra-preflight.sh`. Wire that wrapper into the project's native start path before any application or project-owned infrastructure binds a fixed port. Projects with `services: {}` run preflight but do not start the shared runtime. Project shutdown must never delegate shared `down`. With integration disabled, no external manifest, preflight wrapper, or shared-runtime verification is required.
+
+The manual scaffold below remains useful for understanding or repairing the inheritance assets. When integration is enabled it does not replace the proposal/review/registration step; when disabled, the scaffold and one-argument onboarding remain the complete legacy path.
 
 ```bash
 # 1. Create project directory
@@ -790,11 +859,14 @@ git push -u origin main
 - [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` plus `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present (Codex reads `.agents/`, including `.agents/workflows/`).
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] hooks = true` (or the legacy `codex_hooks = true` alias; deprecated as of Codex CLI 0.129+).
 - [ ] `registry.md` has a row for the new project.
+- [ ] If `shared_infra_root` is non-empty, the external `projects.yaml` has the same project key with explicit `services` and `ports`; empty declarations use `services: {}` / `ports: {}` rather than omission. If the key is absent, this check is skipped.
+- [ ] If integration is enabled, `scripts/local-infra-preflight.sh` exists, is executable, and is called before the native startup path binds fixed ports. If disabled, no wrapper is required.
+- [ ] If integration is enabled, the project shutdown path cannot call the external repository's shared-runtime stop target.
 - [ ] Branch protection enabled on `main`.
 
 ### 10.4 Post-onboarding verification
 
-Run `scripts/doctor.sh` against the new project and, if private operator audits are configured, trigger the hook-drift and registry-health checks. All should return clean with the new project listed.
+Always run `./scripts/doctor.sh --project <registry-name>`. Resolve `SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"`; only when it is non-empty, also run the external `make doctor PROJECT=<registry-name> REGISTRY_FILE=<absolute-registry-path>`, the seeded startup preflight, and manifest/allocation/fixed-port verification. When the key is absent, skip those shared-infrastructure-specific checks and run the ordinary native smoke path. If private operator audits are configured, trigger the hook-drift and registry-health checks as supplemental evidence.
 
 **Tell the project's future sessions how the file grows.** The seeded `CLAUDE.md` is deliberately thin, and thin is the target. It grows from `gotchas.md`, not from documentation written up front: log corrections as they happen, and the `gotchas-rollup` audit promotes anything that recurs three times ([§14.1](#141-rule-of-three)). Resist the urge to describe the codebase in it; describe what the codebase will get wrong.
 
@@ -811,6 +883,19 @@ cd <project>
 `onboard-project.sh` is idempotent: it creates each missing symlink, leaves existing correct ones alone, warns on mismatches, and never overwrites tracked files. Re-running after every `git pull` is harmless.
 
 If you skip this step, Claude Code and Codex sessions in the project will silently run **without** the Trellis parent rules and skills — no error, no warning, just a session quietly missing the load-bearing inheritance file. Add the bootstrap to your project README's "Setup" section so teammates can't miss it.
+
+### 10.6 Adopting a shared service later
+
+Later shared-service or fixed-port adoption exists only when an operator has supplied a separate repository and `jq -r '.shared_infra_root // empty' trellis.config.json` returns a non-empty path. If the key is absent, there is no external manifest to mutate; keep using ordinary onboarding until the operator explicitly enables the integration.
+
+When enabled, use the same path as initial onboarding:
+
+1. Run the external repository's `make propose PROJECT=<registry-name> SOURCE=<absolute-project-path> OUTPUT=<proposal-path>`.
+2. Review the evidence and provide a complete `services` + `ports` fragment. Do not choose credentials, allocations, databases, buckets, or ports by guesswork.
+3. Run `./scripts/onboard-project.sh <absolute-project-path> --infra-entry <reviewed-fragment>`.
+4. Update project environment examples, migrations, startup preflight, native run instructions, and project-owned infrastructure commands.
+5. Reconcile and verify positive project access, negative cross-project access where applicable, `./scripts/doctor.sh --project <registry-name>`, the external doctor, and the lifecycle rule that project shutdown leaves the shared runtime running.
+6. Publish the external repository and project changes through dependency-ordered PRs with the receipts in §6.6.
 
 ---
 

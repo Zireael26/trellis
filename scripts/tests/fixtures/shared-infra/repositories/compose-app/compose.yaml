@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${APP_DATABASE_NAME}
+      POSTGRES_USER: ${APP_DATABASE_USER}
+      POSTGRES_PASSWORD: ${APP_DATABASE_PASSWORD}
+    ports:
+      - "55432:5432"
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "56379:6379"
+  web:
+    image: example.invalid/fixture-web:never-run
+    ports:
+      - "4100:4100"

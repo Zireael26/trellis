@@ -60,6 +60,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Preserve the project-side environment/Make override before config-load replaces
+# SHARED_INFRA_ROOT with the configured canonical path.
+DOCTOR_SHARED_INFRA_OVERRIDE="${SHARED_INFRA_ROOT:-}"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
 # shellcheck source=lib/blacklist-parser.sh
@@ -313,6 +316,54 @@ run_tier0() {
   return 0
 }
 
+# Shared checks are a run-once Tier-0 delegation. They call only the read-only
+# Make surface from the accepted contract: validate and doctor. Neither normal
+# diagnosis nor --fix registers, reconciles, or changes an allocation.
+run_shared_infra_checks() {
+  local output rc detail resolved_candidate resolved_path
+  [ -n "${SHARED_INFRA_ROOT:-}" ] || return 0
+
+  resolved_candidate="${DOCTOR_SHARED_INFRA_OVERRIDE:-${HOME:-$USER_HOME}/projects/shared-infra}"
+  case "$resolved_candidate" in
+    /*) resolved_path="$resolved_candidate" ;;
+    *) resolved_path="$(pwd -P)/$resolved_candidate" ;;
+  esac
+  if [ -d "$resolved_path" ]; then
+    resolved_path="$(cd "$resolved_path" && pwd -P)"
+  fi
+  if [ "$resolved_path" = "$SHARED_INFRA_ROOT" ]; then
+    report_line "  " "$HC_OK" "shared-infra override: resolved path matches config ($SHARED_INFRA_ROOT)"
+  else
+    report_line "  " "$HC_WARN" "shared-infra override: resolved $resolved_path differs from config $SHARED_INFRA_ROOT — set SHARED_INFRA_ROOT=$SHARED_INFRA_ROOT"
+  fi
+
+  if [ ! -f "$SHARED_INFRA_ROOT/Makefile" ]; then
+    report_line "  " "$HC_ERROR" "shared-infra path: Makefile missing at $SHARED_INFRA_ROOT/Makefile"
+    return 0
+  fi
+  report_line "  " "$HC_OK" "shared-infra path: $SHARED_INFRA_ROOT"
+  if ! command -v make >/dev/null 2>&1; then
+    report_line "  " "$HC_ERROR" "shared-infra delegation: make is required but not installed"
+    return 0
+  fi
+
+  if output="$(make --no-print-directory -C "$SHARED_INFRA_ROOT" validate 2>&1)"; then
+    report_line "  " "$HC_OK" "shared-infra manifest: schema and allocation validation passed"
+  else
+    rc=$?
+    detail="$(printf '%s\n' "$output" | tail -n 1)"
+    report_line "  " "$HC_ERROR" "shared-infra manifest: validation failed (exit $rc)${detail:+ — $detail}"
+  fi
+
+  if output="$(make --no-print-directory -C "$SHARED_INFRA_ROOT" doctor "REGISTRY_FILE=$REGISTRY" 2>&1)"; then
+    report_line "  " "$HC_OK" "shared-infra doctor: registry parity, runtime, and fixed-port checks passed"
+  else
+    rc=$?
+    detail="$(printf '%s\n' "$output" | tail -n 1)"
+    report_line "  " "$HC_ERROR" "shared-infra doctor: read-only checks failed (exit $rc)${detail:+ — $detail}"
+  fi
+}
+
 run_tier0 hc_canonical_on_main "$CANON"
 run_tier0 hc_canonical_clean "$CANON"
 run_tier0 hc_canonical_sync "$CANON"
@@ -334,16 +385,16 @@ run_tier0 hc_codex_hooks_enabled
 # patch (re-applies idempotently) — ADR 2026-07-10-sol-ultra-capability-reground.
 run_tier0 hc_codex_plugin_surface
 
-# Tier-0 runs before any project, so N_ERROR here is purely Tier-0. Capture it:
-# Tier-0 is REPORT-ONLY (--fix never mutates the canonical clone), AND a
-# standing Tier-0 ERROR (canonical off-main / dirty / not-a-work-tree) means
-# onboard would re-link projects to an off-main/dirty canonical's rules
-# (incident #2). So --fix SKIPS [auto] repair while a Tier-0 ERROR stands.
+# Capture only canonical-clone precondition errors for the repair gate. Shared
+# manifest/runtime errors still count toward the final exit, but they must not
+# block unrelated inheritance repair: onboard runs with TRELLIS_SKIP_INFRA=1.
 TIER0_ERROR=0
 [ "$N_ERROR" -gt 0 ] && TIER0_ERROR=1
+run_shared_infra_checks
 
-# Tier-0 fix hints (canonical-side; not a per-project repair). Report-only.
-if [ "$N_ERROR" -gt 0 ]; then
+# Canonical Tier-0 fix hints are report-only. Shared-infra failures have their
+# own rows and do not imply that the canonical clone is off-main or dirty.
+if [ "$TIER0_ERROR" -eq 1 ]; then
   add_hint "Tier 0: ensure the canonical clone ($CANON) is on 'main' and clean before trusting any project's inheritance (git -C \"$CANON\" checkout main; commit or stash changes)."
   # Under --fix the `== Suggested actions ==` block is suppressed, so the
   # Tier-0 remediation must surface here directly (Tier-0 is always report-only;
@@ -710,7 +761,7 @@ print_project_plan() {
     for p in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
       echo "  [auto] rm \"$p\""
     done
-    echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 scripts/onboard-project.sh \"$proj\""
+    echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh \"$proj\""
     if [ -n "$PLAN_AUTO" ]; then
       while IFS= read -r line; do
         [ -n "$line" ] && echo "         - $line"
@@ -807,9 +858,10 @@ apply_project_fix() {
       # therefore DO NOT treat a non-zero onboard exit as failure here — the
       # AFTER-pass re-check is the authoritative verdict on whether the repair
       # landed. We just record the exit code informationally.
-      echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 scripts/onboard-project.sh \"$proj\""
+      echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh \"$proj\""
       local onb_rc
-      if TRELLIS_SKIP_SECURITY_BASELINE=1 "$SCRIPT_DIR/onboard-project.sh" "$proj" >/dev/null 2>&1; then
+      if TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 \
+        "$SCRIPT_DIR/onboard-project.sh" "$proj" >/dev/null 2>&1; then
         onb_rc=0
       else
         onb_rc=$?

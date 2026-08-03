@@ -25,6 +25,7 @@
 # mirror). $BATS_TEST_DIRNAME is scripts/tests/, so ../.. is the repo root.
 REPO_ROOT="$( cd "$BATS_TEST_DIRNAME/../.." && pwd )"
 DOCTOR="$REPO_ROOT/scripts/doctor.sh"
+SHARED_FIXTURE="$BATS_TEST_DIRNAME/fixtures/shared-infra"
 # The repo's configured canonical clone — what doctor must NOT print when run
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
 LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null || true)"
@@ -41,8 +42,10 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
+  SHARED="$SANDBOX/shared-infra"
   CFG="$SANDBOX/trellis.config.json"
   mkdir -p "$CANON" "$PROJECTS"
+  DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
 }
 
@@ -120,16 +123,29 @@ git_init_canonical_main() {
 # parity checks stay silent in the healthy path.
 write_config() {
   local harnesses_json="${1:-\"claude\"}"
+  local shared_root="${2:-}"
+  local shared_line=""
+  if [ -n "$shared_root" ]; then
+    shared_line="  \"shared_infra_root\": \"$shared_root\","
+  fi
   cat > "$CFG" <<EOF
 {
   "trellis_root": "$CANON",
   "projects_root": "$PROJECTS",
+$shared_line
   "user_home": "$SANDBOX",
   "maintainer_name": "Test Maintainer",
   "github_user": "tester",
   "harnesses": [$harnesses_json]
 }
 EOF
+}
+
+build_shared_infra_fixture() {
+  mkdir -p "$SHARED"
+  cp "$SHARED_FIXTURE/Makefile" "$SHARED/Makefile"
+  cp "$SHARED_FIXTURE/projects.yaml" "$SHARED/projects.yaml"
+  rm -f "$SHARED/calls.log" "$SHARED/drift"
 }
 
 # Build a fully healthy "healthy" project: good rules symlink, canonical
@@ -166,7 +182,11 @@ EOF
 # (NOT inside the fixture canonical) to mirror real use — doctor resolves the
 # canonical from config, not cwd.
 run_doctor() {
-  run bash "$DOCTOR" "$@"
+  if [ -n "$DOCTOR_SHARED_OVERRIDE" ]; then
+    run env SHARED_INFRA_ROOT="$DOCTOR_SHARED_OVERRIDE" bash "$DOCTOR" "$@"
+  else
+    run env -u SHARED_INFRA_ROOT bash "$DOCTOR" "$@"
+  fi
 }
 
 # Build a symlink-farm bin dir under $BATS_TEST_TMPDIR that mirrors EVERY
@@ -225,6 +245,57 @@ make_no_playwright_path() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"✓ canonical clone is on main"* ]]
   [[ "$output" == *"✓ canonical clone is clean"* ]]
+}
+
+@test "Tier-0 shared infrastructure rows delegate validate and doctor through the configured repository" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  build_shared_infra_fixture
+  write_config '"claude"' "$SHARED"
+  DOCTOR_SHARED_OVERRIDE="$SHARED"
+
+  run_doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ shared-infra override: resolved path matches config ($SHARED)"* ]]
+  [[ "$output" == *"✓ shared-infra path: $SHARED"* ]]
+  [[ "$output" == *"✓ shared-infra manifest: schema and allocation validation passed"* ]]
+  [[ "$output" == *"✓ shared-infra doctor: registry parity, runtime, and fixed-port checks passed"* ]]
+  grep -F 'validate PROJECT= PROJECTS_FILE=' "$SHARED/calls.log"
+  grep -F "doctor PROJECT= REGISTRY_FILE=$CANON/registry.md" "$SHARED/calls.log"
+}
+
+@test "Tier-0 shared infrastructure warns when project-side default differs from configured root" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  build_shared_infra_fixture
+  write_config '"claude"' "$SHARED"
+  local project_default="$SANDBOX/test-home/projects/shared-infra"
+
+  run env -u SHARED_INFRA_ROOT HOME="$SANDBOX/test-home" bash "$DOCTOR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ shared-infra override: resolved $project_default differs from config $SHARED — set SHARED_INFRA_ROOT=$SHARED"* ]]
+}
+
+@test "Tier-0 shared infrastructure drift fails read-only and leaves drift plus manifest unchanged" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  build_shared_infra_fixture
+  write_config '"claude"' "$SHARED"
+  DOCTOR_SHARED_OVERRIDE="$SHARED"
+  printf 'deliberate drift\n' > "$SHARED/drift"
+  local manifest_before drift_before
+  manifest_before="$(shasum -a 256 "$SHARED/projects.yaml" | awk '{print $1}')"
+  drift_before="$(shasum -a 256 "$SHARED/drift" | awk '{print $1}')"
+
+  run_doctor
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"✗ shared-infra doctor: read-only checks failed"* ]]
+  [[ "$output" == *"deliberate drift remains"* ]]
+  [ "$(shasum -a 256 "$SHARED/projects.yaml" | awk '{print $1}')" = "$manifest_before" ]
+  [ "$(shasum -a 256 "$SHARED/drift" | awk '{print $1}')" = "$drift_before" ]
 }
 
 @test "Tier-0 GATE: feature-branch canonical => ERROR + non-zero exit, even though the project's rules symlink resolves" {

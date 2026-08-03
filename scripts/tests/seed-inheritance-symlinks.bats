@@ -252,3 +252,17 @@ teardown() {
   [ ! -e "$WT/.claude/worktrees" ]
   [[ "$output" != *".claude/worktrees/nested"* ]]
 }
+
+@test "project-owned local infrastructure wrappers are outside the symlink inheritance seeder" {
+  mkdir -p "$MAIN/scripts"
+  printf '#!/bin/sh\nexit 0\n' > "$MAIN/scripts/local-infra-preflight.sh"
+  chmod +x "$MAIN/scripts/local-infra-preflight.sh"
+
+  run bash "$SCRIPT" --target "$WT" --root "$ROOT"
+  [ "$status" -eq 0 ]
+
+  # This helper mirrors only the machine-local inheritance symlinks. The tracked
+  # wrapper is seeded by onboard-project.sh and reaches worktrees through Git.
+  [ ! -e "$WT/scripts/local-infra-preflight.sh" ]
+  [ -L "$WT/.claude/rules/trellis.md" ]
+}

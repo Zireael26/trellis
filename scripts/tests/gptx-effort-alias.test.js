@@ -161,6 +161,40 @@ assert.equal(executionModelFor('gpt-5.6-sol'), 'gpt-5.6-sol');
 assert.equal(executionModelFor('gpt-5.6-terra-xhigh'), 'gpt-5.6-terra');
 assert.equal(executionModelFor('gpt-5.6-terra'), 'gpt-5.6-terra');
 assert.notEqual(executionModelFor('gpt-5.6-terra-xhigh'), EXECUTION_MODEL);
+
+const lunaOriginal = Buffer.from('{"model":"gpt-5.6-luna-xhigh","messages":[]}');
+const luna = prepareForwardBody({
+  lane: 'codex',
+  parsedBody: JSON.parse(lunaOriginal.toString('utf8')),
+  body: lunaOriginal,
+});
+assert.equal(luna.rewritten, true);
+assert.equal(luna.executionModel, 'gpt-5.6-luna');
+assert.equal(luna.effort, 'xhigh');
+assert.equal(luna.effortSource, 'profile-alias');
+assert.equal(JSON.parse(luna.body.toString('utf8')).model, 'gpt-5.6-luna');
+
+// Luna deliberately exposes only xhigh. Do not add lower or max aliases for symmetry
+// with Sol or Terra: a reachable lower rung would silently reopen the measured regression.
+for (const model of ['gpt-5.6-luna-medium', 'gpt-5.6-luna-max']) {
+  assert.equal(Object.hasOwn(ALIAS_TABLE, model), false);
+  const body = Buffer.from(JSON.stringify({ model, messages: [] }));
+  const result = prepareForwardBody({
+    lane: 'codex',
+    parsedBody: JSON.parse(body.toString('utf8')),
+    body,
+  });
+  assert.strictEqual(result.body, body);
+  assert.equal(result.rewritten, false);
+  assert.equal(result.executionModel, model);
+  assert.equal(result.effort, null);
+  assert.equal(result.effortSource, null);
+}
+assert.deepEqual(
+  Object.keys(ALIAS_TABLE).filter((model) => model.includes('luna')),
+  ['gpt-5.6-luna-xhigh'],
+);
+
 // EFFORT_BY_ALIAS is derived from ALIAS_TABLE; assert it cannot drift out of step.
 assert.deepEqual(
   EFFORT_BY_ALIAS,
@@ -295,7 +329,7 @@ const observed = [];
       Object.keys(ALIAS_TABLE).length,
     );
     // The last alias exercised above is the final ALIAS_TABLE key, so the receipt must
-    // name a terra execution model — the case the single-constant version could not produce.
+    // name a non-Sol execution model — the case the single-constant version could not produce.
     const lastAlias = Object.keys(ALIAS_TABLE).at(-1);
     assert.deepEqual(statusResponse.body.lanes.codex.lastEffortReceipt, {
       at: statusResponse.body.lanes.codex.lastEffortReceipt.at,

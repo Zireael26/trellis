@@ -296,7 +296,7 @@ agent_links=()
 # must not be linked by a GPTX install. gptx-install.bats asserts the list against the
 # directory so a profile added later fails a test instead of silently going undistributed —
 # which is the drift the previous two lines describe.
-for agent in gpt-mid gpt-high gpt-sol gpt-terra gpt-sol-advisor gpt-sol-reviewer \
+for agent in gpt-mid gpt-high gpt-sol gpt-terra gpt-luna gpt-sol-advisor gpt-sol-reviewer \
   opus-advisor fable-advisor; do
   target="$AGENTS_DIR/$agent.md"
   ln -sfn "$ROOT/core-rules/agents/$agent.md" "$target"

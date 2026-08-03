@@ -1,0 +1,16 @@
+services:
+  postgres-primary:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${PRIMARY_DATABASE_NAME}
+      POSTGRES_PASSWORD: ${PRIMARY_DATABASE_PASSWORD}
+  postgres-legacy:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${LEGACY_DATABASE_NAME}
+      POSTGRES_PASSWORD: ${LEGACY_DATABASE_PASSWORD}
+  minio:
+    image: minio/minio:fixture
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}

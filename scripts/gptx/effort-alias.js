@@ -18,6 +18,7 @@ const ALIAS_TABLE = Object.freeze({
   'gpt-5.6-terra-medium': Object.freeze({ effort: 'medium', executionModel: 'gpt-5.6-terra' }),
   'gpt-5.6-terra-high': Object.freeze({ effort: 'high', executionModel: 'gpt-5.6-terra' }),
   'gpt-5.6-terra-xhigh': Object.freeze({ effort: 'xhigh', executionModel: 'gpt-5.6-terra' }),
+  'gpt-5.6-luna-xhigh': Object.freeze({ effort: 'xhigh', executionModel: 'gpt-5.6-luna' }),
 });
 
 // Kept as alias -> effort for existing consumers; derived so the two cannot drift.

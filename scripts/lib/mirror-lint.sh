@@ -27,7 +27,8 @@
 # is unchanged. This lint is the complementary guard for the UNSYNCED files.
 #
 # Read/write contract:
-#   READS  — only the filesystem under <mirror_dir> (file contents via grep).
+#   READS  — the filesystem under <mirror_dir> plus optional private denylist
+#            data under <source_root>/local/ (file contents via grep/read).
 #   WRITES — nothing. Prints "path: reason" per offender to stdout only. Sets no
 #            globals, mutates no shell state, touches no files.
 #   No `set -euo pipefail`: sourcing must not alter the caller's shell. The
@@ -220,6 +221,47 @@ lint_mirror() {
         rc=1
       done < <(grep -rIliF --exclude-dir='.git' -- "$dtok" "$mirror_dir" 2>/dev/null)
     done < "$denylist_file"
+  fi
+
+  # The private source for this one guide contains a complete fleet inventory.
+  # Its separate denylist is deliberately scoped to the generated public guide:
+  # project names are legitimate in historical public docs, so applying these
+  # tokens to the whole mirror would create false positives. Public clones lack
+  # local/, so the absent private file makes this check a no-op there. Tokens
+  # carry their Markdown backticks for exact-name/port matching. Never echo the
+  # matching token; the lint result identifies only the public file and private
+  # data file.
+  local shared_infra_doc="$mirror_dir/docs/local-development-infrastructure.md"
+  local shared_infra_denylist="$source_root/local/shared-infra-public-denylist.txt"
+  if [ -f "$shared_infra_doc" ] && [ -f "$shared_infra_denylist" ]; then
+    local shared_dtok
+    while IFS= read -r shared_dtok || [ -n "$shared_dtok" ]; do
+      case "$shared_dtok" in ''|'#'*) continue ;; esac
+      if grep -qiF -- "$shared_dtok" "$shared_infra_doc" 2>/dev/null; then
+        echo "docs/local-development-infrastructure.md: private shared-infrastructure identifier must not publish (see local/shared-infra-public-denylist.txt)"
+        rc=1
+        break
+      fi
+    done < "$shared_infra_denylist"
+  fi
+
+  # The current private changelog also carries one fleet-specific publication
+  # receipt. Its public staging replacement is generic, and this separate scoped
+  # denylist prevents the project/port details from reappearing. Keep it separate
+  # from the guide denylist because an older historical changelog entry names a
+  # project legitimately. As above, never disclose the matching token.
+  local shared_infra_changelog="$mirror_dir/CHANGELOG.md"
+  local shared_infra_changelog_denylist="$source_root/local/shared-infra-public-changelog-denylist.txt"
+  if [ -f "$shared_infra_changelog" ] && [ -f "$shared_infra_changelog_denylist" ]; then
+    local shared_changelog_token
+    while IFS= read -r shared_changelog_token || [ -n "$shared_changelog_token" ]; do
+      case "$shared_changelog_token" in ''|'#'*) continue ;; esac
+      if grep -qiF -- "$shared_changelog_token" "$shared_infra_changelog" 2>/dev/null; then
+        echo "CHANGELOG.md: private shared-infrastructure receipt must not publish (see local/shared-infra-public-changelog-denylist.txt)"
+        rc=1
+        break
+      fi
+    done < "$shared_infra_changelog_denylist"
   fi
 
   # --- Root private namespaces: whole subtrees that must never publish (audit

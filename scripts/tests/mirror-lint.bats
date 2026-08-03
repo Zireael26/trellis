@@ -389,3 +389,63 @@ teardown() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"SETUP.md"* ]]
 }
+
+@test "shared-infra public denylist: generic guide passes" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local" "$M/docs"
+  printf '# fake exact Markdown tokens\n`sentinel-private-app`\n`45678`\n' \
+    > "$SRC/local/shared-infra-public-denylist.txt"
+  printf '# Optional shared local infrastructure\n\nservices: {}\nports: {}\n' \
+    > "$M/docs/local-development-infrastructure.md"
+
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "shared-infra public denylist: matching guide token is rejected without disclosure" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local" "$M/docs"
+  printf '# fake exact Markdown tokens\n`sentinel-private-app`\n`45678`\n' \
+    > "$SRC/local/shared-infra-public-denylist.txt"
+  printf '# Public guide\n\nPrivate allocation: `SENTINEL-PRIVATE-APP`.\n' \
+    > "$M/docs/local-development-infrastructure.md"
+
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs/local-development-infrastructure.md: private shared-infrastructure identifier must not publish"* ]]
+  [[ "$output" != *"sentinel-private-app"* ]]
+  [[ "$output" != *"SENTINEL-PRIVATE-APP"* ]]
+}
+
+@test "shared-infra changelog denylist: generic receipt passes" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local"
+  printf '# fake exact Markdown tokens\n`sentinel-private-app`\n`45678`\n' \
+    > "$SRC/local/shared-infra-public-changelog-denylist.txt"
+  printf '# Changelog\n\n- Shared local-infrastructure integration is available.\n' \
+    > "$M/CHANGELOG.md"
+
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "shared-infra changelog denylist: private receipt is rejected without disclosure" {
+  SRC="$(mktemp -d)"
+  mkdir -p "$SRC/local"
+  printf '# fake fixed-string tokens\nsentinel-fleet-count\n`45678`\n' \
+    > "$SRC/local/shared-infra-public-changelog-denylist.txt"
+  printf '# Changelog\n\n- Private receipt: SENTINEL-FLEET-COUNT.\n' \
+    > "$M/CHANGELOG.md"
+
+  run lint_mirror "$M" "$TR" "$SRC" "$PR" "$UH"
+  rm -rf "$SRC"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CHANGELOG.md: private shared-infrastructure receipt must not publish"* ]]
+  [[ "$output" != *"sentinel-fleet-count"* ]]
+  [[ "$output" != *"SENTINEL-FLEET-COUNT"* ]]
+}

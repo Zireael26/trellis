@@ -36,7 +36,7 @@
 # Then runs the initial Mode 1 security-gate baseline (override:
 # TRELLIS_SKIP_SECURITY_BASELINE=1).
 #
-# Usage: onboard-project.sh <project-path>
+# Usage: onboard-project.sh <project-path> [--infra-entry <file>]
 
 set -euo pipefail
 
@@ -67,14 +67,82 @@ CANONICAL_CLAUDE_SETTINGS="$TEMPLATES/claude-settings.json"
 # so they stay tracked.
 IGNORE_PATHS=()
 
-if [ $# -ne 1 ]; then
-  echo "usage: $0 <project-path>" >&2
-  exit 2
-fi
+PROJECT_ARG=""
+INFRA_ENTRY=""
+arg=""
+i=1
+while [ "$i" -le "$#" ]; do
+  eval "arg=\${$i}"
+  case "$arg" in
+    --infra-entry)
+      i=$((i + 1))
+      [ "$i" -le "$#" ] || { echo "onboard-project: --infra-entry requires a FILE" >&2; exit 2; }
+      eval "INFRA_ENTRY=\${$i}"
+      [ -n "$INFRA_ENTRY" ] || { echo "onboard-project: --infra-entry requires a non-empty FILE" >&2; exit 2; }
+      ;;
+    --infra-entry=*)
+      INFRA_ENTRY="${arg#--infra-entry=}"
+      [ -n "$INFRA_ENTRY" ] || { echo "onboard-project: --infra-entry requires a non-empty FILE" >&2; exit 2; }
+      ;;
+    --help|-h)
+      echo "usage: $0 <project-path> [--infra-entry <file>]"
+      exit 0
+      ;;
+    -*)
+      echo "onboard-project: unknown option: $arg" >&2
+      echo "usage: $0 <project-path> [--infra-entry <file>]" >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$PROJECT_ARG" ]; then
+        echo "onboard-project: unexpected argument: $arg" >&2
+        echo "usage: $0 <project-path> [--infra-entry <file>]" >&2
+        exit 2
+      fi
+      PROJECT_ARG="$arg"
+      ;;
+  esac
+  i=$((i + 1))
+done
 
-PROJECT="$1"
+[ -n "$PROJECT_ARG" ] || { echo "usage: $0 <project-path> [--infra-entry <file>]" >&2; exit 2; }
+PROJECT="$PROJECT_ARG"
 [ -d "$PROJECT" ]       || { echo "not a directory: $PROJECT" >&2; exit 1; }
 [ -e "$PROJECT/.git" ]  || { echo "not a git repo: $PROJECT" >&2; exit 1; }
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+
+if [ -n "$INFRA_ENTRY" ]; then
+  [ -f "$INFRA_ENTRY" ] || { echo "onboard-project: infrastructure entry is not a file: $INFRA_ENTRY" >&2; exit 1; }
+  INFRA_ENTRY="$(cd "$(dirname "$INFRA_ENTRY")" && pwd -P)/$(basename "$INFRA_ENTRY")"
+  if grep -Eq '^[[:space:]]*(version|projects):' "$INFRA_ENTRY"; then
+    echo "onboard-project: infrastructure entry must contain only services and ports; project identity comes from the registry or repository basename" >&2
+    exit 2
+  fi
+fi
+
+# Resolve the shared manifest key from registry.md when possible. A repository
+# not yet listed keeps the existing onboarding behavior and uses its basename.
+derive_infra_project_name() {
+  local base match
+  base="$(basename "$PROJECT")"
+  match=""
+  if [ -f "$TRELLIS_ROOT/registry.md" ]; then
+    match="$(awk -F'|' -v base="$base" '
+      /^## Active projects/ { in_table=1; next }
+      /^---$/ && in_table { in_table=0 }
+      in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
+        name=$2; path=$3
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+        gsub(/^[[:space:]`]+|[[:space:]`]+$/, "", path)
+        n=split(path, parts, "/")
+        if (name == base || parts[n] == base) { print name; exit }
+      }
+    ' "$TRELLIS_ROOT/registry.md")"
+  fi
+  printf '%s' "${match:-$base}"
+}
+
+INFRA_PROJECT_NAME=""
 
 # Sanity-check canonical sources exist before we start seeding
 [ -f "$CANONICAL_RULES" ]                  || { echo "canonical rules missing: $CANONICAL_RULES" >&2; exit 1; }
@@ -91,6 +159,52 @@ if pg_has_harness codex; then
   for core in $REVIEWER_CORES; do
     [ -f "$CANONICAL_REVIEWER_LIB_DIR/$core" ] || { echo "canonical reviewer core missing: $CANONICAL_REVIEWER_LIB_DIR/$core" >&2; exit 1; }
   done
+fi
+
+# Shared-infrastructure validation and delegation happen before the first
+# Trellis seed or git-index write. Proposal mode is deliberately read-only with
+# respect to projects.yaml. A reviewed fragment is handed to shared-infra's
+# atomic register target, which validates the whole candidate manifest before
+# replacing it; only a successful registration is reconciled.
+INFRA_ENABLED=0
+if [ -n "$INFRA_ENTRY" ] && [ -z "${SHARED_INFRA_ROOT:-}" ]; then
+  echo "onboard-project: --infra-entry requires shared_infra_root in $TRELLIS_CONFIG_PATH" >&2
+  exit 1
+fi
+if [ -n "$INFRA_ENTRY" ] && [ "${TRELLIS_SKIP_INFRA:-0}" = "1" ]; then
+  echo "onboard-project: --infra-entry cannot be combined with TRELLIS_SKIP_INFRA=1" >&2
+  exit 2
+fi
+if [ -n "${SHARED_INFRA_ROOT:-}" ] && [ "${TRELLIS_SKIP_INFRA:-0}" != "1" ]; then
+  INFRA_PROJECT_NAME="$(derive_infra_project_name)"
+  if ! printf '%s' "$INFRA_PROJECT_NAME" | grep -qE '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+    echo "onboard-project: invalid shared infrastructure project name: $INFRA_PROJECT_NAME" >&2
+    exit 2
+  fi
+  command -v make >/dev/null 2>&1 || { echo "onboard-project: make is required for shared infrastructure delegation" >&2; exit 1; }
+  [ -f "$SHARED_INFRA_ROOT/Makefile" ] || { echo "onboard-project: shared infrastructure Makefile missing: $SHARED_INFRA_ROOT/Makefile" >&2; exit 1; }
+  [ -f "$TEMPLATES/shared-infra-preflight.sh" ] || { echo "onboard-project: preflight template missing: $TEMPLATES/shared-infra-preflight.sh" >&2; exit 1; }
+  INFRA_ENABLED=1
+
+  if [ -n "$INFRA_ENTRY" ]; then
+    echo "== registering reviewed shared infrastructure entry for $INFRA_PROJECT_NAME =="
+    if ! make --no-print-directory -C "$SHARED_INFRA_ROOT" register \
+      "PROJECT=$INFRA_PROJECT_NAME" "ENTRY=$INFRA_ENTRY"; then
+      echo "onboard-project: shared infrastructure registration failed; no Trellis project files were written" >&2
+      exit 1
+    fi
+    if ! make --no-print-directory -C "$SHARED_INFRA_ROOT" reconcile "PROJECT=$INFRA_PROJECT_NAME"; then
+      echo "onboard-project: shared infrastructure entry registered, but project reconciliation failed" >&2
+      exit 1
+    fi
+  else
+    echo "== shared infrastructure proposal for $INFRA_PROJECT_NAME (review only; manifest unchanged) =="
+    if ! make --no-print-directory -C "$SHARED_INFRA_ROOT" propose \
+      "PROJECT=$INFRA_PROJECT_NAME" "SOURCE=$PROJECT"; then
+      echo "onboard-project: shared infrastructure proposal failed; no Trellis project files were written" >&2
+      exit 1
+    fi
+  fi
 fi
 
 seed_file() {
@@ -114,6 +228,30 @@ seed_executable_file() {
     chmod +x "$dst"
     echo "created: ${dst#"$PROJECT"/}"
   fi
+}
+
+seed_shared_infra_preflight() {
+  local src="$TEMPLATES/shared-infra-preflight.sh"
+  local dst="$PROJECT/scripts/local-infra-preflight.sh"
+  local tmp root_escaped
+  if [ -e "$dst" ]; then
+    echo "skip (exists): ${dst#"$PROJECT"/}"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dst")"
+  tmp="$dst.tmp.$$"
+  root_escaped="$(printf '%s' "$SHARED_INFRA_ROOT" | sed 's/[&|\\]/\\&/g')"
+  if ! sed \
+    -e "s/^PROJECT_NAME=\"__TRELLIS_PROJECT_NAME__\"$/PROJECT_NAME=\"$INFRA_PROJECT_NAME\"/" \
+    -e "s|^CONFIGURED_SHARED_INFRA_ROOT=\"__TRELLIS_SHARED_INFRA_ROOT__\"$|CONFIGURED_SHARED_INFRA_ROOT=\"$root_escaped\"|" \
+    "$src" > "$tmp"; then
+    rm -f "$tmp"
+    echo "onboard-project: failed to render shared infrastructure preflight wrapper" >&2
+    return 1
+  fi
+  chmod +x "$tmp"
+  mv "$tmp" "$dst"
+  echo "created: ${dst#"$PROJECT"/}"
 }
 
 seed_tracked_copy() {
@@ -484,6 +622,9 @@ echo "   harnesses:     ${HARNESSES[*]}"
 # Project root files
 seed_file "$TEMPLATES/gotchas.md"     "$PROJECT/gotchas.md"
 seed_file "$TEMPLATES/context-log.md" "$PROJECT/context-log.md"
+if [ "$INFRA_ENABLED" -eq 1 ]; then
+  seed_shared_infra_preflight
+fi
 
 # .gitignore — the Trellis managed block is (re)generated AFTER all symlinks are
 # seeded (see write_gitignore_block near the end), since it lists exactly the

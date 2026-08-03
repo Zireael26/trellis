@@ -1,0 +1,8 @@
+{
+  "name": "shared-infra-package-fixture",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 4102",
+    "start": "next start --port 4102"
+  }
+}

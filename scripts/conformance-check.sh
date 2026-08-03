@@ -171,6 +171,16 @@ for doc in "${SPEC_DOCS[@]}"; do
       case "$rel_doc:$cleaned" in
         "core-rules/skills/process-gate/references/docs.md:docs/EPM.md") continue ;;
         "registry.md:docs/specs/2026-06-04-gwtf-site-design.md") continue ;;
+        # spec 023: onboarding seeds this wrapper INTO each registered project.
+        # Trellis owns only the template it is generated from,
+        # core-rules/templates/shared-infra-preflight.sh, so the seeded path
+        # exists in every consumer and deliberately not here.
+        "engineering-process.md:scripts/local-infra-preflight.sh") continue ;;
+        "docs/local-development-infrastructure.md:scripts/local-infra-preflight.sh") continue ;;
+        "AGENT_ONBOARD_PROJECT.md:scripts/local-infra-preflight.sh") continue ;;
+        "engineering-process.md:tools/local-infra-preflight.sh") continue ;;
+        "docs/local-development-infrastructure.md:tools/local-infra-preflight.sh") continue ;;
+        "AGENT_ONBOARD_PROJECT.md:tools/local-infra-preflight.sh") continue ;;
       esac
       ref_count=$((ref_count + 1))
       # Try repo-root resolution first; fall back to doc-relative for

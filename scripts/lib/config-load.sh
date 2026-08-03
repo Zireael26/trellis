@@ -91,6 +91,14 @@ _pgcfg_validate() {
     echo "  - harnesses (must contain at least one of: claude, codex)" >&2
     return 1
   fi
+  # Optional shared_infra_root still has a non-empty contract. The schema's
+  # minLength is not honored by this fallback, so enforce it explicitly.
+  if jq -e 'has("shared_infra_root")' "$cfg" >/dev/null 2>&1 &&
+     [ -z "$(jq -r '.shared_infra_root // empty' "$cfg" 2>/dev/null)" ]; then
+    echo "config-load: shared_infra_root in $cfg must be a non-empty path" >&2
+    return 1
+  fi
+
   # Optional-field pattern check: trellis_version, if present, must be
   # strict semver. The schema's `pattern` is not honored by the jq
   # fallback otherwise — see scripts/upgrade.sh's post-write tripwire.
@@ -115,6 +123,25 @@ USER_HOME="$(jq -r '.user_home' "$_PGCFG_PATH")"
 MAINTAINER_NAME="$(jq -r '.maintainer_name' "$_PGCFG_PATH")"
 GITHUB_USER="$(jq -r '.github_user' "$_PGCFG_PATH")"
 
+# Optional shared local infrastructure repository. Resolve relative paths from
+# the configuration file rather than the caller's cwd, then canonicalize the
+# configured directory so every delegate receives one stable absolute path.
+SHARED_INFRA_ROOT_RAW="$(jq -r '.shared_infra_root // empty' "$_PGCFG_PATH")"
+SHARED_INFRA_ROOT=""
+if [ -n "$SHARED_INFRA_ROOT_RAW" ]; then
+  case "$SHARED_INFRA_ROOT_RAW" in
+    "~") SHARED_INFRA_ROOT_CANDIDATE="$USER_HOME" ;;
+    \~/*) SHARED_INFRA_ROOT_CANDIDATE="$USER_HOME/${SHARED_INFRA_ROOT_RAW#\~/}" ;;
+    /*) SHARED_INFRA_ROOT_CANDIDATE="$SHARED_INFRA_ROOT_RAW" ;;
+    *) SHARED_INFRA_ROOT_CANDIDATE="$(cd "$(dirname "$_PGCFG_PATH")" && pwd -P)/$SHARED_INFRA_ROOT_RAW" ;;
+  esac
+  if [ ! -d "$SHARED_INFRA_ROOT_CANDIDATE" ]; then
+    echo "config-load: shared_infra_root not a directory: $SHARED_INFRA_ROOT_CANDIDATE — remove the key if this clone has no shared local infrastructure repository" >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  SHARED_INFRA_ROOT="$(cd "$SHARED_INFRA_ROOT_CANDIDATE" && pwd -P)"
+fi
+
 # HARNESSES as a bash array
 HARNESSES=()
 while IFS= read -r h; do
@@ -137,7 +164,7 @@ TRELLIS_VERSION="$(jq -r '.trellis_version // empty' "$_PGCFG_PATH")"
 
 SED_FLAVOR="$(jq -r '.sed_flavor // "auto"' "$_PGCFG_PATH")"
 
-export TRELLIS_ROOT PROJECTS_ROOT USER_HOME MAINTAINER_NAME GITHUB_USER
+export TRELLIS_ROOT PROJECTS_ROOT SHARED_INFRA_ROOT USER_HOME MAINTAINER_NAME GITHUB_USER
 export TEMPLATE_REMOTE TEMPLATE_BRANCH TRELLIS_VERSION SED_FLAVOR
 
 # Validation

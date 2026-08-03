@@ -1,0 +1,32 @@
+version: 1
+
+shared_ports:
+  postgres: [5432]
+  redis: [6379]
+  minio: [9000, 9001]
+  mailpit: [1025, 8025]
+
+projects:
+  compose-app:
+    services: {}
+    ports:
+      app: [4100]
+  ambiguous:
+    services: {}
+    ports:
+      app: [4101]
+  no-service:
+    services: {}
+    ports: {}
+  make-app:
+    services: {}
+    ports:
+      app: [4103]
+  package-app:
+    services: {}
+    ports:
+      app: [4102]
+  firebase-app:
+    services: {}
+    ports:
+      firebase_emulators: [4400, 4500, 4600]

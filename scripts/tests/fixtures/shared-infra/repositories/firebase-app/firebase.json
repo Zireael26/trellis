@@ -1,0 +1,7 @@
+{
+  "emulators": {
+    "auth": { "port": 4400 },
+    "firestore": { "port": 4500 },
+    "ui": { "enabled": true, "port": 4600 }
+  }
+}

@@ -25,6 +25,11 @@
       "type": "string",
       "minLength": 1
     },
+    "shared_infra_root": {
+      "description": "Optional. Path to the canonical shared local infrastructure repository. When configured, scripts/lib/config-load.sh resolves it and requires it to be an existing directory.",
+      "type": "string",
+      "minLength": 1
+    },
     "user_home": {
       "type": "string",
       "minLength": 1

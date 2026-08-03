@@ -47,6 +47,7 @@
 REPO_ROOT="$( cd "$BATS_TEST_DIRNAME/../.." && pwd )"
 DOCTOR="$REPO_ROOT/scripts/doctor.sh"
 WORKTREE_HOOKS="$REPO_ROOT/core-rules/hooks"
+SHARED_FIXTURE="$BATS_TEST_DIRNAME/fixtures/shared-infra"
 # The repo's configured canonical clone — what doctor must NOT print when run
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
 LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null || true)"
@@ -59,8 +60,10 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
+  SHARED="$SANDBOX/shared-infra"
   CFG="$SANDBOX/trellis.config.json"
   mkdir -p "$CANON" "$PROJECTS"
+  DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
 }
 
@@ -154,16 +157,29 @@ git_init_canonical_main() {
 
 write_config() {
   local harnesses_json="${1:-\"claude\"}"
+  local shared_root="${2:-}"
+  local shared_line=""
+  if [ -n "$shared_root" ]; then
+    shared_line="  \"shared_infra_root\": \"$shared_root\","
+  fi
   cat > "$CFG" <<EOF
 {
   "trellis_root": "$CANON",
   "projects_root": "$PROJECTS",
+$shared_line
   "user_home": "$SANDBOX",
   "maintainer_name": "Test Maintainer",
   "github_user": "tester",
   "harnesses": [$harnesses_json]
 }
 EOF
+}
+
+build_shared_infra_fixture() {
+  mkdir -p "$SHARED"
+  cp "$SHARED_FIXTURE/Makefile" "$SHARED/Makefile"
+  cp "$SHARED_FIXTURE/projects.yaml" "$SHARED/projects.yaml"
+  rm -f "$SHARED/calls.log" "$SHARED/drift"
 }
 
 # Build a fully healthy "healthy" project: real git repo (onboard requires
@@ -210,7 +226,11 @@ seed_project_hooks_from_canonical() {
 }
 
 run_doctor() {
-  run bash "$DOCTOR" "$@"
+  if [ -n "$DOCTOR_SHARED_OVERRIDE" ]; then
+    run env SHARED_INFRA_ROOT="$DOCTOR_SHARED_OVERRIDE" bash "$DOCTOR" "$@"
+  else
+    run env -u SHARED_INFRA_ROOT bash "$DOCTOR" "$@"
+  fi
 }
 
 # Symlink-aware snapshot of the project subtree: emits one line per path —
@@ -281,6 +301,51 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   # The bad symlink in particular was NOT touched.
   [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
     "/Users/helios/claude/se-core-template/core-rules/CLAUDE.md" ]
+}
+
+@test "--fix repairs inheritance without proposing registering reconciling or changing shared allocations" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  build_shared_infra_fixture
+  write_config '"claude"' "$SHARED"
+  DOCTOR_SHARED_OVERRIDE="$SHARED"
+  rm -f "$PROJECTS/healthy/.claude/rules/trellis.md"
+  local before
+  before="$(sha_of "$SHARED/projects.yaml")"
+
+  run_doctor --fix
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(sha_of "$SHARED/projects.yaml")" = "$before" ]
+  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = "$CANON/core-rules/CLAUDE.md" ]
+  grep -q '^doctor ' "$SHARED/calls.log"
+  [ ! -e "$PROJECTS/healthy/scripts/local-infra-preflight.sh" ]
+  [[ "$output" == *"TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh"* ]]
+  run grep -Eq '^(propose|register|reconcile|preflight) ' "$SHARED/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "shared infrastructure drift stays an ERROR but does not block unrelated inheritance repair" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  build_shared_infra_fixture
+  write_config '"claude"' "$SHARED"
+  DOCTOR_SHARED_OVERRIDE="$SHARED"
+  printf 'deliberate drift\n' > "$SHARED/drift"
+  rm -f "$PROJECTS/healthy/.claude/rules/trellis.md"
+  local before
+  before="$(sha_of "$SHARED/projects.yaml")"
+
+  run_doctor --fix
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"✗ shared-infra doctor: read-only checks failed"* ]]
+  [[ "$output" == *"onboard ran"* ]]
+  [[ "$output" != *"not onboarding against an off-main/dirty canonical"* ]]
+  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = "$CANON/core-rules/CLAUDE.md" ]
+  [ "$(sha_of "$SHARED/projects.yaml")" = "$before" ]
+  run grep -Eq '^(propose|register|reconcile|preflight) ' "$SHARED/calls.log"
+  [ "$status" -ne 0 ]
 }
 
 # ===========================================================================

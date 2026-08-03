@@ -46,6 +46,7 @@ const AGENT_TYPE_PROVIDERS = Object.freeze({
   'gpt-high': 'gpt',
   'gpt-sol': 'gpt',
   'gpt-terra': 'gpt',
+  'gpt-luna': 'gpt',
   'gpt-sol-advisor': 'gpt',
   'gpt-sol-reviewer': 'gpt',
   claude: 'claude',
@@ -305,6 +306,25 @@ const resolveLaunch = ({
     );
   }
 
+  // Luna's main-loop warning is unrelated to Terra's oracle gate. The main loop holds
+  // the session's largest context surface, while Luna's MRCR long-context recall is
+  // 41.3%; advisor reachability does not change that fit.
+  const lunaIsMainLoop = modelClassification.family === 'luna';
+  const notices = terraIsMainLoop && effectiveAdvisor === 'none'
+    ? ['Terra is the main model with no advisor. It is permitted here only because '
+      + 'Claude delegates are available: an independent reviewer exists but is not '
+      + 'automatic, so you must actually spawn one. Reviewing a finished diff cannot '
+      + 'undo an irreversible side effect, so bound this session away from '
+      + 'destructive and externally-visible work, or pair an advisor.']
+    : [];
+  if (lunaIsMainLoop) {
+    notices.push(
+      'The main loop accumulates the largest context surface in the session, where '
+      + "Luna's MRCR long-context recall degrades sharply (41.3%). Luna is intended "
+      + 'for bounded delegated units rather than the orchestrator seat.',
+    );
+  }
+
   return {
     policy_version: POLICY_VERSION,
     requested,
@@ -335,13 +355,7 @@ const resolveLaunch = ({
       // unit already caused, so it is weaker than the retired gate for destructive
       // or externally-visible work, not merely different. Weigh that per unit.
       terra_advisor_recommended: modelClassification.family === 'terra',
-      notices: terraIsMainLoop && effectiveAdvisor === 'none'
-        ? ['Terra is the main model with no advisor. It is permitted here only because '
-          + 'Claude delegates are available: an independent reviewer exists but is not '
-          + 'automatic, so you must actually spawn one. Reviewing a finished diff cannot '
-          + 'undo an irreversible side effect, so bound this session away from '
-          + 'destructive and externally-visible work, or pair an advisor.']
-        : [],
+      notices,
     },
   };
 };

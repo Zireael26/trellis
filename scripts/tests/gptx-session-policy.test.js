@@ -25,6 +25,7 @@ assert.deepStrictEqual(DEFAULT_AGENT_MODEL_ALIASES, {
   opus: 'opus', sonnet: 'sonnet', haiku: 'haiku', fable: 'fable',
 });
 assert.strictEqual(AGENT_TYPE_PROVIDERS['gpt-terra'], 'gpt');
+assert.strictEqual(AGENT_TYPE_PROVIDERS['gpt-luna'], 'gpt');
 assert.strictEqual(AGENT_TYPE_PROVIDERS['opus-advisor'], 'claude');
 assert.strictEqual(AGENT_TYPE_PROVIDERS['lane-worker'], 'claude');
 assert.strictEqual(AGENT_TYPE_PROVIDERS['code-reviewer'], 'claude');
@@ -108,6 +109,35 @@ assert.match(resolveLaunch({ mode: 'claude', model: 'terra' }).error, /requires 
   const solUnadvised = resolveLaunch({ mode: 'codex', advisor: 'none', delegates: 'none' });
   assert.strictEqual(solUnadvised.valid, true, solUnadvised.error);
   assert.strictEqual(solUnadvised.effective.main_model, 'gpt-5.6-sol');
+}
+
+{
+  // Luna remains a valid main model, but warns because the orchestrator accumulates the
+  // session's largest context surface. Advisor and delegate state do not change that risk.
+  for (const advisor of ADVISOR_INPUTS) {
+    for (const delegates of DELEGATE_INPUTS) {
+      const lunaMain = resolveLaunch({ mode: 'codex', model: 'luna', advisor, delegates });
+      assert.strictEqual(lunaMain.valid, true, lunaMain.error);
+      assert.strictEqual(lunaMain.effective.notices.length, 1);
+      assert.match(lunaMain.effective.notices[0], /largest context surface/);
+      assert.match(lunaMain.effective.notices[0], /MRCR long-context recall degrades sharply/);
+      assert.match(lunaMain.effective.notices[0], /bounded delegated units/);
+    }
+  }
+
+  // With the same advisor state, a non-Luna main loop has no Luna notice even when the
+  // policy permits Luna as a delegated GPT agent. The distinction is the orchestrator seat.
+  const delegatedLuna = classifyAgentRequest({ subagent_type: 'gpt-luna' });
+  for (const advisor of ADVISOR_INPUTS) {
+    for (const delegates of ['auto', 'gpt']) {
+      const delegatedLunaSession = resolveLaunch({
+        mode: 'codex', model: 'sol', advisor, delegates,
+      });
+      assert.strictEqual(delegatedLunaSession.valid, true, delegatedLunaSession.error);
+      assert.deepStrictEqual(delegatedLunaSession.effective.notices, []);
+      assert.strictEqual(evaluateDelegation(delegates, delegatedLuna).allowed, true);
+    }
+  }
 }
 
 assert.deepStrictEqual(classifyModel(' claude-opus-5 '), {

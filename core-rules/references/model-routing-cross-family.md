@@ -225,7 +225,6 @@ unreserved candidate becomes a reserved one. The list is closed.
 | R1 | Front-end, visual, and interaction design | Does the unit decide what a human sees or interacts with? | Operator decision, supported by vendor benchmarks. |
 | R2 | Stand-alone planning or advisory output, and the named advisor seat | Is the deliverable *itself* advice — plan, decomposition, review, recommendation, or normative doctrine — **and does it change nothing that executes?** | Operator decision; this is the orchestrator's own function. |
 | R5 | Short interactive turn with a human waiting | Is a person watching this specific turn complete? | Verified TTFT: Opus first-token is roughly a third of either GPT lane. |
-| R6 | Cheap read-only fan-out | Grep-shaped search, no mutation. | Goes to **Haiku**, not Opus — see the delegation note below. |
 
 **R2 is bounded by output, not by subject.** The test is whether the deliverable is
 advice, not whether the topic is planning. A unit that plans *and then implements*
@@ -259,17 +258,29 @@ Family is now fixed. These rows choose *how* to spend it, never *which lane*.
 |---|---|---|---|
 | high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | Opus | `gpt-terra` | verified: throughput |
 | bounded implementation against a pre-existing oracle | Opus | `gpt-mid` / `gpt-high` | published eval, inverse |
+| bounded mutating unit + pre-existing oracle + small context surface; excluded when correctness depends on a broad surface, regardless of apparent simplicity | Opus | `gpt-luna` (xhigh only) | MRCR: Luna 41.3%, Terra 89.6%, Sol 91.5% |
 | difficult design, weak-oracle debugging, security-sensitive, high-consequence | Opus at `xhigh` | `gpt-sol` | tier definition |
 | reviewing the other family's work | Opus 5 | `gpt-sol-reviewer` | stage 1 rule 2 |
 | short interactive turn, latency felt by a human | Opus | — | verified: TTFT |
-| very cheap read-only fan-out — grep-shaped codebase search | Haiku | — | operator decision |
+| very cheap read-only fan-out — grep-shaped codebase search | Haiku | `gpt-luna` | operator decision; independent bounded retrieval does not require a mutation oracle |
+
+**Luna's surface limit is a disqualifier.** Mutating work requires bounded scope, a
+pre-existing oracle, and a small context surface. Large-codebase reasoning,
+multi-document synthesis, and whole-surface migrations cannot go to Luna, even when
+the requested edit looks simple. Luna is not a cheaper `gpt-terra`, does not inherit
+Terra's volume charter, and is not a downgrade tier for easy-looking work. Only its
+xhigh slug exists because Luna at Low measures 5.1% below baseline. Independent per-file
+reads can fan out to Luna without an oracle; a fan-out whose correctness depends on
+reconciling a broad surface is synthesis rather than independent retrieval and goes to
+`gpt-mid` or above.
 
 Where a row offers only Claude, that shape should not have been allocated to GPT in
 stage 2 — a short latency-sensitive turn is not fan-out work, so it never enters the
 pool.
 
-Sonnet and Haiku are not general-purpose choices. Haiku takes cheap read-only
-fan-out; neither takes judgement or implementation work.
+Sonnet and Haiku are not general-purpose choices. When a unit is on the Claude lane,
+Haiku is its cheap read-only fan-out profile; neither takes judgement or implementation
+work.
 
 Residual preferences that do **not** decide a lane, for use when stage 2 leaves a
 genuine choice within a family: abstract reasoning, novel-problem design, and life
@@ -309,12 +320,10 @@ synthesis. Absent the key, there is no threshold and the orchestrator may implem
 inline freely, which is the pre-030 behaviour.
 
 **"Reserved to Claude" and "stays inline" are different questions.** A reservation
-names a *family*; the threshold names *who executes*. R6 is the clearest case: cheap
-read-only fan-out is reserved to the Claude family and is nonetheless **delegated**,
-to Haiku, because delegating it is the entire point of that row. R1 work is
-similarly delegable to a Claude-family executor. Do not read a reservation as a
-licence to do the work inline — that would route the reserved domains straight back
-into the 55.6% this section exists to shrink.
+names a *family*; the threshold names *who executes*. R1 work is still delegable to a
+Claude-family executor. Do not read a reservation as a licence to do the work inline —
+that would route the reserved domains straight back into the 55.6% this section exists
+to shrink.
 
 Two costs, stated here rather than discovered later:
 
