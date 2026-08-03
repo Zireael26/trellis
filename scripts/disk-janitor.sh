@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # trellis disk-janitor — report-first reclaim of build caches, dead worktrees,
-# and package stores across the active fleet.
+# package stores, and host-global Docker resources across the active fleet.
 #
 # Three modes, escalating in destructiveness:
 #   --report (default)  Scan every scope, print a human report to stdout AND
@@ -8,8 +8,8 @@
 #                       turbo-outputs recurrence pre-pass (the 148 GB/2 days
 #                       root cause) and the tripwire status (free space vs
 #                       floor, largest cache vs ceiling). DELETES NOTHING and
-#                       never modifies a working tree. This is the ONLY mode
-#                       launchd runs.
+#                       never modifies a working tree. The default launchd
+#                       agent runs only this mode.
 #   --dry-run           Print the EXACT deletion plan (path, human bytes,
 #                       why-safe per row; worktrees show the reap verdict).
 #                       DELETES NOTHING.
@@ -22,7 +22,8 @@
 #                       deleting — read a y/N line from stdin unless --yes.
 #                       Destructive ops are a bright-line guardrail, so the
 #                       prompt is mandatory without --yes. Re-scan + report
-#                       reclaimed bytes. launchd NEVER runs --apply.
+#                       reclaimed bytes. The opt-in nightly apply LaunchAgent
+#                       runs only unattended-safe worktrees + Docker.
 #
 # Worktree reap (default, reap_pushed_worktrees=true) is gated on: is_main==0
 # AND not in use (live cwd/open handles via a fail-safe lsof snapshot) AND
@@ -59,39 +60,46 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---------------------------------------------------------------------------
 MODE="report"            # report | dry-run | apply
 ONLY_PROJECT=""
-SCOPES="caches,worktrees,stores"
+SCOPES="caches,worktrees,stores,docker"
 ASSUME_YES=0
 SAFE_ONLY=0              # --safe-only: unattended-safe worktree reap (merged-only)
 
 print_help() {
   cat <<'EOF'
-trellis disk-janitor — reclaim build caches, dead worktrees, package stores
+trellis disk-janitor — reclaim build caches, dead worktrees, package stores,
+and host-global Docker resources
 
 Usage:
   disk-janitor.sh                          Report (read-only). Default mode.
   disk-janitor.sh --report                 Same as no flag: scan + write audit.
   disk-janitor.sh --dry-run                Print the exact deletion plan only.
   disk-janitor.sh --apply                  Apply, confirming per category (y/N).
+                                           NOTE: bare --apply now includes anonymous
+                                           Docker volume + BuildKit cache pruning by
+                                           default; previous releases did not.
   disk-janitor.sh --apply --yes            Apply without the per-category prompt.
   disk-janitor.sh --apply --yes --safe-only
-                                           Unattended-safe reap (the nightly
-                                           LaunchAgent): only merged, clean,
-                                           non-detached, non-secret, idle worktrees.
-  disk-janitor.sh --project NAME           Limit to one registry project.
-  disk-janitor.sh --scopes caches,worktrees,stores
-                                           Limit scopes (default: all three).
+                                           Unattended-safe worktree reap plus the
+                                           same Docker behavior as normal --apply.
+  disk-janitor.sh --project NAME           Limit project scopes to one registry
+                                           project; Docker remains host-global.
+  disk-janitor.sh --scopes caches,worktrees,stores,docker
+                                           Limit scopes (default: all four).
   disk-janitor.sh --help                   Show this help.
 
 Modes (escalating):
   --report   Scans every scope, prints a report AND writes
              audits/YYYY-MM-DD-disk-janitor.md. Includes the turbo-outputs
              recurrence pre-pass + the disk tripwire (free vs floor, largest
-             cache vs ceiling). Deletes nothing. The ONLY mode launchd runs.
+             cache vs ceiling). Deletes nothing. The default report LaunchAgent
+             runs only this mode.
   --dry-run  Prints the deletion plan (path, size, why-safe; worktrees show
-             the reap verdict). Deletes nothing.
+             the reap verdict; Docker shows anonymous-volume and BuildKit
+             cache prune commands). Deletes nothing.
   --apply    Prints the plan, then per category reads a y/N line from stdin
              before deleting (mandatory unless --yes). Re-scans, reports
-             reclaimed bytes.
+             reclaimed bytes. Bare --apply includes Docker pruning by default,
+             unlike previous releases; use --scopes to omit it explicitly.
 
 Merge detection uses a read-only `gh pr list` query (a merged PR for the
 branch); it modifies no git refs and deletes nothing, so report/dry-run stay
@@ -105,8 +113,18 @@ live process cwd or open handle via a bounded lsof snapshot; a missing, failed,
 or timed-out lsof check fails closed and makes the tree a manual candidate.
 Every other auto-delete (pushed-but-unmerged, ephemeral /private/tmp) is
 downgraded to a manual candidate; those are in-flight trees owned by the fan-out
-recipe teardown. The flag only ever tightens the plan, so
-`--dry-run --safe-only` previews exactly what the nightly would reap.
+recipe teardown. The flag only ever tightens the worktree plan, so
+`--dry-run --safe-only` previews exactly what the nightly would reap. Docker
+behavior is unchanged by --safe-only.
+
+Config:
+  disk_janitor.docker_cache_keep_gb  BuildKit cache space retained by Docker
+                                     apply pruning. Non-negative decimal;
+                                     default 20. This is separate from
+                                     cache_ceiling_gb, the largest JS/build-cache
+                                     tripwire. The installed buildx supports
+                                     --reserved-space, so Docker apply uses that
+                                     flag rather than unsupported keep-storage flags.
 
 Scopes:
   caches      .turbo/cache, .next/cache, .next/dev older than cache_ttl_days,
@@ -121,6 +139,13 @@ Scopes:
               stale+clean+merged gates after the liveness gate.
   stores      pnpm store / npm cache footprint — REPORT-ONLY (best-effort
               estimate; --apply does not prune stores in this release).
+  docker      Host-global, scanned exactly once. Report/dry-run are read-only and
+              show total + dangling anonymous volumes (64-lowercase-hex names),
+              dangling reclaimable size, BuildKit cache reclaimable, image count,
+              and Engine version. Apply runs only `docker volume prune -f`
+              (anonymous volumes; Engine >=23 required) and `docker buildx prune
+              -f --reserved-space <N>GB`; images are never pruned. If Docker is
+              not already live, the scope is skipped without starting Desktop.
 
 Exit codes: 0 success, 1 scan/prune error, 2 bad arguments.
 EOF
@@ -201,11 +226,11 @@ validate_scopes() {
   IFS=','
   for s in $SCOPES; do
     case "$s" in
-      caches|worktrees|stores) ;;
+      caches|worktrees|stores|docker) ;;
       "") ;;
       *)
         IFS="$ifs_save"
-        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores)" >&2
+        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker)" >&2
         exit 2
         ;;
     esac
@@ -264,6 +289,13 @@ CACHE_TTL_DAYS="$(cfg_num '.disk_janitor.cache_ttl_days' 14)"
 WORKTREE_STALE_DAYS="$(cfg_num '.disk_janitor.worktree_stale_days' 30)"
 FREE_SPACE_FLOOR_GB="$(cfg_num '.disk_janitor.free_space_floor_gb' 30)"
 CACHE_CEILING_GB="$(cfg_num '.disk_janitor.cache_ceiling_gb' 20)"
+# This is intentionally separate from cache_ceiling_gb: that key is the largest
+# JS/build-cache tripwire, while this value is BuildKit's retained cache floor.
+DOCKER_CACHE_KEEP_GB="$(cfg_num '.disk_janitor.docker_cache_keep_gb' 20)"
+if ! printf '%s\n' "$DOCKER_CACHE_KEEP_GB" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+  echo "disk-janitor: WARNING: malformed disk_janitor.docker_cache_keep_gb='$DOCKER_CACHE_KEEP_GB'; using 20" >&2
+  DOCKER_CACHE_KEEP_GB=20
+fi
 # Layer 2/3 (worktree lifecycle reap). reap_pushed_worktrees is a boolean via
 # cfg_bool (so an explicit false is honored); the rest are numeric via cfg_num.
 # All default-safe: an absent disk_janitor object still yields the documented
@@ -648,6 +680,125 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Scope D: Docker (host-global; scan exactly once, never inside scan_project).
+# The liveness probe is deliberately only `docker info`: no `open`, Desktop
+# helper, or other command that could start Docker Desktop is ever invoked.
+# ---------------------------------------------------------------------------
+DOCKER_LIVE=0
+DOCKER_SCAN_OK=0
+DOCKER_SKIP_REASON=""
+DOCKER_SCAN_ERROR=""
+DOCKER_SERVER_VERSION="unknown"
+DOCKER_VOLUME_PRUNE_SUPPORTED=0
+DOCKER_ANON_VOLUME_COUNT=0
+DOCKER_ANON_DANGLING_COUNT=0
+DOCKER_ANON_RECLAIMABLE_BYTES=0
+DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES=0
+DOCKER_IMAGE_COUNT=0
+DOCKER_VOLUME_PRUNE_APPLIED=0
+DOCKER_BUILDX_PRUNE_APPLIED=0
+
+scan_docker() {
+  local summary verbose buildx_du volume_parsed buildx_parsed server_major
+
+  if ! command -v docker >/dev/null 2>&1; then
+    DOCKER_SKIP_REASON="Docker CLI unavailable"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    DOCKER_SKIP_REASON="Docker is not live"
+    return 0
+  fi
+  DOCKER_LIVE=1
+
+  # Every Docker query below is guarded by the successful docker-info probe.
+  if ! DOCKER_SERVER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null)"; then
+    DOCKER_SERVER_VERSION="unavailable"
+  fi
+  [ -n "$DOCKER_SERVER_VERSION" ] || DOCKER_SERVER_VERSION="unavailable"
+  server_major="${DOCKER_SERVER_VERSION%%.*}"
+  case "$server_major" in
+    ''|*[!0-9]*) DOCKER_VOLUME_PRUNE_SUPPORTED=0 ;;
+    *) [ "$server_major" -ge 23 ] && DOCKER_VOLUME_PRUNE_SUPPORTED=1 ;;
+  esac
+
+  if ! summary="$(docker system df --format json 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="docker system df failed"
+    EXIT_STATUS=1
+    return 0
+  fi
+  if ! verbose="$(docker system df -v --format json 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="docker system df -v failed"
+    EXIT_STATUS=1
+    return 0
+  fi
+  # Buildx prune targets the full BuildKit cache, including shared records that
+  # `docker system df` excludes from its private-only reclaimable figure.
+  if ! buildx_du="$(docker buildx du --format json 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="docker buildx du failed"
+    EXIT_STATUS=1
+    return 0
+  fi
+
+  if ! DOCKER_IMAGE_COUNT="$(printf '%s\n' "$summary" | jq -rs -r \
+    '[.[] | select(.Type == "Images")][0].TotalCount // "0"' 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="could not parse Docker image count"
+    EXIT_STATUS=1
+    return 0
+  fi
+
+  # Docker reports decimal SI sizes. Count every 64-hex anonymous volume, but
+  # plan reclamation only for the dangling subset (Links==0).
+  if ! volume_parsed="$(printf '%s\n' "$verbose" | jq -r '
+    def docker_bytes:
+      if test("kB$") then (sub("kB$"; "") | tonumber * 1000)
+      elif test("MB$") then (sub("MB$"; "") | tonumber * 1000000)
+      elif test("GB$") then (sub("GB$"; "") | tonumber * 1000000000)
+      elif test("TB$") then (sub("TB$"; "") | tonumber * 1000000000000)
+      elif test("B$") then (sub("B$"; "") | tonumber)
+      else error("unsupported Docker size: " + .)
+      end;
+    [.Volumes[]? | select(.Name | test("^[a-f0-9]{64}$"))] as $anonymous |
+    [$anonymous[] | select(.Links == "0")] as $dangling |
+    "\($anonymous | length)\t\($dangling | length)\t\([$dangling[].Size | docker_bytes] | add // 0)"
+  ' 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="could not parse anonymous Docker volume usage"
+    EXIT_STATUS=1
+    return 0
+  fi
+  IFS="$(printf '\t')" read -r DOCKER_ANON_VOLUME_COUNT DOCKER_ANON_DANGLING_COUNT DOCKER_ANON_RECLAIMABLE_BYTES <<EOF
+$volume_parsed
+EOF
+
+  if ! buildx_parsed="$(printf '%s\n' "$buildx_du" | jq -rs -r '
+    def docker_bytes:
+      if test("kB$") then (sub("kB$"; "") | tonumber * 1000)
+      elif test("MB$") then (sub("MB$"; "") | tonumber * 1000000)
+      elif test("GB$") then (sub("GB$"; "") | tonumber * 1000000000)
+      elif test("TB$") then (sub("TB$"; "") | tonumber * 1000000000000)
+      elif test("B$") then (sub("B$"; "") | tonumber)
+      else error("unsupported BuildKit size: " + .)
+      end;
+    [.[] | select(.Reclaimable == true) | .Size | docker_bytes] | add // 0
+  ' 2>/dev/null)"; then
+    DOCKER_SCAN_ERROR="could not parse BuildKit cache usage"
+    EXIT_STATUS=1
+    return 0
+  fi
+  DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES="$buildx_parsed"
+
+  case "$DOCKER_IMAGE_COUNT:$DOCKER_ANON_VOLUME_COUNT:$DOCKER_ANON_DANGLING_COUNT:$DOCKER_ANON_RECLAIMABLE_BYTES:$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES" in
+    *[!0-9:]*)
+      DOCKER_SCAN_ERROR="Docker disk usage returned malformed numeric data"
+      EXIT_STATUS=1
+      return 0
+      ;;
+  esac
+  DOCKER_SCAN_OK=1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Per-project scan with failure isolation: a project that errors mid-scan is
 # reported as skipped and the run continues. The body runs in a subshell so a
 # non-zero return under `set -e` cannot abort the loop.
@@ -695,6 +846,11 @@ fi
 STORES_PLAN=""
 if scope_enabled stores; then
   STORES_PLAN="$(scan_stores || true)"
+fi
+
+# Docker is host-global: scan it once after the fleet loop, never per project.
+if scope_enabled docker; then
+  scan_docker
 fi
 
 # ---------------------------------------------------------------------------
@@ -760,7 +916,7 @@ render_report() {
   echo "date:          $(date +%F)"
   echo "projects root: $PROJECTS_ROOT"
   echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
-  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
+  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
   echo
 
   # --- recurrence pre-pass ---
@@ -850,6 +1006,30 @@ INNER
     echo
   fi
 
+  # --- Docker --- (host-global; report is read-only)
+  if scope_enabled docker; then
+    echo "== Docker (host-global) =="
+    if [ "$DOCKER_LIVE" -ne 1 ]; then
+      echo "  docker scope: skipped ($DOCKER_SKIP_REASON)"
+    elif [ "$DOCKER_SCAN_OK" -ne 1 ]; then
+      echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
+    else
+      printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
+      printf '  anonymous volumes: %s total; %s dangling/reclaimable (%s)\n' \
+        "$DOCKER_ANON_VOLUME_COUNT" "$DOCKER_ANON_DANGLING_COUNT" \
+        "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
+      if [ "$DOCKER_VOLUME_PRUNE_SUPPORTED" -eq 1 ]; then
+        echo "  anonymous volume prune support: yes (Engine >=23)"
+      else
+        echo "  anonymous volume prune support: no/unknown (volume prune will be skipped)"
+      fi
+      printf '  BuildKit cache reclaimable: %s\n' "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
+      printf '  images: %s (report-only; images are never pruned)\n' "$DOCKER_IMAGE_COUNT"
+      printf '  BuildKit reserved space on apply: %sGB\n' "$DOCKER_CACHE_KEEP_GB"
+    fi
+    echo
+  fi
+
   # --- skipped projects ---
   if awk -F'\t' '$1=="meta"' "$PLAN_TMP" | grep -q .; then
     echo "== Skipped projects =="
@@ -861,7 +1041,12 @@ INNER
   fi
 
   echo "== Total =="
-  printf '  reclaimable now (caches + reaped worktrees): %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
+  printf '  host-project reclaimable now (caches + reaped worktrees): %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
+  if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
+    printf '  Docker VM (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable\n' \
+      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -915,6 +1100,36 @@ if [ "$MODE" = "dry-run" ]; then
     done
     echo
   fi
+  if scope_enabled docker; then
+    echo "== Docker prune plan (host-global) =="
+    if [ "$DOCKER_LIVE" -ne 1 ]; then
+      echo "  docker scope: skipped ($DOCKER_SKIP_REASON)"
+    elif [ "$DOCKER_SCAN_OK" -ne 1 ]; then
+      echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
+    else
+      printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
+      if [ "$DOCKER_VOLUME_PRUNE_SUPPORTED" -eq 1 ]; then
+        printf '  anonymous Docker volume prune: docker volume prune -f — %s of %s anonymous volume(s) dangling, %s reclaimable\n' \
+          "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT" \
+          "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
+      else
+        printf '  anonymous Docker volume prune: SKIP — Engine %s is below 23 or unparseable; %s of %s anonymous volume(s) dangling\n' \
+          "$DOCKER_SERVER_VERSION" "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT"
+      fi
+      printf '  BuildKit cache prune: docker buildx prune -f --reserved-space %sGB — %s currently reclaimable\n' \
+        "$DOCKER_CACHE_KEEP_GB" "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
+      printf '  images: %s (never pruned)\n' "$DOCKER_IMAGE_COUNT"
+    fi
+    echo
+  fi
+  echo "== Planned totals =="
+  printf '  host-project plan: %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
+  if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
+    printf '  Docker VM plan (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable, retaining %sGB\n' \
+      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
+  fi
+  echo
   echo "(dry-run: re-run with --apply to act; --apply confirms per category)"
   exit "$EXIT_STATUS"
 fi
@@ -1006,6 +1221,57 @@ if scope_enabled stores; then
   echo
 fi
 
+# --- Docker --- host-global; --safe-only does not change Docker behavior.
+if scope_enabled docker; then
+  echo "== Docker prune plan (host-global) =="
+  if [ "$DOCKER_LIVE" -ne 1 ]; then
+    echo "  docker scope: skipped ($DOCKER_SKIP_REASON)"
+  elif [ "$DOCKER_SCAN_OK" -ne 1 ]; then
+    echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
+  else
+    printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
+    if [ "$DOCKER_VOLUME_PRUNE_SUPPORTED" -eq 1 ]; then
+      printf '  anonymous Docker volume prune: %s of %s anonymous volume(s) dangling, %s reclaimable\n' \
+        "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT" \
+        "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
+    else
+      printf '  anonymous Docker volume prune: SKIP — Engine %s is below 23 or unparseable; %s of %s anonymous volume(s) dangling\n' \
+        "$DOCKER_SERVER_VERSION" "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT"
+    fi
+    printf '  BuildKit cache prune: %s currently reclaimable; retain %sGB with --reserved-space\n' \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
+    printf '  images: %s (never pruned)\n' "$DOCKER_IMAGE_COUNT"
+    if confirm_category "anonymous Docker volume prune and BuildKit cache prune"; then
+      # Recheck immediately before the mutation block; both allowed prune commands
+      # below are guarded by this already-successful liveness probe.
+      if ! docker info >/dev/null 2>&1; then
+        echo "  docker scope: skipped (Docker is no longer live; no prune performed)"
+      else
+        if [ "$DOCKER_VOLUME_PRUNE_SUPPORTED" -eq 1 ]; then
+          # Never pass -a/--all here: bare docker volume prune removes only anonymous volumes; -a/--all would destroy named data volumes.
+          if docker volume prune -f; then
+            DOCKER_VOLUME_PRUNE_APPLIED=1
+          else
+            echo "  Docker anonymous volume prune failed" >&2
+            EXIT_STATUS=1
+          fi
+        else
+          printf '  skipped anonymous Docker volume prune: Engine %s is below 23 or unparseable\n' \
+            "$DOCKER_SERVER_VERSION"
+        fi
+        # This host's buildx exposes --reserved-space (not legacy keep-storage flags).
+        if docker buildx prune -f --reserved-space "${DOCKER_CACHE_KEEP_GB}GB"; then
+          DOCKER_BUILDX_PRUNE_APPLIED=1
+        else
+          echo "  BuildKit cache prune failed" >&2
+          EXIT_STATUS=1
+        fi
+      fi
+    fi
+  fi
+  echo
+fi
+
 # Re-scan caches post-delete to report the actually-reclaimed bytes.
 remaining_cache_bytes=0
 if scope_enabled caches && [ "${#TARGETS[@]}" -gt 0 ]; then
@@ -1036,6 +1302,19 @@ if scope_enabled caches; then
 fi
 if scope_enabled worktrees; then
   printf '  worktrees: %s reaped (planned)\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
+fi
+if scope_enabled docker; then
+  if [ "$DOCKER_SCAN_OK" -eq 1 ]; then
+    printf '  Docker VM (separate from host-project bytes): %s dangling anonymous volume(s), %s planned; BuildKit cache %s reclaimable before prune, retaining %sGB\n' \
+      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
+    printf '  Docker prune commands completed: volume=%s buildkit=%s\n' \
+      "$DOCKER_VOLUME_PRUNE_APPLIED" "$DOCKER_BUILDX_PRUNE_APPLIED"
+  elif [ "$DOCKER_LIVE" -ne 1 ]; then
+    echo "  Docker VM: no plan (Docker was not live)"
+  else
+    echo "  Docker VM: not included (scan unavailable)"
+  fi
 fi
 
 exit "$EXIT_STATUS"
