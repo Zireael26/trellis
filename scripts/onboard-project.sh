@@ -11,7 +11,6 @@
 #         capability-gated dynamic-workflow kit: orchestrate)
 #   - <project>/.claude/commands/{primer,primer-refresh,primer-check,explore,autonomy,surgical}.md
 #       → canonical commands (symlinks; feature primer system + /explore + /autonomy + /surgical)
-#   - <project>/.claude/agents/codex-worker.md → canonical blocking worker agent (symlink)
 #   - <project>/.claude/primers/INDEX.md (copied from canonical template; opt-in directory)
 #   - <project>/.claude/settings.json (copied from canonical template)
 #   - <project>/.claude/hooks/*.sh (9 canonical hook scripts, copied)
@@ -33,6 +32,13 @@
 #       → canonical commands (Codex reads commands/)  [if codex]
 #   - <project>/.codex/hooks.json and .codex/hooks/*.sh           [if codex]
 #
+# OMP native harness surface [if omp]:
+#   - <project>/.omp/AGENTS.md → <project>/CLAUDE.md (absolute machine-local link)
+#   - <project>/.omp/skills    → canonical core-rules/skills      (directory symlink)
+#   - <project>/.omp/commands  → canonical core-rules/commands    (directory symlink)
+#   - <project>/.omp/agents    → canonical core-rules/agents      (directory symlink)
+#   - <project>/.omp/hooks     → canonical core-rules/omp/hooks   (directory symlink)
+#
 # Then runs the initial Mode 1 security-gate baseline (override:
 # TRELLIS_SKIP_SECURITY_BASELINE=1).
 #
@@ -52,6 +58,7 @@ CANONICAL_RULES="$TRELLIS_ROOT/core-rules/CLAUDE.md"
 CANONICAL_SKILLS_DIR="$TRELLIS_ROOT/core-rules/skills"
 CANONICAL_COMMANDS_DIR="$TRELLIS_ROOT/core-rules/commands"
 CANONICAL_AGENTS_DIR="$TRELLIS_ROOT/core-rules/agents"
+CANONICAL_OMP_HOOKS_DIR="$TRELLIS_ROOT/core-rules/omp/hooks"
 CANONICAL_PRIMER_INDEX_TEMPLATE="$TRELLIS_ROOT/core-rules/commands/templates/primer-index-template.md"
 CANONICAL_CODEX_DIR="$SOURCE_ROOT/core-rules/codex"
 CANONICAL_CLAUDE_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
@@ -148,8 +155,11 @@ INFRA_PROJECT_NAME=""
 [ -f "$CANONICAL_RULES" ]                  || { echo "canonical rules missing: $CANONICAL_RULES" >&2; exit 1; }
 [ -d "$CANONICAL_SKILLS_DIR" ]             || { echo "canonical skills dir missing: $CANONICAL_SKILLS_DIR" >&2; exit 1; }
 [ -d "$CANONICAL_COMMANDS_DIR" ]           || { echo "canonical commands dir missing: $CANONICAL_COMMANDS_DIR" >&2; exit 1; }
-[ -f "$CANONICAL_AGENTS_DIR/codex-worker.md" ] || { echo "canonical agent missing: $CANONICAL_AGENTS_DIR/codex-worker.md" >&2; exit 1; }
-[ -f "$CANONICAL_PRIMER_INDEX_TEMPLATE" ]  || { echo "canonical primer INDEX template missing: $CANONICAL_PRIMER_INDEX_TEMPLATE" >&2; exit 1; }
+if pg_has_harness omp; then
+  [ -d "$CANONICAL_AGENTS_DIR" ]           || { echo "canonical agents dir missing: $CANONICAL_AGENTS_DIR" >&2; exit 1; }
+  [ -d "$CANONICAL_OMP_HOOKS_DIR" ]        || { echo "canonical OMP hooks dir missing: $CANONICAL_OMP_HOOKS_DIR" >&2; exit 1; }
+fi
+[ -f "$CANONICAL_PRIMER_INDEX_TEMPLATE" ] || { echo "canonical primer INDEX template missing: $CANONICAL_PRIMER_INDEX_TEMPLATE" >&2; exit 1; }
 [ -d "$CANONICAL_CLAUDE_HOOKS_DIR" ]       || { echo "canonical Claude hooks dir missing: $CANONICAL_CLAUDE_HOOKS_DIR" >&2; exit 1; }
 [ -f "$CANONICAL_CLAUDE_SETTINGS" ]        || { echo "canonical Claude settings template missing: $CANONICAL_CLAUDE_SETTINGS" >&2; exit 1; }
 if pg_has_harness codex; then
@@ -659,7 +669,13 @@ untrack_if_tracked ".claude/commands/primer-check.md"
 untrack_if_tracked ".claude/commands/explore.md"
 untrack_if_tracked ".claude/commands/autonomy.md"
 untrack_if_tracked ".claude/commands/surgical.md"
-untrack_if_tracked ".claude/agents/codex-worker.md"
+if pg_has_harness omp; then
+  untrack_if_tracked ".omp/AGENTS.md"
+  untrack_if_tracked ".omp/skills"
+  untrack_if_tracked ".omp/commands"
+  untrack_if_tracked ".omp/agents"
+  untrack_if_tracked ".omp/hooks"
+fi
 untrack_if_tracked ".agents/rules/trellis.md"
 untrack_if_tracked ".agents/skills/process-gate"
 untrack_if_tracked ".agents/skills/security-gate"
@@ -679,6 +695,68 @@ untrack_if_tracked ".agents/commands/primer-check.md"
 untrack_if_tracked ".agents/commands/explore.md"
 untrack_if_tracked ".agents/commands/autonomy.md"
 untrack_if_tracked ".agents/commands/surgical.md"
+
+# --- Obsolete custom-agent cleanup -------------------------------------------
+# All legacy GPTX-defined custom agents were removed from canonical
+# core-rules/agents; no individual agent is seeded anywhere anymore (the OMP
+# agents surface is the live whole-directory link only). Projects may still
+# carry the old surface from before the removal. Remove ONLY Trellis-owned
+# artifacts: symlinks (any target, including dangling machine-local links) and
+# byte-identical copies of the canonical file (verified against the canonical
+# copy when it still exists). A divergent regular file is user content — warn
+# and leave it alone. Never seed replacements.
+OBSOLETE_AGENTS="codex-worker lane-worker fable-advisor opus-advisor"
+obsolete_agent_sha() {
+  case "$1" in
+    codex-worker)  printf '%s\n' "f74258dc4e4088315e4bec7a35726e448dfbb31f0f6d117b39964a15e3c1a3d5" ;;
+    lane-worker)   printf '%s\n' "9d92206be60a9bf7ee2de2bbc53f29afe1dfb97453c68316c07e652fe2f815d0" ;;
+    fable-advisor) printf '%s\n' "68075c953f55a964a03b0eea0c8bb40d1d968761404c5a6a824fd68d322a533d" ;;
+    opus-advisor)  printf '%s\n' "bb547c5f0f134e0803590dc312f476616ea64376594eef50b6fa5ecc9035566e" ;;
+    *) return 1 ;;
+  esac
+}
+cleanup_obsolete_agent() {
+  local rel="$1"
+  local agent_file="$PROJECT/$rel"
+  case "$agent_file" in
+    "$PROJECT"/*) ;;
+    *) echo "WARN: refusing to clean $rel (outside project)" >&2; return ;;
+  esac
+  if [ -L "$agent_file" ]; then
+    untrack_if_tracked "$rel"
+    rm -f "$agent_file"
+    echo "removed (obsolete agent symlink): $rel"
+  elif [ -f "$agent_file" ]; then
+    local name="${rel##*/}"
+    name="${name%.md}"
+    local legacy_sha=""
+    local actual_sha=""
+    legacy_sha=$(obsolete_agent_sha "$name" 2>/dev/null || true)
+    actual_sha=$(shasum -a 256 "$agent_file" 2>/dev/null | cut -d ' ' -f 1)
+    if { [ -f "$CANONICAL_AGENTS_DIR/$name.md" ] && cmp -s "$agent_file" "$CANONICAL_AGENTS_DIR/$name.md"; } ||
+       { [ -n "$legacy_sha" ] && [ "$actual_sha" = "$legacy_sha" ]; }; then
+      untrack_if_tracked "$rel"
+      rm -f "$agent_file"
+      echo "removed (byte-identical legacy agent copy): $rel"
+    else
+      echo "WARN: $rel exists with divergent content (no longer canonical) — leaving as-is (user content)" >&2
+    fi
+  fi
+}
+# Guard: only descend into surfaces that are REAL directories. If
+# .claude/agents or .omp/agents were themselves symlinks, paths below them
+# could resolve INTO the canonical tree and the byte-identical branch would
+# delete canonical files through the link.
+if [ -d "$PROJECT/.claude/agents" ] && [ ! -L "$PROJECT/.claude/agents" ]; then
+  for name in $OBSOLETE_AGENTS; do
+    cleanup_obsolete_agent ".claude/agents/$name.md"
+  done
+fi
+if pg_has_harness omp && [ -d "$PROJECT/.omp/agents" ] && [ ! -L "$PROJECT/.omp/agents" ]; then
+  for name in $OBSOLETE_AGENTS; do
+    cleanup_obsolete_agent ".omp/agents/$name.md"
+  done
+fi
 
 # Claude Code inheritance: rules + skills + hooks.
 # Canonical skills shipped today: process-gate, security-gate (always on),
@@ -716,10 +794,6 @@ seed_symlink "$CANONICAL_COMMANDS_DIR/primer-check.md"    "$PROJECT/.claude/comm
 seed_symlink "$CANONICAL_COMMANDS_DIR/explore.md"         "$PROJECT/.claude/commands/explore.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/autonomy.md"        "$PROJECT/.claude/commands/autonomy.md"
 seed_symlink "$CANONICAL_COMMANDS_DIR/surgical.md"        "$PROJECT/.claude/commands/surgical.md"
-
-# Canonical Workflow agents — Claude Code resolves definitions from
-# .claude/agents/. There is deliberately no .agents/agents/ mirror.
-seed_symlink "$CANONICAL_AGENTS_DIR/codex-worker.md" "$PROJECT/.claude/agents/codex-worker.md"
 
 # Primer INDEX — opt-in feature primer system. INDEX is project-state (copied,
 # not symlinked) so each project owns its primer list. Empty INDEX = "primers
@@ -793,6 +867,34 @@ if pg_has_harness codex; then
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/primer-check.md"   "$PROJECT/.agents/workflows/primer-check.md"
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/explore.md"        "$PROJECT/.agents/workflows/explore.md"
   seed_tracked_copy "$CANONICAL_COMMANDS_DIR/surgical.md"       "$PROJECT/.agents/workflows/surgical.md"
+fi
+
+# OMP is Trellis's third native harness. Its surface is enabled explicitly by
+# `harnesses`, just like Codex; adding it does not alter either existing
+# harness's files, routing, or hook wiring. OMP reads live Trellis policy
+# through these machine-local absolute symlinks. Whole-directory links make
+# new canonical skills/commands/agents/adapters visible to the next OMP
+# discovery pass without re-running onboarding.
+#
+# .omp/config.yml, .omp/mcp.json, and any other user-owned OMP files are never
+# created or modified here (operator-owned).
+#
+# .omp/AGENTS.md normally targets the project's own CLAUDE.md. The canonical
+# control-plane clone itself has no root CLAUDE.md (rules live in
+# core-rules/CLAUDE.md), so for that project the overlay is the canonical rules
+# file. A public mirror, by contrast, carries a root CLAUDE.md — onboard from
+# the private clone targets that file while the other four links still point at
+# the private canonical.
+if pg_has_harness omp; then
+  OMP_AGENTS_TARGET="$PROJECT/CLAUDE.md"
+  if [ "$(cd "$PROJECT" && pwd -P)" = "$(cd "$TRELLIS_ROOT" && pwd -P)" ] && [ ! -f "$PROJECT/CLAUDE.md" ]; then
+    OMP_AGENTS_TARGET="$CANONICAL_RULES"
+  fi
+  seed_symlink "$OMP_AGENTS_TARGET"        "$PROJECT/.omp/AGENTS.md"
+  seed_symlink "$CANONICAL_SKILLS_DIR"    "$PROJECT/.omp/skills"
+  seed_symlink "$CANONICAL_COMMANDS_DIR"  "$PROJECT/.omp/commands"
+  seed_symlink "$CANONICAL_AGENTS_DIR"    "$PROJECT/.omp/agents"
+  seed_symlink "$CANONICAL_OMP_HOOKS_DIR" "$PROJECT/.omp/hooks"
 fi
 
 # Optional preset layering — opt-in per project via <project>/.trellis.config.json

@@ -3,7 +3,8 @@
 # project's MAIN git working tree into a linked worktree.
 #
 # git worktree add does not recreate gitignored files, so worktrees lose all
-# .claude/ and .agents/ inheritance symlinks. This script restores them.
+# .claude/, .agents/, and .omp/ inheritance symlinks. This script restores
+# them, including whole-directory symlinks (.omp/skills, .omp/commands, ...).
 #
 # Usage: seed-inheritance-symlinks.sh [--target <dir>] [--root <dir>]
 #                                     [--quiet] [--verify-only] [--help]
@@ -212,15 +213,30 @@ collect_symlinks() {
         ;;
     esac
     # -maxdepth 2: every Trellis inheritance symlink lives at exactly
-    # .claude/<subdir>/<entry> or .agents/<subdir>/<entry> (depth 2). Bounding
-    # the search here also prunes nested git worktrees (e.g. Claude session
-    # worktrees under .claude/worktrees/<x>/.claude/...) whose own seeded
-    # symlinks must NOT be re-mirrored into this target.
+    # .claude/<subdir>/<entry> or .agents/<subdir>/<entry> (depth 2) or
+    # .omp/<entry> (depth 1). Bounding the search here also prunes nested git
+    # worktrees (e.g. Claude session worktrees under .claude/worktrees/<x>/
+    # .claude/...) whose own seeded symlinks must NOT be re-mirrored into this
+    # target. Whole-directory symlinks (.omp/skills → $ROOT/core-rules/skills)
+    # match at depth 1; find does not descend through symlinks, so no recursion.
   done < <(find "$dir" -maxdepth 2 -type l)
 }
 
 collect_symlinks "$MAIN/.claude"
 collect_symlinks "$MAIN/.agents"
+collect_symlinks "$MAIN/.omp"
+
+# .omp/AGENTS.md targets the project's OWN CLAUDE.md (not a canonical path), so
+# the $ROOT-prefix filter above skips it. Mirror it with the target rewritten to
+# the TARGET checkout's CLAUDE.md — each checkout's OMP session must read that
+# checkout's project overlay (CLAUDE.md is tracked, so every worktree has its
+# own copy), never the main checkout's. A non-conforming .omp/AGENTS.md is left
+# out of the mirror, matching the generic filter's silent skip.
+omp_agents_link="$MAIN/.omp/AGENTS.md"
+if [ -L "$omp_agents_link" ] && [ "$(readlink "$omp_agents_link")" = "$MAIN/CLAUDE.md" ]; then
+  RELPATHS+=(".omp/AGENTS.md")
+  TARGETS+=("$TARGET/CLAUDE.md")
+fi
 
 if [ ${#RELPATHS[@]} -eq 0 ]; then
   echo "info: main checkout has no Trellis inheritance symlinks to mirror"

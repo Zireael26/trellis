@@ -86,7 +86,6 @@ EOF
     rollout-settings.sh
     rollout-rebrand.sh
     rollout-builder-skills.sh
-    rollout-codex-worker-agent.sh
     rollout-debrief-skill.sh
     rollout-feature-skills.sh
     rollout-orchestrate-skill.sh
@@ -157,7 +156,6 @@ EOF
     rollout-settings.sh
     rollout-rebrand.sh
     rollout-builder-skills.sh
-    rollout-codex-worker-agent.sh
     rollout-debrief-skill.sh
     rollout-feature-skills.sh
     rollout-orchestrate-skill.sh

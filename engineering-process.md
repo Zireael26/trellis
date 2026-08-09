@@ -34,8 +34,9 @@ This is the single human-readable source of truth for how engineering is done un
 
 Trellis is a shared engineering-process regime that a set of opt-in personal projects inherit from. It lives in `~/projects/trellis-instance/` and manifests in each registered project as:
 
-- A `.claude/rules/trellis.md` symlink for Claude Code and `AGENTS.md` / `.agents/rules/trellis.md` for Codex, all pointing at the canonical parent rules.
-- Canonical hooks deployed under `.claude/hooks/` for Claude Code and `.codex/` for Codex that enforce the rules mechanically at tool-use time.
+- Harness-native parent-rule links for Claude Code (`.claude/rules/trellis.md`), Codex (`AGENTS.md` / `.agents/rules/trellis.md`), and OMP (`.omp/AGENTS.md`), all resolving to the canonical parent through the project overlay.
+- Canonical hook enforcement under `.claude/hooks/` for Claude Code, `.codex/` for Codex, and the live `.omp/hooks` adapter for OMP.
+- Native OMP skills, commands, agents, context, and lifecycle enforcement through five live `.omp/` links.
 - Weekly and monthly audits that scan every registered project for drift and write reports to `~/projects/trellis-instance/audits/`.
 
 The goal: shared high standards across projects without hand-enforcing them per session.
@@ -87,7 +88,7 @@ trellis-instance/
 │   ├── CLAUDE.md                   ← parent rules (LLM-facing, inherited)
 │   ├── AGENTS.md                   ← symlink → CLAUDE.md (Codex parity)
 │   ├── hooks.md                    ← three-tier hook spec
-│   ├── inheritance.md              ← symlink + @-import + multi-harness spec
+│   ├── inheritance.md              ← symlink + @-import + multi-harness + OMP spec
 │   ├── deferred.md                 ← n=1 candidates awaiting third witness
 │   ├── hooks/                      ← canonical Claude Code hook implementations
 │   ├── codex/                      ← canonical Codex hooks.json + hook scripts
@@ -117,7 +118,7 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
   "user_home":         "/Users/<you>",
   "maintainer_name":"<your name>",
   "github_user":    "<github-username>",
-  "harnesses":      ["claude"],         // any subset of ["claude", "codex"]
+  "harnesses":      ["claude"],         // any subset of ["claude", "codex", "omp"]
   "template": {
     "remote": "git@github.com:<you>/trellis.git",
     "branch": "main",
@@ -158,6 +159,8 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
 
 Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders). The `loop_safety` *values* stay deployment-local too; the *policy* (`core-rules/loop-safety.md`) and the schema are public.
 
+`harnesses` accepts any non-empty combination of `"claude"`, `"codex"`, and `"omp"`. Each value enables only its native surface; enabling OMP is additive and does not rewrite Claude Code or Codex files, routing, settings, or hook wiring.
+
 **`loop_safety` resolution order (most specific wins).** Modeled on the autonomy resolution (§14.9). The contract is policy; the ceiling values resolve through four layers, so any instance can relax or tighten them without touching code or prose:
 
 1. **Per-loop override** — a recipe's `safety` block or a scheduled-task's "Loop safety" stanza explicitly sets a value.
@@ -177,7 +180,7 @@ Cross-machine portability is achieved by:
 
 | Script | Purpose |
 |---|---|
-| `scripts/onboard-project.sh <project-path>` | Seed inheritance symlinks, gotchas/context-log templates, husky hooks (or skip for native-githooks projects). Reads config; honors `harnesses` to seed the shared `AGENTS.md` + `.agents/{rules,skills,primers}/` surface plus the `.codex/` + `.agents/{commands,workflows}/` trees when Codex is enabled (Codex reads `.agents/`, including `.agents/workflows/`). |
+| `scripts/onboard-project.sh <project-path>` | Seed the native inheritance surfaces for every enabled `harnesses` value, plus gotchas/context-log templates and husky hooks (or skip for native-githooks projects). OMP contributes exactly five links: `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, and `.omp/hooks`. |
 | `scripts/sync-hooks.sh [--dry-run\|--yes]` | Canonical Tier 1+2 hook scripts → all registered projects' `.claude/hooks/`. Skill symlinks update automatically (no rsync needed). |
 | `scripts/sync-codex-hooks.sh [--dry-run\|--yes]` | Canonical Codex hook manifest + scripts → all registered projects' `.codex/` trees when Codex is enabled. |
 | `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
@@ -214,11 +217,31 @@ Claude Code does **not** cascade `CLAUDE.md` up the directory tree. Inheritance 
 
 **Primary — `.claude/rules/trellis.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project.
 
-**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$TRELLIS_ROOT` (e.g., `__TRELLIS_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/trellis-instance/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
+**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$TRELLIS_ROOT` (e.g., `__TRELLIS_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, `.omp/hooks`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/trellis-instance/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
 
 **Secondary — `@`-import in project `CLAUDE.md`.** `@__TRELLIS_PATH__/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
 
 If either mechanism breaks, Claude Code drops the instruction silently — no error, no warning. The `parent-hook-drift` audit catches drift; the `cross-project-process-audit` catches missing symlinks. See `core-rules/inheritance.md` for silent-drop invariants and the registered-project checklist.
+
+#### OMP (third native harness)
+
+OMP is the third supported harness alongside Claude Code and Codex. Add `"omp"` to the top-level `harnesses` array to enable its surface. Each harness remains isolated at the filesystem/configuration boundary, while all three resolve the same canonical Trellis policy. An OMP-enabled project receives exactly these five machine-local, absolute, gitignored symlinks:
+
+| OMP path | Live target |
+|---|---|
+| `.omp/AGENTS.md` | `<project-root>/CLAUDE.md` |
+| `.omp/skills` | `<trellis_root>/core-rules/skills` |
+| `.omp/commands` | `<trellis_root>/core-rules/commands` |
+| `.omp/agents` | `<trellis_root>/core-rules/agents` (reserved; `.gitkeep` only) |
+| `.omp/hooks` | `<trellis_root>/core-rules/omp/hooks` |
+
+The directory links are live and are mirrored by the worktree seeder. OMP's nearest non-empty ancestor `.omp` directory stops discovery even when required entries are absent, so a missing, dangling, wrong-target, regular-file, or non-symlink Trellis-owned path is a doctor error, not a fallback. OMP snapshots discovery and filesystem reads in a running process: a fresh session sees current canonical/project files, while an already-open process requires an explicit discovery reset or restart. This is not full in-process hot reload.
+
+All GPTX-era custom agents are retired. The linked agent root stays present for future harness-neutral definitions, but OMP currently uses only its bundled agents. The canonical private Trellis checkout is the sole context-link exception: it has no root `CLAUDE.md`, so its `.omp/AGENTS.md` points directly to `core-rules/CLAUDE.md`.
+
+OMP task children do not inherit `AGENTS.md`, and OMP does not natively load Trellis's `.claude/rules/preset-*.md` links. The runtime adapter at `core-rules/omp/hooks/pre/trellis.ts` injects a missing live project `CLAUDE.md` plus enabled canonical presets on the first `before_agent_start` event. It resolves `trellis_root` and the project at runtime and invokes live canonical hook scripts; unsupported payloads and adapter/script failures fail loudly with the exact path, while canonical denials retain their reasons.
+
+Trellis does not create `.omp/RULES.md`, `.omp/config.yml`, or `.omp/mcp.json`, and does not overwrite other OMP files. OMP memory is not the Trellis context-log authority, and `approved_mcps` remains documentation rather than an enforceable MCP allowlist. The detailed path, child-session, doctor, rollout, and [primary OMP references](core-rules/inheritance.md#omp-project-surface) live in `core-rules/inheritance.md`.
 
 ### 4.3 Registering / blacklisting
 
@@ -301,7 +324,7 @@ Canonical skills live under `core-rules/skills/<name>/` and are inherited by eve
 
 The directory itself is symlinked, so canonical updates appear automatically. Project-local configuration goes beside the symlink in `<project-root>/.claude/skills/process-gate-local/local.config.sh` (NOT covered by the canonical symlink — project owns it).
 
-**Codex-enabled projects** additionally carry `.agents/skills/<name>/` pointing at the same canonical targets and `.agents/skills/process-gate-local/local.config.sh` for Codex-local overrides. Both harnesses resolve to byte-identical skill content; `process-gate-local/` is the per-project extension point.
+**Codex-enabled projects** additionally carry `.agents/skills/<name>/` pointing at the same canonical targets and `.agents/skills/process-gate-local/local.config.sh` for Codex-local overrides. **OMP-enabled projects** expose the canonical tree through `.omp/skills`. All three resolve byte-identical skill content; `process-gate-local/` remains the project-owned Claude/Codex extension point.
 
 **Stack profiles.** The canonical eight gates apply to every project. Stack-specific validators (design tokens, a11y, module boundaries, asset checks) attach via `PROCESS_GATE_STACK_PROFILE` and `PROCESS_GATE_STACK_VALIDATORS` in `local.config.sh`. See `core-rules/skills/process-gate/references/stack-profiles.md`. Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
@@ -358,24 +381,29 @@ Overrides live in each project's `.claude/hooks/config.sh` and/or `.codex/hooks/
 
 ### 5.4 Guarantees
 
-- **Rename-proof.** Hooks use `$CLAUDE_PROJECT_DIR` or `$CODEX_PROJECT_DIR`, never hardcoded project paths.
-- **Headless-safe.** Claude hooks work identically in interactive and headless runs; Codex hook parity is project-local and gated by the Codex hook feature flag.
+- **Rename-proof.** Claude/Codex hooks use `$CLAUDE_PROJECT_DIR` or `$CODEX_PROJECT_DIR`; the OMP adapter resolves the active project from OMP context at runtime. No project path is baked into canonical hook code.
+- **Headless-safe.** Claude hooks work identically in interactive and headless runs; Codex parity is project-local and feature-gated; OMP uses the same adapter in interactive, headless, and child sessions.
 - **Fail closed.** A failed hook blocks; it never logs-and-continues.
 
 ### 5.5 Harness coverage matrix
 
-Claude Code is the primary harness. Codex is the secondary. Different layers cover each harness:
+Claude Code is the baseline harness, Codex a parallel harness, and OMP the third. Different native surfaces converge on the same policy:
 
-| Layer | Claude Code | Codex | Notes |
-|---|---|---|---|
-| Parent rules doc | `CLAUDE.md` (via `.claude/rules/trellis.md` symlink) | `AGENTS.md` (symlink → `CLAUDE.md`, or `.agents/rules/trellis.md` symlink) | Single canonical source of truth in `core-rules/CLAUDE.md`. `AGENTS.md` and `.agents/rules/` mirror it byte-for-byte — Codex reads the same files. |
-| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` symlink | `.agents/skills/<name>/` symlink | Same canonical target; byte-identical across harnesses. |
-| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` (also mirrored under `.agents/workflows/<name>.md`) | Same canonical targets; Codex reads `.agents/`, including `.agents/workflows/`. |
-| Tier 1 + 2 hooks | `.claude/settings.json` hook entries | `.codex/hooks.json` hook entries | Turn-level (Tier 1/2) enforcement seeded on both harnesses. |
-| Tier 3 git hooks (husky / native) | runs in both | runs in both | Harness-agnostic — git-level enforcement protects every harness. |
-| Operator audits (optional) | Harness scheduler or cron | Harness scheduler or cron | Prompts, targets, and schedules are operator-owned; the public template defines report and loop-safety conventions only. |
+| Layer | Claude Code | Codex | OMP | Notes |
+|---|---|---|---|---|
+| Parent rules doc | `.claude/rules/trellis.md` → `CLAUDE.md` | `AGENTS.md` or `.agents/rules/trellis.md` → `CLAUDE.md` | `.omp/AGENTS.md` → project `CLAUDE.md`; adapter re-injects for children | One canonical source in `core-rules/CLAUDE.md`, preserving project overlays. |
+| Preset rules | `.claude/rules/preset-*.md` | `.agents/rules/preset-*.md` | Adapter injects canonical preset links on first agent start | Same canonical preset content; no copied OMP policy. |
+| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` links | `.agents/skills/<name>/` links | `.omp/skills` directory link | Same live canonical skill tree. |
+| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` and workflows | `.omp/commands` directory link | Same live canonical commands. |
+| Tier 1 + 2 hooks | `.claude/settings.json` + scripts | `.codex/hooks.json` + scripts | `.omp/hooks` lifecycle adapter | Native event envelopes translate to canonical hook decisions. |
+| Tier 3 git hooks (husky / native) | runs | runs | runs | Harness-agnostic merge-boundary enforcement. |
+| Operator audits (optional) | scheduler or cron | scheduler or cron | scheduler or cron | Scheduling remains operator-owned and honors `blacklist.md`. |
 
-Projects opt into the secondary by adding `"codex"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. Both harnesses run the full Tier 1/2/3 enforcement stack — the `code-review` / `ui-verify` / receipt gates block at turn end on Claude Code and Codex alike.
+The public template defaults to `["claude"]`; add `"codex"` and/or `"omp"` to opt into those native surfaces. This private control plane enables all three. OMP onboarding is an additive branch: it never writes `.claude` or `.codex`, and disabling OMP imposes no `.omp` prerequisite. All enabled harnesses retain Tier 1/2/3 enforcement appropriate to their native event model.
+
+#### OMP adapter enforcement
+
+The OMP adapter is the native enforcement path for the third harness, not a replacement for Claude or Codex. Its expected events map to canonical Trellis hook scripts at runtime; a blocked canonical decision becomes `{block: true, reason}`. When OMP is enabled, doctor treats missing, stale, wrong-target, dangling, or non-symlink OMP paths and adapter-load failures as blocking inheritance errors. Scheduled-task policy is unchanged.
 
 #### Codex executor routing
 
@@ -446,7 +474,7 @@ Every Trellis project must have branch protection on `main`:
 
 Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval block means any required-review setting = undeployable). The local `pre-push` guard + CI + the PR window are the functional gate.
 
-**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires on **every harness — Claude Code and Codex** — because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push. Operators can add a recurring tripwire audit as an after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced on both harnesses (§5.5) and carry no separate automated merge backstop. Branch protection (require-PR) is the remote complement to this local gate.
+**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires under **Claude Code, Codex, and OMP** because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push. Operators can add a recurring tripwire audit as an after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced through each enabled harness's native hook path (§5.5) and carry no separate GitHub branch-protection control.
 
 ### 6.5 History hygiene
 
@@ -732,6 +760,8 @@ With integration enabled, onboarding atomically delegates registration of the re
 
 The manual scaffold below remains useful for understanding or repairing the inheritance assets. When integration is enabled it does not replace the proposal/review/registration step; when disabled, the scaffold and one-argument onboarding remain the complete legacy path.
 
+When `"omp"` is enabled, `onboard-project.sh` creates the exact five OMP links listed in §4.2. Keep them machine-local and ignored; never replace them with copied policy or hand-maintained `.omp` files. The OMP adapter and all canonical OMP discovery surfaces resolve live from `trellis_root`. Without `"omp"`, onboarding and doctor leave `.omp` absent and untouched.
+
 ```bash
 # 1. Create project directory
 cd ~/projects/personal
@@ -840,6 +870,7 @@ git push -u origin main
 - [ ] If Codex-enabled (shared surface): `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, and `.agents/primers/INDEX.md` are present.
 - [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` plus `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present (Codex reads `.agents/`, including `.agents/workflows/`).
 - [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] hooks = true` (or the legacy `codex_hooks = true` alias; deprecated as of Codex CLI 0.129+).
+- [ ] OMP has exactly `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, and `.omp/hooks` as absolute symlinks with exact targets; no Trellis-generated `.omp/RULES.md`, `.omp/config.yml`, or `.omp/mcp.json` is present.
 - [ ] `registry.md` has a row for the new project.
 - [ ] If `shared_infra_root` is non-empty, the external `projects.yaml` has the same project key with explicit `services` and `ports`; empty declarations use `services: {}` / `ports: {}` rather than omission. If the key is absent, this check is skipped.
 - [ ] If integration is enabled, `scripts/local-infra-preflight.sh` exists, is executable, and is called before the native startup path binds fixed ports. If disabled, no wrapper is required.
@@ -850,11 +881,13 @@ git push -u origin main
 
 Always run `./scripts/doctor.sh --project <registry-name>`. Resolve `SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"`; only when it is non-empty, also run the external `make doctor PROJECT=<registry-name> REGISTRY_FILE=<absolute-registry-path>`, the seeded startup preflight, and manifest/allocation/fixed-port verification. When the key is absent, skip those shared-infrastructure-specific checks and run the ordinary native smoke path. If private operator audits are configured, trigger the hook-drift and registry-health checks as supplemental evidence.
 
+OMP doctor checks the exact targets, realpaths, target kinds, canonical-root containment, project `CLAUDE.md` import, OMP manifests/collisions, adapter loading, parent/project markers in a fresh headless session, and policy parity in a task child. Any broken or stale OMP path exits nonzero; warnings do not count as parity. If canonical or project files change, verify them in a fresh OMP session or after an explicit discovery reset/process restart rather than claiming in-process hot reload.
+
 **Tell the project's future sessions how the file grows.** The seeded `CLAUDE.md` is deliberately thin, and thin is the target. It grows from `gotchas.md`, not from documentation written up front: log corrections as they happen, and the `gotchas-rollup` audit promotes anything that recurs three times ([§14.1](#141-rule-of-three)). Resist the urge to describe the codebase in it; describe what the codebase will get wrong.
 
 ### 10.5 Bootstrapping a fresh clone (every developer, every machine)
 
-The canonical absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) are gitignored — they encode a per-machine `$TRELLIS_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
+The canonical absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, and the five `.omp` links) are gitignored — they encode a per-machine `$TRELLIS_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
 
 ```bash
 git clone <repo-url>
@@ -900,6 +933,10 @@ The public template does not ship an operator's schedules, prompts, targets, or 
 When configured, audits write to `<trellis-root>/audits/YYYY-MM-DD-<name>.md`. They may run through a harness scheduler, cron, or another headless runner; the private prompt source remains version-controlled in the operator clone and out of the public mirror.
 
 **Loop-safety drift.** Operator process audits should also keep the loop-safety contract (§5c) honest by scanning `orchestrate` recipes and private audit prompts for a present, non-blank declaration. Authoring a loop without the stanza is additionally a `process-gate` / review finding at PR time.
+
+#### OMP inheritance rollout scope
+
+An explicit OMP inheritance rollout walks every row in `registry.md`, including registered-but-held rows, and adds only the ignored five-link surface. This installation scope is intentionally broader than scheduled eligibility: normal fleet scheduling continues to honor `blacklist.md`, so installing OMP links never enrolls a held project in scheduled tasks.
 
 ### 11.2 Remediation workflow
 
@@ -1209,11 +1246,11 @@ Spec-kit Phase D (2026-05-12) added an opt-in mechanism for projects whose disci
 }
 ```
 
-`scripts/rollout-presets.sh` (and `onboard-project.sh`'s preset-seeding pass) read this array, install symlinks at `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` (under Codex), and prune symlinks no longer declared. Both harnesses load every file under their rules directory, so preset content composes with `trellis.md` automatically.
+`scripts/rollout-presets.sh` (and `onboard-project.sh`'s preset-seeding pass) read this array, install symlinks at `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` (under Codex), and prune symlinks no longer declared. Claude Code and Codex load those links natively; the OMP adapter injects the same canonical preset content on first agent start.
 
 **Priority order (conceptual — rules are additive, not last-wins):**
 
-Both harnesses load every file under their rules directory and concatenate the content into the agent's prompt. There is no engine-level override; "priority" here means *which layer's voice an agent should defer to when prose conflicts*, not which file silently overwrites another.
+All three harnesses add the enabled canonical preset content to the agent prompt. There is no engine-level override; "priority" here means *which layer's voice an agent should defer to when prose conflicts*, not which file silently overwrites another.
 
 1. Parent rules (`core-rules/CLAUDE.md`) — always loaded. The baseline.
 2. Presets (`core-rules/presets/<name>.md`) — opt-in; the array order in the project config is also conceptual (later entries are more specific). All declared presets are loaded.

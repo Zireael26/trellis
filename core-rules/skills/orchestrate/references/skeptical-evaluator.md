@@ -5,7 +5,7 @@ contract** that fixes "done" before code is written. Realizes the harness-design
 thesis — *planner → generator → skeptical external evaluator* (GAN-inspired) —
 on top of machinery Trellis already ships. It **sharpens** adversarial
 verification for the hard end; it does **not** replace the always-on
-`code-review-subagent`, DoD receipts, or the `verify-panel` recipe.
+`code-review-subagent` or DoD receipts.
 
 Source: Anthropic, *"Harness design for long-running apps"* (2026-07),
 evaluated via the `ai-dev-trends` digest (2026-07-07, proposal P2).
@@ -100,7 +100,7 @@ not accept a green suite as proof of intent.
 |---|---|
 | `code-review-subagent` (Stop hook) | **Always-on floor.** Fires every edit-heavy turn regardless. The skeptical evaluator is an *additional*, gated layer for above-solo tasks — it never turns the hook off. |
 | DoD receipts (`CLAUDE.md`) | **The evidence the evaluator demands.** "Defaults to not-done unless the receipt proves it" *is* the receipt rule, enforced by a skeptic instead of trusted. |
-| `verify-panel` recipe | **One way to run the persona.** For a hard/`critical` criterion, run the skeptical evaluator as the Claude reviewer inside `verify-panel` to get a cross-model (Claude + Codex) consensus. The panel is the mechanism; the skeptical persona is the prompt it carries. |
+| Independent reviewer stage | **One way to run the persona.** For a hard/`critical` criterion, dispatch isolated skeptical reviewers against the same frozen contract, then reconcile their identity-matched verdicts after both return. |
 | `autonomy.md` L4/L5 | **Where the gate most often opens.** Unattended runs have no human to catch a generous self-assessment, so the skeptical evaluator is the counterweight the slider's bright-line code-review guarantee already reaches for. |
 
 ## Loop safety
@@ -108,13 +108,10 @@ not accept a green suite as proof of intent.
 When a recipe adopts the evaluator as a verify stage, it inherits that recipe's
 loop-safety contract (`core-rules/loop-safety.md`) — no new ceilings. A one-shot
 evaluation over a contract's criteria is a single barrier:
-`no_progress_iterations: null`, other ceilings inherit the resolved baseline. If
-run cross-model via `verify-panel`, Codex tokens attribute at
-`codex_usd_per_mtok`.
+`no_progress_iterations: null`; other ceilings inherit the resolved baseline.
 
 ## See also
 
-- `references/verify-panel.md` — the cross-model panel that can carry this persona.
 - `references/patterns.md` — adversarial-verification and generate-and-filter, the shapes this sharpens.
 - `core-rules/hooks.md` — the `code-review-subagent` floor this layers above.
 - `core-rules/autonomy.md` — the L4/L5 bright-line code-review guarantee.

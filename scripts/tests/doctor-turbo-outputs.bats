@@ -54,16 +54,25 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 build_canonical_tree() {
-  mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands"
+  mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands" \
+    "$CANON/core-rules/agents" "$CANON/core-rules/omp/hooks/pre"
   printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
   local s c
   for s in $CANON_SKILLS; do
     mkdir -p "$CANON/core-rules/skills/$s"
-    printf 'x\n' > "$CANON/core-rules/skills/$s/SKILL.md"
+    printf -- '---\nname: %s\ndescription: fixture skill %s\n---\n\nx\n' \
+      "$s" "$s" > "$CANON/core-rules/skills/$s/SKILL.md"
   done
   for c in $CANON_COMMANDS; do
-    printf 'x\n' > "$CANON/core-rules/commands/$c.md"
+    printf -- '---\ndescription: fixture command %s\n---\n\nx\n' \
+      "$c" > "$CANON/core-rules/commands/$c.md"
   done
+  # OMP surface (design 2026-08-09): the canonical agents dir is EMPTY (the
+  # GPTX-era custom agents were removed; only .gitkeep remains) and the adapter
+  # stub exists, so the OMP checks stay green in every turbo classification.
+  printf '' > "$CANON/core-rules/agents/.gitkeep"
+  printf 'export const trellisAdapter = () => ({});\n' \
+    > "$CANON/core-rules/omp/hooks/pre/trellis.ts"
   cat > "$CANON/registry.md" <<EOF
 # Project registry
 
@@ -120,7 +129,7 @@ EOF
 
 build_healthy_project() {
   local hp="$PROJECTS/healthy"
-  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands"
+  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands" "$hp/.omp"
   ln -s "$CANON/core-rules/CLAUDE.md" "$hp/.claude/rules/trellis.md"
   local s c
   for s in $CANON_SKILLS; do
@@ -135,6 +144,12 @@ build_healthy_project() {
 @$CANON/core-rules/CLAUDE.md
 EOF
   printf '{ "hooks": {} }\n' > "$hp/.claude/settings.json"
+  # OMP surface: the five exact live links in the shared contract.
+  ln -s "$hp/CLAUDE.md" "$hp/.omp/AGENTS.md"
+  ln -s "$CANON/core-rules/skills" "$hp/.omp/skills"
+  ln -s "$CANON/core-rules/commands" "$hp/.omp/commands"
+  ln -s "$CANON/core-rules/agents" "$hp/.omp/agents"
+  ln -s "$CANON/core-rules/omp/hooks" "$hp/.omp/hooks"
 }
 
 # write_turbo <json-body> — drop a turbo.json into the healthy project.

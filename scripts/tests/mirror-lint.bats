@@ -54,10 +54,10 @@ teardown() {
 
 @test "agent definitions may not name the private gateway" {
   mkdir -p "$M/core-rules/agents"
-  printf 'lane worker talks to cliproxy\n' > "$M/core-rules/agents/lane-worker.md"
+  printf 'example agent talks to cliproxy\n' > "$M/core-rules/agents/example-agent.md"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/agents/lane-worker.md: instance-private token 'cliproxy'"* ]]
+  [[ "$output" == *"core-rules/agents/example-agent.md: instance-private token 'cliproxy'"* ]]
 }
 
 @test "claudex remains instance-private everywhere" {

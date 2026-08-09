@@ -112,8 +112,8 @@ Every recipe carries the engine-compatible inline helper pair shown in
   receipts that the caller must see and act on.
 
 Use no quorum unless the recipe declares one as product semantics and tests it. The
-canonical recipes currently require every non-optional stage identity; Codex review in
-`verify-panel` and provider presence probes are optional degradation only.
+canonical recipes currently require every non-optional stage identity; explicitly
+optional provider legs and presence probes are optional degradation only.
 
 ## Mutation waves, override receipts, and checkpoints
 
@@ -137,9 +137,7 @@ first mutation dispatch:
 Missing, stale, unrelated, reordered, duplicate, or malformed evidence throws before dispatch;
 there is no silent clamp or inferred pilot. Pure read-only/judgment runs do not consume mutation
 slots and therefore do not require mutation-override evidence. Before any mutation starts, the
-recipe also rejects duplicate expected identities. `codex-executor` worktrees must be globally
-unique after path normalization, not merely unique inside one wave; dependency-serialized
-`codex-fanout` worktrees remain collision-checked per actual concurrent wave. After every successful
+recipe also rejects duplicate expected identities. After every successful
 mutation wave, recipes emit a structured
 `workflow_checkpoint` JSON log containing stage, one-based wave number, expected/successful
 identities, receipt count, and `ok:true`. The checkpoint is emitted only after strict
@@ -156,8 +154,7 @@ them** rather than spawning a fresh agent per subtask: the re-read cost of a col
 agent usually exceeds the parallelism it buys, and a wave of short agents bottlenecks
 on its slowest member. Intervene when an agent goes off track or is missing context;
 do not re-dispatch around it. `references/speed-doctrine.md` specializes this rule
-for the cross-harness case; the optional legacy `codex-worker` path is deliberately
-blocking for a workflow-engine reason (below), not a violation of it.
+for the cross-harness case.
 
 **Fan-out vehicle preference (teams-enabled harnesses).** When the harness offers
 both a workflow-orchestration tool and named-teammate spawning, default fan-out
@@ -212,10 +209,10 @@ When both an orchestration surface and a subagent executor are available,
 wall-clock speed comes from **topology, not effort**. Two bright lines hold
 regardless of topology: never dispatch the same work order to more than one leg
 (no duplicate work), and keep generic Workflow units on one agent type per unit
-shape so receipts and prefix caches stay uniform. If the operator explicitly
-selected and configured the optional legacy OpenAI Codex plugin companion, its
-Workflow units dispatch through the blocking `codex-worker` agent only — never
-the fire-and-forget rescue path, whose backgrounding breaks
+shape so receipts and prefix caches stay uniform. Trellis ships no custom
+executor-agent definitions; deliberate direct Codex CLI dispatch is the
+supported executor route (see `docs/codex-routing.md`), and the fire-and-forget
+rescue path is never a producing Workflow node — a backgrounded result breaks
 `parallel()`/`pipeline()` barriers. Patterns, guardrails, and receipt contracts:
 [`references/speed-doctrine.md`](references/speed-doctrine.md).
 
@@ -240,7 +237,7 @@ recurring loop, each mapped to machinery Trellis already ships:
 1. **Detect** — an operator-owned recurring task checks for incoming work (a conductor can rank the backlog; audits surface findings).
 2. **Triage** — fan out one agent per item; classify and route.
 3. **Resolve** — worktree-isolated agents work each item in parallel (`isolation: "worktree"`); `drift-holdpr` is this stage for mechanical drift.
-4. **Review** — an adversarial judge checks each fix before it counts (`verify-panel`: Claude + Codex consensus). For a build that exceeds solo-model reliability, run this judge as the **skeptical evaluator** (below) against a pre-agreed sprint contract, not the generous default.
+4. **Review** — an adversarial judge checks each fix before it counts (the `code-review-subagent` floor; the **skeptical evaluator** below for builds that exceed solo-model reliability).
 5. **Respond** — open a **HOLD PR** / update the channel; **never merge** (the Component-D merge bright-line holds at every stage).
 
 Every stage inherits the loop-safety ceilings; a proactive routine declares a conservative `budget_ceiling_usd` and pilots first.
@@ -260,8 +257,8 @@ This is **optional and gated** — it fires only above solo-model reliability, p
 the post's cost/benefit rule; on a routine turn the always-on
 `code-review-subagent` is the right tool and the evaluator is pure overhead. It
 **composes with, and never replaces,** the `code-review-subagent` floor, DoD
-receipts (the evidence it demands), and `verify-panel` (one way to run the
-persona cross-model). The gate defaults closed — when in doubt, don't stand it
+receipts (the evidence it demands), and cross-model review (one way to run the
+persona against a second model). The gate defaults closed — when in doubt, don't stand it
 up, the same restraint as "start simplest" in
 [`core-rules/references/loops.md`](../../references/loops.md). Unattended runs
 are where it earns its cost: at L4/L5 no human is mid-loop to catch a generous
@@ -297,9 +294,8 @@ Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
 
 **Orchestrator reap-after-commit (general rule).** When the main loop — not a
 recipe — commits+pushes a worktree it provisioned, it reaps that tree right after
-the push; the disk-janitor predicate is the mechanical backstop. Full mechanic and
-the `codex-fanout` conflicting-unit case: the `codex-fanout` row in
-[`recipes/MANIFEST.md`](recipes/MANIFEST.md) (ADR
+the push; the disk-janitor predicate is the mechanical backstop. The recipe
+that documents caller-provisioned worktrees reaps nothing itself (ADR
 `2026-07-16-orchestrator-conflicting-unit-reap`).
 
 When running this under degrade tier 2 (subagents, no workflow tool), read the

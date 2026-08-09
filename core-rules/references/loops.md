@@ -81,7 +81,7 @@ to trim its own work — the failure this section exists to prevent.
 The blog's operating advice maps onto machinery Trellis already ships — reference it, don't duplicate it:
 
 - **Verification** ("don't hand back partially verified work") → DoD receipts (`CLAUDE.md` § Definition of done) + `stop-verify`; prefer **quantitative** checks (tests, scores) an agent can *observe*, over qualitative ones.
-- **Adversarial review** ("use a fresh second agent") → the `verify-panel` recipe (Claude + Codex consensus) and cross-model review — beyond a single reviewer.
+- **Adversarial review** ("use a fresh second agent") → the `code-review-subagent` floor, the **skeptical evaluator** (`orchestrate` references/skeptical-evaluator.md), and cross-model review — beyond a single reviewer.
 - **Encode the fix for all future iterations** → `gotchas.md` + the `propose-rules` hook + the rule-of-three promotion; a fix that only patches one iteration is half-done.
 - **Budget / stop awareness** → the three ceilings; `budget_ceiling_usd` is dollar-native. The **operator** watches `/usage`, `/workflows`, and `/goal`'s token readout; the running agent honors the declared ceilings and does not reason about its own remaining context (see § Context budget is the operator's readout).
 

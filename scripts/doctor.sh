@@ -7,7 +7,10 @@
 #     worktrees). Probes via `git -C "$TRELLIS_ROOT" ...`.
 #   - Tier 1: per active project (registry.md MINUS blacklist.md): rules
 #     symlink, @-import, skills/commands symlinks, harness-conditional
-#     artifacts, hook freshness + settings wiring, version-pin lag.
+#     artifacts, hook freshness + settings wiring, version-pin lag, and the
+#     OMP surface (design 2026-08-09): the five live .omp links + target
+#     kinds/containment, the project CLAUDE.md parent import, canonical
+#     manifest layout/frontmatter, and adapter existence.
 #
 # WITHOUT --fix: READ-ONLY. doctor only PRINTS the fix command a human/agent
 # would run; it never calls onboard-project.sh / sync-hooks.sh /
@@ -98,11 +101,15 @@ WITH --fix, per project (after diagnosis):
            (idempotent, never-clobber). A STALE/wrong-target trellis-managed
            symlink is `rm`'d first (each rm is printed) because onboard's
            never-clobber would otherwise leave it as-is, then re-seeded.
+           The five OMP surface links (.omp/*) follow the same rm+onboard path.
   [hooks]  Claude/Codex hook drift -> SKIPPED unless --fix-hooks is also given
            (it changes enforcement behavior). With --fix-hooks: sync-hooks.sh /
            sync-codex-hooks.sh --yes <name>.
-  [manual] dead/missing @-import (never auto-edit a user's CLAUDE.md) and
-           settings.json .hooks drift (no engine fixes it) -> reported only.
+  [manual] dead/missing @-import (never auto-edit a user's CLAUDE.md),
+           settings.json .hooks drift (no engine fixes it), the OMP parent
+           import (first @-import in CLAUDE.md — never auto-edited), and
+           canonical OMP manifest/adapter gaps (canonical-side, never
+           auto-applied) -> reported only.
   [info]   version-pin lag, Tier-0 canonical issues -> reported only.
 After repair, the project's checks re-run and the resulting status is shown.
 
@@ -433,6 +440,10 @@ else
   if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
     for n in "${REGISTRY_NAMES[@]}"; do
       if is_blacklisted "$n"; then
+        # Normal fleet scheduling skips blacklisted rows; report them as HELD
+        # (still registered — the OMP rollout covers them too) rather than
+        # silently. An explicit --project still validates (handled above).
+        echo "  (held: $n — blacklisted; skipped)"
         continue
       fi
       TARGETS+=("$n")
@@ -558,6 +569,58 @@ run_project_checks() {
     fi
   fi
 
+  # --- OMP harness surface (design 2026-08-09) — ERROR-class live-link contract ---
+  # Only evaluated when `omp` is enabled, matching the existing Codex gate.
+  # OMP native discovery stops at the nearest non-empty .omp dir, so a broken
+  # Trellis-owned .omp surface silently yields an unparented OMP session. Five
+  # rows: links (type/target/resolvability), target kinds + canonical realpath
+  # containment, the project CLAUDE.md parent import, canonical manifest
+  # layout/frontmatter, and adapter existence. A broken .omp link is
+  # [auto]-fixable via onboard (rm wrong-target first — never-clobber); the
+  # import/manifest/adapter gaps are canonical/user-owned -> [manual] only.
+  if pg_has_harness omp; then
+    # --- OMP links: symlink type, exact target, resolvability (ERROR) ---
+    if emit "  " hc_omp_symlinks "$proj" "$CANON"; then :; else
+      add_hint "$name: OMP surface link missing/wrong/dangling — re-seed: scripts/onboard-project.sh \"$proj\""
+      PLAN_NEEDS_ONBOARD=1
+      # rm only wrong-target trellis-managed OMP links so onboard can recreate
+      # them (never-clobber would skip a wrong-target link) — mirrors the
+      # skills/commands re-walk above.
+      for p in AGENTS.md skills commands agents hooks; do
+        if [ -L "$proj/.omp/$p" ] && [ "$(readlink "$proj/.omp/$p")" != "$(hc_omp_expected_target "$proj" "$CANON" "$p")" ]; then
+          plan_add_rm "$proj/.omp/$p"
+          plan_add PLAN_AUTO "rm wrong-target OMP link .omp/$p, then onboard re-seeds it"
+        fi
+      done
+      plan_add PLAN_AUTO "onboard re-seeds missing OMP surface links under .omp/"
+    fi
+
+    # --- OMP target kinds + canonical realpath containment (ERROR) ---
+    if emit "  " hc_omp_target_kinds "$proj" "$CANON"; then :; else
+      add_hint "$name: OMP link resolves to a wrong target kind or escapes trellis_root — re-seed: scripts/onboard-project.sh \"$proj\""
+      PLAN_NEEDS_ONBOARD=1
+      plan_add PLAN_AUTO "onboard re-seeds OMP links with the correct target kinds (file vs dir) under the canonical root"
+    fi
+
+    # --- OMP parent import (ERROR) — MANUAL-only (never auto-edit CLAUDE.md) ---
+    if emit "  " hc_omp_project_import "$proj" "$CANON"; then :; else
+      add_hint "$name: OMP parent chain broken — the FIRST @-import in $proj/CLAUDE.md must be: @$CANON/core-rules/CLAUDE.md (never auto-edited)"
+      plan_add PLAN_MANUAL "OMP parent import — hand-fix the first @-import in CLAUDE.md to: @$CANON/core-rules/CLAUDE.md (never auto-edited)"
+    fi
+
+    # --- OMP canonical manifests (ERROR) — MANUAL-only (canonical-side) ---
+    if emit "  " hc_omp_manifests "$proj" "$CANON"; then :; else
+      add_hint "$name: canonical OMP manifests fail discovery — fix under $CANON/core-rules: skills <name>/SKILL.md + description, commands *.md + description, agents *.md + name/description frontmatter"
+      plan_add PLAN_MANUAL "canonical OMP manifest violation under $CANON/core-rules — fix SKILL.md/command/agent frontmatter in the canonical clone (never auto-applied)"
+    fi
+
+    # --- OMP adapter existence (ERROR) — MANUAL-only (canonical-side) ---
+    if emit "  " hc_omp_adapter "$proj" "$CANON"; then :; else
+      add_hint "$name: canonical OMP adapter missing — create $CANON/core-rules/omp/hooks/pre/trellis.ts"
+      plan_add PLAN_MANUAL "canonical OMP adapter missing — create core-rules/omp/hooks/pre/trellis.ts in the canonical clone (never auto-applied)"
+    fi
+  fi
+
   # --- skills symlinks (WARN) ---
   if emit "  " hc_skills_symlinks "$proj" "$CANON"; then :; else
     add_hint "$name: incomplete skill set — run: scripts/onboard-project.sh \"$proj\""
@@ -592,7 +655,7 @@ run_project_checks() {
     if emit "  " hc_harness_artifacts "$proj" "$h"; then :; else
       add_hint "$name: missing $h harness artifacts — run: scripts/onboard-project.sh \"$proj\""
       PLAN_NEEDS_ONBOARD=1
-      plan_add PLAN_AUTO "onboard re-seeds missing $h harness artifacts (.agents/ + harness surface). NOTE: a wrong-TARGET .agents symlink that still resolves is not detected by the check, so --fix cannot repair what the check cannot see."
+      plan_add PLAN_AUTO "onboard re-seeds missing $h harness artifacts without rewriting the other enabled harness surfaces"
     fi
   done
 

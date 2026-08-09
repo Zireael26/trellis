@@ -67,8 +67,9 @@ way.**
   subagents are for genuinely independent, parallelizable investigation.
 - `core-rules/references/loops.md` — the batch pass is one iteration of a
   time-based / proactive audit loop; this keeps that iteration cheap.
-- `core-rules/skills/orchestrate/references/codex-executor.md` — a batched
-  fan-out is the kind of execution-heavy bounded unit an executor node runs.
+- `core-rules/references/delegation.md` — routing an execution-heavy bounded
+  unit to an executor node; a batched fan-out is the kind of unit that runs
+  there.
 - `core-rules/references/source-driven-development.md` — the platform claims
   above are source-cited per this discipline; re-verify the beta's specifics
   against the current docs before relying on them.

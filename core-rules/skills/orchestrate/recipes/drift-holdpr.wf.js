@@ -53,9 +53,9 @@ const RECIPE_NAME = 'drift-holdpr'
 const SAFETY_MAX_ITERATIONS = 25
 const SAFETY_BUDGET_CEILING_USD = 40
 
-// The caller resolves caller-owned capability inputs (`codexAvailable`,
-// `loopSafety`); recipes never read project config. Stages without a declared
-// agentType inherit the calling main loop by construction.
+// Caller-owned capability input (`loopSafety`) arrives in `args`; recipes
+// never read project config. Stages without a declared agentType inherit the
+// calling main loop by construction.
 async function settle(id, run) {
   try {
     const value = await run()

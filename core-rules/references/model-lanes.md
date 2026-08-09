@@ -37,18 +37,16 @@ actually exposes, self-activates where that mechanism exists, and
 self-deactivates where it does not. It also keeps the same prose contract at
 every tier while only the carrying mechanism changes.
 
-Apply that framing here. `scripts/lane-preflight.sh` reports whether the local
-lane is configured and currently healthy; callers decide what to do. The
-probe always exits 0 and returns one JSON line. `available` is true only when
-the configured state endpoint answers with HTTP 2xx and reports state `ok`.
-Unknown state, malformed output, missing tools, connection errors, and
-timeouts all report false.
+Apply that framing here. A lane probe — when an operator supplies one —
+reports whether the local lane is configured and currently healthy; callers
+decide what to do. Unknown state, malformed output, missing tools, connection
+errors, and timeouts all resolve to unavailable.
 
 ## Degrade tiers
 
-1. **Foreign lane available.** Dispatch the bounded work order through
-   `lane-worker` and retain its receipt.
-2. **Foreign lane unavailable.** The worker returns `STATUS: UNAVAILABLE` and
+1. **Foreign lane available.** Dispatch the bounded work order through the
+   configured lane and retain its receipt.
+2. **Foreign lane unavailable.** The lane returns `STATUS: UNAVAILABLE` and
    `CODE: LANE_UNAVAILABLE`. The caller records the degrade and re-runs the
    identical unit on the first-party model.
 3. **No delegation mechanism.** Execute the identical unit inline on the
@@ -89,14 +87,14 @@ rerun. Do not report the unavailable attempt as success.
 
 ## Precedent and deliberate limits
 
-`core-rules/agents/codex-worker.md` provides four reusable rules: pin a
-first-party frontmatter model, reach the foreign backend through Bash, gate on
+The durable rules a foreign-lane route must follow: pin a first-party
+frontmatter model, reach the foreign backend through `Bash`, gate on
 capability, and return a structured unavailable receipt that the caller must
 handle.
 
-Its effort ladder, setup triple, background launch, job-id polling,
-no-session-id retry, silent-log relaunch, cancellation bookkeeping, and
-diff-stat receipt are not copied. A single foreground lane request has no
-effort-tier policy, companion setup, background job, session-id wedge, or
-worker-owned edit to measure. Copying those mechanics would add ceremony
-without preserving a real invariant.
+Effort ladders, setup triples, background launch, job-id polling,
+no-session-id retries, cancellation bookkeeping, and diff-stat receipts are
+not copied here. A single foreground lane request has no effort-tier policy,
+companion setup, background job, session-id wedge, or worker-owned edit to
+measure. Copying those mechanics would add ceremony without preserving a real
+invariant.

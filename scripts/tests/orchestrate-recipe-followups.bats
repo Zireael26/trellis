@@ -29,35 +29,20 @@ _json_assert() {
   _json_assert "!r.error && (() => { const rank = r.prompts.find((entry) => entry.opts.label === 'rank'); const specs = r.prompts.filter((entry) => (entry.opts.label || '').startsWith('spec:')); return rank.prompt.includes('WEIGHTS_OVERRIDE_JSON: {\"deadline\":0.7,\"impact\":0.3}') && rank.prompt.includes('delivered-on-main') && rank.prompt.includes('existing-spec:<path>') && specs.map((entry) => entry.opts.label).join(',') === 'spec:forced,spec:normal' && !specs.some((entry) => /exempt|delivered|existing/.test(entry.opts.label)) && r.logs.some((line) => line.includes('forced=1') && line.includes('exempt=1') && line.includes('hard-excluded=2') && line.includes('duplicate=0')); })()"
 }
 
-@test "M12 fleet workflow accepts restored band and hard-rejects max even when justified" {
+@test "M12 fleet workflow uses the inherited orchestrator model for every stage" {
   [ -f "$FLEET_RECIPE" ] || skip "private fleet workflow is not shipped in the public mirror"
-  local effort
-  for effort in medium high xhigh; do
-    _run_recipe "$FLEET_RECIPE" "{\"codexAvailable\":true,\"repoLanes\":[{\"repo\":\"repo-alpha\",\"path\":\"/tmp/repo-alpha\",\"base\":\"main\",\"harness\":\"codex\",\"effort\":\"$effort\",\"rows\":[]}]}"
-    _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].effort === '$effort'"
-  done
-
-  # `max` is hard-rejected at dispatch (0c128e5). This case deliberately admits it at the
-  # schema level via supportedEfforts AND supplies a justification, to prove neither one
-  # re-opens the door: xhigh is the ceiling.
-  _run_recipe "$FLEET_RECIPE" '{"codexAvailable":true,"supportedEfforts":["max"],"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"max","justification":"bounded exception","rows":[]}]}'
-  _json_assert "r.error && r.error.message.includes('max') && r.error.message.includes('hard-rejected') && r.prompts.length === 0 && r.logs.some((line) => line.includes('HARD-REJECT effort=max'))"
-
-  _run_recipe "$FLEET_RECIPE" '{"codexAvailable":true,"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","harness":"codex","effort":"turbo","rows":[]}]}'
-  _json_assert "r.error && r.error.message.includes('turbo') && r.error.message.includes('enum [medium, high, xhigh]') && r.prompts.length === 0"
+  _run_recipe "$FLEET_RECIPE" '{"repoLanes":[{"repo":"repo-alpha","path":"/tmp/repo-alpha","base":"main","rows":[]}]}'
+  _json_assert "!r.error && r.result && r.result.verdicts.length === 1 && r.result.verdicts[0].repo === 'repo-alpha' && r.prompts.map((entry) => entry.opts.label).join(',') === 'impl:repo-alpha,verify:repo-alpha' && r.prompts.every((entry) => entry.opts.agent === undefined)"
 }
 
-@test "M13 schema and public example define positive codex_fanout concurrency" {
+@test "M13 schema and public example omit retired codex_fanout configuration" {
   run node - "$CONFIG_SCHEMA" "$CONFIG_EXAMPLE" <<'NODE'
 const fs = require('node:fs')
 const schema = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const example = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
-const block = schema.properties?.codex_fanout
-const concurrency = block?.properties?.concurrency
-if (!block || block.type !== 'object' || block.additionalProperties !== false) process.exit(1)
-if (!block.required?.includes('concurrency')) process.exit(2)
-if (concurrency?.type !== 'integer' || concurrency.minimum !== 1) process.exit(3)
-if (example.codex_fanout?.concurrency !== 2) process.exit(4)
+if (Object.prototype.hasOwnProperty.call(schema.properties ?? {}, 'codex_fanout')) process.exit(1)
+if (Object.prototype.hasOwnProperty.call(example, 'codex_fanout')) process.exit(2)
+if (Object.prototype.hasOwnProperty.call(example, 'comment_codex_fanout')) process.exit(3)
 NODE
   [ "$status" -eq 0 ]
 }

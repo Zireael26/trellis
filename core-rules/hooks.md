@@ -1,19 +1,20 @@
 # Hook specifications
 
-Two tiers: **fast-local** runs on every relevant turn, **heavy-gated** runs on wrap-up. A third tier — **git-boundary** husky hooks — catches anything that slipped past the agent. Specs only; implementations live per-project under `.claude/hooks/`, `.codex/hooks/`, and `.husky/`.
+Two tiers: **fast-local** runs on every relevant turn, **heavy-gated** runs on wrap-up. A third tier — **git-boundary** husky hooks — catches anything that slipped past the agent. Specs only; native surfaces live per project under `.claude/hooks/`, `.codex/`, `.omp/hooks`, and `.husky/`.
 
-Claude Code and Codex use different hook envelopes, so Trellis keeps separate canonical implementations:
+The harnesses use different event envelopes, so Trellis keeps two direct script stacks plus one OMP adapter:
 
 - Claude Code: `core-rules/hooks/*.sh`, copied to `<project>/.claude/hooks/` and registered in `<project>/.claude/settings.json`.
 - Codex: `core-rules/codex/hooks.json` plus `core-rules/codex/hooks/*.sh`, copied to `<project>/.codex/`.
+- OMP: `core-rules/omp/hooks/pre/trellis.ts`, linked through `<project>/.omp/hooks`, translates OMP lifecycle/tool events and invokes the live canonical scripts.
 
-The policy intent is the same across harnesses. Claude-specific JSON such as `hookSpecificOutput.permissionDecision` stays in the Claude implementation; Codex blocking hooks emit `{"decision":"block","reason":"..."}` and exit 2.
+The policy intent is the same across all three. Claude-specific JSON such as `hookSpecificOutput.permissionDecision` stays in the Claude implementation; Codex blocking hooks emit `{"decision":"block","reason":"..."}` and exit 2; the OMP adapter maps the same denial to `{block: true, reason}`.
 
 ---
 
 ## Tier 1 — fast-local (every turn)
 
-Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, Claude sees it the same turn it happened.
+Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, the active harness surfaces it in the same turn.
 
 ### block-destructive
 - **Event:** `PreToolUse` on `Bash`
@@ -245,7 +246,7 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
   2. **The merge gate** — `process-gate/scripts/run-all.sh --mode=<merge|push>`, derived from the pushed refs: a push targeting `main`/`master` runs `--mode=merge` (full BLOCKED semantics, no downgrade), a WIP feature-branch push runs the lenient `--mode=push`. This single call supersedes the old standalone typecheck+lint+test block (`check-tests.sh` is a strict superset of those). It covers the deterministic gate set: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. rc 1 → block (exit 1); rc 2 → warn (exit 0); rc 0 → ok.
 - **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy + the deterministic merge gate at the git boundary.
 - **Block:** PR-flow guard trips, or `run-all.sh --mode=merge` returns a hard failure.
-- **Cross-harness reach.** Git hooks are harness-agnostic — they run on both Claude Code and Codex. So this local `pre-push` git hook is the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire that an optional operator bypass audit can surface after the fact. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`; those turn-level gates are enforced in-session on both harnesses, not at the git boundary.
+- **Cross-harness reach.** Git hooks are harness-agnostic — they run under Claude Code, Codex, and OMP. This local `pre-push` git hook is therefore the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire that an optional operator bypass audit can surface after the fact. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`; those turn-level gates are enforced through each enabled harness's native session path, not at the git boundary.
 - **GitHub-side complement:** local guard prevents accidents; branch protection on the remote is the durable gate. Every Trellis project should have `main` branch-protected (require PR, passing status checks, merge-commit only — squash-merge disabled in repo settings to preserve full history). Review-count enforcement is N/A here — sole-maintainer org, GitHub blocks self-approval; the PR window itself + CI is the gate.
 
 ### spec-gate (mandatory feature pipeline — spec 006)
@@ -253,8 +254,8 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 The gate that makes "every feature gets specced" enforceable rather than aspirational. **Default OFF** — inert until a project sets `mandatory_pipeline.enabled: true`.
 
 - **Teeth location:** `core-rules/husky/pre-push` and `core-rules/githooks/pre-push` invoke `.claude/hooks/spec-gate.sh --gate` (`.agents/` fallback) **after** the PR-flow guard, **before** the process-gate. A block exits non-zero → the push is refused. This is the load-bearing enforcement point.
-- **Parity by construction:** the verdict engine `lib/spec-gate-core.sh` is a **pure function of git + filesystem state** (branch diff size, which paths changed, whether a spec triad was added in *this* branch's range, whether a bound `/surgical` marker exists) — **zero model classification**. Same repo state → same verdict on Claude and Codex. The Codex twin (`core-rules/codex/hooks/spec-gate.sh`) shares the identical core. This is *why* the pipeline follows equally well on both harnesses: determinism, not prose, does the enforcing.
-- **Early-warning:** the same script is registered as the **first `Stop` hook** on both manifests (`claude-settings.json` + `codex/hooks.json`). It surfaces a block mid-session (Claude block-JSON + exit 2) so the agent hears about it before the push, but the push hook is the actual gate.
+- **Parity by construction:** the verdict engine `lib/spec-gate-core.sh` is a **pure function of git + filesystem state** (branch diff size, changed paths, in-range spec triad, bound `/surgical` marker) with **zero model classification**. Same repository state → same verdict on Claude Code, Codex, and OMP. Codex shares the identical core; OMP invokes the canonical script through its adapter. Determinism, not prose, does the enforcing.
+- **Early-warning:** Claude Code and Codex register the script first in their Stop manifests; the OMP adapter invokes it first in `session_stop`. Each surfaces the block before push, while the git-boundary invocation remains the load-bearing gate.
 - **Thresholds** (config, most-specific wins: project-local `.trellis.config.json` → central `trellis.config.json` → built-in): `spec_required_diff_lines` (floor, default **80**) and `surgical_max_diff_lines` (surgical ceiling, default **400**).
 - **Gated diff:** net added+deleted vs the protected merge-base, with non-feature paths excluded (tests, `docs/`, `specs/`, `audits/`, lockfiles, generated, and operational config like `*.yml`/`package.json`/`trellis.config.json`). Below the floor → passes with no spec (surgical-by-default). Above the floor → one of three routes required.
 - **The three routes** (above the floor):
@@ -269,18 +270,6 @@ The gate that makes "every feature gets specced" enforceable rather than aspirat
 ---
 
 ## Invariants across all tiers
-
-### Optional legacy Codex worker preflight is runtime, not a hook
-
-A project explicitly configured for the optional legacy OpenAI Codex plugin
-companion runs `scripts/codex-worker-preflight.sh` when it dispatches
-`codex-worker`. This is a legacy runtime check, intentionally not registered in
-either hook manifest: the companion state root and sandbox follow the invocation
-cwd, so the check must run from the target checkout. Per-dispatch model pinning
-requires Codex CLI 0.144 or newer. After a CLI upgrade, restart any stale
-`codex app-server`, and reconcile competing Homebrew/npm installations or links
-before dispatch so the selected binary is not shadowed. Generic Codex CLI
-harness hooks do not depend on this preflight.
 
 - **Never skip with `--no-verify`.** If a hook fails, fix the cause. If the hook is wrong, fix the hook and commit that separately.
 - **`stop_hook_active` guard is mandatory** on every `Stop` hook. Missing it causes infinite loops when a blocked hook triggers another stop.

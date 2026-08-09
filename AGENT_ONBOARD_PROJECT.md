@@ -1,6 +1,6 @@
 # AGENT_ONBOARD_PROJECT.md — paste-into-agent project onboarding
 
-> **For the human:** open an agent (Claude Code, Codex, Cowork, or any agent with filesystem + shell tools) **inside this Trellis canonical repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you — including a short pass on what has bitten you in this repo, which is the one thing it cannot work out for itself — run `scripts/onboard-project.sh`, wire your project's `CLAUDE.md`, seed `gotchas.md`, update `registry.md`, commit in both repos, and verify.
+> **For the human:** open an agent (Claude Code, Codex, OMP, Cowork, or any agent with filesystem + shell tools) **inside this Trellis canonical repo**, then paste **everything below the `--- BEGIN PROMPT ---` line**. The agent will interview you — including a short pass on what has bitten you in this repo, which is the one thing it cannot work out for itself — run `scripts/onboard-project.sh`, wire your project's native harness surfaces, seed `gotchas.md`, update `registry.md`, commit in both repos, and verify.
 >
 > Works for three entry paths:
 > - **`new`** — a project not yet in `registry.md`. Full onboarding.
@@ -347,6 +347,14 @@ test -L "$PROJECT/.agents/commands/primer.md"
 # (tracked copies, not symlinks, so use test -f)
 test -f "$PROJECT/.agents/workflows/primer.md"
 test -f "$PROJECT/.agents/workflows/explore.md"
+
+# OMP-only artifacts (only if "omp" in harnesses)
+test -L "$PROJECT/.omp/AGENTS.md"
+test "$(readlink "$PROJECT/.omp/AGENTS.md")" = "$PROJECT/CLAUDE.md"
+test -L "$PROJECT/.omp/skills"
+test -L "$PROJECT/.omp/commands"
+test -L "$PROJECT/.omp/agents"
+test -L "$PROJECT/.omp/hooks"
 
 # Registry row present (mode `new`): match absolute path, shorthand, or projects-root-relative form
 grep -nE "\`(${PROJECT}|${PROJ_SHORT}${PROJ_REL:+|${PROJ_REL}})\`" registry.md

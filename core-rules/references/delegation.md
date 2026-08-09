@@ -75,12 +75,13 @@ correctness cost: it changes which agent runs a unit, never what that agent can 
   model owns the main loop.
 - Explicit provider or model selections remain authoritative. If the selected
   lane is rejected, unavailable, or fails, surface that lane result and fail the
-  unit closed; never rewrite the request or silently substitute the optional
-  legacy OpenAI Codex plugin companion.
-- `codex-worker` is legacy compatibility only. Use its blocking direct-result
-  contract, never the fire-and-forget rescue path, only when the operator has
-  explicitly selected and configured that plugin-backed route. Generic Codex CLI
-  harness support is independent of this optional companion.
+  unit closed; never rewrite the request or silently substitute another provider.
+- Trellis ships no custom executor-agent definitions. Deliberate direct Codex CLI
+  dispatch (`codex exec --json ...` from the orchestrator, which holds Bash) is
+  the supported executor route; generic Codex CLI harness support is independent
+  of any plugin. Inside a Workflow engine (no shell), dispatch a general-purpose
+  agent to run the executor mechanics rather than an agent-type alias for a
+  removed custom agent.
 - The gate widens beyond orchestration: a bounded **work-order unit** (frozen
   spec, known repro, mechanical change) **routes** to an available executor node
   from any turn. The 009 pilot's advisory-first posture — propose, don't

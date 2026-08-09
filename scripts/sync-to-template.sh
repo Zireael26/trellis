@@ -74,6 +74,7 @@ SYNC_PATHS=(
   "core-rules/CLAUDE.md"
   "core-rules/AGENTS.md"
   "core-rules/agents/"
+  "core-rules/omp/"
   "core-rules/VERSION"
   "core-rules/codex/"
   "core-rules/hooks.md"
@@ -343,7 +344,7 @@ if [ -f "$TMP_STAGE/trellis.config.json" ]; then
   cat > "$TMP_STAGE/trellis.config.json" <<'EOF'
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" when opting into Codex parity. Multiple harnesses may be enabled together.",
+  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" and/or \"omp\" when opting into those native harness surfaces. Multiple harnesses may be enabled together.",
 
   "trellis_root": "__TRELLIS_PATH__",
   "projects_root": "__PROJECTS_ROOT__",

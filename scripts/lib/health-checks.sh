@@ -385,8 +385,9 @@ hc_commands_symlinks() {
 # Harness-conditional parity, checked per enabled harness. The caller passes
 # ONE harness name and invokes once per enabled harness.
 #   codex       -> AGENTS.md, .agents/rules, .agents/skills, .agents/workflows, .codex/hooks
+#   omp         -> .omp/AGENTS.md, .omp/skills, .omp/commands, .omp/agents, .omp/hooks
 #   claude      -> nothing extra (Claude is the baseline surface)
-# WARN if any required artifact for that harness is missing.
+# WARN if any required artifact for that enabled harness is missing.
 hc_harness_artifacts() {
   local proj="$1" harness="$2"
   local missing=""
@@ -397,6 +398,13 @@ hc_harness_artifacts() {
       [ -e "$proj/.agents/skills" ]    || missing="$missing .agents/skills"
       [ -e "$proj/.agents/workflows" ] || missing="$missing .agents/workflows"
       [ -e "$proj/.codex/hooks" ]      || missing="$missing .codex/hooks"
+      ;;
+    omp)
+      [ -e "$proj/.omp/AGENTS.md" ] || missing="$missing .omp/AGENTS.md"
+      [ -e "$proj/.omp/skills" ]    || missing="$missing .omp/skills"
+      [ -e "$proj/.omp/commands" ]  || missing="$missing .omp/commands"
+      [ -e "$proj/.omp/agents" ]    || missing="$missing .omp/agents"
+      [ -e "$proj/.omp/hooks" ]     || missing="$missing .omp/hooks"
       ;;
     claude)
       echo "harness[$harness]: baseline surface (no extra artifacts)"
@@ -661,6 +669,254 @@ hc_version_pin_lag() {
   fi
   echo "version: pin ($pin) lags canonical ($canon_ver) — pinned features trail"
   return "$HC_INFO"
+}
+
+# ===========================================================================
+# OMP SURFACE (design 2026-08-09 — full Trellis inheritance into Oh My Pi).
+# ERROR-class Tier-1 checks. OMP native discovery stops at the nearest
+# non-empty ancestor `.omp` directory even when required files are absent, so a
+# partial/dangling/wrong/non-symlink Trellis-owned `.omp` surface silently
+# yields an unparented OMP session — the same incident-#1 class as a broken
+# .claude/rules link. All five paths are machine-local absolute symlinks:
+#   .omp/AGENTS.md -> <project>/CLAUDE.md
+#   .omp/skills    -> <canonical>/core-rules/skills
+#   .omp/commands  -> <canonical>/core-rules/commands
+#   .omp/agents    -> <canonical>/core-rules/agents
+#   .omp/hooks     -> <canonical>/core-rules/omp/hooks
+# Whole-directory links are deliberate (new canonical skills/commands/agents/
+# adapters appear without re-running onboarding), so the manifest checks
+# validate the RESOLVED canonical contents, not a snapshot list.
+# ===========================================================================
+
+# Expected literal target for an OMP surface path. Prints the expected absolute
+# target, or empty for an unknown path. Helper shared by hc_omp_symlinks and
+# doctor.sh's --fix rm re-walk (bash 3.2: no arrays of pairs).
+#
+# Canonical control-plane exception (steered 2026-08-09): when the checked
+# project IS the canonical clone itself (realpath-equal to trellis_root) and
+# the canonical root carries no CLAUDE.md, the project overlay IS the parent
+# rules file — .omp/AGENTS.md links <trellis_root>/core-rules/CLAUDE.md and no
+# parent import applies (see hc_omp_project_import). Ordinary projects always
+# link their own <project>/CLAUDE.md.
+hc_omp_expected_target() {
+  local proj="$1" canon="$2" p="$3"
+  case "$p" in
+    AGENTS.md)
+      local proj_real canon_real
+      proj_real="$(cd "$proj" 2>/dev/null && pwd -P || printf '%s' "$proj")"
+      canon_real="$(cd "$canon" 2>/dev/null && pwd -P || printf '%s' "$canon")"
+      if [ "$proj_real" = "$canon_real" ] && [ ! -f "$canon/CLAUDE.md" ]; then
+        printf '%s/core-rules/CLAUDE.md' "$canon"
+      else
+        printf '%s/CLAUDE.md' "$proj"
+      fi
+      ;;
+    skills)    printf '%s/core-rules/skills' "$canon" ;;
+    commands)  printf '%s/core-rules/commands' "$canon" ;;
+    agents)    printf '%s/core-rules/agents' "$canon" ;;
+    hooks)     printf '%s/core-rules/omp/hooks' "$canon" ;;
+  esac
+}
+
+# hc_omp_symlinks <project> <canonical>
+# ERROR if any of the five OMP surface paths is missing, not a symlink,
+# wrong-target, or dangling. The literal readlink target must equal the
+# expected absolute path (machine-local, generated from the configured
+# trellis_root / project root) — a stale cross-machine target is exactly
+# incident #1's shape. First failure wins; the message names the path.
+hc_omp_symlinks() {
+  local proj="$1" canon="$2"
+  local p link expected target
+  for p in AGENTS.md skills commands agents hooks; do
+    link="$proj/.omp/$p"
+    expected="$(hc_omp_expected_target "$proj" "$canon" "$p")"
+    if [ ! -L "$link" ]; then
+      if [ -e "$link" ]; then
+        echo "omp: .omp/$p exists but is not a symlink — OMP reads a policy copy, not the live Trellis link"
+      else
+        echo "omp: .omp/$p missing — OMP session has no Trellis surface"
+      fi
+      return "$HC_ERROR"
+    fi
+    target="$(readlink "$link")"
+    if [ "$target" != "$expected" ]; then
+      echo "omp: .omp/$p → '$target' (expected '$expected') — stale/wrong target"
+      return "$HC_ERROR"
+    fi
+    if [ ! -e "$link" ]; then
+      echo "omp: .omp/$p → '$target' is a dangling symlink"
+      return "$HC_ERROR"
+    fi
+  done
+  echo "omp: all 5 surface links resolve to exact canonical targets"
+  return "$HC_OK"
+}
+
+# hc_omp_target_kinds <project> <canonical>
+# ERROR if a resolved OMP link is the wrong target kind (AGENTS.md must be a
+# regular file; the four canonical links must be directories) or if a canonical
+# link's REALPATH escapes the canonical root — the containment half of the
+# contract (e.g. a `core-rules/skills` that is itself a symlink out of
+# trellis_root passes the literal-target check but must still fail here).
+hc_omp_target_kinds() {
+  local proj="$1" canon="$2"
+  local p link canon_real target_real
+  for p in AGENTS.md skills commands agents hooks; do
+    link="$proj/.omp/$p"
+    [ -L "$link" ] || continue  # missing/wrong/dangling handled by hc_omp_symlinks
+    if [ "$p" = "AGENTS.md" ]; then
+      if [ ! -f "$link" ]; then
+        echo "omp: .omp/AGENTS.md resolves to a non-file target — OMP overlay must be a file"
+        return "$HC_ERROR"
+      fi
+      continue
+    fi
+    if [ ! -d "$link" ]; then
+      echo "omp: .omp/$p resolves to a non-directory target — canonical directory link must be a directory"
+      return "$HC_ERROR"
+    fi
+    # Canonical realpath containment: the RESOLVED target must stay under the
+    # canonical root's own realpath. `cd && pwd -P` normalizes /var vs
+    # /private/var so the two spellings cannot diverge.
+    canon_real="$(cd "$canon" && pwd -P 2>/dev/null || printf '%s' "$canon")"
+    target_real="$(cd "$link" && pwd -P 2>/dev/null || printf '%s' "$link")"
+    case "$target_real" in
+      "$canon_real"/*) ;;
+      *)
+        echo "omp: .omp/$p resolves to '$target_real' OUTSIDE the canonical root '$canon_real' — links must stay under trellis_root"
+        return "$HC_ERROR"
+        ;;
+    esac
+  done
+  echo "omp: target kinds correct and canonical links stay under trellis_root"
+  return "$HC_OK"
+}
+
+# hc_omp_project_import <project> <canonical>
+# ERROR-class OMP parent-import check. .omp/AGENTS.md resolves the project's
+# CLAUDE.md (validated by hc_omp_symlinks); that file must carry the canonical
+# @-import as its FIRST import, resolving to <canonical>/core-rules/CLAUDE.md.
+# OMP installs no RULES.md and has no symlinked rules file — the AGENTS.md
+# @-import is the ONLY channel for parent rules, so a missing or wrong first
+# import is an inheritance break (ERROR), not a degraded warning.
+#
+# Canonical control-plane exception: when the checked project IS the canonical
+# clone (realpath-equal) and the canonical root has no CLAUDE.md, .omp/AGENTS.md
+# IS the parent rules file — there is no parent above it to import, so the
+# check passes without inspecting an import line.
+hc_omp_project_import() {
+  local proj="$1" canon="$2"
+  local proj_real canon_real
+  proj_real="$(cd "$proj" 2>/dev/null && pwd -P || printf '%s' "$proj")"
+  canon_real="$(cd "$canon" 2>/dev/null && pwd -P || printf '%s' "$canon")"
+  if [ "$proj_real" = "$canon_real" ] && [ ! -f "$canon/CLAUDE.md" ]; then
+    echo "omp-import: canonical control-plane project — .omp/AGENTS.md IS core-rules/CLAUDE.md (no parent import applies)"
+    return "$HC_OK"
+  fi
+  local claudemd="$proj/CLAUDE.md"
+  local expected="$canon/core-rules/CLAUDE.md"
+  if [ ! -f "$claudemd" ]; then
+    echo "omp-import: project CLAUDE.md (target of .omp/AGENTS.md) missing — OMP session has no overlay at all"
+    return "$HC_ERROR"
+  fi
+  # First @-import line (leading whitespace allowed), mirroring the
+  # hc_import_resolves extraction but restricting to the FIRST match.
+  local first_import path
+  first_import="$(grep -E '^[[:space:]]*@' "$claudemd" 2>/dev/null | head -n 1)"
+  if [ -z "$first_import" ]; then
+    echo "omp-import: no @-import in project CLAUDE.md — OMP session inherits NO parent rules (AGENTS.md is the only channel)"
+    return "$HC_ERROR"
+  fi
+  # Strip leading whitespace and the leading @; trim trailing whitespace.
+  path="${first_import#"${first_import%%[![:space:]]*}"}"
+  path="${path#@}"
+  path="${path%"${path##*[![:space:]]}"}"
+  if [ "$path" = "$expected" ]; then
+    echo "omp-import: first @-import → canonical core-rules/CLAUDE.md"
+    return "$HC_OK"
+  fi
+  echo "omp-import: first @-import → '$path' (expected '$expected') — OMP parent chain broken"
+  return "$HC_ERROR"
+}
+
+# hc_omp_manifests <project> <canonical>
+# ERROR if the RESOLVED canonical manifest layout fails OMP discovery:
+#   skills   — one-level <skills-root>/<name>/SKILL.md entries, each with a
+#              `description:` frontmatter key; a missing SKILL.md or a
+#              description-less one silently vanishes from discovery.
+#   commands — .omp/commands/*.md, each with a `description:` frontmatter key.
+#   agents   — the canonical agents dir is being EMPTIED (the custom
+#              fable/opus/codex/lane agents are GPTX-era and removed; only a
+#              .gitkeep remains). An EMPTY agents target is healthy; ANY
+#              discoverable *.md is an ERROR — a legacy agent that would still
+#              be discovered by OMP (first-win by name) and must be removed.
+# Non-.md entries under commands/agents (e.g. templates/) are ignored by OMP
+# discovery and are not flagged. Reads the canonical dirs directly: the links
+# were already exact-target-validated, so the resolved dirs ARE these. The
+# <project> arg is part of the standard Tier-1 signature but unused here.
+hc_omp_manifests() {
+  local canon="$2"
+  local entry bad=""
+  if [ -d "$canon/core-rules/skills" ]; then
+    for entry in "$canon/core-rules/skills"/*; do
+      [ -e "$entry" ] || continue
+      if [ ! -d "$entry" ]; then
+        bad="$bad skills:$(basename "$entry")"
+        continue
+      fi
+      if [ ! -f "$entry/SKILL.md" ]; then
+        bad="$bad skills:$(basename "$entry")/SKILL.md"
+        continue
+      fi
+      if ! grep -qE '^description:' "$entry/SKILL.md" 2>/dev/null; then
+        bad="$bad skills:$(basename "$entry")/SKILL.md"
+      fi
+    done
+  else
+    bad="$bad skills-dir-missing"
+  fi
+  if [ -d "$canon/core-rules/commands" ]; then
+    for entry in "$canon/core-rules/commands"/*.md; do
+      [ -e "$entry" ] || continue
+      if ! grep -qE '^description:' "$entry" 2>/dev/null; then
+        bad="$bad commands:$(basename "$entry")"
+      fi
+    done
+  else
+    bad="$bad commands-dir-missing"
+  fi
+  if [ -d "$canon/core-rules/agents" ]; then
+    for entry in "$canon/core-rules/agents"/*.md; do
+      [ -e "$entry" ] || continue
+      bad="$bad agents:$(basename "$entry")"
+    done
+  else
+    bad="$bad agents-dir-missing"
+  fi
+  if [ -n "$bad" ]; then
+    echo "omp-manifests: OMP discovery broken —${bad# }"
+    return "$HC_ERROR"
+  fi
+  echo "omp-manifests: canonical skill/command/agent manifests satisfy OMP discovery"
+  return "$HC_OK"
+}
+
+# hc_omp_adapter <project> <canonical>
+# ERROR if the canonical OMP hook adapter is absent. .omp/hooks resolves to
+# <canonical>/core-rules/omp/hooks (validated by hc_omp_symlinks); the adapter
+# factory must exist at pre/trellis.ts. STATIC existence check only — doctor
+# NEVER invokes node/tsx/omp to load it (read-only contract; loadability is the
+# rollout's smoke test, not doctor's). The <project> arg is part of the
+# standard Tier-1 signature but unused here.
+hc_omp_adapter() {
+  local canon="$2"
+  local adapter="$canon/core-rules/omp/hooks/pre/trellis.ts"
+  if [ ! -f "$adapter" ]; then
+    echo "omp-adapter: canonical adapter $adapter missing — OMP hooks surface unlinked"
+    return "$HC_ERROR"
+  fi
+  echo "omp-adapter: canonical adapter present (pre/trellis.ts)"
+  return "$HC_OK"
 }
 
 # Canonical one-line fix for an unscoped Turbo `.next/**` outputs glob. SINGLE

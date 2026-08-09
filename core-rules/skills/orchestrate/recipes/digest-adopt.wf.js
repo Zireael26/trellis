@@ -75,9 +75,9 @@ const RECIPE_NAME = 'digest-adopt'
 const SAFETY_MAX_ITERATIONS = 12
 const SAFETY_BUDGET_CEILING_USD = 60
 
-// Caller-owned capability inputs (`codexAvailable`, `loopSafety`) arrive in
-// `args`; recipes never read project config. Stages without a declared
-// agentType inherit the calling main loop by construction.
+// Caller-owned capability input (`loopSafety`) arrives in `args`; recipes
+// never read project config. Stages without a declared agentType inherit the
+// calling main loop by construction.
 async function settle(id, run) {
   try {
     const value = await run()

@@ -5,7 +5,7 @@
 #   . "$(dirname "$0")/lib/config-load.sh"
 #   echo "$TRELLIS_ROOT"     # /Users/.../projects/trellis-instance
 #   echo "$PROJECTS_ROOT"    # /Users/.../projects/personal
-#   echo "${HARNESSES[@]}"   # claude codex
+#   echo "${HARNESSES[@]}"   # claude codex omp
 #
 # Resolves the config file by:
 #   1. Walking up from the calling script until trellis.config.json is found.
@@ -88,7 +88,7 @@ _pgcfg_validate() {
   # the fallback enforces).
   if [ "$(jq '.harnesses | if type == "array" then length else 0 end' "$cfg")" -lt 1 ]; then
     echo "config-load: missing required field(s) in $cfg:" >&2
-    echo "  - harnesses (must contain at least one of: claude, codex)" >&2
+    echo "  - harnesses (must contain at least one of: claude, codex, omp)" >&2
     return 1
   fi
   # Optional shared_infra_root still has a non-empty contract. The schema's

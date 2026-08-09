@@ -22,7 +22,7 @@ setup.
    assume it is wrong and look for the input, state, or edge that breaks it. If a
    second model is available, the doubt pass goes to **the other model**
    (cross-model diversity beats self-redundancy — see `docs/codex-routing.md` §2
-   and the `verify-panel` recipe).
+   for the second-opinion routing).
 4. **RECONCILE.** Fold what the doubt found back into the claim: strengthen it,
    scope it down, or drop it. Record the reconciliation, not just the verdict.
 5. **STOP.** **Bounded to 3 cycles.** If the claim is not settled after three
@@ -32,8 +32,9 @@ setup.
 
 ## When to use
 
-- Before acting on a **hard / `critical`** finding (pair it with `verify-panel`
-  for the cross-model leg).
+- Before acting on a **hard / `critical`** finding (run it through the
+  `code-review-subagent` floor and, where a second-model opinion is wanted,
+  route the review leg to another model per `docs/codex-routing.md` §2).
 - Before shipping a claim whose being-wrong is expensive (a security assertion, a
   "this is backward-compatible", a "the tests prove X").
 - Inside `analyze` / `security-gate` where a verdict must survive an adversary.
@@ -94,7 +95,6 @@ treat the agent as a thought partner rather than an executor.
 
 ## Relationship to other surfaces
 
-- `verify-panel` recipe — the parallel, two-model realization of one DOUBT pass.
 - `advisor` — a single stronger-reviewer DOUBT pass over your whole transcript.
 - `code-review-subagent` — the automated DOUBT pass over an edit-heavy diff.
 - `source-driven-development` — DOUBT specialized to framework claims (verify

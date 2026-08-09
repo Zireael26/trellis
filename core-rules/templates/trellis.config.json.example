@@ -1,6 +1,6 @@
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Example Trellis configuration. Copy to repo root as trellis.config.json, then fill in absolute paths and identity. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude' and 'codex'.",
+  "comment": "Example Trellis configuration. Copy to repo root as trellis.config.json, then fill in absolute paths and identity. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude', 'codex', and 'omp'.",
 
   "trellis_root": "/ABSOLUTE/PATH/TO/trellis-instance",
   "projects_root": "/ABSOLUTE/PATH/TO/projects",
@@ -10,7 +10,7 @@
   "maintainer_name": "Your Name",
   "github_user": "your-github-handle",
 
-  "harnesses": ["claude", "codex"],
+  "harnesses": ["claude", "codex", "omp"],
 
   "autonomy_default": 3,
   "comment_autonomy_default": "Optional. Fleet autonomy level 1–5; default 3 (current Trellis behavior). 1=pedagogical, 2=cautious, 3=standard, 4=initiative, 5=autonomous. Per-project override via <project>/.trellis.config.json autonomy field. Presets may clamp via autonomy_ceiling.",
@@ -38,11 +38,6 @@
     "free_space_floor_gb": 30,
     "cache_ceiling_gb": 20,
     "skip_projects": []
-  },
-
-  "comment_codex_fanout": "Optional. Central Codex-slot ceiling for codex-fanout. The caller must read this positive integer and pass it explicitly as args.codexCap; the recipe has no baked Codex fallback. Canonical mutation waves separately default to maxParallel=2, including Claude legs; larger mutation waves require the documented justified two-target pilot receipt.",
-  "codex_fanout": {
-    "concurrency": 2
   },
 
   "comment_mandatory_pipeline": "Optional (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff over spec_required_diff_lines cannot be pushed without ONE of: a spec triad added on this branch (+ interview artifact), a size-capped `/surgical` declaration (<= surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push (equal on Claude + Codex by construction) with a Stop-hook early-warning. Default OFF: absence or enabled:false is byte-identical to prior behavior; a present-but-malformed block fails CLOSED. Leave enabled:false until your team is ready to require specs for feature-sized changes.",

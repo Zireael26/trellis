@@ -13,7 +13,7 @@ setup() {
   cat > "$FIXTURES/typed.wf.js" <<'JS'
 const receipt = await settle('work', () => agent(
   prompt(),
-  { agentType: 'codex-worker', label: 'work' },
+  { agentType: 'code-reviewer', label: 'work' },
 ))
 JS
 

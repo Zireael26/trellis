@@ -15,9 +15,9 @@ generation. Operator directive 2026-07-10.
 **What replaced racing.** Pick the leg per unit from the routing table
 (`docs/codex-routing.md §2`) and commit to it. If the chosen leg fails or
 degrades, the standard degrade path re-dispatches the unit — sequentially,
-never concurrently — to the other leg. Cross-model *review* of one produced
-diff (verify-panel) is not duplication: generation happens once; only judgment
-is duplicated, at a fraction of the cost.
+never concurrently — to the other leg. Independent review of one produced diff
+is not duplication: generation happens once; only judgment is duplicated, at a
+fraction of the cost.
 
 **History.** Race-the-legs (launch both legs, first verify-pass wins) shipped
 in spec 013 and won its one recorded outing (013 plan authoring, pilot-ledger
@@ -123,13 +123,12 @@ xhigh with multi-agent machinery engaged — receipts in
   2026-07-10). Declare a per-unit token ceiling and check it against the
   `turn.completed` usage in the captured full JSONL receipt; a breach halts
   further ultra dispatch for the run.
-- **Inside `.wf.js` recipes: still hard-reject.** The recipe surface
-  (codex-worker → companion ≤ 1.0.5) caps at xhigh, and ultra's prompt-nudged
-  delegation is invisible and non-resumable inside a deterministic workflow.
-  A workflow agent that holds Bash must never invoke `codex exec` itself at
-  any effort — Codex dispatch belongs to the orchestrator, through
-  codex-worker. Revisit when the companion accepts it AND per-subagent
-  visibility exists.
+- **Inside `.wf.js` recipes: hard-reject direct Codex dispatch.** Workflow
+  recipes run every stage on the orchestrator's inherited model. A workflow
+  agent that holds Bash must never invoke `codex exec` itself; deliberate
+  direct Codex dispatch remains an attended main-loop operation. Revisit only
+  when the workflow engine exposes explicit per-stage model selection,
+  resumable visibility, and equivalent receipt accounting.
 
 **Guardrails.** Counts ×4 against any concurrency-derived budget arithmetic,
 cannot oversubscribe a wave, requires a named justification, never a default,

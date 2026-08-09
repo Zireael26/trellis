@@ -80,24 +80,35 @@ teardown() {
 # Lay down the canonical inheritance surface. Unlike doctor.bats's builder, this
 # ALSO seeds core-rules/commands/templates/primer-index-template.md, which
 # onboard-project.sh REQUIRES (it exits 1 before seeding anything if absent).
+# The skills/commands manifests carry OMP discovery frontmatter, the agents dir
+# holds only a .gitkeep (empty is healthy — the GPTX-era custom agents were
+# removed), the OMP adapter stub exists (hc_omp_manifests / hc_omp_adapter
+# require them), and core-rules/omp/hooks is present (onboard's OMP preflight
+# requires the dir).
 # Does NOT git init — that is git_init_canonical_main's job, run AFTER any
 # per-test canonical augmentation so the committed tree stays clean (a dirty
 # canonical trips Tier-0 ERROR, which gates ALL [auto] repair off).
 build_canonical_tree() {
   mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands/templates" \
-    "$CANON/core-rules/agents"
+    "$CANON/core-rules/agents" "$CANON/core-rules/omp/hooks/pre"
   printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
-  printf '# codex worker fixture\n' > "$CANON/core-rules/agents/codex-worker.md"
+  # The canonical agents dir is EMPTY (the GPTX-era custom agents were removed;
+  # only .gitkeep remains) — an empty .omp/agents target is healthy.
+  printf '' > "$CANON/core-rules/agents/.gitkeep"
   local s c
   for s in $CANON_SKILLS; do
     mkdir -p "$CANON/core-rules/skills/$s"
-    printf 'x\n' > "$CANON/core-rules/skills/$s/SKILL.md"
+    printf -- '---\nname: %s\ndescription: fixture skill %s\n---\n\nx\n' \
+      "$s" "$s" > "$CANON/core-rules/skills/$s/SKILL.md"
   done
   for c in $CANON_COMMANDS; do
-    printf 'x\n' > "$CANON/core-rules/commands/$c.md"
+    printf -- '---\ndescription: fixture command %s\n---\n\nx\n' \
+      "$c" > "$CANON/core-rules/commands/$c.md"
   done
   printf '# primer index template\n' \
     > "$CANON/core-rules/commands/templates/primer-index-template.md"
+  printf 'export const trellisAdapter = () => ({});\n' \
+    > "$CANON/core-rules/omp/hooks/pre/trellis.ts"
   cat > "$CANON/registry.md" <<EOF
 # Project registry
 
@@ -156,7 +167,7 @@ git_init_canonical_main() {
 }
 
 write_config() {
-  local harnesses_json="${1:-\"claude\"}"
+  local harnesses_json="${1:-\"claude\",\"omp\"}"
   local shared_root="${2:-}"
   local shared_line=""
   if [ -n "$shared_root" ]; then
@@ -184,11 +195,12 @@ build_shared_infra_fixture() {
 
 # Build a fully healthy "healthy" project: real git repo (onboard requires
 # $PROJECT/.git), good rules symlink, canonical @-import, full skills + commands
-# sets, and a .claude/settings.json. The git init is what lets onboard run when
-# a later mutation breaks part of the surface.
+# sets, a .claude/settings.json, and the five OMP surface links (design
+# 2026-08-09). The git init is what lets onboard run when a later mutation
+# breaks part of the surface.
 build_healthy_project() {
   local hp="$PROJECTS/healthy"
-  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands"
+  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands" "$hp/.omp"
   ln -s "$CANON/core-rules/CLAUDE.md" "$hp/.claude/rules/trellis.md"
   local s c
   for s in $CANON_SKILLS; do
@@ -203,6 +215,12 @@ build_healthy_project() {
 @$CANON/core-rules/CLAUDE.md
 EOF
   printf '{ "hooks": {} }\n' > "$hp/.claude/settings.json"
+  # OMP surface: the five exact live links in the shared contract.
+  ln -s "$hp/CLAUDE.md" "$hp/.omp/AGENTS.md"
+  ln -s "$CANON/core-rules/skills" "$hp/.omp/skills"
+  ln -s "$CANON/core-rules/commands" "$hp/.omp/commands"
+  ln -s "$CANON/core-rules/agents" "$hp/.omp/agents"
+  ln -s "$CANON/core-rules/omp/hooks" "$hp/.omp/hooks"
   (
     cd "$hp"
     git init -q -b main
@@ -700,4 +718,39 @@ add_linked_worktree() {
   [[ "$output" == *"Tier-0"* ]]
   # The worktree must remain un-seeded.
   [ ! -d "$WT_PATH/.claude" ]
+}
+
+# ===========================================================================
+# OMP surface (design 2026-08-09) — the --fix PLAN for a broken .omp link.
+# Wrong-target OMP links follow the same rm-then-onboard path as the rules
+# symlink (onboard never-clobbers, so the bad link must be rm'd first). The
+# actual re-seed is onboard's contract (covered by onboard's own tests); here
+# we pin the doctor-side plan and the read-only guarantee.
+# ===========================================================================
+
+@test "OMP --fix --dry-run: wrong-target .omp link is planned as rm + onboard, and nothing is touched" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+  # Repoint .omp/agents at a dead cross-machine path (incident #1 shape).
+  rm -f "$PROJECTS/healthy/.omp/agents"
+  ln -s "/Users/helios/claude/se-core-template/core-rules/agents" \
+        "$PROJECTS/healthy/.omp/agents"
+  local before after
+  before="$(snapshot_project "$PROJECTS/healthy")"
+
+  run_doctor --fix --dry-run
+  [ "$status" -eq 0 ]
+  # The plan names the rm of the known-bad OMP link AND the onboard re-seed.
+  [[ "$output" == *"[auto] rm "*".omp/agents"* ]]
+  [[ "$output" == *"onboard-project.sh"* ]]
+  [[ "$output" == *"nothing applied"* ]]
+
+  after="$(snapshot_project "$PROJECTS/healthy")"
+  # READ-ONLY oracle: byte-for-byte + symlink-target identical before vs after.
+  [ "$before" = "$after" ]
+  # The bad link in particular was NOT touched.
+  [ "$(readlink "$PROJECTS/healthy/.omp/agents")" = \
+    "/Users/helios/claude/se-core-template/core-rules/agents" ]
 }
