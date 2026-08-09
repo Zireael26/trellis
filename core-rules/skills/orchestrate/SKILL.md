@@ -79,20 +79,10 @@ change, and self-deactivate where the tool is absent.
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
 
-**Executor Agent selection.** When GPTX Agent capability is available *and*
-`gptx.enabled` is set (spec 028; default off — with it off there are no GPT
-profiles to dispatch to and this paragraph is inert), generic Workflow dispatch
-uses the native GPT profiles: `gpt-mid` for mechanical or strong-oracle units,
-`gpt-high` for moderately complex cross-file units, `gpt-sol` for weak-oracle or
-consequential units, and `gpt-terra` for large sustained output against a
-pre-existing oracle. Terra's mandatory pre-mutation advisory call was retired
-2026-07-30 for delegated units — pair it with an advisor when one is available
-and say so when one is not. An explicit provider or model selection
-wins; a rejected, unavailable, null, or failed selected lane fails the receipt and
-stays visible. Never rewrite it or silently substitute the OpenAI Codex plugin
-companion. `codex-worker`-specific recipes and mechanics are optional legacy
-compatibility and run only when the operator explicitly selected and configured
-that route. Generic Codex CLI harness support remains independent.
+**Caller-resolved capability inputs.** Recipe bodies do not read project config.
+The caller must resolve and pass `codexAvailable` for Codex-capable recipes and
+caller-resolved `loopSafety` where a recipe inherits safety values. Omission is a
+known safe degrade: those stages inherit the calling main loop exactly.
 
 ## Stage receipts and fail-closed gates
 
@@ -218,15 +208,16 @@ Full catalog: [`references/patterns.md`](references/patterns.md).
 
 ## Dual-harness speed doctrine
 
-When both an orchestration surface and a GPT executor are available, wall-clock
-speed comes from **topology, not effort**. Two bright lines hold regardless of
-topology: never dispatch the same work order to more than one leg (no duplicate
-work), and prefer native `gpt-*` Agent types for generic Workflow units when GPTX
-exposes them. If the operator explicitly selected and configured the optional
-legacy OpenAI Codex plugin companion, its Workflow units dispatch through the
-blocking `codex-worker` agent only — never the fire-and-forget rescue path, whose
-backgrounding breaks `parallel()`/`pipeline()` barriers. Patterns, guardrails, and
-receipt contracts: [`references/speed-doctrine.md`](references/speed-doctrine.md).
+When both an orchestration surface and a subagent executor are available,
+wall-clock speed comes from **topology, not effort**. Two bright lines hold
+regardless of topology: never dispatch the same work order to more than one leg
+(no duplicate work), and keep generic Workflow units on one agent type per unit
+shape so receipts and prefix caches stay uniform. If the operator explicitly
+selected and configured the optional legacy OpenAI Codex plugin companion, its
+Workflow units dispatch through the blocking `codex-worker` agent only — never
+the fire-and-forget rescue path, whose backgrounding breaks
+`parallel()`/`pipeline()` barriers. Patterns, guardrails, and receipt contracts:
+[`references/speed-doctrine.md`](references/speed-doctrine.md).
 
 ## Proactive-loop shape + piloting
 

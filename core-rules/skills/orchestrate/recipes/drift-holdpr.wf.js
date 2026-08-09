@@ -46,6 +46,16 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'drift-holdpr'
+const SAFETY_MAX_ITERATIONS = 25
+const SAFETY_BUDGET_CEILING_USD = 40
+
+// The caller resolves caller-owned capability inputs (`codexAvailable`,
+// `loopSafety`); recipes never read project config. Stages without a declared
+// agentType inherit the calling main loop by construction.
 async function settle(id, run) {
   try {
     const value = await run()
@@ -101,10 +111,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactSuccess = successIds.length === 2
     && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('drift-holdpr: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('drift-holdpr: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('drift-holdpr: maxParallel > 2 requires a positive existing safety budget')
@@ -197,6 +207,7 @@ phase('Discover')
 let drifts = args.drifts
 if (!drifts || drifts.length === 0) {
   const discoveryReceipt = await settle('discover-drift', async () => {
+    // routing: inherit — audit discovery is a bounded read, stays on the main loop's model
     const discovered = await agent(
       [
         'Read the most recent parent-hook-drift audit report under the control-plane audits/.',
@@ -222,7 +233,7 @@ if (!drifts || drifts.length === 0) {
 //      one branch/PR, so parallel units cannot collide or silently drop files.
 //   3. max_iterations cap: bounds the project count so a runaway list can't open
 //      dozens of PRs — the loop-safety ceiling is enforced, not just declared.
-const MAX = meta.safety.max_iterations
+const MAX = SAFETY_MAX_ITERATIONS
 const mechanical = drifts.filter((d) => d.mechanical === true)
 const grouped = new Map()
 for (const drift of mechanical) {
@@ -244,11 +255,8 @@ if (capped.length < remediable.length) {
 log('drift-holdpr: ' + mechanical.length + ' mechanical drift file(s) grouped into ' + capped.length + ' project HOLD PR(s)')
 
 // --- Phase: Remediate -----------------------------------------------------
-// One worktree-isolated agent per project. Stays on the orchestrator (Claude):
-// the unit needs a structured VERDICT + `gh pr create`, and the codex-rescue
-// forwarder returns raw stdout (no schema) — so routing it to Codex would break
-// the verdict contract (same reason codex-executor omits schema on its Codex
-// leg). The Component-D risk here is the unattended PR-opening, not the executor.
+// One worktree-isolated agent per project. Bulk mechanical drift remediation
+// uses the throughput lane while preserving the structured VERDICT contract.
 // HOLD PR only, never merge, never a project's main.
 phase('Remediate')
 const projectIds = assertUniqueExpectedIds('Remediate', capped.map((group) => String(group.project)))
@@ -259,6 +267,7 @@ const mutationScopeFingerprint = JSON.stringify(capped.map((group) => ({
 const mutationCap = resolveMutationParallelism(projectIds, mutationScopeFingerprint)
 log('drift-holdpr: mutation maxParallel=' + mutationCap)
 const verdictReceipts = await runInWaves(capped, mutationCap, 'Remediate', async (group) => {
+  // routing: inherit — mechanical remediation; the main loop's model owns the unit
   const verdict = await agent(remediatePrompt(group), {
     label: 'drift:' + group.project,
     phase: 'Remediate',

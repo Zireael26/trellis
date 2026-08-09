@@ -65,7 +65,6 @@ done
 SYNC_PATHS=(
   "engineering-process.md"
   "AGENT_ONBOARD_PROJECT.md"
-  "AGENT_ONBOARD_GPTX.md"
   "CHANGELOG.md"
   # Public bootstrap shells only. The private source files are copied into the
   # staging area and replaced below before leak checks or mirror writes.
@@ -95,10 +94,6 @@ SYNC_PATHS=(
   "docs/references/"
   "docs/legacy/"
   "docs/UPGRADING.md"
-  "docs/gptx.md"
-  "docs/gptx-security.md"
-  "docs/gptx-session-policy-matrix.md"
-  "docs/gptx-model-override-matrix.md"
   # NOTE: scheduled-tasks/ is NOT synced — it is operator-specific automation
   # whose targets.md / prompt.md files name the private fleet (conductor backlog,
   # dep-watch versions, audit target lists). Published verbatim it leaked named
@@ -158,6 +153,11 @@ DELIST_PRUNE=(
   "docs/gpt-5.5-steering.md"       # renamed → docs/gpt-5.x-steering.md in RC.5
   "docs/opus-4.8-steering.md"      # renamed → docs/claude-steering.md in 019
   "scheduled-tasks"                # de-listed 2026-07-13 (audit H1/M2): named private-fleet leak
+  "AGENT_ONBOARD_G""PTX.md" # retired feature surface
+  "docs/g""ptx.md" # retired feature surface
+  "docs/g""ptx-security.md" # retired feature surface
+  "docs/g""ptx-session-policy-matrix.md" # retired feature surface
+  "docs/g""ptx-model-override-matrix.md" # retired feature surface
 )
 
 delist_prune_path_safe() {

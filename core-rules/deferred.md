@@ -102,6 +102,20 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Why defer:** both sources are multi-tenant SaaS with RLS, so this may be architecture-class-specific rather than universal. Queue and watch for a third multi-tenant project before lifting.
 **Lift when:** a third multi-tenant project independently adopts an explicit-tenant-filter / per-session-context rule.
 
+### `native-mobile` security-gate profile
+
+**Source:** prana (n=1).
+**What:** a security-gate stack profile for native/mobile projects. The canonical list is `web-next | web-static | web-rag-llm | monorepo-saas | unity-game` — all web- or game-shaped. `onboard-project.sh` guessed `web-next` for a Swift package with no web surface at all, which is simply wrong; prana overrides to `web-static` because it at least asserts the true things (no server, no LLM endpoint).
+**Why defer:** one witness. Inventing a profile from a single Swift package would bake in whatever prana happens to need — and prana's own shape is about to change when its Cloudflare Worker lands, at which point `web-rag-llm` may be the honest answer and the native gap narrows to the app target alone.
+**Lift when:** a second and third native/mobile project (Swift, Kotlin, Flutter — `provakil-competitor` plans Flutter) independently need it. Note the guess in `guess_profile()` should be fixed at the same time, so onboarding stops proposing a web profile for a native project.
+
+### Gated-diff exclusion globs miss Swift test files
+
+**Source:** prana (n=1).
+**What:** the mandatory-pipeline gated diff excludes `*_test.*`, `*.test.*`, `*.spec.*`, `*.bats`. Swift's convention is `FooTests.swift` — no separator before `Tests` — so **no Swift test file matches any exclusion**, and the whole `Tests/` tree counts toward `spec_required_diff_lines`. prana's first increment measured 673 gated lines (435 source + 238 test) rather than the ~435 the exclusions imply. At that size `/surgical` is arithmetically unavailable against its 400-line cap, so the route is decided by an accident of naming convention.
+**Why defer:** the fix is a one-line glob addition, but the *class* of problem is wider — Go's `_test.go` matches, Python's `test_*.py` does not, Kotlin's `FooTest.kt` does not. Patching Swift alone at n=1 treats the symptom. Worth one deliberate pass over per-language test-naming conventions rather than a glob per project that trips over it.
+**Lift when:** a second language's test convention is found to miss the globs — at which point fix the whole set at once. Until then the effect is conservative (more work routed through specs, never less), so it is a distortion rather than a hole.
+
 ---
 
 ## Meta

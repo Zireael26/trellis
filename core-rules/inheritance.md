@@ -64,14 +64,6 @@ use the same machine-local symlink pattern as skills and commands:
 
     <project-root>/.claude/agents/<name>.md  →  __TRELLIS_PATH__/core-rules/agents/<name>.md
 
-When GPTX capability is installed and `gptx.enabled` is set (spec 028; default
-off), its canonical executor profiles are `gpt-mid.md`, `gpt-high.md`,
-`gpt-sol.md`, and `gpt-terra.md`; Claude Code resolves the corresponding symlinks
-as native `gpt-mid`, `gpt-high`, `gpt-sol`, and `gpt-terra` Agent types. These are
-the preferred GPT executor identities. The definitions are inert with the switch
-off — a profile nothing routes to is unused, not broken — so a single-subscription
-project inheriting them is harmless.
-
 `codex-worker.md` is optional legacy compatibility for projects whose operator
 explicitly installs and selects the OpenAI Codex plugin companion. Such a project
 may inherit it as `<project-root>/.claude/agents/codex-worker.md`, but its absence
@@ -165,7 +157,6 @@ Every one of these points at the same canonical files under `core-rules/commands
 │   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md
 │   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
 │   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md
-│   ├── agents/gpt-{mid,high,sol,terra}.md → /…/trellis/core-rules/agents/…  ← when GPTX is installed
 │   ├── agents/codex-worker.md → /…/trellis/core-rules/agents/codex-worker.md ← optional legacy plugin only
 │   ├── hooks/                                               ← Tier 1+2, Claude-only
 │   └── settings.json
@@ -203,6 +194,45 @@ Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot 
 - The hooks directory and its scripts MUST be tracked in git so the enforcement is visible in repo state and survives a clone.
 
 Reference example: a Unity project using `.githooks/pre-push` with `core.hooksPath = .githooks` should be treated as healthy when `package.json` is absent and the native-hooks fallback is in place. Operator process audits should encode the same exception.
+
+### `commit-msg` — use the native hook, not the husky copy
+
+`core-rules/githooks/commit-msg` validates the conventional-commit header in POSIX `sh` with **no Node dependency**. Non-Node projects MUST copy that one, not `core-rules/husky/commit-msg`.
+
+This was a silent hole, and wider than "non-Node": the husky variant shelled out to `./node_modules/.bin/commitlint` and printed `skipping` when it was absent. A fleet check found commitlint actually installed in only **2 of 7** registered projects — so the hook was reporting success while checking nothing almost everywhere, including Node projects that never installed it. Both canonical variants now run the native check; husky's still prefers commitlint where it genuinely exists, since it reads the project's own config.
+
+The native check is header-only by design (type, optional scope, optional `!`, non-empty description, ≤100 chars, no trailing period) and passes machine-generated headers — merge, revert, fixup/squash/amend — untouched. Body and footer rules stay with commitlint. A check that runs everywhere and catches the common mistake beats a thorough one that runs nowhere.
+
+**Projects already carrying the old copy keep skipping until they re-seed it** — `onboard-project.sh` never overwrites an existing file. lume and prana are both in that state today.
+
+## Canonical clone hygiene
+
+The canonical clone (`trellis_root` in `trellis.config.json`) is a **published surface, not a workspace.** Every registered project resolves its rules, skills, and hooks through absolute paths into it, so that clone's branch and working-tree state are inherited *live* by all of them. Checking out a feature branch there, or leaving an edit uncommitted, silently changes governance for every project and every running session — including hook behaviour, which is the part nobody notices until it misfires.
+
+`trellis-doctor` Tier 0 already checks all three conditions (`on main`, `clean`, `in sync with origin`). A Tier 0 failure is **blocking, not advisory**.
+
+### The rule
+
+- Canonical stays on **`main`, clean, in sync with origin**.
+- All Trellis work happens in a `git worktree`. Never check out a feature branch in the canonical clone.
+- After a Trellis PR merges, fast-forward canonical so projects inherit it.
+
+### Agents enforce this unprompted
+
+Finding canonical off-main or dirty is a **stop-and-fix condition that precedes the task in hand** — not something to report and work around. Recovery, in order:
+
+1. `git add -A && git commit` the working tree as a WIP snapshot. **Prefer this to `git stash`:** a commit stays reachable by branch *and* reflog, survives a failed pop, and does not interact with the shared stash stack that other worktrees can see.
+2. Free `main` if another worktree holds it, then `git worktree add <path> <branch>` for the parked work.
+3. In the canonical clone: `git checkout main && git merge --ff-only origin/main`.
+4. In the new worktree: `git reset HEAD~1` (mixed) to restore the exact prior state — tracked files modified, previously-untracked files untracked again.
+
+Verify by comparing dirty-entry count and commits-ahead before and after; they must match. Never discard, never force-push, never resolve this by deleting work.
+
+### What this does not solve
+
+Projects still track `main`, so a bad merge reaches all of them on the next fast-forward. This bounds the blast radius from *any keystroke* to *any merge* — it is not isolation. True immunity needs `trellis_root` pinned to a tag with deliberate roll-forward; adopt that only if a bad merge actually bites.
+
+`~/.claude/agents/` symlinks are the same class of problem: they resolve into the canonical checkout, so a fast-forward there changes agents mid-session for every live session. Use a pinned worktree at `origin/main` for that path if agent stability matters.
 
 ## Worktree inheritance (`git worktree add` re-seeding)
 

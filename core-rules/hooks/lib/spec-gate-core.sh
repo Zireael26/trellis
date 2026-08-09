@@ -29,10 +29,10 @@ SG_DEFAULT_CEILING=400
 SG_TEMPLATE_MIN_BYTES=200
 
 # --- config resolution ------------------------------------------------------
-# ONE parser, N blocks. Every boolean-gated Trellis config block (spec 006
-# `mandatory_pipeline`, spec 028 `gptx`) shares the same resolution order, the
-# same unparseable-config rule, and the same enabled-key validation, so those
-# live here once instead of being re-implemented per block.
+# ONE parser, N blocks. Every boolean-gated Trellis config block shares the
+# same resolution order, the same unparseable-config rule, and the same
+# enabled-key validation, so those live here once instead of being
+# re-implemented per block.
 #
 # Echoes TAB-separated: "<enabled>\t<status>\t<file>"
 #   status: ok | disabled | malformed | nojq
@@ -42,12 +42,9 @@ SG_TEMPLATE_MIN_BYTES=200
 # Args: $1 repo root, $2 block name, $3 optional jq filter evaluated against the
 # block for block-specific key validation — must output true to pass.
 #
-# `enabled=false` is returned for every non-ok status. What false MEANS is the
-# consumer's call, and the two consumers differ: `mandatory_pipeline` escalates
-# `malformed` to a hard block (an opted-in project must not be silently
-# disabled by a typo), whereas `gptx` simply stays off. Both are "fail closed"
-# in their own direction — for a gate, closed is blocking; for a feature that
-# hands out routing instructions, closed is off.
+# `enabled=false` is returned for every non-ok status. The consumer decides
+# what false means; `mandatory_pipeline` escalates `malformed` to a hard block
+# (an opted-in project must not be silently disabled by a typo).
 sg_resolve_block() {
   local root="$1" block="$2" extra="${3:-}" f enabled="" present=0 match=""
   if ! command -v jq >/dev/null 2>&1; then printf 'false\tnojq\t\n'; return; fi
@@ -108,84 +105,6 @@ EOF
   [ -n "$floor" ] || floor=$SG_DEFAULT_FLOOR
   [ -n "$ceiling" ] || ceiling=$SG_DEFAULT_CEILING
   echo "$enabled $floor $ceiling ok"
-}
-
-# --- spec 028: GPTX cross-family routing switch ------------------------------
-# Echoes: "<enabled> <status>" — status: ok | disabled | malformed | nojq.
-# Every non-ok status resolves to OFF. Off is the safe direction here because it
-# can only ever withdraw an instruction to use a lane, never invent one: a
-# single-subscription operator who mistypes the block gets a Trellis that reads
-# as though GPTX never shipped, which is exactly the intended default.
-sg_resolve_gptx() {
-  local out enabled status
-  out=$(sg_resolve_block "$1" gptx)
-  IFS=$'\t' read -r enabled status _ <<EOF
-$out
-EOF
-  case "$status" in
-    ok) echo "$enabled ok" ;;
-    *)  echo "false $status" ;;
-  esac
-}
-
-# Convenience predicate for consumers that only need the boolean.
-sg_gptx_enabled() {
-  local out; out=$(sg_resolve_gptx "$1")
-  [ "${out%% *}" = true ]
-}
-
-# --- spec 030: GPTX directional family routing -------------------------------
-# Echoes: "<default_family> <share_floor> <inline_max> <status>"
-#   status: ok | disabled | malformed | nojq
-#   inline_max: literal "-" when no orchestrator inline limit is configured.
-# A missing routing sub-block under an enabled GPTX switch is a successful (`ok`)
-# resolution to the spec-028 fallback. Every non-ok result, and an off master
-# switch, returns the same fallback triple: "balanced 0.4 -".
-sg_resolve_gptx_routing() {
-  local root="$1" out enabled status file values
-  # Resolve gptx exactly once. Nested validation rides on the winning gptx block
-  # so enabled and routing cannot come from different precedence levels.
-  out=$(sg_resolve_block "$root" gptx '
-        def positive_integer($key):
-            if (has($key) | not) then true
-            else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end)
-            end;
-          if (has("routing") | not) then true
-          else (.routing
-                | type == "object"
-                  and has("default_family")
-                  and (.default_family
-                       | type == "string"
-                         and (. == "gpt" or . == "claude" or . == "balanced"))
-                  and has("share_floor")
-                  and (.share_floor | type == "number" and . > 0 and . <= 1)
-                  and positive_integer("orchestrator_inline_max_lines"))
-          end')
-  IFS=$'\t' read -r enabled status file <<EOF
-$out
-EOF
-  if [ "$status" != ok ]; then
-    echo "balanced 0.4 - $status"; return
-  fi
-  # This same-file enabled check is the sg_gptx_enabled predicate without a
-  # second precedence walk. Routing cannot take effect while the master is off.
-  if [ "$enabled" != true ]; then
-    echo "balanced 0.4 - disabled"; return
-  fi
-  # Avoid `//`: jq treats false as absent. Validation already guarantees all
-  # present values, so explicit has() checks make the fallback path unambiguous.
-  if ! values=$(jq -r '
-      if (.gptx | has("routing")) then
-        [.gptx.routing.default_family,
-         .gptx.routing.share_floor,
-         (if (.gptx.routing | has("orchestrator_inline_max_lines"))
-          then .gptx.routing.orchestrator_inline_max_lines else "-" end)]
-      else ["balanced", 0.4, "-"]
-      end
-      | map(tostring) | join(" ")' "$file" 2>/dev/null); then
-    echo "balanced 0.4 - malformed"; return
-  fi
-  echo "$values ok"
 }
 
 # --- protected branch + diff baseline ---------------------------------------

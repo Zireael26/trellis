@@ -40,4 +40,4 @@ Review remains bounded by one invariant: no required Workflow identity may disap
 - Required stage loss becomes explicit failed run with stable IDs and counts.
 - Optional provider degradation stays visible without failing otherwise valid work.
 - Recipe source grows through repeated local helpers, traded for engine compatibility and reviewable identical semantics.
-- Public mirror publication must rerun from rebased `main`; configured mirror currently contains concurrent GPTX work not present on this independent branch.
+- Public mirror publication must rerun from rebased `main`; configured mirror currently contains concurrent work not present on this independent branch.

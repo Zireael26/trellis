@@ -106,6 +106,13 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'codex-executor'
+const SAFETY_MAX_ITERATIONS = undefined
+const SAFETY_BUDGET_CEILING_USD = undefined
+
 async function settle(id, run) {
   try {
     const value = await run()
@@ -161,10 +168,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactSuccess = successIds.length === 2
     && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('codex-executor: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('codex-executor: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('codex-executor: maxParallel > 2 requires a positive existing safety budget')
@@ -431,6 +438,7 @@ async function dispatchCodex(u) {
 }
 
 function dispatchClaude(u) {
+  // routing: inherit — Claude leg for judgment units and Codex degradation; preserves the orchestrator prompt and tools
   return agent(claudePrompt(u), {
     label: 'claude:' + u.name,
     phase: 'Fan-out',
@@ -449,6 +457,7 @@ let codexAvailable = args.codexAvailable
 if (codexAvailable === undefined) {
   // A dead/skipped probe is an optional provider failure: preserve the receipt,
   // log the optional gate, and resolve the capability to OFF.
+  // routing: inherit — Claude capability probe for the optional Codex leg; keeps provider detection on the orchestrator
   const presenceReceipt = await settle('codex-presence', () => agent(
     [
       'Check whether the local Codex CLI is callable. Run exactly:',
@@ -524,6 +533,7 @@ const artifacts = executed.filter((e) => e.branch)
 const artifactIds = artifacts.map((e) => String(e.unit))
 const reviewReceipts = await parallel(
   artifacts.map((e) => () => settle(String(e.unit), async () => {
+    // routing: inherit — Claude review gate over Codex-produced artifacts; preserves independent cross-model verification
     const verdict = await agent(
       [
         'REVIEW the unit "' + e.unit + '" executed by ' + e.harness + ' on branch ' + e.branch + '.',

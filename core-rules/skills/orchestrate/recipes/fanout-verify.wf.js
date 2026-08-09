@@ -46,6 +46,13 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'fanout-verify'
+const SAFETY_MAX_ITERATIONS = undefined
+const SAFETY_BUDGET_CEILING_USD = undefined
+
 async function settle(id, run) {
   try {
     const value = await run()
@@ -126,10 +133,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactSuccess = successIds.length === 2
     && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('fanout-verify: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('fanout-verify: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('fanout-verify: maxParallel > 2 requires a positive existing safety budget')
@@ -280,6 +287,8 @@ async function reap(t, verdict) {
     return { target: t.name, outcome: 'skipped' }
   }
   try {
+    // Reaping is a tiny bounded git operation with a pre-validated path.
+    // routing: inherit — teardown is mechanical git plumbing, not a unit to re-route
     const result = await agent(reapPrompt(t, worktreePath), { label: 'reap:' + t.name, phase: 'Teardown' })
     return result == null ? null : { target: t.name, outcome: 'attempted' }
   } catch (error) {
@@ -296,6 +305,7 @@ phase('Targets')
 let targets = args.targets
 if (!targets || targets.length === 0) {
   const discoveryReceipt = await settle('resolve-targets', async () => {
+    // routing: inherit — registry discovery is a bounded read, stays on the main loop's model
     const discovered = await agent(
       [
         'Read the control-plane registry.md "Active projects" table.',
@@ -321,6 +331,7 @@ const mutationScopeFingerprint = JSON.stringify({
 const mutationCap = resolveMutationParallelism(targetIds, mutationScopeFingerprint)
 log('fanout-verify: mutation maxParallel=' + mutationCap)
 const verdictReceipts = await runInWaves(targets, mutationCap, 'Fan-out', async (t) => {
+  // routing: inherit — generic work order; the main loop's model owns it
   const verdict = await agent(workPrompt(t), {
     label: 'fanout:' + t.name,
     phase: 'Fan-out',

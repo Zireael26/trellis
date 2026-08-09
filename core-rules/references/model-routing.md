@@ -10,14 +10,6 @@ The short version: the orchestrator holds the large context and delegates
 execution; route on properties you can verify rather than on a general belief
 about which model is smarter.
 
-> **Cross-family routing is a separate, opt-in layer.** Everything below applies
-> to a single-model-family Trellis, which is the default. If `gptx.enabled` is
-> true in `trellis.config.json` — which requires both a Claude subscription and a
-> Codex subscription, plus `scripts/gptx/install.sh` — then
-> `core-rules/references/model-routing-cross-family.md` also applies and adds
-> family allocation on top of this file. With the switch off, that file is not in
-> force and nothing in Trellis routes to a second family.
-
 ## Why this file exists
 
 Given a free choice between comparable options, an orchestrator collapses onto
@@ -62,9 +54,8 @@ A reviewer that shares the author's context shares the author's assumptions, and
 the failure it is most likely to miss is the one the author already talked itself
 past.
 
-This is the single-family form of a rule that has a stronger form when a second
-model family is available; see the cross-family file when the switch is on. The
-rule does not lapse when only one family is present — it changes shape.
+This is the form of the rule regardless of which model families are in reach:
+the rule does not lapse when a second family is unavailable — it changes shape.
 
 Deterministic gates are exempt: a hook, a type checker, or a test suite is
 mechanism, not self-review.
@@ -99,5 +90,4 @@ or instruction-following. The question is never "is this task important" — it 
 
 Related: `core-rules/references/delegation.md` (staging, teammate lifecycle),
 `core-rules/references/model-lanes.md` (name → lane, degrade tiers),
-`core-rules/references/model-prompting-deltas.md` (per-family prompting),
-`core-rules/references/model-routing-cross-family.md` (opt-in, requires `gptx`).
+`core-rules/references/model-prompting-deltas.md` (per-family prompting).

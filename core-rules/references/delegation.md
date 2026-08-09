@@ -19,6 +19,51 @@ holding a live teammate.
 - Keep planning, review, and synthesis on the orchestrator. Those are the stages
   that need the whole picture.
 
+## Which paradigm for parallel work
+
+Prefer **dynamic workflows** when parallelism must not cost correctness: `pipeline()`
+fans out without barriers, a declared `schema` forces structured returns validated at
+the tool-call layer, adversarial-verify and judge-panel patterns are expressible as
+control flow rather than as hope, and resume-from-run makes a failed run cheap to
+re-enter. Named-teammate fan-out trades determinism for interactivity and leaves live
+processes that must be `TaskStop`-ed. Plain subagents are for one-off errands. Reach
+for those two when the work genuinely needs a mailbox or is a single bounded task —
+not for parallel breadth.
+
+Know the enforcement asymmetry before you concentrate work in workflows. A `Workflow`
+call returns **asynchronously, before its stages finish** — metadata lands in
+milliseconds while resolved-model transcripts complete minutes later — so live
+post-spawn model verification sees no resolved models and fails open. Post-hoc
+review over completed stages is the load-bearing surface, not the live hook.
+Untyped stages carry no declared family and so cannot be classified as
+mismatches at all; they are counted as inherited. Run the review after a fan-out;
+do not read hook silence as a pass.
+
+## What a delegated agent costs, and what actually reduces it
+
+Measured 2026-08-03 on the Claude lane, one session, identical trivial prompts.
+
+A subagent's prompt is dominated by its tool schemas: ~16K tokens for a three-tool
+agent against ~95K for one inheriting the full set. Do not decompose that spread
+further — the per-agent instruction body varies too and is mixed into it.
+
+**Prefix caching makes trimming that a dead lever.** The second agent of a type reads
+~85–95% of its prefix from cache; three agents launched in one message showed the
+first writing the prefix and the other two hitting at 95%, so concurrent spawns do not
+stampede. A marginal fan-out agent costs ~13% of the first — ten agents cost ~2.2x one
+agent, not 10x. **Never restrict an agent's `tools:` frontmatter to save tokens**:
+caching already removes most of what that targets, a static allowlist makes an
+implementer fail when it needs a tool it was not given, and any such list would still
+have to retain `Agent`, since nested advisor consultation runs through it.
+
+**The real driver is agent-type diversity, not tool count.** Two agent types with
+*identical* tool sets still share no cache — the per-agent instruction body sits ahead
+of the schemas in the prefix — so every distinct type pays the full scaffold once per
+session. So **fan out N same-shape units on one agent type**. Routing already selects
+on unit shape, so same-shape units should land on one lane anyway; mix lanes when the
+units genuinely differ, not for variety. This is a scheduling preference with no
+correctness cost: it changes which agent runs a unit, never what that agent can do.
+
 ## Routing to an executor node
 
 - When a dispatchable executor node is available, route **execution-heavy bounded
@@ -28,14 +73,6 @@ holding a live teammate.
 - **This is a capability gate, not a model-identity branch.** Inspect the
   dispatch surfaces the session actually exposes; do not infer them from which
   model owns the main loop.
-- When GPTX Agent capability is available **and** `gptx.enabled` is set (spec 028;
-  capability means the installer ran, the switch means the doctrine is in force —
-  an install may legitimately be switched off), the canonical GPT executor path is a
-  native profile: `gpt-mid` for mechanical or strong-oracle work, `gpt-high` for
-  moderately complex cross-file work, `gpt-sol` for weak-oracle or consequential
-  work, and `gpt-terra` as the throughput lane for large sustained output against a
-  pre-existing oracle. Pairing Terra with a stronger advisor is recommended, not
-  required — the review gate below is what arbitrates its output.
 - Explicit provider or model selections remain authoritative. If the selected
   lane is rejected, unavailable, or fails, surface that lane result and fail the
   unit closed; never rewrite the request or silently substitute the optional

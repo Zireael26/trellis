@@ -199,6 +199,7 @@ async function codexReview(f) {
 }
 
 function claudeReview(f) {
+  // routing: inherit — Claude leg of the mixed Codex/Claude review panel; pairs with the codex-worker leg above
   return agent(reviewPrompt(f), {
     label: 'claude-verify:' + (f.id ?? f.file ?? 'finding'),
     phase: 'Panel',
@@ -224,6 +225,7 @@ if (!effortSupported) {
   log('verify-panel: FAIL-CLOSED tier=' + effort + ' not supported by surface [' + supportedEfforts.join(', ') + '] — Codex leg OFF for this run (single-model), no clamp')
   codexAvailable = false
 } else if (codexAvailable === undefined) {
+  // routing: inherit — Claude capability probe for the optional Codex leg; keeps provider detection on the orchestrator
   const presenceReceipt = await settle('codex-presence', () => agent(
     [
       'Run this and report ONLY whether Codex is usable:',

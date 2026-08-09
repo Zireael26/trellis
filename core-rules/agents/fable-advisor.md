@@ -27,17 +27,12 @@ is small enough that `opus-advisor` would settle it, that is the profile to use.
 ## Why the model is pinned literally
 
 `model:` is the literal `claude-fable-5`, not the `fable` alias slot, and this is
-deliberate. Slot aliases resolve through the runtime alias policy, and that resolution is
-observed to degrade: on 2026-07-31 an audit found `opus-advisor` — which declares
-`model: opus` — resolving to `gpt-5.6-sol` on 2 of 111 calls, always under a GPT caller.
-A GPT worker then consults a "stronger Claude reviewer" that is actually its own family,
-which is self-review wearing another name, and nothing in the transcript says so.
-
-A literal Claude model id removes the alias step that failed. `laneFor()` matches
-`^claude[-.]` first, so the request is pinned to the Anthropic lane by the routing
-predicate itself rather than by policy that has to hold. The cost is that this profile
-cannot be retargeted by changing the alias policy — accepted, because retargeting the
-top-rung cross-family reviewer to another family is the failure, not a feature.
+deliberate. Session-level model mapping can retarget alias slots, and a
+top-rung reviewer that drifts to a weaker or differently-behaved model is the
+failure, not a feature — the escalation tier exists precisely because the
+decision is expensive to unwind. Pinning the literal id makes the strongest
+reviewer unmissable: there is no alias step between this profile and the model
+it promises.
 
 ## What to do
 
@@ -58,10 +53,8 @@ top-rung cross-family reviewer to another family is the failure, not a feature.
 - **Read-only.** You have no Edit, Write, or Bash. If a fix is needed, describe it
   precisely enough for the worker to apply.
 - **No delegation.** You have no `Agent` tool: a reviewer that can spawn workers stops
-  being a reviewer, and where `gptx.enabled` is set nesting is on process-wide.
+  being a reviewer.
 - **Never review your own prior advice as if it were the worker's work.**
 - **Never review another Claude agent's output as cross-model review.** Being the
-  strongest Claude rung does not make this a different family. When the requested value
-  is specifically cross-model review of Claude work, that is `gpt-sol-reviewer` — a
-  target that exists only where `gptx.enabled` is set; with the switch off, cross-model
-  review is unavailable and a fresh-context Claude reviewer is the single-family form.
+  strongest Claude rung does not make this a different family; a fresh-context
+  Claude reviewer is the single-family form of independent review.

@@ -34,88 +34,38 @@ teardown() {
   [ -z "$output" ]
 }
 
-@test "GPTX is allowed only on the approved public feature surface" {
-  mkdir -p "$M/scripts/gptx" "$M/docs" "$M/core-rules/references"
-  printf 'gptx router\n' > "$M/scripts/gptx/router.js"
-  printf 'CLIProxyAPI setup\n' > "$M/docs/gptx.md"
-  printf 'GPTX delegate policy stays caller-owned.\n' > "$M/core-rules/references/model-lanes.md"
-  printf 'gptx session policy matrix\n' > "$M/docs/gptx-session-policy-matrix.md"
-  printf 'gptx model override matrix\n' > "$M/docs/gptx-model-override-matrix.md"
 
-  local rel
-  for rel in \
-    README.md SETUP.md AGENT_SETUP.md engineering-process.md \
-    docs/references/gptx-sources.md docs/legacy/codex-plugin.md \
-    docs/codex-routing.md core-rules/CLAUDE.md core-rules/hooks.md \
-    core-rules/inheritance.md core-rules/references/delegation.md \
-    core-rules/skills/orchestrate/SKILL.md; do
-    mkdir -p "$M/$(dirname "$rel")"
-    printf 'GPTX public guidance.\n' > "$M/$rel"
-  done
-
-  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-
-  printf 'enable gptx here\n' > "$M/scripts/onboard-project.sh"
+@test "cliproxy is instance-private: allowed only in sync machinery and history" {
+  mkdir -p "$M/scripts/lib"
+  printf '# lint names cliproxy\n' > "$M/scripts/lib/mirror-lint.sh"
+  printf 'cli-proxy-api setup\n' > "$M/scripts/onboard-project.sh"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"scripts/onboard-project.sh: unofficial proxy token"* ]]
-}
+  [[ "$output" == *"scripts/onboard-project.sh: instance-private token 'cliproxy'"* ]]
+  rm -f "$M/scripts/onboard-project.sh"
 
-@test "agent definitions: gpt-* and opus-advisor may name GPTX; other agents may not" {
-  mkdir -p "$M/core-rules/agents"
-
-  # The allowlist encoded "gpt-prefixed agents" while the rule's own comment permits agent
-  # definitions. opus-advisor.md is one, and it cannot describe why it exists — the built-in
-  # advisor refuses dispatch under gptx — without naming the feature. It first entered the
-  # mirror 2026-07-30 and the lint fired.
-  printf 'The bridged advisor refuses dispatch under gptx, so nest this one.\n' \
-    > "$M/core-rules/agents/opus-advisor.md"
-  printf 'gpt-terra throughput lane under gptx\n' > "$M/core-rules/agents/gpt-terra.md"
+  # Historical record keeps its allowance, mirroring antigravity.
+  mkdir -p "$M/docs/adr"
+  printf 'The local gateway (CLIProxyAPI) predates the purge.\n' > "$M/docs/adr/0003-gateway.md"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
 
-  # The widening is one explicit filename, not agents/*. A different agent file still fails,
-  # so a future agent has to be considered on purpose rather than inheriting an exemption.
+@test "agent definitions may not name the private gateway" {
+  mkdir -p "$M/core-rules/agents"
   printf 'lane worker talks to cliproxy\n' > "$M/core-rules/agents/lane-worker.md"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/agents/lane-worker.md: unofficial proxy token"* ]]
+  [[ "$output" == *"core-rules/agents/lane-worker.md: instance-private token 'cliproxy'"* ]]
 }
 
-@test "spec 028: the config schema and the cross-family routing file may name GPTX" {
-  mkdir -p "$M/scripts/lib" "$M/core-rules/references"
-
-  # The switch that makes GPTX optional cannot be documented without naming it. A
-  # public single-subscription user must be able to see the knob exists and ships
-  # off; hiding it would defeat spec 028. Added 2026-07-30 when the schema entry
-  # tripped the lint on the very PR that introduced the switch.
-  printf '{"gptx":{"description":"GPTX cross-family routing switch, default off"}}\n' \
-    > "$M/scripts/lib/trellis.config.schema.json"
-  # The cross-family file is the quarantine target for two-subscription doctrine —
-  # it names gpt-* profiles by design, which is what keeps the always-loaded files clean.
-  printf 'Applies only when gptx.enabled is true. Route gpt-sol for weak-oracle work.\n' \
-    > "$M/core-rules/references/model-routing-cross-family.md"
-  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-
-  # Still scoped: a sibling reference file does not inherit the exemption.
-  printf 'this reference mentions cliproxy in passing\n' \
-    > "$M/core-rules/references/model-prompting-deltas.md"
+@test "claudex remains instance-private everywhere" {
+  mkdir -p "$M/scripts"
+  printf 'claudex private binding\n' > "$M/scripts/router.js"
   run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/references/model-prompting-deltas.md: unofficial proxy token"* ]]
-}
-
-@test "claudex remains instance-private even inside the GPTX feature" {
-  mkdir -p "$M/scripts/gptx"
-  printf 'claudex private binding\n' > "$M/scripts/gptx/router.js"
-  run lint_mirror "$M" "$TR" "$TR" "$PR" "$UH"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"scripts/gptx/router.js: instance-private token 'claudex'"* ]]
+  [[ "$output" == *"scripts/router.js: instance-private token 'claudex'"* ]]
 }
 
 @test "only the public ledger bootstrap is allowed in the audits namespace" {

@@ -9,10 +9,15 @@ setup() {
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
   PROJECTS="$SANDBOX/projects"
-  # Keep the feature token split so this synced fixture remains outside the
-  # exact proxy-token content allowlist it is exercising.
-  SECURITY_REL="docs/g""ptx-security.md"
+  SECURITY_REL="docs/adr/public-security-boundary.md"
   LEGACY_REL="docs/legacy/codex-plugin.md"
+  RETIRED_DOCS=(
+    "AGENT_ONBOARD_G""PTX.md"
+    "docs/g""ptx.md"
+    "docs/g""ptx-security.md"
+    "docs/g""ptx-session-policy-matrix.md"
+    "docs/g""ptx-model-override-matrix.md"
+  )
   mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/audits" \
     "$SOURCE/docs" "$SOURCE/local" "$SOURCE/shared-runtime" \
     "$SOURCE/$(dirname "$SECURITY_REL")" "$SOURCE/$(dirname "$LEGACY_REL")" \
@@ -190,6 +195,11 @@ PY
   mkdir -p "$MIRROR/scheduled-tasks"
   printf 'Clean public README.\n' > "$MIRROR/README.md"
   printf 'private fleet task\n' > "$MIRROR/scheduled-tasks/prompt.md"
+  local retired
+  for retired in "${RETIRED_DOCS[@]}"; do
+    mkdir -p "$MIRROR/$(dirname "$retired")"
+    printf 'retired feature doc\n' > "$MIRROR/$retired"
+  done
   git -C "$MIRROR" add -A
   git -C "$MIRROR" commit -qm seed
 
@@ -201,6 +211,10 @@ PY
   [[ "$output" == *"pruned: scheduled-tasks"* ]]
   [[ "$output" == *"mirror clean."* ]]
   [ ! -e "$MIRROR/scheduled-tasks" ]
+  for retired in "${RETIRED_DOCS[@]}"; do
+    [ ! -e "$MIRROR/$retired" ]
+    [[ "$output" == *"pruned: $retired"* ]]
+  done
   [ -f "$MIRROR/scripts/sync-to-template.sh" ]
   [ -f "$MIRROR/dependency-baseline.json" ]
   [ -f "$MIRROR/audits/fleet-remediation-ledger.json" ]

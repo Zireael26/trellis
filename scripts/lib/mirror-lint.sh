@@ -135,53 +135,20 @@ lint_mirror() {
   done < <(grep -rIliF --exclude-dir='.git' -- 'antigravity' "$mirror_dir" 2>/dev/null)
 
   # --- UNOFFICIAL PROXY TOKENS ----------------------------------------------
-  # Spec 022 reverses the old blanket GPTX/CLIProxy ban and publishes that feature
-  # through an exact surface. `claudex` remains instance-private everywhere. GPTX and
-  # CLIProxy names are legal only in the feature's implementation, tests, public
-  # onboarding/docs/history, agent definitions, changelog, and sync/lint machinery.
-  # This is intentionally path-scoped rather than a broad scripts/ or docs/ exemption.
-  #
-  # `core-rules/agents/opus-advisor.md` is listed alongside the `gpt-*` agents because the
-  # stated policy above permits AGENT DEFINITIONS, and that file is one: it is the advisor
-  # GPT workers nest into precisely because the built-in advisor tool refuses dispatch under
-  # gptx, so it cannot describe its own reason for existing without naming the feature. Found
-  # 2026-07-30 when the file first entered the mirror and the lint fired — the regex had
-  # encoded "gpt-prefixed agents" while the comment said "agent definitions". Kept as an
-  # explicit filename rather than widening to `agents/[^/]+\.md$`, so a future agent file
-  # still has to be considered on purpose.
-  #
-  # `scripts/lib/trellis.config.schema.json` and `model-routing-cross-family.md` joined
-  # 2026-07-30 with spec 028, and for the same reason as opus-advisor: the switch that
-  # makes GPTX optional cannot be documented without naming GPTX. A public user has to be
-  # able to see that the knob exists and ships off — hiding it would defeat the spec. The
-  # cross-family file is the quarantine target for the two-subscription doctrine, so it
-  # names the profiles by design; that is what keeps the always-loaded files clean.
-  #
-  # `core-rules/hooks/lib/spec-gate-core.sh` joined for the same reason: spec 028 resolves
-  # the `gptx` block through the SHARED reader that already serves `mandatory_pipeline`
-  # (one parser, two blocks), so the reader necessarily names the block it resolves.
-  # Writing a second reader purely to keep the token out of this file would be worse code
-  # for a lint's benefit. Caught 2026-07-30 by the throwaway-mirror probe, not by the
-  # in-repo suite — the lint only runs against an assembled mirror.
-  #
-  # `fable-advisor.md` joined `opus-advisor.md` on 2026-07-31 for a reason worth stating,
-  # because two gates pull in opposite directions on this one file. It names
-  # `gpt-sol-reviewer` as the cross-model-review target, so `gptx-off-state.bats` REQUIRES
-  # it to carry a literal `gptx.enabled` predicate — otherwise a single-subscription
-  # install inherits a routing target it cannot satisfy. Carrying that predicate is
-  # precisely what makes it match this lint's token grep. Satisfying one gate necessarily
-  # trips the other, so the file must be allowlisted; the alternative is a profile that
-  # names a GPT target with no predicate, which is the worse of the two failures. Also
-  # caught by the throwaway-mirror probe rather than the in-repo suite.
-  local gptx_allow_re='^(AGENT_ONBOARD_GPTX\.md$|README\.md$|SETUP\.md$|AGENT_SETUP\.md$|engineering-process\.md$|CHANGELOG\.md$|docs/gptx(-[^/]*)?\.md$|docs/references/gptx-sources\.md$|docs/legacy/codex-plugin\.md$|docs/codex-routing\.md$|docs/adr/|docs/specs/|core-rules/CLAUDE\.md$|core-rules/hooks\.md$|core-rules/hooks/lib/spec-gate-core\.sh$|core-rules/inheritance\.md$|core-rules/references/delegation\.md$|core-rules/references/model-routing(-cross-family)?\.md$|core-rules/skills/orchestrate/SKILL\.md$|core-rules/agents/gpt-[^/]+\.md$|core-rules/agents/(opus|fable)-advisor\.md$|core-rules/references/model-lanes\.md$|scripts/gptx/|scripts/cmux-trellis-teams$|scripts/trellis$|scripts/tests/(gptx[^/]*|cmux-trellis-teams)\.(js|bats)$|scripts/lib/mirror-lint\.sh$|scripts/lib/trellis\.config\.schema\.json$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
+  # `claudex` remains instance-private everywhere. `cliproxy`/`cli-proxy-api`
+  # name the operator's local gateway, which is not part of the public template.
+  # The tokens are legal only in the sync/lint machinery itself and in the
+  # historical record (docs/adr/, docs/specs/, CHANGELOG.md), mirroring the
+  # `antigravity` allowance above.
+  local proxy_allow_re='^(docs/adr/|docs/specs/|CHANGELOG\.md$|scripts/lib/mirror-lint\.sh$|scripts/tests/mirror-lint\.bats$)'
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
-    if ! printf '%s\n' "$rel" | grep -qE "$gptx_allow_re"; then
-      echo "$rel: unofficial proxy token is outside the approved public GPTX surface"
+    if ! printf '%s\n' "$rel" | grep -qE "$proxy_allow_re"; then
+      echo "$rel: instance-private token 'cliproxy' must never reach the public mirror"
       rc=1
     fi
-  done < <(grep -rIliE --exclude-dir='.git' -- 'gptx|cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+  done < <(grep -rIliE --exclude-dir='.git' -- 'cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue

@@ -56,6 +56,17 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'my-recipe'
+const SAFETY_MAX_ITERATIONS = undefined
+const SAFETY_BUDGET_CEILING_USD = undefined
+
+// Caller-owned capability inputs arrive in `args`; recipes never read project
+// config. Stages without a declared agentType inherit the calling main loop by
+// construction.
+
 // Every dispatched identity gets one receipt. The Workflow engine may resolve a
 // failed thunk to null, so required-stage success must be decided here — never by
 // shrinking the result array with filter(Boolean).
@@ -143,10 +154,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactTargets = expectedPilotIds.length === 2 && targetIds.length === 2 && targetIds.every((id, index) => id === expectedPilotIds[index])
   const exactSuccess = successIds.length === 2 && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('my-recipe: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('my-recipe: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('my-recipe: maxParallel > 2 requires a positive existing safety budget')
@@ -199,10 +210,17 @@ function workPrompt(item) {
 
 phase('Work')
 
+// Routing authoring rule: every live agent() call must set agentType directly or
+// carry `// routing: inherit — <reason>` immediately above the call/on its opts
+// line. Choose deliberately using `core-rules/references/model-routing.md`:
+// agentType swaps the full subagent definition, while inheritance keeps the
+// main-loop model, system prompt, and tools.
+//
 // One live agent call. opts: { label, phase, schema } — and isolation:'worktree'
 // when the agent mutates a repo checkout. A valid negative verdict (ok:false
 // inside the schema) is still a successful receipt; only null/throw is transport
 // failure.
+// routing: inherit — sample work order; the main loop's model owns it
 const workReceipt = await settle('work', () => agent(workPrompt(args.item ?? { name: 'subject' }), {
   label: 'work',
   phase: 'Work',
@@ -222,6 +240,7 @@ const result = workReceipt.value
 // const mutationCap = resolveMutationParallelism(itemIds, scopeFingerprint)
 // const receipts = await runInWaves(items, mutationCap, 'Work', (it) => agent(workPrompt(it), {
 //   label: 'work:' + it.name, phase: 'Work', schema: VERDICT, isolation: 'worktree',
+//   // routing: inherit — sample fan-out unit; the main loop's model owns it
 // }), (it) => it.name)
 // requireStage('Work', itemIds, receipts, itemIds.length)
 // const results = receipts.map((receipt) => receipt.value)

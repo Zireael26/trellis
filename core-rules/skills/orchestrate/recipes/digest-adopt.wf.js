@@ -68,6 +68,16 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'digest-adopt'
+const SAFETY_MAX_ITERATIONS = 12
+const SAFETY_BUDGET_CEILING_USD = 60
+
+// Caller-owned capability inputs (`codexAvailable`, `loopSafety`) arrive in
+// `args`; recipes never read project config. Stages without a declared
+// agentType inherit the calling main loop by construction.
 async function settle(id, run) {
   try {
     const value = await run()
@@ -123,10 +133,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactSuccess = successIds.length === 2
     && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('digest-adopt: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('digest-adopt: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('digest-adopt: maxParallel > 2 requires a positive existing safety budget')
@@ -220,7 +230,7 @@ const usdPerMTokAvailable = typeof usdPerMTok === 'number'
   && usdPerMTok > 0
 
 function currentCostLine() {
-  const ceiling = meta.safety.budget_ceiling_usd.toFixed(2)
+  const ceiling = SAFETY_BUDGET_CEILING_USD.toFixed(2)
   const rate = usdPerMTokAvailable
     ? (Number.isInteger(usdPerMTok) ? usdPerMTok.toFixed(2) : String(usdPerMTok))
     : 'unavailable'
@@ -257,6 +267,7 @@ function emitCostLine(summary) {
 // ledger has already settled (cross-week dedup — never re-propose settled work).
 phase('Ingest')
 const ingestReceipt = await settle('ingest-digest', async () => {
+  // routing: inherit — digest ingest is a bounded read, stays on the main loop's model
   const value = await agent(
     [
       'You are the INGEST stage of the digest-adopt loop. Read TWO files:',
@@ -294,6 +305,7 @@ phase('Triage')
 const candidateIds = candidates.map((c) => String(c.id))
 const triageReceipts = await parallel(
   candidates.map((c) => () => settle(String(c.id), async () => {
+    // routing: inherit — skeptical triage; the main loop's model owns the judgement
     const triage = await agent(
       [
         'You are the TRIAGE stage for ONE digest proposal. Classify its route and',
@@ -315,6 +327,7 @@ const triageReceipts = await parallel(
         'before claiming validation-only)? is the digest effort tag honest? Set',
         'skeptic_upheld=false if your own skeptical pass does not confirm the route.',
       ].join('\n'),
+      // routing: inherit — skeptical triage; the main loop's model owns the judgement
       { label: 'triage:' + c.id, phase: 'Triage', schema: TRIAGE },
     )
     return triage?.id === c.id ? triage : null
@@ -346,7 +359,7 @@ if (!args.approved || args.approved.length === 0) {
 // declared). One worktree-isolated agent per item; process-gate green before
 // each HOLD PR; never merge.
 phase('Execute')
-const MAX = meta.safety.max_iterations
+const MAX = SAFETY_MAX_ITERATIONS
 const byId = new Map(triaged.map((t) => [t.id, t]))
 const toBuild = args.approved
   .filter((a) => a.route === 'surgical' || a.route === 'feature')
@@ -394,6 +407,7 @@ const mutationScopeFingerprint = JSON.stringify({
 const mutationCap = resolveMutationParallelism(buildIds, mutationScopeFingerprint)
 log('digest-adopt: mutation maxParallel=' + mutationCap)
 const verdictReceipts = await runInWaves(capped, mutationCap, 'Execute', async (a) => {
+  // routing: inherit — approved execution units; the main loop's model owns them
   const verdict = await agent(executePrompt(a), {
     label: 'build:' + a.id,
     phase: 'Execute',

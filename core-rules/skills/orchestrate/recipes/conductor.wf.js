@@ -41,6 +41,16 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'conductor'
+const SAFETY_MAX_ITERATIONS = undefined
+const SAFETY_BUDGET_CEILING_USD = 60
+
+// Caller-owned capability inputs arrive in `args`; recipes never read project
+// config. Stages without a declared agentType inherit the calling main loop by
+// construction.
 async function settle(id, run) {
   try {
     const value = await run()
@@ -96,10 +106,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactSuccess = successIds.length === 2
     && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('conductor: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('conductor: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('conductor: maxParallel > 2 requires a positive existing safety budget')
@@ -286,6 +296,7 @@ function specPrompt(item, mainSha) {
 // --- Phase: Refresh refs ---------------------------------------------------
 phase('Refresh refs')
 const refreshReceipt = await settle('refresh-refs', async () => {
+  // routing: inherit — git-reference refresh is a tiny bounded read, stays on the main loop's model
   const value = await agent(refreshPrompt(), { label: 'refresh-refs', phase: 'Refresh refs', schema: REFRESH })
   return value && typeof value.complete === 'boolean' && Array.isArray(value.refs) ? value : null
 })
@@ -312,6 +323,7 @@ if (!mutationAllowed) {
 // --- Phase: Rank -----------------------------------------------------------
 phase('Rank')
 const rankReceipt = await settle('rank', async () => {
+  // routing: inherit — fleet ranking; the main loop's model owns the judgement
   const value = await agent(rankPrompt(Array.from(refByProject, ([project, main_sha]) => ({ project, main_sha })), mutationAllowed), { label: 'rank', phase: 'Rank', schema: SLATE })
   return Array.isArray(value?.ranked) ? value : null
 })
@@ -351,6 +363,7 @@ const mutationCap = resolveMutationParallelism(selectedIds, mutationScopeFingerp
 log('conductor: mutation maxParallel=' + mutationCap)
 const specReceipts = selected.length
   ? await runInWaves(selected, mutationCap, 'Auto-spec', async (item) => {
+      // routing: inherit — stand-alone spec-triad planning output is a named routing-doctrine reservation
       const verdict = await agent(specPrompt(item, refByProject.get(item.project)), {
         label: 'spec:' + item.id,
         phase: 'Auto-spec',

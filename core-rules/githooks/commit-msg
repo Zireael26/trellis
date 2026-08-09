@@ -1,27 +1,28 @@
 #!/usr/bin/env sh
-# Trellis canonical commit-msg (husky variant).
+# Trellis canonical commit-msg — native, no Node required.
 #
-# Prefers commitlint where it is actually installed; otherwise runs the same native header check
-# as core-rules/githooks/commit-msg rather than skipping.
+# Why this exists: the husky variant shells out to ./node_modules/.bin/commitlint and prints
+# "skipping" when it is absent. Across the fleet that absence is the common case, not the edge
+# case — most registered projects have no commitlint installed, and every non-Node project
+# (native .githooks/) never could. The result was a hook that reported success while checking
+# nothing. This enforces the same shape commitlint's config-conventional would.
 #
-# The previous version printed "commitlint not installed - skipping" and exited 0. Across the
-# fleet that is the common path, not the edge case — most registered projects have no commitlint
-# installed — so the hook reported success while checking nothing. Self-contained by necessity:
-# this file is copied standalone into <project>/.husky/.
+# Deliberately narrower than commitlint: it validates the header only. Body/footer rules stay with
+# commitlint where it is installed. A check that runs everywhere and catches the common mistake
+# beats a thorough check that runs nowhere.
 
 set -e
 
 MSG_FILE="$1"
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
 
-# commitlint is authoritative where present — it reads the project's own config.
-if command -v node >/dev/null 2>&1 && [ -x ./node_modules/.bin/commitlint ]; then
-  exec ./node_modules/.bin/commitlint --edit "$MSG_FILE"
-fi
-
+# First line that is neither blank nor a comment is the header.
 HEADER="$(grep -vE '^[[:space:]]*#' "$MSG_FILE" | grep -vE '^[[:space:]]*$' | head -n 1)"
+
+# Nothing to check — git will reject an empty message itself.
 [ -n "$HEADER" ] || exit 0
 
+# Machine-generated headers git creates or rewrites; not authored, not our business.
 case "$HEADER" in
   "Merge "*|"Revert "*|"fixup!"*|"squash!"*|"amend!"*|"Applying "*) exit 0 ;;
 esac
@@ -44,9 +45,11 @@ fail() {
 echo "$HEADER" | grep -qE "^($TYPES)(\([a-z0-9._/-]+\))?!?: .+" \
   || fail "not a conventional commit."
 
+# commitlint's config-conventional default: header-max-length = 100.
 [ "${#HEADER}" -le 100 ] \
   || fail "header is ${#HEADER} chars; the limit is 100."
 
+# subject-empty / subject-full-stop, the two that actually get tripped.
 SUBJECT="${HEADER#*: }"
 [ -n "$SUBJECT" ] || fail "description is empty."
 case "$SUBJECT" in

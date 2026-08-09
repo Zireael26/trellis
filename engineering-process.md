@@ -152,17 +152,6 @@ Single file capturing the customizations of THIS clone of Trellis. Bootstrapped 
     "enabled": false,
     "spec_required_diff_lines": 80,  // size floor: at or below this, no spec needed
     "surgical_max_diff_lines": 400   // ceiling a /surgical declaration is honored to
-  },
-
-  // Optional. The GPTX cross-family routing switch (spec 028). Default OFF.
-  // Requires BOTH a Claude and a Codex subscription plus scripts/gptx/install.sh.
-  // When on, core-rules/references/model-routing-cross-family.md is in force:
-  // gpt-* profiles become routing targets and the >=40% cross-family mix binds.
-  // Absent, false, and malformed are all OFF and byte-identical to a Trellis that
-  // never shipped GPTX — off can only withdraw an instruction to use a lane,
-  // never invent one.
-  "gptx": {
-    "enabled": false
   }
 }
 ```
@@ -388,21 +377,14 @@ Claude Code is the primary harness. Codex is the secondary. Different layers cov
 
 Projects opt into the secondary by adding `"codex"` to the `harnesses` array in `trellis.config.json` (see §3 control plane). The public template defaults to `["claude"]`; this live control plane decides per maintainer choice. Both harnesses run the full Tier 1/2/3 enforcement stack — the `code-review` / `ui-verify` / receipt gates block at turn end on Claude Code and Codex alike.
 
-#### Optional GPTX model lane inside Claude Code
+#### Codex executor routing
 
-GPTX is separate from Codex harness parity. It keeps Claude Code as the terminal, tool loop, Agent surface, team UI, and permissions boundary while a local Trellis router sends only explicit GPT/Codex model IDs to a maintained CLIProxyAPI translator. Claude and unknown model IDs default to Anthropic. Main mode, main model, advisor, and Agent provider policy resolve independently; explicit selections fail closed.
-
-When GPTX capability is installed, bounded executor units prefer native `gpt-mid`, `gpt-high`, `gpt-sol`, and advice-gated `gpt-terra` Agent profiles. The OpenAI Codex plugin for Claude Code and Trellis `codex-worker` compatibility are not required and never become an automatic fallback. Generic Codex CLI use remains a separate operator-selected surface.
-
-This is native-feeling harness participation, not vendor support. Anthropic documents gateway wire formats but explicitly does not support routing Claude Code to non-Claude models and does not endorse, maintain, or audit third-party gateways. Public setup therefore requires credential separation, loopback binding, exact translator provenance, reversible installation, hermetic gates, and live release certification.
-
-Canonical references:
-
-- [`docs/gptx.md`](docs/gptx.md) — topology, request flow, modes, Agent/team/Workflow participation;
-- [`docs/gptx-security.md`](docs/gptx-security.md) — trust boundaries, failure matrix, residual risks;
-- [`AGENT_ONBOARD_GPTX.md`](AGENT_ONBOARD_GPTX.md) — tested macOS setup and rollback;
-- [`docs/references/gptx-sources.md`](docs/references/gptx-sources.md) — vendor, implementation, license, and prior-art sources;
-- [`specs/027-gptx-public-release/`](specs/027-gptx-public-release/) — certification and publication gates.
+Codex work is dispatchable through the direct CLI (deliberate `codex exec`) with
+explicit per-unit effort, and through the optional legacy OpenAI Codex plugin
+companion when the operator explicitly installs and selects it. Neither is required
+inheritance, and neither is ever an implicit fallback from an explicit selection.
+Generic Codex CLI use remains a separate operator-selected surface; the effort band
+and fail-closed contract live in [`docs/codex-routing.md`](docs/codex-routing.md).
 
 ### 5.6 Token-noise filter (`permissions.deny`)
 

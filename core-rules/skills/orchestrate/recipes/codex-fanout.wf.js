@@ -49,6 +49,13 @@ export const meta = {
   },
 }
 
+// Mirrors meta above. `meta` must stay a pure literal, and the Workflow engine
+// strips the whole declaration before executing this body — so the body cannot read it.
+// scripts/tests/orchestrate-meta-mirror.bats asserts these stay in sync with meta.
+const RECIPE_NAME = 'codex-fanout'
+const SAFETY_MAX_ITERATIONS = undefined
+const SAFETY_BUDGET_CEILING_USD = undefined
+
 async function settle(id, run) {
   try {
     const value = await run()
@@ -101,10 +108,10 @@ function resolveMutationParallelism(currentTargetIds, scopeFingerprint = '') {
   const exactTargets = expectedPilotIds.length === 2 && targetIds.length === 2 && targetIds.every((id, index) => id === expectedPilotIds[index])
   const exactSuccess = successIds.length === 2 && successIds.every((id, index) => id === expectedPilotIds[index])
   const runId = typeof args.runId === 'string' ? args.runId.trim() : ''
-  const runBound = runId !== '' && pilot?.recipe === meta.name && pilot?.run_id === runId
+  const runBound = runId !== '' && pilot?.recipe === RECIPE_NAME && pilot?.run_id === runId
   const scopeBound = scopeFingerprint === '' || pilot?.scope_fingerprint === scopeFingerprint
   const pilotComplete = pilot?.completed === true && exactTargets && exactSuccess && runBound && scopeBound
-  const budgetCeiling = meta.safety.budget_ceiling_usd ?? args.loopSafety?.budget_ceiling_usd
+  const budgetCeiling = SAFETY_BUDGET_CEILING_USD ?? args.loopSafety?.budget_ceiling_usd
   if (typeof args.parallelJustification !== 'string' || args.parallelJustification.trim() === '') throw new Error('codex-fanout: maxParallel > 2 requires non-empty args.parallelJustification')
   if (!pilotComplete) throw new Error('codex-fanout: maxParallel > 2 requires a current-run args.pilotReceipt bound to recipe, runId, exact first two target IDs, successes, and scope')
   if (typeof budgetCeiling !== 'number' || !Number.isFinite(budgetCeiling) || budgetCeiling <= 0) throw new Error('codex-fanout: maxParallel > 2 requires a positive existing safety budget')
@@ -380,6 +387,7 @@ function verifyPrompt(state) {
 }
 
 async function dispatchClaude(unit, mode, degraded) {
+  // routing: inherit — Claude leg of the mixed Codex/Claude fan-out; pairs with the codex-worker leg below
   return agent(workOrder(unit, mode), {
     label: (degraded ? 'claude(degraded):' : 'claude:') + mode + ':' + unit.name,
     phase: mode === 'generate' ? 'Fan-out' : 'Fix',

@@ -9,6 +9,7 @@ CODEX_FANOUT="$REPO/core-rules/skills/orchestrate/recipes/codex-fanout.wf.js"
 DRIFT="$REPO/core-rules/skills/orchestrate/recipes/drift-holdpr.wf.js"
 DIGEST="$REPO/core-rules/skills/orchestrate/recipes/digest-adopt.wf.js"
 CONDUCTOR="$REPO/core-rules/skills/orchestrate/recipes/conductor.wf.js"
+TEMPLATE="$REPO/core-rules/skills/orchestrate/recipes/template.wf.js"
 FLEET="$REPO/scripts/workflows/fleet-audit-remediation.wf.js"
 
 setup() {
@@ -31,6 +32,92 @@ if (!passed) {
   process.exit(1)
 }
 NODE
+}
+
+@test "generic recipe dispatch inherits the main loop model at every site" {
+  run bash "$REPO/scripts/lint-recipe-routing.sh" --list "$FANOUT" "$DRIFT" "$DIGEST" "$CONDUCTOR" "$TEMPLATE"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c ':inherit$')" -eq 12 ]
+
+  run node --input-type=module - "$STUB" "$FANOUT" "$DRIFT" "$DIGEST" "$CONDUCTOR" "$TEMPLATE" <<'NODE'
+import { pathToFileURL } from 'node:url'
+
+const [stub, fanout, drift, digest, conductor, template] = process.argv.slice(2)
+const { runWorkflow } = await import(pathToFileURL(stub).href)
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+const fail = (message, run) => {
+  console.error(message)
+  if (run) console.error(JSON.stringify({ error: run.error, opts: run.prompts.map((entry) => entry.opts) }, null, 2))
+  process.exit(1)
+}
+
+const cases = [
+  {
+    name: 'fanout-verify',
+    path: fanout,
+    args: {
+      __agentOutputByLabel: {
+        'resolve-targets': { targets: [{ name: 'alpha', path: '/tmp/alpha' }] },
+        'fanout:alpha': { target: 'alpha', branch: 'feat/a', pushed: true, green: true, pr_url: 'https://example.test/pr/1', worktree_path: '/tmp/alpha-worktree', notes: 'ready' },
+      },
+    },
+    expected: ['resolve-targets', 'fanout:alpha', 'reap:alpha'],
+  },
+  {
+    name: 'drift-holdpr',
+    path: drift,
+    args: {
+      __agentOutputByLabel: {
+        'discover-drift': { drifts: [{ project: 'alpha', path: 'hooks/a.sh', canonical: 'core/a.sh', fix: 'sync a', mechanical: true }] },
+      },
+    },
+    expected: ['discover-drift', 'drift:alpha'],
+  },
+  {
+    name: 'digest-adopt',
+    path: digest,
+    args: {
+      digestPath: 'digest.md',
+      approved: [{ id: 'P1', route: 'surgical' }],
+      __agentOutputByLabel: {
+        'ingest-digest': { candidates: [{ id: 'P1', title: 'probe', effort: 'S', risk: 'lo' }], skipped_settled: 0 },
+      },
+    },
+    expected: ['ingest-digest', 'triage:P1', 'build:P1'],
+  },
+  {
+    name: 'conductor',
+    path: conductor,
+    args: {
+      today: '2026-08-03',
+      __agentOutputByLabel: {
+        rank: { generated_for: '2026-08-03', ranked: [{ id: 's1', project: 'repo', title: 'probe', score: 1, reasons: 'top', eligible_auto_spec: true, auto_spec: null, delivered_on_main: false, existing_spec_path: '', auto_spec_exclusions: [] }] },
+      },
+    },
+    expected: ['refresh-refs', 'rank'],
+  },
+  {
+    // The authoring template is executable under the stub so its live helper stays covered.
+    name: 'template',
+    path: template,
+    args: {},
+    expected: ['work'],
+  },
+]
+
+for (const item of cases) {
+  const run = await runWorkflow(item.path, item.args)
+  if (run.error) fail(`${item.name} threw`, run)
+  for (const label of item.expected) {
+    const matches = run.prompts.filter((entry) => entry.opts.label === label)
+    if (matches.length !== 1) fail(`${item.name}:${label} dispatched ${matches.length} times`, run)
+    if (hasOwn(matches[0].opts, 'agentType')) {
+      fail(`${item.name}:${label} owns agentType — generic dispatch must inherit the main loop's model`, run)
+    }
+  }
+}
+NODE
+  [ "$status" -eq 0 ]
 }
 
 @test "all failed required fanout units fail closed with preserved identities" {
@@ -319,7 +406,7 @@ const fs = require('node:fs')
 for (const file of process.argv.slice(2)) {
   const source = fs.readFileSync(file, 'utf8')
   if (!source.includes('assertUniqueExpectedIds')) process.exit(1)
-  if (!source.includes("pilot?.recipe === meta.name")) process.exit(2)
+  if (!source.includes("pilot?.recipe === RECIPE_NAME")) process.exit(2)
   if (!source.includes('pilot?.run_id === runId')) process.exit(3)
   if (!source.includes('exact first two target IDs')) process.exit(4)
 }
