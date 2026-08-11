@@ -29,6 +29,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 - Shared-service provisioning is declarative and idempotent on every start rather than first-volume-only. Static onboarding discovery produces evidence and a reviewable proposal but cannot execute project code, read secret values, choose credentials/allocations silently, or mutate the manifest before explicit review.
 - Shared local-infrastructure integration now validates optional external manifests, reviewed empty declarations, and fixed-port uniqueness without publishing an operator fleet inventory or allocation map.
 - Infrastructure publication now requires dependency-ordered repository receipts: scoped commit, local gates, PR, merge SHA, and synchronized local `main`.
+- **Local-state ignore policy.** Added the 24 explicit root-scoped runtime paths to the repository ignore policy; onboarding now emits the same block exactly once and idempotently.
 
 ## [v1.0.0-rc.14] — 2026-07-28
 

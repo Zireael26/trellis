@@ -22,6 +22,70 @@
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 ONBOARD="$REPO_ROOT/scripts/onboard-project.sh"
 
+RUNTIME_IGNORE_PATTERNS=(
+  "/context-log.md"
+  "/.claude/worktrees/"
+  "/.claude/settings.local.json"
+  "/.claude/checkpoints/"
+  "/.claude/mailbox/"
+  "/.claude/agent-registry.json"
+  "/.claude/agent-memory-local"
+  "/.claude/first-run"
+  "/.claude/assistant-daemon-state.json"
+  "/.claude/routines/.state/"
+  "/.claude/scheduled_tasks.lock"
+  "/.claude/scheduled_tasks.json"
+  "/.claude/session-autonomy"
+  "/.claude/session-surgical"
+  "/.claude/spec-gate-audit.log"
+  "/.claude/.fail-counter"
+  "/.codex/.fail-counter"
+  "/.claude/.reread-state/"
+  "/.codex/.reread-state/"
+  "/.claude/.review-done-*"
+  "/.codex/.review-done-*"
+  "/.claude/screenshots/"
+  "/.codex/screenshots/"
+  "/.claude/codex-thread-pool.json"
+)
+
+assert_runtime_ignore_contract() {
+  local project="$1"
+  local pattern fixture matches root_scoped_count
+
+  for pattern in "${RUNTIME_IGNORE_PATTERNS[@]}"; do
+    matches="$(grep -Fxc -- "$pattern" "$project/.gitignore" || true)"
+    [ "$matches" -eq 1 ] || {
+      echo "runtime ignore pattern must appear exactly once: $pattern"
+      return 1
+    }
+
+    fixture="${pattern#/}"
+    case "$fixture" in
+      */) fixture="${fixture}runtime-state" ;;
+      *\*) fixture="${fixture%\*}runtime-state" ;;
+    esac
+    mkdir -p "$(dirname "$project/$fixture")"
+    : > "$project/$fixture"
+    git -C "$project" check-ignore --no-index -q -- "$fixture" || {
+      echo "runtime state is not ignored: $fixture"
+      return 1
+    }
+  done
+
+  root_scoped_count="$(grep -Ec '^/' "$project/.gitignore" || true)"
+  [ "$root_scoped_count" -eq "${#RUNTIME_IGNORE_PATTERNS[@]}" ] || {
+    echo "unexpected root-scoped runtime ignore inventory"
+    return 1
+  }
+}
+
+seed_standalone_runtime_policy() {
+  local project="$1"
+  printf 'project-owned.log\n' > "$project/.gitignore"
+  printf '%s\n' "${RUNTIME_IGNORE_PATTERNS[@]}" >> "$project/.gitignore"
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   # Resolve through real path so /var vs /private/var cannot diverge
@@ -168,18 +232,35 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 }
 
 # ===========================================================================
-# 2. Managed ignore: the five OMP links are machine-local and gitignored.
+# 2. Managed ignore: the five OMP links plus root-only runtime state.
 # ===========================================================================
 
-@test "OMP links are gitignored and never tracked" {
+@test "managed ignore protects runtime state without hiding tracked surfaces" {
   build_canonical_tree
   build_healthy_project
   write_config
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
   local hp="$PROJECTS/healthy"
-  # The managed .gitignore block lists all five exact paths.
+  seed_standalone_runtime_policy "$hp"
+  run_onboard "$hp"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_runtime_ignore_contract "$hp"
+  grep -Fxq -- "project-owned.log" "$hp/.gitignore" ||
+    { echo "project-authored ignore line was removed"; false; }
+
+  mkdir -p "$hp/nested"
+  : > "$hp/nested/context-log.md"
+  run git -C "$hp" check-ignore --no-index -q -- "nested/context-log.md"
+  [ "$status" -eq 1 ] || { echo "nested context-log.md is unexpectedly ignored"; false; }
+
+  # Tracked onboarding surfaces remain visible.
+  local rel
+  for rel in ".claude/settings.json" ".claude/primers/INDEX.md"; do
+    [ -f "$hp/$rel" ] || { echo "missing tracked onboarding surface: $rel"; false; }
+    run git -C "$hp" check-ignore --no-index -q -- "$rel"
+    [ "$status" -eq 1 ] || { echo "tracked onboarding surface is ignored: $rel"; false; }
+  done
+
+  # The managed .gitignore block lists all five exact machine-local links.
   for rel in ".omp/AGENTS.md" ".omp/skills" ".omp/commands" ".omp/agents" ".omp/hooks"; do
     grep -q "^$rel\$" "$hp/.gitignore" || { echo "missing from .gitignore: $rel"; false; }
     git -C "$hp" check-ignore -q "$rel" || { echo "not ignored: $rel"; false; }
@@ -197,22 +278,25 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   build_canonical_tree
   build_healthy_project
   write_config
-  run_onboard "$PROJECTS/healthy"
+  local hp="$PROJECTS/healthy"
+  seed_standalone_runtime_policy "$hp"
+  run_onboard "$hp"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_runtime_ignore_contract "$hp"
 
   local before
-  before="$(sha_of "$PROJECTS/healthy/.gitignore")"
+  before="$(sha_of "$hp/.gitignore")"
 
   run_onboard "$PROJECTS/healthy"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  local hp="$PROJECTS/healthy"
   [[ "$output" == *"skip (correct symlink): .omp/AGENTS.md"* ]]
   [[ "$output" == *"skip (correct symlink): .omp/skills"* ]]
   [[ "$output" == *"skip (correct symlink): .omp/hooks"* ]]
   [[ "$output" != *"linked: .omp/"* ]]
   [ "$(readlink "$hp/.omp/AGENTS.md")" = "$hp/CLAUDE.md" ]
   [ "$(readlink "$hp/.omp/hooks")" = "$CANON/core-rules/omp/hooks" ]
+  assert_runtime_ignore_contract "$hp"
   [ "$(sha_of "$hp/.gitignore")" = "$before" ]
 }
 
