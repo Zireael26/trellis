@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-21
 **Status:** SPIKE / design exploration — **no build this pass.** Prototype-on-paper only; recommends go/no-go criteria for a future implementation cycle.
-**Owner:** __MAINTAINER_NAME__ (solo maintainer)
+**Owner:** Abhishek Kaushik (solo maintainer)
 **Related:**
 - Source: spec 017 digest batch-2 adoption, item **P15** ("reference-token handoff spike"), route `spike`.
 - Prior recommendation consumed: `docs/specs/2026-07-07-session-event-log-spike.md`, §7 conditional GO criteria **G1–G3**.

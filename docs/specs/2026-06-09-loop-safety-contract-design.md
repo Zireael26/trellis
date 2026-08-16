@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09
 **Status:** Approved design (brainstorming). Next: writing-plans → implementation.
-**Owner:** __MAINTAINER_NAME__ (solo maintainer)
+**Owner:** Abhishek Kaushik (solo maintainer)
 **Related:**
 - Research brief: `docs/research/2026-06-09-agent-loops-and-nested-subagents.md`
 - Sibling sub-projects (separate spec→plan cycles, dependency order): **(this) loop-safety contract** → nesting-depth budget in `orchestrate` → "Mayor" loops-supervising-loops recipe.

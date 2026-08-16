@@ -45,7 +45,7 @@ make_named_skill() {
   [ "$status" -eq 0 ]
   run skill_size_check_root "$SANDBOX/over"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"65537 bytes; budget is 65536 bytes"* ]]
+  [[ "$output" == *"65537 bytes; budget is 65536 bytes"* ]] || { echo "$output"; false; }
 }
 
 @test "manifest size counts UTF-8 bytes rather than characters" {
@@ -107,7 +107,7 @@ PY
   make_skill "$USER_HOME/.claude/plugins/cache/vendor/two/1.0.0/skills/duplicate"
   run skill_size_resolve_root duplicate "$PROJECT" "$USER_HOME"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous Skill 'duplicate' (2 roots)"* ]]
+  [[ "$output" == *"ambiguous Skill 'duplicate' (2 roots)"* ]] || { echo "$output"; false; }
 }
 
 @test "resolver deduplicates symlink aliases to the same physical Skill root" {
@@ -135,7 +135,7 @@ PY
   make_named_skill "$USER_HOME/.claude/plugins/cache/vendor/two/1.0.0/skills/second-root" "declared-conflict"
   run skill_size_resolve_root declared-conflict "$PROJECT" "$USER_HOME"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous Skill 'declared-conflict' (2 roots)"* ]]
+  [[ "$output" == *"ambiguous Skill 'declared-conflict' (2 roots)"* ]] || { echo "$output"; false; }
 }
 
 @test "plugin-qualified resolution tries exact identity before final-colon suffix" {
@@ -163,7 +163,7 @@ PY
   make_skill "$USER_HOME/.claude/plugins/cache/other/plugin/1.0.0/skills/shared"
   run skill_size_resolve_root shared "$PROJECT" "$USER_HOME"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous Skill 'shared' (2 roots)"* ]]
+  [[ "$output" == *"ambiguous Skill 'shared' (2 roots)"* ]] || { echo "$output"; false; }
 }
 
 @test "discovery excludes Cursor Windsurf and foreign nested skill trees" {
@@ -175,10 +175,10 @@ PY
 
   run skill_size_discover_roots "$PROJECT" "$USER_HOME"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/claude-skill"* ]]
-  [[ "$output" != *"cursor-skill"* ]]
-  [[ "$output" != *"windsurf-skill"* ]]
-  [[ "$output" != *"nested-foreign"* ]]
+  [[ "$output" == *"/claude-skill"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"cursor-skill"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"windsurf-skill"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"nested-foreign"* ]] || { echo "$output"; false; }
 }
 
 @test "canonicalization rejects control-character roots without newline aliasing" {
@@ -202,7 +202,7 @@ PY
   make_skill "$control_project/.claude/skills/anything"
   run skill_size_resolve_root anything "$control_project" "$USER_HOME"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"invalid project directory"* ]]
+  [[ "$output" == *"invalid project directory"* ]] || { echo "$output"; false; }
 }
 
 @test "canonicalization and checker handle leading-dash roots literally" {
@@ -216,7 +216,7 @@ PY
 
   run bash -c 'cd -- "$1" && "$2" "-P"' _ "$parent" "$CHECK"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"OK (1 Skill roots checked"* ]]
+  [[ "$output" == *"OK (1 Skill roots checked"* ]] || { echo "$output"; false; }
 }
 
 @test "library rejects missing roots, malformed names, invalid UTF-8, and invalid budgets" {
@@ -228,10 +228,10 @@ PY
   printf '\377' > "$SANDBOX/invalid-utf8/SKILL.md"
   run skill_size_check_root "$SANDBOX/invalid-utf8"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"not valid UTF-8"* ]]
+  [[ "$output" == *"not valid UTF-8"* ]] || { echo "$output"; false; }
   run skill_size_check_root "$SANDBOX/invalid-utf8" nope
   [ "$status" -eq 2 ]
-  [[ "$output" == *"budget must be a positive integer"* ]]
+  [[ "$output" == *"budget must be a positive integer"* ]] || { echo "$output"; false; }
 }
 
 @test "canonical checker passes bounded collections and hard-fails oversized Skills" {
@@ -239,18 +239,18 @@ PY
   make_skill "$collection/ok" 65536
   run "$CHECK" "$collection"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"OK (1 Skill roots checked; budget 65536 bytes)"* ]]
+  [[ "$output" == *"OK (1 Skill roots checked; budget 65536 bytes)"* ]] || { echo "$output"; false; }
 
   make_skill "$collection/too-large" 65537
   run "$CHECK" "$collection"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"too-large/SKILL.md is 65537 bytes"* ]]
-  [[ "$output" == *"FAILED (2 Skill roots checked)"* ]]
+  [[ "$output" == *"too-large/SKILL.md is 65537 bytes"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"FAILED (2 Skill roots checked)"* ]] || { echo "$output"; false; }
 }
 
 @test "canonical checker rejects a non-directory input" {
   printf 'not a directory\n' > "$SANDBOX/file"
   run "$CHECK" "$SANDBOX/file"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not a directory"* ]]
+  [[ "$output" == *"not a directory"* ]] || { echo "$output"; false; }
 }

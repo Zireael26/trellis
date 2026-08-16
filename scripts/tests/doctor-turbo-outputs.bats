@@ -26,7 +26,7 @@ DOCTOR="$REPO_ROOT/scripts/doctor.sh"
 
 # Kept in lockstep with HC_CANONICAL_SKILLS / HC_CANONICAL_COMMANDS in
 # health-checks.sh (same lists doctor.bats uses).
-CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze"
+CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy"
 
 setup() {
@@ -177,36 +177,36 @@ run_doctor() { run bash "$DOCTOR" "$@"; }
   run_doctor
   [ "$status" -eq 0 ]
   # The check WARNs (⚠ glyph) for the unscoped glob.
-  [[ "$output" == *"⚠"*"turbo-outputs:"*"unscoped"* ]]
+  [[ "$output" == *"⚠"*"turbo-outputs:"*"unscoped"* ]] || { echo "$output"; false; }
   # The one-line fix hint surfaces (both negations named).
-  [[ "$output" == *"!.next/cache/**"* ]]
-  [[ "$output" == *"!.next/dev/**"* ]]
+  [[ "$output" == *"!.next/cache/**"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"!.next/dev/**"* ]] || { echo "$output"; false; }
   # Degraded, not broken: no inheritance ERROR.
-  [[ "$output" != *"✗ inheritance is broken"* ]]
+  [[ "$output" != *"✗ inheritance is broken"* ]] || { echo "$output"; false; }
 }
 
 @test "scoped turbo outputs (with !.next/cache/** negation) -> OK" {
   write_turbo '{ "tasks": { "build": { "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"] } } }'
   run_doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"✓"*"turbo-outputs:"*"scoped"* ]]
+  [[ "$output" == *"✓"*"turbo-outputs:"*"scoped"* ]] || { echo "$output"; false; }
   # No unscoped WARN. (Check the WARN-specific phrase — the OK message itself
   # contains "no unscoped .next/** glob", so a bare "unscoped" substring collides.)
-  [[ "$output" != *"has an unscoped .next/** outputs glob"* ]]
+  [[ "$output" != *"has an unscoped .next/** outputs glob"* ]] || { echo "$output"; false; }
 }
 
 @test "no turbo.json -> OK (recurrence check skipped)" {
   # build_healthy_project lays down no turbo.json.
   run_doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"turbo-outputs: no turbo.json"* ]]
+  [[ "$output" == *"turbo-outputs: no turbo.json"* ]] || { echo "$output"; false; }
 }
 
 @test "legacy v1 .pipeline schema with an unscoped glob also WARNs" {
   write_turbo '{ "pipeline": { "build": { "outputs": [".next/**"] } } }'
   run_doctor
   [ "$status" -eq 0 ]
-  [[ "$output" == *"⚠"*"turbo-outputs:"*"unscoped"* ]]
+  [[ "$output" == *"⚠"*"turbo-outputs:"*"unscoped"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================

@@ -1,5 +1,10 @@
 # 2026-05-30 — Trellis doctor: unified inheritance health-check + repair
 
+> **Status:** Superseded (2026-08-12).
+>
+> Replaced by [2026-08-12 — Local fleets and immutable releases](2026-08-12-local-fleets-immutable-releases.md). The incident record and deterministic-diagnosis rationale below remain historical. Its live canonical-checkout Tier-0, tracked-registry, and direct-repair assumptions are replaced by private local-fleet registry, verified immutable-release, and attachment-ownership diagnosis under `TRELLIS_HOME`.
+
+
 ## Context
 
 Trellis governs its active projects through an **inheritance mechanism** — a symlink (`<project>/.claude/rules/trellis.md` → canonical `core-rules/CLAUDE.md`), an `@`-import fallback in each project `CLAUDE.md`, and parallel skills / `.agents/` / `.codex/` surfaces. The load-bearing invariant is also the dangerous one: **silent drop**. If a symlink target or import path does not resolve, Claude Code drops the instruction with no error, no warning, no log line. A project silently runs unparented.

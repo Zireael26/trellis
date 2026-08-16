@@ -1,14 +1,14 @@
 #!/usr/bin/env bats
-# Tests for scripts/codex-effort-preflight.sh — the spec 011 D6 surface
-# preflight (SC6).
+# Tests for scripts/codex-effort-preflight.sh — direct Codex surface preflight.
 #
 # THE FAIL-CLOSED GUARANTEE under test: every bad state (wrong/absent pin,
-# absent/unrecognizable companion plugin, old/absent CLI) degrades to a
+# absent/unrecognizable selected plugin, old/absent CLI) degrades to a
 # fail-closed JSON report (pin_ok=false / supported_efforts=[] / cli_ok=false)
-# with exit 0 — the script only reports; callers decide. No probe result is
-# ever guessed: the effort enum comes from the installed companion's validator
-# SOURCE (pattern-driven), never a hardcoded tier list (verified-surface rule,
-# spec 011 §4).
+# with exit 0 — the script only reports status for an explicitly selected direct
+# CLI or plugin command. It does not select a provider or authorize an effort
+# tier. No probe result is ever guessed: the plugin enum comes from the selected
+# validator SOURCE (pattern-driven), never a hardcoded tier list
+# (verified-surface rule, spec 011 §4).
 #
 # Isolation: all three probes are pointed at fixtures via the env overrides
 # (CODEX_CONFIG / CODEX_PLUGIN / CODEX_BIN); stub `codex` binaries are built
@@ -51,8 +51,8 @@ _run_preflight() {
   CODEX_CONFIG="$cfg" CODEX_PLUGIN="$plugin" CODEX_BIN="$bin" run "$PREFLIGHT" "$@"
 }
 
-# _assert_json — the captured $output must parse as JSON (node, already a
-# repo dependency via the wf recipes).
+# _assert_json — the captured $output must parse as JSON (node is already a
+# repository dependency).
 _assert_json() {
   printf '%s' "$output" | node -e 'JSON.parse(require("fs").readFileSync(0,"utf8"))'
 }
@@ -64,27 +64,20 @@ _assert_json() {
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"model_pin": "gpt-5.6-sol"'* ]]
-  [[ "$output" == *'"pin_ok": true'* ]]
-  [[ "$output" == *'"supported_efforts": ["none", "minimal", "low", "medium", "high", "xhigh"]'* ]]
-  [[ "$output" == *'"cli_version": "0.144.0"'* ]]
-  [[ "$output" == *'"cli_ok": true'* ]]
+  [[ "$output" == *'"model_pin": "gpt-5.6-sol"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"pin_ok": true'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"supported_efforts": ["none", "minimal", "low", "medium", "high", "xhigh"]'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_version": "0.144.0"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": true'* ]] || { echo "$output"; false; }
 }
 
-@test "enum is read from the installed surface: extended validator -> max/ultra reported" {
-  bin="$(_stub_codex "codex-cli 0.144.0")"
-  _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin-extended" "$bin"
-  [ "$status" -eq 0 ]
-  _assert_json
-  [[ "$output" == *'"supported_efforts": ["medium", "high", "xhigh", "max", "ultra"]'* ]]
-}
 
 @test "expected pin is parameterized via \$1, never baked" {
   bin="$(_stub_codex "codex-cli 0.144.0")"
   _run_preflight "$FIXTURES/config-wrong.toml" "$FIXTURES/plugin" "$bin" "gpt-5.5-codex"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"model_pin": "gpt-5.5-codex"'* ]]
-  [[ "$output" == *'"pin_ok": true'* ]]
+  [[ "$output" == *'"model_pin": "gpt-5.5-codex"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"pin_ok": true'* ]] || { echo "$output"; false; }
 }
 
 # --- fail-closed: model pin ---------------------------------------------------
@@ -94,8 +87,8 @@ _assert_json() {
   _run_preflight "$FIXTURES/config-wrong.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"model_pin": "gpt-5.5-codex"'* ]]
-  [[ "$output" == *'"pin_ok": false'* ]]
+  [[ "$output" == *'"model_pin": "gpt-5.5-codex"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"pin_ok": false'* ]] || { echo "$output"; false; }
 }
 
 @test "absent config file -> model_pin absent, pin_ok false, exit 0" {
@@ -103,26 +96,28 @@ _assert_json() {
   _run_preflight "$SANDBOX/nonexistent/config.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"model_pin": "absent"'* ]]
-  [[ "$output" == *'"pin_ok": false'* ]]
+  [[ "$output" == *'"model_pin": "absent"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"pin_ok": false'* ]] || { echo "$output"; false; }
 }
 
 @test "config without a model key -> model_pin absent, pin_ok false" {
   bin="$(_stub_codex "codex-cli 0.144.0")"
   _run_preflight "$FIXTURES/config-no-pin.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"model_pin": "absent"'* ]]
-  [[ "$output" == *'"pin_ok": false'* ]]
+  [[ "$output" == *'"model_pin": "absent"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"pin_ok": false'* ]] || { echo "$output"; false; }
 }
 
-# --- fail-closed: companion enum ----------------------------------------------
+# --- absent/unrecognized selected plugin --------------------------------------
 
-@test "absent plugin -> supported_efforts [] (fail-closed), exit 0" {
+@test "direct CLI preflight remains usable without a selected plugin" {
   bin="$(_stub_codex "codex-cli 0.144.0")"
   _run_preflight "$FIXTURES/config-right.toml" "$SANDBOX/nonexistent-plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"supported_efforts": []'* ]]
+  [[ "$output" == *'"pin_ok": true'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"supported_efforts": []'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": true'* ]] || { echo "$output"; false; }
 }
 
 @test "plugin present but validator pattern moved -> supported_efforts [] (fail-closed, never guessed)" {
@@ -130,7 +125,7 @@ _assert_json() {
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin-no-validator" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"supported_efforts": []'* ]]
+  [[ "$output" == *'"supported_efforts": []'* ]] || { echo "$output"; false; }
 }
 
 # --- fail-closed: CLI version ---------------------------------------------------
@@ -140,31 +135,31 @@ _assert_json() {
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"cli_version": "0.143.0"'* ]]
-  [[ "$output" == *'"cli_ok": false'* ]]
+  [[ "$output" == *'"cli_version": "0.143.0"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": false'* ]] || { echo "$output"; false; }
 }
 
 @test "CLI at 1.0.0 (major above floor) -> cli_ok true" {
   bin="$(_stub_codex "codex-cli 1.0.0")"
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"cli_ok": true'* ]]
+  [[ "$output" == *'"cli_ok": true'* ]] || { echo "$output"; false; }
 }
 
 @test "absent codex binary -> cli_version absent, cli_ok false, exit 0" {
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$SANDBOX/no-such-codex"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"cli_version": "absent"'* ]]
-  [[ "$output" == *'"cli_ok": false'* ]]
+  [[ "$output" == *'"cli_version": "absent"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": false'* ]] || { echo "$output"; false; }
 }
 
 @test "codex binary emitting garbage -> cli_version absent, cli_ok false" {
   bin="$(_stub_codex "not a version at all")"
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"cli_version": "absent"'* ]]
-  [[ "$output" == *'"cli_ok": false'* ]]
+  [[ "$output" == *'"cli_version": "absent"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": false'* ]] || { echo "$output"; false; }
 }
 
 # --- everything-absent (Claude-only host) ---------------------------------------
@@ -173,7 +168,7 @@ _assert_json() {
   _run_preflight "$SANDBOX/none.toml" "$SANDBOX/none-plugin" "$SANDBOX/none-codex"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"pin_ok": false'* ]]
-  [[ "$output" == *'"supported_efforts": []'* ]]
-  [[ "$output" == *'"cli_ok": false'* ]]
+  [[ "$output" == *'"pin_ok": false'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"supported_efforts": []'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"cli_ok": false'* ]] || { echo "$output"; false; }
 }

@@ -1,139 +1,117 @@
 #!/usr/bin/env bats
 
-SOURCE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+SOURCE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 
 setup() {
   HARNESS_ROOT="$(mktemp -d)"
-  mkdir -p "$HARNESS_ROOT/scripts" "$HARNESS_ROOT/core-rules/evals"
+  TRELLIS_HOME="$HARNESS_ROOT/trellis home"
+  REGISTRY_LIB="$HARNESS_ROOT/scripts/lib/local-registry.sh"
+  CLAUDE_MARKER="$HARNESS_ROOT/claude-called"
+
+  mkdir -p "$HARNESS_ROOT/scripts/lib" "$HARNESS_ROOT/core-rules/evals/template/example" \
+    "$HARNESS_ROOT/bin" "$TRELLIS_HOME"
   cp "$SOURCE_ROOT/scripts/run-evals.sh" "$HARNESS_ROOT/scripts/run-evals.sh"
-  chmod +x "$HARNESS_ROOT/scripts/run-evals.sh"
-  write_blacklist
+  cp "$SOURCE_ROOT/scripts/registry.sh" "$HARNESS_ROOT/scripts/registry.sh"
+  cp "$SOURCE_ROOT/scripts/lib/local-registry.sh" "$REGISTRY_LIB"
+  cp "$SOURCE_ROOT/scripts/lib/trellis-home.sh" "$HARNESS_ROOT/scripts/lib/trellis-home.sh"
+  cp "$SOURCE_ROOT/scripts/lib/trellis.registry.schema.json" "$HARNESS_ROOT/scripts/lib/trellis.registry.schema.json"
+  cp "$SOURCE_ROOT/scripts/lib/trellis.machine.schema.json" "$HARNESS_ROOT/scripts/lib/trellis.machine.schema.json"
+  cp "$SOURCE_ROOT/core-rules/CLAUDE.md" "$HARNESS_ROOT/core-rules/CLAUDE.md"
+  chmod +x "$HARNESS_ROOT/scripts/run-evals.sh" "$HARNESS_ROOT/scripts/registry.sh"
+
+  cat > "$HARNESS_ROOT/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+touch "${CLAUDE_MARKER:?}"
+echo 'unexpected model invocation' >&2
+exit 99
+EOF
+  cat > "$HARNESS_ROOT/bin/yq" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+
+if [ "${1:-}" = "." ]; then
+  cat "$2"
+  exit 0
+fi
+
+[ "${1:-}" = "-r" ] || exit 2
+query="$2"
+file="$3"
+case "$query" in
+  '.version // ""') key=version; fallback="" ;;
+  '.id // ""') key=id; fallback="" ;;
+  '.project // ""') key=project; fallback="" ;;
+  '.prompt // ""') key=prompt; fallback="" ;;
+  '.runs // 5') key=runs; fallback=5 ;;
+  '.model // "sonnet"') key=model; fallback=sonnet ;;
+  *) exit 2 ;;
+esac
+value="$(awk -v key="$key" '$0 ~ "^" key ":[[:space:]]*" { sub("^[^:]*:[[:space:]]*", ""); print; exit }' "$file")"
+printf '%s\n' "${value:-$fallback}"
+EOF
+  chmod +x "$HARNESS_ROOT/bin/yq"
+  chmod +x "$HARNESS_ROOT/bin/claude"
+  cat > "$HARNESS_ROOT/core-rules/evals/template/example/manifest.yml" <<'EOF'
+version: 1
+id: example
+project: template
+prompt: This fixture is excluded from fleet evaluation.
+EOF
 }
 
 teardown() {
   rm -rf "$HARNESS_ROOT"
 }
 
-write_registry() {
-  {
-    printf '%s\n' '# Project registry' '' '## Active projects' ''
-    printf '%s\n' '| Project | Path | Class | Notes |' '|---|---|---|---|'
-    for project in "$@"; do
-      # Backticks in the format string are literal Markdown.
-      # shellcheck disable=SC2016
-      printf '| %s | `/personal/%s` | app | test |\n' "$project" "$project"
-    done
-    printf '%s\n' '' '---'
-  } > "$HARNESS_ROOT/registry.md"
+make_repo() {
+  local root="$1" project_id="$2"
+  mkdir -p "$root"
+  git -C "$root" init -q -b main
+  git -C "$root" config user.email run-evals@example.invalid
+  git -C "$root" config user.name 'Run Evals'
+  printf '%s\n' '{"schema_version":1,"project_id":"'"$project_id"'"}' > "$root/.trellis.json"
+  printf '%s\n' fixture > "$root/README"
+  git -C "$root" add .
+  git -C "$root" commit -q -m fixture
 }
 
-write_blacklist() {
-  {
-    printf '%s\n' '# Blacklist' '' '## 1. Temporarily excluded (registered projects)' ''
-    printf '%s\n' '| Project | Reason | Added | Review after |' '|---|---|---|---|'
-    for project in "$@"; do
-      printf '| %s | test | 2026-07-14 | 2026-07-15 |\n' "$project"
-    done
-    printf '%s\n' '' '## 2. Permanently excluded from management' ''
-    printf '%s\n' '| Path | Reason |' '|---|---|'
-  } > "$HARNESS_ROOT/blacklist.md"
+register_project() {
+  local fleet="$1" project_id="$2" root="$3"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" "$2" "$3" "$4" "" "[]" "" "{}"' \
+    _ "$REGISTRY_LIB" "$fleet" "$project_id" "$root"
+  [ "$status" -eq 0 ]
 }
 
-write_public_controls() {
-  cat > "$HARNESS_ROOT/registry.md" <<'EOF'
-# Project registry
-
-Projects under the Trellis process regime. Opt-in list. A project is "active" for process purposes if and only if it appears here and is **not** listed in `blacklist.md`.
-
-This registry is also the input for any private operator audits you configure; no audit schedule ships in the public template.
-
-> **Template note:** this file ships empty. As you onboard projects (see [`engineering-process.md` §10](engineering-process.md#10-onboarding-a-new-project-full-playbook)), append rows below.
-
----
-
-## Active projects
-
-| Project | Path | Class | Notes |
-|---|---|---|---|
-| _(none yet)_ | | | |
-
-<!--
-Example rows — uncomment and edit when you onboard projects:
-
-| my-app           | `__PROJECTS_ROOT__/my-app`           | monorepo SaaS       | Onboarded YYYY-MM-DD. |
-| my-marketing-site| `__PROJECTS_ROOT__/my-marketing-site`| single Next.js app  | Onboarded YYYY-MM-DD. |
-| my-game          | `__PROJECTS_ROOT__/my-game`          | game (Unity, 3D)    | Onboarded YYYY-MM-DD. Native git hooks via `.githooks/` — see `core-rules/inheritance.md`. |
--->
-
----
-
-## Not in the registry (intentionally)
-
-Everything else under your personal projects root is outside this regime. Reasons vary — archived, experiment, client-owned, or just too small to benefit from the hook stack. If one of them becomes active enough to matter, add a row here.
-
----
-
-## How to add a project
-
-Full playbook: [`engineering-process.md` §10](engineering-process.md#10-onboarding-a-new-project-full-playbook). That is the single source of truth for onboarding steps — keep them there, not here. Registry-local steps only:
-
-1. Add a row to the "Active projects" table above with `Path` and `Class`.
-2. Commit in `trellis-instance/` with `chore: register <name>`.
-3. If private operator audits are configured, the project becomes eligible under that operator's own cadence.
-
-## How to remove a project
-
-Move it to `blacklist.md` with a reason. Operator checks should skip it. Don't delete the row — we want the history of "this project was active once."
-EOF
-
-  cat > "$HARNESS_ROOT/blacklist.md" <<'EOF'
-# Blacklist
-
-Two scopes, both excluded from registry-driven operator checks.
-
-> **Template note:** this file ships empty. Add entries as you decide which projects to pause or permanently exclude.
-
-## 1. Temporarily excluded (registered projects)
-
-Projects listed in `registry.md` that should be **temporarily** excluded from centralized process checks. Every entry needs a **reason** and a **review-after** date.
-
-| Project | Reason | Added | Review after |
-|---|---|---|---|
-| — | — | — | — |
-
-*(empty)*
-
-## 2. Permanently excluded from management
-
-Git repos under `__PROJECTS_ROOT__/` that should **never** be onboarded to Trellis. Operator checks that scan the filesystem should skip these paths.
-
-If any row becomes an active project, move it to `registry.md` (step 1 of onboarding).
-
-| Path | Reason |
-|---|---|
-| _(none yet)_ | |
-
-<!--
-Example rows — uncomment as you blacklist things:
-
-| `__PROJECTS_ROOT__/scratch-tool` | One-off script, not a managed app.       |
-| `__PROJECTS_ROOT__/old-experiment`| Dormant; kept locally but not maintained.|
--->
-
----
-
-## Semantics
-
-- **Temporarily excluded** (section 1) — for projects that ARE in `registry.md` but need a time-bound pause (refactor freeze, bootstrap period, noisy-audit window). Reason + review-after required.
-- **Permanently excluded** (section 2) — for git repos that are NOT in `registry.md` and never will be unless explicitly moved. No review-after needed.
-- Registry-driven operator checks should read both sections: a project participates iff it is in `registry.md` AND not in either blacklist section. Filesystem checks should skip every path listed in section 2.
-- Temporary entries older than 90 days trigger a prompt to make them permanent or lift them.
-EOF
+record_unavailable() {
+  local fleet="$1" project_id="$2" root="$3"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    '. "$1"; local_registry_record_unavailable_root "$TRELLIS_HOME" "$2" "$3" "$4" "{}"' \
+    _ "$REGISTRY_LIB" "$fleet" "$project_id" "$root"
+  [ "$status" -eq 0 ]
 }
+write_machine_config() {
+  local default_fleet="${1:-personal}" discovery_root="$HARNESS_ROOT/discovery root"
+  mkdir -p "$discovery_root"
+  jq -n \
+    --arg source "$HARNESS_ROOT" \
+    --arg root "$discovery_root" \
+    --arg fleet "$default_fleet" \
+    '{
+      schema_version: 1,
+      source_root: $source,
+      release_remote: "fixture://release",
+      active_cli_release: "1.2.3",
+      default_fleet: $fleet,
+      fleets: {($fleet): {discovery_roots: [$root]}}
+    }' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+}
+
 
 write_fixture() {
-  project="$1"
-  fixture="$HARNESS_ROOT/core-rules/evals/$project/smoke"
+  local project="$1"
+  local fixture="$HARNESS_ROOT/core-rules/evals/$project/smoke"
   mkdir -p "$fixture"
   cat > "$fixture/manifest.yml" <<EOF
 version: 1
@@ -145,139 +123,160 @@ EOF
 }
 
 run_mode() {
-  local mode="$1"
-  run bash "$HARNESS_ROOT/scripts/run-evals.sh" "--$mode"
+  local mode="$1" fleet="${2:-personal}"
+  run env \
+    TRELLIS_HOME="$TRELLIS_HOME" \
+    CLAUDE_MARKER="$CLAUDE_MARKER" \
+    PATH="$HARNESS_ROOT/bin:$PATH" \
+    bash "$HARNESS_ROOT/scripts/run-evals.sh" "--$mode" \
+      --home "$TRELLIS_HOME" --fleet "$fleet"
 }
 
-@test "check and dry-run allow the shipped placeholder-only public controls without private evals" {
-  write_public_controls
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
+@test "template-only evals pass for an empty selected local fleet without model invocation" {
   for mode in check dry-run; do
     run_mode "$mode"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no fixtures matched"* ]]
+    [[ "$output" == *"no fixtures matched"* ]] || { echo "$output"; false; }
   done
+  [ ! -e "$CLAUDE_MARKER" ]
 }
 
-@test "check and dry-run fail closed when public control files are absent" {
-  rm -f "$HARNESS_ROOT/registry.md" "$HARNESS_ROOT/blacklist.md"
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
-  for mode in check dry-run; do
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"registry is missing"* ]]
-  done
-}
-
-@test "check and dry-run fail closed when a public control file is empty" {
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
-  for control in registry blacklist; do
-    write_public_controls
-    : > "$HARNESS_ROOT/$control.md"
-
-    for mode in check dry-run; do
-      run_mode "$mode"
-
-      [ "$status" -eq 4 ]
-      [[ "$output" == *"$control"* ]]
-      [[ "$output" == *"placeholder-only structure"* ]]
-    done
-  done
-}
-
-@test "check and dry-run fail closed when public controls are truncated or malformed" {
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
-  for mode in check dry-run; do
-    write_public_controls
-    printf '%s\n' '# Project registry' '' '## Active projects' > "$HARNESS_ROOT/registry.md"
-
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"registry"* ]]
-    [[ "$output" == *"placeholder-only structure"* ]]
-
-    write_public_controls
-    cat > "$HARNESS_ROOT/blacklist.md" <<'EOF'
-# Blacklist
-
-## 1. Temporarily excluded (registered projects)
-
-| Project | Reason |
-|---|---|
-| — | — |
-
-## 2. Permanently excluded from management
-
-| Path |
-|---|
-| _(none yet)_ |
-EOF
-
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"blacklist"* ]]
-    [[ "$output" == *"placeholder-only structure"* ]]
-  done
-}
-
-@test "check and dry-run fail closed when nonempty private controls have no eval root" {
-  write_registry alpha
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
-  for mode in check dry-run; do
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"eval fixture root"* ]]
-  done
-}
-
-@test "check and dry-run fail closed when private inputs are partial" {
-  write_registry alpha
-  rm -f "$HARNESS_ROOT/blacklist.md"
-  rm -rf "$HARNESS_ROOT/core-rules/evals"
-
-  for mode in check dry-run; do
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"blacklist"* ]]
-  done
-}
-
-@test "check and dry-run fail when an active registry project has no eval fixture manifest" {
-  write_registry beta
-  mkdir -p "$HARNESS_ROOT/core-rules/evals/beta"
-
-  for mode in check dry-run; do
-    run_mode "$mode"
-
-    [ "$status" -eq 4 ]
-    [[ "$output" == *"beta"* ]]
-    [[ "$output" == *"missing eval fixture"* ]]
-  done
-}
-
-@test "check and dry-run validate a complete private fixture set" {
-  write_registry alpha beta
-  write_blacklist beta
+@test "available worktrees with spaces are selected from the requested fleet and unavailable rows are reported" {
+  alpha="$HARNESS_ROOT/personal roots/alpha project"
+  unavailable="$HARNESS_ROOT/offline volume/alpha\\backup"
+  make_repo "$alpha" alpha
+  register_project personal alpha "$alpha"
+  record_unavailable personal alpha-offline "$unavailable"
   write_fixture alpha
 
   for mode in check dry-run; do
     run_mode "$mode"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"1 fixture(s) valid"* ]]
-    if [ "$mode" = "dry-run" ]; then
-      [[ "$output" == *"would run:"* ]]
+    [[ "$output" == *"unavailable local registry row: personal/alpha-offline"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"$unavailable"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"1 fixture(s) valid"* ]] || { echo "$output"; false; }
+    if [ "$mode" = dry-run ]; then
+      [[ "$output" == *"would run:"* ]] || { echo "$output"; false; }
     fi
   done
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+
+@test "unavailable rows do not require an eval fixture or trigger a model invocation" {
+  record_unavailable personal unavailable-only "$HARNESS_ROOT/missing volume/project"
+
+  for mode in check dry-run; do
+    run_mode "$mode"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unavailable local registry row: personal/unavailable-only"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"no fixtures matched"* ]] || { echo "$output"; false; }
+  done
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+# A registered row whose recorded root is present but is not a Git worktree.
+# Its stored hashes still verify, so `registry.sh list` emits the complete
+# listing and only then exits with the state class.
+add_broken_registry_row() {
+  local fleet="$1" project_id="$2" sibling="$HARNESS_ROOT/broken sibling checkout"
+  local registry="$TRELLIS_HOME/registry.json" checkout_id worktree_id sha
+  mkdir -p "$sibling"
+  if command -v shasum >/dev/null 2>&1; then sha="shasum -a 256"; else sha="sha256sum"; fi
+  checkout_id="$(printf '%s' "$sibling/.git" | $sha | cut -d ' ' -f 1)"
+  worktree_id="$(printf '%s' "$sibling" | $sha | cut -d ' ' -f 1)"
+  jq --arg key "$fleet/$project_id" --arg fleet "$fleet" --arg project_id "$project_id" \
+    --arg root "$sibling" --arg common "$sibling/.git" \
+    --arg checkout "$checkout_id" --arg worktree "$worktree_id" '
+      .projects[$key] = {
+        fleet: $fleet, project_id: $project_id, status: "active", metadata: {},
+        checkouts: {
+          ($checkout): {
+            root: $root, git_common_dir: $common, harnesses: [],
+            worktrees: {($worktree): {root: $root}}
+          }
+        }
+      }' "$registry" > "$registry.next"
+  mv -f "$registry.next" "$registry"
+  chmod 600 "$registry"
+}
+
+@test "a registry state-error row raises the exit class without discarding the listing" {
+  alpha="$HARNESS_ROOT/personal roots/alpha project"
+  make_repo "$alpha" alpha
+  register_project personal alpha "$alpha"
+  add_broken_registry_row personal broken-sibling
+  write_fixture alpha
+
+  for mode in check dry-run; do
+    run_mode "$mode"
+
+    # The complete listing survives exit 4: the healthy row is still evaluated,
+    # the state-error row is reported, and class 4 reaches run-evals' own exit
+    # rather than being discarded or downgraded.
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"state-error local registry row: personal/broken-sibling"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"1 fixture(s) valid"* ]] || { echo "$output"; false; }
+  done
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+
+@test "an explicitly filtered ineligible fixture fails instead of becoming an empty success" {
+  unavailable="$HARNESS_ROOT/missing volume/alpha"
+  record_unavailable personal alpha "$unavailable"
+  write_fixture alpha
+
+  run env \
+    TRELLIS_HOME="$TRELLIS_HOME" \
+    CLAUDE_MARKER="$CLAUDE_MARKER" \
+    PATH="$HARNESS_ROOT/bin:$PATH" \
+    bash "$HARNESS_ROOT/scripts/run-evals.sh" --check \
+      --home "$TRELLIS_HOME" --fleet personal --filter 'alpha/*'
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"selected eval fixture 'alpha/smoke' has no active available worktree in fleet 'personal'"* ]] || { echo "$output"; false; }
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+
+@test "a selected fleet must exist in validated local machine state" {
+  write_machine_config personal
+
+  run_mode check work
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"selected fleet is not configured locally: work"* ]] || { echo "$output"; false; }
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+
+
+@test "fleet selection is isolated even when the same machine registry has other available roots" {
+  personal="$HARNESS_ROOT/personal roots/alpha project"
+  work="$HARNESS_ROOT/work roots/beta project"
+  make_repo "$personal" alpha
+  make_repo "$work" beta
+  register_project personal alpha "$personal"
+  register_project work beta "$work"
+  write_fixture alpha
+
+  run_mode check personal
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 fixture(s) valid"* ]] || { echo "$output"; false; }
+
+  run_mode check work
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"active available project 'beta' is missing eval fixture"* ]] || { echo "$output"; false; }
+  [ ! -e "$CLAUDE_MARKER" ]
+}
+
+@test "check fails only for an available selected worktree without a fixture" {
+  alpha="$HARNESS_ROOT/registered/alpha"
+  make_repo "$alpha" alpha
+  register_project personal alpha "$alpha"
+
+  run_mode check
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"active available project 'alpha' is missing eval fixture"* ]] || { echo "$output"; false; }
+  [ ! -e "$CLAUDE_MARKER" ]
 }

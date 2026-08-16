@@ -8,7 +8,7 @@ lane reaches another model through a local lane router, which may in turn use
 an OpenAI-compatible local proxy. The router is an optional capability, not a
 prerequisite for loading the agent or completing the work.
 
-The public contract defines routing, availability, and degrade behavior. An
+The public contract defines routing, availability, and failure/continuity behavior. An
 instance-private binding outside the template owns concrete hosts, ports,
 credentials, process management, and provider setup.
 
@@ -42,20 +42,23 @@ reports whether the local lane is configured and currently healthy; callers
 decide what to do. Unknown state, malformed output, missing tools, connection
 errors, and timeouts all resolve to unavailable.
 
-## Degrade tiers
+## Failure and continuity tiers
 
-1. **Foreign lane available.** Dispatch the bounded work order through the
+1. **Selected foreign lane available.** Dispatch the bounded work order through the
    configured lane and retain its receipt.
-2. **Foreign lane unavailable.** The lane returns `STATUS: UNAVAILABLE` and
-   `CODE: LANE_UNAVAILABLE`. The caller records the degrade and re-runs the
-   identical unit on the first-party model.
-3. **No delegation mechanism.** Execute the identical unit inline on the
-   first-party model, preserving the same scope, constraints, proof, and
-   expected output.
+2. **Selected foreign lane unavailable.** The lane returns `STATUS: UNAVAILABLE` and
+   `CODE: LANE_UNAVAILABLE`. Record the failed selection. The selected attempt stays
+   visible and fails closed; its receipt does not authorize an automatic rerun on the
+   first-party model or any other lane.
+3. **Explicit re-selection or same-provider continuity.** A caller or operator may
+   explicitly select a different lane after observing the failed receipt. If the
+   first-party lane was already selected and native delegation is unavailable, execute
+   the identical unit inline on the first-party model, preserving the same scope,
+   constraints, proof, and expected output. That is same-provider continuity, not a
+   fallback.
 
-The unit contract does not change across tiers. Only the mechanism carrying it
-changes: foreign lane, first-party delegation, or the caller's own context.
-The router never rewrites the requested model to hide a fallback.
+An explicitly re-selected lane preserves the unit contract. The router never rewrites
+the requested model or chooses a replacement provider.
 
 ## Why unknown resolves to OFF
 
@@ -71,19 +74,21 @@ as available converts a broken probe into a fail-open gate; treating an
 unknown model as foreign lets a typo or naming collision change providers.
 Neither is acceptable at a system boundary.
 
-## Re-running on the first-party model
+## Explicit re-selection before a first-party rerun
 
-A caller that receives the unavailable receipt must:
+A foreign-lane unavailable receipt ends the selected attempt. It does not authorize a
+rerun. If a caller or operator explicitly selects the first-party lane afterwards, the
+caller must:
 
 1. state that the foreign lane was unavailable and include the receipt reason;
 2. preserve `task_prompt`, `target_cwd`, scope, constraints, proof, expected
    output, and any explicitly requested model-independent settings;
-3. submit that identical work order to a first-party Claude agent, or execute
-   it inline when no delegation mechanism exists; and
+3. submit that identical work order to a first-party Claude agent, or execute it
+   inline when no delegation mechanism exists; and
 4. run the original verification before reporting completion.
 
-Do not ask the router to substitute silently. Do not widen the unit during the
-rerun. Do not report the unavailable attempt as success.
+Do not ask the router to substitute silently. Do not widen the unit during an
+explicitly selected rerun. Do not report the unavailable attempt as success.
 
 ## Precedent and deliberate limits
 
@@ -96,5 +101,5 @@ Effort ladders, setup triples, background launch, job-id polling,
 no-session-id retries, cancellation bookkeeping, and diff-stat receipts are
 not copied here. A single foreground lane request has no effort-tier policy,
 companion setup, background job, session-id wedge, or worker-owned edit to
-measure. Copying those mechanics would add ceremony without preserving a real
-invariant.
+measure; the former worker is retired. Copying those mechanics would add
+ceremony without preserving a real invariant.

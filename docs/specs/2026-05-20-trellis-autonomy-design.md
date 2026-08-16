@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-20
 **Status:** Draft (awaiting user review)
-**Authors:** __MAINTAINER_NAME__ (+ Claude)
+**Authors:** Abhishek Kaushik (+ Claude)
 **Target version:** core-rules/VERSION 0.4.5
 
 ---

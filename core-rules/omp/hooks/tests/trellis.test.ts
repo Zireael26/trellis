@@ -18,8 +18,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
-import {
+import trellisExtension, {
 	buildTranscriptJsonl,
 	canonicalToolName,
 	createTrellisAdapter,
@@ -28,11 +29,13 @@ import {
 	parseHookOutput,
 	policyMarker,
 	resolveTrellisRoot,
+	resolveTrellisRuntime,
 	runCanonicalHook,
 	slashCommandName,
 	systemPromptHasPolicy,
 	toolResponseText,
 	trellisPresetPolicies,
+	type OmpApi,
 	type OmpBeforeAgentStartEvent,
 	type OmpContext,
 	type OmpInputEvent,
@@ -57,15 +60,120 @@ interface SpawnCall {
 	transcript?: string;
 }
 
-/** Temp dir with the given script names created as empty files. */
-function makeHooksDir(scripts: string[]): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-root-"));
-	const dir = path.join(root, "core-rules", "hooks");
-	fs.mkdirSync(dir, { recursive: true });
-	for (const script of scripts) {
-		fs.writeFileSync(path.join(dir, script), "");
+interface PayloadFixtureEntry {
+	path: string;
+	content?: string;
+	mode?: number;
+	symlinkTarget?: string;
+}
+
+interface ReleaseFixture {
+	releaseDir: string;
+	payloadRoot: string;
+	hooksDir: string;
+}
+
+function fixtureGitBlobOid(content: Buffer): string {
+	return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
+}
+
+function fixtureMode(stat: fs.Stats): "100644" | "100755" | "120000" {
+	if (stat.isSymbolicLink()) return "120000";
+	if (!stat.isFile()) throw new Error(`unexpected payload fixture entry mode: ${stat.mode}`);
+	return (stat.mode & 0o111) === 0 ? "100644" : "100755";
+}
+
+function fixtureTree(payloadRoot: string): Array<{ path: string; mode: "100644" | "100755" | "120000"; oid: string }> {
+	const tree: Array<{ path: string; mode: "100644" | "100755" | "120000"; oid: string }> = [];
+	function visit(directory: string): void {
+		for (const name of fs.readdirSync(directory).sort()) {
+			const fullPath = path.join(directory, name);
+			const stat = fs.lstatSync(fullPath);
+			if (stat.isDirectory()) {
+				visit(fullPath);
+				continue;
+			}
+			const relativePath = path.relative(payloadRoot, fullPath).split(path.sep).join("/");
+			const content = stat.isSymbolicLink() ? Buffer.from(fs.readlinkSync(fullPath)) : fs.readFileSync(fullPath);
+			tree.push({ path: relativePath, mode: fixtureMode(stat), oid: fixtureGitBlobOid(content) });
+		}
 	}
-	return dir;
+	visit(payloadRoot);
+	return tree;
+}
+
+function setFixtureWritable(root: string, writable: boolean): void {
+	const stat = fs.lstatSync(root);
+	if (stat.isSymbolicLink()) return;
+	if (stat.isDirectory()) {
+		fs.chmodSync(root, writable ? (stat.mode & 0o777) | 0o200 : (stat.mode & 0o777) & ~0o222);
+		for (const name of fs.readdirSync(root)) {
+			setFixtureWritable(path.join(root, name), writable);
+		}
+		return;
+	}
+	fs.chmodSync(root, writable ? (stat.mode & 0o777) | 0o200 : (stat.mode & 0o777) & ~0o222);
+}
+
+function sealRelease(releaseDir: string): void {
+	setFixtureWritable(releaseDir, false);
+}
+
+function makeReleaseWritable(releaseDir: string): void {
+	setFixtureWritable(releaseDir, true);
+}
+
+function writeFixtureReleaseRecord(payloadRoot: string): void {
+	const releaseDir = path.dirname(payloadRoot);
+	fs.writeFileSync(
+		path.join(releaseDir, "release.json"),
+		JSON.stringify({
+			schema_version: 1,
+			version: "1.0.0",
+			tag: "v1.0.0",
+			commit: "0".repeat(40),
+			remote: "https://example.test/trellis.git",
+			tree: fixtureTree(payloadRoot),
+		}),
+	);
+}
+
+function rewriteFixtureReleaseRecord(payloadRoot: string, update: (record: Record<string, unknown>) => void): void {
+	const releaseDir = path.dirname(payloadRoot);
+	makeReleaseWritable(releaseDir);
+	const releaseJson = path.join(releaseDir, "release.json");
+	const record = JSON.parse(fs.readFileSync(releaseJson, "utf8")) as Record<string, unknown>;
+	update(record);
+	fs.writeFileSync(releaseJson, JSON.stringify(record));
+	sealRelease(releaseDir);
+}
+
+function makeReleaseFixture(entries: PayloadFixtureEntry[]): ReleaseFixture {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-release-")));
+	const releaseDir = path.join(root, "releases", "1.0.0");
+	const payloadRoot = path.join(releaseDir, "payload");
+	for (const entry of entries) {
+		const fullPath = path.join(payloadRoot, entry.path);
+		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+		if (entry.symlinkTarget !== undefined) {
+			fs.symlinkSync(entry.symlinkTarget, fullPath);
+		} else {
+			fs.writeFileSync(fullPath, entry.content ?? "", { mode: entry.mode ?? 0o644 });
+		}
+	}
+	writeFixtureReleaseRecord(payloadRoot);
+	sealRelease(releaseDir);
+	return { releaseDir, payloadRoot, hooksDir: path.join(payloadRoot, "core-rules", "hooks") };
+}
+
+/** Temp immutable payload with the given canonical script names. */
+function makeHooksDir(scripts: string[], extraEntries: PayloadFixtureEntry[] = []): string {
+	return makeReleaseFixture([
+		{ path: "core-rules/omp/hooks/pre/trellis.ts", content: "// installed OMP adapter\n" },
+		{ path: "core-rules/hooks/.keep", content: "" },
+		...scripts.map((script) => ({ path: `core-rules/hooks/${script}`, content: "" })),
+		...extraEntries,
+	]).hooksDir;
 }
 
 /** Temp project dir with an optional CLAUDE.md. */
@@ -73,6 +181,54 @@ function makeProjectDir(claudeMd: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-project-"));
 	fs.writeFileSync(path.join(dir, "CLAUDE.md"), claudeMd, "utf8");
 	return dir;
+}
+
+/** Project carrying the managed OMP adapter leaf, before runtime adoption. */
+function makeOmpSurfaceProject(): string {
+	const projectDir = makeProjectDir(PROJECT_CLAUDE_MD);
+	const adapterLeaf = path.join(projectDir, ".omp", "hooks", "pre", "trellis.ts");
+	fs.mkdirSync(path.dirname(adapterLeaf), { recursive: true });
+	fs.symlinkSync("../../../.trellis/runtime/core-rules/omp/hooks/pre/trellis.ts", adapterLeaf);
+	fs.symlinkSync("../CLAUDE.md", path.join(projectDir, ".omp", "AGENTS.md"));
+	return projectDir;
+}
+
+/** Attach an OMP surface to an installed immutable payload. */
+function makeAttachedOmpProject(payloadRoot: string): string {
+	const projectDir = makeOmpSurfaceProject();
+	fs.mkdirSync(path.join(projectDir, ".trellis"), { recursive: true });
+	fs.symlinkSync(payloadRoot, path.join(projectDir, ".trellis", "runtime"), "dir");
+	return projectDir;
+}
+
+function makeExtensionApi(): {
+	api: OmpApi;
+	handlers: Map<string, (event: unknown, ctx: OmpContext) => unknown>;
+	labels: string[];
+	errors: string[];
+} {
+	const handlers = new Map<string, (event: unknown, ctx: OmpContext) => unknown>();
+	const labels: string[] = [];
+	const errors: string[] = [];
+	return {
+		api: {
+			on(event, handler): void {
+				handlers.set(event, handler);
+			},
+			setLabel(label): void {
+				labels.push(label);
+			},
+			logger: {
+				warn(..._args: unknown[]): void {},
+				error(...args: unknown[]): void {
+					errors.push(args.map(String).join(" "));
+				},
+			},
+		},
+		handlers,
+		labels,
+		errors,
+	};
 }
 
 /** Fake spawn returning canned stdout per script; records calls for assertions. */
@@ -157,6 +313,7 @@ const ALL_CANONICAL_SCRIPTS = [
 	"save-context-log.sh",
 	"post-compact-context.sh",
 	"spec-gate.sh",
+	"decision-receipt.sh",
 	"stop-verify.sh",
 	"code-review-subagent.sh",
 	"propose-rules.sh",
@@ -169,30 +326,269 @@ const ALL_CANONICAL_SCRIPTS = [
 // ---------------------------------------------------------------------------
 
 describe("resolveTrellisRoot", () => {
-	it("prefers a valid TRELLIS_ROOT env var", () => {
-		const root = makeHooksDir(["block-destructive.sh"]);
-		const trellisRoot = path.dirname(path.dirname(root)); // .../core-rules/hooks -> root
-		const env = { TRELLIS_ROOT: trellisRoot };
-		assert.equal(resolveTrellisRoot("/elsewhere/deep/path", env), trellisRoot);
+	it("ignores TRELLIS_ROOT and only accepts an immutable payload ancestor", () => {
+		const hooksDir = makeHooksDir(["block-destructive.sh"]);
+		const payloadRoot = path.dirname(path.dirname(hooksDir));
+		const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-source-"));
+		fs.mkdirSync(path.join(sourceRoot, "core-rules", "hooks"), { recursive: true });
+		const adapterDir = path.join(payloadRoot, "core-rules", "omp", "hooks", "pre");
+
+		assert.equal(resolveTrellisRoot(adapterDir, { TRELLIS_ROOT: sourceRoot }), payloadRoot);
 	});
 
-	it("ignores a dangling TRELLIS_ROOT and falls back to the module walk-up", () => {
-		const root = makeHooksDir(["block-destructive.sh"]);
-		const trellisRoot = path.dirname(path.dirname(root));
-		const adapterDir = path.join(trellisRoot, "core-rules", "omp", "hooks", "pre");
-		const env = { TRELLIS_ROOT: "/nonexistent/trellis" };
-		assert.equal(resolveTrellisRoot(adapterDir, env), trellisRoot);
+	it("rejects a mutable checkout even when it contains canonical hooks", () => {
+		const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-source-"));
+		fs.mkdirSync(path.join(sourceRoot, "core-rules", "hooks"), { recursive: true });
+
+		assert.equal(resolveTrellisRoot(path.join(sourceRoot, "core-rules", "omp", "hooks", "pre"), {}), undefined);
 	});
 
-	it("walks up from the adapter directory to the ancestor carrying core-rules/hooks", () => {
-		const root = makeHooksDir(["block-destructive.sh"]);
-		const trellisRoot = path.dirname(path.dirname(root));
-		const adapterDir = path.join(trellisRoot, "core-rules", "omp", "hooks", "pre");
-		assert.equal(resolveTrellisRoot(adapterDir, {}), trellisRoot);
-	});
-
-	it("returns undefined when no root exists", () => {
+	it("returns undefined when no immutable payload exists", () => {
 		assert.equal(resolveTrellisRoot("/nonexistent/a/b/c", {}), undefined);
+	});
+});
+
+describe("immutable runtime resolution", () => {
+	it("resolves an installed payload from the attached project runtime anchor", () => {
+		const hooksDir = makeHooksDir(["block-destructive.sh"]);
+		const payloadRoot = path.dirname(path.dirname(hooksDir));
+		const projectDir = makeAttachedOmpProject(payloadRoot);
+		const nestedDir = path.join(projectDir, "src", "nested");
+		fs.mkdirSync(nestedDir, { recursive: true });
+
+		assert.deepEqual(resolveTrellisRuntime(nestedDir), {
+			projectDir,
+			trellisRoot: path.join(projectDir, ".trellis", "runtime"),
+			hooksDir: path.join(projectDir, ".trellis", "runtime", "core-rules", "hooks"),
+		});
+	});
+
+	it("keeps effective OMP hooks on the installed payload after the source checkout is dirtied and moved", async () => {
+		const hooksDir = makeHooksDir(["block-destructive.sh"]);
+		const payloadRoot = path.dirname(path.dirname(hooksDir));
+		const projectDir = makeAttachedOmpProject(payloadRoot);
+		const runtime = resolveTrellisRuntime(projectDir);
+		if (!runtime) throw new Error("expected attached immutable runtime");
+
+		const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-source-"));
+		const sourceHook = path.join(sourceRoot, "core-rules", "hooks", "block-destructive.sh");
+		fs.mkdirSync(path.dirname(sourceHook), { recursive: true });
+		fs.writeFileSync(sourceHook, "# mutable source policy\n");
+		fs.writeFileSync(sourceHook, "# dirty mutable source policy\n");
+		const movedSourceRoot = `${sourceRoot}-moved`;
+		fs.renameSync(sourceRoot, movedSourceRoot);
+
+		const spawnSetup = makeSpawn({});
+		const { adapter } = makeAdapter({
+			trellisRoot: runtime.trellisRoot,
+			hooksDir: runtime.hooksDir,
+			spawn: spawnSetup.spawn,
+		});
+		const result = await adapter.onToolCall(
+			{ type: "tool_call", toolCallId: "call-runtime", toolName: "bash", input: { command: "printf runtime" } },
+			makeCtx({ cwd: projectDir }),
+		);
+		const [call] = spawnSetup.calls;
+		if (!call) throw new Error("expected installed canonical hook invocation");
+
+		assert.equal(result, undefined);
+		assert.equal(call.args[0], path.join(payloadRoot, "core-rules", "hooks", "block-destructive.sh"));
+		assert.equal(call.options.env.TRELLIS_ROOT, runtime.trellisRoot);
+		assert.notEqual(call.args[0], path.join(movedSourceRoot, "core-rules", "hooks", "block-destructive.sh"));
+	});
+
+	it("rejects mutable source inputs passed through the explicit adapter contract", () => {
+		const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-source-"));
+		const sourceHooksDir = path.join(sourceRoot, "core-rules", "hooks");
+		fs.mkdirSync(sourceHooksDir, { recursive: true });
+
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: sourceRoot, hooksDir: sourceHooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+	});
+
+	it("fails closed for an attached OMP surface with a missing runtime anchor", () => {
+		const projectDir = makeOmpSurfaceProject();
+		const { api, handlers } = makeExtensionApi();
+		trellisExtension(api);
+		const onToolCall = handlers.get("tool_call");
+		if (!onToolCall) throw new Error("expected OMP tool-call handler");
+
+		assert.throws(
+			() => {
+				onToolCall(
+					{ type: "tool_call", toolCallId: "call-missing-runtime", toolName: "bash", input: { command: "true" } },
+					makeCtx({ cwd: projectDir }),
+				);
+			},
+			/missing immutable runtime anchor/,
+		);
+	});
+
+	it("fails closed for an attached OMP surface with a wrong runtime payload", () => {
+		const projectDir = makeOmpSurfaceProject();
+		const mutableRoot = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-source-"));
+		fs.mkdirSync(path.join(mutableRoot, "core-rules", "hooks"), { recursive: true });
+		fs.mkdirSync(path.join(projectDir, ".trellis"), { recursive: true });
+		fs.symlinkSync(mutableRoot, path.join(projectDir, ".trellis", "runtime"), "dir");
+
+		assert.throws(() => resolveTrellisRuntime(projectDir), /does not resolve to an immutable payload/);
+	});
+
+	it("keeps a raw non-Trellis project inert and warning-free", async () => {
+		const rawProjectDir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-raw-"));
+		fs.mkdirSync(path.join(rawProjectDir, ".trellis"), { recursive: true });
+		fs.writeFileSync(path.join(rawProjectDir, ".trellis", "runtime"), "not an OMP attachment\n");
+		const { api, handlers, labels, errors } = makeExtensionApi();
+		trellisExtension(api);
+		const onToolCall = handlers.get("tool_call");
+		if (!onToolCall) throw new Error("expected OMP tool-call handler");
+
+		const result = await onToolCall(
+			{ type: "tool_call", toolCallId: "call-raw", toolName: "bash", input: { command: "true" } },
+			makeCtx({ cwd: rawProjectDir }),
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(labels, []);
+		assert.deepEqual(errors, []);
+	});
+
+	it("rejects forged, empty, and incomplete release records", () => {
+		const forged = makeReleaseFixture([{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" }]);
+		rewriteFixtureReleaseRecord(forged.payloadRoot, (record) => {
+			record.commit = "not-a-commit";
+		});
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: forged.payloadRoot, hooksDir: forged.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+
+		const empty = makeReleaseFixture([{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" }]);
+		rewriteFixtureReleaseRecord(empty.payloadRoot, (record) => {
+			record.tree = [];
+		});
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: empty.payloadRoot, hooksDir: empty.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+
+		const incomplete = makeReleaseFixture([
+			{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" },
+			{ path: "core-rules/hooks/reread-guard.sh", content: "approved\n" },
+		]);
+		rewriteFixtureReleaseRecord(incomplete.payloadRoot, (record) => {
+			record.tree = (record.tree as unknown[]).slice(0, 1);
+		});
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: incomplete.payloadRoot, hooksDir: incomplete.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+	});
+
+	it("rejects modified, added, and writable payload state", () => {
+		const changed = makeReleaseFixture([{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" }]);
+		makeReleaseWritable(changed.releaseDir);
+		fs.writeFileSync(path.join(changed.hooksDir, "block-destructive.sh"), "changed\n");
+		sealRelease(changed.releaseDir);
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: changed.payloadRoot, hooksDir: changed.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+
+		const added = makeReleaseFixture([{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" }]);
+		makeReleaseWritable(added.releaseDir);
+		fs.writeFileSync(path.join(added.hooksDir, "unrecorded.sh"), "extra\n");
+		sealRelease(added.releaseDir);
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: added.payloadRoot, hooksDir: added.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+
+		const writable = makeReleaseFixture([{ path: "core-rules/hooks/block-destructive.sh", content: "approved\n" }]);
+		assert.equal(resolveTrellisRoot(writable.payloadRoot, {}), writable.payloadRoot);
+		fs.chmodSync(path.join(writable.hooksDir, "block-destructive.sh"), 0o644);
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: writable.payloadRoot, hooksDir: writable.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+	});
+
+	it("rejects hooks directory and script symlink escapes", () => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-outside-"));
+		const outsideHooks = path.join(outside, "hooks");
+		fs.mkdirSync(outsideHooks);
+		fs.writeFileSync(path.join(outsideHooks, "block-destructive.sh"), "outside\n");
+		const hooksEscape = makeReleaseFixture([{ path: "core-rules/hooks", symlinkTarget: outsideHooks }]);
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: hooksEscape.payloadRoot, hooksDir: hooksEscape.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+
+		const outsideScript = path.join(outside, "block-destructive.sh");
+		const scriptEscape = makeReleaseFixture([
+			{ path: "core-rules/hooks/block-destructive.sh", symlinkTarget: outsideScript },
+		]);
+		assert.throws(
+			() => createTrellisAdapter({ trellisRoot: scriptEscape.payloadRoot, hooksDir: scriptEscape.hooksDir }),
+			/canonical hooks directory missing or not from immutable payload/,
+		);
+	});
+
+	it("keeps regular and unrelated OMP leaves in raw projects inert", async () => {
+		for (const kind of ["regular", "unrelated-symlink"] as const) {
+			const rawProjectDir = makeProjectDir(PROJECT_CLAUDE_MD);
+			const adapterLeaf = path.join(rawProjectDir, ".omp", "hooks", "pre", "trellis.ts");
+			fs.mkdirSync(path.dirname(adapterLeaf), { recursive: true });
+			if (kind === "regular") {
+				fs.writeFileSync(adapterLeaf, "// project-owned OMP adapter\n");
+			} else {
+				fs.symlinkSync("./project-owned.ts", adapterLeaf);
+			}
+			const { api, handlers, labels, errors } = makeExtensionApi();
+			trellisExtension(api);
+			const onToolCall = handlers.get("tool_call");
+			if (!onToolCall) throw new Error("expected OMP tool-call handler");
+			assert.equal(
+				await onToolCall(
+					{ type: "tool_call", toolCallId: `call-${kind}`, toolName: "task", input: { task: "raw" } },
+					makeCtx({ cwd: rawProjectDir }),
+				),
+				undefined,
+			);
+			assert.deepEqual(labels, []);
+			assert.deepEqual(errors, []);
+		}
+	});
+
+	it("stops at nested Git roots and linked-worktree Git files", async () => {
+		const hooksDir = makeHooksDir(["block-destructive.sh"]);
+		const attachedProject = makeAttachedOmpProject(path.dirname(path.dirname(hooksDir)));
+		const rawClone = path.join(attachedProject, "vendor", "raw-clone");
+		const rawCwd = path.join(rawClone, "src");
+		fs.mkdirSync(path.join(rawClone, ".git"), { recursive: true });
+		fs.mkdirSync(rawCwd, { recursive: true });
+		const linkedWorktree = path.join(attachedProject, "vendor", "linked-worktree");
+		const linkedCwd = path.join(linkedWorktree, "src");
+		fs.mkdirSync(linkedCwd, { recursive: true });
+		fs.writeFileSync(path.join(linkedWorktree, ".git"), "gitdir: /tmp/linked-worktree.git\n");
+
+		assert.equal(resolveTrellisRuntime(rawCwd), undefined);
+		assert.equal(resolveTrellisRuntime(linkedCwd), undefined);
+		const { api, handlers, labels, errors } = makeExtensionApi();
+		trellisExtension(api);
+		const onToolCall = handlers.get("tool_call");
+		if (!onToolCall) throw new Error("expected OMP tool-call handler");
+		assert.equal(
+			await onToolCall(
+				{ type: "tool_call", toolCallId: "call-nested-raw", toolName: "task", input: { task: "raw" } },
+				makeCtx({ cwd: rawCwd }),
+			),
+			undefined,
+		);
+		assert.deepEqual(labels, []);
+		assert.deepEqual(errors, []);
 	});
 });
 
@@ -435,17 +831,15 @@ describe("policy marker detection", () => {
 
 describe("Trellis preset policy discovery", () => {
 	it("loads only managed preset links resolving inside the canonical preset root", () => {
-		const hooksDir = makeHooksDir([]);
+		const strictPolicy = "# Compliance strict preset\nCanonical preset body.";
+		const hooksDir = makeHooksDir([], [{ path: "core-rules/presets/compliance-strict.md", content: strictPolicy }]);
 		const trellisRoot = path.dirname(path.dirname(hooksDir));
 		const presetsDir = path.join(trellisRoot, "core-rules", "presets");
 		const projectDir = makeProjectDir(PROJECT_CLAUDE_MD);
 		const rulesDir = path.join(projectDir, ".claude", "rules");
-		fs.mkdirSync(presetsDir, { recursive: true });
 		fs.mkdirSync(rulesDir, { recursive: true });
 
-		const strictPolicy = "# Compliance strict preset\nCanonical preset body.";
 		const strictPath = path.join(presetsDir, "compliance-strict.md");
-		fs.writeFileSync(strictPath, strictPolicy);
 		fs.symlinkSync(strictPath, path.join(rulesDir, "preset-compliance-strict.md"));
 
 		const outsidePath = path.join(projectDir, "outside.md");
@@ -804,16 +1198,16 @@ describe("before_agent_start", () => {
 	});
 
 	it("injects canonical Trellis presets that OMP does not discover natively", async () => {
-		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS);
+		const preset = "# Compliance strict preset\nAdditional canonical constraints.";
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: "core-rules/presets/compliance-strict.md", content: preset },
+		]);
 		const trellisRoot = path.dirname(path.dirname(hooksDir));
 		const presetsDir = path.join(trellisRoot, "core-rules", "presets");
 		const projectDir = makeProjectDir(PROJECT_CLAUDE_MD);
 		const rulesDir = path.join(projectDir, ".claude", "rules");
-		fs.mkdirSync(presetsDir, { recursive: true });
 		fs.mkdirSync(rulesDir, { recursive: true });
-		const preset = "# Compliance strict preset\nAdditional canonical constraints.";
 		const presetPath = path.join(presetsDir, "compliance-strict.md");
-		fs.writeFileSync(presetPath, preset);
 		fs.symlinkSync(presetPath, path.join(rulesDir, "preset-compliance-strict.md"));
 
 		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
@@ -841,16 +1235,42 @@ describe("before_agent_start", () => {
 	});
 
 	it("injects the canonical policy in the private control-plane checkout", async () => {
-		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS);
-		const trellisRoot = path.dirname(path.dirname(hooksDir));
 		const canonicalPolicy = "# Canonical Trellis control plane\nLoad-bearing policy.";
-		fs.writeFileSync(path.join(trellisRoot, "core-rules", "CLAUDE.md"), canonicalPolicy);
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: "core-rules/CLAUDE.md", content: canonicalPolicy },
+		]);
+		const trellisRoot = path.dirname(path.dirname(hooksDir));
 		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
 		const { adapter } = makeAdapter({ spawn, hooksDir, trellisRoot });
 		const result = await adapter.onBeforeAgentStart(
 			agentStartEvent(),
 			makeCtx({ cwd: trellisRoot, getSystemPrompt: () => ["base"] }),
 		);
+		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy]);
+	});
+
+	it("uses immutable payload policy when an attached project has no CLAUDE.md", async () => {
+		const canonicalPolicy = "# Immutable release policy\nNo source checkout fallback.";
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: "core-rules/CLAUDE.md", content: canonicalPolicy },
+		]);
+		const payloadRoot = path.dirname(path.dirname(hooksDir));
+		const projectDir = makeAttachedOmpProject(payloadRoot);
+		fs.rmSync(path.join(projectDir, "CLAUDE.md"));
+		const runtime = resolveTrellisRuntime(projectDir);
+		if (!runtime) throw new Error("expected attached immutable runtime");
+		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
+		const { adapter } = makeAdapter({
+			spawn,
+			hooksDir: runtime.hooksDir,
+			trellisRoot: runtime.trellisRoot,
+		});
+
+		const result = await adapter.onBeforeAgentStart(
+			agentStartEvent(),
+			makeCtx({ cwd: projectDir, getSystemPrompt: () => ["base"] }),
+		);
+
 		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy]);
 	});
 
@@ -950,10 +1370,10 @@ describe("session_stop", () => {
 		};
 	}
 
-	it("requests a continuation with the canonical reason when a receipt gate blocks", async () => {
+	it("propagates a decision-receipt block before general verification", async () => {
 		const { spawn, calls } = makeSpawn({
-			"stop-verify.sh": {
-				stdout: JSON.stringify({ decision: "block", reason: "receipts: no Definition-of-Done receipt found" }),
+			"decision-receipt.sh": {
+				stdout: JSON.stringify({ decision: "block", reason: "decision-receipt: missing decision block" }),
 				status: 2,
 			},
 		});
@@ -961,16 +1381,15 @@ describe("session_stop", () => {
 		const { adapter } = makeAdapter({ spawn, tmpDir });
 
 		const result = await adapter.onStop(stopEvent(), makeCtx());
-		assert.deepEqual(result, { decision: "block", reason: "receipts: no Definition-of-Done receipt found" });
+		assert.deepEqual(result, { decision: "block", reason: "decision-receipt: missing decision block" });
 
-		// Earlier hooks ran in canonical order before the blocker.
 		const scripts = calls.map((call) => call.script);
-		assert.equal(scripts[0], "spec-gate.sh");
-		assert.ok(scripts.indexOf("stop-verify.sh") > scripts.indexOf("spec-gate.sh"));
+		assert.deepEqual(scripts, ["spec-gate.sh", "decision-receipt.sh"]);
+		assert.ok(!scripts.includes("stop-verify.sh"), "general verification does not run after the decision block");
 		assert.ok(!scripts.includes("stamp-turn.sh"), "stops at the first block");
 
 		// Transcript: adapter-produced Claude JSONL, exported via env, cleaned up.
-		const stopCall = calls.find((call) => call.script === "stop-verify.sh");
+		const stopCall = calls.find((call) => call.script === "decision-receipt.sh");
 		const transcriptPath = stopCall?.options.env.CLAUDE_TRANSCRIPT_PATH;
 		assert.ok(transcriptPath, "CLAUDE_TRANSCRIPT_PATH must be set");
 		assert.equal(stopCall?.transcript, buildTranscriptJsonl(messages));
@@ -979,7 +1398,24 @@ describe("session_stop", () => {
 		assert.equal(envelope.session_id, "sess-abc");
 		assert.equal(envelope.session_file, "/tmp/sess-abc.jsonl");
 		assert.equal(envelope.stop_hook_active, false);
-		assert.ok(!fs.existsSync(transcriptPath), "temp transcript is removed after the stop pass");
+		assert.ok(!fs.existsSync(transcriptPath), "temp transcript is removed after the blocked stop pass");
+	});
+
+	it("fails closed when decision-receipt cannot run", async () => {
+		const { spawn, calls } = makeSpawn({
+			"decision-receipt.sh": { stderr: "jq missing", status: 1 },
+		});
+		const { adapter } = makeAdapter({ spawn });
+
+		const result = await adapter.onStop(stopEvent(), makeCtx());
+		assert.deepEqual(result, {
+			decision: "block",
+			reason: "decision-receipt.sh: exit 1: jq missing",
+		});
+		assert.deepEqual(
+			calls.map((call) => call.script),
+			["spec-gate.sh", "decision-receipt.sh"],
+		);
 	});
 
 	it("continues quietly when every receipt gate passes", async () => {
@@ -1013,6 +1449,7 @@ describe("session_stop", () => {
 
 const STOP_SCRIPTS_EXPECTED = [
 	"spec-gate.sh",
+	"decision-receipt.sh",
 	"stop-verify.sh",
 	"code-review-subagent.sh",
 	"propose-rules.sh",
@@ -1031,13 +1468,9 @@ describe("adapter setup refusal", () => {
 	});
 
 	it("runs a real script through runCanonicalHook with the envelope on stdin", () => {
-		const hooksDir = makeHooksDir(["echo-hook.sh"]);
-		const scriptPath = path.join(hooksDir, "echo-hook.sh");
-		fs.writeFileSync(
-			scriptPath,
-			'#!/usr/bin/env bash\ncat\n',
-			{ mode: 0o755 },
-		);
+		const hooksDir = makeHooksDir([], [
+			{ path: "core-rules/hooks/echo-hook.sh", content: "#!/usr/bin/env bash\ncat\n", mode: 0o755 },
+		]);
 		const result = runCanonicalHook(
 			{
 				hooksDir,

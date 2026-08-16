@@ -20,11 +20,53 @@ trap 'rm -f "$RAW"' EXIT
 osv-scanner --format=json --recursive "$PROJECT_DIR" >"$RAW" 2>/dev/null || true
 
 python3 - "$RAW" "$PROJECT_DIR" >"$OUT" <<'PY'
-import json, sys, os
+import json, math, os, sys
+
 raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
 sev_rank = {"CRITICAL": "critical", "HIGH": "high", "MODERATE": "medium", "MEDIUM": "medium", "LOW": "low"}
+
+
+def score_severity(value):
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score) or not 0 <= score <= 10:
+        return None
+    if score >= 9:
+        return "critical"
+    if score >= 7:
+        return "high"
+    if score >= 4:
+        return "medium"
+    return "low"
+
+
+def vulnerability_severity(vuln, groups):
+    vulnerability_id = vuln.get("id")
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        ids = group.get("ids") or []
+        if vulnerability_id in ids:
+            normalized = score_severity(group.get("max_severity"))
+            if normalized:
+                return normalized
+
+    database_specific = vuln.get("database_specific")
+    if isinstance(database_specific, dict):
+        database_severity = database_specific.get("severity")
+        if isinstance(database_severity, str):
+            normalized = sev_rank.get(database_severity.upper())
+            if normalized:
+                return normalized
+
+    return "medium"
+
+
 try:
-    with open(raw) as fh: data = json.load(fh)
+    with open(raw) as fh:
+        data = json.load(fh)
 except Exception:
     sys.exit(0)
 counter = 0
@@ -34,28 +76,11 @@ for result in data.get("results", []):
     for pkg in result.get("packages", []):
         info = pkg.get("package", {})
         name, ver, eco = info.get("name", "?"), info.get("version", "?"), info.get("ecosystem", "?")
+        groups = pkg.get("groups", []) or []
         for vuln in pkg.get("vulnerabilities", []):
             vid = vuln.get("id", "OSV-UNKNOWN")
             summary = (vuln.get("summary") or vuln.get("details") or "")[:200].splitlines()[0] if (vuln.get("summary") or vuln.get("details")) else ""
-            sev_raw = ""
-            for s in vuln.get("severity", []) or []:
-                if isinstance(s, dict):
-                    sev_raw = s.get("type") or s.get("score") or ""
-                    if sev_raw: break
-            sev = "medium"
-            for db_sev in vuln.get("database_specific", {}).get("severity", "") if isinstance(vuln.get("database_specific"), dict) else []:
-                pass
-            for grp in result.get("groups", []) or []:
-                ms = grp.get("max_severity", "")
-                if ms:
-                    try:
-                        score = float(ms)
-                        if score >= 9: sev = "critical"
-                        elif score >= 7: sev = "high"
-                        elif score >= 4: sev = "medium"
-                        else: sev = "low"
-                    except ValueError:
-                        pass
+            sev = vulnerability_severity(vuln, groups)
             counter += 1
             out = {
                 "id": f"osv-{counter:04d}",

@@ -38,9 +38,12 @@ EOF
   # Real user prompts present
   grep -q "first real user prompt" "$PROJECT_DIR/context-log.md"
   grep -q "second real user prompt" "$PROJECT_DIR/context-log.md"
-  # tool_result content NOT present
-  ! grep -q "tool output here" "$PROJECT_DIR/context-log.md"
-  ! grep -q "tool_use_id" "$PROJECT_DIR/context-log.md"
+  # tool_result content NOT present. Counted, not `! grep -q`: a leading `!`
+  # is never fatal under `set -e`, so the bare form asserted nothing.
+  [ "$(grep -cF "tool output here" "$PROJECT_DIR/context-log.md")" -eq 0 ] ||
+    { cat "$PROJECT_DIR/context-log.md"; false; }
+  [ "$(grep -cF "tool_use_id" "$PROJECT_DIR/context-log.md")" -eq 0 ] ||
+    { cat "$PROJECT_DIR/context-log.md"; false; }
 }
 
 @test "P1.4: real transcript → assistant section extracts text blocks only" {
@@ -61,7 +64,7 @@ EOF
 @test "P1.4: bad transcript_path → rc=1 + stderr line" {
   run_with_stderr "$HOOK" '{"transcript_path": "/nonexistent/transcript.jsonl"}'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"transcript_path"* ]]
+  [[ "$stderr" == *"transcript_path"* ]] || { echo "$stderr"; false; }
   [[ "$stderr" == *"does not exist"* ]]
 }
 

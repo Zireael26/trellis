@@ -47,7 +47,7 @@ teardown() {
 
   run check_core_rules_coverage "$SANDBOX" "$sync_paths" "$exclude"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/orphan/"* ]]
+  [[ "$output" == *"core-rules/orphan/"* ]] || { echo "$output"; false; }
 }
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ teardown() {
   run check_core_rules_coverage "$SANDBOX" "$sync_paths" "$exclude"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$output" != *"evals"* ]]
+  [[ "$output" != *"evals"* ]] || { echo "$output"; false; }
 }
 
 # ---------------------------------------------------------------------------

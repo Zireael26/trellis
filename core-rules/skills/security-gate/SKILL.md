@@ -19,7 +19,7 @@ When in doubt, that document and `engineering-process.md` win. If a rule here co
 
 ## When to use
 
-- **At onboarding.** First run after wiring a project into `registry.md` — establishes the ground-truth findings JSON that every later diff scan reads.
+- **At onboarding.** First run after attaching a project into a local fleet — establishes the ground-truth findings JSON that every later diff scan reads.
 - **On a slow cadence.** Operators should run a private quarterly baseline. Drift between baselines is normal; the roll-up records new vs. recurring vs. resolved.
 - **Pre-release.** Before cutting a major version, re-run baseline to catch latent issues that diff scans skipped because no PR touched them.
 - **Post-incident.** After a CVE disclosure or near-miss, re-run baseline so the next diff has a clean reference.

@@ -32,6 +32,13 @@ case "$PROFILE" in
   monorepo-saas)
     CONFIGS=(--config=p/owasp-top-ten --config=p/javascript --config=p/typescript --config=p/nextjs --config=p/react)
     ;;
+  shell-tooling)
+    # Semgrep's registry has no bash ruleset (`p/bash` 404s). These are the two
+    # packs whose rules can fire on shell at all. Real shell SAST for this repo is
+    # ShellCheck, gated by .github/workflows/shellcheck.yml at severity=warning,
+    # not by this engine — see SKILL.md "Shell coverage".
+    CONFIGS=(--config=p/owasp-top-ten --config=p/command-injection --config=p/secrets)
+    ;;
   unity-game)
     CONFIGS=(--config=p/owasp-top-ten --config=p/csharp)
     if [ -d "$SKILL_ROOT/rulesets/unity-game" ]; then

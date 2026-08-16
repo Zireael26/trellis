@@ -28,21 +28,21 @@ _write_cfg() { printf '%s\n' "$@" > "$CODEX_HOME/config.toml"; }
   HARNESSES=(claude)
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_OK" ]
-  [[ "$output" == *"n/a"* ]]
+  [[ "$output" == *"n/a"* ]] || { echo "$output"; false; }
 }
 
 @test "[features] hooks = true -> OK" {
   _write_cfg '[features]' 'hooks = true'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_OK" ]
-  [[ "$output" == *"hooks = true"* ]]
+  [[ "$output" == *"hooks = true"* ]] || { echo "$output"; false; }
 }
 
 @test "config present but [features] hooks not set -> WARN" {
   _write_cfg '[features]' 'other = true' '' '[unrelated]' 'hooks = true'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"NO-OP"* ]]
+  [[ "$output" == *"NO-OP"* ]] || { echo "$output"; false; }
 }
 
 @test "hooks = false under [features] -> WARN" {
@@ -55,7 +55,7 @@ _write_cfg() { printf '%s\n' "$@" > "$CODEX_HOME/config.toml"; }
   # no config written
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"absent"* ]]
+  [[ "$output" == *"absent"* ]] || { echo "$output"; false; }
 }
 
 @test "hooks=true only in a NON-features table -> WARN (table-scoped)" {

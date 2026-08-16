@@ -18,6 +18,7 @@ REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 GATE="$REPO/core-rules/hooks/spec-gate.sh"
 CODEX_GATE="$REPO/core-rules/codex/hooks/spec-gate.sh"
 CORE="$REPO/core-rules/hooks/lib/spec-gate-core.sh"
+NATIVE_PREPUSH="$REPO/core-rules/githooks/pre-push"
 
 setup() {
   SANDBOX="$(mktemp -d)"
@@ -41,17 +42,15 @@ teardown() {
 
 # --- helpers ----------------------------------------------------------------
 
-# _config <enabled> [floor] [ceiling] — write the fixture trellis.config.json AND
-# commit it on the current branch (always main, at call time) so every feature
-# branch created afterward inherits it through the merge-base. Without the commit,
-# a test that checks out main mid-run would lose the config on the next branch.
+# _config <enabled> [floor] [ceiling] — write immutable runtime policy for an
+# attached fixture. Project-root trellis.config.json is deliberately not policy.
 _config() {
   local enabled="$1" floor="${2:-80}" ceiling="${3:-400}"
-  cat > "$REPO_DIR/trellis.config.json" <<JSON
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  cat > "$TRELLIS_FIXTURE/trellis.config.json" <<JSON
 { "template": { "branch": "main" },
   "mandatory_pipeline": { "enabled": $enabled, "spec_required_diff_lines": $floor, "surgical_max_diff_lines": $ceiling } }
 JSON
-  ( cd "$REPO_DIR" && git add trellis.config.json && git commit -qm "chore: trellis config" >/dev/null )
 }
 
 # _write_lines <file> <n> — n distinct source lines (deterministic content).
@@ -84,6 +83,18 @@ _gate() {
   ( cd "$REPO_DIR" && bash "$GATE" --gate )
 }
 
+_deploy_native_spec_gate() {
+  mkdir -p "$REPO_DIR/.claude/hooks/lib"
+  cp "$GATE" "$REPO_DIR/.claude/hooks/spec-gate.sh"
+  cp "$CORE" "$REPO_DIR/.claude/hooks/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/hooks/lib/deps.sh" "$REPO_DIR/.claude/hooks/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$REPO_DIR/.claude/hooks/lib/autonomy.sh"
+}
+
+_native_prepush() {
+  ( cd "$REPO_DIR" && printf '' | sh "$NATIVE_PREPUSH" )
+}
+
 _resolved_cfg() {
   ( . "$CORE" && sg_resolve_cfg "$REPO_DIR" )
 }
@@ -92,19 +103,30 @@ _autonomy_level() {
   ( . "$CORE" && sg_autonomy_level "$REPO_DIR" )
 }
 
+_protected_branch() {
+  ( . "$CORE" && sg_protected_branch "$REPO_DIR" )
+}
+
 _write_fleet_autonomy() {
-  printf '{"autonomy_default":%s}\n' "$1" > "$TRELLIS_FIXTURE/trellis.config.json"
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  if [ -f "$TRELLIS_FIXTURE/trellis.config.json" ]; then
+    jq --argjson level "$1" '. + {autonomy_default: $level}' \
+      "$TRELLIS_FIXTURE/trellis.config.json" > "$TRELLIS_FIXTURE/trellis.config.json.tmp"
+    mv "$TRELLIS_FIXTURE/trellis.config.json.tmp" "$TRELLIS_FIXTURE/trellis.config.json"
+  else
+    printf '{"autonomy_default":%s}\n' "$1" > "$TRELLIS_FIXTURE/trellis.config.json"
+  fi
 }
 
 _write_project_autonomy() {
   local autonomy_json="$1" presets_json="${2:-[]}"
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   jq -n \
-    --arg root "$TRELLIS_FIXTURE" \
     --argjson autonomy "$autonomy_json" \
     --argjson presets "$presets_json" \
-    '{trellis_root: $root, presets: $presets}
+    '{presets: $presets}
      + (if $autonomy == null then {} else {autonomy: $autonomy} end)' \
-    > "$REPO_DIR/.trellis.config.json"
+    > "$REPO_DIR/.trellis.json"
 }
 
 # --- default-off invariant (SC5) --------------------------------------------
@@ -125,6 +147,83 @@ _write_project_autonomy() {
   git add -A && git commit -qm "feat: big" >/dev/null
   run _gate
   [ "$status" -eq 0 ]
+}
+
+
+# --- portable policy source precedence --------------------------------------
+
+@test "canonical, legacy, and immutable runtime resolve mandatory fields independently" {
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'
+{ "template": { "branch": "runtime" },
+  "mandatory_pipeline": { "enabled": true, "spec_required_diff_lines": 120, "surgical_max_diff_lines": 480 } }
+JSON
+  cat > "$REPO_DIR/.trellis.config.json" <<'JSON'
+{ "template": { "branch": "legacy" },
+  "mandatory_pipeline": { "spec_required_diff_lines": 90 } }
+JSON
+  cat > "$REPO_DIR/.trellis.json" <<'JSON'
+{ "template": { "branch": "canonical" },
+  "mandatory_pipeline": { "surgical_max_diff_lines": 250 } }
+JSON
+
+  run _resolved_cfg
+  [ "$status" -eq 0 ]
+  [ "$output" = "true 90 250 ok" ]
+}
+@test "unattached project-root config is ignored as mutable source policy" {
+  cat > "$REPO_DIR/trellis.config.json" <<'JSON'
+{ "mandatory_pipeline": { "enabled": true, "spec_required_diff_lines": 91, "surgical_max_diff_lines": 401 } }
+JSON
+  unset TRELLIS_ROOT
+
+  run _resolved_cfg
+  [ "$status" -eq 0 ]
+  [ "$output" = "false 80 400 disabled" ]
+}
+
+@test "attached native pre-push derives and enforces immutable runtime policy" {
+  _config true 80 400
+  mkdir -p "$REPO_DIR/.trellis"
+  ln -s "$TRELLIS_FIXTURE" "$REPO_DIR/.trellis/runtime"
+  _deploy_native_spec_gate
+  _write_lines src/f.js 200
+  git checkout -q -b feat/native-runtime
+  git add -A && git commit -qm "feat: runtime policy" >/dev/null
+  unset TRELLIS_ROOT
+
+  run _native_prepush
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"spec-gate blocked"* ]] || { echo "$output"; false; }
+}
+
+@test "broken attached native runtime fails closed before spec-gate dispatch" {
+  mkdir -p "$REPO_DIR/.trellis"
+  ln -s "$SANDBOX/missing-runtime" "$REPO_DIR/.trellis/runtime"
+  unset TRELLIS_ROOT
+
+  run _native_prepush
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"attached Trellis runtime is corrupt"* ]] || { echo "$output"; false; }
+}
+
+@test "invalid canonical protected branch claims do not fall through" {
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  printf '{ "template": { "branch": "runtime" } }\n' > "$TRELLIS_FIXTURE/trellis.config.json"
+  printf '{ "template": { "branch": "bypass" } }\n' > "$REPO_DIR/.trellis.config.json"
+
+  local value
+  for value in null '""' 7; do
+    printf '{ "template": { "branch": %s } }\n' "$value" > "$REPO_DIR/.trellis.json"
+    run _protected_branch
+    [ "$status" -eq 0 ]
+    [ "$output" = main ]
+  done
+
+  printf '{}\n' > "$REPO_DIR/.trellis.json"
+  run _protected_branch
+  [ "$status" -eq 0 ]
+  [ "$output" = bypass ]
 }
 
 # --- core verdict matrix (knob on) ------------------------------------------
@@ -153,8 +252,8 @@ _write_project_autonomy() {
   git add -A && git commit -qm "feat: big" >/dev/null
   run _gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"BLOCKED"* ]]
-  [[ "$output" == *"Surgical"* ]]
+  [[ "$output" == *"BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Surgical"* ]] || { echo "$output"; false; }
 }
 
 @test "excluded paths do not count toward the gated diff" {
@@ -187,7 +286,7 @@ _write_project_autonomy() {
   git add -A && git commit -qm "feat: big + spec, no clarify" >/dev/null
   run _gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"interview artifact"* ]]
+  [[ "$output" == *"interview artifact"* ]] || { echo "$output"; false; }
 }
 
 @test "C-CRIT-1: triad exists on main but NOT in branch range -> BLOCK" {
@@ -344,6 +443,27 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+
+@test "canonical autonomy selects the decisions-log interview path over legacy and runtime" {
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'
+{ "autonomy_default": 2,
+  "mandatory_pipeline": { "enabled": true } }
+JSON
+  printf '{ "autonomy": 1 }\n' > "$REPO_DIR/.trellis.config.json"
+  printf '{ "autonomy": 4 }\n' > "$REPO_DIR/.trellis.json"
+  _write_lines src/f.js 200
+  _real_triad 001-feature
+  git checkout -q -b feat/canonical-l4
+  printf '# decisions\n- feat/canonical-l4: self-answered intake\n' > "$REPO_DIR/decisions-log.md"
+  git add -A && git commit -qm "feat: canonical L4 spec" >/dev/null
+
+  run _autonomy_level
+  [ "$status" -eq 0 ]
+  [ "$output" = "4" ]
+  run _gate
+  [ "$status" -eq 0 ]
+}
 @test "preset ceiling clamps L5 session to L2 interview path" {
   _config true 80 400
   _write_fleet_autonomy 3
@@ -387,10 +507,32 @@ EOF
   [ "$status" -eq 1 ]
 }
 
+
+@test "malformed canonical policy blocks before legacy and runtime fallback" {
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'
+{ "mandatory_pipeline": { "enabled": true } }
+JSON
+  printf '{ "mandatory_pipeline": { "enabled": false } }\n' > "$REPO_DIR/.trellis.config.json"
+  printf '{ "mandatory_pipeline": { "enabled": "true" } }\n' > "$REPO_DIR/.trellis.json"
+
+  run _resolved_cfg
+  [ "$status" -eq 0 ]
+  [ "$output" = "false 80 400 malformed" ]
+}
+
+@test "malformed immutable runtime policy blocks when project policy is absent" {
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  printf '{ this is not json ' > "$TRELLIS_FIXTURE/trellis.config.json"
+
+  run _resolved_cfg
+  [ "$status" -eq 0 ]
+  [ "$output" = "false 80 400 malformed" ]
+}
 # --- config failure semantics (C-6a) ----------------------------------------
 
 @test "malformed: mandatory_pipeline not an object -> BLOCK (fail-closed)" {
-  cat > "$REPO_DIR/trellis.config.json" <<'JSON'
+  cat > "$REPO_DIR/.trellis.json" <<'JSON'
 { "template": { "branch": "main" }, "mandatory_pipeline": true }
 JSON
   _write_lines src/f.js 200
@@ -401,7 +543,7 @@ JSON
 }
 
 @test "malformed: unparseable JSON -> BLOCK (fail-closed)" {
-  printf '{ this is not json ' > "$REPO_DIR/trellis.config.json"
+  printf '{ this is not json ' > "$REPO_DIR/.trellis.json"
   _write_lines src/f.js 200
   git checkout -q -b feat/badjson
   git add -A && git commit -qm "feat: big" >/dev/null
@@ -410,7 +552,7 @@ JSON
 }
 
 @test "missing optional thresholds use the documented defaults" {
-  cat > "$REPO_DIR/trellis.config.json" <<'JSON'
+  cat > "$REPO_DIR/.trellis.json" <<'JSON'
 { "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true } }
 JSON
 
@@ -424,11 +566,11 @@ JSON
   for key in spec_required_diff_lines surgical_max_diff_lines; do
     for value in '"80"' -1 0 1.5 null true; do
       printf '{ "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true, "%s": %s } }\n' \
-        "$key" "$value" > "$REPO_DIR/trellis.config.json"
+        "$key" "$value" > "$REPO_DIR/.trellis.json"
 
       run _gate
       [ "$status" -eq 1 ]
-      [[ "$output" == *"malformed"* ]]
+      [[ "$output" == *"malformed"* ]] || { echo "$output"; false; }
     done
   done
 }
@@ -484,7 +626,7 @@ NODE
   # Stop hooks receive event JSON on stdin; the verdict is state-based.
   run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$GATE'"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
 @test "Stop-hook mode: stop_hook_active=true -> exit 0 (re-entrancy guard, no infinite loop)" {
@@ -496,7 +638,7 @@ NODE
   # the guard must exit 0 instead of re-blocking (else infinite Stop loop).
   run bash -c "cd '$REPO_DIR' && printf '{\"stop_hook_active\":true}' | bash '$GATE'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
 @test "Stop-hook mode: passing state -> exit 0, no block JSON (Claude)" {
@@ -506,7 +648,7 @@ NODE
   git add -A && git commit -qm "fix: tiny" >/dev/null
   run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$GATE'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
 @test "Stop-hook mode: DEPLOYED Codex twin blocks identically (exit 2 + JSON)" {
@@ -515,13 +657,14 @@ NODE
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config true 80 400
   _write_lines src/f.js 200
   git checkout -q -b feat/stop-codex
   git add -A && git commit -qm "feat: big" >/dev/null
   run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$cdir/spec-gate.sh'"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
 @test "parity: Claude spec-gate.sh and Codex twin are byte-identical" {
@@ -537,6 +680,7 @@ NODE
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config true 80 400
   _write_lines src/f.js 200
   git checkout -q -b feat/parity
@@ -547,6 +691,28 @@ NODE
   [ "$claude" -eq "$codex" ]
 }
 
+
+@test "parity: deployed Codex resolves immutable policy with Claude" {
+  local cdir="$SANDBOX/codex/hooks"
+  mkdir -p "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'
+{ "mandatory_pipeline": { "enabled": true, "spec_required_diff_lines": 120, "surgical_max_diff_lines": 480 } }
+JSON
+  printf '{ "mandatory_pipeline": { "spec_required_diff_lines": 90 } }\n' > "$REPO_DIR/.trellis.config.json"
+  printf '{ "mandatory_pipeline": { "surgical_max_diff_lines": 250 } }\n' > "$REPO_DIR/.trellis.json"
+
+  run bash -c "cd '$REPO_DIR' && . '$CORE' && sg_resolve_cfg '$REPO_DIR'"; local claude="$output"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$REPO_DIR' && . '$cdir/lib/spec-gate-core.sh' && sg_resolve_cfg '$REPO_DIR'"; local codex="$output"
+  [ "$status" -eq 0 ]
+  [ "$claude" = "true 90 250 ok" ]
+  [ "$claude" = "$codex" ]
+}
 @test "inherited Trellis infrastructure does not count toward the gated diff" {
   _config true 80 400
   # A canonical hook sync: far over the floor, but every path is copied from the
@@ -572,5 +738,5 @@ NODE
   git add -A && git commit -qm "hooks plus a real feature" >/dev/null
   run _gate
   [ "$status" -ne 0 ]
-  [[ "$output" == *"over floor"* ]]
+  [[ "$output" == *"over floor"* ]] || { echo "$output"; false; }
 }

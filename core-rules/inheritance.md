@@ -1,315 +1,297 @@
-# Load-bearing inheritance mechanism
+# Portable attachment and inheritance
 
-Claude Code does **not** cascade `CLAUDE.md` up the directory tree — a child session loads the nearest `CLAUDE.md` and nothing above it unless the child explicitly names a parent. There are two documented mechanisms for explicit inheritance, and they behave very differently.
+This document defines the local attachment contract for Trellis. It supersedes
+tracked direct links into a live control-plane checkout and Trellis-managed
+`@`-imports. The installed release's
+`core-rules/inheritance-manifest.json` is the machine-readable authority for
+native leaves; this document explains its ownership and recovery rules rather
+than a command interface.
 
-## Primary — `.claude/rules/` symlink (REQUIRED for every registered project)
+## 1. Two project surfaces
 
-Each project under `registry.md` MUST carry a symlink at:
+### Primary portable surface — `.trellis.json`
 
-    <project-root>/.claude/rules/trellis.md → __TRELLIS_PATH__/core-rules/CLAUDE.md
+The only Trellis-controlled **tracked** project state is `<project>/.trellis.json`.
+It contains portable identity and policy, such as `project_id`, presets,
+autonomy, package-manager policy, loop safety, and gate declarations. It MUST
+NOT contain a checkout path, fleet, `TRELLIS_HOME`, source root, installed
+release, or attachment/harness state.
 
-Claude Code loads every file under `.claude/rules/` **unconditionally** at session start — no approval dialog, no gate, no TTY dependency. This works identically in interactive and `claude -p` headless modes, which is the property that matters: every automated run (scheduled tasks, cron jobs, subagents, CI) must inherit parent rules without human interaction.
+A manifest-only clone is intentionally inert. It has no Trellis-generated
+native links, settings, hooks, exclusion block, registry entry, warning, or
+runtime discovery requirement. Project-owned `CLAUDE.md`, `AGENTS.md`,
+`.claude/`, `.agents/`, `.codex/`, and `.omp/` content remains project-owned
+unless a concrete leaf is recorded by an attachment.
 
-Track the symlink in git so the inheritance is visible in repo state and protected from local deletion. If `.claude/` is gitignored in a project, add explicit exceptions for `.claude/rules/` and `.claude/rules/trellis.md` — otherwise the symlink exists only on one machine.
+### Secondary local surface — explicit attachment
 
-## Secondary — `@`-import in project `CLAUDE.md` (interactive fallback only)
+Attachment is an opt-in, machine-local transaction. Its configuration,
+inventory, releases, journals, attachment records, and clone-local hook
+dispatcher live below private `TRELLIS_HOME` (default `~/.trellis`), never in
+project Git history. The local registry records fleet membership and checkout
+locations; it is an inventory index, not the portable identity authority.
+Selected-root discovery can rebuild that index from `.trellis.json`.
 
-Every project `CLAUDE.md` also carries an `@`-import line pointing at the canonical path:
+There is no tracked fleet inventory. The compatibility release's `registry.md`
+and `blacklist.md` were removed at `v1.0.0-rc.25`; `trellis registry import`
+still reads a Markdown roster the operator supplies from their own history or
+backup, and that is the only role those filenames retain. A project becomes
+active only after an explicit attachment records it locally.
 
-    @__TRELLIS_PATH__/core-rules/CLAUDE.md
+## 2. Immutable runtime topology
 
-This is kept for belt-and-braces redundancy in **interactive** sessions only. `@`-imports are gated by Claude Code's trust-verification approval dialog, which:
+Every attachment has one local absolute anchor and relative native leaves:
 
-- Cannot fire in `-p` / headless mode — trust verification is explicitly disabled non-interactively (per Claude Code docs). Unapproved imports silently skip.
-- Fires once on the first interactive session that encounters a new `@`-import. Approve → persists per project. Decline → permanently disabled for that project with no further prompt.
-
-So the `@`-import is useful only after a human has clicked "approve" at least once in interactive mode. It is never load-bearing for automation and must never be treated as the primary inheritance path.
-
-## Silent-drop invariants
-
-1. If either the symlink target or the `@`-import path does not resolve on disk, Claude Code drops the instruction with **no runtime error, no warning, no user-visible log line.** Detection is only possible via the `InstructionsLoaded` hook (`~/.claude/hooks/log-instructions-loaded.sh` → `~/.claude/instruction-audit.log`), and even that captures `session_start` reliably but not every include-style event.
-2. When this parent directory moves, the symlinks in all five projects break at once. Update them in the same filesystem change as the move, or accept that every child session will silently run unparented until the next scheduled audit catches the drift.
-3. Never replace the symlink with a file copy. A copy diverges. Divergence kills the whole point of a parent layer.
-
-## Registered-project checklist
-
-Every project in `registry.md` must:
-
-- [ ] Contain `CLAUDE.md` at the project root.
-- [ ] Contain `.claude/rules/trellis.md` as a symlink to the canonical core-rules path.
-- [ ] Track `.claude/rules/trellis.md` in git (including `.gitignore` exceptions where needed).
-- [ ] Contain the `@`-import line in the project `CLAUDE.md` for interactive fallback.
-- [ ] Contain `.claude/skills/process-gate/` as a symlink to the canonical skills path (see "Skills inheritance" above).
-- [ ] If Codex-enabled (`harnesses` includes `"codex"`): contain root `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate/`, and `.agents/skills/process-gate-local/local.config.sh`.
-- [ ] If Codex-enabled additionally: `.codex/hooks.json`, executable `.codex/hooks/*.sh`, `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` symlinks, and `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` symlinks (workflow-style command surface Codex also reads).
-- [ ] Contain the exact Trellis-owned OMP surface: `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, and `.omp/hooks` as absolute symlinks to the targets in the OMP table below; the generated managed-ignore block covers them.
-- [ ] Have GitHub branch protection enabled on `main` (see `registry.md` step 5).
-
-## Skills inheritance (process-gate + future canonical skills)
-
-Canonical skills live under `core-rules/skills/<name>/` and are inherited via symlinks identical in shape to the rules symlink:
-
-    <project-root>/.claude/skills/<name>/  →  __TRELLIS_PATH__/core-rules/skills/<name>/
-    <project-root>/.agents/skills/<name>/  →  __TRELLIS_PATH__/core-rules/skills/<name>/
-
-The directory itself is symlinked (not individual files) so additions to canonical files appear automatically without per-project re-onboarding. Project-local overrides go in `<project-root>/.claude/skills/<name>/local.config.sh` (or other ungitignored override file the skill defines) — these are project-private, NOT covered by the canonical symlink.
-
-As of 2026-07-09, twelve canonical skills ship: `process-gate`, `security-gate` (always-on), the pipeline `clarify`, `spec`, `plan`, `tasks`, `analyze` (opt-in by default; enforceable above a size floor via `mandatory_pipeline`, spec 006), the canonical builder `execute` (shipped Phase 4), the ideation front-door `brainstorming` (shipped Phase 6), the dynamic-workflow orchestration kit `orchestrate` (capability-gated: runs the recipe's workflow script when the harness exposes a subagent-orchestration tool, otherwise degrades to running the same stages by hand), the explicit teach-it-back skill `debrief` (explicit-invoke-only, never auto-fires: teaches the human the change just made, gated incremental, verifying understanding before advancing), and the publishing skill `writing` (explicit-invoke-only, spec 010: drafts and publishes blogs + X threads in the author's voice, gated by a scriptable anti-AI-tell check; posting leg capability-gated, degrades to draft handoff). (Was eleven before `writing`, 2026-06-05; nine before `orchestrate`; seven as of Phase C, 2026-05-12, before `execute` and `brainstorming`.)
-
-Same silent-drop invariant: if the symlink target moves or breaks, the skill simply does not load — no error. Detected by the extended `parent-hook-drift` audit (skills coverage), not at session time.
-
-## Canonical agents inheritance
-
-Canonical Claude Workflow-agent definitions live under `core-rules/agents/` and
-use the same machine-local symlink pattern as skills and commands:
-
-    <project-root>/.claude/agents/<name>.md  →  __TRELLIS_PATH__/core-rules/agents/<name>.md
-
-### Skill path-scoping (optional, project-local)
-
-Canonical skills are global by design — they apply to the whole repo, regardless of which subtree the agent is editing. That works because every canonical skill is workflow-shaped, not language-shaped: `process-gate`, `security-gate`, the two `brainstorming` front-door routes — the lightweight track `brainstorming` → a project-local design plan → `execute`, and the heavyweight spec-kit pipeline `clarify` → `spec` → `plan` → `tasks` → `analyze` → `execute` — and the dynamic-workflow orchestration kit `orchestrate`.
-
-**Project-local skills can opt into path-scoping.** A project-local skill (one that does NOT come from the canonical symlink — typically lives at `<project>/.claude/skills/<custom-name>/` and is project-owned) may carry a `scope.json` next to its `SKILL.md`:
-
-    {
-      "paths": ["services/**", "pkg/**"],
-      "reason": "Go-only validators; would noise non-Go subtrees"
-    }
-
-When `scope.json` is present, the agent reads it at session start and only auto-mentions the skill when the session's working tree (or the changed files this turn) falls under at least one of the listed globs. The agent still **can** invoke the skill explicitly via `/skill <name>` from any path; the scope only controls auto-invocation.
-
-This is a Trellis convention, not a Claude Code engine feature. The agent is expected to honour it because every project loads `core-rules/CLAUDE.md` and that file directs scope-respecting behaviour. If you find yourself wanting to write a canonical skill with a `scope.json`, the skill is probably mis-shaped — split it into a workflow part (canonical, global) and a stack-specific part (project-local, scoped).
-
-Schema (one entry per skill):
-
-| Field | Required | Meaning |
-|---|---|---|
-| `paths` | yes | Glob array (POSIX-style, project-relative). At least one element. |
-| `reason` | yes | One-line human note for the audit trail. Travels with the file. |
-| `also_active_when` | no | Free-form selector list for follow-up scoping (e.g., `["touched_files: services/**/*.go"]`). Reserved; agent treats as advisory only. |
-
-## Presets inheritance (opt-in rule layering)
-
-Presets are the rules-side counterpart to the skills inheritance above: opt-in layers that sit on top of the parent CLAUDE.md. Each preset is a single markdown file at `core-rules/presets/<name>.md`. Projects opt in via the `presets` array in `<project>/.trellis.config.json` (or `trellis.config.json`).
-
-For each declared preset, parallel symlinks land at:
-
-    <project-root>/.claude/rules/preset-<name>.md  →  __TRELLIS_PATH__/core-rules/presets/<name>.md
-    <project-root>/.agents/rules/preset-<name>.md  →  __TRELLIS_PATH__/core-rules/presets/<name>.md
-
-Claude Code and Codex load their enabled preset-rule links natively; the OMP adapter injects the same canonical preset content on first agent start. Rules are additive, not last-wins. There is no mechanical "override". The "priority" framing in `engineering-process.md §14.8` is a conceptual contract for how an agent should resolve apparent conflicts between layers (later layers in the parent < preset < project-local chain are more specific and should win), not a directive that the engine enforces. If a preset's prose contradicts the parent rules, that is a bug in the preset — fix the text rather than relying on load order.
-
-Symmetry with skills:
-
-| Aspect | Skills | Presets |
-|---|---|---|
-| Canonical source | `core-rules/skills/<name>/` (directory) | `core-rules/presets/<name>.md` (single file) |
-| Project symlink (Claude) | `.claude/skills/<name>/` | `.claude/rules/preset-<name>.md` |
-| Project symlink (Codex) | `.agents/skills/<name>/` | `.agents/rules/preset-<name>.md` |
-| Opt-in mechanism | Always seeded by `onboard-project.sh` | Only seeded when project's `.trellis.config.json` declares it |
-| Rollout script | `scripts/rollout-feature-skills.sh` | `scripts/rollout-presets.sh` |
-| Drift audit | operator hook-drift check | operator preset-drift check |
-| Silent-drop invariant | yes — broken symlink → skill doesn't load | yes — broken symlink → preset rules don't load |
-
-Removing a preset from the project's config + re-running `rollout-presets.sh` prunes the now-stale symlink automatically.
-
-## Multi-harness support (Claude Code + Codex + Oh My Pi)
-
-Claude Code is the baseline harness, Codex a parallel native harness, and OMP the third native harness. Trellis is configured per clone via the `harnesses` array in `trellis.config.json`; each enabled value adds its own native surface while pointing at the same canonical policy.
-
-**Canonical file layout under `core-rules/`:**
-
-| Path | Purpose | Used by |
-|---|---|---|
-| `core-rules/CLAUDE.md` | Parent rules — single source of truth | Claude Code directly; Codex through `AGENTS.md`; OMP through project `.omp/AGENTS.md` |
-| `core-rules/AGENTS.md` | Symlink → `CLAUDE.md` | Codex canonical companion |
-| `core-rules/skills/<name>/` | Canonical skills | All three harnesses through native links |
-| `core-rules/commands/<name>.md` | Canonical slash commands | All three harnesses through native links |
-| `core-rules/agents/` | Reserved harness-neutral task-agent root | OMP whole-directory link; currently `.gitkeep` only |
-| `core-rules/hooks/` | Canonical Tier 1 + 2 hook scripts | Claude Code directly; OMP through its adapter |
-| `core-rules/codex/` | Codex hook manifest + scripts | Codex only |
-| `core-rules/omp/` | OMP lifecycle adapter | OMP only |
-| `core-rules/husky/` | Tier 3 git hooks | All three (git-level, harness-agnostic) |
-
-**Slash-command directory names differ per engine:**
-
-| Harness | Slash-command directory | Rationale |
-|---|---|---|
-| Claude Code | `.claude/commands/` | Claude Code convention |
-| Codex | `.agents/commands/` | Codex convention; reuses the `AGENTS.md` companion dir |
-| Codex (workflows) | `.agents/workflows/` | workflow-style command surface Codex also reads |
-| OMP | `.omp/commands/` | Native whole-directory link |
-
-Every command surface resolves to the same canonical files under `core-rules/commands/`. A project enabling all three harnesses exposes those files through each harness's native directory without copied policy.
-
-**What a fully-configured project (Claude + Codex) looks like:**
-
-```
-<project-root>/
-├── CLAUDE.md                                                ← Claude Code rules entry
-├── AGENTS.md                                                ← symlink → CLAUDE.md (Codex)
-├── .claude/
-│   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md
-│   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
-│   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md
-│   ├── hooks/                                               ← Tier 1+2, Claude-only
-│   └── settings.json
-├── .agents/                                                 ← Codex companion dir
-│   ├── rules/trellis.md   → /…/trellis/core-rules/CLAUDE.md   (same target as .claude/rules/)
-│   ├── skills/process-gate/ → /…/trellis/core-rules/skills/process-gate/
-│   ├── skills/process-gate-local/local.config.sh
-│   ├── primers/INDEX.md                                     ← shared primer index
-│   ├── commands/primer.md → /…/trellis/core-rules/commands/primer.md  ← Codex-only
-│   └── workflows/primer.md → /…/trellis/core-rules/commands/primer.md ← Codex (workflow-style command surface)
-└── .codex/                                                  ← Codex-only
-    ├── hooks.json
-    └── hooks/*.sh
+```text
+<project>/.trellis.json                         tracked, inert
+<project>/.trellis/runtime
+  -> <TRELLIS_HOME>/releases/<version>/payload  local absolute symlink
+<project>/<managed native leaf>
+  -> relative path through .trellis/runtime/... local relative symlink
 ```
 
-Codex project instructions are loaded from `AGENTS.md` plus `.agents/`. Keep `AGENTS.md` as a symlink to `CLAUDE.md` unless a project has a deliberate harness-specific override. Codex hooks require the user-level feature flag in `$CODEX_HOME/config.toml`:
+The anchor MUST resolve to a verified, read-only installed release payload.
+Release installation verifies the recorded release identity and payload tree;
+an existing release directory is never silently replaced. A release change is
+an explicit, verified adoption that atomically changes the anchor. Attachment,
+detach, doctor, recovery, and relink use the release recorded by ownership
+state rather than a latest-version guess.
 
-```toml
-[features]
-hooks = true
+The source checkout is for management and publication only. It is never an
+attached project's runtime authority: dirtying it, changing its branch,
+moving it, or losing it cannot alter an existing attachment. A managed leaf or
+runtime anchor that resolves into a source checkout is corrupt, not a fallback.
+There are no Trellis-managed absolute source links, copied policy trees, or
+parent `@`-imports in the portable layout.
+
+Most managed links reach release content through the relative runtime anchor.
+The two project-context leaves, `AGENTS.md` and `.omp/AGENTS.md`, instead link
+relatively to a regular project `CLAUDE.md` when one exists; otherwise they use
+the immutable runtime fallback. Attachment never creates or overwrites the
+project's root `CLAUDE.md` to make that choice possible.
+
+## 3. Manifest-owned native leaves
+
+The release payload's `core-rules/inheritance-manifest.json` is the sole list
+used by attach, detach, diagnosis, and worktree reconciliation. It expands
+concrete child entries at planning time; no script or runbook may maintain a
+second hard-coded leaf list.
+
+The current manifest separates primary context leaves from secondary discovery
+and lifecycle leaves:
+
+| Harness | Primary context leaves | Secondary manifest leaves and renders |
+|---|---|---|
+| Claude Code | `.claude/rules/trellis.md` | eligible skill directories, command and agent Markdown files, executable hook and hook-library files, `.claude/primers/INDEX.md`, and the optional local settings JSON render |
+| Codex | `AGENTS.md`; `.agents/rules/trellis.md` | eligible skill directories, command and workflow Markdown files, Codex hook and hook-library files, named shared hook-library leaves, `.agents/primers/INDEX.md`, and the optional Codex hook JSON render |
+| Oh My Pi | `.omp/AGENTS.md` | eligible skill directories, command and agent Markdown files, and `.omp/hooks/pre/` TypeScript adapter leaves |
+
+“Owned” always means an exact expanded leaf, its recorded kind, and its
+recorded target, content hash, and mode where applicable. It never means a
+whole harness directory. For example, a recorded
+`.claude/commands/example.md` does not give Trellis ownership of a sibling
+project command or of `.claude/commands/` itself. Parent directories are only
+transaction-owned when attachment created them, and may be removed only when
+empty. The release manifest, not this summary table, decides the exact current
+leaf set.
+
+### Skill path-scoping (project-local skills only)
+
+Release-owned skills are global by design: they are workflow-shaped, not
+language-shaped, so they apply to the whole repository regardless of which
+subtree is being edited. A **project-local** skill — one the project owns, not a
+manifest-owned leaf — may opt into path-scoping by carrying a `scope.json` next
+to its `SKILL.md`:
+
+```json
+{
+  "paths": ["services/**", "pkg/**"],
+  "reason": "Go-only validators; would noise non-Go subtrees"
+}
 ```
 
-(The older `[features].codex_hooks` key still works as a deprecated alias but emits a warning on Codex CLI 0.129+. New installs should use `hooks`.)
+When `scope.json` is present, the agent reads it at session start and
+auto-mentions the skill only when the session's working tree, or this turn's
+changed files, falls under at least one listed glob. Explicit `/skill <name>`
+invocation still works from any path; the scope controls auto-invocation only.
 
-Tier 3 (husky / native git hooks) covers all three harnesses identically.
+This is a Trellis convention, not a harness engine feature. Agents honour it
+because every attached project loads the parent policy, which directs
+scope-respecting behavior. A release-owned skill must never carry a
+`scope.json`: wanting one means the skill is mis-shaped, and it should be split
+into a workflow part (released, global) and a stack-specific part
+(project-local, scoped).
 
-For Claude-Code-only projects (default), `.agents/` is omitted entirely.
+## 4. Silent-drop and inert-contributor invariants
 
-## Oh My Pi — third native harness
+Harnesses can silently omit a missing, dangling, or malformed context, skill,
+command, or extension leaf. That makes a broken attachment a correctness
+failure even when a harness emits no useful error. Attachment therefore has no
+fallback to a mutable source tree, copied policy, a parent `@`-import, or a
+same-named project file.
 
-Oh My Pi (OMP) is Trellis's **third native harness**. Add `"omp"` to the top-level `harnesses` array to enable its surface; the current private instance enables `["claude", "codex", "omp"]`. The OMP path is additive: onboarding and doctor gate it independently, and do not rewrite Claude Code or Codex rules, settings, hooks, routing, or provider configuration.
+Before mutation, attachment expands the verified payload manifest and checks
+every planned destination and parent component. It rejects unsafe paths,
+symlinked parents, duplicate destinations, paths outside the project boundary,
+and any project-owned collision. Existing attachment state is idempotent only
+when every recorded artifact and shared local state still matches exactly.
+Otherwise it is a conflict, not permission to overwrite or repair by guesswork.
 
-### OMP project surface
+The inverse is equally important: absence of all local attachment artifacts in
+a raw or manifest-only clone is expected and MUST NOT create a Trellis warning,
+hook invocation, policy injection, or discovery failure. Diagnosis distinguishes
+that inert state from a locally recorded attachment whose leaves are missing or
+modified.
 
-The Trellis-owned OMP surface is **exactly** these five absolute, machine-local, gitignored symlinks:
+## 5. Transaction and ownership record
 
-| OMP path | Live target | Purpose |
-|---|---|---|
-| `.omp/AGENTS.md` | `<project-root>/CLAUDE.md` | Project overlay, including its canonical `@<trellis_root>/core-rules/CLAUDE.md` import |
-| `.omp/skills` | `<trellis_root>/core-rules/skills` | All canonical skills, including future additions |
-| `.omp/commands` | `<trellis_root>/core-rules/commands` | All canonical slash commands, including future additions |
-| `.omp/agents` | `<trellis_root>/core-rules/agents` | Reserved task-agent root; contains only `.gitkeep` after GPTX-era custom agents were retired |
-| `.omp/hooks` | `<trellis_root>/core-rules/omp/hooks` | Native OMP adapter factories |
+A successful attachment records its fleet, project ID, clone identity, worktree
+identity, release, selected harnesses, exact artifacts, rendered-file state,
+managed exclude state, and prior hook configuration under
+`$TRELLIS_HOME/state/attachments/`. A journal is durable before mutation.
+Writes use private temporary siblings and atomic replacement; a failed
+transaction rolls back only artifacts it created.
 
-Whole-directory links are deliberate: the next OMP discovery pass sees new canonical skills, commands, future harness-neutral agents, and adapters without re-running onboarding. No custom task agent ships today; OMP uses its bundled agents. `.omp/AGENTS.md` points to the **project** `CLAUDE.md`, not directly to the parent file, so the project overlay is not discarded by OMP's native context priority. The adapter additionally injects enabled canonical `preset-*.md` policies because OMP does not natively load Claude's `.claude/rules/` surface. The private canonical checkout is the special case: because it has no root `CLAUDE.md`, its link targets `core-rules/CLAUDE.md` directly. `onboard-project.sh` owns creation and the managed-ignore block; `seed-inheritance-symlinks.sh` mirrors these links into worktrees.
+The planner refuses a collision before it writes any leaf, and every refusal
+names the path it refused. A regular project file, directory, symlink, rendered
+file, hook configuration, or managed block that does not exactly match a
+recorded attachment is project-owned or corrupt and MUST be preserved. Neither
+attach nor recovery may delete it as a shortcut.
 
-Do not add a `.omp/RULES.md`. Do not generate or overwrite user-owned `.omp/config.yml`, `.omp/mcp.json`, or any other OMP file. Model/provider settings remain operator-owned; `approved_mcps` remains documentary rather than an enforceable MCP allowlist; and OMP memory is not a Trellis context-log or compaction authority. Every Trellis policy surface here is a live link or a runtime adapter, never a copied policy file.
+Three shapes are deferred to the project rather than refused, and only these
+three. A `render_if_absent` render whose destination already exists is a seed
+the project has since authored — `.claude/primers/INDEX.md` and
+`.agents/primers/INDEX.md` are seeded that way, and `core-rules/primers.md`
+makes the live file project content. A destination that is already the exact
+symlink the plan would create — link text byte-for-byte equal to the planned
+target — is the attachment's own goal state, not foreign content. A symlink
+destination holding a project-authored regular file is the project's own
+document, and the same doctrine applies: a project that writes its own
+`AGENTS.md` keeps it, rather than losing the whole harness. That third shape is
+deliberately narrow — an empty file, or one byte-for-byte identical to a
+canonical source, is a dropping rather than authored content and stays a named
+refusal. All three are recorded on the owner as `pre_existing`, are absent from
+the artifact list and from the managed exclude block, and detach never removes
+them. Diagnosis re-derives the same decision from the immutable manifest and
+the checkout instead of trusting the record.
 
-### OMP discovery and freshness
+A managed `info/exclude` block is powerless where a tracked `.gitignore`
+negation re-includes the same path, because `.gitignore` outranks
+`info/exclude`. Attach therefore refuses, before any mutation, when the winning
+ignore pattern for an artifact it would create is a negation, and the refusal
+names the offending `.gitignore` line. A silently dirty attached checkout is
+not an acceptable outcome.
 
-OMP's native provider priority is 100. The **nearest non-empty ancestor `.omp` directory stops project discovery even when its required entries are absent**. A partial, missing, dangling, wrong-target, regular-file, or otherwise non-symlink Trellis-owned path is therefore not harmless fallback: doctor must report it as an inheritance error.
+## 6. Rendered local JSON and inverse merge
 
-When OMP is enabled, doctor verifies the exact targets and realpaths, target types, canonical-root containment where applicable, the project `CLAUDE.md` parent import, OMP skill/command discovery requirements, the deliberately empty custom-agent root, and the absence of discoverable legacy custom agents. It exits nonzero for any broken or stale OMP inheritance path; a warning is not parity. An OMP-disabled Claude/Codex installation neither requires nor validates `.omp` artifacts.
+A manifest `explicit-json` render is the only exception to simple
+leaf-is-absent collision refusal. The current manifest uses it for local Claude
+settings and local Codex hook configuration.
 
-The links are live, but OMP snapshots discovery and filesystem reads within a running process. A **fresh OMP session** reads the files currently present under `trellis_root` and the project root. After changing a canonical fixture or project overlay, reset OMP discovery explicitly or restart the OMP process; an already-open session does not receive a full in-process hot reload, and onboarding need not be repeated.
+- The template and an existing destination MUST both be regular JSON objects.
+- Attachment recursively adds only missing template leaves. A pre-existing
+  template leaf, incompatible object shape, non-object JSON value, symlink, or
+  non-regular destination is a collision; attachment does not choose a winner.
+- Ownership stores the template leaf paths, created container paths, original
+  bytes and mode when present, and the post-merge bytes, hash, and mode.
+- On detach, an unchanged render restores its original bytes and mode, or is
+  removed if attachment created it. If the project added unrelated keys, detach
+  removes only still-exact Trellis-owned leaves and only empty containers it
+  created. A changed owned value, type, mode, or path is a conflict and remains
+  untouched.
 
-### OMP child sessions and adapter
+This makes a local settings render additive and reversible without claiming the
+surrounding JSON document.
 
-OMP task children inherit skills, templates, workspace data, and extension paths, but OMP excludes `AGENTS.md` from inherited context files and does not natively load Trellis's Claude preset links. The adapter's first `before_agent_start` event injects the live project `CLAUDE.md` when absent and adds enabled canonical presets before the child's first agent run, preserving the project overlay, its canonical parent import, and Trellis preset policy.
+## 7. Shared Git state and managed hook chaining
 
-The adapter is `core-rules/omp/hooks/pre/trellis.ts`, exposed through `.omp/hooks`. It resolves `trellis_root` and the current project at runtime, translates OMP event payloads to canonical Trellis hook envelopes, and executes the live canonical scripts. Denials map to OMP `{block: true, reason}` results. Unsupported payloads, adapter errors, and script exceptions fail loudly with the exact adapter/script path; they do not silently pass as parity.
+Git worktrees share a common directory, so attachment writes one exact managed
+block in `<git-common-dir>/info/exclude`. The block lists only the local runtime
+anchor and the concrete manifest-owned artifacts. It does not own a broad
+`.claude`, `.agents`, `.codex`, `.omp`, or `.trellis` directory and never edits
+the tracked `.gitignore`.
 
-### OMP doctor and rollout contract
+A clone-scoped ownership manager retains that block while any attached worktree
+uses it. Detaching one worktree transfers management or keeps the block;
+restoration of its prior bytes occurs only after the final attached worktree
+leaves. A duplicate, malformed, or modified managed block is a conflict.
 
-Doctor statically verifies the links, manifests, import chain, and adapter path. Rollout verification separately loads the adapter and checks its registered events, proves that a fresh headless session sees both parent and project markers, exercises a task child against the same policy, and confirms that a canonical fixture mutation appears after the documented discovery reset or process restart. GPTX and OpenCode remain absent from active Trellis/OMP routing.
+Attachment also records the prior local `core.hooksPath` and installs its
+absolute dispatcher below `$TRELLIS_HOME/state/git-hooks/<checkout-id>/`. The
+dispatcher invokes an executable prior `post-checkout` hook with the original
+arguments and inherited standard input before release reconciliation, and does
+not hide a prior non-zero result. It is local clone state, not a project
+artifact. Detach restores the prior hook setting and removes the dispatcher
+only when both still match the record; a changed hook configuration is never
+clobbered.
 
-An explicit OMP inheritance rollout covers every row in `registry.md`, including registered-but-held rows. Installing the ignored five-link surface does not enroll a held project in scheduled work: normal scheduling continues to honor `blacklist.md`.
+## 8. Clones, worktrees, and SessionStart
 
-### Primary OMP references
+Registry and attachment identity are clone-scoped through the real Git common
+directory, with a separate worktree record for each root. Every linked worktree
+needs its own runtime anchor and native leaves even though the exclude block and
+hook dispatcher are shared.
 
-- [OMP context files](https://github.com/can1357/oh-my-pi/blob/main/docs/context-files.md)
-- [OMP skills](https://github.com/can1357/oh-my-pi/blob/main/docs/skills.md)
-- [OMP task-agent discovery](https://github.com/can1357/oh-my-pi/blob/main/docs/task-agent-discovery.md)
-- [OMP extensions](https://github.com/can1357/oh-my-pi/blob/main/docs/extensions.md)
-- [OMP extension loading](https://github.com/can1357/oh-my-pi/blob/main/docs/extension-loading.md)
-- [OMP settings](https://github.com/can1357/oh-my-pi/blob/main/docs/settings.md)
-- [OMP native discovery source](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/discovery/builtin.ts)
-- [OMP extension event types](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/extensibility/extensions/types.ts)
+For an already opted-in clone, worktree creation and the managed post-checkout
+dispatcher reconcile attachment eagerly after a real checkout, before a harness
+should discover the new worktree. A raw clone, an unregistered clone, and a
+worktree without a checked-out portable manifest remain inert; no hook creates
+Trellis state merely because it sees a Git repository.
 
-## Native git hooks (Unity / non-Node projects)
+SessionStart is a diagnosis-only fallback, never a repair path. Harness
+discovery has already run by then. The safety net reads validated local
+registry and ownership metadata only; it does not follow or execute a project
+runtime path, write project files, attach a worktree, or make the current
+session parented. When it finds an opted-in worktree missing a valid attachment,
+it reports the condition and requires reconciliation plus a fresh session.
 
-Projects without `package.json` (Unity, C#, Rust, Go, Python-only, etc.) cannot use husky. They MUST instead enforce the Trellis PR-flow guard via native git hooks:
+The rendered session surfaces make that boundary mechanical. Attachment renders
+each `SessionStart` entry as an invocation of the fixed launcher —
+`trellis hook NAME HARNESS PROJECT_ROOT` — behind its own `env -i` boundary
+carrying only `HOME`, `TRELLIS_HOME`, and a fixed `PATH`. The launcher verifies
+the active release before anything executes; the verified payload's dispatcher
+then resolves `NAME` and `HARNESS` against a closed route table and runs the
+hook from that payload in a deliberately small environment with no `BASH_ENV`,
+no `ENV`, no exported functions, no inherited Git loader or config variables,
+and Git configured only by two command-scoped entries. `PROJECT_ROOT` MUST be an
+absolute canonical directory; anything else is a usage error, and an
+unresolvable one is unavailable. Claude Code has four routes — `session-context`,
+`post-compact-context`, `inject-primer-index`, `skill-size-preflight` — and
+Codex has the first three; an unsupported route is refused rather than
+defaulted. A project's `.trellis/runtime` anchor is consequently data that
+diagnosis reads, never a hook source anything executes.
 
-- Set `git config core.hooksPath` to a tracked directory (e.g., `.githooks/`).
-- That directory MUST contain a `pre-push` whose body includes the canonical Trellis PR-flow guard (block direct push to `main`/`master`, `TRELLIS_ALLOW_MAIN_PUSH=1` override).
-- The hooks directory and its scripts MUST be tracked in git so the enforcement is visible in repo state and survives a clone.
+## 9. Detach, recovery, and relink
 
-Reference example: a Unity project using `.githooks/pre-push` with `core.hooksPath = .githooks` should be treated as healthy when `package.json` is absent and the native-hooks fallback is in place. Operator process audits should encode the same exception.
+Detach is the inverse of the recorded attachment, optionally retaining leaves
+for harnesses that remain attached. It verifies each owned leaf's type, target,
+hash, mode, rendered keys, exclusion block, and hook state before removal. It
+removes only matching leaves; restores rendered JSON, shared excludes, and
+prior hooks only at the appropriate final-owner boundary; and leaves all
+project-owned bytes unchanged.
 
-### `commit-msg` — use the native hook, not the husky copy
+An interrupted attach or detach leaves a journal. Recovery resolves the one
+matching journal from local ownership state, verifies its recorded boundaries,
+and either completes the committed operation or rolls back the uncommitted
+one. Ambiguous, modified, or mismatched state remains a conflict for operator
+resolution rather than an automatic deletion.
 
-`core-rules/githooks/commit-msg` validates the conventional-commit header in POSIX `sh` with **no Node dependency**. Non-Node projects MUST copy that one, not `core-rules/husky/commit-msg`.
+Relink repairs a missing local runtime anchor only to the verified release
+already recorded for that attachment. It verifies the remaining owned leaves
+and shared state first, does not silently select a different release, and never
+edits tracked project files. It is the repair path after a local-home relocation
+or lost anchor; explicit adoption remains the only way to change release.
 
-This was a silent hole, and wider than "non-Node": the husky variant shelled out to `./node_modules/.bin/commitlint` and printed `skipping` when it was absent. A fleet check found commitlint actually installed in only **2 of 7** registered projects — so the hook was reporting success while checking nothing almost everywhere, including Node projects that never installed it. Both canonical variants now run the native check; husky's still prefers commitlint where it genuinely exists, since it reads the project's own config.
+## 10. Migration and policy boundary
 
-The native check is header-only by design (type, optional scope, optional `!`, non-empty description, ≤100 chars, no trailing period) and passes machine-generated headers — merge, revert, fixup/squash/amend — untouched. Body and footer rules stay with commitlint. A check that runs everywhere and catches the common mistake beats a thorough one that runs nowhere.
+The old live canonical checkout, absolute direct symlinks, Trellis-managed
+`@`-imports, tracked registry/blacklist, and fixed-root clean-`main` runtime
+doctrine are not part of portable attachment. They may be recognized only by
+compatibility and migration tooling until cutover; they MUST NOT be created for
+new attachments.
 
-**Projects already carrying the old copy keep skipping until they re-seed it** — `onboard-project.sh` never overwrites an existing file. lume and prana are both in that state today.
-
-## Canonical clone hygiene
-
-The canonical clone (`trellis_root` in `trellis.config.json`) is a **published surface, not a workspace.** Every registered project resolves its rules, skills, and hooks through absolute paths into it, so that clone's branch and working-tree state are inherited *live* by all of them. Checking out a feature branch there, or leaving an edit uncommitted, silently changes governance for every project and every running session — including hook behaviour, which is the part nobody notices until it misfires.
-
-`trellis-doctor` Tier 0 already checks all three conditions (`on main`, `clean`, `in sync with origin`). A Tier 0 failure is **blocking, not advisory**.
-
-### The rule
-
-- Canonical stays on **`main`, clean, in sync with origin**.
-- All Trellis work happens in a `git worktree`. Never check out a feature branch in the canonical clone.
-- After a Trellis PR merges, fast-forward canonical so projects inherit it.
-
-### Agents enforce this unprompted
-
-Finding canonical off-main or dirty is a **stop-and-fix condition that precedes the task in hand** — not something to report and work around. Recovery, in order:
-
-1. `git add -A && git commit` the working tree as a WIP snapshot. **Prefer this to `git stash`:** a commit stays reachable by branch *and* reflog, survives a failed pop, and does not interact with the shared stash stack that other worktrees can see.
-2. Free `main` if another worktree holds it, then `git worktree add <path> <branch>` for the parked work.
-3. In the canonical clone: `git checkout main && git merge --ff-only origin/main`.
-4. In the new worktree: `git reset HEAD~1` (mixed) to restore the exact prior state — tracked files modified, previously-untracked files untracked again.
-
-Verify by comparing dirty-entry count and commits-ahead before and after; they must match. Never discard, never force-push, never resolve this by deleting work.
-
-### What this does not solve
-
-Projects still track `main`, so a bad merge reaches all of them on the next fast-forward. This bounds the blast radius from *any keystroke* to *any merge* — it is not isolation. True immunity needs `trellis_root` pinned to a tag with deliberate roll-forward; adopt that only if a bad merge actually bites.
-
-`~/.claude/agents/` symlinks are the same class of problem: they resolve into the canonical checkout, so a fast-forward there changes agents mid-session for every live session. Use a pinned worktree at `origin/main` for that path if agent stability matters.
-
-## Worktree inheritance (`git worktree add` re-seeding)
-
-### The problem
-
-All Trellis inheritance symlinks — `.claude/rules/trellis.md`, `.claude/rules/preset-*.md`, `.claude/skills/*`, `.claude/commands/*`, `.claude/agents/*`, the `.agents/` mirror, and the five `.omp` paths (`AGENTS.md`, `skills`, `commands`, `agents`, `hooks`) — are **gitignored** by design: their targets are absolute paths under each developer's `$TRELLIS_ROOT`, which differs per machine. `git worktree add` materializes only tracked content from the commit. Gitignored files are never recreated in a new worktree.
-
-The consequence is the canonical silent-drop failure: a fresh worktree of any managed project has no parent rules, no skills, no commands, and no canonical Workflow agents. An agent starts without error, without warning, and runs completely unparented. This is the same silent-drop class as a broken symlink target — undetectable at runtime unless the caller checks explicitly.
-
-### The fix: mirror the main checkout
-
-**`scripts/seed-inheritance-symlinks.sh`** is an idempotent seeder. It enumerates the inheritance symlinks already present in the project's **main working tree** (the ones `onboard-project.sh` placed there) and recreates each at the same relative path with the same target in the target worktree. It owns no symlink list and cannot drift from onboard; new skills, presets, `.agents` entries, and `.omp` entries are covered automatically. Root is resolved from the main checkout's `.claude/rules/trellis.md` symlink target — machine-local, correct on every developer's clone.
-
-### Four triggers
-
-One seeder; four contexts that call it:
-
-1. **`core-rules/githooks/post-checkout`** (eager, native-hooks projects only) — fires on `git worktree add`. Installed by `onboard-project.sh` only when `core.hooksPath` points at a tracked directory (native-`.githooks` projects: lume, clusterbid-console; plain-git: `.git/hooks`). Always `exit 0` — seeding failure never aborts the worktree creation.
-
-2. **`trellis worktree add|sync`** (universal — use this) — wraps `git worktree add` and calls the seeder immediately after. Works on every project, regardless of hook type. `trellis worktree sync [<path>]` re-seeds an existing worktree. This is the recommended way to create worktrees of Trellis-managed projects.
-
-3. **SessionStart safety-net** (`core-rules/hooks/session-context.sh` + codex mirror) — on session start in a linked worktree, runs the seeder in verify-only mode; if symlinks are missing, seeds them (for the *next* session) and emits a loud restart warning. Cannot heal the current session — skills are enumerated at process init before any SessionStart hook filesystem change lands (verified). Converts the silent-drop into a visible, self-repairing event.
-
-4. **`doctor` `hc_worktree_inheritance` check + `--fix`** — Tier-1 doctor check; enumerates `git worktree list` and reports linked worktrees with missing inheritance. `doctor --fix` (gated by the Tier-0 canonical-on-main guard) repairs them via the seeder.
-
-### Per-project capability
-
-The eager git hook is unavailable on husky projects. Husky v9 sets `core.hooksPath=.husky/_` and `.husky/_` (the dispatch directory) is gitignored — it never materializes in a worktree. Any `post-checkout` placed in the dispatch dir is dead. This is the same bug class as the inheritance symlinks themselves, verified on neev.
-
-| Project type | Eager hook | `trellis worktree add` | Raw `git worktree add` → first session |
-|---|---|---|---|
-| native-`.githooks` (lume, clusterbid-console) | ✓ correct | ✓ correct | **first-session-correct** |
-| husky (neev, tgsc, akaushik.org, curat.money, vericite) | ✗ dead | ✓ correct | unparented → SessionStart warns + seeds-for-next → restart |
-
-No project ever fails silently. The silent-drop invariant that governs rules and skills symlinks throughout this document holds for worktrees too — but only because the seeder + triggers make silence structurally impossible.
+For migration sequencing and rollback, read
+`docs/MIGRATING-LOCAL-FLEETS.md`. For release installation, verification, and
+adoption policy, read `docs/UPGRADING.md`. The broader operator and publication
+process belongs in `engineering-process.md`. None of those operational guides
+changes the ownership, inert-contributor, or immutable-runtime invariants above.

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Pure parser for blacklist.md project names.
+# Pure parser for legacy blacklist project names.
 #
 # Usage: read_blacklist_names /path/to/blacklist.md
 #
-# Prints registry-compatible project names from both current blacklist sections:
+# The argument is an OPERATOR-SUPPLIED path — a legacy compatibility checkout's
+# own file, or one recovered from history for `trellis registry import`. Trellis
+# has tracked no `blacklist.md` since v1.0.0-rc.25; nothing here resolves a
+# repository-relative default.
+#
+# Prints registry-compatible project names from both legacy blacklist sections:
 #   1. the Project column under "Temporarily excluded"
 #   2. the basename of the Path column under "Permanently excluded"
 # Missing files and placeholder rows produce no output.

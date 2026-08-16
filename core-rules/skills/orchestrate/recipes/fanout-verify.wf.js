@@ -298,9 +298,9 @@ async function reap(t, verdict) {
 }
 
 // --- Phase: Targets -------------------------------------------------------
-// Targets come from args. Fallback: ask a discovery agent to read the
-// control-plane registry's Active-projects table (filename reference is
-// path-neutral; a baked absolute path would not be). No `fs` global exists.
+// Targets come from args. Fallback: ask a discovery agent to list the
+// machine-local registry (command reference is path-neutral; a baked absolute
+// path would not be). No `fs` global exists.
 phase('Targets')
 let targets = args.targets
 if (!targets || targets.length === 0) {
@@ -308,9 +308,9 @@ if (!targets || targets.length === 0) {
     // routing: inherit — registry discovery is a bounded read, stays on the main loop's model
     const discovered = await agent(
       [
-        'Read the control-plane registry.md "Active projects" table.',
-        'Return its rows as targets: an array of { name, path } using the Project and Path columns.',
-        'Skip any project listed in blacklist.md.',
+        'Run `trellis registry list --json` through the installed launcher.',
+        'Return its rows as targets: an array of { name, path } using each entry\'s project_id and worktree root.',
+        'Skip any row whose status is not "active", and any row reported unavailable.',
       ].join('\n'),
       { label: 'resolve-targets', phase: 'Targets', schema: TARGET_LIST },
     )

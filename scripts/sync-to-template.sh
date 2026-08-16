@@ -1,381 +1,984 @@
-#!/usr/bin/env bash
-# Sync canonical content from this live Trellis clone to the public Trellis mirror.
+#!/bin/sh
+# The source wrapper is deliberately non-authoritative. It crosses an explicit
+# env -i boundary before Bash parses its body, then admits only the canonical
+# payload identity minted by the stable launcher after release verification.
+# shellcheck shell=bash
+# The `#!/bin/sh` line above is a POSIX bootstrap: it does nothing but `exec` a
+# clean `/bin/bash --noprofile --norc` through `env -i`, so every line of this
+# file after the bootstrap is Bash and must be linted as Bash. Without this
+# directive ShellCheck believed the shebang and buried ~30 real findings under
+# ~250 SC30xx dialect complaints about a dialect that never runs.
 #
-# Reads trellis.config.json for paths.
-# Substitutes user-specific values back to placeholders so the template
-# remains shareable.
+# ShellCheck only honours `shell=` at the top of a file, so the directive covers
+# the POSIX prologue too. `scripts/tests/posix-bootstrap-prologue.bats` re-checks
+# each prologue as `sh` to keep that guarantee, since this line removes it here.
+mirror_bootstrap_home=${HOME-}
+mirror_bootstrap_trellis_home=${TRELLIS_HOME-}
+mirror_bootstrap_payload=${TRELLIS_VERIFIED_PAYLOAD-}
+mirror_bootstrap_release_version=${TRELLIS_VERIFIED_RELEASE_VERSION-}
+mirror_bootstrap_ssh_auth_sock=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}
+exec /usr/bin/env -i \
+  "HOME=$mirror_bootstrap_home" "TRELLIS_HOME=$mirror_bootstrap_trellis_home" \
+  "TRELLIS_VERIFIED_PAYLOAD=$mirror_bootstrap_payload" \
+  "TRELLIS_VERIFIED_RELEASE_VERSION=$mirror_bootstrap_release_version" \
+  "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$mirror_bootstrap_ssh_auth_sock" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  /bin/bash --noprofile --norc -c '
+set -u
+umask 077
+mirror_source="$1"
+shift
+case "$mirror_source" in
+  /*) ;;
+  *) mirror_source="$(/bin/pwd -P)/$mirror_source" ;;
+esac
+mirror_source_name="$(/usr/bin/basename "$mirror_source")"
+mirror_source_dir="$(CDPATH= cd "$(/usr/bin/dirname "$mirror_source")" && /bin/pwd -P)" || {
+  /usr/bin/printf "%s\n" "trellis mirror: could not resolve source wrapper" >&2
+  exit 5
+}
+[ "$mirror_source_name" = "sync-to-template.sh" ] &&
+  [ ! -L "$mirror_source_dir/$mirror_source_name" ] &&
+  [ -f "$mirror_source_dir/$mirror_source_name" ] || {
+  /usr/bin/printf "%s\n" "trellis mirror: invalid source wrapper" >&2
+  exit 5
+}
+mirror_bootstrap_clean_absolute_path() {
+  local path="${1:-}"
+  [ -n "$path" ] && [ "$path" != "/" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    *[[:cntrl:]]*|*//*|*/./*|*/../*|*/.|*/..|*/) return 1 ;;
+  esac
+  return 0
+}
+# Byte-identical copy of trellis_home_snapshot_payload_matches (see
+# scripts/lib/trellis-home.sh for the normative definition and the reason the
+# version segment must be matched whole rather than as a prefix). This gate
+# runs before the bootstrap re-execs into the verified payload, so no library
+# is available to call and the body is pinned by
+# scripts/tests/release-snapshot-predicate.bats instead.
+mirror_bootstrap_payload_matches() {
+  local home="$1" payload="$2" version="$3" snapshot_root snapshot_base rest suffix
+  [ "$payload" = "$home/releases/$version/payload" ] && return 0
+  snapshot_root="${payload%/payload}"
+  [ "$snapshot_root" != "$payload" ] || return 1
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
+  snapshot_base="${snapshot_root##*/}"
+  rest="${snapshot_base#.tmp.}"
+  [ "$rest" != "$snapshot_base" ] || return 1
+  suffix="${rest#"$version".exec.}"
+  [ "$suffix" != "$rest" ] || return 1
+  case "$suffix" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  return 0
+}
+mirror_bootstrap_reject_source() {
+  /usr/bin/printf "%s\n" "trellis mirror: direct source execution is unsupported; run trellis mirror from the installed stable launcher" >&2
+  exit 2
+}
+mirror_bootstrap_clean_absolute_path "${TRELLIS_HOME:-}" &&
+  mirror_bootstrap_clean_absolute_path "${TRELLIS_VERIFIED_PAYLOAD:-}" &&
+  [ -n "${TRELLIS_VERIFIED_RELEASE_VERSION:-}" ] &&
+  [ "${TRELLIS_VERIFIED_RELEASE_VERSION#*/}" = "${TRELLIS_VERIFIED_RELEASE_VERSION}" ] &&
+  [ ! -L "$TRELLIS_VERIFIED_PAYLOAD" ] &&
+  [ -d "$TRELLIS_VERIFIED_PAYLOAD" ] || mirror_bootstrap_reject_source
+mirror_canonical_home="$(CDPATH= cd "$TRELLIS_HOME" && /bin/pwd -P)" ||
+  mirror_bootstrap_reject_source
+mirror_canonical_payload="$(CDPATH= cd "$TRELLIS_VERIFIED_PAYLOAD" && /bin/pwd -P)" ||
+  mirror_bootstrap_reject_source
+mirror_bootstrap_payload_matches "$mirror_canonical_home" "$mirror_canonical_payload" "$TRELLIS_VERIFIED_RELEASE_VERSION" &&
+  [ "$mirror_source_dir" = "$mirror_canonical_payload/scripts" ] ||
+  mirror_bootstrap_reject_source
+mirror_body="$(/usr/bin/mktemp /tmp/trellis-mirror.XXXXXX)" || {
+  /usr/bin/printf "%s\n" "trellis mirror: could not prepare trusted bootstrap" >&2
+  exit 5
+}
+if ! /usr/bin/awk "body { print } /^# -- trellis mirror body --\$/ { body = 1 }" "$mirror_source_dir/$mirror_source_name" > "$mirror_body" ||
+  ! /bin/test -s "$mirror_body" ||
+  ! /bin/chmod 600 "$mirror_body"; then
+  /bin/rm -f "$mirror_body"
+  /usr/bin/printf "%s\n" "trellis mirror: could not prepare trusted bootstrap" >&2
+  exit 5
+fi
+exec /usr/bin/env -i \
+  "HOME=${HOME-}" "TRELLIS_HOME=$mirror_canonical_home" \
+  "TRELLIS_VERIFIED_PAYLOAD=$mirror_canonical_payload" \
+  "TRELLIS_VERIFIED_RELEASE_VERSION=${TRELLIS_VERIFIED_RELEASE_VERSION-}" \
+  "TRELLIS_VERIFIED_SSH_AUTH_SOCK=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}" \
+  "TRELLIS_MIRROR_SOURCE_DIR=$mirror_source_dir" \
+  "TRELLIS_MIRROR_BODY=$mirror_body" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  /bin/bash --noprofile --norc "$mirror_body" "$@"
+' trellis-mirror-bootstrap "$0" "$@"
+
+# -- trellis mirror body --
+# Publish portable Trellis policy and tools to a public mirror.
 #
-# Default mode: --dry-run (show diff, don't write).
-# To actually write: --apply
-# To commit + push: --push (requires gh CLI access to the template remote).
-#
-# Usage:
-#   sync-to-template.sh                         # dry-run
-#   sync-to-template.sh --apply                 # write to template working tree
-#   sync-to-template.sh --apply --push          # also commit + push
-#
-# On --apply the mirror is PRUNED of de-listed paths (DELIST_PRUNE) then LINTED
-# for forbidden content — absolute-path leaks and stale antigravity outside the
-# historical record (docs/adr/, docs/specs/, CHANGELOG.md). A lint failure
-# ABORTS before any commit/push, so a drifted public-only file (README/SETUP/
-# AGENT_SETUP) cannot ship stale content.
+# This command has publication authority only when the stable launcher has
+# already verified an immutable installed release. A source checkout is never
+# executed or sourced: its mutable bytes are not an input to publication.
 
 set -euo pipefail
+MIRROR_BODY_PATH="${TRELLIS_MIRROR_BODY:-}"
+unset TRELLIS_MIRROR_BODY
+mirror_cleanup_body() {
+  [ -z "$MIRROR_BODY_PATH" ] || /bin/rm -f "$MIRROR_BODY_PATH"
+}
+trap 'mirror_cleanup_body' EXIT
+trap 'mirror_cleanup_body; exit 129' HUP
+trap 'mirror_cleanup_body; exit 130' INT
+trap 'mirror_cleanup_body; exit 143' TERM
+unset BASH_ENV ENV CDPATH
+PATH='/usr/bin:/bin:/usr/sbin:/sbin'
+export PATH
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=lib/config-load.sh
-. "$SCRIPT_DIR/lib/config-load.sh"
-# shellcheck source=lib/sed-portable.sh
-. "$SCRIPT_DIR/lib/sed-portable.sh"
-# shellcheck source=lib/sync-coverage.sh
-. "$SCRIPT_DIR/lib/sync-coverage.sh"
+PAYLOAD_ROOT="${TRELLIS_VERIFIED_PAYLOAD:-}"
+RELEASE_VERSION="${TRELLIS_VERIFIED_RELEASE_VERSION:-}"
+TRELLIS_HOME_ROOT="${TRELLIS_HOME:-}"
+[ -n "$PAYLOAD_ROOT" ] && [ -n "$RELEASE_VERSION" ] && [ -n "$TRELLIS_HOME_ROOT" ] || {
+  printf 'trellis mirror: run trellis mirror from the verified stable launcher\n' >&2
+  exit 2
+}
+case "$RELEASE_VERSION" in
+  *$'\t'*|*$'\n'*|*$'\r'*|*'/'*|'.'|'..'|'')
+    printf 'trellis mirror: run trellis mirror from the verified stable launcher\n' >&2
+    exit 2
+    ;;
+esac
+TRELLIS_HOME_ROOT="$(CDPATH='' cd -P -- "$TRELLIS_HOME_ROOT" && pwd -P)" || {
+  printf 'trellis mirror: verified Trellis home is unavailable\n' >&2
+  exit 5
+}
+PAYLOAD_ROOT="$(CDPATH='' cd -P -- "$PAYLOAD_ROOT" && pwd -P)" || {
+  printf 'trellis mirror: verified release payload is unavailable\n' >&2
+  exit 5
+}
+# Byte-identical copy of trellis_home_snapshot_payload_matches (see
+# scripts/lib/trellis-home.sh for the normative definition and the reason the
+# version segment must be matched whole rather than as a prefix). The mirror
+# body re-decides the question the bootstrap already decided, in the separate
+# process the bootstrap re-exec'd into, and it does so before it sources any
+# library — so this is a second copy inside the same file, pinned by
+# scripts/tests/release-snapshot-predicate.bats alongside the bootstrap's.
+mirror_payload_matches_release() {
+  local home="$1" payload="$2" version="$3" snapshot_root snapshot_base rest suffix
+  [ "$payload" = "$home/releases/$version/payload" ] && return 0
+  snapshot_root="${payload%/payload}"
+  [ "$snapshot_root" != "$payload" ] || return 1
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
+  snapshot_base="${snapshot_root##*/}"
+  rest="${snapshot_base#.tmp.}"
+  [ "$rest" != "$snapshot_base" ] || return 1
+  suffix="${rest#"$version".exec.}"
+  [ "$suffix" != "$rest" ] || return 1
+  case "$suffix" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  return 0
+}
+mirror_payload_is_verified_location() {
+  mirror_payload_matches_release \
+    "$TRELLIS_HOME_ROOT" "$PAYLOAD_ROOT" "$RELEASE_VERSION"
+}
+mirror_payload_is_verified_location || {
+  printf 'trellis mirror: run trellis mirror from the verified stable launcher\n' >&2
+  exit 2
+}
+SCRIPT_DIR="${TRELLIS_MIRROR_SOURCE_DIR:-}"
+unset TRELLIS_MIRROR_SOURCE_DIR
+case "$SCRIPT_DIR" in
+  /*) ;;
+  *)
+    printf 'trellis mirror: verified release script directory is unavailable\n' >&2
+    exit 5
+    ;;
+esac
+[ -d "$SCRIPT_DIR" ] && [ ! -L "$SCRIPT_DIR" ] &&
+  [ "$(CDPATH='' cd -P -- "$SCRIPT_DIR" && pwd -P)" = "$SCRIPT_DIR" ] &&
+  [ "$SCRIPT_DIR" = "$PAYLOAD_ROOT/scripts" ] || {
+  printf 'trellis mirror: run trellis mirror from the verified stable launcher\n' >&2
+  exit 2
+}
+[ -f "$PAYLOAD_ROOT/../release.json" ] && [ ! -L "$PAYLOAD_ROOT/../release.json" ] || {
+  printf 'trellis mirror: verified release record is unavailable\n' >&2
+  exit 5
+}
+[ -f "$PAYLOAD_ROOT/../release.json" ] && [ ! -L "$PAYLOAD_ROOT/../release.json" ] || {
+  printf 'trellis mirror: verified release record is unavailable\n' >&2
+  exit 5
+}
+
+SOURCE_COMMIT_MATCH="$(/usr/bin/grep -oE '"commit"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' \
+  "$PAYLOAD_ROOT/../release.json" 2>/dev/null || true)"
+SOURCE_COMMIT="$(printf '%s\n' "$SOURCE_COMMIT_MATCH" | /usr/bin/sed -E 's/.*"([0-9a-f]{40})"/\1/')"
+case "$SOURCE_COMMIT" in
+  ''|*[!0-9a-f]*)
+    printf 'trellis mirror: verified release commit identity is invalid\n' >&2
+    exit 5
+    ;;
+esac
+[ "${#SOURCE_COMMIT}" -eq 40 ] || {
+  printf 'trellis mirror: verified release commit identity is invalid\n' >&2
+  exit 5
+}
+
+mirror_git() {
+  local home="${HOME:-/}"
+  /usr/bin/env -i \
+    "HOME=$home" \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "GIT_CONFIG_NOSYSTEM=1" \
+    "GIT_CONFIG_GLOBAL=/dev/null" \
+    "GIT_CONFIG_COUNT=6" \
+    "GIT_CONFIG_KEY_0=core.fsmonitor" \
+    "GIT_CONFIG_VALUE_0=false" \
+    "GIT_CONFIG_KEY_1=core.hooksPath" \
+    "GIT_CONFIG_VALUE_1=/dev/null" \
+    "GIT_CONFIG_KEY_2=core.sshCommand" \
+    "GIT_CONFIG_VALUE_2=" \
+    "GIT_CONFIG_KEY_3=credential.helper" \
+    "GIT_CONFIG_VALUE_3=" \
+    "GIT_CONFIG_KEY_4=protocol.ext.allow" \
+    "GIT_CONFIG_VALUE_4=never" \
+    "GIT_CONFIG_KEY_5=protocol.file.allow" \
+    "GIT_CONFIG_VALUE_5=never" \
+    /usr/bin/git "$@"
+}
+
+mirror_require_verified_ssh_socket() {
+  local socket="${TRELLIS_VERIFIED_SSH_AUTH_SOCK:-}" parent base canonical
+  case "$socket" in
+    /*) ;;
+    *)
+      printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
+      return 5
+      ;;
+  esac
+  [ -S "$socket" ] && [ ! -L "$socket" ] || {
+    printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
+    return 5
+  }
+  parent="${socket%/*}"
+  base="${socket##*/}"
+  canonical="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || return 5
+  [ "$canonical/$base" = "$socket" ] || {
+    printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
+    return 5
+  }
+  printf '%s\n' "$socket"
+}
+
+mirror_git_push() {
+  local socket="$1"
+  shift
+  /usr/bin/env -i \
+    "HOME=${HOME:-/}" \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "SSH_AUTH_SOCK=$socket" \
+    "GIT_CONFIG_NOSYSTEM=1" \
+    "GIT_CONFIG_GLOBAL=/dev/null" \
+    "GIT_CONFIG_COUNT=7" \
+    "GIT_CONFIG_KEY_0=core.fsmonitor" \
+    "GIT_CONFIG_VALUE_0=false" \
+    "GIT_CONFIG_KEY_1=core.hooksPath" \
+    "GIT_CONFIG_VALUE_1=/dev/null" \
+    "GIT_CONFIG_KEY_2=core.sshCommand" \
+    "GIT_CONFIG_VALUE_2=/usr/bin/ssh -oBatchMode=yes" \
+    "GIT_CONFIG_KEY_3=credential.helper" \
+    "GIT_CONFIG_VALUE_3=" \
+    "GIT_CONFIG_KEY_4=protocol.ext.allow" \
+    "GIT_CONFIG_VALUE_4=never" \
+    "GIT_CONFIG_KEY_5=protocol.file.allow" \
+    "GIT_CONFIG_VALUE_5=never" \
+    "GIT_CONFIG_KEY_6=credential.useHttpPath" \
+    "GIT_CONFIG_VALUE_6=true" \
+    /usr/bin/git "$@"
+}
+
 # shellcheck source=lib/mirror-lint.sh
 . "$SCRIPT_DIR/lib/mirror-lint.sh"
 
-# --- Args ------------------------------------------------------------------
-APPLY=false
-PUSH=false
-TEMPLATE_DIR="${TRELLIS_TEMPLATE_DIR:-$USER_HOME/projects/trellis}"
+usage() {
+  cat <<'EOF'
+Usage:
+  trellis mirror --template-dir PATH [--dry-run|--apply|--push]
 
-for arg in "$@"; do
-  case "$arg" in
-    --apply)        APPLY=true ;;
-    --push)         APPLY=true; PUSH=true ;;
-    --template-dir=*) TEMPLATE_DIR="${arg#--template-dir=}" ;;
-    --dry-run)      APPLY=false; PUSH=false ;;
-    --help|-h)
-      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
-      exit 0
-      ;;
-    *)
-      echo "unknown option: $arg" >&2
-      exit 2
-      ;;
-  esac
-done
-
-[ -e "$TEMPLATE_DIR/.git" ] || {
-  echo "template repo not found at $TEMPLATE_DIR" >&2
-  echo "set TRELLIS_TEMPLATE_DIR or pass --template-dir=<path>" >&2
-  exit 1
+Stages portable policy/tools from the verified immutable release into PATH.
+--dry-run is the default and validates a simulated post-sync mirror without
+changing PATH. --apply writes only after staged and simulated whole-tree lint
+passes. --push also offers an interactive commit and push after apply.
+EOF
 }
 
-# Files / dirs to sync from live → template
-SYNC_PATHS=(
-  "engineering-process.md"
-  "AGENT_ONBOARD_PROJECT.md"
-  "CHANGELOG.md"
-  # Public bootstrap shells only. The private source files are copied into the
-  # staging area and replaced below before leak checks or mirror writes.
-  "dependency-baseline.json"
-  "audits/fleet-remediation-ledger.json"
-  "docs/local-development-infrastructure.md"
-  "core-rules/CLAUDE.md"
-  "core-rules/AGENTS.md"
-  "core-rules/agents/"
-  "core-rules/omp/"
-  "core-rules/VERSION"
-  "core-rules/codex/"
-  "core-rules/hooks.md"
-  "core-rules/inheritance.md"
-  "core-rules/deferred.md"
-  # the feature-primer system, relocated out of core-rules/CLAUDE.md in 019 —
-  # CLAUDE.md ships a pointer to it, so it must publish or the pointer dangles.
-  "core-rules/primers.md"
-  "core-rules/hooks/"
-  "core-rules/husky/"
-  "core-rules/githooks/"
-  "core-rules/skills/"
-  "core-rules/commands/"
-  "core-rules/templates/"
-  "core-rules/references/"
-  "docs/adr/"
-  "docs/primers/"
-  "docs/references/"
-  "docs/legacy/"
-  "docs/UPGRADING.md"
-  # NOTE: scheduled-tasks/ is NOT synced — it is operator-specific automation
-  # whose targets.md / prompt.md files name the private fleet (conductor backlog,
-  # dep-watch versions, audit target lists). Published verbatim it leaked named
-  # infra ops (audit 2026-07-13 H1/M2). See NEVER_SYNC + DELIST_PRUNE below. A
-  # genericized public example set may be re-added deliberately later.
-  "scripts/"
-  "trellis.config.json"
-  # Public-mirror parity (v0.6.0) — formerly instance-only, published on
-  # maintainer decision so the public template reaches full feature parity.
-  # The 2026-05-08 meta-audit stays private (security-gap detail); its example
-  # citation in references/secrets.md was genericized to avoid a dangling ref.
-  "recon.md"
-  "core-rules/autonomy.md"
-  # published because 13 synced files reference it (CLAUDE.md § Loops, references/loops.md, orchestrate skill+recipes) — spec 009 D9.
-  "core-rules/loop-safety.md"
-  "core-rules/presets/"
-  "docs/claude-steering.md"
-  "docs/gpt-5.x-steering.md"
-  "docs/codex-routing.md"
-  "docs/specs/2026-05-20-trellis-autonomy-design.md"
-  "docs/specs/2026-06-02-trellis-process-enforcement-design.md"
-  "docs/specs/2026-06-09-loop-safety-contract-design.md"
-  "docs/specs/2026-07-21-reference-token-handoff-spike.md"
-  "docs/specs/2026-07-21-public-dependency-bootstrap-design.md"
-  # single file, NOT the docs/research/ dir — the rest of that dir is instance
-  # research. Published because core-rules/references/model-prompting-deltas.md,
-  # engineering-process.md, and docs/claude-steering.md all cite it, and it is a
-  # distillation of published Anthropic sources with nothing instance-private.
-  "docs/research/2026-07-25-claude-5-prompting-corpus.md"
-)
+mirror_require_real_root() {
+  local root="${1:-}" remaining component current="/" canonical
+  case "$root" in
+    /*) ;;
+    *)
+      printf 'trellis mirror: template directory must be an absolute canonical path: %s\n' "$root" >&2
+      return 2
+      ;;
+  esac
+  case "$root" in
+    ''|*'//'|*$'\t'*|*$'\n'*|*$'\r'*|*/./*|*/../*|*/.|*/..)
+      printf 'trellis mirror: template directory must be an absolute canonical path: %s\n' "$root" >&2
+      return 2
+      ;;
+  esac
+  while [ "${root%/}" != "$root" ] && [ "$root" != "/" ]; do root="${root%/}"; done
+  remaining="${root#/}"
+  while [ -n "$remaining" ]; do
+    case "$remaining" in
+      */*) component="${remaining%%/*}"; remaining="${remaining#*/}" ;;
+      *) component="$remaining"; remaining="" ;;
+    esac
+    current="${current%/}/$component"
+    if [ -L "$current" ] || { [ -e "$current" ] && [ ! -d "$current" ]; }; then
+      printf 'trellis mirror: template directory has a symlink or non-directory ancestor: %s\n' "$current" >&2
+      return 4
+    fi
+    [ -d "$current" ] || {
+      printf 'trellis mirror: template directory is unavailable: %s\n' "$current" >&2
+      return 5
+    }
+  done
+  canonical="$(CDPATH='' cd "$root" && pwd -P)" || return 5
+  [ "$canonical" = "$root" ] || {
+    printf 'trellis mirror: template directory is not canonical: %s\n' "$root" >&2
+    return 4
+  }
+  printf '%s\n' "$canonical"
+}
 
-# Files NEVER synced (private / instance-specific) — informational; the
-# actual exclusion is implemented via SYNC_PATHS being a positive allowlist.
-# shellcheck disable=SC2034  # documents intent; not consumed
-NEVER_SYNC=(
-  "registry.md"
-  "blacklist.md"
-  # audits/ stays private except for the exact sanitized empty ledger shell in
-  # SYNC_PATHS. No source report or private finding row is ever published.
-  "audits/"
-  "scheduled-tasks/"   # operator-specific automation; names the private fleet (audit 2026-07-13 H1/M2)
-  "conductor/"         # conductor slate/state — private fleet inventory
-  "research/"          # instance research outputs
-  "local/"             # instance-private local tooling — MUST stay private
-)
+apply=false
+push=false
+template_dir=""
 
-# De-listed / removed paths to PRUNE from the mirror on --apply (Workstream D2).
-# The per-subtree `rsync --delete` below only prunes WITHIN wholesale-synced
-# dirs; a file removed from SYNC_PATHS or deleted upstream (e.g. a renamed or
-# retired doc) lingers in the mirror forever otherwise — docs/antigravity-
-# steering.md did exactly that until a manual git rm. This is an explicit
-# append-and-forget register, NOT a blanket "delete anything unsynced" (that
-# would nuke legit public-only files: README.md, SETUP.md, AGENT_SETUP.md,
-# LICENSE, .github/). Add a path here when you de-list or rename it.
-DELIST_PRUNE=(
-  "docs/antigravity-steering.md"   # retired in RC.4 (AntiGravity strip)
-  "docs/gpt-5.5-steering.md"       # renamed → docs/gpt-5.x-steering.md in RC.5
-  "docs/opus-4.8-steering.md"      # renamed → docs/claude-steering.md in 019
-  "scheduled-tasks"                # de-listed 2026-07-13 (audit H1/M2): named private-fleet leak
-  "AGENT_ONBOARD_G""PTX.md" # retired feature surface
-  "docs/g""ptx.md" # retired feature surface
-  "docs/g""ptx-security.md" # retired feature surface
-  "docs/g""ptx-session-policy-matrix.md" # retired feature surface
-  "docs/g""ptx-model-override-matrix.md" # retired feature surface
-)
-
-delist_prune_path_safe() {
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    ""|"."|".."|/*|"~"*|*..*) return 1 ;;
+    --dry-run) apply=false; push=false ;;
+    --apply) apply=true; push=false ;;
+    --push) apply=true; push=true ;;
+    --template-dir)
+      shift
+      [ "$#" -gt 0 ] || { printf 'trellis mirror: --template-dir requires PATH\n' >&2; exit 2; }
+      template_dir="$1"
+      ;;
+    --template-dir=*) template_dir="${1#--template-dir=}" ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'trellis mirror: unknown option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -n "$template_dir" ] || {
+  printf 'trellis mirror: --template-dir PATH is required\n' >&2
+  exit 2
+}
+template_dir="$(mirror_require_real_root "$template_dir")" || exit "$?"
+[ -d "$template_dir/.git" ] && [ ! -L "$template_dir/.git" ] || {
+  printf 'trellis mirror: template repository not found at %s\n' "$template_dir" >&2
+  exit 5
+}
+if "$push" && [ -n "$(mirror_git -C "$template_dir" status --porcelain=v1 --untracked-files=all)" ]; then
+  printf 'trellis mirror: --push requires a clean template checkout before publication\n' >&2
+  exit 3
+fi
+
+# Positive publication allowlist. A payload path must be deliberately listed to
+# become public; state directories are absent by design.
+sync_paths=(
+  'engineering-process.md'
+  'AGENT_SETUP.md'
+  'AGENT_ONBOARD_PROJECT.md'
+  'CHANGELOG.md'
+  'dependency-baseline.json'
+  'audits/fleet-remediation-ledger.json'
+  'docs/local-development-infrastructure.md'
+  'core-rules/CLAUDE.md'
+  'core-rules/AGENTS.md'
+  'core-rules/agents/'
+  'core-rules/omp/'
+  'core-rules/VERSION'
+  'core-rules/codex/'
+  'core-rules/hooks.md'
+  'core-rules/inheritance.md'
+  'core-rules/deferred.md'
+  'core-rules/primers.md'
+  'core-rules/hooks/'
+  'core-rules/husky/'
+  'core-rules/githooks/'
+  'core-rules/skills/'
+  'core-rules/commands/'
+  'core-rules/templates/'
+  'core-rules/references/'
+  'core-rules/autonomy.md'
+  'core-rules/loop-safety.md'
+  'core-rules/presets/'
+  'docs/adr/'
+  'docs/primers/'
+  'docs/references/'
+  'docs/legacy/'
+  'docs/UPGRADING.md'
+  'docs/claude-steering.md'
+  'docs/gpt-5.x-steering.md'
+  'docs/codex-routing.md'
+  'docs/specs/2026-05-20-trellis-autonomy-design.md'
+  'docs/specs/2026-06-02-trellis-process-enforcement-design.md'
+  'docs/specs/2026-06-09-loop-safety-contract-design.md'
+  'docs/specs/2026-07-21-reference-token-handoff-spike.md'
+  'docs/specs/2026-07-21-public-dependency-bootstrap-design.md'
+  'docs/research/2026-07-25-claude-5-prompting-corpus.md'
+  'scripts/'
+  'trellis.config.json'
+  'recon.md'
+)
+
+# Every core-rules subtree is either published above or consciously private.
+core_rules_no_sync=(
+  'evals'
+)
+
+# Paths removed from an existing mirror. These are public-tree relative and
+# validated before deletion. They include all possible TRELLIS_HOME state that
+# might have been copied by an earlier implementation.
+#
+# The private-state roots below are paired one-for-one with the structural
+# reject terms in `lint_mirror` (`scripts/lib/mirror-lint.sh`). Keep them in
+# sync in both directions: a term the lint rejects with no entry here leaves a
+# mirror permanently unpublishable, and an entry here with no lint term deletes
+# silently instead of failing loudly.
+delist_prune=(
+  'docs/antigravity-steering.md'
+  'docs/gpt-5.5-steering.md'
+  'docs/opus-4.8-steering.md'
+  'scheduled-tasks'
+  'local'
+  '.trellis'
+  'config.json'
+  'state'
+  'tasks'
+  'locks'
+  'releases'
+  'registry.json'
+  'AGENT_ONBOARD_GPTX.md'
+  'docs/gptx.md'
+  'docs/gptx-security.md'
+  'docs/gptx-session-policy-matrix.md'
+  'docs/gptx-model-override-matrix.md'
+)
+
+safe_prune_path() {
+  case "$1" in
+    ''|'.'|'..'|/*|*'//'|*$'\t'*|*$'\n'*|*$'\r'*|./*|../*|*'/./'*|*'/../'*|*/.|*/..) return 1 ;;
     *) return 0 ;;
   esac
 }
 
-# core-rules/ subdirs deliberately kept instance-private — the explicit
-# "do not publish" register that the sync-coverage pre-flight checks against.
-# Each bare basename here is a core-rules/<name>/ subdir that must NEVER reach
-# the public template. Document WHY for every entry:
-#   evals — per-project eval suites; subdirs identify registered private
-#           projects. Instance-private, intentionally never published.
-# shellcheck disable=SC2034  # consumed via "${CORE_RULES_NO_SYNC[@]}" below
-CORE_RULES_NO_SYNC=(
-  "evals"
-)
 
-# Placeholder substitutions: live values → template placeholders. Put more
-# specific roots before USER_HOME so an external shared-infrastructure path gets
-# its own placeholder instead of being partially rewritten as a home-relative
-# path. The optional value must never add an empty grep/substitution token.
-declare -a SUB_FROM=()
-declare -a SUB_TO=()
-if [ -n "${SHARED_INFRA_ROOT:-}" ]; then
-  SUB_FROM+=("$SHARED_INFRA_ROOT")
-  SUB_TO+=("__SHARED_INFRA_PATH__")
-fi
-SUB_FROM+=("$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME" "$MAINTAINER_NAME" "$GITHUB_USER")
-SUB_TO+=("__TRELLIS_PATH__" "__TRELLIS_PATH__" "__PROJECTS_ROOT__" "__USER_HOME__" "__MAINTAINER_NAME__" "__GITHUB_USER__")
 
-sync_path_covers_ref() {
-  local ref sync_path
-  ref="$1"
-  for sync_path in "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}"; do
-    if [ "$sync_path" = "$ref" ]; then
-      return 0
-    fi
-    case "$sync_path" in
-      */)
-        case "$ref" in
-          "$sync_path"*) return 0 ;;
-        esac
-        ;;
+mirror_require_real_parent() {
+  local root="$1" relative="$2" parent rest component current
+  safe_prune_path "$relative" || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || {
+    printf 'trellis mirror: destination root is not a real directory: %s\n' "$root" >&2
+    return 1
+  }
+  case "$relative" in
+    */*) parent="${relative%/*}" ;;
+    *) return 0 ;;
+  esac
+  current="$root"
+  rest="$parent"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) component="${rest%%/*}"; rest="${rest#*/}" ;;
+      *) component="$rest"; rest="" ;;
     esac
+    current="$current/$component"
+    if [ -L "$current" ]; then
+      printf 'trellis mirror: destination parent is a symlink: %s\n' "${current#"$root"/}" >&2
+      return 1
+    fi
+    if [ -e "$current" ] && [ ! -d "$current" ]; then
+      printf 'trellis mirror: destination parent is not a directory: %s\n' "${current#"$root"/}" >&2
+      return 1
+    fi
+  done
+}
+
+# Execute a mutation while the destination parent is the process's current
+# directory. `cd -P` plus the expected physical path binds later relative
+# operations to that directory even if an attacker renames a pathname parent
+# after preflight. Missing components are created one-at-a-time from that bound
+# directory; a raced symlink or non-directory is rejected before descent.
+mirror_run_in_real_parent() {
+  local root="$1" relative="$2" action="$3" parent rest component leaf expected actual
+  shift 3
+  safe_prune_path "$relative" || return 1
+  mirror_require_real_parent "$root" "$relative" || return 1
+  case "$relative" in
+    */*) parent="${relative%/*}"; leaf="${relative##*/}" ;;
+    *) parent=""; leaf="$relative" ;;
+  esac
+  (
+    CDPATH='' cd -P -- "$root" || exit 1
+    actual="$(pwd -P)" || exit 1
+    [ "$actual" = "$root" ] || {
+      printf 'trellis mirror: destination root changed during mutation: %s\n' "$root" >&2
+      exit 1
+    }
+    expected="$root"
+    rest="$parent"
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        */*) component="${rest%%/*}"; rest="${rest#*/}" ;;
+        *) component="$rest"; rest="" ;;
+      esac
+      if [ ! -e "$component" ] && [ ! -L "$component" ]; then
+        mkdir "$component" || exit 1
+      fi
+      [ ! -L "$component" ] && [ -d "$component" ] || {
+        printf 'trellis mirror: destination parent is not a real directory: %s\n' "$component" >&2
+        exit 1
+      }
+      CDPATH='' cd -P -- "$component" || exit 1
+      expected="$expected/$component"
+      actual="$(pwd -P)" || exit 1
+      [ "$actual" = "$expected" ] || {
+        printf 'trellis mirror: destination parent changed during mutation: %s\n' "$expected" >&2
+        exit 1
+      }
+    done
+    "$action" "$leaf" "$relative" "$@"
+  )
+}
+
+# A destination symlink is refused because a mutation must never be written
+# THROUGH a link an attacker controls. One destination link is not that: the
+# one this flow itself published on an earlier run. Recognise it and only it —
+# both sides links, link TEXT equal byte-for-byte, and that text relative and
+# lexically contained in the mirror. `readlink` and `-L` are lstat-only, so the
+# link is never followed and a hostile target buys nothing. Absolute targets,
+# escaping targets, mismatched text, and a link facing a non-link staged source
+# all still fall through to the refusal.
+#
+# Preflight has to accept it or it rejects its own output: `mirror_copy_staged_paths`
+# and `mirror_remove_pruned_paths` each re-run `mirror_preflight_mutations`, and
+# any already-published mirror hands the first preflight a link it installed
+# itself. The re-runs are deliberate — they catch a tree raced between the two
+# passes — so the invariant to hold is that preflight is idempotent over the
+# flow's own output, not that the second preflight looks at less.
+mirror_destination_is_staged_link() {
+  local relative="$1" source="$2" destination="$3" source_target destination_target
+  [ -L "$source" ] && [ -L "$destination" ] || return 1
+  source_target="$(readlink "$source")" || return 1
+  destination_target="$(readlink "$destination")" || return 1
+  [ -n "$source_target" ] && [ "$source_target" = "$destination_target" ] || return 1
+  mirror_link_target_is_contained "$relative" "$source_target" || return 1
+}
+
+mirror_install_file_in_parent() {
+  local leaf="$1" relative="$2" source="$3" temporary target
+  if [ -L "$leaf" ]; then
+    mirror_destination_is_staged_link "$relative" "$source" "$leaf" || {
+      printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
+      return 1
+    }
+    return 0
+  fi
+  if [ -L "$source" ]; then
+    target="$(readlink "$source")" || return 1
+    mirror_link_target_is_contained "$relative" "$target" || {
+      printf 'trellis mirror: staged source link escapes destination: %s\n' "$relative" >&2
+      return 1
+    }
+    if [ -e "$leaf" ] || [ -L "$leaf" ]; then
+      [ -f "$leaf" ] && [ ! -L "$leaf" ] || {
+        printf 'trellis mirror: destination is not a regular file: %s\n' "$relative" >&2
+        return 1
+      }
+      rm -f "$leaf" || return 1
+    fi
+    [ ! -e "$leaf" ] && [ ! -L "$leaf" ] || return 1
+    ln -s "$target" "$leaf"
+    return
+  fi
+  [ -f "$source" ] || {
+    printf 'trellis mirror: staged source is not a regular file: %s\n' "$relative" >&2
+    return 1
+  }
+  temporary="$(mktemp ".trellis-mirror-file.XXXXXX")" || return 1
+  if ! cp -P "$source" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  [ ! -L "$leaf" ] || {
+    rm -f "$temporary"
+    printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
+    return 1
+  }
+  if [ -e "$leaf" ]; then
+    [ -f "$leaf" ] || {
+      rm -f "$temporary"
+      printf 'trellis mirror: destination is not a regular file: %s\n' "$relative" >&2
+      return 1
+    }
+    rm -f "$leaf" || {
+      rm -f "$temporary"
+      return 1
+    }
+  fi
+  if ! ln "$temporary" "$leaf"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
+}
+
+mirror_install_directory_in_parent() {
+  local leaf="$1" relative="$2" source="$3" temporary temporary_path expected actual
+  [ -d "$source" ] && [ ! -L "$source" ] || {
+    printf 'trellis mirror: staged source is not a real directory: %s\n' "$relative" >&2
+    return 1
+  }
+  temporary_path="$(mktemp -d ".trellis-mirror-dir.XXXXXX")" || return 1
+  temporary="$(CDPATH='' cd -P -- "$temporary_path" && pwd -P)" || {
+    rm -rf "$temporary_path"
+    return 1
+  }
+  if ! rsync -a --delete --links --safe-links "${source}/" "${temporary}/"; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  [ ! -L "$leaf" ] || {
+    rm -rf "$temporary"
+    printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
+    return 1
+  }
+  if [ -e "$leaf" ]; then
+    [ -d "$leaf" ] || {
+      rm -rf "$temporary"
+      printf 'trellis mirror: destination is not a directory: %s\n' "$relative" >&2
+      return 1
+    }
+    rm -rf "$leaf" || {
+      rm -rf "$temporary"
+      return 1
+    }
+  fi
+  if ! mkdir "$leaf"; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  expected="$PWD/$leaf"
+  if ! (
+    CDPATH='' cd -P -- "$leaf" || exit 1
+    actual="$(pwd -P)" || exit 1
+    [ "$actual" = "$expected" ] || {
+      printf 'trellis mirror: destination changed during mutation: %s\n' "$relative" >&2
+      exit 1
+    }
+    rsync -a --links --safe-links "${temporary}/" ./
+  ); then
+    rm -rf "$temporary"
+    return 1
+  fi
+  rm -rf "$temporary"
+}
+
+mirror_prune_in_parent() {
+  local leaf="$1" relative="$2"
+  [ ! -L "$leaf" ] || {
+    printf 'trellis mirror: refusing symlinked prune target: %s\n' "$relative" >&2
+    return 1
+  }
+  [ -e "$leaf" ] || return 0
+  if [ -d "$leaf" ]; then
+    rm -rf "$leaf"
+  else
+    rm -f "$leaf"
+  fi
+}
+
+mirror_preflight_mutations() {
+  local root="$1" path source destination
+  mirror_validate_symlinks "$root" || return 1
+  for path in "${sync_paths[@]}"; do
+    source="$stage/${path%/}"
+    [ -e "$source" ] || [ -L "$source" ] || continue
+    mirror_validate_copy_target "$root" "${path%/}" "$source" || return 1
+  done
+  for path in "${delist_prune[@]}"; do
+    safe_prune_path "$path" || {
+      printf 'trellis mirror: unsafe prune path: %s\n' "$path" >&2
+      return 1
+    }
+    mirror_require_real_parent "$root" "$path" || return 1
+    destination="$root/$path"
+    [ ! -L "$destination" ] || {
+      printf 'trellis mirror: refusing symlinked prune target: %s\n' "$path" >&2
+      return 1
+    }
+  done
+}
+
+mirror_validate_copy_target() {
+  local root="$1" relative="$2" source="$3" destination
+  mirror_require_real_parent "$root" "$relative" || return 1
+  destination="$root/$relative"
+  if [ -L "$destination" ]; then
+    mirror_destination_is_staged_link "$relative" "$source" "$destination" || {
+      printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
+      return 1
+    }
+    return 0
+  fi
+  if [ -L "$source" ] || [ -f "$source" ]; then
+    if [ -e "$destination" ] && [ ! -f "$destination" ]; then
+      printf 'trellis mirror: destination is not a regular file: %s\n' "$relative" >&2
+      return 1
+    fi
+  elif [ -d "$source" ]; then
+    if [ -e "$destination" ] && [ ! -d "$destination" ]; then
+      printf 'trellis mirror: destination is not a directory: %s\n' "$relative" >&2
+      return 1
+    fi
+  else
+    printf 'trellis mirror: staged source is not publishable: %s\n' "$relative" >&2
+    return 1
+  fi
+}
+
+mirror_copy_staged_paths() {
+  local root="$1" path source
+  mirror_preflight_mutations "$root" || return 1
+  for path in "${sync_paths[@]}"; do
+    source="$stage/${path%/}"
+    [ -e "$source" ] || [ -L "$source" ] || continue
+    mirror_validate_copy_target "$root" "${path%/}" "$source" || return 1
+    if [ -L "$source" ] || [ -f "$source" ]; then
+      mirror_run_in_real_parent "$root" "${path%/}" mirror_install_file_in_parent "$source" || return 1
+    else
+      mirror_run_in_real_parent "$root" "${path%/}" mirror_install_directory_in_parent "$source" || return 1
+    fi
+  done
+}
+
+mirror_remove_pruned_paths() {
+  local root="$1" path destination
+  mirror_preflight_mutations "$root" || return 1
+  for path in "${delist_prune[@]}"; do
+    destination="$root/$path"
+    [ -e "$destination" ] || [ -L "$destination" ] || continue
+    mirror_run_in_real_parent "$root" "$path" mirror_prune_in_parent || return 1
+  done
+}
+sync_path_covers_ref() {
+  local ref="$1" path
+  for path in "${sync_paths[@]}"; do
+    [ "$path" = "$ref" ] && return 0
+    case "$path" in */) case "$ref" in "$path"*) return 0 ;; esac ;; esac
   done
   return 1
 }
 
 core_rules_private_ref() {
-  local ref private_dir
-  ref="$1"
-  for private_dir in "${CORE_RULES_NO_SYNC[@]+"${CORE_RULES_NO_SYNC[@]}"}"; do
-    case "$ref" in
-      "core-rules/$private_dir/"*) return 0 ;;
-    esac
+  local ref="$1" name
+  for name in "${core_rules_no_sync[@]}"; do
+    case "$ref" in "core-rules/$name/"*) return 0 ;; esac
   done
   return 1
 }
 
 ref_integrity_check() {
-  local failed refs_tmp files_tmp sync_path src md_file rel ref
-  failed=0
-  refs_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-refs.XXXXXX")"
-  files_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-files.XXXXXX")"
-
-  for sync_path in "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}"; do
-    src="${SOURCE_ROOT}/${sync_path%/}"
-    if [ -f "$src" ]; then
-      case "$src" in
-        *.md) ;;
-        *) continue ;;
-      esac
-      grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$src" 2>/dev/null | sort -u > "$refs_tmp" || true
+  local root="${1:-}" refs files path source file ref failed=0
+  [ "$#" -eq 1 ] || return 2
+  refs="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-refs.XXXXXX")"
+  files="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-files.XXXXXX")"
+  for path in "${sync_paths[@]}"; do
+    source="$root/${path%/}"
+    if [ -f "$source" ]; then
+      case "$source" in *.md) printf '%s\n' "$source" > "$files" ;; *) continue ;; esac
+    elif [ -d "$source" ]; then
+      find "$source" -type f -name '*.md' -print > "$files"
+    else
+      continue
+    fi
+    while IFS= read -r file; do
+      grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$file" 2>/dev/null | sort -u > "$refs" || true
       while IFS= read -r ref; do
         [ -n "$ref" ] || continue
         core_rules_private_ref "$ref" && continue
         if ! sync_path_covers_ref "$ref"; then
-          echo "ref-integrity: $sync_path -> $ref" >&2
+          printf 'trellis mirror: unsatisfied public reference: %s -> %s\n' "${file#"$root"/}" "$ref" >&2
           failed=1
         fi
-      done < "$refs_tmp"
-    elif [ -d "$src" ]; then
-      find "$src" -type f -name '*.md' -print > "$files_tmp"
-      while IFS= read -r md_file; do
-        rel="${md_file#"$SOURCE_ROOT"/}"
-        grep -oE 'core-rules/[A-Za-z0-9._/-]*\.md' "$md_file" 2>/dev/null | sort -u > "$refs_tmp" || true
-        while IFS= read -r ref; do
-          [ -n "$ref" ] || continue
-          core_rules_private_ref "$ref" && continue
-          if ! sync_path_covers_ref "$ref"; then
-            echo "ref-integrity: $rel -> $ref" >&2
-            failed=1
-          fi
-        done < "$refs_tmp"
-      done < "$files_tmp"
-    fi
+      done < "$refs"
+    done < "$files"
   done
-
-  rm -f "$refs_tmp" "$files_tmp"
+  rm -f "$refs" "$files"
   [ "$failed" -eq 0 ]
 }
 
-# --- Pre-flight: core-rules/ sync coverage ---------------------------------
-# Fail closed if any core-rules/<name>/ subdir is neither published
-# (SYNC_PATHS) nor explicitly kept private (CORE_RULES_NO_SYNC). Runs in ALL
-# modes (including the default dry-run) so the gap is caught before any work.
-# The helper returns 1 by design when uncovered subdirs exist; `|| true` keeps
-# pipefail from killing the script before we can print the actionable message.
-echo "==> Checking core-rules/ sync coverage"
-uncovered="$(check_core_rules_coverage "$SOURCE_ROOT" \
-  "$(printf '%s\n' "${SYNC_PATHS[@]+"${SYNC_PATHS[@]}"}")" \
-  "$(printf '%s\n' "${CORE_RULES_NO_SYNC[@]+"${CORE_RULES_NO_SYNC[@]}"}")" )" || true
-if [ -n "$uncovered" ]; then
-  echo "  ERROR: core-rules/ subdir(s) neither in SYNC_PATHS nor CORE_RULES_NO_SYNC:" >&2
-  printf '%s\n' "$uncovered" | sed 's|^|    |' >&2
-  echo "  Decide for each: add to SYNC_PATHS (publish to the template) or to CORE_RULES_NO_SYNC (keep instance-private)." >&2
-  echo "  This guard prevents the PR #78 class of silent omission. Aborting." >&2
-  exit 1
-fi
-echo "  all core-rules/ subdirs classified."
-
-echo "==> Checking synced markdown references"
-if ! ref_integrity_check; then
-  exit 1
-fi
-echo "  all synced markdown refs covered."
-
-# --- Workspace -------------------------------------------------------------
-TMP_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/trellis-sync.XXXXXX")"
-trap 'rm -rf "$TMP_STAGE"' EXIT
-
-echo "==> Staging in $TMP_STAGE"
-for p in "${SYNC_PATHS[@]}"; do
-  src="${SOURCE_ROOT}/${p%/}"
-  if [ ! -e "$src" ]; then
-    echo "skip (missing in live): $p"
-    continue
-  fi
-  dst="${TMP_STAGE}/${p%/}"
-  if [ -d "$src" ]; then
-    mkdir -p "$dst"
-    # check-secrets.bats carries literal secret-pattern fixtures (fake
-    # sk_live_… keys) that trip GitHub push protection for anyone cloning
-    # the public template. Keep it instance-only; the public skill ships the
-    # detector + its other tests without the fixture footgun.
-    # scripts/workflows/*.js and scripts/full-audit-sweep-ledger.mjs are
-    # operator one-off execution artifacts (per-project redis/audit/sweep runs)
-    # with hardcoded instance paths + github user. They are not framework, and
-    # the placeholder pass below does not cover .js/.mjs, so they would leak
-    # live values into the public mirror. Keep them instance-only.
-    rsync -a --delete \
-      --exclude='__pycache__/' --exclude='.DS_Store' --exclude='*.swp' \
-      --exclude='check-secrets.bats' \
-      --exclude='/workflows/' --exclude='/full-audit-sweep-ledger.mjs' \
-      "${src}/" "${dst}/"
-  else
-    mkdir -p "$(dirname "$dst")"
-    cp -P "$src" "$dst"
-  fi
-done
-
-# Substitute placeholders in every text file we just staged
-echo "==> Substituting placeholders"
-find "$TMP_STAGE" -type f \( -name '*.md' -o -name '*.sh' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.toml' \) -print0 \
-  | while IFS= read -r -d '' f; do
-      for i in "${!SUB_FROM[@]}"; do
-        from="${SUB_FROM[$i]}"
-        to="${SUB_TO[$i]}"
-        # Treat configured values as literals. The search side must escape
-        # basic-regex metacharacters; the replacement side must escape '&'
-        # and backslashes as well as the '/' delimiter.
-        from_esc="$(printf '%s\n' "$from" | sed -e 's/[][\/.^$*\\]/\\&/g')"
-        to_esc="$(printf '%s\n' "$to" | sed -e 's/[\/&\\]/\\&/g')"
-        sed_inplace -e "s/$from_esc/$to_esc/g" "$f"
-      done
+# The verified payload is the only source. Inspect its tree directly rather
+# than consulting a mutable checkout or an ambient Git worktree.
+check_payload_core_rules_coverage() {
+  local dir name path private rc=0
+  for dir in "$PAYLOAD_ROOT"/core-rules/*/; do
+    [ -d "$dir" ] || continue
+    [ ! -L "$dir" ] || {
+      printf '%s\n' "${dir#"$PAYLOAD_ROOT"/}"
+      rc=1
+      continue
+    }
+    name="${dir%/}"
+    name="${name##*/}"
+    for path in "${sync_paths[@]}"; do
+      case "$path" in
+        "core-rules/$name"|"core-rules/$name/") continue 2 ;;
+      esac
     done
+    for private in "${core_rules_no_sync[@]}"; do
+      [ "$private" = "$name" ] && continue 2
+    done
+    printf 'core-rules/%s/\n' "$name"
+    rc=1
+  done
+  return "$rc"
+}
 
-# Reset trellis.config.json to placeholder shape
-if [ -f "$TMP_STAGE/trellis.config.json" ]; then
-  cat > "$TMP_STAGE/trellis.config.json" <<'EOF'
+stage_verified_payload() {
+  local path source destination staged_path
+  for path in "${sync_paths[@]}"; do
+    source="$PAYLOAD_ROOT/${path%/}"
+    destination="$stage/${path%/}"
+    case "$path" in
+      */)
+        if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+          printf '  skip missing: %s\n' "$path"
+        elif [ -d "$source" ] && [ ! -L "$source" ]; then
+          mkdir -p "$destination" || return 5
+          rsync -a --delete --links --safe-links \
+            --exclude='.DS_Store' --exclude='__pycache__/' --exclude='*.swp' \
+            --exclude='check-secrets.bats' --exclude='/workflows/' \
+            --exclude='/full-audit-sweep-ledger.mjs' \
+            "${source}/" "${destination}/" || return 5
+        else
+          printf 'trellis mirror: verified payload directory is not publishable: %s\n' "$path" >&2
+          return 4
+        fi
+        ;;
+      *)
+        if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+          printf '  skip missing: %s\n' "$path"
+        elif [ -L "$source" ] || [ -f "$source" ]; then
+          mkdir -p "$(dirname "$destination")" || return 5
+          cp -P "$source" "$destination" || return 5
+        else
+          printf 'trellis mirror: verified payload file is not publishable: %s\n' "$path" >&2
+          return 4
+        fi
+        ;;
+    esac
+  done
+  mirror_validate_symlinks "$stage" || {
+    printf 'trellis mirror: verified payload contains unsafe symlinks\n' >&2
+    return 4
+  }
+  # The verified release is intentionally read-only. Its copied stage is
+  # private scratch space, so make only non-link entries writable before
+  # deterministic redaction and eventual cleanup; find -P never traverses
+  # payload links.
+  find -P "$stage" -type d -exec chmod u+rwx {} + || return 5
+  find -P "$stage" -type f -exec chmod u+rw {} + || return 5
+  while IFS= read -r -d '' staged_path; do
+    rm -f "$staged_path" || return 5
+  done < <(find -P "$stage" \( -type f -o -type l \) \( -name '.DS_Store' -o -name '*.swp' -o -name 'check-secrets.bats' \) -print0)
+  while IFS= read -r -d '' staged_path; do
+    rm -rf "$staged_path" || return 5
+  done < <(find -P "$stage" -type d -name '__pycache__' -prune -print0)
+  for path in "${sync_paths[@]}"; do
+    [ -d "$stage/${path%/}" ] && [ ! -L "$stage/${path%/}" ] || continue
+    rm -rf "$stage/${path%/}/workflows" || return 5
+    rm -f "$stage/${path%/}/full-audit-sweep-ledger.mjs" || return 5
+  done
+}
+
+printf '==> Verifying immutable publication payload\n'
+[ -d "$PAYLOAD_ROOT" ] && [ ! -L "$PAYLOAD_ROOT" ] || {
+  printf 'trellis mirror: verified release payload is unavailable\n' >&2
+  exit 5
+}
+
+printf '==> Checking core-rules publication coverage\n'
+if uncovered="$(check_payload_core_rules_coverage)"; then
+  :
+else
+  coverage_status=$?
+  [ "$coverage_status" -eq 1 ] || {
+    printf 'trellis mirror: unable to inspect verified core-rules payload\n' >&2
+    exit 5
+  }
+fi
+if [ -n "$uncovered" ]; then
+  printf 'trellis mirror: core-rules paths are neither published nor private:\n%s\n' "$uncovered" >&2
+  exit 4
+fi
+
+stage="$(mktemp -d "${TMPDIR:-/tmp}/trellis-mirror-stage.XXXXXX")" || {
+  printf 'trellis mirror: unable to create staging directory\n' >&2
+  exit 5
+}
+stage_tmp="$stage"
+stage="$(CDPATH='' cd -P -- "$stage_tmp" && pwd -P)" || {
+  rm -rf "$stage_tmp"
+  printf 'trellis mirror: unable to canonicalize staging directory\n' >&2
+  exit 5
+}
+trap 'rm -rf "$stage"' EXIT INT TERM
+printf '==> Staging portable policy from verified commit %s\n' "$SOURCE_COMMIT"
+stage_verified_payload || exit "$?"
+
+printf '==> Checking staged markdown references\n'
+ref_integrity_check "$stage" || exit 4
+
+# Publish a deterministic tracked policy shell, not the immutable payload's
+# machine configuration. Machine-specific roots/remotes/release state belong
+# only in TRELLIS_HOME/config.json and are not a configurable redaction feature.
+[ ! -L "$stage/trellis.config.json" ] || {
+  printf 'trellis mirror: verified payload config must not be a symlink\n' >&2
+  exit 4
+}
+cat > "$stage/trellis.config.json" <<'EOF'
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" and/or \"omp\" when opting into those native harness surfaces. Multiple harnesses may be enabled together.",
-
-  "trellis_root": "__TRELLIS_PATH__",
-  "projects_root": "__PROJECTS_ROOT__",
-  "user_home": "__USER_HOME__",
-
+  "schema_version": 2,
+  "comment": "Tracked portable Trellis policy. Configure machine roots, fleet settings, release remote, and attachment state in TRELLIS_HOME, never in this file.",
   "maintainer_name": "__MAINTAINER_NAME__",
   "github_user": "__GITHUB_USER__",
-
   "harnesses": ["claude"],
-
   "template": {
-    "remote": "git@github.com:__GITHUB_USER__/trellis.git",
-    "branch": "main",
-    "redact_paths": [
-      "audits/",
-      "blacklist.md",
-      "registry.md"
-    ]
-  },
-
-  "sed_flavor": "auto"
+    "remote": "https://example.invalid/trellis.git",
+    "branch": "main"
+  }
 }
 EOF
-fi
 
-# Publish schema-valid bootstrap shells, never the instance's fleet policy or
-# finding receipts. A public clone can run `trellis deps check` immediately;
-# maintainers populate their own baseline with `trellis deps snapshot` after
-# registering projects. Keep these deterministic so repeated syncs are clean.
-if [ -f "$TMP_STAGE/dependency-baseline.json" ]; then
-  cat > "$TMP_STAGE/dependency-baseline.json" <<'EOF'
+# Fleet observations are local. Public bootstrap shells remain deterministic and
+# empty so a fresh mirror can populate its own local state without inheriting
+# another operator's project or finding inventory.
+if [ -L "$stage/dependency-baseline.json" ]; then
+  printf 'trellis mirror: verified payload dependency baseline must not be a symlink\n' >&2
+  exit 4
+fi
+if [ -f "$stage/dependency-baseline.json" ]; then
+  cat > "$stage/dependency-baseline.json" <<'EOF'
 {
   "$schema": "./scripts/lib/fleet-dependency-baseline.schema.json",
   "schema_version": 1,
@@ -393,362 +996,138 @@ if [ -f "$TMP_STAGE/dependency-baseline.json" ]; then
 }
 EOF
 fi
-
-if [ -f "$TMP_STAGE/audits/fleet-remediation-ledger.json" ]; then
-  cat > "$TMP_STAGE/audits/fleet-remediation-ledger.json" <<'EOF'
+if [ -L "$stage/audits" ] || [ -L "$stage/audits/fleet-remediation-ledger.json" ]; then
+  printf 'trellis mirror: verified payload remediation ledger must not use a symlink\n' >&2
+  exit 4
+fi
+if [ -f "$stage/audits/fleet-remediation-ledger.json" ]; then
+  cat > "$stage/audits/fleet-remediation-ledger.json" <<'EOF'
 {
   "$schema": "../scripts/lib/fleet-remediation-ledger.schema.json",
   "schema_version": 1,
-  "audit_date": "2026-07-21",
+  "audit_date": "2026-08-13",
   "source_reports": [],
   "findings": []
 }
 EOF
 fi
 
-# The private spec-023 changelog receipt records the operator's current fleet and
-# several project-specific port assignments. Preserve that detailed receipt in
-# the source repo, but replace its one recognizable line in the public staging
-# tree. Match only the generic sentence shape so this synced script does not
-# repeat the private fleet count, project name, or allocation details it removes.
-# The positive assertion below is also a maintenance tripwire: deleting or
-# rewording the private receipt requires updating this replacement deliberately.
-SHARED_INFRA_PUBLIC_CHANGELOG_RECEIPT='- Shared local-infrastructure integration now validates optional external manifests, reviewed empty declarations, and fixed-port uniqueness without publishing an operator fleet inventory or allocation map.'
-if [ -f "$TMP_STAGE/CHANGELOG.md" ]; then
-  SHARED_INFRA_CHANGELOG_TMP="$(mktemp "${TMPDIR:-/tmp}/trellis-public-changelog.XXXXXX")"
-  awk -v replacement="$SHARED_INFRA_PUBLIC_CHANGELOG_RECEIPT" '
-    index($0, "- The current ") == 1 &&
-    index($0, " manifest includes ") > 0 &&
-    index($0, " with `services: {}` and `ports: {}`.") > 0 {
-      print replacement
-      next
-    }
-    { print }
-  ' "$TMP_STAGE/CHANGELOG.md" > "$SHARED_INFRA_CHANGELOG_TMP"
-  mv "$SHARED_INFRA_CHANGELOG_TMP" "$TMP_STAGE/CHANGELOG.md"
-  if ! grep -qF -- "$SHARED_INFRA_PUBLIC_CHANGELOG_RECEIPT" "$TMP_STAGE/CHANGELOG.md"; then
-    echo "shared-infrastructure changelog receipt replacement did not fire; aborting" >&2
-    exit 1
-  fi
+printf '==> Linting staged portable policy\n'
+if ! lint_out="$(lint_mirror "$stage")"; then
+  printf 'trellis mirror: staged policy contains forbidden content:\n%s\n' "$lint_out" >&2
+  exit 4
 fi
 
-# The instance guide is intentionally detailed and private. Publish a stable
-# capability manual instead of trying to redact its runtime inventory in place.
-# This replacement is unconditional and runs before every staged-tree leak check
-# or mirror write, matching the bootstrap-shell treatment above. Do not guard it
-# on the private source file existing: a rename or omission must still create the
-# safe public document rather than leave private staged content as the fallback.
-mkdir -p "$TMP_STAGE/docs"
-cat > "$TMP_STAGE/docs/local-development-infrastructure.md" <<'EOF'
-# Optional shared local infrastructure
-
-Trellis projects run their applications natively. An operator may separately provide a shared local-infrastructure repository for data services and other reusable development dependencies, but that repository remains outside the Trellis template and outside each application's normal runtime.
-
-The supported shared-service families are PostgreSQL with pgvector, Redis, MinIO, and Mailpit. The external repository decides which of them to provide and how to allocate them; Trellis does not assign public default ports, credentials, databases, indexes, buckets, or message tags.
-
-The public Trellis template does **not** ship or own that external runtime repository, its manifest, credentials, service allocations, or fixed-port map. Trellis only integrates with an operator-supplied repository when the operator opts in.
-
-## Enable or leave disabled
-
-The integration is enabled by the optional `trellis.config.json.shared_infra_root` key:
-
-```bash
-SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  test -d "$SHARED_INFRA_ROOT"
-  test -f "$SHARED_INFRA_ROOT/Makefile"
+template_snapshot="$stage/.template-snapshot"
+simulated="$stage/.simulated-mirror"
+printf '==> Preflighting template mutation paths for simulation\n'
+mirror_preflight_mutations "$template_dir" || {
+  printf 'trellis mirror: template destination has unsafe mutation path\n' >&2
+  exit 4
+}
+mkdir -p "$template_snapshot" "$simulated" || {
+  printf 'trellis mirror: unable to create simulated mirror\n' >&2
+  exit 5
+}
+printf '==> Building simulated post-sync mirror\n'
+if ! rsync -a --delete --links --safe-links --exclude='.git' "$template_dir/" "$template_snapshot/"; then
+  printf 'trellis mirror: unable to snapshot template for simulation\n' >&2
+  exit 5
 fi
-```
-
-When the key is absent, shared-infrastructure integration is disabled. Project onboarding continues through the ordinary one-argument flow, Trellis doctor skips shared-infrastructure checks, no manifest entry is required, and legacy onboarding and doctor behavior remain intact.
-
-When the key is present, it must resolve to the separately managed repository. Adding the key does not make Trellis the owner or provisioner of that repository.
-
-Project-side checks accept a `SHARED_INFRA_ROOT` environment override and otherwise compare against the conventional `$HOME/projects/shared-infra` location. If the configured repository lives elsewhere, export `SHARED_INFRA_ROOT` to the configured path when running project-side startup or doctor checks; the seeded preflight wrapper also carries the configured path.
-
-## External repository contract
-
-An opted-in repository is expected to expose these Make targets. Its own documentation and schema remain authoritative.
-
-| Target | Expected boundary |
-|---|---|
-| `propose` | Inspect a project conservatively and write a reviewable proposal without changing the external manifest. |
-| `register` | Atomically add or replace one operator-reviewed project fragment, then validate the candidate manifest. |
-| `validate` | Check manifest shape, references, allocations, and fixed-port uniqueness. |
-| `preflight` | Reject conflicting declarations or occupied declared ports before project startup. |
-| `reconcile` | Converge only the requested declaration and remain safe to repeat. |
-| `up` | Start only the externally declared shared-service subset, then reconcile it. |
-| `doctor` | Perform read-only manifest, runtime, registry-parity, and port checks. |
-
-Trellis delegates to this interface; it does not define the external repository's Compose topology, credentials, allocation policy, or destructive recovery commands.
-
-## Reviewed declaration
-
-A proposal is evidence, not approval. Review every service and fixed listener before registration. The reviewed file contains only the external repository's `services` and `ports` fragment. A project that consumes no shared service still uses an explicit empty declaration when the integration is enabled:
-
-```yaml
-services: {}
-ports: {}
-```
-
-Non-empty declarations follow the external repository's schema. Use placeholders while reviewing; do not copy credentials or operator allocations into Trellis documentation.
-
-## Onboarding flow
-
-Resolve the optional key first and keep the disabled path ordinary:
-
-```bash
-PROJECT_ROOT="${PROJECT_ROOT:?set the absolute project path}"
-PROJECT_NAME="${PROJECT_NAME:?set the reviewed registry name}"
-SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
-
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  PROPOSAL_FILE="${PROPOSAL_FILE:?set a proposal output path}"
-  REVIEWED_ENTRY="${REVIEWED_ENTRY:?set the reviewed fragment path}"
-
-  make -C "$SHARED_INFRA_ROOT" propose \
-    PROJECT="$PROJECT_NAME" SOURCE="$PROJECT_ROOT" OUTPUT="$PROPOSAL_FILE"
-  # Stop here for operator review. After approval:
-  ./scripts/onboard-project.sh "$PROJECT_ROOT" --infra-entry "$REVIEWED_ENTRY"
-else
-  ./scripts/onboard-project.sh "$PROJECT_ROOT"
+if ! rsync -a --delete --links --safe-links "$template_snapshot/" "$simulated/"; then
+  printf 'trellis mirror: unable to build simulated mirror\n' >&2
+  exit 5
 fi
-```
+mirror_copy_staged_paths "$simulated" || {
+  printf 'trellis mirror: simulated destination has unsafe mutation path\n' >&2
+  exit 4
+}
+mirror_remove_pruned_paths "$simulated" || {
+  printf 'trellis mirror: simulated destination has unsafe prune path\n' >&2
+  exit 4
+}
 
-With integration enabled, onboarding delegates registration and project-scoped reconciliation to the external repository and seeds `scripts/local-infra-preflight.sh`. Wire that wrapper into the native startup path before the application or project-owned infrastructure binds a fixed listener.
-
-The wrapper performs project-scoped preflight. An explicit `services: {}` project does not start shared services. A project with declared shared services may delegate project-scoped `up`; migrations and the native application still run from the project repository.
-
-Project shutdown stops only native processes and project-owned infrastructure. It must never stop the shared runtime, invoke a shared `down`, delete shared volumes, or reset another project.
-
-## Verification
-
-Always run the ordinary Trellis checks. Run shared-infrastructure checks only when the optional key is non-empty:
-
-```bash
-./scripts/doctor.sh --project "$PROJECT_NAME"
-
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  make -C "$SHARED_INFRA_ROOT" validate PROJECT="$PROJECT_NAME"
-  make -C "$SHARED_INFRA_ROOT" doctor \
-    PROJECT="$PROJECT_NAME" REGISTRY_FILE="$PWD/registry.md"
-  test -x "$PROJECT_ROOT/scripts/local-infra-preflight.sh"
-  "$PROJECT_ROOT/scripts/local-infra-preflight.sh"
+printf '==> Linting simulated post-sync mirror\n'
+if ! lint_out="$(lint_mirror "$simulated")"; then
+  printf 'MIRROR LINT FAILED — forbidden content in simulated public mirror:\n%s\n' "$lint_out" >&2
+  exit 4
 fi
-```
+printf '  simulated mirror clean.\n'
 
-For a live project proof, run preflight before startup, start only the declared shared-service subset and project-owned infrastructure, run migrations, then start the application natively. Record the shared runtime identity before project shutdown and confirm shutdown leaves it unchanged.
-
-## Recovery boundary
-
-Prefer non-destructive, project-scoped recovery. Rerun `make -C "$SHARED_INFRA_ROOT" reconcile PROJECT="$PROJECT_NAME"`, then rerun migrations, the external doctor, Trellis doctor, and the native smoke path. Use any reset or shared-runtime stop operation only through the external repository's operator-approved procedure.
-
-A failed project migration or startup does not justify stopping the shared runtime for other projects. Trellis configuration rollback uses normal version-control reverts; it does not create or preserve a hidden second infrastructure path.
-EOF
-
-# Defense in depth for the one public guide whose private source contains the
-# operator's fleet inventory. Tokens include Markdown backticks so fixed-string
-# matching catches exact names and ports without substring false positives.
-# Never print the matching token: the denylist is private metadata.
-SHARED_INFRA_PUBLIC_DOC="$TMP_STAGE/docs/local-development-infrastructure.md"
-SHARED_INFRA_PUBLIC_DENYLIST="$SOURCE_ROOT/local/shared-infra-public-denylist.txt"
-if [ -f "$SHARED_INFRA_PUBLIC_DOC" ] && [ -f "$SHARED_INFRA_PUBLIC_DENYLIST" ]; then
-  SHARED_INFRA_DOC_LEAK=0
-  while IFS= read -r deny_token || [ -n "$deny_token" ]; do
-    case "$deny_token" in ''|'#'*) continue ;; esac
-    if grep -qiF -- "$deny_token" "$SHARED_INFRA_PUBLIC_DOC" 2>/dev/null; then
-      SHARED_INFRA_DOC_LEAK=1
-      break
-    fi
-  done < "$SHARED_INFRA_PUBLIC_DENYLIST"
-  if [ "$SHARED_INFRA_DOC_LEAK" -ne 0 ]; then
-    echo "  LEAK: staged shared-infrastructure guide contains a private fleet identifier" >&2
-    echo "shared-infrastructure publication redaction failed; aborting" >&2
-    exit 1
-  fi
-fi
-
-# Apply the same fail-closed treatment to the genericized public changelog
-# receipt. Its scoped denylist is separate because an older historical changelog
-# entry legitimately names a project while this current fleet receipt must not.
-SHARED_INFRA_PUBLIC_CHANGELOG="$TMP_STAGE/CHANGELOG.md"
-SHARED_INFRA_CHANGELOG_DENYLIST="$SOURCE_ROOT/local/shared-infra-public-changelog-denylist.txt"
-if [ -f "$SHARED_INFRA_PUBLIC_CHANGELOG" ] && [ -f "$SHARED_INFRA_CHANGELOG_DENYLIST" ]; then
-  SHARED_INFRA_CHANGELOG_LEAK=0
-  while IFS= read -r deny_token || [ -n "$deny_token" ]; do
-    case "$deny_token" in ''|'#'*) continue ;; esac
-    if grep -qiF -- "$deny_token" "$SHARED_INFRA_PUBLIC_CHANGELOG" 2>/dev/null; then
-      SHARED_INFRA_CHANGELOG_LEAK=1
-      break
-    fi
-  done < "$SHARED_INFRA_CHANGELOG_DENYLIST"
-  if [ "$SHARED_INFRA_CHANGELOG_LEAK" -ne 0 ]; then
-    echo "  LEAK: staged changelog contains a private shared-infrastructure identifier" >&2
-    echo "shared-infrastructure changelog publication redaction failed; aborting" >&2
-    exit 1
-  fi
-fi
-
-# Verify no live values leaked through
-echo "==> Verifying no live values remain"
-LEAK=0
-for v in "${SUB_FROM[@]}"; do
-  if grep -rq --binary-files=without-match "$v" "$TMP_STAGE" 2>/dev/null; then
-    echo "  LEAK: '$v' still present in staged tree" >&2
-    grep -rln "$v" "$TMP_STAGE" 2>/dev/null | head -5 | sed 's|^|    |'
-    LEAK=1
-  fi
-done
-[ "$LEAK" -eq 0 ] || { echo "redaction failed; aborting" >&2; exit 1; }
-echo "  clean."
-
-# --- Diff against template tree --------------------------------------------
-echo "==> Diff vs $TEMPLATE_DIR"
-DIFF_OUT="$(mktemp "${TMPDIR:-/tmp}/trellis-sync-diff.XXXXXX")"
+printf '==> Diff vs %s\n' "$template_dir"
+diff_out="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-diff.XXXXXX")" || {
+  printf 'trellis mirror: unable to create diff output\n' >&2
+  exit 5
+}
 {
-  for p in "${SYNC_PATHS[@]}"; do
-    src_stage="${TMP_STAGE}/${p%/}"
-    dst_template="${TEMPLATE_DIR}/${p%/}"
-    if [ -d "$src_stage" ] || [ -d "$dst_template" ]; then
-      diff -urN --exclude='.git' "$dst_template" "$src_stage" 2>/dev/null || true
-    elif [ -f "$src_stage" ] || [ -f "$dst_template" ]; then
-      diff -uN "$dst_template" "$src_stage" 2>/dev/null || true
+  for path in "${sync_paths[@]}"; do
+    source="$stage/${path%/}"
+    destination="$template_snapshot/${path%/}"
+    if [ -d "$source" ] || [ -d "$destination" ]; then
+      diff -urN --exclude='.git' "$destination" "$source" 2>/dev/null || true
+    elif [ -f "$source" ] || [ -f "$destination" ]; then
+      diff -uN "$destination" "$source" 2>/dev/null || true
     fi
   done
-} > "$DIFF_OUT"
-
-if [ ! -s "$DIFF_OUT" ]; then
-  echo "  no changes."
+} > "$diff_out"
+if [ -s "$diff_out" ]; then
+  printf '  %s diff lines\n' "$(wc -l < "$diff_out")"
+  if ! "$apply"; then
+    printf '===== DIFF (first 200 lines) =====\n'
+    head -200 "$diff_out"
+    printf '===== END DIFF =====\n'
+  fi
 else
-  echo "  $(wc -l <"$DIFF_OUT") diff lines"
-  if ! $APPLY; then
-    echo
-    echo "===== DIFF (first 200 lines) ====="
-    head -200 "$DIFF_OUT"
-    echo "===== END DIFF ====="
-    echo
-    echo "Re-run with --apply to write to $TEMPLATE_DIR (no commit)."
-    echo "Re-run with --apply --push to commit + push to template remote."
-  fi
+  printf '  no changes.\n'
+fi
+rm -f "$diff_out"
+
+if ! "$apply"; then
+  exit 0
 fi
 
-# --- Dry-run post-sync simulation + lint -----------------------------------
-# Dry-run must validate the state that --apply would produce, not the stale
-# mirror currently on disk. Build that state under TMP_STAGE: start from the
-# full mirror working tree (including public-only files), overlay the staged
-# SYNC_PATHS with apply-equivalent delete semantics, then remove only safe
-# DELIST_PRUNE entries. The real mirror is never touched.
-if ! $APPLY; then
-  SIMULATED_MIRROR="$TMP_STAGE/.simulated-mirror"
-  mkdir -p "$SIMULATED_MIRROR"
-  echo "==> Building simulated post-sync mirror for dry-run lint"
-  rsync -a --delete --exclude='.git/' "$TEMPLATE_DIR/" "$SIMULATED_MIRROR/"
+printf '==> Rechecking template mutation paths before apply\n'
+mirror_preflight_mutations "$template_dir" || {
+  printf 'trellis mirror: template destination has unsafe mutation path\n' >&2
+  exit 4
+}
 
-  for p in "${SYNC_PATHS[@]}"; do
-    src_stage="${TMP_STAGE}/${p%/}"
-    dst_simulated="${SIMULATED_MIRROR}/${p%/}"
-    [ -e "$src_stage" ] || continue
-    if [ -d "$src_stage" ]; then
-      mkdir -p "$dst_simulated"
-      rsync -a --delete "${src_stage}/" "${dst_simulated}/"
-    else
-      mkdir -p "$(dirname "$dst_simulated")"
-      cp -P "$src_stage" "$dst_simulated"
-    fi
-  done
+printf '==> Writing to %s\n' "$template_dir"
+mirror_copy_staged_paths "$template_dir" || {
+  printf 'trellis mirror: destination has unsafe mutation path\n' >&2
+  exit 4
+}
+mirror_remove_pruned_paths "$template_dir" || {
+  printf 'trellis mirror: destination has unsafe prune path\n' >&2
+  exit 4
+}
+printf '  applied.\n'
 
-  for dp in ${DELIST_PRUNE[@]+"${DELIST_PRUNE[@]}"}; do
-    if ! delist_prune_path_safe "$dp"; then
-      echo "  SKIP unsafe DELIST_PRUNE entry in simulation: '$dp'" >&2
-      continue
-    fi
-    [ -e "$SIMULATED_MIRROR/$dp" ] || continue
-    rm -rf "${SIMULATED_MIRROR:?}/$dp"
-  done
-
-  echo "==> Linting simulated post-sync mirror for forbidden content"
-  if lint_out="$(lint_mirror "$SIMULATED_MIRROR" "$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME")"; then
-    echo "  simulated mirror clean."
+if "$push"; then
+  origin="$(mirror_git -C "$template_dir" remote get-url origin 2>/dev/null)" || {
+    printf 'trellis mirror: --push requires an SSH origin remote\n' >&2
+    exit 5
+  }
+  case "$origin" in
+    ssh://*|*@*:* ) ;;
+    *)
+      printf 'trellis mirror: --push requires an SSH origin remote\n' >&2
+      exit 4
+      ;;
+  esac
+  verified_socket="$(mirror_require_verified_ssh_socket)" || exit "$?"
+  printf '==> Committing in template repository\n'
+  mirror_git -C "$template_dir" add -A
+  if mirror_git -C "$template_dir" diff --cached --quiet; then
+    printf '  no staged changes — nothing to commit.\n'
   else
-    echo "  MIRROR LINT FAILED — forbidden content in the simulated post-sync mirror:" >&2
-    printf '%s\n' "$lint_out" | sed 's|^|    |' >&2
-    echo "  Fix the offending files before publishing. Real mirror was not touched. Aborting." >&2
-    exit 1
-  fi
-fi
-
-# --- Apply -----------------------------------------------------------------
-if $APPLY; then
-  echo "==> Writing to $TEMPLATE_DIR"
-  for p in "${SYNC_PATHS[@]}"; do
-    src_stage="${TMP_STAGE}/${p%/}"
-    dst_template="${TEMPLATE_DIR}/${p%/}"
-    if [ ! -e "$src_stage" ]; then
-      continue
-    fi
-    if [ -d "$src_stage" ]; then
-      mkdir -p "$dst_template"
-      rsync -a --delete "${src_stage}/" "${dst_template}/"
+    printf 'Commit + push? [y/N] '
+    read -r answer
+    if [ "$answer" = y ] || [ "$answer" = Y ]; then
+      mirror_git -C "$template_dir" commit -m "chore: sync portable Trellis policy ($(date +%Y-%m-%d))"
+      mirror_git_push "$verified_socket" -C "$template_dir" push origin main
     else
-      mkdir -p "$(dirname "$dst_template")"
-      cp -P "$src_stage" "$dst_template"
-    fi
-  done
-  echo "  applied."
-
-  # --- Prune de-listed paths (Workstream D2) --------------------------------
-  echo "==> Pruning de-listed paths from mirror"
-  pruned_any=false
-  for dp in ${DELIST_PRUNE[@]+"${DELIST_PRUNE[@]}"}; do
-    # Path-safety: a typo'd entry (empty, ., .., absolute, tilde, or any path
-    # containing ..) must NEVER reach the destructive rm — it could delete the
-    # mirror root or escape it. Skip loudly (cross-model review finding).
-    if ! delist_prune_path_safe "$dp"; then
-      echo "  SKIP unsafe DELIST_PRUNE entry: '$dp'" >&2
-      continue
-    fi
-    if [ -e "$TEMPLATE_DIR/$dp" ]; then
-      git -C "$TEMPLATE_DIR" rm -rf --ignore-unmatch --quiet -- "$dp" 2>/dev/null || rm -rf "${TEMPLATE_DIR:?}/$dp"
-      echo "  pruned: $dp"
-      pruned_any=true
-    fi
-  done
-  $pruned_any || echo "  nothing to prune."
-
-  # --- Post-apply denylist lint (Workstream D1) -----------------------------
-  # Greps the WHOLE mirror — including public-only files the sync never touches
-  # (README/SETUP/AGENT_SETUP/architecture.svg) — for absolute-path leaks and
-  # stale antigravity outside the historical record. Fail-closed: abort before
-  # any commit/push. This is the guard the RC.4 stale-antigravity regression
-  # (in exactly those unsynced files) would have tripped.
-  echo "==> Linting mirror for forbidden content"
-  if lint_out="$(lint_mirror "$TEMPLATE_DIR" "$TRELLIS_ROOT" "$SOURCE_ROOT" "$PROJECTS_ROOT" "$USER_HOME")"; then
-    echo "  mirror clean."
-  else
-    echo "  MIRROR LINT FAILED — forbidden content in the public mirror:" >&2
-    printf '%s\n' "$lint_out" | sed 's|^|    |' >&2
-    echo "  Fix the offending files before publishing. Aborting." >&2
-    exit 1
-  fi
-
-  if $PUSH; then
-    echo "==> Committing in template repo"
-    cd "$TEMPLATE_DIR"
-    git add -A
-    if git diff --cached --quiet; then
-      echo "  no staged changes — nothing to commit."
-    else
-      git status --short
-      printf "Commit + push? [y/N] "
-      read -r ans
-      if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
-        git commit -m "chore: sync from live Trellis clone ($(date +%Y-%m-%d))"
-        git push origin "$TEMPLATE_BRANCH"
-      else
-        echo "  aborted before commit."
-      fi
+      printf '  aborted before commit.\n'
     fi
   fi
 fi
-
-rm -f "$DIFF_OUT"

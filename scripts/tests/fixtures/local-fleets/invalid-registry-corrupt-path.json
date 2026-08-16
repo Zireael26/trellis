@@ -1,0 +1,21 @@
+{
+  "$schema": "../../../lib/trellis.registry.schema.json",
+  "schema_version": 1,
+  "projects": {
+    "personal/neev": {
+      "fleet": "personal",
+      "project_id": "neev",
+      "status": "active",
+      "metadata": {},
+      "checkouts": {
+        "1111111111111111111111111111111111111111111111111111111111111111": {
+          "root": "relative/projects/neev",
+          "git_common_dir": "/Users/alex/projects/neev/.git",
+          "release": "1.0.0-rc.24",
+          "harnesses": ["claude", "codex", "omp"],
+          "worktrees": {}
+        }
+      }
+    }
+  }
+}

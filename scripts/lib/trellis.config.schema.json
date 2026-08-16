@@ -1,11 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Trellis configuration",
+  "title": "Trellis portable policy",
   "type": "object",
   "required": [
-    "trellis_root",
-    "projects_root",
-    "user_home",
+    "schema_version",
     "maintainer_name",
     "github_user",
     "harnesses"
@@ -17,23 +15,20 @@
     "comment": {
       "type": "string"
     },
-    "trellis_root": {
-      "type": "string",
-      "minLength": 1
+    "schema_version": {
+      "description": "Schema version for tracked portable Trellis policy.",
+      "type": "integer",
+      "const": 2
     },
-    "projects_root": {
-      "type": "string",
-      "minLength": 1
-    },
-    "shared_infra_root": {
-      "description": "Optional. Path to the canonical shared local infrastructure repository. When configured, scripts/lib/config-load.sh resolves it and requires it to be an existing directory.",
-      "type": "string",
-      "minLength": 1
-    },
-    "user_home": {
-      "type": "string",
-      "minLength": 1
-    },
+    "trellis_root": false,
+    "projects_root": false,
+    "shared_infra_root": false,
+    "user_home": false,
+    "source_root": false,
+    "release_remote": false,
+    "active_cli_release": false,
+    "default_fleet": false,
+    "fleets": false,
     "maintainer_name": {
       "type": "string",
       "minLength": 1
@@ -55,6 +50,9 @@
       },
       "uniqueItems": true
     },
+    "symlink_style": false,
+    "fleet": false,
+    "installed_release": false,
     "presets": {
       "description": "Optional. List of preset rule-layers to load on top of the parent rules. Each entry must match a file under core-rules/presets/<name>.md. Symlinks land at <project>/.claude/rules/preset-<name>.md and <project>/.agents/rules/preset-<name>.md (under Codex). Order is preserved — later entries compose on top of earlier ones.",
       "type": "array",
@@ -70,15 +68,61 @@
       "type": "object",
       "properties": {
         "remote": {
-          "type": "string"
+          "description": "Optional portable Git remote. Present values must be HTTPS, ssh://, or git@host:path Git remotes.",
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "not": {
+                "pattern": "\\\\"
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "pattern": "^https://[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/[^\\s\\u0000-\\u001F\\u007F]+$"
+                },
+                {
+                  "pattern": "^ssh://(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/[^\\s\\u0000-\\u001F\\u007F]+$"
+                },
+                {
+                  "pattern": "^git@[A-Za-z0-9][A-Za-z0-9.-]*:[^:\\s\\u0000-\\u001F\\u007F]+$"
+                }
+              ]
+            }
+          ]
         },
         "branch": {
-          "type": "string"
+          "description": "Optional single Git branch or ref name. Present values must satisfy conservative Git ref safety rules.",
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "not": {
+                "pattern": "\\\\"
+              }
+            },
+            {
+              "pattern": "^[A-Za-z0-9](?!.*\\.\\.)(?!.*@\\{)(?!.*//)(?!.*(?:/\\.{1,2})(?:/|$))(?!.*\\.lock(?:/|$))(?!.*[./]$)[^\\s\\u0000-\\u001F\\u007F~^:?*\\[]*$"
+            }
+          ]
         },
         "redact_paths": {
           "type": "array",
           "items": {
-            "type": "string"
+            "description": "Portable repository-relative path. A trailing slash is allowed for a directory redaction.",
+            "type": "string",
+            "minLength": 1,
+            "allOf": [
+              {
+                "not": {
+                  "pattern": "\\\\"
+                }
+              },
+              {
+                "pattern": "^(?![-/])(?![A-Za-z]:)(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\u0000-\\u001F\\u007F]+(?:/[^/\\u0000-\\u001F\\u007F]+)*/?$"
+              }
+            ]
           }
         }
       },
@@ -174,7 +218,7 @@
           "minimum": 0
         },
         "skip_projects": {
-          "description": "Registry project names the janitor never scans or touches, on top of blacklist.md. Default [].",
+          "description": "Local-registry project ids the janitor never scans or touches, on top of the registry's own excluded rows. Default [].",
           "type": "array",
           "items": {
             "type": "string",
@@ -236,6 +280,74 @@
           "minimum": 1
         }
       },
+      "additionalProperties": true
+    },
+    "aeo_gate": {
+      "description": "Optional Spec 033 warn-only AEO diff adapter. Absence or enabled:false is byte-identical to pre-033 behavior. When enabled, changed public-page source files are compared with an accepted deterministic baseline; every status remains non-blocking during initial rollout.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1
+        },
+        "marker_file": {
+          "description": "Portable repository-relative source path.",
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "not": {
+                "pattern": "\\\\"
+              }
+            },
+            {
+              "pattern": "^(?![-/])(?![A-Za-z]:)(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\u0000-\\u001F\\u007F]+(?:/[^/\\u0000-\\u001F\\u007F]+)*$"
+            }
+          ]
+        },
+        "marker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseline": {
+          "description": "Portable repository-relative path to the accepted AEO baseline.",
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "not": {
+                "pattern": "\\\\"
+              }
+            },
+            {
+              "pattern": "^(?![-/])(?![A-Za-z]:)(?!\\.{1,2}(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))[^/\\u0000-\\u001F\\u007F]+(?:/[^/\\u0000-\\u001F\\u007F]+)*$"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["project", "url", "marker_file", "marker", "baseline"]
+          }
+        }
+      ],
       "additionalProperties": true
     }
   },

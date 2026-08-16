@@ -132,9 +132,9 @@ _make_red_copy() {
 
   run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
   [ "$status" -eq 0 ]                                  # MERGEABLE: validator passed
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
-  [[ "$output" == *"Stack profile:"* ]]
-  [[ "$output" != *"validator missing"* ]]             # NOT reported missing
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Stack profile:"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }  # NOT reported missing
   [ -f "$INVOKED_MARKER" ]                             # the 644 validator RAN
   [ "$(cat "$INVOKED_MARKER")" = "invoked" ]
 }
@@ -146,8 +146,8 @@ _make_red_copy() {
 
   run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge"
   [ "$status" -eq 1 ]                                  # BLOCKED
-  [[ "$output" == *"Overall: BLOCKED"* ]]
-  [[ "$output" == *"validator missing"* ]]             # reported missing under -x
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"validator missing"* ]] || { echo "$output"; false; }  # reported missing under -x
   [ ! -f "$INVOKED_MARKER" ]                           # validator was NEVER run
 }
 
@@ -161,8 +161,8 @@ _make_red_copy() {
 
   run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
-  [[ "$output" != *"validator missing"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }
   [ -f "$INVOKED_MARKER" ]
   [ "$(cat "$INVOKED_MARKER")" = "invoked" ]
 }
@@ -175,8 +175,8 @@ _make_red_copy() {
 
   run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
-  [[ "$output" == *"validator missing"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"validator missing"* ]] || { echo "$output"; false; }
   [ ! -f "$INVOKED_MARKER" ]
 }
 
@@ -197,7 +197,7 @@ EOF
 
   run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
   [ "$status" -eq 1 ]                                  # BLOCKED (genuine fail)
-  [[ "$output" == *"Overall: BLOCKED"* ]]
-  [[ "$output" != *"validator missing"* ]]             # it was FOUND, not missing
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }  # it was FOUND, not missing
   [ -f "$INVOKED_MARKER" ]                             # and it actually RAN
 }

@@ -9,6 +9,11 @@
 #
 # Usage: scripts/run-evals.sh [OPTIONS]
 #
+# Selection:
+#   --home <path>        Local Trellis state; CLI wins over TRELLIS_HOME.
+#   --fleet <name>       Fleet to evaluate; CLI wins over TRELLIS_FLEET, then
+#                        the validated local default fleet.
+#
 # Modes:
 #   --check               Parse and validate every fixture; no model invocation.
 #   --dry-run             --check plus print what would run; no invocation.
@@ -29,22 +34,31 @@
 #   1  At least one fixture failed.
 #   2  Bad arguments.
 #   3  Missing dependency or required env var.
-#   4  Fixture schema validation error.
+#   4  Fixture schema validation error, or a local registry row that failed
+#      identity validation (reported and skipped; healthy rows still run).
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
+ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 EVALS_DIR="$ROOT/core-rules/evals"
 PARENT_RULES_FILE="$ROOT/core-rules/CLAUDE.md"
-REGISTRY_FILE="$ROOT/registry.md"
-BLACKLIST_FILE="$ROOT/blacklist.md"
+REGISTRY_CLI="$SCRIPT_DIR/registry.sh"
 
 MODE="run"
 FILTER=""
 CHANGED_ONLY=0
 OUTPUT=""
 QUIET=0
+HOME_OPT=""
+FLEET_OPT=""
+SELECTED_HOME=""
+SELECTED_FLEET=""
+REGISTRY_SNAPSHOT=""
+REGISTRY_PROJECTS=""
+REGISTRY_STATE_ERRORS=0
+# `trellis-home.sh` is not sourced here, so name the shared class locally.
+REGISTRY_EX_STATE=4
 
 usage() {
   sed -n '4,29p' "$0" | sed 's/^# \{0,1\}//'
@@ -54,6 +68,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE="check"; shift ;;
     --dry-run) MODE="dry-run"; shift ;;
+    --home)
+      [ $# -ge 2 ] || { echo "error: --home requires an argument" >&2; exit 2; }
+      HOME_OPT="$2"; shift 2 ;;
+    --fleet)
+      [ $# -ge 2 ] || { echo "error: --fleet requires an argument" >&2; exit 2; }
+      FLEET_OPT="$2"; shift 2 ;;
     --filter)
       [ $# -ge 2 ] || { echo "error: --filter requires an argument" >&2; exit 2; }
       FILTER="$2"; shift 2 ;;
@@ -92,192 +112,135 @@ discover_fixtures() {
     | sort
 }
 
-registry_projects() {
-  awk -F '|' '
-    /<!--/ { in_comment=1 }
-    in_comment {
-      if (/-->/) in_comment=0
-      next
-    }
-    /^## Active projects/ { active=1; next }
-    active && /^---$/ { exit }
-    active && /^\|/ {
-      name=$2
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-      if (name != "" && name != "Project" && name != "—" && name != "_(none yet)_" && name != "(none yet)" && name !~ /^-+$/) print name
-    }
-  ' "$REGISTRY_FILE"
+resolve_registry_selection() {
+  local resolver selection
+  resolver='
+set -eu
+. "$1"
+home="$(trellis_home_resolve "$2")"
+config="$(trellis_home_config_path "$home")"
+fleet="$(trellis_home_resolve_fleet "$3" "$config")"
+if [ -e "$config" ] || [ -L "$config" ]; then
+  jq -e --arg fleet "$fleet" ".fleets[\$fleet] != null" "$config" >/dev/null || {
+    printf "trellis: selected fleet is not configured locally: %s\n" "$fleet" >&2
+    exit "$TRELLIS_EX_USAGE"
+  }
+fi
+printf "%s\t%s\n" "$home" "$fleet"
+'
+  if ! selection="$(bash -c "$resolver" run-evals "$SCRIPT_DIR/lib/trellis-home.sh" "$HOME_OPT" "$FLEET_OPT")"; then
+    err "could not resolve local fleet selection"
+    return 1
+  fi
+  IFS=$'\t' read -r SELECTED_HOME SELECTED_FLEET <<< "$selection"
+  if [ -z "$SELECTED_HOME" ] || [ -z "$SELECTED_FLEET" ]; then
+    err "could not resolve local fleet selection"
+    return 1
+  fi
 }
 
-blacklisted_projects() {
-  awk -F '|' '
-    /<!--/ { in_comment=1 }
-    in_comment {
-      if (/-->/) in_comment=0
-      next
-    }
-    /^## 1\./ { section=1; next }
-    /^## 2\./ { section=2; next }
-    section > 0 && /^\|/ {
-      name=$2
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-      gsub(/`/, "", name)
-      if (section == 2) sub(/^.*\//, "", name)
-      if (name != "" && name != "Project" && name != "Path" && name != "—" && name != "_(none yet)_" && name != "(none yet)" && name !~ /^-+$/) print name
-    }
-  ' "$BLACKLIST_FILE" | sort -u
+# `registry.sh list` emits the COMPLETE listing and only then reports per-row
+# registry state errors with exit class 4 — the same contract
+# `fleet-dependencies.mjs` consumes. Discarding that listing turned one broken
+# row into a refusal to evaluate the whole fleet. Accept exit 4 when the listing
+# is present and parseable, evaluate every healthy row, report the state-error
+# rows, and carry class 4 into this run's own exit aggregation. An empty or
+# unparseable listing, or any other non-zero class, stays fatal.
+load_registry_snapshot() {
+  local rc=0
+  REGISTRY_SNAPSHOT="$(bash "$REGISTRY_CLI" list --home "$SELECTED_HOME" --fleet "$SELECTED_FLEET" --json)" || rc=$?
+  if [ "$rc" -ne 0 ] && { [ "$rc" -ne "$REGISTRY_EX_STATE" ] || [ -z "$REGISTRY_SNAPSHOT" ]; }; then
+    err "could not list the local registry for fleet '$SELECTED_FLEET'"
+    return 1
+  fi
+  if ! jq -e '.schema_version == 1 and (.entries | type == "array")' <<<"$REGISTRY_SNAPSHOT" >/dev/null; then
+    err "local registry returned an unsupported snapshot for fleet '$SELECTED_FLEET'"
+    return 1
+  fi
+  REGISTRY_STATE_ERRORS="$(jq -r '[.entries[] | select(.availability == "identity_error")] | length' <<<"$REGISTRY_SNAPSHOT")" || {
+    err "could not classify local registry identity state for fleet '$SELECTED_FLEET'"
+    return 1
+  }
+  # A state class we cannot attribute to a visible row is not a partial listing.
+  if [ "$rc" -eq "$REGISTRY_EX_STATE" ] && [ "$REGISTRY_STATE_ERRORS" -eq 0 ]; then
+    err "local registry reported a state error with no identity-drift row for fleet '$SELECTED_FLEET'"
+    return 1
+  fi
 }
 
-registry_has_public_placeholder_shape() {
-  awk '
-    { sub(/\r$/, "") }
-    /<!--/ { in_comment=1 }
-    in_comment {
-      if (/-->/) in_comment=0
-      next
-    }
-    $0 == "## Active projects" {
-      headings++
-      if (state != 0) bad=1
-      state=1
-      next
-    }
-    state == 1 && $0 == "| Project | Path | Class | Notes |" {
-      headers++
-      state=2
-      next
-    }
-    state == 2 && $0 == "|---|---|---|---|" {
-      separators++
-      state=3
-      next
-    }
-    state == 3 && $0 == "| _(none yet)_ | | | |" {
-      placeholders++
-      state=4
-      next
-    }
-    state > 0 && state < 5 && $0 == "---" {
-      terminators++
-      if (state != 4) bad=1
-      state=5
-      next
-    }
-    state > 0 && state < 5 && ($0 != "" || index($0, "|") > 0) { bad=1 }
-    END {
-      valid = headings == 1 && headers == 1 && separators == 1 \
-        && placeholders == 1 && terminators == 1 && state == 5 \
-        && !in_comment && !bad
-      exit(valid ? 0 : 1)
-    }
-  ' "$REGISTRY_FILE"
+registry_available_projects() {
+  jq -r --arg fleet "$SELECTED_FLEET" '
+    .entries[]
+    | select(.fleet == $fleet)
+    | select(.kind == "worktree" and .availability == "available" and .status == "active")
+    | select((.excluded // false) | not)
+    | .project_id
+  ' <<<"$REGISTRY_SNAPSHOT" | LC_ALL=C sort -u
+}
+registry_project_is_evaluable() {
+  local project="$1"
+  printf '%s\n' "$REGISTRY_PROJECTS" | grep -Fqx "$project"
 }
 
-blacklist_has_public_placeholder_shape() {
-  awk '
-    { sub(/\r$/, "") }
-    /<!--/ { in_comment=1 }
-    in_comment {
-      if (/-->/) in_comment=0
-      next
-    }
-    $0 == "## 1. Temporarily excluded (registered projects)" {
-      section1++
-      if (state != 0) bad=1
-      state=1
-      next
-    }
-    state == 1 && $0 == "| Project | Reason | Added | Review after |" {
-      headers1++
-      state=2
-      next
-    }
-    state == 2 && $0 == "|---|---|---|---|" {
-      separators1++
-      state=3
-      next
-    }
-    state == 3 && $0 == "| — | — | — | — |" {
-      placeholders1++
-      state=4
-      next
-    }
-    state == 4 && $0 == "*(empty)*" {
-      empty_markers++
-      state=5
-      next
-    }
-    $0 == "## 2. Permanently excluded from management" {
-      section2++
-      if (state != 5) bad=1
-      state=6
-      next
-    }
-    state == 6 && $0 == "| Path | Reason |" {
-      headers2++
-      state=7
-      next
-    }
-    state == 7 && $0 == "|---|---|" {
-      separators2++
-      state=8
-      next
-    }
-    state == 8 && $0 == "| _(none yet)_ | |" {
-      placeholders2++
-      state=9
-      next
-    }
-    state > 5 && state < 10 && $0 == "---" {
-      terminators++
-      if (state != 9) bad=1
-      state=10
-      next
-    }
-    state > 0 && state < 10 && index($0, "|") > 0 { bad=1 }
-    END {
-      valid = section1 == 1 && headers1 == 1 && separators1 == 1 \
-        && placeholders1 == 1 && empty_markers == 1 && section2 == 1 \
-        && headers2 == 1 && separators2 == 1 && placeholders2 == 1 \
-        && terminators == 1 && state == 10 && !in_comment && !bad
-      exit(valid ? 0 : 1)
-    }
-  ' "$BLACKLIST_FILE"
+
+registry_unavailable_rows() {
+  jq -c --arg fleet "$SELECTED_FLEET" '
+    .entries[]
+    | select(.fleet == $fleet)
+    | select(.kind != "worktree" or .availability != "available")
+    | {
+        fleet,
+        project: .project_id,
+        kind: (.kind // "unknown"),
+        availability: (.availability // "unknown"),
+        root: (.root // "(no recorded worktree root)")
+      }
+  ' <<<"$REGISTRY_SNAPSHOT"
+}
+
+report_unavailable_registry_rows() {
+  local rows row fleet project kind availability root
+  rows="$(registry_unavailable_rows)" || return 1
+  [ -n "$rows" ] || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    fleet="$(jq -r '.fleet' <<<"$row")" || return 1
+    project="$(jq -r '.project' <<<"$row")" || return 1
+    kind="$(jq -r '.kind' <<<"$row")" || return 1
+    availability="$(jq -r '.availability' <<<"$row")" || return 1
+    root="$(jq -r '.root' <<<"$row")" || return 1
+    # An identity_error row is a registry state error, not a merely absent root.
+    if [ "$availability" = identity_error ]; then
+      printf 'state-error local registry row: %s/%s (%s, %s): %s\n' \
+        "$fleet" "$project" "$kind" "$availability" "$root" >&2
+    else
+      printf 'unavailable local registry row: %s/%s (%s, %s): %s\n' \
+        "$fleet" "$project" "$kind" "$availability" "$root" >&2
+    fi
+  done <<<"$rows"
+}
+
+load_eval_registry() {
+  resolve_registry_selection || return 1
+  load_registry_snapshot || return 1
+  REGISTRY_PROJECTS="$(registry_available_projects)" || {
+    err "could not select available worktrees from the local registry"
+    return 1
+  }
+  report_unavailable_registry_rows || {
+    err "could not report unavailable local registry rows"
+    return 1
+  }
 }
 
 reconcile_eval_projects() {
-  local registry_present=0 blacklist_present=0 evals_present=0
-  [ -e "$REGISTRY_FILE" ] && registry_present=1
-  [ -e "$BLACKLIST_FILE" ] && blacklist_present=1
-  [ -e "$EVALS_DIR" ] && evals_present=1
+  load_eval_registry || return 1
 
-  if [ "$registry_present" -eq 0 ] || [ ! -r "$REGISTRY_FILE" ]; then
-    err "registry is missing or unreadable: $REGISTRY_FILE"
-    return 1
-  fi
-  if [ "$blacklist_present" -eq 0 ] || [ ! -r "$BLACKLIST_FILE" ]; then
-    err "blacklist is missing or unreadable: $BLACKLIST_FILE"
-    return 1
-  fi
-
-  local registered blacklisted
-  registered="$(registry_projects)"
-  blacklisted="$(blacklisted_projects)"
-
-  # The public template excludes the private fixture tree. Its only valid
-  # no-evals state is the shipped placeholder-only control structure plus
-  # semantic emptiness; parser emptiness alone cannot distinguish truncation.
-  if [ "$evals_present" -eq 0 ]; then
-    if [ -n "$registered" ] || [ -n "$blacklisted" ]; then
+  # A shipped template may carry only template fixtures or no eval tree at all.
+  # It is valid only when this selected local fleet has no evaluable worktree.
+  if [ ! -e "$EVALS_DIR" ]; then
+    if [ -n "$REGISTRY_PROJECTS" ]; then
       err "eval fixture root is missing, unreadable, or not a directory: $EVALS_DIR"
-      return 1
-    fi
-    if ! registry_has_public_placeholder_shape; then
-      err "registry does not match the shipped placeholder-only structure: $REGISTRY_FILE"
-      return 1
-    fi
-    if ! blacklist_has_public_placeholder_shape; then
-      err "blacklist does not match the shipped placeholder-only structure: $BLACKLIST_FILE"
       return 1
     fi
     return 0
@@ -290,30 +253,27 @@ reconcile_eval_projects() {
   local fixture_projects missing project
   fixture_projects="$(discover_fixtures \
     | sed "s#^$EVALS_DIR/##; s#/.*##" \
-    | sort -u)"
+    | LC_ALL=C sort -u)"
   missing=0
 
   while IFS= read -r project; do
     [ -n "$project" ] || continue
-    if printf '%s\n' "$blacklisted" | grep -Fqx "$project"; then
-      continue
-    fi
     if ! printf '%s\n' "$fixture_projects" | grep -Fqx "$project"; then
-      err "active project '$project' is missing eval fixture manifests under core-rules/evals/$project/"
+      err "active available project '$project' is missing eval fixture manifests under core-rules/evals/$project/"
       missing=$((missing + 1))
     fi
   done <<EOF
-$registered
+$REGISTRY_PROJECTS
 EOF
 
   if [ "$missing" -gt 0 ]; then
-    err "$missing active non-blacklisted project(s) have no eval fixtures"
+    err "$missing active available project(s) have no eval fixtures"
     return 1
   fi
 }
 
 apply_filter() {
-  local mf rel
+  local mf rel project
   while IFS= read -r mf; do
     [ -z "$mf" ] && continue
     rel="${mf#"$EVALS_DIR/"}"
@@ -329,6 +289,14 @@ apply_filter() {
         || git -C "$ROOT" diff --name-only main..HEAD 2>/dev/null \
         | grep -q "^$fdir_rel" \
         || continue
+    fi
+    project="${rel%%/*}"
+    if ! registry_project_is_evaluable "$project"; then
+      if [ -n "$FILTER" ] || [ "$CHANGED_ONLY" -eq 1 ]; then
+        err "selected eval fixture '$rel' has no active available worktree in fleet '$SELECTED_FLEET'"
+        return 1
+      fi
+      continue
     fi
     printf '%s\n' "$mf"
   done
@@ -634,25 +602,37 @@ eval_assertion() {
 # Main
 # -----------------------------------------------------------------------------
 
-case "$MODE" in
-  check|dry-run)
-    if ! reconcile_eval_projects; then
-      exit 4
-    fi
-    ;;
-esac
+# Highest exit class wins. A local registry row that failed identity validation
+# is a state error (4); "this run found failing fixtures" is only 1, and a clean
+# run must not report 0 while state-error rows were skipped.
+final_exit_status() {
+  local status="${1:-0}"
+  if [ "$REGISTRY_STATE_ERRORS" -gt 0 ] && [ "$status" -lt "$REGISTRY_EX_STATE" ]; then
+    printf '%s\n' "$REGISTRY_EX_STATE"
+  else
+    printf '%s\n' "$status"
+  fi
+}
+
+if ! reconcile_eval_projects; then
+  exit 4
+fi
 
 ALL_FIXTURES=()
 while IFS= read -r line; do ALL_FIXTURES+=("$line"); done < <(discover_fixtures)
 SELECTED=()
 if [ ${#ALL_FIXTURES[@]} -gt 0 ]; then
-  while IFS= read -r line; do SELECTED+=("$line"); done < <(printf '%s\n' "${ALL_FIXTURES[@]}" | apply_filter)
+  if ! filtered="$(printf '%s\n' "${ALL_FIXTURES[@]}" | apply_filter)"; then
+    exit 4
+  fi
+  if [ -n "$filtered" ]; then
+    while IFS= read -r line; do SELECTED+=("$line"); done <<<"$filtered"
+  fi
 fi
 
 if [ ${#SELECTED[@]} -eq 0 ]; then
   log "no fixtures matched."
-  if [ "$MODE" = "check" ] || [ "$MODE" = "dry-run" ]; then exit 0; fi
-  exit 0
+  exit "$(final_exit_status 0)"
 fi
 
 # Always validate
@@ -679,7 +659,7 @@ fi
 log "✓ ${#VALID[@]} fixture(s) valid"
 
 if [ "$MODE" = "check" ]; then
-  exit 0
+  exit "$(final_exit_status 0)"
 fi
 
 if [ "$MODE" = "dry-run" ]; then
@@ -691,7 +671,7 @@ if [ "$MODE" = "dry-run" ]; then
     model=$(yq -r '.model // "sonnet"' "$mf")
     log "  $rel  (n=$runs, model=$model)"
   done
-  exit 0
+  exit "$(final_exit_status 0)"
 fi
 
 # Full run
@@ -734,6 +714,6 @@ log "results: $OUTPUT"
 log "summary: $passed/$total passed (rate=$overall_rate)"
 
 if [ "$passed" -lt "$total" ]; then
-  exit 1
+  exit "$(final_exit_status 1)"
 fi
-exit 0
+exit "$(final_exit_status 0)"

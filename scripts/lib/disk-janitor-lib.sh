@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# disk-janitor-lib.sh — shared scanner + (drafted) deletion library for
+# disk-janitor-lib.sh — shared scanner and registry-owned deletion library for
 # `trellis disk-janitor`.
 #
 # Single source of truth for "what is safe to reclaim." Sourced by
@@ -14,14 +14,14 @@
 #     so a failing `du`/`git`/`jq` never aborts the caller mid-run — the return
 #     code is the ONLY status signal.
 #
-# Two predicates are INJECTABLE for tests (the running-build guard and the
-# merge discriminator can't be exercised against live processes / network):
-#   dj_build_active   honors $DJ_BUILD_ACTIVE_OVERRIDE
-#   dj_branch_merged  honors $DJ_MERGED_OVERRIDE
+# The registry-backed deletion functions accept the complete local ownership
+# identity. They never derive a project path from a fleet root and never fall
+# back to a broad `rm -rf` when Git cannot prove the registered worktree.
 #
-# The two DELETION functions (dj_prune_cache_entry, dj_reap_worktree) are a
-# guarded first pass, marked `# OWNED: integrator rewrites + reviews`.
-#
+_DISK_JANITOR_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=local-registry.sh
+. "$_DISK_JANITOR_LIB_DIR/local-registry.sh"
+
 # bash 3.2 compatible: no `[[ ]]`, no associative arrays, no `mapfile`, no
 # `${x,,}` — `[ ]`/`case`, indexed arrays + `while read`, `tr` for case.
 
@@ -30,13 +30,36 @@
 # ===========================================================================
 
 # dj_mtime <path>
-# Epoch modification time, portable across darwin (stat -f %m) and linux
-# (stat -c %Y). Echoes 0 when the path is missing or stat fails. The single
+# Epoch modification time on darwin (stat -f %m) and linux (stat -c %Y).
+# Echoes 0 when the path is missing or neither dialect answers. The single
 # place stat-flavor differences live — every other helper reuses this.
+#
+# The two dialects MUST be captured separately. GNU `stat -f` is --file-system,
+# so `stat -f %m PATH` treats the format as a missing operand AND still prints a
+# whole filesystem block for PATH on stdout before exiting non-zero. Chained
+# into one `||` list that block was emitted first and the GNU epoch second, so
+# on linux this helper returned multi-line garbage that every arithmetic caller
+# then read as a bogus age — the opposite of the portability the old comment
+# advertised. Exit status alone is not a sufficient probe for the same reason,
+# so the BSD result is shape-checked (digits only) before it is trusted.
 dj_mtime() {
-  local path="$1"
+  local path="$1" candidate
   [ -e "$path" ] || { echo 0; return 0; }
-  stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0
+  candidate="$(stat -f %m "$path" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-9]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c %Y "$path" 2>/dev/null)" || candidate=""
+    case "$candidate" in
+      ''|*[!0-9]*) candidate="" ;;
+    esac
+  fi
+  if [ -z "$candidate" ]; then
+    echo 0
+  else
+    printf '%s\n' "$candidate"
+  fi
 }
 
 # dj_dir_bytes <path>
@@ -92,40 +115,271 @@ dj_human_bytes() {
 # ===========================================================================
 
 # dj_find_caches <project_path>
-# Deep, symlink-safe (-P) search for the build-cache dirs literally named
-# `.turbo/cache`, `.next/cache`, `.next/dev` anywhere under the project
-# (the `*/.next/...` globs already cover apps/*/.next). Descent into OTHER
-# tools' node_modules is pruned, but the cache dirs themselves are still found.
 #
-# Emits TSV, one row per cache dir:
+# Enumerate `.turbo/cache`, `.next/cache`, and `.next/dev` below PROJECT_PATH
+# without crossing a symlink or mount boundary. `find -P` alone is insufficient:
+# a Linux bind mount keeps the source device number, so it can expose external
+# bytes as an apparently in-tree cache. This walker opens every directory
+# descriptor-relative, compares its inode after opening, and requires the
+# descriptor's kernel mount identity to match the registered root. Linux uses
+# `statx(2)`'s STATX_MNT_ID; Darwin uses fstatfs's fsid + mountpoint tuple.
+# If either capability is unavailable, scanning fails closed instead of guessing.
+#
+# Emits TSV, one row per verified cache dir:
 #   <kind>\t<abs_path>\t<bytes>\t<mtime_epoch>
 # kind ∈ turbo-cache | next-cache | next-dev.
 dj_find_caches() {
   local proj="$1"
   [ -d "$proj" ] || return 0
-  local path kind bytes mtime
-  # NOTE: -prune on node_modules removes the *node_modules tree* from the walk;
-  # the cache dirs we want never live under node_modules, so this is safe and
-  # keeps the scan fast on large monorepos.
-  find -P "$proj" \
-    \( -type d -name node_modules -prune \) -o \
-    \( -type d \( \
-        -path '*/.turbo/cache' -o \
-        -path '*/.next/cache' -o \
-        -path '*/.next/dev' \
-      \) -print \) 2>/dev/null \
-  | while IFS= read -r path; do
-      [ -n "$path" ] || continue
-      case "$path" in
-        */.turbo/cache) kind="turbo-cache" ;;
-        */.next/cache)  kind="next-cache" ;;
-        */.next/dev)    kind="next-dev" ;;
-        *) continue ;;
-      esac
-      bytes="$(dj_dir_bytes "$path")"
-      mtime="$(dj_mtime "$path")"
-      printf '%s\t%s\t%s\t%s\n' "$kind" "$path" "$bytes" "$mtime"
-    done
+  command -v python3 >/dev/null 2>&1 || {
+    echo "dj_find_caches: python3 with descriptor-relative mount checks is required" >&2
+    return 1
+  }
+  python3 - "$proj" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+root_path = sys.argv[1]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+class MountIdentityError(Exception):
+    pass
+
+
+class StatxTimestamp(ctypes.Structure):
+    _fields_ = [
+        ("tv_sec", ctypes.c_int64),
+        ("tv_nsec", ctypes.c_uint32),
+        ("reserved", ctypes.c_int32),
+    ]
+
+
+class Statx(ctypes.Structure):
+    _fields_ = [
+        ("stx_mask", ctypes.c_uint32),
+        ("stx_blksize", ctypes.c_uint32),
+        ("stx_attributes", ctypes.c_uint64),
+        ("stx_nlink", ctypes.c_uint32),
+        ("stx_uid", ctypes.c_uint32),
+        ("stx_gid", ctypes.c_uint32),
+        ("stx_mode", ctypes.c_uint16),
+        ("spare0", ctypes.c_uint16),
+        ("stx_ino", ctypes.c_uint64),
+        ("stx_size", ctypes.c_uint64),
+        ("stx_blocks", ctypes.c_uint64),
+        ("stx_attributes_mask", ctypes.c_uint64),
+        ("stx_atime", StatxTimestamp),
+        ("stx_btime", StatxTimestamp),
+        ("stx_ctime", StatxTimestamp),
+        ("stx_mtime", StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32),
+        ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32),
+        ("stx_dev_minor", ctypes.c_uint32),
+        ("stx_mnt_id", ctypes.c_uint64),
+        ("stx_dio_mem_align", ctypes.c_uint32),
+        ("stx_dio_offset_align", ctypes.c_uint32),
+        ("spare3", ctypes.c_uint64 * 12),
+    ]
+
+
+class DarwinStatfs(ctypes.Structure):
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+if not O_DIRECTORY or not O_NOFOLLOW:
+    raise SystemExit("dj_find_caches: descriptor no-follow support is unavailable")
+
+platform = sys.platform
+libc = ctypes.CDLL(None, use_errno=True)
+if platform.startswith("linux"):
+    try:
+        statx = libc.statx
+    except AttributeError:
+        raise SystemExit("dj_find_caches: Linux statx mount identity is unavailable")
+    statx.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,
+        ctypes.POINTER(Statx),
+    ]
+    statx.restype = ctypes.c_int
+elif platform == "darwin":
+    fstatfs = libc.fstatfs
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinStatfs)]
+    fstatfs.restype = ctypes.c_int
+else:
+    raise SystemExit("dj_find_caches: kernel mount identity is unsupported on this platform")
+
+
+def mount_identity(fd):
+    if platform.startswith("linux"):
+        result = Statx()
+        if statx(fd, b"", 0x1000, 0x1000, ctypes.byref(result)) != 0:
+            raise MountIdentityError("statx(STATX_MNT_ID) failed: %s" % os.strerror(ctypes.get_errno()))
+        if not (result.stx_mask & 0x1000):
+            raise MountIdentityError("statx did not return STATX_MNT_ID")
+        return ("linux", int(result.stx_mnt_id))
+    result = DarwinStatfs()
+    if fstatfs(fd, ctypes.byref(result)) != 0:
+        raise MountIdentityError("fstatfs failed: %s" % os.strerror(ctypes.get_errno()))
+    mountpoint = bytes(result.f_mntonname).split(b"\0", 1)[0]
+    source = bytes(result.f_mntfromname).split(b"\0", 1)[0]
+    filesystem = bytes(result.f_fstypename).split(b"\0", 1)[0]
+    if not mountpoint:
+        raise MountIdentityError("fstatfs returned no mountpoint")
+    return (
+        "darwin", int(result.f_fsid[0]), int(result.f_fsid[1]),
+        filesystem, mountpoint, source,
+    )
+
+
+def same_stat(left, right):
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def stat_child(parent_fd, name):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def open_child_directory(parent_fd, name, root_device, root_mount):
+    before = stat_child(parent_fd, name)
+    if before is None or not stat.S_ISDIR(before.st_mode):
+        return None
+    try:
+        child_fd = os.open(
+            name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd
+        )
+    except OSError:
+        return None
+    actual = os.fstat(child_fd)
+    try:
+        mounted = mount_identity(child_fd)
+    except MountIdentityError:
+        os.close(child_fd)
+        return None
+    if not same_stat(actual, before) or actual.st_dev != root_device or mounted != root_mount:
+        os.close(child_fd)
+        return None
+    return child_fd, actual
+
+
+def allocated_bytes(value):
+    return int(getattr(value, "st_blocks", 0)) * 512
+
+
+def measure_tree(directory_fd, root_device, root_mount):
+    own = os.fstat(directory_fd)
+    try:
+        if own.st_dev != root_device or mount_identity(directory_fd) != root_mount:
+            return None
+    except MountIdentityError:
+        return None
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError:
+        return None
+    total = allocated_bytes(own)
+    for name in names:
+        if name in (".", "..") or "/" in name:
+            return None
+        before = stat_child(directory_fd, name)
+        if before is None:
+            return None
+        if stat.S_ISDIR(before.st_mode):
+            opened = open_child_directory(directory_fd, name, root_device, root_mount)
+            if opened is None:
+                return None
+            child_fd, child_stat = opened
+            try:
+                nested = measure_tree(child_fd, root_device, root_mount)
+            finally:
+                os.close(child_fd)
+            current = stat_child(directory_fd, name)
+            if nested is None or current is None or not same_stat(current, child_stat):
+                return None
+            total += nested
+        else:
+            current = stat_child(directory_fd, name)
+            if current is None or not same_stat(current, before):
+                return None
+            total += allocated_bytes(before)
+    return total
+
+
+def cache_kind(parent_name, name):
+    if parent_name == ".turbo" and name == "cache":
+        return "turbo-cache"
+    if parent_name == ".next" and name == "cache":
+        return "next-cache"
+    if parent_name == ".next" and name == "dev":
+        return "next-dev"
+    return None
+
+
+def walk(directory_fd, directory_path, root_device, root_mount):
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError:
+        return
+    parent_name = os.path.basename(directory_path)
+    for name in names:
+        if name in (".", "..") or "/" in name or name in (".git", "node_modules"):
+            continue
+        opened = open_child_directory(directory_fd, name, root_device, root_mount)
+        if opened is None:
+            continue
+        child_fd, child_stat = opened
+        child_path = os.path.join(directory_path, name)
+        try:
+            kind = cache_kind(parent_name, name)
+            if kind is not None:
+                size = measure_tree(child_fd, root_device, root_mount)
+                current = stat_child(directory_fd, name)
+                if size is not None and current is not None and same_stat(current, child_stat):
+                    print("%s\t%s\t%d\t%d" % (kind, child_path, size, int(child_stat.st_mtime)))
+            else:
+                walk(child_fd, child_path, root_device, root_mount)
+        finally:
+            os.close(child_fd)
+
+
+try:
+    root_fd = os.open(root_path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+except OSError as error:
+    raise SystemExit("dj_find_caches: registered root cannot be opened without following links: %s" % error)
+try:
+    root_stat = os.fstat(root_fd)
+    root_mount = mount_identity(root_fd)
+    walk(root_fd, root_path, root_stat.st_dev, root_mount)
+except MountIdentityError as error:
+    raise SystemExit("dj_find_caches: %s" % error)
+finally:
+    os.close(root_fd)
+PY
 }
 
 # dj_cache_is_stale <mtime> <ttl_days> <now_epoch>
@@ -257,9 +511,9 @@ dj__emit_worktree() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$wt" "$head" "$branch" "$is_main" "$prunable"
 }
 
-# dj__abspath <path>
 # Best-effort canonical absolute path (cd+pwd -P for dirs; resolve a file's
-# parent). Empty input → empty output. Used only for the is_main comparison.
+# parent). Empty input → empty output. Used for Git identity and containment
+# comparisons.
 dj__abspath() {
   local p="$1"
   [ -n "$p" ] || { printf ''; return 0; }
@@ -301,87 +555,31 @@ dj_worktree_mtime() {
 }
 
 # dj_worktree_clean <wt_path>
-# return 0 iff the worktree is safe to remove. Two conditions:
-#   1. `git status --porcelain` is EMPTY — no staged, unstaged, OR untracked
-#      changes (NO -uno: untracked WIP is data we must never silently destroy).
-#   2. EVERY gitignored entry is a known-recoverable build artifact. `git
-#      worktree remove` deletes gitignored files (they are invisible to plain
-#      `status`), and unlike tracked/untracked content they are NOT in git's
-#      object store — losing one is unrecoverable.
 #
-#      This is an ALLOWLIST, not a denylist, and the direction is the whole
-#      point. A denylist ("refuse only on .env / .key / …") fails OPEN: any
-#      secret we forgot to enumerate — .npmrc (npm auth tokens, ubiquitous in
-#      JS monorepos), .dev.vars, *.keystore/*.jks, *.p8 — would be silently
-#      destroyed. An allowlist fails CLOSED: an ignored entry we don't
-#      recognise over-refuses the reap (the worktree is left for manual
-#      cleanup — the status quo, zero data loss) instead of deleting a secret.
-#      Reaping node_modules/.next/.turbo/dist is the intended win, so those are
-#      on the list; anything else stays the operator's call.
+# Return 0 only when `git status --porcelain --ignored` is empty. A linked
+# worktree removal destroys ignored files too, and an ignored path's basename is
+# never adequate proof that its contents are disposable: a credential, database,
+# or operator state can share any seemingly-artifact name. Auto-reap therefore
+# refuses every ignored, untracked, staged, and unstaged entry; cleanup of a
+# tree carrying any residual local state stays an explicit operator action.
 dj_worktree_clean() {
-  local wt="$1" status entry base
-  status="$(git -C "$wt" status --porcelain 2>/dev/null || echo 'ERR')"
-  [ -z "$status" ] || return 1
-  # `--ignored` lines look like "!! path/to/file[/]"; strip the "!! " marker,
-  # drop any trailing slash (ignored dirs report one), and match on the
-  # basename so a nested artifact (apps/web/.next/) is recognised by ".next".
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    entry="${entry%/}"
-    base="${entry##*/}"
-    case "$base" in
-      node_modules|.next|.nuxt|.svelte-kit|.angular|.turbo|.cache|.parcel-cache|.vite|dist|build|out|coverage|.DS_Store|*.log|*.tsbuildinfo) ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$(git -C "$wt" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p')
-EOF
-  return 0
+  local wt="$1" status
+  status="$(git -C "$wt" status --porcelain --ignored 2>/dev/null || echo 'ERR')"
+  [ -z "$status" ]
 }
 
 # dj_worktree_porcelain_clean <wt_path>
-# return 0 iff `git status --porcelain` (no --ignored, no -uno) is EMPTY — no
-# staged, unstaged, OR untracked changes. This is the real "no uncommitted work"
-# signal (the one validated by hand during the 2026-07-16 flood) and it REPLACES
-# the ignored-file allowlist (dj_worktree_clean) as the auto-reap cleanliness
-# gate: for a recoverable tree the only residual risk is a gitignored *secret*,
-# which dj_worktree_has_secret_ignored screens separately. A git error yields a
-# non-empty 'ERR' → treated as dirty (fail-closed, never silently reaped).
+#
+# Return 0 only when tracked and ordinary untracked changes are absent. The
+# orchestrator uses this narrower predicate solely to distinguish untracked
+# work from ignored local content; every automatic reap still requires
+# dj_worktree_clean's no-local-content predicate immediately afterward.
 dj_worktree_porcelain_clean() {
   local wt="$1" status
   status="$(git -C "$wt" status --porcelain 2>/dev/null || echo 'ERR')"
   [ -z "$status" ]
 }
 
-# dj_worktree_has_secret_ignored <wt_path>
-# return 0 iff any gitignored entry (`git status --porcelain --ignored`, the
-# "!! " lines) has a BASENAME matching a known-secret pattern. Such a file is
-# NOT in git's object store and NOT regenerable, so `git worktree remove` would
-# destroy it irretrievably. A porcelain-clean + recoverable tree that harbors one
-# is downgraded to a manual candidate (reported, never auto-reaped) — this is the
-# minimal fail-closed denylist that lets Decision 1 drop the build-artifact
-# allowlist without ever risking a silent secret loss.
-#
-# Patterns (basename): .env .env.* .dev.vars .npmrc *.pem *.key *.keystore *.jks *.p8
-# return 1 when no ignored entry matches — safe to auto-reap re: secrets.
-dj_worktree_has_secret_ignored() {
-  local wt="$1" entry base
-  # `--ignored` lines look like "!! path/to/.env[/]"; strip the "!! " marker,
-  # drop a trailing slash (ignored dirs report one), and match on the basename.
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    entry="${entry%/}"
-    base="${entry##*/}"
-    case "$base" in
-      .env|.env.*|.dev.vars|.npmrc|*.pem|*.key|*.keystore|*.jks|*.p8)
-        return 0
-        ;;
-    esac
-  done <<EOF
-$(git -C "$wt" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p')
-EOF
-  return 1
-}
 
 # dj_capture_lsof_snapshot <snapshot_path> [timeout_seconds]
 # Capture one host-wide lsof field snapshot for all worktree liveness checks in a
@@ -689,117 +887,534 @@ dj_turbo_fix_hint() {
 }
 
 # ===========================================================================
-# OWNED: deletion (integrator rewrites + reviews every line)
+# Registry-owned deletion
 # ===========================================================================
 
-# dj_prune_cache_entry <abs_cache_path>
-# OWNED: integrator rewrites + reviews
-# Delete a single build-cache dir, with hard guards before any rm -rf:
-#   * path non-empty AND exists,
-#   * canonical real path resolves UNDER $PROJECTS_ROOT (refuse if unset),
-#   * basename path ends in one of: cache | .next/cache | .next/dev.
-# Refuses (stderr + return 1) on any guard miss; never touches anything else.
-dj_prune_cache_entry() {
-  # OWNED: integrator rewrites + reviews
-  local target="$1"
-  [ -n "$target" ] || { echo "dj_prune_cache_entry: empty path refused" >&2; return 1; }
-  [ -e "$target" ] || { echo "dj_prune_cache_entry: path does not exist: $target" >&2; return 1; }
-  [ -d "$target" ] || { echo "dj_prune_cache_entry: not a directory (refusing to rm a file/symlink): $target" >&2; return 1; }
+# dj_registered_owner_identity HOME FLEET PROJECT_ID CHECKOUT_ID WORKTREE_ID
+#   GIT_COMMON_DIR ROOT
+#
+# Print the freshly verified Git identity for exactly one active, available
+# registry row. This is deliberately strict: state corruption, a status change,
+# a disappeared volume, a changed Git common directory, a moved worktree, or a
+# duplicate owner all refuse the caller before it can mutate anything.
+dj_registered_owner_identity() {
+  local home="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
+  local common="$6" root="$7" root_real common_real snapshot row actual
 
-  local root real
-  root="${PROJECTS_ROOT:-}"
-  [ -n "$root" ] || { echo "dj_prune_cache_entry: PROJECTS_ROOT unset — refusing" >&2; return 1; }
-  root="$(dj__abspath "$root")"
-  real="$(dj__abspath "$target")"
+  [ "$#" -eq 7 ] || {
+    echo "dj_registered_owner_identity: expected HOME FLEET PROJECT_ID CHECKOUT_ID WORKTREE_ID GIT_COMMON_DIR ROOT" >&2
+    return 1
+  }
+  [ -n "$home" ] && [ -n "$fleet" ] && [ -n "$project_id" ] &&
+    [ -n "$checkout_id" ] && [ -n "$worktree_id" ] && [ -n "$common" ] && [ -n "$root" ] || {
+    echo "dj_registered_owner_identity: incomplete registry identity refused" >&2
+    return 1
+  }
+  [ -d "$root" ] && [ ! -L "$root" ] || {
+    echo "dj_registered_owner_identity: registered worktree is unavailable or symlinked: $root" >&2
+    return 1
+  }
+  [ -d "$common" ] && [ ! -L "$common" ] || {
+    echo "dj_registered_owner_identity: registered Git common directory is unavailable or symlinked: $common" >&2
+    return 1
+  }
+  root_real="$(dj__abspath "$root")"
+  common_real="$(dj__abspath "$common")"
+  [ "$root_real" = "$root" ] && [ "$common_real" = "$common" ] || {
+    echo "dj_registered_owner_identity: registry identity must use canonical real paths" >&2
+    return 1
+  }
 
-  # Must resolve strictly under PROJECTS_ROOT (prefix + path separator so a
-  # sibling like "<root>-evil" can't slip through).
-  case "$real/" in
-    "$root"/*) ;;
-    *) echo "dj_prune_cache_entry: '$real' not under PROJECTS_ROOT ($root) — refusing" >&2; return 1 ;;
-  esac
+  if snapshot="$(local_registry_list_json "$home" "$fleet")"; then :; else
+    echo "dj_registered_owner_identity: strict registry read failed" >&2
+    return 1
+  fi
+  if row="$(printf '%s\n' "$snapshot" | jq -cer \
+      --arg fleet "$fleet" --arg project_id "$project_id" \
+      --arg checkout_id "$checkout_id" --arg worktree_id "$worktree_id" \
+      --arg common "$common" --arg root "$root" '
+        [ .entries[]
+          | select(
+              .kind == "worktree" and .availability == "available"
+              and .status == "active"
+              and .fleet == $fleet and .project_id == $project_id
+              and .checkout_id == $checkout_id and .worktree_id == $worktree_id
+              and .git_common_dir == $common and .root == $root
+            )
+        ]
+        | if length == 1 then .[0] else error("registered owner is absent or ambiguous") end
+      ')"; then :; else
+    echo "dj_registered_owner_identity: exact active registry owner not found" >&2
+    return 1
+  fi
+  : "$row"
 
-  # Suffix must be one of the EXACT cache dirs the finder emits — never a parent
-  # like .next or the project, and not a bare */cache (that would match
-  # .pnpm/cache, .yarn/cache, any dir named cache if another caller is ever added).
-  case "$real" in
-    */.turbo/cache|*/.next/cache|*/.next/dev) ;;
-    *) echo "dj_prune_cache_entry: '$real' is not a recognized cache dir — refusing" >&2; return 1 ;;
-  esac
-
-  rm -rf "$real"
+  if actual="$(local_registry_identity_for_root "$root")"; then :; else
+    echo "dj_registered_owner_identity: could not re-read Git worktree identity: $root" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$actual" | jq -e \
+      --arg root "$root" --arg common "$common" \
+      --arg checkout_id "$checkout_id" --arg worktree_id "$worktree_id" '
+        .root == $root and .git_common_dir == $common
+        and .checkout_id == $checkout_id and .worktree_id == $worktree_id
+      ' >/dev/null; then
+    echo "dj_registered_owner_identity: live Git identity no longer matches registry ownership" >&2
+    return 1
+  fi
+  printf '%s\n' "$actual"
 }
 
-# dj_reap_worktree <repo_path> <wt_abs_path>
-# OWNED: integrator rewrites + reviews
-# Remove a linked worktree, with hard guards:
-#   * wt_abs_path non-empty AND != the repo's git common-dir's parent (the main
-#     checkout),
-#   * resolves UNDER $PROJECTS_ROOT (refuse if unset),
-#   * is NOT the main worktree (dj_list_worktrees is_main must be 0 — the caller
-#     is responsible for passing only is_main==0 entries; we re-check here).
-# Tries `git worktree remove`; if that fails AND the entry is prunable (dead
-# .git pointer), falls back to rm -rf + `git worktree prune`.
-dj_reap_worktree() {
-  # OWNED: integrator rewrites + reviews
-  local repo="$1" wt="$2"
-  [ -n "$wt" ] || { echo "dj_reap_worktree: empty worktree path refused" >&2; return 1; }
-  [ -n "$repo" ] || { echo "dj_reap_worktree: empty repo path refused" >&2; return 1; }
+# dj_cache_entry_owned_by_worktree ROOT CACHE
+#
+# Return 0 only when CACHE is a real directory below ROOT and Git still reports
+# ROOT as CACHE's own worktree top level. The final check prevents a parent
+# checkout scan from crossing into a nested linked worktree or submodule.
+dj_cache_entry_owned_by_worktree() {
+  local root="$1" target="$2" root_real target_real top
 
-  local root real common common_parent
-  root="${PROJECTS_ROOT:-}"
-  [ -n "$root" ] || { echo "dj_reap_worktree: PROJECTS_ROOT unset — refusing" >&2; return 1; }
-  root="$(dj__abspath "$root")"
-  real="$(dj__abspath "$wt")"
+  [ "$#" -eq 2 ] || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  [ -d "$target" ] && [ ! -L "$target" ] || return 1
+  root_real="$(dj__abspath "$root")"
+  target_real="$(dj__abspath "$target")"
+  [ "$root_real" = "$root" ] || return 1
+  case "$target_real/" in
+    "$root_real"/*) ;;
+    *) return 1 ;;
+  esac
+  top="$(git -C "$target_real" rev-parse --show-toplevel 2>/dev/null || echo '')"
+  [ -n "$top" ] || return 1
+  top="$(dj__abspath "$top")"
+  [ "$top" = "$root_real" ]
+}
 
-  # Refuse the main checkout: its dir is the parent of the git common-dir. If we
-  # cannot even determine the common-dir, refuse (fail closed) rather than skip
-  # the guard.
-  common="$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null || echo '')"
-  [ -n "$common" ] || { echo "dj_reap_worktree: cannot determine git-common-dir for '$repo' — refusing" >&2; return 1; }
-  common="$(dj__abspath "$common")"
-  common_parent="$(dirname "$common")"
-  common_parent="$(dj__abspath "$common_parent")"
-  if [ "$real" = "$common_parent" ] || [ "$real" = "$common" ]; then
-    echo "dj_reap_worktree: '$real' is the main checkout — refusing" >&2
+# dj_stat_device_inode <directory>
+#
+# Emit a portable device:inode identity for a real directory. This snapshot is
+# passed to the descriptor-relative cache remover so a namespace swap between
+# the shell's ownership checks and the sink is refused rather than followed.
+#
+# The two dialects MUST be captured separately: GNU `stat -f` is --file-system,
+# so it prints a whole filesystem block for the path on stdout before failing on
+# the format operand. Chained into one substitution that block was concatenated
+# with the GNU identity, and the case below then rejected the result — so on
+# linux this refused every legitimate cache root instead of snapshotting it.
+# Shape-check the BSD result (digits:digits) rather than trusting exit status.
+dj_stat_device_inode() {
+  local path="$1" identity
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  identity="$(stat -f '%d:%i' "$path" 2>/dev/null)" || identity=""
+  case "$identity" in
+    *[!0-9:]*|*:*:*|:*|*:|'') identity="" ;;
+    *:*) ;;
+    *) identity="" ;;
+  esac
+  if [ -z "$identity" ]; then
+    identity="$(stat -c '%d:%i' "$path" 2>/dev/null)" || identity=""
+  fi
+  case "$identity" in
+    *[!0-9:]*|*:*:*|:*|*:|'') return 1 ;;
+    *:*) printf '%s\n' "$identity" ;;
+    *) return 1 ;;
+  esac
+}
+
+# dj_remove_cache_tree_safely ROOT TARGET
+#
+# Delete TARGET only through descriptors rooted at ROOT. Python's dir_fd APIs
+# give this Bash library openat-style O_NOFOLLOW traversal on both macOS and
+# Linux: every component is pinned, compared against its lstat identity, and
+# kept on ROOT's filesystem. A symlink, replacement, or nested mount fails
+# closed; no pathname-based recursive rm is used at the sink.
+dj_remove_cache_tree_safely() {
+  local root="$1" target="$2" root_identity target_identity
+  local root_dev root_inode target_dev target_inode
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "dj_prune_cache_entry: python3 with descriptor-relative filesystem APIs is required" >&2
+    return 1
+  }
+  root_identity="$(dj_stat_device_inode "$root")" || {
+    echo "dj_prune_cache_entry: could not snapshot registered root identity" >&2
+    return 1
+  }
+  target_identity="$(dj_stat_device_inode "$target")" || {
+    echo "dj_prune_cache_entry: could not snapshot cache identity" >&2
+    return 1
+  }
+  root_dev="${root_identity%%:*}"
+  root_inode="${root_identity#*:}"
+  target_dev="${target_identity%%:*}"
+  target_inode="${target_identity#*:}"
+
+  python3 - "$root" "$target" "$root_dev" "$root_inode" "$target_dev" "$target_inode" <<'PY'
+import ctypes
+import os
+import stat
+import sys
+
+root, target = sys.argv[1:3]
+expected_root = (int(sys.argv[3]), int(sys.argv[4]))
+expected_target = (int(sys.argv[5]), int(sys.argv[6]))
+
+
+def fail(message):
+    sys.stderr.write("dj_prune_cache_entry: %s\n" % message)
+    raise SystemExit(1)
+
+
+class MountIdentityError(Exception):
+    pass
+
+
+class StatxTimestamp(ctypes.Structure):
+    _fields_ = [
+        ("tv_sec", ctypes.c_int64),
+        ("tv_nsec", ctypes.c_uint32),
+        ("reserved", ctypes.c_int32),
+    ]
+
+
+class Statx(ctypes.Structure):
+    _fields_ = [
+        ("stx_mask", ctypes.c_uint32),
+        ("stx_blksize", ctypes.c_uint32),
+        ("stx_attributes", ctypes.c_uint64),
+        ("stx_nlink", ctypes.c_uint32),
+        ("stx_uid", ctypes.c_uint32),
+        ("stx_gid", ctypes.c_uint32),
+        ("stx_mode", ctypes.c_uint16),
+        ("spare0", ctypes.c_uint16),
+        ("stx_ino", ctypes.c_uint64),
+        ("stx_size", ctypes.c_uint64),
+        ("stx_blocks", ctypes.c_uint64),
+        ("stx_attributes_mask", ctypes.c_uint64),
+        ("stx_atime", StatxTimestamp),
+        ("stx_btime", StatxTimestamp),
+        ("stx_ctime", StatxTimestamp),
+        ("stx_mtime", StatxTimestamp),
+        ("stx_rdev_major", ctypes.c_uint32),
+        ("stx_rdev_minor", ctypes.c_uint32),
+        ("stx_dev_major", ctypes.c_uint32),
+        ("stx_dev_minor", ctypes.c_uint32),
+        ("stx_mnt_id", ctypes.c_uint64),
+        ("stx_dio_mem_align", ctypes.c_uint32),
+        ("stx_dio_offset_align", ctypes.c_uint32),
+        ("spare3", ctypes.c_uint64 * 12),
+    ]
+
+
+class DarwinStatfs(ctypes.Structure):
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint32 * 7),
+    ]
+
+
+platform = sys.platform
+libc = ctypes.CDLL(None, use_errno=True)
+if platform.startswith("linux"):
+    try:
+        statx = libc.statx
+    except AttributeError:
+        fail("Linux statx mount identity is unavailable")
+    statx.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,
+        ctypes.POINTER(Statx),
+    ]
+    statx.restype = ctypes.c_int
+elif platform == "darwin":
+    fstatfs = libc.fstatfs
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinStatfs)]
+    fstatfs.restype = ctypes.c_int
+else:
+    fail("kernel mount identity is unsupported on this platform")
+
+
+def mount_identity(fd):
+    if platform.startswith("linux"):
+        result = Statx()
+        if statx(fd, b"", 0x1000, 0x1000, ctypes.byref(result)) != 0:
+            raise MountIdentityError(
+                "statx(STATX_MNT_ID) failed: %s" % os.strerror(ctypes.get_errno())
+            )
+        if not (result.stx_mask & 0x1000):
+            raise MountIdentityError("statx did not return STATX_MNT_ID")
+        return ("linux", int(result.stx_mnt_id))
+    result = DarwinStatfs()
+    if fstatfs(fd, ctypes.byref(result)) != 0:
+        raise MountIdentityError(
+            "fstatfs failed: %s" % os.strerror(ctypes.get_errno())
+        )
+    mountpoint = bytes(result.f_mntonname).split(b"\0", 1)[0]
+    source = bytes(result.f_mntfromname).split(b"\0", 1)[0]
+    filesystem = bytes(result.f_fstypename).split(b"\0", 1)[0]
+    if not mountpoint:
+        raise MountIdentityError("fstatfs returned no mountpoint")
+    return (
+        "darwin", int(result.f_fsid[0]), int(result.f_fsid[1]),
+        filesystem, mountpoint, source,
+    )
+
+
+def same_identity(value, expected):
+    return value.st_dev == expected[0] and value.st_ino == expected[1]
+
+
+def stat_child(parent_fd, name):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as error:
+        fail("descriptor-relative stat failed for %s: %s" % (name, error))
+
+
+def open_child_directory(parent_fd, name, root_device, root_mount, expected=None):
+    before = stat_child(parent_fd, name)
+    if not stat.S_ISDIR(before.st_mode):
+        fail("cache path component is not a real directory: %s" % name)
+    if before.st_dev != root_device:
+        fail("cache path crosses a filesystem boundary: %s" % name)
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except (AttributeError, OSError) as error:
+        fail("cache path component cannot be opened without following links: %s (%s)" % (name, error))
+    actual = os.fstat(child_fd)
+    try:
+        child_mount = mount_identity(child_fd)
+    except MountIdentityError as error:
+        os.close(child_fd)
+        fail("could not determine cache mount identity for %s: %s" % (name, error))
+    if not same_identity(actual, (before.st_dev, before.st_ino)):
+        os.close(child_fd)
+        fail("cache path component changed during validation: %s" % name)
+    if child_mount != root_mount:
+        os.close(child_fd)
+        fail("cache path crosses a mount boundary: %s" % name)
+    if expected is not None and not same_identity(actual, expected):
+        os.close(child_fd)
+        fail("cache target changed during validation")
+    return child_fd, actual
+
+
+def remove_contents(directory_fd, root_device, root_mount):
+    try:
+        if mount_identity(directory_fd) != root_mount:
+            fail("cache content crosses a mount boundary")
+        names = os.listdir(directory_fd)
+    except MountIdentityError as error:
+        fail("could not determine cache mount identity: %s" % error)
+    except OSError as error:
+        fail("could not enumerate cache directory: %s" % error)
+    for name in names:
+        if name in (".", "..") or "/" in name:
+            fail("unsafe cache directory entry")
+        before = stat_child(directory_fd, name)
+        if stat.S_ISDIR(before.st_mode):
+            if before.st_dev != root_device:
+                fail("cache content crosses a filesystem boundary: %s" % name)
+            child_fd, child_stat = open_child_directory(
+                directory_fd, name, root_device, root_mount,
+                (before.st_dev, before.st_ino),
+            )
+            try:
+                remove_contents(child_fd, root_device, root_mount)
+                current = stat_child(directory_fd, name)
+                if not same_identity(current, (child_stat.st_dev, child_stat.st_ino)):
+                    fail("cache directory changed before removal: %s" % name)
+                os.rmdir(name, dir_fd=directory_fd)
+            except OSError as error:
+                fail("could not remove cache directory entry %s: %s" % (name, error))
+            finally:
+                os.close(child_fd)
+        else:
+            current = stat_child(directory_fd, name)
+            if not same_identity(current, (before.st_dev, before.st_ino)):
+                fail("cache file changed before removal: %s" % name)
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError as error:
+                fail("could not remove cache file entry %s: %s" % (name, error))
+
+
+try:
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except (AttributeError, OSError) as error:
+    fail("registered root cannot be opened without following links: %s" % error)
+
+open_fds = [root_fd]
+try:
+    root_stat = os.fstat(root_fd)
+    if not same_identity(root_stat, expected_root):
+        fail("registered root changed during validation")
+    if root_stat.st_dev != expected_root[0]:
+        fail("registered root filesystem changed during validation")
+    try:
+        root_mount = mount_identity(root_fd)
+    except MountIdentityError as error:
+        fail("could not determine registered root mount identity: %s" % error)
+
+    relative = os.path.relpath(target, root)
+    if relative in ("", ".") or relative == ".." or relative.startswith("../"):
+        fail("cache target is not strictly below the registered root")
+    parts = relative.split(os.sep)
+    if any(part in ("", ".", "..") for part in parts):
+        fail("cache target has an unsafe relative path")
+
+    parent_fd = root_fd
+    for component in parts[:-1]:
+        parent_fd, _ = open_child_directory(
+            parent_fd, component, root_stat.st_dev, root_mount
+        )
+        open_fds.append(parent_fd)
+    target_fd, target_stat = open_child_directory(
+        parent_fd, parts[-1], root_stat.st_dev, root_mount, expected_target
+    )
+    open_fds.append(target_fd)
+    remove_contents(target_fd, root_stat.st_dev, root_mount)
+    current = stat_child(parent_fd, parts[-1])
+    if not same_identity(current, (target_stat.st_dev, target_stat.st_ino)):
+        fail("cache target changed before removal")
+    os.rmdir(parts[-1], dir_fd=parent_fd)
+finally:
+    for descriptor in reversed(open_fds):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+PY
+}
+
+# dj_prune_cache_entry HOME FLEET PROJECT_ID CHECKOUT_ID WORKTREE_ID
+#   GIT_COMMON_DIR ROOT ABS_CACHE_PATH
+#
+# Delete one known cache directory only after a fresh strict registry and Git
+# identity check. The registry lock is held from that final check through the
+# descriptor-relative deletion sink, so a registry writer cannot revoke or
+# reassign ownership mid-mutation.
+dj_prune_cache_entry() {
+  local home="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
+  local common="$6" root="$7" target="$8" real result=1
+
+  [ "$#" -eq 8 ] || {
+    echo "dj_prune_cache_entry: expected complete registry identity and cache path" >&2
+    return 1
+  }
+  [ -n "$target" ] || {
+    echo "dj_prune_cache_entry: empty path refused" >&2
+    return 1
+  }
+  [ -d "$target" ] && [ ! -L "$target" ] || {
+    echo "dj_prune_cache_entry: cache is unavailable, not a directory, or symlinked: $target" >&2
+    return 1
+  }
+  if ! trellis_home_lock_acquire "$home" registry 30; then
+    echo "dj_prune_cache_entry: could not acquire the registry lock" >&2
     return 1
   fi
 
-  # Must resolve under a PERMITTED reap root: PROJECTS_ROOT (project homes + the
-  # .claude/worktrees convention beneath each project) OR the ephemeral tmp root
-  # where fan-out stages throwaway worktrees. A /private/tmp tree is the single
-  # biggest reclaim target (audit waves stage 1–3 GB trees there), so refusing it
-  # here would make the delete verdict un-appliable. Widening the root stays safe
-  # by construction: the destructive step below is `git worktree remove`, which
-  # only acts on a path REGISTERED as a linked worktree of THIS repo — an
-  # unrelated tmp dir (a scratchpad, another repo's tree) is not, so it is
-  # refused; the rm -rf fallback likewise fires only for a git-confirmed-prunable
-  # registered entry. `dj__abspath` resolved symlinks (/tmp → /private/tmp), so
-  # compare against the resolved tmp roots.
-  local tmp_root tmpdir_root
-  tmp_root="$(dj__abspath /tmp)"
-  tmpdir_root="$(dj__abspath "${TMPDIR:-/tmp}")"
-  case "$real/" in
-    "$root"/*) ;;
-    "$tmp_root"/*) ;;
-    "$tmpdir_root"/*) ;;
-    *) echo "dj_reap_worktree: '$real' not under a permitted reap root (PROJECTS_ROOT=$root, tmp=$tmp_root) — refusing" >&2; return 1 ;;
-  esac
-
-  if git -C "$repo" worktree remove "$real" >/dev/null 2>&1; then
-    return 0
+  if ! dj_registered_owner_identity "$home" "$fleet" "$project_id" "$checkout_id" \
+      "$worktree_id" "$common" "$root" >/dev/null; then
+    echo "dj_prune_cache_entry: registered ownership changed or is unavailable" >&2
+  elif ! dj_cache_entry_owned_by_worktree "$root" "$target"; then
+    echo "dj_prune_cache_entry: cache crosses its registered worktree boundary: $target" >&2
+  else
+    real="$(dj__abspath "$target")"
+    case "$real" in
+      */.turbo/cache|*/.next/cache|*/.next/dev)
+        if dj_remove_cache_tree_safely "$root" "$target"; then
+          result=0
+        fi
+        ;;
+      *)
+        echo "dj_prune_cache_entry: '$real' is not a recognized cache directory" >&2
+        ;;
+    esac
   fi
 
-  # Fallback only for a prunable (dead-pointer) entry: confirm git itself flags
-  # this path as prunable before we rm anything by hand.
-  local prunable_row
-  prunable_row="$(dj_list_worktrees "$repo" | awk -F'\t' -v p="$real" '$1==p && $5=="1"{print}')"
-  if [ -n "$prunable_row" ]; then
-    rm -rf "$real"
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
-    return 0
+  if ! trellis_home_lock_release >/dev/null 2>&1; then
+    echo "dj_prune_cache_entry: could not release the registry lock" >&2
+    result=1
+  fi
+  return "$result"
+}
+
+# dj_reap_worktree HOME FLEET PROJECT_ID CHECKOUT_ID WORKTREE_ID
+#   GIT_COMMON_DIR ROOT
+#
+# Remove a registered linked worktree through Git. A main checkout, changed
+# identity, unsafe ignored content, symlinked path, or a failed Git removal is
+# refused. The registry lock covers the final exact owner check through Git's
+# removal, so writers cannot reassign the worktree during the destructive step.
+dj_reap_worktree() {
+  local home="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
+  local common="$6" root="$7" identity checkout_root checkout_root_real checkout_common
+  local git_dir result=1
+
+  [ "$#" -eq 7 ] || {
+    echo "dj_reap_worktree: expected complete registry identity" >&2
+    return 1
+  }
+  if ! trellis_home_lock_acquire "$home" registry 30; then
+    echo "dj_reap_worktree: could not acquire the registry lock" >&2
+    return 1
   fi
 
-  echo "dj_reap_worktree: 'git worktree remove' failed and entry is not prunable: $real" >&2
-  return 1
+  if identity="$(dj_registered_owner_identity "$home" "$fleet" "$project_id" \
+      "$checkout_id" "$worktree_id" "$common" "$root")"; then
+    checkout_root="$(printf '%s\n' "$identity" | jq -r '.checkout_root // empty')"
+    if [ -z "$checkout_root" ] || [ ! -d "$checkout_root" ] || [ -L "$checkout_root" ]; then
+      echo "dj_reap_worktree: registered primary checkout is unavailable or symlinked" >&2
+    else
+      checkout_root_real="$(dj__abspath "$checkout_root")"
+      checkout_common="$(git -C "$checkout_root" rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+      checkout_common="$(dj__abspath "$checkout_common")"
+      if [ "$checkout_root_real" != "$checkout_root" ]; then
+        echo "dj_reap_worktree: registered primary checkout is not a canonical real path" >&2
+      elif [ -z "$checkout_common" ] || [ "$checkout_common" != "$common" ]; then
+        echo "dj_reap_worktree: primary checkout no longer has the registered Git common directory" >&2
+      elif [ "$root" = "$checkout_root" ]; then
+        echo "dj_reap_worktree: registered root is the main checkout — refusing" >&2
+      else
+        git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+        git_dir="$(dj__abspath "$git_dir")"
+        if [ -z "$git_dir" ] || [ "$git_dir" = "$common" ]; then
+          echo "dj_reap_worktree: registered root is not a linked worktree — refusing" >&2
+        elif ! dj_worktree_clean "$root"; then
+          echo "dj_reap_worktree: worktree has tracked, untracked, or ignored local content" >&2
+        elif git -C "$checkout_root" worktree remove "$root" >/dev/null 2>&1; then
+          result=0
+        else
+          echo "dj_reap_worktree: Git refused registered worktree removal: $root" >&2
+        fi
+      fi
+    fi
+  else
+    echo "dj_reap_worktree: registered ownership changed or is unavailable" >&2
+  fi
+
+  if ! trellis_home_lock_release >/dev/null 2>&1; then
+    echo "dj_reap_worktree: could not release the registry lock" >&2
+    result=1
+  fi
+  return "$result"
 }

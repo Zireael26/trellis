@@ -1,6 +1,21 @@
-# ADR — Orchestrator reaps a codex-fanout conflicting-unit worktree after commit+push (immediacy)
+# ADR — Historical `codex-fanout` conflicting-unit reap after commit+push (retired)
 
-**Date:** 2026-07-16 · **Status:** accepted
+**Date:** 2026-07-16 · **Status:** accepted in PR #162; later retired by commit `2ad1808`
+
+> **Historical record only.** The decision and consequences below describe the
+> rc.10 Trellis-owned `codex-fanout` conflicting-unit policy. Commit `2ad1808`
+> retired its `codex-worker`, `codex-fanout`, and `codex-executor` surfaces,
+> including their worker preflight, rollout, and operator reap instructions.
+> Preserve this ADR for field evidence; do not use it as current routing or
+> reaping guidance.
+>
+> **Still live, separately:** Spec 016's generic
+> [worktree-lifecycle janitor/reaping architecture](2026-07-16-worktree-lifecycle-reap.md)
+> remains accepted. This retirement does not change the `disk-janitor` safe-reap
+> predicate, protections, or generic manual reap process.
+>
+> Direct `codex exec` and explicitly selected plugin-owned
+> `codex-companion.mjs` commands remain supported independently.
 
 ## Context
 

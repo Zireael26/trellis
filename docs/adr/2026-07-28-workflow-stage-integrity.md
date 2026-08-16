@@ -1,7 +1,7 @@
 # Preserve Workflow stage identity and fail required work closed
 
 Date: 2026-07-28
-Status: Accepted
+Status: Accepted for stage identity (decisions 1–3 and 5–6); decision 4's provider-fallback policy is historical/non-executable after `2ad1808`. Current selected-provider failures remain visible and fail closed until explicit caller/operator re-selection under `core-rules/skills/orchestrate/SKILL.md`.
 Spec: `specs/024-workflow-stage-integrity/`
 
 ## Context
@@ -15,7 +15,7 @@ Fix spans parity test harness, canonical recipe template, eight representative r
 1. Every dispatched identity receives a settled `{id, ok, value, error}` receipt.
 2. Null and thrown results are failed receipts; schema-level negative verdicts remain successful receipts.
 3. `requireStage` validates exact receipt cardinality and identity, emits one structured `workflow_stage_gate`, and throws when required success is below declared threshold.
-4. Optional provider legs may declare `minSuccess: 0`, but still preserve every expected failed receipt. Required Claude fallbacks remain strict.
+4. Historical provider policy (retired by `2ad1808`): optional provider legs could declare `minSuccess: 0`, while automatic Claude fallbacks remained strict. Current replacement-provider attempts require explicit caller/operator selection and preserve their own settled receipts.
 5. Test stub mirrors production null-settling, pipeline skip, and stage-argument behavior.
 6. Recipes keep helpers inline and identical because shared imports are not part of engine contract.
 

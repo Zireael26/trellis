@@ -2,124 +2,129 @@
 
 ## Status
 
-Accepted (2026-07-05)
+Accepted (2026-07-05); partially superseded by `2ad1808` (2026-08-09).
+
+> **Historical / non-executable retirement banner.** Commit `2ad1808` retired the Trellis-owned `codex-worker`, `codex-executor`, and `codex-fanout` worker/recipe surfaces, including their plugin preflight, rollout, and automatic provider-fallback contracts. The decision text below preserves its 2026-07-05 rationale and receipts; it MUST NOT be used to invoke or recreate those deleted surfaces.
+>
+> Current execution is deliberate direct `codex exec` or, only after explicit caller/operator selection, a plugin-owned `codex-companion.mjs` command. A rejected, unavailable, or failed selected lane fails closed: it does not fall through to Claude or another provider unless the caller/operator explicitly selects that lane. See `docs/codex-routing.md` §§3–4.5.
+>
+> **Partial-supersession scope.** Only the retired Trellis-owned dispatch, preflight, rollout, and fallback mechanics are superseded. The dated parity/routing evidence, budget proposal, Component-D guardrail record, and AntiGravity decision remain preserved as history; they do not revive a worker or recipe.
 
 ## Context
 
-Trellis has run Claude Code and Codex as **parity harnesses** since the Codex
+Before RC.4, Trellis had run Claude Code and Codex as **parity harnesses** since the Codex
 parity rollout (`2026-05-04-codex-parity-rollout.md`): byte-identical parent
-rules, each agent working alone. The RC.4 work
-(`docs/plans/2026-07-05-codex-claude-dual-harness-integration.md`) closes the
-next gap — **cross-harness orchestration**, where one harness dispatches units of
+rules, with each agent working alone. RC.4
+(`docs/plans/2026-07-05-codex-claude-dual-harness-integration.md`) closed the
+next gap through **cross-harness orchestration**, where one harness dispatched units of
 work to the other inside its own dynamic workflows and loops.
 
-The July 2026 research basis (recorded in §2 of the RC.4 plan) gives a clean
-division of labor: Claude/Opus wins at code quality, repo-level refactors,
+The July 2026 research basis recorded in §2 of the RC.4 plan supported a clean
+division of labor: Claude/Opus led on code quality, repo-level refactors,
 architecture, planning, interactive decisions, code review, and hard reasoning;
-Codex/GPT-5.x wins at speed, autonomy, token efficiency (~3–4× cheaper/task), and
-background/async bounded execution. The consensus is not "pick one" but "run both,
+Codex/GPT-5.x led on speed, autonomy, token efficiency (~3–4× cheaper/task), and
+background/async bounded execution. The accepted answer was not "pick one" but "run both,
 build a bridge."
 
-The tooling is asymmetric in the same direction: `Workflow`, ultracode, and
-`/loop` are Claude-side orchestration surfaces today; Codex has no equivalent
-orchestration engine yet. Whoever owns the loop is therefore Claude by
-construction.
+The tooling was asymmetric in the same direction: `Workflow`, ultracode, and
+`/loop` were Claude-side orchestration surfaces; Codex had no equivalent
+orchestration engine. Claude therefore owned the loop by construction.
 
-The control plane needs to decide the topology, how a Codex unit is dispatched
-without a hard dependency Trellis cannot ship publicly, where the routing policy
-lives, and how loop-safety budget accounting stays honest across two models with
-different token prices.
+The control-plane decision covered the topology, dispatch without a hard
+public plugin dependency, routing-policy placement, and honest loop-safety
+budget accounting across models with different token prices.
 
-## Decision
+## Historical decision (partially superseded)
 
-1. **Topology: Claude is the orchestrator; Codex is a dispatchable executor node.**
-   The loop belongs to Claude (it owns `Workflow` / ultracode / `/loop`); Codex is
-   one worker *type* it fans out to inside a Claude-driven workflow. "Prioritize
-   dynamic workflows / ultracode / loops" and "use Codex agents in our loops and
-   workflows" are the **same** requirement under this topology, not two.
+The five points below record the July 2026 decision. In this historical text, an “executor node” denotes the retired Trellis-owned dispatch surface unless the retirement banner expressly identifies a current direct route.
 
-2. **Capability-gated cross-harness dispatch — no in-file model conditionals.**
+1. **Topology: Claude was the orchestrator; Codex was a dispatchable executor node.**
+   The loop belonged to Claude, which owned `Workflow`, ultracode, and `/loop`;
+   Codex was one worker *type* fanned out inside a Claude-driven workflow.
+   "Prioritize dynamic workflows / ultracode / loops" and "use Codex agents in
+   our loops and workflows" were the **same** requirement under this topology.
+
+2. **[Retired implementation] Capability-gated cross-harness dispatch — no in-file model conditionals.**
    Consistent with `2026-05-08-claude-md-primary-not-agents-md.md`
-   (CLAUDE.md and AGENTS.md are byte-identical symlinks), the routing intent is
+   (CLAUDE.md and AGENTS.md are byte-identical symlinks), the routing intent was
    expressed as *steering* in a doc plus a capability-gated skill — **never** as
    `if-claude / if-codex` conditionals in shared rules. Cross-harness dispatch
-   lives in the public, capability-gated `orchestrate` skill (a `codex-executor`
-   recipe + routing references), riding the same rail the dynamic-workflows spec
-   established. The skill is inert without the Codex plugin, so it is safe to
-   publish to the template mirror.
+   then lived in the public, capability-gated `orchestrate` skill (a
+   `codex-executor` recipe + routing references), riding the same rail the
+   dynamic-workflows spec established. That retired recipe was inert without the
+   Codex plugin and was safe to publish to the template mirror.
 
-3. **Presence gate + degrade-to-Claude — no hard plugin dependency.** The
-   `openai-codex` Claude Code plugin is **not** part of Trellis and cannot ship to
-   the public mirror, so Codex-callability is a **runtime-detected capability**,
-   exactly like the existing Workflow-tool capability gate. A presence gate
-   (`codex-companion.mjs setup --json` → `ready` / `available` / `loggedIn`)
-   decides whether routing is on. Because there is no quota API, a limit-hit and a
-   task failure are the **same signal**: a null/error Codex result transparently
-   falls through to a Claude `agent()` for the same unit. The framework works
-   single-family when Codex is absent, and the degrade is `log()`-ed (no silent
-   caps).
+3. **[Retired implementation] Presence gate + degrade-to-Claude — no hard plugin dependency.** The
+   external `openai-codex` Claude Code plugin was not part of Trellis and could
+   not ship to the public mirror, so Codex-callability was designed as a
+   runtime-detected capability. A presence gate (`codex-companion.mjs setup
+   --json` → `ready` / `available` / `loggedIn`) decided whether routing was on.
+   Because no quota API existed, the former design treated a limit-hit and task
+   failure as the same signal: a null/error Codex result fell through to a
+   Claude `agent()` for the same unit. The framework worked single-family when
+   Codex was absent and logged each degrade. That automatic fallback is retired;
+   selected lanes now fail closed as the retirement banner states.
 
 4. **Strength-routing policy lives in `docs/codex-routing.md`.** The
    work-type → model map (planning/review/synthesis → Claude; large bounded
    implementation and long-running/async fan-out units → Codex; second-opinion
-   diversity passes → the other model) is durable steering intent sourced to the
-   research, kept out of shared rules. Shipped as the fixed default map in the
-   `codex-executor` recipe; no `routing` config block this release (override added
-   later only if a project needs one).
+   diversity passes → the other model) remains documented routing context sourced
+   to the research and kept out of shared rules. The now-retired
+   `codex-executor` recipe was its former fixed-default carrier; current direct
+   execution and its fail-closed selection policy are governed by
+   `docs/codex-routing.md` §§3–4.5.
 
-5. **Per-model loop budget rate.** `core-rules/loop-safety.md` converts
-   `budget_ceiling_usd` to a token budget via a single `usd_per_mtok` (Opus output
-   price). A dual-model workflow also spends cheaper Codex tokens; counting them at
-   Opus rates over-charges the budget and trips the ceiling early. The conversion
-   extends to a **per-model rate**: `usd_per_mtok` stays the Claude/Opus rate; an
-   optional `codex_usd_per_mtok` (GPT-5.x output price) attributes each unit's
-   spend at its model's rate. Absent the new field → single-rate fallback
-   (backward compatible).
+5. **Per-model loop budget rate.** At adoption, `core-rules/loop-safety.md`
+   converted `budget_ceiling_usd` to a token budget through one `usd_per_mtok`
+   Opus output rate. A dual-model workflow also spent cheaper Codex tokens, so
+   the single rate overcharged the budget and tripped the ceiling early. RC.4
+   extended the conversion with optional `codex_usd_per_mtok`, attributing each
+   unit's spend at its model's rate while retaining the single-rate fallback
+   when the optional field was absent.
 
-## Deferred "Component D" — inherited guardrails
+## Historical "Component D" — inherited guardrails
 
 The dynamic-workflows spec (`docs/specs/2026-06-03-dynamic-workflows-design.md`)
-explicitly deferred unattended, PR-opening, worktree-mutating fan-out as
+had explicitly deferred unattended, PR-opening, worktree-mutating fan-out as
 **"Component D — categorically higher autonomy … deserves a dedicated spec with
 its own autonomy ceiling, HOLD-only-PR policy, and bypass-permissions
-discipline."** Cross-harness parallel orchestration **is** Component D. Its
-guardrails are inherited verbatim, not re-decided:
+discipline."** RC.4 classified cross-harness parallel orchestration as
+Component D and inherited its guardrails rather than re-deciding them:
 
-- **HOLD-only PRs** from unattended cross-harness runs — never auto-merge.
-- **Own autonomy ceiling** for the cross-harness recipe — it does not float up to
-  L5 implicitly.
-- **Bright-lines fire on every Codex unit too.** Codex output flows back into
-  Claude's `code-review-subagent` / verify gate, so quality is **not** laundered
-  by running work on Codex. Destructive-op, external-message, secrets, and
-  DoD-receipt guards all still apply.
-- **Overnight runs need bypass-permissions mode** (per the dangerous-rm autonomy
-  blocker — agent `rm $VAR.*` globs stall unattended runs); Codex-unit prompt
-  contracts are hardened against unbounded globs.
-- **Every new loop/recipe declares a `safety` block (three ceilings)** or it is
-  non-compliant (process-gate + audit finding).
+- Unattended cross-harness runs opened **HOLD-only PRs** and never auto-merged.
+- The cross-harness recipe had its own autonomy ceiling rather than floating
+  implicitly to L5.
+- Bright-line guardrails fired on every Codex unit. Codex output flowed through
+  Claude's `code-review-subagent` and verify gate; destructive-op,
+  external-message, secrets, and DoD-receipt guards remained active.
+- Overnight runs used bypass-permissions mode, while Codex-unit prompt
+  contracts prohibited unbounded globs.
+- Each new loop or recipe declared a three-ceiling `safety` block or was
+  non-compliant.
 
-## Consequences
+## Consequences (historical at adoption)
 
-- Cross-harness dispatch ships in the public `orchestrate` skill (a
-  `codex-executor` recipe + routing references); the stale README line calling
-  `orchestrate` "instance-only" is corrected.
-- `docs/codex-routing.md` is added as the routing-policy source of truth; one
-  model-neutral capability-conditional clause is folded into `CLAUDE.md`
-  (§Context management neighborhood).
-- `core-rules/loop-safety.md`, the `loop_safety` block in `trellis.config.json`,
-  and the config schema gain the optional `codex_usd_per_mtok` per-model rate.
-- The executor-node wrapper detects Codex presence at runtime and degrades to
-  Claude on absence or task failure; no hard plugin dependency enters the mirror.
-- This ADR supersedes `2026-05-20-antigravity-third-harness.md`: AntiGravity is
-  stripped from the live tree in the same RC.4 release (it is not enabled in this
-  instance and does not compete with Claude Code + Codex). The AntiGravity ADR is
-  preserved as history and marked superseded.
+- At adoption, cross-harness dispatch shipped in the public `orchestrate`
+  skill as the `codex-executor` recipe plus routing references, and the stale
+  README line calling `orchestrate` "instance-only" was corrected. That retired
+  recipe is no longer executable.
+- RC.4 added `docs/codex-routing.md` as the routing-policy source of truth and
+  folded one model-neutral capability-conditional clause into `CLAUDE.md`.
+- RC.4 added optional `codex_usd_per_mtok` to `core-rules/loop-safety.md`, the
+  `loop_safety` block in `trellis.config.json`, and the config schema.
+- The executor-node wrapper detected Codex presence at runtime and degraded to
+  Claude on absence or task failure. `2ad1808` retired that wrapper; it MUST NOT
+  be recreated as an automatic fallback.
+- This ADR superseded `2026-05-20-antigravity-third-harness.md`: RC.4 stripped
+  AntiGravity from the live tree because it was not enabled in this instance
+  and did not compete with Claude Code + Codex. The AntiGravity ADR remained as
+  history and was marked superseded.
 
 ## References
 
-- `docs/plans/2026-07-05-codex-claude-dual-harness-integration.md` — the RC.4
-  plan this ADR ratifies (topology §3, routing §4, degrade §5, budget §6,
-  Component-D guardrails §7, AntiGravity strip §8).
+- `docs/plans/2026-07-05-codex-claude-dual-harness-integration.md` — the
+  historical RC.4 plan this ADR originally ratified (topology §3, routing §4,
+  degrade §5, budget §6, Component-D guardrails §7, AntiGravity strip §8).
 - `docs/specs/2026-06-03-dynamic-workflows-design.md` — capability-gating (not
   identity-gating), the skill-symlink distribution rail, and the deferred
   Component D whose guardrails this ADR inherits.

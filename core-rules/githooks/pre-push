@@ -57,10 +57,26 @@ done
 # --- spec-gate (mandatory-pipeline, spec 006) — LOAD-BEARING teeth ---
 # Blocks a push whose branch carries over-floor feature code with no spec triad,
 # no size-capped /surgical declaration, and no emergency override. Deterministic
-# (git/fs state only) => equal on Claude + Codex. No-op unless
-# mandatory_pipeline.enabled in trellis.config.json; fail-open on a broken env
-# (the gate returns 'advisory', which does not block). Locate the harness-neutral
-# entrypoint: .claude first, .agents fallback.
+# (git/fs state only) => equal on Claude + Codex. No-op unless policy enables
+# mandatory_pipeline. Locate the harness-neutral entrypoint: .claude first,
+# .agents fallback.
+#
+# An attached checkout owns one immutable runtime anchor. Do not let a stale or
+# broken anchor silently downgrade its policy: it must resolve to a runtime
+# directory carrying the policy snapshot before the gate can run.
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
+if [ -n "$PROJECT_ROOT" ]; then
+  TRELLIS_RUNTIME="$PROJECT_ROOT/.trellis/runtime"
+  if [ -e "$TRELLIS_RUNTIME" ] || [ -L "$TRELLIS_RUNTIME" ]; then
+    if [ ! -d "$TRELLIS_RUNTIME" ] || [ ! -f "$TRELLIS_RUNTIME/trellis.config.json" ]; then
+      echo "[pre-push] attached Trellis runtime is corrupt: $TRELLIS_RUNTIME must resolve to a directory containing trellis.config.json." >&2
+      exit 1
+    fi
+    TRELLIS_ROOT="$TRELLIS_RUNTIME"
+    export TRELLIS_ROOT
+  fi
+fi
+
 SPECGATE=""
 if [ -f .claude/hooks/spec-gate.sh ]; then
   SPECGATE=.claude/hooks/spec-gate.sh
@@ -76,6 +92,21 @@ if [ -n "$SPECGATE" ]; then
     echo "[pre-push] spec-gate blocked this push (mandatory pipeline). Resolve per the remedies above, or override for a true emergency with /surgical --emergency." >&2
     exit 1
   fi
+fi
+
+# --- AEO gate (spec 033) — instance-only, disabled-default, warn-only ---
+# The adapter owns relevance checks and always exits zero. A configured result
+# is emitted once on stderr; it can never block this push during rollout.
+AEOGATE=""
+if [ -f .claude/hooks/lib/aeo-gate-warn.sh ]; then
+  AEOGATE=.claude/hooks/lib/aeo-gate-warn.sh
+elif [ -f .codex/hooks/lib/aeo-gate-warn.sh ]; then
+  AEOGATE=.codex/hooks/lib/aeo-gate-warn.sh
+elif [ -f .agents/hooks/lib/aeo-gate-warn.sh ]; then
+  AEOGATE=.agents/hooks/lib/aeo-gate-warn.sh
+fi
+if [ -n "$AEOGATE" ]; then
+  AEO_GATE_RANGE="${RANGE:-origin/main..HEAD}" bash "$AEOGATE" || true
 fi
 
 echo "[pre-push] Trellis verification starting (mode=$MODE)..."

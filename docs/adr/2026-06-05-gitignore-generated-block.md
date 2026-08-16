@@ -1,5 +1,10 @@
 # 2026-06-05 — Generate the project `.gitignore` Trellis block instead of appending a template
 
+> **Status:** Superseded (2026-08-12).
+>
+> Replaced by [2026-08-12 — Local fleets and immutable releases](2026-08-12-local-fleets-immutable-releases.md). The stacked-block diagnosis and generated-block cleanup below remain historical. Generated tracked `.gitignore` inheritance blocks are replaced by attachment-owned managed `.git/info/exclude` blocks; tracked project state is the inert `.trellis.json` manifest.
+
+
 ## Context
 
 Trellis seeds each registered project with machine-absolute inheritance symlinks

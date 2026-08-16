@@ -52,7 +52,7 @@ SHARED_FIXTURE="$BATS_TEST_DIRNAME/fixtures/shared-infra"
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
 LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null || true)"
 
-CANON_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
+CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
@@ -62,13 +62,21 @@ setup() {
   PROJECTS="$SANDBOX/projects"
   SHARED="$SANDBOX/shared-infra"
   CFG="$SANDBOX/trellis.config.json"
-  mkdir -p "$CANON" "$PROJECTS"
+  # Pin the operator-state env every doctor run inherits. A legacy run must not
+  # read the real machine's HOME or $TRELLIS_HOME, and any assertion about a
+  # delegated engine's REFUSAL is only meaningful if ambient local state cannot
+  # be what produced it. FIXTURE_TRELLIS_HOME is a private, empty machine home.
+  FIXTURE_HOME="$SANDBOX/operator-home"
+  FIXTURE_TRELLIS_HOME="$SANDBOX/machine-home"
+  mkdir -p "$CANON" "$PROJECTS" "$FIXTURE_HOME" "$FIXTURE_TRELLIS_HOME"
+  chmod 700 "$FIXTURE_TRELLIS_HOME"
   DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
 }
 
 teardown() {
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
+    chmod -R u+w "$SANDBOX" 2>/dev/null || true
     rm -rf "$SANDBOX"
   fi
 }
@@ -245,9 +253,11 @@ seed_project_hooks_from_canonical() {
 
 run_doctor() {
   if [ -n "$DOCTOR_SHARED_OVERRIDE" ]; then
-    run env SHARED_INFRA_ROOT="$DOCTOR_SHARED_OVERRIDE" bash "$DOCTOR" "$@"
+    run env HOME="$FIXTURE_HOME" TRELLIS_HOME="$FIXTURE_TRELLIS_HOME" \
+      SHARED_INFRA_ROOT="$DOCTOR_SHARED_OVERRIDE" bash "$DOCTOR" "$@"
   else
-    run env -u SHARED_INFRA_ROOT bash "$DOCTOR" "$@"
+    run env -u SHARED_INFRA_ROOT HOME="$FIXTURE_HOME" \
+      TRELLIS_HOME="$FIXTURE_TRELLIS_HOME" bash "$DOCTOR" "$@"
   fi
 }
 
@@ -283,17 +293,18 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   write_config
   run_doctor --dry-run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"--dry-run is only valid with --fix"* ]]
+  [[ "$output" == *"--dry-run is only valid with --fix"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
 # 1. --fix --dry-run is READ-ONLY: prints the plan, mutates nothing.
-#    Fixture has a STALE (wrong-target) rules symlink — the kind of drift that
-#    needs the rm+onboard path — so the plan has real [auto] content to print
-#    while the tree must remain byte/link-identical.  (dryrun_is_readonly_verified)
+#    Fixture has a STALE (wrong-target) rules symlink. Before the cutover this
+#    was the rm+onboard [auto] path; since v1.0.0-rc.25 the only disposition is
+#    [manual] with the migration that owns it. The read-only oracle is unchanged
+#    and still load-bearing.  (dryrun_is_readonly_verified)
 # ===========================================================================
 
-@test "--fix --dry-run on a drifted fixture: prints the planned commands AND leaves the fixture byte/link-identical" {
+@test "--fix --dry-run on a drifted fixture: prints the migration plan AND leaves the fixture byte/link-identical" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -308,10 +319,13 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
   run_doctor --fix --dry-run
   [ "$status" -eq 0 ]
-  # The plan is printed: the rm of the known-bad link AND the onboard re-seed.
-  [[ "$output" == *"[auto] rm "*".claude/rules/trellis.md"* ]]
-  [[ "$output" == *"onboard-project.sh"* ]]
-  [[ "$output" == *"nothing applied"* ]]
+  # The plan names the broken surface and the migration that owns it.
+  [[ "$output" == *"[manual] stale/wrong rules symlink .claude/rules/trellis.md"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis migrate --prepare \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  [[ "$output" == *"nothing applied"* ]] || { echo "$output"; false; }
+  # The removed writers must not be advertised in any spelling.
+  [[ "$output" != *"[auto]"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"onboard-project.sh"* ]] || { echo "$output"; false; }
 
   after="$(snapshot_project "$PROJECTS/healthy")"
   # READ-ONLY oracle: byte-for-byte + symlink-target identical before vs after.
@@ -321,7 +335,7 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
     "/Users/helios/claude/se-core-template/core-rules/CLAUDE.md" ]
 }
 
-@test "--fix repairs inheritance without proposing registering reconciling or changing shared allocations" {
+@test "--fix diagnoses inheritance without proposing registering reconciling or changing shared allocations" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -333,17 +347,20 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   before="$(sha_of "$SHARED/projects.yaml")"
 
   run_doctor --fix
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # The missing rules symlink is now an unrepaired ERROR, so the run is non-zero.
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
   [ "$(sha_of "$SHARED/projects.yaml")" = "$before" ]
-  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = "$CANON/core-rules/CLAUDE.md" ]
+  # Doctor did NOT re-seed it — that is the migration's job now.
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [ ! -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
   grep -q '^doctor ' "$SHARED/calls.log"
   [ ! -e "$PROJECTS/healthy/scripts/local-infra-preflight.sh" ]
-  [[ "$output" == *"TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh"* ]]
+  [[ "$output" == *"[manual] missing rules symlink .claude/rules/trellis.md"* ]] || { echo "$output"; false; }
   run grep -Eq '^(propose|register|reconcile|preflight) ' "$SHARED/calls.log"
   [ "$status" -ne 0 ]
 }
 
-@test "shared infrastructure drift stays an ERROR but does not block unrelated inheritance repair" {
+@test "shared infrastructure drift stays an ERROR and does not suppress unrelated inheritance diagnosis" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -357,10 +374,12 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
   run_doctor --fix
   [ "$status" -eq 1 ]
-  [[ "$output" == *"✗ shared-infra doctor: read-only checks failed"* ]]
-  [[ "$output" == *"onboard ran"* ]]
-  [[ "$output" != *"not onboarding against an off-main/dirty canonical"* ]]
-  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = "$CANON/core-rules/CLAUDE.md" ]
+  [[ "$output" == *"✗ shared-infra doctor: read-only checks failed"* ]] || { echo "$output"; false; }
+  # A failing shared-infra row must not swallow the per-project diagnosis: the
+  # unrelated broken symlink is still classified and still names its migration.
+  [[ "$output" == *"[manual] missing rules symlink .claude/rules/trellis.md"* ]] || { echo "$output"; false; }
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [ ! -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
   [ "$(sha_of "$SHARED/projects.yaml")" = "$before" ]
   run grep -Eq '^(propose|register|reconcile|preflight) ' "$SHARED/calls.log"
   [ "$status" -ne 0 ]
@@ -371,7 +390,7 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 #    and the re-check is ✓ + exit 0.  (fix_repairs_verified)
 # ===========================================================================
 
-@test "--fix on a MISSING rules symlink: onboard re-seeds it; afterward it resolves to canonical and exit 0" {
+@test "--fix on a MISSING rules symlink: nothing is re-seeded; the row stays ERROR and names its migration" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -380,24 +399,28 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
 
   run_doctor --fix
-  [ "$status" -eq 0 ]
-  # The link now exists, points at the fixture canonical, and resolves.
-  [ -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
-  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
-    "$CANON/core-rules/CLAUDE.md" ]
-  [ -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
-  # The AFTER-pass re-check shows the row green (proves doctor re-verified, not
-  # just that onboard exited).
-  [[ "$output" == *"re-checking healthy after fixes"* ]]
-  [[ "$output" == *"✓ rules: trellis.md resolves to canonical"* ]]
+  # Unrepaired ERROR — the cutover removed every writer that could seed this.
+  [ "$status" -ne 0 ]
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [ ! -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [[ "$output" == *"legacy direct-link repair was removed in v1.0.0-rc.25"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis migrate --prepare \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis attach --fleet NAME \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  # The AFTER-pass re-check still runs and still surfaces the row as broken.
+  [[ "$output" == *"re-checking healthy after fixes"* ]] || { echo "$output"; false; }
+  [[ "${output##*re-checking healthy after fixes}" == *"rules:"* ]] || { echo "$output"; false; }
+  [[ "${output##*re-checking healthy after fixes}" != *"✓ rules: trellis.md resolves to canonical"* ]] \
+    || { echo "$output"; false; }
 }
 
 # ===========================================================================
-# 3. --fix repairs a STALE/broken symlink via the rm+onboard path: onboard alone
-#    never-clobbers, so doctor must rm the bad link first, then re-seed.
+# 3. A STALE/broken symlink is the case that most needs a guard: the pre-cutover
+#    path `rm`'d it before re-seeding. With the re-seed gone, an `rm` would
+#    destroy a project-owned byte for nothing — so doctor must not touch it at
+#    all. This pins that the bad link survives verbatim.
 # ===========================================================================
 
-@test "--fix on a STALE/wrong-target rules symlink: rm+onboard repairs it; afterward it resolves to canonical and exit 0" {
+@test "--fix on a STALE/wrong-target rules symlink: the bad link is never rm'd, and the migration is reported" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -409,17 +432,18 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
 
   run_doctor --fix
-  [ "$status" -eq 0 ]
-  # doctor printed the rm of the known-bad link before re-seeding.
-  [[ "$output" == *"[auto] rm "*".claude/rules/trellis.md"* ]]
-  # Now retargeted to the fixture canonical and resolving.
+  [ "$status" -ne 0 ]
+  # No rm is planned or performed, in any spelling.
+  [[ "$output" != *"[auto] rm "* ]] || { echo "$output"; false; }
+  # The known-bad link is byte-identical — still pointing cross-machine.
+  [ -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
   [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
-    "$CANON/core-rules/CLAUDE.md" ]
-  [ -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
-  [[ "$output" == *"✓ rules: trellis.md resolves to canonical"* ]]
+    "/Users/helios/claude/se-core-template/core-rules/CLAUDE.md" ]
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [[ "$output" == *"[manual] stale/wrong rules symlink .claude/rules/trellis.md"* ]] || { echo "$output"; false; }
 }
 
-@test "--fix preserves a PLAN_RM_LIST path containing spaces as one rm argument" {
+@test "the reported migration quotes a project path containing spaces as one argument" {
   local spaced_root="$SANDBOX/root with spaces"
   CANON="$spaced_root/canonical"
   PROJECTS="$spaced_root/projects"
@@ -437,20 +461,34 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
   run_doctor --fix
 
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"[auto] rm \"$PROJECTS/healthy/.claude/rules/trellis.md\""* ]]
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  # The migration command an operator would paste must survive the spaces.
+  [[ "$output" == *"trellis migrate --prepare \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis attach --fleet NAME \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  # And the wrong-target link is left exactly as found.
   [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
-    "$CANON/core-rules/CLAUDE.md" ]
+    "/nonexistent/wrong-target.md" ]
 }
 
 # ===========================================================================
-# 4. The --fix-hooks GATE. Fixture has BOTH a stale top-level hook AND a missing
-#    rules symlink, so onboard actually RUNS — proving that onboard's seed pass
-#    does NOT clobber the stale hook (never-clobber), and that ONLY --fix-hooks
-#    (sync-hooks.sh) updates it.  (hook_gate_verified)
+# 4. Hook drift on a LEGACY direct-link project is [manual], not [auto]/[hooks].
+#    Fixture has BOTH a stale top-level hook AND a missing rules symlink, so
+#    onboard actually RUNS — proving onboard's seed pass does NOT clobber the
+#    stale hook (never-clobber) — while doctor classifies the hook drift as
+#    unrepairable and prints the remedy that actually works.
+#    (hook_manual_classification_verified)
+#
+#    Spec 036: sync-hooks.sh reconciles a hook surface ONLY through the
+#    recorded immutable release of a REGISTERED, attached row, and never copies
+#    a hook out of the mutable checkout that launched it. A legacy-config
+#    project has no registry row and no recorded release, so an [auto]/[hooks]
+#    repair could NEVER succeed. Doctor therefore stops advertising it: the row
+#    is reported [manual] with the attach/adopt remedy, and --fix-hooks says
+#    plainly that it is inert. The refusal that makes this the honest answer is
+#    proven directly, against sync-hooks.sh itself, in the test after this one.
 # ===========================================================================
 
-@test "--fix WITHOUT --fix-hooks does NOT modify a drifted hook (reported skipped); --fix --fix-hooks DOES converge it" {
+@test "hook drift on a legacy project is reported [manual] with the attach remedy; neither --fix nor --fix-hooks delegates to sync-hooks.sh, and the after-pass still surfaces the drift" {
   build_canonical_tree
   add_canonical_hooks            # canonical hooks == worktree hooks
   git_init_canonical_main        # commit AFTER hooks so canonical stays clean
@@ -466,34 +504,79 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   canon_sha="$(sha_of "$CANON/core-rules/hooks/session-context.sh")"
   [ "$stale_sha" != "$canon_sha" ]   # precondition: it really is drifted
 
-  # Also break the rules symlink so onboard has a real reason to run. This makes
-  # the gate load-bearing: onboard executes, yet must leave the stale hook alone.
+  # Also break the rules symlink. Before the cutover this made onboard run, so
+  # the case proved onboard never-clobbered the hook. Since the cutover it makes
+  # the point more directly: doctor repairs NEITHER surface, and says so.
   rm -f "$PROJECTS/healthy/.claude/rules/trellis.md"
 
-  # --- plain --fix: onboard runs, hook must be UNTOUCHED, output says skipped ---
+  # --- plain --fix ---
   run_doctor --fix
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipped (run with --fix-hooks)"* ]]
-  # The rules symlink WAS repaired (proving onboard ran)...
-  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
-    "$CANON/core-rules/CLAUDE.md" ]
-  # ...but the drifted hook is byte-for-byte UNCHANGED (still the stale sha,
-  # NOT the canonical sha). This is the gate.
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  # The honest remedy, naming the flow that CAN own hook reconciliation.
+  [[ "$output" == *"[manual] Claude hook copies drift from canonical — no engine repairs a legacy direct-link project's hooks; attach it (scripts/attach-project.sh attach \"$PROJECTS/healthy\")"* ]] \
+    || { echo "$output"; false; }
+  # No [hooks] class, and no promise of a sync-hooks repair, in any spelling.
+  [[ "$output" != *"[hooks]"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"sync-hooks.sh --yes"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"run with --fix-hooks"* ]] || { echo "$output"; false; }
+  # The rules symlink was NOT re-seeded...
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  [ ! -L "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  # ...and the drifted hook is byte-for-byte UNCHANGED.
   [ "$(sha_of "$bell")" = "$stale_sha" ]
   [ "$(sha_of "$bell")" != "$canon_sha" ]
+  # And the AFTER-pass re-check still surfaces the drift — a [manual] row is
+  # reported, never quietly resolved.
+  [[ "$output" == *"-- re-checking healthy after fixes --"* ]] || { echo "$output"; false; }
+  [[ "${output##*-- re-checking healthy after fixes --}" == *"hooks: drift vs canonical —stale: session-context.sh"* ]] \
+    || { echo "$output"; false; }
 
-  # --- now --fix --fix-hooks: the hook converges to canonical ---
+  # --- --fix --fix-hooks: the flag is accepted and says it is inert. It must
+  # NOT resurrect the delegation, and must not touch the hook.
   run_doctor --fix --fix-hooks
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"sync-hooks.sh"* ]]
-  [ "$(sha_of "$bell")" = "$canon_sha" ]
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"[manual] --fix-hooks is inert:"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[hooks]"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"sync-hooks.sh --yes"* ]] || { echo "$output"; false; }
+  [ "$(sha_of "$bell")" = "$stale_sha" ]
+  [ "$(sha_of "$bell")" != "$canon_sha" ]
+  [[ "${output##*-- re-checking healthy after fixes --}" == *"hooks: drift vs canonical —stale: session-context.sh"* ]] \
+    || { echo "$output"; false; }
+}
+
+# The remedy above is honest only if sync-hooks.sh genuinely cannot repair this
+# project. Prove that directly, against a PINNED private machine home (an empty
+# $TRELLIS_HOME with no config and no registry — exactly what a legacy-config
+# operator has), and assert the SPECIFIC refusal rather than "it failed".
+@test "sync-hooks.sh refuses a legacy direct-link project outright: no local registry to reconcile through, hook bytes untouched" {
+  build_canonical_tree
+  add_canonical_hooks
+  git_init_canonical_main
+  build_healthy_project
+  seed_project_hooks_from_canonical
+  write_config
+
+  local bell="$PROJECTS/healthy/.claude/hooks/session-context.sh"
+  printf '\n# DRIFT MARKER\n' >> "$bell"
+  local stale_sha
+  stale_sha="$(sha_of "$bell")"
+
+  run env -u SHARED_INFRA_ROOT HOME="$FIXTURE_HOME" TRELLIS_HOME="$FIXTURE_TRELLIS_HOME" \
+    bash "$REPO_ROOT/scripts/sync-hooks.sh" --yes healthy
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  # The specific refusal: there is no registry row to reconcile through,
+  # because a legacy direct-link project was never registered/attached at all.
+  [[ "$output" == *"sync-hooks.sh: project not in local registry fleet personal: healthy"* ]] \
+    || { echo "$output"; false; }
+  # Refusal, not partial work: the drifted hook is byte-identical.
+  [ "$(sha_of "$bell")" = "$stale_sha" ]
 }
 
 # ===========================================================================
 # 5. A dead/cross-machine @-import is MANUAL-only: --fix NEVER edits a user's
-#    CLAUDE.md. We pair it with a missing rules symlink so onboard actually runs
-#    — proving onboard repairs the symlink yet leaves CLAUDE.md byte-identical.
-#    The import is a dead ERROR, so the run stays non-zero (it is unfixed).
+#    CLAUDE.md. Since the cutover nothing else is edited either, so the
+#    load-bearing assertion is that the user-owned file is byte-identical while
+#    the dead import is still named in full.
 # ===========================================================================
 
 @test "--fix on a dead @-import: CLAUDE.md is byte-identical, reported [manual], import still ERROR (non-zero exit)" {
@@ -515,25 +598,26 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   # though the symlink was repaired.
   [ "$status" -ne 0 ]
   # Reported as a [manual] action (never auto-edited).
-  [[ "$output" == *"[manual]"* ]]
-  [[ "$output" == *"@-import"* ]]
-  # onboard DID run and repaired the symlink (the load-bearing pairing)...
-  [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
-    "$CANON/core-rules/CLAUDE.md" ]
-  # ...yet the user-owned CLAUDE.md is byte-for-byte UNCHANGED.
+  [[ "$output" == *"[manual]"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"@-import"* ]] || { echo "$output"; false; }
+  # Nothing was re-seeded...
+  [ ! -e "$PROJECTS/healthy/.claude/rules/trellis.md" ]
+  # ...and the user-owned CLAUDE.md is byte-for-byte UNCHANGED.
   [ "$(sha_of "$cm")" = "$before_sha" ]
-  [[ "$output" == *"/Users/helios/"* ]]
+  [[ "$output" == *"/Users/helios/"* ]] || { echo "$output"; false; }
   # The import row is still ✗ in the after-pass re-check.
-  [[ "$output" == *"✗ import:"* ]]
+  [[ "$output" == *"✗ import:"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
-# 6. Tier-0 gate on --fix: a dirty/off-main canonical blocks ALL [auto] repair
-#    (onboard would re-link projects to off-main/dirty rules — incident #2).
-#    The bad symlink must therefore remain untouched.
+# 6. Tier-0 on --fix. The gate used to exist because [auto] repair would re-link
+#    projects to off-main/dirty rules (incident #2). With no [auto] channel left
+#    there is nothing to gate — so the invariant the gate protected has to hold
+#    unconditionally: a Tier-0 ERROR is reported and the bad symlink is
+#    untouched, exactly as when the canonical is clean.
 # ===========================================================================
 
-@test "--fix is BLOCKED by a Tier-0 ERROR: off-main canonical => [auto] skipped, the bad symlink is left as-is, non-zero exit" {
+@test "--fix under a Tier-0 ERROR: Tier-0 is reported, the bad symlink is left as-is, non-zero exit" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -547,9 +631,8 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
   run_doctor --fix
   [ "$status" -ne 0 ]
-  # [auto] repair is explicitly skipped while Tier-0 stands.
-  [[ "$output" == *"SKIPPED"* ]]
-  [[ "$output" == *"Tier-0"* ]]
+  [[ "$output" == *"Tier-0"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Tier-0 is report-only"* ]] || { echo "$output"; false; }
   # The known-bad symlink was NOT touched — still pointing cross-machine.
   [ "$(readlink "$PROJECTS/healthy/.claude/rules/trellis.md")" = \
     "/Users/helios/claude/se-core-template/core-rules/CLAUDE.md" ]
@@ -568,8 +651,8 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
   build_healthy_project
   write_config
   run_doctor --fix --dry-run
-  [[ "$output" == *"canonical clone: $CANON"* ]]
-  [[ -z "$LIVE_CANON" || "$output" != *"$LIVE_CANON"* ]]
+  [[ "$output" == *"canonical clone: $CANON"* ]] || { echo "$output"; false; }
+  [[ -z "$LIVE_CANON" || "$output" != *"$LIVE_CANON"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -628,8 +711,8 @@ add_linked_worktree() {
   run_doctor
   # Doctor WARNs about the missing-inheritance worktree.
   [ "$status" -eq 0 ]
-  [[ "$output" == *"⚠ worktree-inheritance:"* ]]
-  [[ "$output" == *"missing inheritance symlinks"* ]]
+  [[ "$output" == *"⚠ worktree-inheritance:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"missing inheritance symlinks"* ]] || { echo "$output"; false; }
 }
 
 @test "worktree-inheritance DETECTION: all linked worktrees healthy => no WARN" {
@@ -640,18 +723,33 @@ add_linked_worktree() {
   write_config
   add_linked_worktree "healthy-wt"
 
-  # Seed the worktree manually so it is fully healthy before running doctor.
-  bash "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" \
-    --target "$WT_PATH" --root "$CANON" --quiet
+  # Seed the worktree by hand. The legacy mirror command that used to do this
+  # was removed at v1.0.0-rc.25, and its replacement needs local registration
+  # this legacy-config fixture deliberately does not have — so the fixture
+  # builds the healthy end state directly, by copying every managed link the
+  # main checkout carries. Only the DETECTION is under test.
+  local wt_link wt_dest
+  while IFS= read -r wt_link; do
+    [ -n "$wt_link" ] || continue
+    wt_dest="$WT_PATH/${wt_link#"$PROJECTS/healthy/"}"
+    mkdir -p "$(dirname "$wt_dest")"
+    ln -sfn "$(readlink "$wt_link")" "$wt_dest"
+  done < <(find "$PROJECTS/healthy/.claude" "$PROJECTS/healthy/.agents" \
+    "$PROJECTS/healthy/.omp" -maxdepth 2 -type l 2>/dev/null)
+  # .omp/AGENTS.md points at the checkout's OWN CLAUDE.md, so the worktree's
+  # copy must point at the worktree's file, not the main checkout's.
+  if [ -L "$PROJECTS/healthy/.omp/AGENTS.md" ]; then
+    ln -sfn "$WT_PATH/CLAUDE.md" "$WT_PATH/.omp/AGENTS.md"
+  fi
 
   run_doctor
   # The worktree is healthy — no worktree-inheritance WARN.
   [ "$status" -eq 0 ]
-  [[ "$output" != *"⚠ worktree-inheritance:"* ]]
-  [[ "$output" == *"✓ worktree-inheritance:"* ]]
+  [[ "$output" != *"⚠ worktree-inheritance:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"✓ worktree-inheritance:"* ]] || { echo "$output"; false; }
 }
 
-@test "worktree-inheritance FIX --dry-run: plans the seeder repair (seed-inheritance-symlinks.sh + wt path), changes nothing" {
+@test "worktree-inheritance FIX --dry-run: reports the clone migration and every offending worktree, changes nothing" {
   add_canonical_seeder
   build_canonical_tree
   git_init_canonical_main
@@ -666,10 +764,12 @@ add_linked_worktree() {
 
   run_doctor --fix --dry-run
   [ "$status" -eq 0 ]
-  # The plan mentions seed-inheritance-symlinks.sh and the worktree path.
-  [[ "$output" == *"seed-inheritance-symlinks.sh"* ]]
-  [[ "$output" == *"$WT_PATH"* ]]
-  [[ "$output" == *"nothing applied"* ]]
+  # The plan names the offending worktree and the clone migration that covers
+  # it — never the removed per-worktree mirror command.
+  [[ "$output" == *"[manual] linked worktree missing inheritance: $WT_PATH"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis migrate --prepare \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  [[ "$output" != *"--legacy-mirror"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"nothing applied"* ]] || { echo "$output"; false; }
 
   # Filesystem is unchanged (dry-run = no mutation).
   local after
@@ -678,7 +778,7 @@ add_linked_worktree() {
   [ ! -d "$WT_PATH/.claude" ]
 }
 
-@test "worktree-inheritance FIX: --fix seeds missing inheritance and re-check is OK (exit 0)" {
+@test "worktree-inheritance FIX: --fix seeds nothing; the worktree stays un-seeded and the WARN persists" {
   add_canonical_seeder
   build_canonical_tree
   git_init_canonical_main
@@ -690,16 +790,15 @@ add_linked_worktree() {
   [ ! -d "$WT_PATH/.claude" ]
 
   run_doctor --fix
-  # After fix the re-check must show the worktree as healthy.
+  # Worktree inheritance is a WARN, so a run with nothing else broken still
+  # exits 0 — but nothing was seeded and the WARN is still reported after.
   [ "$status" -eq 0 ]
-  [[ "$output" == *"re-checking healthy after fixes"* ]]
-  [[ "$output" == *"✓ worktree-inheritance:"* ]]
-  # The symlinks must actually exist in the worktree.
-  [ -d "$WT_PATH/.claude" ]
-  [ -L "$WT_PATH/.claude/rules/trellis.md" ]
+  [[ "$output" == *"re-checking healthy after fixes"* ]] || { echo "$output"; false; }
+  [[ "${output##*re-checking healthy after fixes}" == *"⚠ worktree-inheritance:"* ]] || { echo "$output"; false; }
+  [ ! -d "$WT_PATH/.claude" ]
 }
 
-@test "worktree-inheritance FIX: Tier-0 gate blocks seed repair when canonical is off-main" {
+@test "worktree-inheritance FIX: an off-main canonical changes nothing — the worktree was never going to be seeded" {
   add_canonical_seeder
   build_canonical_tree
   git_init_canonical_main
@@ -713,22 +812,21 @@ add_linked_worktree() {
   run_doctor --fix
   # Tier-0 is in error → non-zero exit.
   [ "$status" -ne 0 ]
-  # The seed repair is explicitly skipped (Tier-0 gate).
-  [[ "$output" == *"SKIPPED"* ]]
-  [[ "$output" == *"Tier-0"* ]]
-  # The worktree must remain un-seeded.
+  [[ "$output" == *"Tier-0"* ]] || { echo "$output"; false; }
+  # The worktree remains un-seeded — the same outcome as a clean canonical,
+  # because there is no seeding path left to gate.
   [ ! -d "$WT_PATH/.claude" ]
 }
 
 # ===========================================================================
 # OMP surface (design 2026-08-09) — the --fix PLAN for a broken .omp link.
-# Wrong-target OMP links follow the same rm-then-onboard path as the rules
-# symlink (onboard never-clobbers, so the bad link must be rm'd first). The
-# actual re-seed is onboard's contract (covered by onboard's own tests); here
-# we pin the doctor-side plan and the read-only guarantee.
+# Wrong-target OMP links used to follow the rm-then-onboard path. Since
+# v1.0.0-rc.25 they follow the same path as every other legacy surface: report
+# the migration, touch nothing. Here we pin the doctor-side plan and the
+# read-only guarantee.
 # ===========================================================================
 
-@test "OMP --fix --dry-run: wrong-target .omp link is planned as rm + onboard, and nothing is touched" {
+@test "OMP --fix --dry-run: a wrong-target .omp link is reported for migration, and nothing is touched" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -742,10 +840,11 @@ add_linked_worktree() {
 
   run_doctor --fix --dry-run
   [ "$status" -eq 0 ]
-  # The plan names the rm of the known-bad OMP link AND the onboard re-seed.
-  [[ "$output" == *"[auto] rm "*".omp/agents"* ]]
-  [[ "$output" == *"onboard-project.sh"* ]]
-  [[ "$output" == *"nothing applied"* ]]
+  # The plan names the broken OMP surface and the migration that owns it.
+  [[ "$output" == *"[manual] OMP surface link missing/wrong/dangling under .omp/"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis migrate --prepare \"$PROJECTS/healthy\""* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] rm "* ]] || { echo "$output"; false; }
+  [[ "$output" == *"nothing applied"* ]] || { echo "$output"; false; }
 
   after="$(snapshot_project "$PROJECTS/healthy")"
   # READ-ONLY oracle: byte-for-byte + symlink-target identical before vs after.
@@ -753,4 +852,405 @@ add_linked_worktree() {
   # The bad link in particular was NOT touched.
   [ "$(readlink "$PROJECTS/healthy/.omp/agents")" = \
     "/Users/helios/claude/se-core-template/core-rules/agents" ]
+}
+
+# Portable T15 fixture is intentionally local-only. The source checkout is
+# merely configuration provenance; no release or attachment is needed to prove
+# doctor withholds an unsafe attach repair without mutating an inert manifest.
+build_portable_doctor_fix_home() {
+  PORTABLE_HOME="$SANDBOX/portable-home"
+  PORTABLE_SOURCE="$SANDBOX/portable-source"
+  PORTABLE_PROJECT="$SANDBOX/portable project"
+  PORTABLE_ACCOUNT_HOME="$SANDBOX/portable-account"
+  mkdir -p "$PORTABLE_HOME/locks" "$PORTABLE_HOME/state" "$PORTABLE_HOME/releases" \
+    "$PORTABLE_SOURCE" "$PORTABLE_PROJECT" "$PORTABLE_ACCOUNT_HOME/.local/bin"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis"
+  chmod 755 "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis"
+  chmod 700 "$PORTABLE_HOME" "$PORTABLE_HOME/locks" "$PORTABLE_HOME/state" "$PORTABLE_HOME/releases"
+  printf '{"schema_version":2,"harnesses":["claude","codex","omp"]}\n' > "$PORTABLE_SOURCE/trellis.config.json"
+  cat > "$PORTABLE_HOME/config.json" <<EOF
+{"schema_version":1,"source_root":"$PORTABLE_SOURCE","release_remote":"$PORTABLE_SOURCE","active_cli_release":"1.2.3","default_fleet":"personal","fleets":{"personal":{"discovery_roots":["$SANDBOX"]}}}
+EOF
+  chmod 600 "$PORTABLE_HOME/config.json"
+  git -C "$PORTABLE_PROJECT" init -q -b main
+  printf '{"schema_version":1,"project_id":"portable-fixture"}\n' > "$PORTABLE_PROJECT/.trellis.json"
+  git -C "$PORTABLE_PROJECT" add .trellis.json
+  git -C "$PORTABLE_PROJECT" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm initial
+  identity="$(bash -c '. "'"$REPO_ROOT"'/scripts/lib/trellis-home.sh"; . "'"$REPO_ROOT"'/scripts/lib/local-registry.sh"; local_registry_identity_for_root "'"$PORTABLE_PROJECT"'"')"
+  PORTABLE_CHECKOUT_ID="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
+  PORTABLE_WORKTREE_ID="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
+  PORTABLE_COMMON="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
+  cat > "$PORTABLE_HOME/registry.json" <<EOF
+{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$PORTABLE_CHECKOUT_ID":{"root":"$PORTABLE_PROJECT","git_common_dir":"$PORTABLE_COMMON","release":"1.2.3","harnesses":["claude","codex","omp"],"worktrees":{"$PORTABLE_WORKTREE_ID":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
+EOF
+  chmod 600 "$PORTABLE_HOME/registry.json"
+}
+
+@test "portable doctor --fix --dry-run withholds attach when the recorded release is unavailable" {
+  build_portable_doctor_fix_home
+  before="$(shasum -a 256 "$PORTABLE_PROJECT/.trellis.json" | awk '{print $1}')"
+
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" bash "$DOCTOR" --fix --dry-run
+
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"repair boundary: attach/relink is withheld until recorded immutable release 1.2.3 validates"* ]] || { echo "$output"; false; }
+  [ ! -e "$PORTABLE_PROJECT/.trellis/runtime" ]
+  [ "$(shasum -a 256 "$PORTABLE_PROJECT/.trellis.json" | awk '{print $1}')" = "$before" ]
+}
+
+run_portable_doctor_fix() {
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" bash "$DOCTOR" "$@"
+}
+
+install_portable_doctor_release() {
+  local repo="$SANDBOX/portable-release" command_name hook
+  mkdir -p \
+    "$repo/core-rules/skills/fixture" \
+    "$repo/core-rules/commands/templates" \
+    "$repo/core-rules/agents" \
+    "$repo/core-rules/hooks/lib" \
+    "$repo/core-rules/githooks" \
+    "$repo/core-rules/codex/hooks/lib" \
+    "$repo/core-rules/omp/hooks/pre" \
+    "$repo/core-rules/templates" \
+    "$repo/core-rules/presets"
+  cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$repo/core-rules/inheritance-manifest.json"
+  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
+    "$repo/core-rules/templates/claude-settings.local.json"
+  cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
+    "$repo/core-rules/templates/codex-hooks.local.json"
+  mkdir -p "$repo/scripts"
+  cp "$REPO_ROOT/scripts/trellis" "$repo/scripts/trellis"
+  cp "$REPO_ROOT/scripts/release.sh" "$repo/scripts/release.sh"
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
+  cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
+  cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
+  chmod 755 "$repo/scripts/trellis" "$repo/scripts/release.sh" \
+    "$repo/scripts/attach-project.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
+  cat > "$repo/trellis.config.json" <<'EOF'
+{"schema_version":2,"maintainer_name":"Fixture","github_user":"fixture","harnesses":["claude","codex","omp"],"autonomy_default":2}
+EOF
+  printf '1.2.3\n' > "$repo/core-rules/VERSION"
+  printf '# fixture rules\n' > "$repo/core-rules/CLAUDE.md"
+  printf -- '---\nname: fixture\ndescription: fixture\n---\n' > "$repo/core-rules/skills/fixture/SKILL.md"
+  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+    printf '# fixture command %s\n' "$command_name" > "$repo/core-rules/commands/$command_name.md"
+  done
+  printf '# primer\n' > "$repo/core-rules/commands/templates/primer-index-template.md"
+  printf '# fixture agent\n' > "$repo/core-rules/agents/fixture.md"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/hooks/fixture.sh"
+  chmod 755 "$repo/core-rules/hooks/fixture.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
+  chmod 755 "$repo/core-rules/githooks/pre-push"
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core spec-gate-core ui-verify-core; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/hooks/lib/$hook.sh"
+    chmod 755 "$repo/core-rules/hooks/lib/$hook.sh"
+  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/codex/hooks/fixture.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/codex/hooks/lib/fixture.sh"
+  chmod 755 "$repo/core-rules/codex/hooks/fixture.sh" "$repo/core-rules/codex/hooks/lib/fixture.sh"
+  printf 'export const fixture = true;\n' > "$repo/core-rules/omp/hooks/pre/fixture.ts"
+  (
+    cd "$repo"
+    git init -q -b main
+    git config user.email fixture@example.invalid
+    git config user.name fixture
+    git config commit.gpgsign false
+    git config tag.gpgSign false
+    git add -A
+    git commit -qm fixture
+    git tag -a v1.2.3 -m fixture
+  )
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis" release install 1.2.3 --remote "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis" release verify 1.2.3
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+attach_portable_doctor_project() {
+  install_portable_doctor_release
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
+      --fleet personal --release 1.2.3 \
+      --harness claude --harness codex --harness omp "$PORTABLE_PROJECT"
+  if [ "$status" -ne 0 ]; then
+    printf 'attach_portable_doctor_project failed (exit %s):\n%s\n' "$status" "$output" >&2
+    return "$status"
+  fi
+}
+
+build_portable_fixture_project() {
+  local root="$1" project_id="$2"
+  mkdir -p "$root"
+  git -C "$root" init -q -b main
+  printf '{"schema_version":1,"project_id":"%s"}\n' "$project_id" > "$root/.trellis.json"
+  git -C "$root" add .trellis.json
+  git -C "$root" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm initial
+}
+
+portable_identity_for_root() {
+  bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/local-registry.sh"; local_registry_identity_for_root "$2"' \
+    _ "$REPO_ROOT" "$1"
+}
+
+@test "portable doctor --fix --dry-run preserves harnesses and quotes attachment arguments" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"--harness claude"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"--harness codex"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"--harness omp"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"portable\\ project"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"safe repair through trellis attach is planned but was not applied"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor refuses a dry-run attach with an empty registry harness set" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  jq '.projects["personal/portable-fixture"].checkouts |= with_entries(.value.harnesses = [])' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"registry harness selection is empty or invalid; attach cannot choose native surfaces"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor never reattaches detached or excluded rows" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  jq '.projects["personal/portable-fixture"].status = "detached"' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"registry status: detached"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+
+  jq '.projects["personal/portable-fixture"].status = "active"
+      | .projects["personal/portable-fixture"].metadata = {legacy:{blacklisted:true}}' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"registry exclusion: automatic attachment repair is withheld"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor refuses unsafe attachment journal entries instead of recovering or attaching" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  mkdir -p "$PORTABLE_HOME/state/attachment-journals"
+  chmod 700 "$PORTABLE_HOME/state" "$PORTABLE_HOME/state/attachment-journals"
+  ln -s "$SANDBOX/untrusted-journal" "$PORTABLE_HOME/state/attachment-journals/corrupt.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"attachment journal entry is a symlink or non-regular file"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis recover"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor refuses an unexpected attachment journal node instead of treating it as absent" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  mkdir -p "$PORTABLE_HOME/state/attachment-journals"
+  chmod 700 "$PORTABLE_HOME/state" "$PORTABLE_HOME/state/attachment-journals"
+  ln -s "$SANDBOX/untrusted-journal" "$PORTABLE_HOME/state/attachment-journals/unexpected-node"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"attachment journal directory has an unexpected entry"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis recover"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor refuses a valid-shaped journal for a different registry row" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" ATTACHMENT_FAULT_PHASE=prepared \
+    bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
+      --fleet personal --release 1.2.3 --harness claude "$PORTABLE_PROJECT"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  journal="$(find "$PORTABLE_HOME/state/attachment-journals" -type f -name '*.json' -print)"
+  [ -f "$journal" ]
+  jq '.project_id = "different-project"' "$journal" > "$journal.next"
+  mv "$journal.next" "$journal"
+  chmod 600 "$journal"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"attachment journal does not exactly match this registry row"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis recover"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor withholds even an exact journal and continues later rows" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" ATTACHMENT_FAULT_PHASE=prepared \
+    bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
+      --fleet personal --release 1.2.3 --harness claude "$PORTABLE_PROJECT"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  journal="$(find "$PORTABLE_HOME/state/attachment-journals" -type f -name '*.json' -print)"
+  [ -f "$journal" ]
+  journal_before="$(shasum -a 256 "$journal" | awk '{print $1}')"
+  project_before="$(shasum -a 256 "$PORTABLE_PROJECT/.trellis.json" | awk '{print $1}')"
+
+  visible_root="$SANDBOX/z-visible"
+  build_portable_fixture_project "$visible_root" z-visible
+  visible_identity="$(portable_identity_for_root "$visible_root")"
+  visible_checkout="$(printf '%s\n' "$visible_identity" | jq -r '.checkout_id')"
+  visible_worktree="$(printf '%s\n' "$visible_identity" | jq -r '.worktree_id')"
+  visible_common="$(printf '%s\n' "$visible_identity" | jq -r '.git_common_dir')"
+  jq --arg checkout "$visible_checkout" --arg common "$visible_common" \
+    --arg root "$visible_root" --arg worktree "$visible_worktree" '
+      .projects["personal/z-visible"] = {
+        fleet: "personal", project_id: "z-visible", status: "active", metadata: {},
+        checkouts: {
+          ($checkout): {
+            root: $root, git_common_dir: $common, release: "1.2.3", harnesses: ["claude"],
+            worktrees: {($worktree): {root: $root}}
+          }
+        }
+      }
+    ' "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"attachment journal at $journal (state=prepared) requires manual recovery"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis recover --home"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis recover"* ]] || { echo "$output"; false; }
+  [[ "${output#*portable-fixture (worktree)}" == *"z-visible (worktree)"* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$journal" | awk '{print $1}')" = "$journal_before" ]
+  [ "$(shasum -a 256 "$PORTABLE_PROJECT/.trellis.json" | awk '{print $1}')" = "$project_before" ]
+  [ ! -e "$PORTABLE_PROJECT/.trellis/runtime" ]
+}
+
+@test "portable doctor dry-run remains nonzero for an unavailable row" {
+  build_portable_doctor_fix_home
+  jq '.projects["personal/portable-fixture"].status = "unavailable"' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"unavailable: retained local registry row at $PORTABLE_PROJECT"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor treats a corrupt recorded release as a row error" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  corrupt_file="$PORTABLE_HOME/releases/1.2.3/payload/trellis.config.json"
+  chmod u+w "$corrupt_file"
+  printf '\n# corrupted after verification\n' >> "$corrupt_file"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"immutable release: 1.2.3 is corrupt or unsafe"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor does not relink when native surfaces or excludes drift" {
+  build_portable_doctor_fix_home
+  attach_portable_doctor_project
+  rm "$PORTABLE_PROJECT/.trellis/runtime"
+  printf '\n# user exclude drift\n' >> "$PORTABLE_PROJECT/.git/info/exclude"
+  jq --arg checkout "$PORTABLE_CHECKOUT_ID" --arg worktree "$PORTABLE_WORKTREE_ID" \
+    '.projects["personal/portable-fixture"].checkouts[$checkout].harnesses = ["codex"]' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  # The registry harness selection is an input to the native-surface plan the
+  # owner exclude block is derived from, so shrinking that selection changes the
+  # EXPECTED block and the excludes check reports a plan mismatch. It therefore
+  # never reaches the "surrounding user bytes changed" wording, which compares
+  # the on-disk file against an expected block it has already rejected. This
+  # assertion asked for that later wording and was inert (a bare mid-test
+  # `[[ … ]]` does not fail a bats test on this host), so it never reported that
+  # it was checking for a message this fixture cannot produce. Exclude-byte
+  # drift is asserted on its own below, where it is actually reachable.
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"managed excludes: owner block does not match the exact immutable native surface plan"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"native surfaces: registry harness selection does not exactly match"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis relink"* ]] || { echo "$output"; false; }
+
+  # Restore the attached harness selection so the expected block matches again,
+  # leaving the appended user bytes as the only drift. That is the fixture in
+  # which the byte-level wording IS reachable, so the exclude-byte invariant
+  # this test is named for stays proven rather than merely asserted.
+  jq --arg checkout "$PORTABLE_CHECKOUT_ID" \
+    '.projects["personal/portable-fixture"].checkouts[$checkout].harnesses = ["claude", "codex", "omp"]' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"managed excludes: exact Trellis-owned block or surrounding user bytes changed"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis relink"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor reports identity drift and still enumerates a later row" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  drift_root="$SANDBOX/a-drift"
+  visible_root="$SANDBOX/z-visible"
+  build_portable_fixture_project "$drift_root" a-drift
+  build_portable_fixture_project "$visible_root" z-visible
+  drift_identity="$(portable_identity_for_root "$drift_root")"
+  visible_identity="$(portable_identity_for_root "$visible_root")"
+  drift_checkout="$(printf '%s\n' "$drift_identity" | jq -r '.checkout_id')"
+  drift_common="$(printf '%s\n' "$drift_identity" | jq -r '.git_common_dir')"
+  visible_checkout="$(printf '%s\n' "$visible_identity" | jq -r '.checkout_id')"
+  visible_worktree="$(printf '%s\n' "$visible_identity" | jq -r '.worktree_id')"
+  visible_common="$(printf '%s\n' "$visible_identity" | jq -r '.git_common_dir')"
+  cat > "$PORTABLE_HOME/registry.json" <<EOF
+{"schema_version":1,"projects":{"personal/a-drift":{"fleet":"personal","project_id":"a-drift","status":"active","metadata":{},"checkouts":{"$drift_checkout":{"root":"$drift_root","git_common_dir":"$drift_common","release":"1.2.3","harnesses":["claude"],"worktrees":{"0000000000000000000000000000000000000000000000000000000000000000":{"root":"$drift_root"}}}}},"personal/z-visible":{"fleet":"personal","project_id":"z-visible","status":"active","metadata":{},"checkouts":{"$visible_checkout":{"root":"$visible_root","git_common_dir":"$visible_common","release":"1.2.3","harnesses":["claude"],"worktrees":{"$visible_worktree":{"root":"$visible_root"}}}}}},"discovery_ignores":{}}
+EOF
+  chmod 600 "$PORTABLE_HOME/registry.json"
+  jq '.projects["personal/a-drift"].checkouts |= with_entries(.value.release = "9.9.9")' \
+    "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
+  mv "$PORTABLE_HOME/registry.next" "$PORTABLE_HOME/registry.json"
+  chmod 600 "$PORTABLE_HOME/registry.json"
+
+  run_portable_doctor_fix --fix --dry-run
+
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"a-drift (worktree)"* ]] || { echo "$output"; false; }
+  # The detail text comes from local_registry (`worktree ID does not match
+  # recorded root`); the wording this assertion asked for was never emitted by
+  # any code path. It was inert, so the mismatch went unreported.
+  [[ "$output" == *"identity drift: worktree ID does not match recorded root"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"immutable release: 9.9.9 is unavailable"* ]] || { echo "$output"; false; }
+  [[ "${output#*a-drift (worktree)}" == *"z-visible (worktree)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[auto] trellis attach"*"$visible_root"* ]] || { echo "$output"; false; }
 }

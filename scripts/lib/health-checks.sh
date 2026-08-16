@@ -32,7 +32,7 @@ export HC_OK HC_ERROR HC_WARN HC_INFO
 
 # Canonical sets — the full inheritance surface a healthy project carries.
 # Kept here (not in doctor.sh) so audits share the same definition of "full".
-HC_CANONICAL_SKILLS="process-gate security-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
+HC_CANONICAL_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
 # Project-seeded commands only. `constitution`, `trellis-doctor`, and
 # `disk-janitor` are control-plane diagnostics run from the canonical checkout
 # and are intentionally outside this set.
@@ -237,6 +237,21 @@ hc_tooling_noninteractive_path() {
 # without touching globals.
 # ===========================================================================
 
+# Return the expected literal link text for an absolute target under the active
+# symlink style. Relative links are computed from the link's containing dir.
+hc_expected_link_target() {
+  local target="$1" link="$2"
+  if [ "${SYMLINK_STYLE:-absolute}" = "relative" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$target" "$(dirname "$link")" <<'PY'
+import os
+import sys
+print(os.path.relpath(sys.argv[1], sys.argv[2]), end="")
+PY
+  else
+    printf '%s' "$target"
+  fi
+}
+
 # hc_rules_symlink <project> <canonical>
 # ERROR if .claude/rules/trellis.md is missing, not a symlink, or resolves to
 # anything other than <canonical>/core-rules/CLAUDE.md (incident #1: missing
@@ -244,7 +259,8 @@ hc_tooling_noninteractive_path() {
 hc_rules_symlink() {
   local proj="$1" canon="$2"
   local link="$proj/.claude/rules/trellis.md"
-  local expected="$canon/core-rules/CLAUDE.md"
+  local expected
+  expected="$(hc_expected_link_target "$canon/core-rules/CLAUDE.md" "$link")"
   if [ ! -L "$link" ]; then
     if [ -e "$link" ]; then
       echo "rules: .claude/rules/trellis.md exists but is not a symlink"
@@ -332,7 +348,7 @@ hc_skills_symlinks() {
     if [ -L "$link" ]; then
       local target
       target="$(readlink "$link")"
-      if [ "$target" != "$canon_skills/$s" ] || [ ! -e "$link" ]; then
+      if [ "$target" != "$(hc_expected_link_target "$canon_skills/$s" "$link")" ] || [ ! -e "$link" ]; then
         broken="$broken $s"
       fi
     fi
@@ -365,7 +381,7 @@ hc_commands_symlinks() {
     if [ -L "$link" ]; then
       local target
       target="$(readlink "$link")"
-      if [ "$target" != "$canon_cmd/$c.md" ] || [ ! -e "$link" ]; then
+      if [ "$target" != "$(hc_expected_link_target "$canon_cmd/$c.md" "$link")" ] || [ ! -e "$link" ]; then
         broken="$broken $c"
       fi
     fi
@@ -551,6 +567,66 @@ EOF
   return "$HC_OK"
 }
 
+# hc_worktree_links_ok <main-checkout> <worktree> <canonical>
+# Return 0 when every legacy direct-link inheritance symlink present in the MAIN
+# checkout also exists in WORKTREE and resolves to the same destination.
+#
+# Until v1.0.0-rc.25 this question was answered by shelling out to
+# `seed-inheritance-symlinks.sh --legacy-mirror --verify-only`. The cutover
+# removed that mode, and a diagnosis must not depend on a writer, so the
+# verification half lives here now. It is READ-ONLY by construction: it creates
+# nothing and repairs nothing, which is exactly the split the cutover draws.
+#
+# Enumeration matches the mirror it replaces: symlinks at depth <= 2 under
+# .claude/.agents/.omp whose resolved destination is inside the canonical clone,
+# plus the control-plane root AGENTS.md link, plus .omp/AGENTS.md — which points
+# at the checkout's OWN CLAUDE.md and must therefore resolve to the WORKTREE's
+# copy, never the main checkout's. Comparison is by RESOLVED destination, so an
+# absolute link and an equivalent relative one are both correct; a missing link,
+# a non-symlink, and a link to somewhere else are all offences.
+hc_worktree_links_ok() {
+  local main="$1" wt="$2" canon="$3" dir link relpath resolved dest
+  command -v python3 >/dev/null 2>&1 || return 0
+  for dir in "$main/.claude" "$main/.agents" "$main/.omp"; do
+    [ -d "$dir" ] || continue
+    while IFS= read -r link; do
+      [ -n "$link" ] || continue
+      relpath="${link#"$main"/}"
+      resolved="$(hc_realpath "$link")" || continue
+      case "$resolved" in
+        "$canon"/*) ;;
+        *) continue ;;
+      esac
+      dest="$wt/$relpath"
+      [ -L "$dest" ] || return 1
+      [ "$(hc_realpath "$dest")" = "$resolved" ] || return 1
+    done < <(find "$dir" -maxdepth 2 -type l 2>/dev/null)
+  done
+  if [ -L "$main/AGENTS.md" ]; then
+    resolved="$(hc_realpath "$main/AGENTS.md")"
+    case "$resolved" in
+      "$canon"/*)
+        [ -L "$wt/AGENTS.md" ] || return 1
+        [ "$(hc_realpath "$wt/AGENTS.md")" = "$resolved" ] || return 1
+        ;;
+    esac
+  fi
+  if [ -L "$main/.omp/AGENTS.md" ] && [ -f "$main/CLAUDE.md" ] &&
+     [ "$(hc_realpath "$main/.omp/AGENTS.md")" = "$(hc_realpath "$main/CLAUDE.md")" ]; then
+    [ -L "$wt/.omp/AGENTS.md" ] || return 1
+    [ "$(hc_realpath "$wt/.omp/AGENTS.md")" = "$(hc_realpath "$wt/CLAUDE.md")" ] || return 1
+  fi
+  return 0
+}
+
+hc_realpath() {
+  python3 - "$1" <<'HCPY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]), end="")
+HCPY
+}
+
 # hc_worktree_offenders <project> <canonical>
 # Helper (not an hc_ check): prints one offending linked-worktree path per line.
 # Used by hc_worktree_inheritance to build the WARN message AND by doctor.sh's
@@ -559,7 +635,6 @@ EOF
 # Skips worktrees that no longer exist on disk (detached-but-deleted worktrees).
 hc_worktree_offenders() {
   local proj="$1" canon="$2"
-  local seeder="$canon/scripts/seed-inheritance-symlinks.sh"
   # If the project is not a git repo, there are no worktrees to check.
   local wt_list
   wt_list="$(git -C "$proj" worktree list --porcelain 2>/dev/null || true)"
@@ -576,9 +651,16 @@ hc_worktree_offenders() {
         fi
         # Only probe linked worktrees that still exist on disk.
         [ -d "$wt_path" ] || continue
-        # If the seeder is absent, skip (can't verify); not an error.
-        [ -f "$seeder" ] || continue
-        if ! bash "$seeder" --target "$wt_path" --verify-only --quiet >/dev/null 2>&1; then
+        # This row IS the legacy direct-link inheritance contract, so it is
+        # verified directly against the main checkout's links. It deliberately
+        # does NOT consult seed-inheritance-symlinks.sh: its legacy mirror mode
+        # was removed at v1.0.0-rc.25 and refuses, while its portable default
+        # answers a different question entirely (whether this worktree's local
+        # ATTACHMENT is committed and current against its recorded release) and
+        # returns 0 for any clone the local registry does not opt in — which a
+        # legacy clone always is. Either verdict would be evidence about
+        # something other than direct links.
+        if ! hc_worktree_links_ok "$proj" "$wt_path" "$canon"; then
           printf '%s\n' "$wt_path"
         fi
         ;;
@@ -590,12 +672,14 @@ EOF
 
 # hc_worktree_inheritance <project> <canonical>
 # WARN if any linked git worktree of the project is missing Trellis inheritance
-# symlinks. Uses seed-inheritance-symlinks.sh --verify-only to probe each linked
-# worktree (found via `git worktree list --porcelain`; the first entry — the
-# main checkout — is always skipped).
-#   - Not a git repo, or no linked worktrees, or seeder absent -> OK (silent)
-#   - Any linked worktree missing symlinks                      -> WARN
-# Classification: WARN / [auto] (fixable via seed-inheritance-symlinks.sh).
+# symlinks. Compares each linked worktree (found via
+# `git worktree list --porcelain`; the first entry — the main checkout — is
+# always skipped) against the main checkout through hc_worktree_links_ok.
+#   - Not a git repo, no linked worktrees, or no python3 -> OK (silent)
+#   - Any linked worktree missing/mismatched symlinks     -> WARN
+# Classification: WARN / [manual]. Since v1.0.0-rc.25 the repair is the clone's
+# migration (`trellis migrate --prepare` then `trellis attach`), not a
+# per-worktree re-seed: the mirror writer that used to own that is gone.
 hc_worktree_inheritance() {
   local proj="$1" canon="$2"
   # Guard: project must be a git repo (doctor.bats's healthy fixture is NOT
@@ -604,9 +688,8 @@ hc_worktree_inheritance() {
     echo "worktree-inheritance: not a git repo — check skipped"
     return "$HC_OK"
   fi
-  local seeder="$canon/scripts/seed-inheritance-symlinks.sh"
-  if [ ! -f "$seeder" ]; then
-    echo "worktree-inheritance: seeder not present in canonical — check skipped"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "worktree-inheritance: python3 unavailable — link resolution skipped"
     return "$HC_OK"
   fi
   local offenders wt_count
@@ -677,7 +760,7 @@ hc_version_pin_lag() {
 # non-empty ancestor `.omp` directory even when required files are absent, so a
 # partial/dangling/wrong/non-symlink Trellis-owned `.omp` surface silently
 # yields an unparented OMP session — the same incident-#1 class as a broken
-# .claude/rules link. All five paths are machine-local absolute symlinks:
+# .claude/rules link. Links use the configured absolute or relative style:
 #   .omp/AGENTS.md -> <project>/CLAUDE.md
 #   .omp/skills    -> <canonical>/core-rules/skills
 #   .omp/commands  -> <canonical>/core-rules/commands
@@ -699,23 +782,32 @@ hc_version_pin_lag() {
 # parent import applies (see hc_omp_project_import). Ordinary projects always
 # link their own <project>/CLAUDE.md.
 hc_omp_expected_target() {
-  local proj="$1" canon="$2" p="$3"
+  local proj="$1" canon="$2" p="$3" target=""
   case "$p" in
     AGENTS.md)
       local proj_real canon_real
       proj_real="$(cd "$proj" 2>/dev/null && pwd -P || printf '%s' "$proj")"
       canon_real="$(cd "$canon" 2>/dev/null && pwd -P || printf '%s' "$canon")"
       if [ "$proj_real" = "$canon_real" ] && [ ! -f "$canon/CLAUDE.md" ]; then
-        printf '%s/core-rules/CLAUDE.md' "$canon"
+        target="$canon/core-rules/CLAUDE.md"
       else
-        printf '%s/CLAUDE.md' "$proj"
+        target="$proj/CLAUDE.md"
       fi
       ;;
-    skills)    printf '%s/core-rules/skills' "$canon" ;;
-    commands)  printf '%s/core-rules/commands' "$canon" ;;
-    agents)    printf '%s/core-rules/agents' "$canon" ;;
-    hooks)     printf '%s/core-rules/omp/hooks' "$canon" ;;
+    skills)    target="$canon/core-rules/skills" ;;
+    commands)  target="$canon/core-rules/commands" ;;
+    agents)    target="$canon/core-rules/agents" ;;
+    hooks)     target="$canon/core-rules/omp/hooks" ;;
   esac
+  if [ "${SYMLINK_STYLE:-absolute}" = "relative" ] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$target" "$proj/.omp" <<'PY'
+import os
+import sys
+print(os.path.relpath(sys.argv[1], sys.argv[2]), end="")
+PY
+  else
+    printf '%s' "$target"
+  fi
 }
 
 # hc_omp_symlinks <project> <canonical>
@@ -1212,10 +1304,9 @@ hc_codex_hooks_enabled() {
   return "$HC_WARN"
 }
 
-# WARN-class, global: guard the codex plugin surface — companion effort enum
-# (widening unblocks recipe-side max; ADR 2026-07-10-sol-ultra) and the
-# teammate node/PATH hooks.json patch (a plugin update reverts it; the check
-# script re-applies idempotently). Delegates to check-codex-plugin-surface.sh.
+# WARN-class, global: guard Codex plugin hook runtime setup. A plugin update can
+# remove the hooks.json node/PATH prefix; the check script repairs it
+# idempotently. Delegates to check-codex-plugin-surface.sh.
 hc_codex_plugin_surface() {
   local script="$SCRIPT_DIR/check-codex-plugin-surface.sh"
   if [ ! -x "$script" ]; then
@@ -1227,10 +1318,986 @@ hc_codex_plugin_surface() {
     if printf '%s' "$out" | grep -q 'RE-APPLIED\|refreshed'; then
       echo "codex-plugin-surface: drift auto-repaired — $(printf '%s' "$out" | grep -E 'RE-APPLIED|refreshed' | head -2 | tr '\n' '; ')"
     else
-      echo "codex-plugin-surface: baseline (companion caps at xhigh; hooks.json patch present)"
+      echo "codex-plugin-surface: hooks PATH/setup present"
     fi
     return "$HC_OK"
   fi
-  echo "codex-plugin-surface: DRIFT needing a human — $(printf '%s' "$out" | grep -E 'WIDENED|CHANGED|manually|cannot' | head -2 | tr '\n' '; ')"
+  echo "codex-plugin-surface: DRIFT needing a human — $(printf '%s' "$out" | grep -E 'CHANGED|manually|cannot' | head -2 | tr '\n' '; ')"
   return "$HC_WARN"
+}
+
+# ===========================================================================
+# PORTABLE LOCAL-STATE HEALTH
+#
+# These checks consume only validated TRELLIS_HOME state, the local registry,
+# immutable installed payloads, and attachment ownership.  They never infer a
+# checkout from tracked policy or accept mutable source-checkout runtime paths.
+# ===========================================================================
+
+hc_portable_sha256_file() {
+  local path="$1" output
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  output="$(shasum -a 256 "$path" 2>/dev/null)" ||
+    output="$(sha256sum "$path" 2>/dev/null)" || return 1
+  printf '%s\n' "${output%% *}"
+}
+
+hc_portable_sha256_text() {
+  local value="$1" output
+  output="$(printf '%s' "$value" | shasum -a 256 2>/dev/null)" ||
+    output="$(printf '%s' "$value" | sha256sum 2>/dev/null)" || return 1
+  printf '%s\n' "${output%% *}"
+}
+
+hc_portable_decode_base64() {
+  local value="$1"
+  printf '%s' "$value" | base64 -D 2>/dev/null ||
+    printf '%s' "$value" | base64 -d 2>/dev/null
+}
+
+# Keep manifest expansion bound to the immutable payload.  Doctor/show-config
+# may be launched from a mutable checkout, so their sourced surface planner is
+# never authority for an attached payload.
+hc_portable_payload_surface_plan() (
+  local payload="${1:-}" runtime_plan
+  [ "$#" -gt 0 ] || return 1
+  shift
+  _attachment_canonical_dir "$payload" || return 1
+  runtime_plan="$payload/scripts/lib/surface-plan.sh"
+  _attachment_canonical_file "$runtime_plan" || return 1
+  # shellcheck disable=SC1090  # Path is resolved at runtime by design: an installed release
+  # is the only authority, so this must never be a constant checkout path.
+  . "$runtime_plan" || return 1
+  type surface_plan_emit >/dev/null 2>&1 || return 1
+  surface_plan_emit "$payload" "$@"
+)
+
+hc_portable_normalize_harnesses() {
+  local raw="${1:-}" normalized
+  normalized="$(printf '%s\n' "$raw" | jq -cS '
+    if type == "array" and length > 0
+       and all(.[]; . == "claude" or . == "codex" or . == "omp")
+    then unique | sort
+    else error("invalid harness set")
+    end
+  ' 2>/dev/null)" || return 1
+  printf '%s\n' "$normalized"
+}
+
+# This mirrors attach_exclude_block, but derives the block from the installed
+# immutable payload's surface planner rather than trusting bytes in an owner
+# record.
+hc_portable_expected_exclude_block() (
+  local payload="$1" registry_harnesses="$2" deferred="${3:-[]}" normalized plan harness
+  local -a harnesses=()
+  normalized="$(hc_portable_normalize_harnesses "$registry_harnesses")" || return 1
+  while IFS= read -r harness; do
+    [ -n "$harness" ] && harnesses+=("$harness")
+  done < <(printf '%s\n' "$normalized" | jq -r '.[]')
+  plan="$(hc_portable_payload_surface_plan "$payload" "${harnesses[@]}")" || return 1
+  printf '%s\n' '# --- Trellis local attachment exclude block ---'
+  printf '%s\n' "$plan" | jq -r --argjson deferred "$deferred" '
+    ($deferred | map(.path)) as $skip
+    | ["/.trellis/runtime"]
+      + [.artifacts[].destination | . as $d | select(($skip | index($d)) == null) | "/" + .]
+    | unique | sort | .[]
+  ' || return 1
+  printf '%s\n' '# --- end Trellis local attachment exclude block ---'
+)
+
+# A contextual render is attachment state, not an instruction to consult the
+# caller's process environment.  The owner records the attach-time context;
+# validate it against the selected local machine before using the immutable
+# renderer to reconstruct owned bytes.
+hc_portable_owner_render_context() (
+  local home="$1" owner="$2" context
+  context="$(jq -c '.render_context // empty' "$owner" 2>/dev/null)" || return 1
+  [ -n "$context" ] || return 1
+  attachment_contextual_render_context_validate "$context" "$home" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$context"
+)
+
+# Exact read-only equivalent of trellis_home_validate_config's schema check.
+# Calling that writer-facing helper would chmod the config, so doctor mirrors
+# its validation and intentionally does not repair permissions during a read.
+hc_portable_machine_config() {
+  local home="$1" cfg="$1/config.json" schema home_mode config_mode
+  if ! _attachment_canonical_dir "$home"; then
+    echo "machine state: TRELLIS_HOME is unavailable, noncanonical, or has a symlink component: $home"
+    return "$HC_ERROR"
+  fi
+  if ! home_mode="$(local_registry_mode "$home" 2>/dev/null)"; then
+    echo "machine state: could not inspect TRELLIS_HOME permissions: $home"
+    return "$HC_ERROR"
+  fi
+  if [ "$home_mode" != 700 ]; then
+    echo "machine state: TRELLIS_HOME permissions must be 0700, found $home_mode: $home"
+    return "$HC_ERROR"
+  fi
+  if [ -L "$cfg" ] || [ ! -f "$cfg" ]; then
+    echo "machine state: missing or non-regular local config: $cfg — run trellis configure"
+    return "$HC_ERROR"
+  fi
+  if ! config_mode="$(local_registry_mode "$cfg" 2>/dev/null)"; then
+    echo "machine state: could not inspect local config permissions: $cfg"
+    return "$HC_ERROR"
+  fi
+  if [ "$config_mode" != 600 ]; then
+    echo "machine state: local config permissions must be 0600, found $config_mode: $cfg"
+    return "$HC_ERROR"
+  fi
+  schema="$(trellis_home_schema_path)"
+  if [ ! -f "$schema" ]; then
+    echo "machine state: local machine schema is unavailable: $schema"
+    return "$HC_ERROR"
+  fi
+  if ! jq -e 'type == "object"' "$cfg" >/dev/null 2>&1; then
+    echo "machine state: config is not a JSON object: $cfg"
+    return "$HC_ERROR"
+  fi
+  if ! jq -e '
+    def no_machine_controls:
+      type == "string" and all(explode[]; . >= 32 and (. < 127 or . > 159));
+    def absolute_safe_path:
+      no_machine_controls
+      and startswith("/")
+      and length >= 2
+      and (startswith("//") | not)
+      and (test("(^|/)(\\.|\\.\\.)(/|$)") | not);
+    def closed_object($required; $optional):
+      type == "object"
+      and ((keys_unsorted - ($required + $optional)) | length == 0)
+      and (($required - keys_unsorted) | length == 0);
+    def fleet_name:
+      no_machine_controls and test("^[a-z0-9][a-z0-9._-]{0,63}$");
+    def version:
+      no_machine_controls and test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$");
+    def fleet_config:
+      closed_object(["discovery_roots"]; ["shared_infra_root"])
+      and (.discovery_roots | type == "array" and length >= 1)
+      and ([.discovery_roots[] | absolute_safe_path] | all)
+      and ((.discovery_roots | unique | length) == (.discovery_roots | length))
+      and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema"])
+    and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
+    and .schema_version == 1
+    and (.source_root | absolute_safe_path)
+    and (.release_remote | no_machine_controls and length > 0)
+    and (.active_cli_release | version)
+    and (.default_fleet | fleet_name)
+    and (.fleets | type == "object" and length >= 1)
+    and ([.fleets | keys[] | fleet_name] | all)
+    and (.fleets[.default_fleet] != null)
+    and ([.fleets[] | fleet_config] | all)
+  ' "$cfg" >/dev/null 2>&1; then
+    echo "machine state: invalid local config at $cfg — run trellis configure with an explicit source and fleet"
+    return "$HC_ERROR"
+  fi
+  echo "machine state: validated local config at $cfg"
+  return "$HC_OK"
+}
+
+hc_portable_source_root() {
+  local home="$1" cfg source canonical
+  cfg="$home/config.json"
+  source="$(jq -r '.source_root // empty' "$cfg" 2>/dev/null)" || source=""
+  if ! canonical="$(trellis_home_require_source_root "$source" 2>/dev/null)"; then
+    echo "source checkout: configured source_root is unavailable or not a Trellis policy checkout (${source:-unset}) — run trellis configure"
+    return "$HC_ERROR"
+  fi
+  echo "source checkout: validated management source $canonical (not used for attached runtime)"
+  return "$HC_OK"
+}
+
+hc_portable_release_store() {
+  local home="$1"
+  if TRELLIS_HOME="$home" release_store_verify >/dev/null 2>&1; then
+    echo "immutable releases: every installed payload passed integrity verification"
+    return "$HC_OK"
+  fi
+  echo "immutable releases: installed release store is unavailable, corrupt, or unsafe — run trellis release verify"
+  return "$HC_ERROR"
+}
+
+hc_portable_release() {
+  local home="$1" version="$2" rc
+  if TRELLIS_HOME="$home" release_store_verify "$version" >/dev/null 2>&1; then
+    echo "immutable release: $version passed installed payload integrity verification"
+    return "$HC_OK"
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    "$TRELLIS_EX_UNAVAILABLE")
+      echo "immutable release: $version is unavailable — install or explicitly adopt a verified release"
+      ;;
+    *)
+      echo "immutable release: $version is corrupt or unsafe — run trellis release verify $version before attach/relink"
+      ;;
+  esac
+  return "$HC_ERROR"
+}
+
+# The store can be internally sound while config.json points its CLI selection
+# at an absent release.  Treat that selection as machine health, not a later
+# best-effort repair detail.
+hc_portable_active_cli_release() {
+  local home="$1" release
+  release="$(jq -r '.active_cli_release // empty' "$home/config.json" 2>/dev/null)" || release=""
+  if [ -z "$release" ]; then
+    echo "active CLI release: local config has no usable active_cli_release"
+    return "$HC_ERROR"
+  fi
+  hc_portable_release "$home" "$release"
+}
+
+
+# Owner files are local authority.  Verify their canonical private ancestry
+# before inspecting even an absent final file so a symlinked state subtree is
+# never accepted as an inert attachment.
+hc_portable_owner_path_is_safe() {
+  local home="$1" owner="$2" checkout_id="$3" worktree_id="$4" expected parent
+  expected="$home/state/attachments/$checkout_id/$worktree_id.json"
+  [ "$owner" = "$expected" ] || return 1
+  _attachment_valid_absolute "$expected" || return 1
+  _attachment_canonical_dir "$home" && [ "$(_attachment_mode "$home")" = 700 ] || return 1
+  for parent in "$home/state" "$home/state/attachments" "$home/state/attachments/$checkout_id"; do
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+      _attachment_canonical_dir "$parent" && [ "$(_attachment_mode "$parent")" = 700 ] || return 1
+
+    else
+      return 0
+    fi
+  done
+  return 0
+}
+
+# A checkout has one managed hook authority.  A worktree that shares another
+# attachment's exclude block legitimately records disabled hooks, but only if
+# that exact checkout has one healthy, matching hook-owning attachment.
+HC_PORTABLE_HOOK_STATE=""
+hc_portable_managed_hooks() {
+  local home="$1" owner="$2" enabled checkout_id release common block_hash owner_dir candidate
+  local candidate_checkout candidate_worktree candidate_enabled hook_owner_count=0
+  HC_PORTABLE_HOOK_STATE=""
+  if ! jq -e '
+    has("git_hooks")
+    and (.git_hooks | type == "object" and has("enabled") and (.enabled | type == "boolean"))
+  ' "$owner" >/dev/null 2>&1; then
+    HC_PORTABLE_HOOK_STATE="missing"
+    return 1
+  fi
+  enabled="$(jq -r '.git_hooks.enabled' "$owner")" || return 1
+  if [ "$enabled" = true ]; then
+    if _attachment_verify_managed_hooks "$home" "$owner"; then
+      HC_PORTABLE_HOOK_STATE="direct"
+      return 0
+    fi
+    HC_PORTABLE_HOOK_STATE="conflict"
+    return 1
+  fi
+  [ "$enabled" = false ] || { HC_PORTABLE_HOOK_STATE="corrupt"; return 1; }
+
+  checkout_id="$(jq -r '.checkout_id' "$owner")" || return 1
+  release="$(jq -r '.release' "$owner")" || return 1
+  common="$(jq -r '.exclude.git_common_dir // empty' "$owner")" || return 1
+  block_hash="$(jq -r '.exclude.managed_block_sha256 // empty' "$owner")" || return 1
+  [ -n "$common" ] && [ -n "$block_hash" ] || { HC_PORTABLE_HOOK_STATE="corrupt"; return 1; }
+  owner_dir="$home/state/attachments/$checkout_id"
+  _attachment_canonical_dir "$owner_dir" &&
+    [ "$(_attachment_mode "$owner_dir")" = 700 ] || {
+      HC_PORTABLE_HOOK_STATE="missing"
+      return 1
+    }
+  for candidate in "$owner_dir"/*.json; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] &&
+      [ "$(_attachment_mode "$candidate")" = 600 ] || {
+        HC_PORTABLE_HOOK_STATE="corrupt"
+        return 1
+      }
+    _attachment_owner_json_valid "$candidate" >/dev/null 2>&1 || {
+      HC_PORTABLE_HOOK_STATE="corrupt"
+      return 1
+    }
+    candidate_checkout="$(jq -r '.checkout_id' "$candidate")" || return 1
+    candidate_worktree="$(jq -r '.worktree_id' "$candidate")" || return 1
+    [ "$candidate_checkout" = "$checkout_id" ] &&
+      hc_portable_owner_path_is_safe "$home" "$candidate" "$candidate_checkout" "$candidate_worktree" || {
+        HC_PORTABLE_HOOK_STATE="corrupt"
+        return 1
+      }
+    candidate_enabled="$(jq -r '.git_hooks.enabled // empty' "$candidate")" || return 1
+    case "$candidate_enabled" in
+      false) continue ;;
+      true) ;;
+      *) HC_PORTABLE_HOOK_STATE="corrupt"; return 1 ;;
+    esac
+    jq -e --arg release "$release" --arg common "$common" --arg block_hash "$block_hash" '
+      .release == $release
+      and .exclude.git_common_dir == $common
+      and .exclude.managed_block_sha256 == $block_hash
+      and .exclude.managed_by_attachment == true
+    ' "$candidate" >/dev/null 2>&1 || {
+      HC_PORTABLE_HOOK_STATE="conflict"
+      return 1
+    }
+    _attachment_verify_owner_artifacts "$candidate" "$home" &&
+      _attachment_verify_managed_hooks "$home" "$candidate" || {
+        HC_PORTABLE_HOOK_STATE="conflict"
+        return 1
+      }
+    hook_owner_count=$((hook_owner_count + 1))
+  done
+  [ "$hook_owner_count" -eq 1 ] || {
+    HC_PORTABLE_HOOK_STATE="missing"
+    return 1
+  }
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  HC_PORTABLE_HOOK_STATE="shared"
+  return 0
+}
+
+# Verify every owned leaf except the runtime anchor.  This distinguishes the
+# one safe relink condition (only runtime absent) from any conflicting mutation.
+hc_portable_owner_without_runtime_exact() {
+  local home="$1" owner="$2" record root artifact
+  record="$(jq -c . "$owner")" || return 1
+  _attachment_contextual_render_context_record_valid "$record" "$home" || return 1
+  _attachment_validate_roots "$record" || return 1
+  _attachment_validate_ids "$record" || return 1
+  root="$(printf '%s\n' "$record" | jq -r '.worktree_root')" || return 1
+  while IFS= read -r artifact; do
+    [ -n "$artifact" ] || continue
+    _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || return 1
+    _attachment_artifact_exact "$root" "$artifact" || return 1
+  done < <(jq -c '.artifacts[] | select(.path != ".trellis/runtime")' "$owner")
+}
+
+HC_PORTABLE_OWNER_STATE=""
+hc_portable_owner() {
+  local home="$1" owner="$2" root="$3" fleet="$4" project_id="$5"
+  local checkout_id="$6" worktree_id="$7" attachment_id="$8" release="$9"
+  local expected identity expected_runtime
+  HC_PORTABLE_OWNER_STATE=""
+  if [ -L "$root" ] || [ ! -d "$root" ]; then
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: registered worktree root is unavailable or a raw symlink: $root"
+    return "$HC_ERROR"
+  fi
+  if ! hc_portable_owner_path_is_safe "$home" "$owner" "$checkout_id" "$worktree_id"; then
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: owner state path is noncanonical, symlinked, or has unsafe private parent permissions"
+    return "$HC_ERROR"
+  fi
+
+  if [ -L "$owner" ] || [ ! -f "$owner" ]; then
+    if [ -n "$attachment_id" ]; then
+      HC_PORTABLE_OWNER_STATE="conflict"
+      echo "attachment ownership: registry attachment_id has no committed bound owner record; local attachment state is corrupt"
+      return "$HC_ERROR"
+    fi
+    HC_PORTABLE_OWNER_STATE="missing"
+    echo "attachment ownership: no committed owner record for this registered checkout/worktree"
+    return "$HC_INFO"
+  fi
+  if [ -z "$attachment_id" ]; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: registry record lacks attachment_id; refusing to accept an unbound owner"
+    return "$HC_ERROR"
+  fi
+  if ! _attachment_owner_json_valid "$owner" >/dev/null 2>&1; then
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: owner record is invalid or has unsafe permissions: $owner"
+    return "$HC_ERROR"
+  fi
+  identity="$(local_registry_identity_for_root "$root" 2>/dev/null)" || {
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: registered root no longer resolves to a canonical Git worktree"
+    return "$HC_ERROR"
+  }
+  if ! printf '%s\n' "$identity" | jq -e --arg checkout "$checkout_id" --arg worktree "$worktree_id" \
+      '.checkout_id == $checkout and .worktree_id == $worktree' >/dev/null 2>&1; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: current Git identity disagrees with the local registry row"
+    return "$HC_ERROR"
+  fi
+  expected="$(jq -cn \
+    --arg project_root "$root" \
+    --arg root "$root" --arg fleet "$fleet" --arg project_id "$project_id" \
+    --arg checkout_id "$checkout_id" --arg worktree_id "$worktree_id" \
+    --arg attachment_id "$attachment_id" --arg release "$release" \
+    '{project_root:$project_root,worktree_root:$root,fleet:$fleet,project_id:$project_id,checkout_id:$checkout_id,worktree_id:$worktree_id,attachment_id:$attachment_id,release:$release}')" ||
+    {
+      HC_PORTABLE_OWNER_STATE="corrupt"
+      echo "attachment ownership: could not construct expected local identity"
+      return "$HC_ERROR"
+    }
+  if ! jq -e --argjson expected "$expected" '
+    {project_root, worktree_root, fleet, project_id, checkout_id, worktree_id, attachment_id, release} == $expected
+  ' "$owner" >/dev/null 2>&1; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: owner record does not exactly match its registry checkout/worktree identity"
+    return "$HC_ERROR"
+  fi
+  if ! expected_runtime="$(TRELLIS_HOME="$home" release_store_release_path "$release" 2>/dev/null)"; then
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: registry release cannot resolve to an immutable release path"
+    return "$HC_ERROR"
+  fi
+  expected_runtime="$expected_runtime/payload"
+  if ! jq -e --arg expected_runtime "$expected_runtime" '
+    [.artifacts[] | select(.path == ".trellis/runtime")] as $runtime
+    | ($runtime | length) == 1
+    and $runtime[0].kind == "symlink"
+    and $runtime[0].target == $expected_runtime
+  ' "$owner" >/dev/null 2>&1; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: runtime anchor does not exactly match the registry-selected immutable release"
+    return "$HC_ERROR"
+  fi
+  if [ ! -e "$root/.trellis/runtime" ] && [ ! -L "$root/.trellis/runtime" ]; then
+    if hc_portable_owner_without_runtime_exact "$home" "$owner" &&
+       hc_portable_managed_hooks "$home" "$owner"; then
+      HC_PORTABLE_OWNER_STATE="runtime-missing"
+      echo "attachment ownership: committed owner and managed hooks are intact but its Trellis runtime anchor is missing"
+      return "$HC_ERROR"
+    fi
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: runtime anchor is missing and another Trellis-owned artifact or managed hook changed"
+    return "$HC_ERROR"
+  fi
+  if ! _attachment_verify_owner_artifacts "$owner" "$home"; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: a Trellis-owned artifact is missing, modified, or escapes its recorded state"
+    return "$HC_ERROR"
+  fi
+  if ! hc_portable_managed_hooks "$home" "$owner"; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: the required managed hook authority is missing, disabled, modified, or escapes its recorded state"
+    return "$HC_ERROR"
+  fi
+  HC_PORTABLE_OWNER_STATE="attached"
+  echo "attachment ownership: exact committed owner, owned artifacts, and managed hooks match"
+  return "$HC_OK"
+}
+
+HC_PORTABLE_EXCLUDE_STATE=""
+hc_portable_exclude_parse() {
+  local file="$1" block_file="$2" line state=outside count=0 block="" expected
+  local begin='# --- Trellis local attachment exclude block ---'
+  local end='# --- end Trellis local attachment exclude block ---'
+  expected="$(cat "$block_file")" || return 1
+  [ -e "$file" ] || [ -L "$file" ] || { printf 'none\n'; return 0; }
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$state:$line" in
+      outside:"$begin")
+        state=inside
+        count=$((count + 1))
+        block="$line"
+        ;;
+      outside:"$end") return 1 ;;
+      outside:*) ;;
+      inside:"$end")
+        block="$block
+$line"
+        [ "$block" = "$expected" ] || return 1
+        state=after
+        ;;
+      inside:"$begin") return 1 ;;
+      inside:*) block="$block
+$line" ;;
+      after:"$begin"|after:"$end") return 1 ;;
+      after:*) ;;
+    esac
+  done < "$file"
+  [ "$state" != inside ] || return 1
+  [ "$count" -eq 1 ] || return 1
+  printf 'one\n'
+}
+
+hc_portable_excludes() (
+  local owner="$1" payload="$2" registry_harnesses="$3"
+  local exclude path common expected_hash expected_exists expected64
+  local before_exists before_hash before64 block64 block_hash managed_by_attachment root actual_common
+  local before_file after_file block_file expected_file expected_after_file size last empty_hash block_state
+  HC_PORTABLE_EXCLUDE_STATE=""
+  exclude="$(jq -c '.exclude' "$owner" 2>/dev/null)" || {
+    HC_PORTABLE_EXCLUDE_STATE="corrupt"
+    echo "managed excludes: owner record has no readable exclude state"
+    return "$HC_ERROR"
+  }
+  path="$(printf '%s\n' "$exclude" | jq -r '.path // empty')" || path=""
+  common="$(printf '%s\n' "$exclude" | jq -r '.git_common_dir // empty')" || common=""
+  expected_hash="$(printf '%s\n' "$exclude" | jq -r '.after_sha256 // empty')" || expected_hash=""
+  expected_exists="$(printf '%s\n' "$exclude" | jq -r '.after_exists // empty')" || expected_exists=""
+  expected64="$(printf '%s\n' "$exclude" | jq -r '.after_base64 // empty')" || expected64=""
+  before_exists="$(printf '%s\n' "$exclude" | jq -r '.before_exists // empty')" || before_exists=""
+  before_hash="$(printf '%s\n' "$exclude" | jq -r '.before_sha256 // empty')" || before_hash=""
+  before64="$(printf '%s\n' "$exclude" | jq -r '.before_base64 // empty')" || before64=""
+  block64="$(printf '%s\n' "$exclude" | jq -r '.managed_block_base64 // empty')" || block64=""
+  block_hash="$(printf '%s\n' "$exclude" | jq -r '.managed_block_sha256 // empty')" || block_hash=""
+  managed_by_attachment="$(printf '%s\n' "$exclude" | jq -r '.managed_by_attachment // empty')" || managed_by_attachment=""
+  if [ -z "$path" ] || [ -z "$common" ] || [ -z "$expected_hash" ] || [ -z "$expected64" ] ||
+     [ -z "$before_hash" ] || [ -z "$block_hash" ]; then
+    HC_PORTABLE_EXCLUDE_STATE="corrupt"
+    echo "managed excludes: owner record is incomplete"
+    return "$HC_ERROR"
+  fi
+  root="$(jq -r '.worktree_root // empty' "$owner")" || root=""
+  actual_common="$(_attachment_git_common_dir "$root" 2>/dev/null)" || actual_common=""
+  if [ -z "$actual_common" ] || [ "$common" != "$actual_common" ] ||
+     [ "$path" != "$actual_common/info/exclude" ]; then
+    HC_PORTABLE_EXCLUDE_STATE="conflict"
+    echo "managed excludes: owner exclude path no longer matches this worktree's Git common directory"
+    return "$HC_ERROR"
+  fi
+  before_file="$(mktemp "${TMPDIR:-/tmp}/trellis-health-exclude.before.XXXXXX")" ||
+    { HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: could not create a verification scratch file"; return "$HC_ERROR"; }
+  after_file="$(mktemp "${TMPDIR:-/tmp}/trellis-health-exclude.after.XXXXXX")" ||
+    { rm -f "$before_file"; HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: could not create a verification scratch file"; return "$HC_ERROR"; }
+  block_file="$(mktemp "${TMPDIR:-/tmp}/trellis-health-exclude.block.XXXXXX")" ||
+    { rm -f "$before_file" "$after_file"; HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: could not create a verification scratch file"; return "$HC_ERROR"; }
+  expected_file="$(mktemp "${TMPDIR:-/tmp}/trellis-health-exclude.expected.XXXXXX")" ||
+    { rm -f "$before_file" "$after_file" "$block_file"; HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: could not create a verification scratch file"; return "$HC_ERROR"; }
+  expected_after_file="$(mktemp "${TMPDIR:-/tmp}/trellis-health-exclude.composed.XXXXXX")" ||
+    { rm -f "$before_file" "$after_file" "$block_file" "$expected_file"; HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: could not create a verification scratch file"; return "$HC_ERROR"; }
+  trap 'rm -f "$before_file" "$after_file" "$block_file" "$expected_file" "$expected_after_file"' EXIT
+  hc_portable_decode_base64 "$before64" > "$before_file" &&
+    hc_portable_decode_base64 "$expected64" > "$after_file" &&
+    hc_portable_decode_base64 "$block64" > "$block_file" || {
+      HC_PORTABLE_EXCLUDE_STATE="corrupt"
+      echo "managed excludes: owner block or byte encoding is corrupt"
+      return "$HC_ERROR"
+    }
+  empty_hash="$(hc_portable_sha256_text '')" || return "$HC_ERROR"
+  case "$before_exists" in
+    true) [ "$(hc_portable_sha256_file "$before_file")" = "$before_hash" ] || {
+      HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: owner before-image hash is corrupt"; return "$HC_ERROR"; } ;;
+    false) [ "$(wc -c < "$before_file" | tr -d ' ')" -eq 0 ] && [ "$before_hash" = "$empty_hash" ] || {
+      HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: owner empty before-image is corrupt"; return "$HC_ERROR"; } ;;
+    *) HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: owner before-image state is invalid"; return "$HC_ERROR" ;;
+  esac
+  hc_portable_expected_exclude_block "$payload" "$registry_harnesses" "$(jq -c '.pre_existing // []' "$owner")" > "$expected_file" || {
+    HC_PORTABLE_EXCLUDE_STATE="corrupt"
+    echo "managed excludes: immutable payload cannot derive the exact native surface block"
+    return "$HC_ERROR"
+  }
+  if [ "$(hc_portable_sha256_file "$block_file")" != "$block_hash" ] ||
+     ! cmp -s "$block_file" "$expected_file"; then
+    HC_PORTABLE_EXCLUDE_STATE="conflict"
+    echo "managed excludes: owner block does not match the exact immutable native surface plan"
+    return "$HC_ERROR"
+  fi
+  case "$managed_by_attachment" in
+    true)
+      cat "$before_file" > "$expected_after_file" || return "$HC_ERROR"
+      size="$(wc -c < "$before_file" | tr -d ' ')" || return "$HC_ERROR"
+      if [ "$size" -gt 0 ]; then
+        last="$(dd if="$before_file" bs=1 skip=$((size - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')" || return "$HC_ERROR"
+        [ "$last" = 0a ] || printf '\n' >> "$expected_after_file" || return "$HC_ERROR"
+      fi
+      cat "$expected_file" >> "$expected_after_file" || return "$HC_ERROR"
+      ;;
+    false) cp "$before_file" "$expected_after_file" || return "$HC_ERROR" ;;
+    *) HC_PORTABLE_EXCLUDE_STATE="corrupt"; echo "managed excludes: owner managed-block state is invalid"; return "$HC_ERROR" ;;
+  esac
+  if [ "$expected_exists" != true ] ||
+     [ "$(hc_portable_sha256_file "$after_file")" != "$expected_hash" ] ||
+     ! cmp -s "$after_file" "$expected_after_file"; then
+    HC_PORTABLE_EXCLUDE_STATE="corrupt"
+    echo "managed excludes: owner after-image does not exactly derive from its immutable block and recorded user bytes"
+    return "$HC_ERROR"
+  fi
+  if [ -L "$path" ] || [ ! -f "$path" ] || ! cmp -s "$path" "$expected_after_file"; then
+    HC_PORTABLE_EXCLUDE_STATE="conflict"
+    echo "managed excludes: exact Trellis-owned block or surrounding user bytes changed at $path"
+    return "$HC_ERROR"
+  fi
+  block_state="$(hc_portable_exclude_parse "$path" "$expected_file")" || {
+    HC_PORTABLE_EXCLUDE_STATE="conflict"
+    echo "managed excludes: expected immutable block is missing, duplicated, or modified at $path"
+    return "$HC_ERROR"
+  }
+  [ "$block_state" = one ] || {
+    HC_PORTABLE_EXCLUDE_STATE="conflict"
+    echo "managed excludes: expected immutable block is missing, duplicated, or modified at $path"
+    return "$HC_ERROR"
+  }
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  HC_PORTABLE_EXCLUDE_STATE="ok"
+  echo "managed excludes: exact immutable native-surface block and surrounding user bytes match ownership"
+  return "$HC_OK"
+)
+hc_portable_verify_payload_render_record() (
+  local home="$1" owner="$2" payload="$3" record="$4" context="${5:-}"
+  local merge template destination mode source expected expected_owner tmp_root="" before_path
+  local before_exists before64 before_mode before_hash expected_before_hash
+  merge="$(printf '%s\n' "$record" | jq -r '.merge')" || return 1
+  template="$(printf '%s\n' "$record" | jq -r '.template')" || return 1
+  destination="$(printf '%s\n' "$record" | jq -r '.destination')" || return 1
+  mode="$(printf '%s\n' "$record" | jq -r '.mode')" || return 1
+  source="$payload/$template"
+  _attachment_canonical_file "$source" || return 1
+  case "$merge" in
+    replace)
+      expected="$(jq -cn --arg path "$destination" \
+        --arg sha "$(hc_portable_sha256_file "$source")" --arg mode "$mode" \
+        '{path:$path,kind:"file",sha256:$sha,mode:$mode}')" || return 1
+      jq -e --arg path "$destination" --argjson expected "$expected" '
+        ([.artifacts[] | select(.path == $path)]) == [$expected]
+        and ([.renders[] | select(.path == $path)] | length) == 0
+      ' "$owner" >/dev/null 2>&1
+      return $?
+      ;;
+    explicit-json)
+      before_exists="$(jq -r --arg path "$destination" '[.renders[] | select(.path == $path)] | if length == 1 then .[0].before_exists else empty end' "$owner")" || return 1
+      before64="$(jq -r --arg path "$destination" '[.renders[] | select(.path == $path)] | if length == 1 then .[0].before_base64 else empty end' "$owner")" || return 1
+      before_mode="$(jq -r --arg path "$destination" '[.renders[] | select(.path == $path)] | if length == 1 then .[0].before_mode else empty end' "$owner")" || return 1
+      before_hash="$(jq -r --arg path "$destination" '[.renders[] | select(.path == $path)] | if length == 1 then .[0].before_sha256 else empty end' "$owner")" || return 1
+      tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/trellis-health-render.XXXXXX")" || return 1
+      trap 'rm -rf "$tmp_root"' EXIT HUP INT TERM
+      case "$before_exists" in
+        true)
+          [ "$before_mode" != null ] || return 1
+          mkdir -p "$tmp_root/$(dirname "$destination")" || return 1
+          before_path="$tmp_root/$destination"
+          hc_portable_decode_base64 "$before64" > "$before_path" || return 1
+          [ "$(hc_portable_sha256_file "$before_path")" = "$before_hash" ] || return 1
+          chmod "$before_mode" "$before_path" || return 1
+          ;;
+        false)
+          expected_before_hash="$(hc_portable_sha256_text '')" || return 1
+          [ -z "$before64" ] && [ "$before_mode" = null ] && [ "$before_hash" = "$expected_before_hash" ] || return 1
+          ;;
+        *) return 1 ;;
+      esac
+      expected="$(attach_json_render_plan "$tmp_root" "$payload" "$record" "$context" 2>/dev/null)" || return 1
+      expected_owner="$(printf '%s\n' "$expected" | jq -cS '.artifact | del(.source, .content_base64, .replace)')" || return 1
+      jq -e --arg path "$destination" --argjson artifact "$expected_owner" --argjson render "$expected" '
+        ([.artifacts[] | select(.path == $path)]) == [$artifact]
+        and ([.renders[] | select(.path == $path)]) == [$render.render]
+      ' "$owner" >/dev/null 2>&1
+      return $?
+      ;;
+    *) return 1 ;;
+  esac
+)
+
+hc_portable_verify_payload_renders() (
+  local home="$1" owner="$2" payload="$3" plan="$4"
+  local runtime_lib runtime_script context="" expected_paths actual_paths record deferred
+  runtime_lib="$payload/scripts/lib/attachment.sh"
+  runtime_script="$payload/scripts/attach-project.sh"
+  _attachment_canonical_file "$runtime_lib" || return 1
+  _attachment_canonical_file "$runtime_script" || return 1
+  # shellcheck disable=SC1090  # Path is resolved at runtime by design: an installed release
+  # is the only authority, so this must never be a constant checkout path.
+  . "$runtime_lib" || return 1
+  # shellcheck disable=SC1090  # Path is resolved at runtime by design: an installed release
+  # is the only authority, so this must never be a constant checkout path.
+  . "$runtime_script" || return 1
+  type attachment_contextual_render_required >/dev/null 2>&1 ||
+    type attachment_contextual_template_render >/dev/null 2>&1 ||
+    type attachment_contextual_render_context_validate >/dev/null 2>&1 ||
+    type attach_json_render_plan >/dev/null 2>&1 || return 1
+  deferred="$(jq -c '[(.pre_existing // [])[].path]' "$owner")" || return 1
+  expected_paths="$(printf '%s\n' "$plan" | jq -cS --argjson deferred "$deferred" '
+    [.artifacts[]
+     | select(.kind == "render" and .merge == "explicit-json")
+     | .destination
+     | . as $d | select(($deferred | index($d)) == null)] | sort
+  ')" || return 1
+  actual_paths="$(jq -cS '[.renders[] | .path] | sort' "$owner")" || return 1
+  [ "$actual_paths" = "$expected_paths" ] || return 1
+  if attachment_contextual_render_required "$plan"; then
+    context="$(hc_portable_owner_render_context "$home" "$owner")" || return 1
+  elif ! jq -e '(has("render_context") | not) or .render_context == null' "$owner" >/dev/null 2>&1; then
+    return 1
+  fi
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    hc_portable_verify_payload_render_record "$home" "$owner" "$payload" "$record" "$context" || return 1
+  done < <(printf '%s\n' "$plan" | jq -c --argjson deferred "$deferred" '
+    .artifacts[]
+    | select(.kind == "render")
+    | .destination as $d | select(($deferred | index($d)) == null)')
+)
+
+# Attach defers three leaf shapes to the project and records them on the owner
+# (attach_deferred_leaves in scripts/attach-project.sh). Doctor cannot take that
+# record on trust: a forged or stale entry would otherwise hide a leaf that is
+# genuinely missing. So re-derive the SAME decision from the immutable manifest
+# and the checkout — the entry has to name a leaf the manifest still plans, in
+# the shape that qualifies for deferral, and the checkout still has to hold it.
+#
+# The re-derivation is per RECORDED REASON, not merely per kind, and the two
+# symlink reasons are mutually exclusive by construction — one needs a symlink
+# at the destination, the other a regular file. So an authored `AGENTS.md` that
+# is later deleted fails (nothing qualifies), and one later REPLACED by the
+# managed symlink also fails: the checkout now derives `pre-existing-symlink`
+# while the owner still claims `project-authored-file`, and a leaf that changed
+# shape under a live attachment is drift the operator should see, not a state
+# doctor should quietly re-label.
+hc_portable_deferred_leaves_still_justified() {
+  local root="$1" payload="$2" plan="$3" deferred="$4" project_claude="$5"
+  local entry kind path target reason record
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    kind="$(printf '%s\n' "$entry" | jq -r '.kind')" || return 1
+    path="$(printf '%s\n' "$entry" | jq -r '.path')" || return 1
+    target="$(printf '%s\n' "$entry" | jq -r '.target // ""')" || return 1
+    reason="$(printf '%s\n' "$entry" | jq -r '.reason')" || return 1
+    case "$kind" in
+      symlink)
+        printf '%s\n' "$plan" | jq -e --arg path "$path" --arg target "$target" --argjson project_claude "$project_claude" '
+          [.artifacts[]
+           | select(.kind == "symlink" and .destination == $path)
+           | (if .source_scope == "project"
+              then (if $project_claude then .target else .fallback_target end)
+              else .target end)] == [$target]
+        ' >/dev/null 2>&1 || return 1
+        case "$reason" in
+          pre-existing-symlink)
+            _attachment_symlink_matches "$root/$path" "$target" || return 1
+            ;;
+          project-authored-file)
+            record="$(printf '%s\n' "$plan" | jq -c --arg path "$path" '
+              first(.artifacts[] | select(.kind == "symlink" and .destination == $path))')" || return 1
+            [ -n "$record" ] || return 1
+            _attachment_symlink_destination_authored "$record" "$root" "$payload" "$path" || return 1
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      file)
+        printf '%s\n' "$plan" | jq -e --arg path "$path" '
+          [.artifacts[]
+           | select(.kind == "render" and .destination == $path and (.render_if_absent // false))]
+          | length == 1
+        ' >/dev/null 2>&1 || return 1
+        [ -e "$root/$path" ] || [ -L "$root/$path" ] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(printf '%s\n' "$deferred" | jq -c '.[]')
+  return 0
+}
+
+HC_PORTABLE_SURFACE_STATE=""
+hc_portable_native_surfaces() (
+  local home="$1" owner="$2" payload="$3" registry_harnesses="$4" root owner_harnesses normalized_registry
+  local expected actual plan project_claude=false harness deferred
+  local -a harnesses=()
+  HC_PORTABLE_SURFACE_STATE=""
+  normalized_registry="$(hc_portable_normalize_harnesses "$registry_harnesses")" || {
+    HC_PORTABLE_SURFACE_STATE="conflict"
+    echo "native surfaces: registry harness selection is empty or invalid"
+    return "$HC_ERROR"
+  }
+  root="$(jq -r '.worktree_root' "$owner" 2>/dev/null)" || root=""
+  if [ -z "$root" ] || [ -L "$root" ] || [ ! -d "$root" ]; then
+    HC_PORTABLE_SURFACE_STATE="corrupt"
+    echo "native surfaces: owner worktree root is unavailable or symlinked"
+    return "$HC_ERROR"
+  fi
+  owner_harnesses="$(jq -cS '
+    [(.artifacts + (.pre_existing // []))[]
+      | if .path == "AGENTS.md" or (.path | startswith(".agents/")) or (.path | startswith(".codex/")) then "codex"
+        elif .path | startswith(".claude/") then "claude"
+        elif .path | startswith(".omp/") then "omp"
+        else empty end] | unique | sort
+  ' "$owner" 2>/dev/null)" || owner_harnesses=""
+  if [ "$owner_harnesses" != "$normalized_registry" ]; then
+    HC_PORTABLE_SURFACE_STATE="conflict"
+    echo "native surfaces: registry harness selection does not exactly match the committed attachment owner"
+    return "$HC_ERROR"
+  fi
+  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$normalized_registry" | jq -r '.[]')
+  if [ -f "$root/CLAUDE.md" ] && [ ! -L "$root/CLAUDE.md" ]; then project_claude=true; fi
+  plan="$(hc_portable_payload_surface_plan "$payload" "${harnesses[@]}")" || {
+    HC_PORTABLE_SURFACE_STATE="corrupt"
+    echo "native surfaces: installed immutable inheritance manifest is invalid for this attachment"
+    return "$HC_ERROR"
+  }
+  deferred="$(jq -c '.pre_existing // []' "$owner" 2>/dev/null)" || deferred=""
+  if [ -z "$deferred" ]; then
+    HC_PORTABLE_SURFACE_STATE="corrupt"
+    echo "native surfaces: owner record has no readable project-owned deferral list"
+    return "$HC_ERROR"
+  fi
+  if ! hc_portable_deferred_leaves_still_justified "$root" "$payload" "$plan" "$deferred" "$project_claude"; then
+    HC_PORTABLE_SURFACE_STATE="conflict"
+    echo "native surfaces: a leaf recorded as project-owned no longer matches the immutable manifest or the checkout"
+    return "$HC_ERROR"
+  fi
+  expected="$(printf '%s\n' "$plan" | jq -cS --arg payload "$payload" --argjson project_claude "$project_claude" --argjson deferred "$deferred" '
+    .artifacts as $artifacts
+    | ($deferred | map(.path)) as $skip
+    | ([{path:".trellis/runtime",kind:"symlink",target:$payload}]
+       + [$artifacts[] | select(.kind == "symlink") | .destination as $d | select(($skip | index($d)) == null)
+          | {path:.destination,kind:"symlink",
+             target:(if .source_scope == "project"
+                     then (if $project_claude then .target else .fallback_target end)
+                     else .target end)}]
+       + [$artifacts[] | select(.kind == "render") | .destination as $d | select(($skip | index($d)) == null)
+          | {path:.destination,kind:"file",target:null}])
+    | sort_by(.path, .kind)
+  ')" || {
+    HC_PORTABLE_SURFACE_STATE="corrupt"
+    echo "native surfaces: could not normalize installed inheritance manifest"
+    return "$HC_ERROR"
+  }
+  actual="$(jq -cS '
+    [.artifacts[]
+     | select(.kind != "parent" and .kind != "directory")
+     | {path:.path,kind:.kind,target:(.target // null)}]
+    | sort_by(.path, .kind)
+  ' "$owner" 2>/dev/null)" || actual=""
+  if [ "$actual" != "$expected" ]; then
+    HC_PORTABLE_SURFACE_STATE="conflict"
+    echo "native surfaces: committed leaves differ from the exact immutable inheritance manifest"
+    return "$HC_ERROR"
+  fi
+  if ! hc_portable_verify_payload_renders "$home" "$owner" "$payload" "$plan"; then
+    HC_PORTABLE_SURFACE_STATE="conflict"
+    echo "native surfaces: committed render bytes or owned keys differ from the exact immutable template context"
+    return "$HC_ERROR"
+  fi
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  HC_PORTABLE_SURFACE_STATE="ok"
+  echo "native surfaces: $(printf '%s\n' "$normalized_registry" | jq -r 'join(", ")') match the immutable Claude/Codex/OMP manifest"
+  return "$HC_OK"
+)
+
+# hc_portable_attachment
+# The strict local attachment predicate used by show-config.  A display may
+# mention an attachment only after the exact registry/owner binding, immutable
+# payload, managed excludes, native leaves/renders/runtime, and managed hooks
+# all validate against the selected local state.
+HC_PORTABLE_ATTACHMENT_RELEASE_PATH=""
+HC_PORTABLE_ATTACHMENT_STATE=""
+hc_portable_attachment() {
+  local home="$1" owner="$2" root="$3" fleet="$4" project_id="$5"
+  local checkout_id="$6" worktree_id="$7" attachment_id="$8" release="$9"
+  local harness_list="${10}" release_path
+  HC_PORTABLE_ATTACHMENT_RELEASE_PATH=""
+  HC_PORTABLE_ATTACHMENT_STATE=""
+  hc_portable_owner "$home" "$owner" "$root" "$fleet" "$project_id" \
+    "$checkout_id" "$worktree_id" "$attachment_id" "$release" || return "$HC_ERROR"
+  if [ "$HC_PORTABLE_OWNER_STATE" != attached ]; then
+    echo "attachment: exact owner verification did not reach an attached state"
+    return "$HC_ERROR"
+  fi
+  hc_portable_release "$home" "$release" || return "$HC_ERROR"
+  if ! release_path="$(TRELLIS_HOME="$home" release_store_locate "$release" 2>/dev/null)"; then
+    echo "attachment: verified immutable release disappeared before strict attachment verification"
+    return "$HC_ERROR"
+  fi
+  hc_portable_excludes "$owner" "$release_path/payload" "$harness_list" || return "$HC_ERROR"
+  hc_portable_native_surfaces "$home" "$owner" "$release_path/payload" "$harness_list" || return "$HC_ERROR"
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  HC_PORTABLE_ATTACHMENT_RELEASE_PATH="$release_path"
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  HC_PORTABLE_ATTACHMENT_STATE="attached"
+  echo "attachment: exact registry, owner, immutable payload, excludes, native surfaces, and managed hooks match"
+  return "$HC_OK"
+}
+
+# Only unambiguously generated compatibility artifacts count. A project-owned
+# CLAUDE.md, .claude/, or .agents/ directory alone is never legacy.
+hc_portable_legacy_marker() {
+  local root="$1" path target
+  for path in ".trellis.config.json" ".claude/rules/se-core.md" ".agents/rules/se-core.md"; do
+    if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then printf '%s\n' "$path"; return 0; fi
+  done
+  for path in ".claude/rules/trellis.md" ".agents/rules/trellis.md"; do
+    if [ -L "$root/$path" ]; then
+      target="$(readlink "$root/$path" 2>/dev/null || true)"
+      case "$target" in */core-rules/CLAUDE.md)
+        case "$target" in */.trellis/runtime/*) ;; *) printf '%s\n' "$path"; return 0 ;; esac ;;
+      esac
+    fi
+  done
+  if [ -f "$root/CLAUDE.md" ] && [ ! -L "$root/CLAUDE.md" ] &&
+     LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then printf '%s\n' 'CLAUDE.md'; return 0; fi
+  if [ -f "$root/.gitignore" ] && [ ! -L "$root/.gitignore" ] &&
+     LC_ALL=C grep -qF '# --- Trellis inheritance symlinks' "$root/.gitignore"; then printf '%s\n' '.gitignore'; return 0; fi
+  return 1
+}
+
+HC_PORTABLE_LAYOUT=""
+HC_PORTABLE_LAYOUT_MARKER=""
+hc_portable_layout() {
+  local root="$1" owner_state="${2:-missing}" registry_project_id="${3:-}" manifest="$1/.trellis.json"
+  local manifest_state="absent" manifest_project_id="" marker runtime_present=false
+  HC_PORTABLE_LAYOUT=""
+  HC_PORTABLE_LAYOUT_MARKER=""
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    if [ -L "$manifest" ] || [ ! -f "$manifest" ] ||
+       ! manifest_project_id="$(local_registry_manifest_project_id "$manifest" 2>/dev/null)"; then
+      manifest_state="corrupt"
+    elif [ -n "$registry_project_id" ] && [ "$manifest_project_id" != "$registry_project_id" ]; then
+      manifest_state="corrupt"
+    else
+      manifest_state="portable"
+    fi
+  fi
+  marker="$(hc_portable_legacy_marker "$root" 2>/dev/null || true)"
+  # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+  [ -n "$marker" ] && HC_PORTABLE_LAYOUT_MARKER="$marker"
+  if [ -e "$root/.trellis/runtime" ] || [ -L "$root/.trellis/runtime" ]; then runtime_present=true; fi
+  if [ "$manifest_state" = corrupt ]; then
+    HC_PORTABLE_LAYOUT="corrupt"
+    echo "layout: corrupt portable project manifest at .trellis.json (missing/invalid or project_id disagrees with local registry)"
+    return "$HC_ERROR"
+  fi
+  case "$owner_state" in
+    missing|attached|runtime-missing) ;;
+    *)
+      HC_PORTABLE_LAYOUT="corrupt"
+      echo "layout: corrupt — local attachment ownership is $owner_state, not repairable automatically"
+      return "$HC_ERROR"
+      ;;
+  esac
+  if [ -n "$marker" ] && { [ "$manifest_state" = portable ] || [ "$runtime_present" = true ] || [ "$owner_state" = attached ] || [ "$owner_state" = runtime-missing ]; }; then
+    HC_PORTABLE_LAYOUT="mixed/conflict"
+    echo "layout: mixed/conflict — portable attachment coexists with explicit compatibility artifact $marker"
+    return "$HC_ERROR"
+  fi
+  if [ -n "$marker" ]; then
+    HC_PORTABLE_LAYOUT="compatibility-legacy"
+    echo "layout: explicit compatibility legacy ($marker) — run trellis migrate --prepare before portable attach"
+    return "$HC_WARN"
+  fi
+  case "$owner_state" in
+    attached|runtime-missing)
+      if [ "$manifest_state" != portable ]; then
+        HC_PORTABLE_LAYOUT="corrupt"
+        echo "layout: corrupt — committed attachment lacks its portable manifest"
+        return "$HC_ERROR"
+      fi
+      HC_PORTABLE_LAYOUT="portable-attached"
+      if [ "$runtime_present" = true ]; then echo "layout: portable-attached"; return "$HC_OK"; fi
+      echo "layout: portable-attached with a missing Trellis runtime anchor"
+      return "$HC_ERROR"
+      ;;
+    missing)
+      if [ "$runtime_present" = true ]; then
+        HC_PORTABLE_LAYOUT="corrupt"
+        echo "layout: corrupt — runtime anchor exists without exact committed ownership"
+        return "$HC_ERROR"
+      fi
+      if [ "$manifest_state" = portable ]; then
+        HC_PORTABLE_LAYOUT="inert-non-user"
+        echo "layout: inert non-user portable manifest (not locally attached)"
+        return "$HC_OK"
+      fi
+      # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+      HC_PORTABLE_LAYOUT="inert-non-user"
+      echo "layout: inert non-user (no Trellis local attachment)"
+      return "$HC_OK"
+      ;;
+  esac
 }

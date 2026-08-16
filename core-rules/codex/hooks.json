@@ -100,6 +100,12 @@
           },
           {
             "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/decision-receipt.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking decision receipts..."
+          },
+          {
+            "type": "command",
             "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/stop-verify.sh\"",
             "timeout": 300,
             "statusMessage": "Running final verification..."

@@ -1,7 +1,7 @@
 # ADR: Interactive executor delegation (spec 009)
 
 **Date:** 2026-07-08
-**Status:** Accepted
+**Status:** Historical/non-executable Spec 009 receipt. Commit `2ad1808` retired the companion, automatic-takeover, effort-ladder, and recipe-follow-up clauses below; current routing is governed by `docs/codex-routing.md` and `core-rules/references/delegation.md`, fails closed, and allows another provider only after explicit caller/operator re-selection.
 
 ## Context
 

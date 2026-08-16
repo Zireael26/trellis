@@ -12,6 +12,7 @@
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 SCRIPT="$REPO_ROOT/scripts/worktree.sh"
+load helpers/t14-worktree
 
 setup() {
   SANDBOX="$(mktemp -d)"
@@ -74,76 +75,53 @@ teardown() {
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
+  t14_teardown_sandbox
 }
 
 # ---------------------------------------------------------------------------
-# Test 1: worktree add creates the worktree AND seeds inheritance symlinks
+# An ordinary clone may carry no Trellis state. The wrapper must still be a
+# harmless worktree convenience rather than revive legacy direct-link state.
 # ---------------------------------------------------------------------------
-@test "'add <path>' creates the worktree and seeds inheritance symlinks" {
+@test "'add <path>' leaves an unregistered clone inert" {
   WT2="$SANDBOX/wt2"
 
-  # Must run from MAIN so git worktree add can find the repository
   cd "$MAIN"
   run bash "$SCRIPT" add "$WT2"
 
   [ "$status" -eq 0 ]
-
-  # The worktree directory must exist
   [ -d "$WT2" ]
-
-  # Inheritance symlinks seeded
-  [ -L "$WT2/.claude/rules/trellis.md" ]
-  [ -L "$WT2/.claude/skills/process-gate" ]
-  [ -L "$WT2/.claude/skills/security-gate" ]
-  [ -L "$WT2/.claude/commands/primer.md" ]
-
-  # Targets correct
-  [ "$(readlink "$WT2/.claude/rules/trellis.md")"        = "$ROOT/core-rules/CLAUDE.md" ]
-  [ "$(readlink "$WT2/.claude/skills/process-gate")"     = "$ROOT/core-rules/skills/process-gate" ]
-
-  # Success line present
-  [[ "$output" == *"worktree ready (inheritance seeded):"* ]]
+  [ ! -e "$WT2/.trellis/runtime" ]
+  [ ! -e "$WT2/.claude/rules/trellis.md" ]
+  [[ "$output" == *"worktree ready:"* ]] || { echo "$output"; false; }
 }
 
 # ---------------------------------------------------------------------------
-# Test 2: worktree sync <path> seeds an existing unseeded worktree
+# sync is likewise an inert no-op for an unregistered worktree.
 # ---------------------------------------------------------------------------
-@test "'sync <path>' seeds an existing unseeded worktree" {
+@test "'sync <path>' leaves an unregistered worktree inert" {
   WT2="$SANDBOX/wt2"
 
-  # Create the real git worktree (unseeded — no inheritance symlinks)
   git -C "$MAIN" worktree add --detach "$WT2" >/dev/null 2>&1
-
-  # Confirm it is unseeded
-  [ ! -L "$WT2/.claude/skills/process-gate" ]
-
   run bash "$SCRIPT" sync "$WT2"
-  [ "$status" -eq 0 ]
 
-  # Inheritance symlinks now present
-  [ -L "$WT2/.claude/rules/trellis.md" ]
-  [ -L "$WT2/.claude/skills/process-gate" ]
-  [ -L "$WT2/.claude/skills/security-gate" ]
-  [ -L "$WT2/.claude/commands/primer.md" ]
+  [ "$status" -eq 0 ]
+  [ ! -e "$WT2/.trellis/runtime" ]
+  [ ! -e "$WT2/.claude/rules/trellis.md" ]
 }
 
 # ---------------------------------------------------------------------------
-# Test 3: worktree sync (no arg) seeds $PWD when cwd is an unseeded worktree
+# sync without a path diagnoses/reconciles only the active worktree.
 # ---------------------------------------------------------------------------
-@test "'sync' with no arg seeds \$PWD" {
+@test "'sync' with no arg leaves an unregistered \$PWD inert" {
   WT2="$SANDBOX/wt2"
 
-  # Create unseeded worktree
   git -C "$MAIN" worktree add --detach "$WT2" >/dev/null 2>&1
-
-  # cd into the worktree before running sync with no argument
   cd "$WT2"
   run bash "$SCRIPT" sync
-  [ "$status" -eq 0 ]
 
-  # Symlinks seeded
-  [ -L "$WT2/.claude/rules/trellis.md" ]
-  [ -L "$WT2/.claude/skills/process-gate" ]
+  [ "$status" -eq 0 ]
+  [ ! -e "$WT2/.trellis/runtime" ]
+  [ ! -e "$WT2/.claude/rules/trellis.md" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -152,7 +130,7 @@ teardown() {
 @test "unknown subcommand exits 2" {
   run bash "$SCRIPT" frobulate
   [ "$status" -eq 2 ]
-  [[ "$output" == *"error: unknown subcommand"* ]]
+  [[ "$output" == *"error: unknown subcommand"* ]] || { echo "$output"; false; }
 }
 
 # ---------------------------------------------------------------------------
@@ -161,7 +139,71 @@ teardown() {
 @test "--help exits 0 and prints usage" {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"worktree.sh"* ]]
-  [[ "$output" == *"add"* ]]
-  [[ "$output" == *"sync"* ]]
+  [[ "$output" == *"worktree.sh"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"add"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"sync"* ]] || { echo "$output"; false; }
+}
+
+@test "opted-in worktree add attaches from immutable release with registered project identity" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  [ "$?" -eq 0 ]
+  T14_WORKTREE="$T14_SANDBOX/linked worktree"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    'cd "$1" && "$2" add -b t14-linked "$3"' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+
+  [ "$status" -eq 0 ]
+  [ -L "$T14_WORKTREE/.trellis/runtime" ]
+  [ -L "$T14_WORKTREE/.claude/rules/trellis.md" ]
+  owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  [ -f "$owner" ]
+  jq -e '.status == "committed" and .project_id == "fixture-project" and .fleet == "personal" and .release == "1.2.3"' "$owner"
+  [ -z "$(git -C "$T14_PROJECT" status --porcelain)" ]
+  [ -z "$(git -C "$T14_WORKTREE" status --porcelain)" ]
+}
+
+@test "opted-in --no-checkout add defers attachment until a real checkout" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  [ "$?" -eq 0 ]
+  T14_WORKTREE="$T14_SANDBOX/deferred worktree"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    'cd "$1" && "$2" add --no-checkout -b t14-deferred "$3"' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+
+  [ "$status" -eq 0 ]
+  [ -d "$T14_WORKTREE" ]
+  [ ! -e "$T14_WORKTREE/.trellis/runtime" ]
+  [ ! -L "$T14_WORKTREE/.trellis/runtime" ]
+  [[ "$output" == *"will reconcile on first checkout"* ]] || { echo "$output"; false; }
+  [ -z "$(t14_owner_for_root "$T14_WORKTREE" 2>/dev/null || true)" ]
+}
+
+@test "ordinary opted-in add is immediately attached and sync is idempotent" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  [ "$?" -eq 0 ]
+  T14_WORKTREE="$T14_SANDBOX/idempotent linked worktree"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    'cd "$1" && "$2" add -b t14-idempotent "$3"' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+  [ "$status" -eq 0 ]
+  owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  before="$(t14_sha256_text "$(cat "$owner")")"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" sync "$T14_WORKTREE"
+  [ "$status" -eq 0 ]
+  [ "$(t14_sha256_text "$(cat "$owner")")" = "$before" ]
+  [ -L "$T14_WORKTREE/.trellis/runtime" ]
+  [ -L "$T14_WORKTREE/.claude/rules/trellis.md" ]
 }

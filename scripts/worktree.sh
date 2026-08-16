@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Trellis worktree wrapper — creates (or repairs) a git worktree and then
-# seeds Trellis inheritance symlinks into it via seed-inheritance-symlinks.sh.
-#
-# Unlike the git post-checkout hook (dead on husky projects), this wrapper
-# works on every project: just use `trellis worktree add` instead of
-# `git worktree add`.
+# Trellis worktree wrapper. Opted-in clones are attached from clone-local
+# registry/release state before any harness has a chance to discover them;
+# unregistered clones remain inert.
 #
 # Usage:
 #   worktree.sh add <path> [extra git-worktree-add-args...]
@@ -21,18 +18,11 @@ worktree.sh — Trellis worktree wrapper
 
 Usage:
   worktree.sh add <path> [git-worktree-add-args...]
-      Create a new git worktree at <path> and seed Trellis inheritance
-      symlinks into it. Extra args (e.g. -b <branch>) are passed through
-      verbatim to git worktree add.
-
-      NOTE: The FIRST non-flag positional argument is treated as the worktree
-      path (matching git's own "git worktree add <path> [<commit-ish>]"
-      convention). Flags that take a value (-b/-B/--reason) are skipped when
-      locating the path.
+      Create a worktree, then reconcile it from this clone's local Trellis
+      registration and immutable release. Unregistered clones are unchanged.
 
   worktree.sh sync [<path>]
-      Seed (or re-seed) Trellis inheritance symlinks into an existing worktree.
-      Defaults to $PWD when <path> is omitted.
+      Reconcile an existing worktree. Defaults to $PWD.
 
   worktree.sh --help
       Print this message and exit 0.
@@ -54,10 +44,20 @@ case "$cmd" in
       exit 2
     fi
 
+    # `--no-checkout` deliberately leaves the new worktree without its tracked
+    # manifest. Its common-dir post-checkout dispatcher reconciles the
+    # attachment after the first real checkout, when the manifest exists.
+    defer_attachment=0
+    for arg in "$@"; do
+      case "$arg" in
+        --no-checkout) defer_attachment=1 ;;
+        --checkout) defer_attachment=0 ;;
+      esac
+    done
+
     # Run git worktree add with ALL original args passed through verbatim.
     # set -e means: if git fails, we exit here and the seeder never runs.
     git worktree add "$@"
-
     # Now locate the worktree path from the (already-validated) arg list.
     # Convention: the FIRST non-flag positional is the worktree path, which
     # matches git's "git worktree add <path> [<commit-ish>]" signature.
@@ -81,8 +81,12 @@ case "$cmd" in
     fi
 
     abs="$(cd "$wt_path" && pwd -P)"
-    "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$abs"
-    echo "worktree ready (inheritance seeded): $abs"
+    if [ "$defer_attachment" -eq 1 ]; then
+      echo "worktree created without checkout; Trellis attachment will reconcile on first checkout: $abs"
+    else
+      "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$abs"
+      echo "worktree ready: $abs"
+    fi
     ;;
 
   sync)

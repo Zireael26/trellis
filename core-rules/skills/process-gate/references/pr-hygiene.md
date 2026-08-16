@@ -4,8 +4,9 @@ Authoritative source: `engineering-process.md` §6 (Git workflow) and §7 (Defin
 
 ## Branch name
 
-- Pattern: `<type>/<kebab-slug>`. Type ∈ `codex`, `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `revert`.
-- Examples: `codex/agent-parity`, `feat/avatar-rotation-gesture`, `fix/wardrobe-zoom-reset`, `chore/upgrade-next-15`.
+- Pattern: `<type>/<kebab-slug>`. Type ∈ `codex`, `feature`, `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `perf`, `build`, `ci`, `revert`.
+- Examples: `codex/agent-parity`, `feature/portable-multi-fleet-setup`, `feat/avatar-rotation-gesture`, `fix/wardrobe-zoom-reset`, `chore/upgrade-next-15`.
+- `feature` is present because the `spec`, `plan`, and `tasks` skills mandate `feature/<slug>`. A branch that followed the canonical pipeline must not fail the gate for doing so.
 - Anything else: **warn** (rename if the branch is short-lived).
 
 ## Commit messages
@@ -41,9 +42,16 @@ PROCESS_GATE_PR_SIZE_HARD=1200
 ```
 
 When a range exceeds the hard cap, the gate accepts the documented ADR path only
-when the same diff changes at least one Markdown file under
-`PROCESS_GATE_ADR_DIR` (default `docs/adr`). The ADR should name the oversized
-change and explain why splitting it would make review or rollback less clear.
+when the same diff **adds** at least one Markdown file under
+`PROCESS_GATE_ADR_DIR` (default `docs/adr`). The ADR must name the oversized
+change and explain why splitting it would make review or rollback less clear —
+so it has to be an ADR this change authored. An ADR that already existed and was
+merely edited in passing does not disarm the cap; without that bound, any
+incidental touch under `docs/adr` exempted an arbitrarily large diff.
+
+A qualifying ADR downgrades the row from **fail** to **warn**, not to pass. The
+line count and the ADR path are named in the finding, and the PR description
+still has to record reviewer acknowledgement of the size.
 
 ## PR description checklist
 

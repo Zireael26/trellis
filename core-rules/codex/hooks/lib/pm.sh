@@ -3,29 +3,28 @@
 # Sourced by hooks that need to know which package manager a project uses.
 # Sibling location: lib/ alongside the hook scripts.
 #
-# Single source of truth for PM resolution. By deliberate design (Trellis
-# avoids incidental cross-subsystem coupling — see husky/pre-commit comments)
-# this logic is MIRRORED, not shared-by-symlink, in:
-#   - core-rules/codex/hooks/lib/pm.sh                       (codex harness copy, identical)
+# This logic is MIRRORED, not shared-by-symlink, in:
+#   - core-rules/codex/hooks/lib/pm.sh                       (Codex harness copy, identical)
 #   - core-rules/skills/process-gate/scripts/lib/common.sh   (pg_resolve_pm)
-#   - core-rules/husky/pre-push                              (inlined; git-level, seeded once)
-# Keep these four in sync — resolution precedence + lockfile order are identical.
-# One deliberate divergence: pg_resolve_pm returns EMPTY when a project has no
-# JS lockfile and no explicit config (so Python/Go toolchain detection can
-# proceed), whereas this helper terminates at npm. stop-verify only calls this
-# inside an `[ -f package.json ]` guard, so the npm terminal never bites non-JS.
 #
-# Resolution (first hit wins):
-#   1. project-local <repo>/.trellis.config.json  .package_manager
-#   2. project-local <repo>/trellis.config.json   .package_manager
-#   3. fleet $TRELLIS_ROOT/trellis.config.json     .package_manager
-#   4. "auto" (or unset / any non-jq env) → lockfile detection:
+# Keep the Claude/Codex copies byte-identical. Process gate preserves this
+# policy precedence but returns EMPTY without an explicit value or JS lockfile,
+# while this helper terminates at npm. The separately inlined husky/pre-push
+# copy is seeded once and does not source this helper.
+#
+# Resolution (first available value wins):
+#   1. canonical project <repo>/.trellis.json                 .package_manager
+#   2. DEPRECATED legacy <repo>/.trellis.config.json         .package_manager
+#      (read-only; kept past v1.0.0-rc.25 only for checkouts still held on the
+#      legacy layout — `trellis migrate --prepare` replaces it with .trellis.json)
+#   3. immutable runtime $TRELLIS_ROOT/trellis.config.json    .package_manager
+#   4. "auto" or unset → lockfile detection:
 #        pnpm-lock.yaml → pnpm | bun.lock(b) → bun | yarn.lock → yarn
 #        | package-lock.json → npm | (none) → npm
 #
-# "auto" == today's lockfile detection: this whole helper is ADDITIVE — with
-# package_manager unset, behaviour is byte-identical to the pre-config hooks.
-# A project/fleet opts in by setting an explicit value.
+# A selected value must be auto, pnpm, npm, bun, or yarn. Unsupported, null,
+# empty, and malformed values still claim their precedence slot, then resolve
+# through lockfile detection rather than exposing a lower policy source.
 
 # trellis_resolve_pm [project_dir]
 #   Echoes the resolved package manager (pnpm|npm|bun|yarn). Never empty for a
@@ -33,15 +32,27 @@
 trellis_resolve_pm() {
   local dir="${1:-$PWD}" pm="" cand
   if command -v jq >/dev/null 2>&1; then
-    for cand in "$dir/.trellis.config.json" "$dir/trellis.config.json"; do
-      if [ -f "$cand" ]; then
-        pm="$(jq -r '.package_manager // empty' "$cand" 2>/dev/null)"
-        [ -n "$pm" ] && break
+    # A candidate without package_manager is absent and falls through. Once a
+    # candidate is malformed/non-object or declares package_manager, it owns
+    # this field's precedence slot: invalid, null, and empty values resolve as
+    # auto rather than allowing a lower policy source to override them.
+    for cand in \
+      "$dir/.trellis.json" \
+      "$dir/.trellis.config.json" \
+      "${TRELLIS_ROOT:+${TRELLIS_ROOT}/trellis.config.json}"; do
+      [ -n "$cand" ] && [ -f "$cand" ] || continue
+      if ! jq -e 'type == "object"' "$cand" >/dev/null 2>&1; then
+        break
+      fi
+      if jq -e 'has("package_manager")' "$cand" >/dev/null 2>&1; then
+        pm="$(jq -r '.package_manager | if type == "string" then . else empty end' "$cand" 2>/dev/null)"
+        break
       fi
     done
-    if [ -z "$pm" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
-      pm="$(jq -r '.package_manager // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null)"
-    fi
+    case "$pm" in
+      auto|pnpm|npm|bun|yarn|'') ;;
+      *) pm="" ;;
+    esac
   fi
 
   if [ -z "$pm" ] || [ "$pm" = "auto" ]; then

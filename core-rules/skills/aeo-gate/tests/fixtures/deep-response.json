@@ -1,0 +1,9 @@
+{
+  "findings": [
+    {
+      "aspect": "external-authority-citations",
+      "state": "present",
+      "rationale": "The supplied content explicitly attributes its measurements to external sources."
+    }
+  ]
+}

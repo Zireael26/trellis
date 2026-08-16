@@ -1,48 +1,182 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Thin Trellis dispatcher. Maps a subcommand to its script and execs it,
-# passing the remaining args through verbatim. No subcommand framework, no
-# per-command flag parsing — each engine owns its own flags and exit codes,
-# and `exec` makes those codes (and signals) propagate unchanged.
-#
-#   trellis doctor       -> doctor.sh           (inheritance health check / --fix)
-#   trellis disk-janitor -> disk-janitor.sh     (reclaim caches/worktrees/stores)
-#   trellis onboard      -> onboard-project.sh  (onboard a project into Trellis)
-#   trellis upgrade      -> upgrade.sh          (compare/adopt the version pin)
-#   trellis sync         -> sync-hooks.sh       (sync Claude hooks into projects)
-#   trellis deps         -> fleet-dependencies  (check/apply dependency baseline)
-#   trellis worktree     -> worktree.sh         (create/repair an inheritance-seeded worktree)
-#
-# No args / `help` -> list subcommands (stdout, exit 0).
-# Unknown command  -> usage to stderr, exit 2.
+# passing remaining arguments through verbatim. Each engine owns flags and exit
+# codes; exec preserves its status and signal behavior unchanged.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
 
 usage() {
   cat <<'EOF'
 trellis — Trellis management dispatcher
 Usage: trellis <command> [args...]
 
+Local setup and release commands:
+  configure     Configure local machine state and install the stable launcher
+  fleet         Manage local fleet settings
+  launchd       Install or remove local disk-janitor LaunchAgents
+  release       Install, verify, list, locate, or adopt immutable releases
+  registry      Import, list, rebuild, or annotate the local registry
+  show-config   Print portable policy plus validated local machine context
+  attach        Attach one checkout to an immutable release
+  detach        Remove owned local attachment surfaces
+  recover       Recover an interrupted attachment transaction
+  relink        Repair local release anchors
+  task          Materialize a local scheduled-task input
+
+Existing commands:
   doctor        Diagnose (and --fix) inheritance health
+  conformance  Verify live documentation path citations
   disk-janitor  Reclaim build caches, dead worktrees, package stores
   onboard       Onboard a project into Trellis
-  upgrade       Compare/adopt the canonical version pin
+  upgrade       Install, verify, and explicitly adopt a named immutable release
+                (launcher-only route; not runnable from this dispatcher)
+  mirror        Publish the verified immutable policy payload to a mirror
   sync          Sync Claude hooks into managed projects
-  deps          Check/snapshot/apply the fleet dependency baseline and ledger
   worktree      Create/repair a worktree with Trellis inheritance seeded
 EOF
 }
 
+# Internal SessionStart routes. The stable launcher verifies the active immutable
+# payload before it executes this dispatcher. Project runtime anchors are data to
+# diagnose, never executable hook sources.
+session_hook_path() {
+  local payload_root="$1" hook_name="$2" harness="$3"
+  case "$harness:$hook_name" in
+    claude:session-context|claude:post-compact-context|claude:inject-primer-index|claude:skill-size-preflight)
+      printf '%s/core-rules/hooks/%s.sh\n' "$payload_root" "$hook_name"
+      ;;
+    codex:session-context|codex:post-compact-context|codex:inject-primer-index)
+      printf '%s/core-rules/codex/hooks/%s.sh\n' "$payload_root" "$hook_name"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+session_project_root() {
+  local project_root="${1:-}" canonical
+  case "$project_root" in
+    /*) ;;
+    *)
+      printf 'trellis: SessionStart PROJECT_ROOT must be an absolute canonical directory\n' >&2
+      return 2
+      ;;
+  esac
+  case "$project_root" in
+    *$'\t'*|*$'\n'*|*$'\r'*|*'//'|*/./*|*/../*|*/.|*/..)
+      printf 'trellis: SessionStart PROJECT_ROOT must be an absolute canonical directory\n' >&2
+      return 2
+      ;;
+  esac
+  [ -d "$project_root" ] || {
+    printf 'trellis: SessionStart PROJECT_ROOT is unavailable: %s\n' "$project_root" >&2
+    return 5
+  }
+  canonical="$(CDPATH= cd "$project_root" && pwd -P)" || {
+    printf 'trellis: SessionStart PROJECT_ROOT is unavailable: %s\n' "$project_root" >&2
+    return 5
+  }
+  printf '%s\n' "$canonical"
+}
+
+run_session_hook() {
+  local hook_name="${1:-}" harness="${2:-}" project_root="${3:-}" payload_root hook home trellis_home rc
+
+  [ "$#" -eq 3 ] || {
+    printf 'trellis: hook requires NAME, HARNESS, and PROJECT_ROOT\n' >&2
+    exit 2
+  }
+  project_root="$(session_project_root "$project_root")"
+  rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
+
+  payload_root="$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)" || {
+    printf 'trellis: could not resolve verified release payload\n' >&2
+    exit 5
+  }
+  hook="$(session_hook_path "$payload_root" "$hook_name" "$harness")" || {
+    printf 'trellis: unsupported SessionStart hook route: %s/%s\n' "$harness" "$hook_name" >&2
+    exit 2
+  }
+  [ -f "$hook" ] && [ -x "$hook" ] || {
+    printf 'trellis: verified release SessionStart hook is unavailable: %s\n' "$hook" >&2
+    exit 5
+  }
+
+  # Execute hooks in a deliberately small environment. This drops BASH_ENV,
+  # ENV, exported functions, all inherited Git loader/config variables, and
+  # ambient PATH before the hook's interpreter is selected. Git then sees no
+  # system or user config; the two command-scoped entries below are its only
+  # configuration for SessionStart.
+  home="${HOME:-}"
+  trellis_home="${TRELLIS_HOME:-}"
+  case "$harness" in
+    claude)
+      exec /usr/bin/env -i \
+        "HOME=$home" "TRELLIS_HOME=$trellis_home" \
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+        "TRELLIS_ROOT=$payload_root" "CLAUDE_PROJECT_DIR=$project_root" \
+        "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null" \
+        "GIT_CONFIG_COUNT=2" "GIT_CONFIG_KEY_0=core.fsmonitor" "GIT_CONFIG_VALUE_0=false" \
+        "GIT_CONFIG_KEY_1=core.hooksPath" "GIT_CONFIG_VALUE_1=/dev/null" \
+        "$hook"
+      ;;
+    codex)
+      exec /usr/bin/env -i \
+        "HOME=$home" "TRELLIS_HOME=$trellis_home" \
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+        "TRELLIS_ROOT=$payload_root" "CODEX_PROJECT_DIR=$project_root" \
+        "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null" \
+        "GIT_CONFIG_COUNT=2" "GIT_CONFIG_KEY_0=core.fsmonitor" "GIT_CONFIG_VALUE_0=false" \
+        "GIT_CONFIG_KEY_1=core.hooksPath" "GIT_CONFIG_VALUE_1=/dev/null" \
+        "$hook"
+      ;;
+    *)
+      # session_hook_path has already rejected this; keep an explicit closed
+      # branch so a future route cannot run with a partially selected env.
+      exit 2
+      ;;
+  esac
+}
+
+
 cmd="${1:-help}"
 case "$cmd" in
+  configure)    shift; exec "$SCRIPT_DIR/configure.sh" configure "$@" ;;
+  fleet)        shift; exec "$SCRIPT_DIR/configure.sh" fleet "$@" ;;
+  release)      shift; exec "$SCRIPT_DIR/release.sh" "$@" ;;
+  registry)     shift; exec "$SCRIPT_DIR/registry.sh" "$@" ;;
+  show-config)  shift; exec "$SCRIPT_DIR/show-config.sh" "$@" ;;
+  attach|detach|recover|relink)
+                shift; exec "$SCRIPT_DIR/attach-project.sh" "$cmd" "$@" ;;
   doctor)       shift; exec "$SCRIPT_DIR/doctor.sh" "$@" ;;
+  conformance)  shift; exec "$SCRIPT_DIR/conformance-check.sh" "$@" ;;
   disk-janitor) shift; exec "$SCRIPT_DIR/disk-janitor.sh" "$@" ;;
+  launchd)      shift; exec "$SCRIPT_DIR/install-disk-janitor-launchd.sh" "$@" ;;
   onboard)      shift; exec "$SCRIPT_DIR/onboard-project.sh" "$@" ;;
-  upgrade)      shift; exec "$SCRIPT_DIR/upgrade.sh" "$@" ;;
+  migrate)      shift; exec "$SCRIPT_DIR/migrate-project.sh" "$@" ;;
+  upgrade)
+                # `trellis upgrade` is executed by the stable launcher as a
+                # verified in-memory command bundle, never from a pathname in
+                # this payload. The launcher intercepts the route before this
+                # dispatcher runs, so reaching here means the dispatcher was
+                # invoked directly; upgrade.sh would refuse anyway, and it would
+                # refuse with a diagnostic about its own bootstrap rather than
+                # about the route. Say what to run instead.
+                printf '%s\n' \
+                  'trellis: upgrade runs only through the installed stable launcher, as a verified in-memory command bundle' \
+                  'trellis: run: trellis upgrade VERSION [--remote URL] (--project ID | --fleet NAME | --all)' >&2
+                exit 2
+                ;;
+  mirror)       shift; exec "$SCRIPT_DIR/sync-to-template.sh" "$@" ;;
   sync)         shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
-  deps)         shift; exec node "$SCRIPT_DIR/fleet-dependencies.mjs" "$@" ;;
+  hook)
+                shift
+                run_session_hook "$@"
+                ;;
   worktree)     shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
-  help)         usage ;;
+  task)         shift; exec "$SCRIPT_DIR/materialize-scheduled-task.sh" "$@" ;;
+  help|-h|--help) usage ;;
   *)            usage >&2; exit 2 ;;
 esac

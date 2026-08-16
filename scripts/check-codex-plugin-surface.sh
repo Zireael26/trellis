@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# check-codex-plugin-surface.sh — guard the two things a codex plugin update silently breaks.
+# check-codex-plugin-surface.sh — guard the Codex plugin hook setup a plugin
+# update can silently break.
 #
-# 1. Companion effort enum: v1.0.5 rejects everything above xhigh
-#    (VALID_REASONING_EFFORTS in codex-companion.mjs). When an update widens it,
-#    recipe-side `max` becomes unblockable (ultra additionally needs per-subagent
-#    visibility) — see follow-ups.md + docs/adr/2026-07-10-sol-ultra-capability-reground.md.
-#    This script REPORTS the change; it never edits doctrine.
-# 2. Teammate node/PATH fix: hooks.json commands need the
-#    PATH="$HOME/.local/bin:$PATH" prefix on bare `node` invocations (GUI-spawned
-#    panes carry launchd PATH — gotchas.md 2026-07-10). A plugin update rewrites
-#    hooks.json and reverts the patch. This script RE-APPLIES it idempotently,
-#    on both the marketplace checkout and every cache copy. It also refreshes
-#    the ~/.local/bin/node shim if nvm moved the real binary.
+# hooks.json commands invoke bare `node`; GUI-spawned panes carry a launchd PATH
+# that may not resolve it. They need the PATH="$HOME/.local/bin:$PATH" prefix.
+# A plugin update can rewrite hooks.json and remove that prefix. This script
+# re-applies it idempotently on both the marketplace checkout and every cache
+# copy, and refreshes the ~/.local/bin/node shim if nvm moved the real binary.
 #
 # Usage: check-codex-plugin-surface.sh [--quiet]
 # Exit: 0 = surface as expected (patch present or re-applied); 1 = drift needing a human.
@@ -23,7 +18,6 @@ QUIET=false
 say() { $QUIET || echo "$@"; }
 
 DRIFT=0
-BASELINE_ENUM='"none", "minimal", "low", "medium", "high", "xhigh"'
 
 # --- node shim ---------------------------------------------------------------
 # Resolve the REAL node with ~/.local/bin stripped from PATH, else the shim
@@ -43,26 +37,6 @@ else
   DRIFT=1
 fi
 
-# --- companion enum ----------------------------------------------------------
-for MJS in "$HOME"/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs \
-           "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs; do
-  [ -f "$MJS" ] || continue
-  LINE="$(grep -m1 'VALID_REASONING_EFFORTS' "$MJS" || true)"
-  if [ -z "$LINE" ]; then
-    say "companion enum: validator not found in $MJS — companion structure changed, re-verify manually"
-    DRIFT=1
-  elif printf '%s' "$LINE" | grep -q '"max"\|"ultra"'; then
-    say "companion enum: WIDENED in $MJS -> $LINE"
-    say "  ACTION: companion now accepts exception tiers — recipe-side max unblock candidate."
-    say "  See follow-ups.md row 'ultra capability re-ground' + ADR 2026-07-10-sol-ultra-capability-reground.md."
-    DRIFT=1
-  elif printf '%s' "$LINE" | grep -qF "$BASELINE_ENUM"; then
-    say "companion enum: baseline (caps at xhigh) in $MJS"
-  else
-    say "companion enum: CHANGED (non-baseline, no max/ultra) in $MJS -> $LINE"
-    DRIFT=1
-  fi
-done
 
 # --- hooks.json PATH prefix --------------------------------------------------
 for HJ in "$HOME"/.claude/plugins/marketplaces/openai-codex/plugins/codex/hooks/hooks.json \

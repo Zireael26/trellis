@@ -1,0 +1,217 @@
+{
+  "effortLevel": "xhigh",
+  "permissions": {
+    "deny": [
+      "Read(./node_modules/**)",
+      "Read(./**/node_modules/**)",
+      "Read(./.next/**)",
+      "Read(./**/.next/**)",
+      "Read(./dist/**)",
+      "Read(./**/dist/**)",
+      "Read(./build/**)",
+      "Read(./**/build/**)",
+      "Read(./out/**)",
+      "Read(./**/out/**)",
+      "Read(./target/**)",
+      "Read(./**/target/**)",
+      "Read(./vendor/**)",
+      "Read(./**/vendor/**)",
+      "Read(./.venv/**)",
+      "Read(./venv/**)",
+      "Read(./**/__pycache__/**)",
+      "Read(./.pytest_cache/**)",
+      "Read(./.mypy_cache/**)",
+      "Read(./.ruff_cache/**)",
+      "Read(./coverage/**)",
+      "Read(./.coverage)",
+      "Read(./.turbo/**)",
+      "Read(./.cache/**)",
+      "Read(./.parcel-cache/**)",
+      "Read(./Library/**)",
+      "Read(./Temp/**)",
+      "Read(./pnpm-lock.yaml)",
+      "Read(./package-lock.json)",
+      "Read(./yarn.lock)",
+      "Read(./go.sum)",
+      "Read(./Cargo.lock)",
+      "Read(./poetry.lock)",
+      "Read(./uv.lock)",
+      "Read(./Pipfile.lock)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/block-destructive.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking command safety..."
+          }
+        ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/skill-preload-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking Skill pre-load size..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/reread-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Re-read guard..."
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/skill-slash-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking slash-command Skill size..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/post-edit-verify.sh\"",
+            "timeout": 120,
+            "statusMessage": "Verifying edit..."
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/truncation-check.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking for truncation..."
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/track-read.sh\"",
+            "timeout": 5,
+            "statusMessage": "Recording reads..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context claude \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "Loading session context..."
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context claude \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "Restoring context after compact..."
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index claude \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 5,
+            "statusMessage": "Loading primer index..."
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook skill-size-preflight claude \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "Scanning discoverable Skill sizes..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/save-context-log.sh\"",
+            "timeout": 10,
+            "statusMessage": "Saving session context..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/spec-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking spec-gate..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/decision-receipt.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking decision receipts..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/stop-verify.sh\"",
+            "timeout": 300,
+            "statusMessage": "Running final verification..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/code-review-subagent.sh\"",
+            "timeout": 120,
+            "statusMessage": "Code review on diff..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/propose-rules.sh\"",
+            "timeout": 60,
+            "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/ui-verify.sh\"",
+            "timeout": 120,
+            "statusMessage": "UI verification..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/stamp-turn.sh\"",
+            "timeout": 5,
+            "statusMessage": "Stamping turn..."
+          }
+        ]
+      }
+    ]
+  }
+}

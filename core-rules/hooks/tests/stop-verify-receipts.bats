@@ -274,9 +274,11 @@ EOF
   printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
   printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
   printf '%s' "$output" | jq -r '.additionalContext' | grep -q 'follow-ups'
-  # Anti-template: rendered warn must not match the detection regex.
-  ! printf '%s' "$output" | jq -r '.additionalContext' \
-    | grep -Eq '<!-- follow-ups: (none|[0-9]+) -->'
+  # Anti-template: rendered warn must not match the detection regex. Counted,
+  # not `! ... | grep -Eq`: a leading `!` never trips `set -e`, so the bare
+  # form passed whatever the hook rendered.
+  [ "$(printf '%s' "$output" | jq -r '.additionalContext' \
+      | grep -Ec '<!-- follow-ups: (none|[0-9]+) -->')" -eq 0 ] || { echo "$output"; false; }
 }
 
 # =========================================================================

@@ -25,7 +25,7 @@ Run `git rev-parse --git-common-dir` and take its parent. This is `<canonical-ro
 
 ### 3. Resolve preset ceiling
 
-Read `<canonical-root>/.trellis.config.json` (preferred) or `<canonical-root>/trellis.config.json`. Parse the `.presets` array.
+Read `<canonical-root>/.trellis.json` (preferred), then the deprecated `<canonical-root>/.trellis.config.json`, then `<canonical-root>/trellis.config.json`. Parse the `.presets` array.
 
 For each preset name in the array, read `<trellis-root>/core-rules/presets/<name>.md` and parse its YAML frontmatter. If frontmatter declares `autonomy_ceiling`, collect it. The active ceiling is the **lowest** value across all declared ceilings; if no preset declares one, ceiling is 5.
 

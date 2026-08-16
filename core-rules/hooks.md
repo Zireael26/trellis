@@ -74,6 +74,16 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, th
 
 Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per stop event, guarded against infinite loops.
 
+### decision-receipt
+- **Event:** `Stop`, after `spec-gate` and before `stop-verify` / review. Codex preserves its existing `save-context-log` call between `spec-gate` and this boundary; OMP invokes the canonical Claude wrapper.
+- **Guard:** if `$stop_hook_active == true`, exit 0 immediately. Resolve the effective, post-ceiling autonomy level through `lib/autonomy.sh`; L1-L3 exit 0 without parsing.
+- **Substantive turn:** validate when the project worktree is dirty or the current turn contains a filled canonical DoD receipt marker. A clean read-only turn exits 0.
+- **Required block:** exactly one `## Decisions made (L<n>)` block for the effective level. Every non-empty line in that block must be a canonical decision entry copied verbatim into `<canonical-root>/decisions-log.md`.
+- **Entry validation:** current UTC date, valid `HH:MM:SSZ`, effective `[L<n>]`, one of `interpretation` / `pattern` / `scope` / `architectural`, and filled decision, `Reasoning:`, and `Alternatives considered:` clauses. Architectural entries alone end in ` SURFACED INLINE`.
+- **Forward-only invariant:** reads the current assistant message or current-turn transcript and the canonical log; never appends, rewrites, normalizes, rotates, or validates legacy log entries.
+- **Return on block:** `{"decision":"block","reason":"decision-receipt: ..."}` and exit 2. Passes are silent with exit 0.
+- **Budget:** 15s.
+
 ### stop-verify
 - **Event:** `Stop`
 - **Guard:** if `$stop_hook_active == true`, exit 0 immediately. Also exit 0 if no file edits occurred this turn (pure chat / read-only).
@@ -243,7 +253,9 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 ### pre-push (husky on Node projects; native `core-rules/githooks/pre-push` mirror elsewhere)
 - **Runs, in order:**
   1. **PR-flow guard** — blocks direct push to `main` or `master` across all Trellis projects. Commits must land on a branch and merge via PR. Emergency override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use rarely; every invocation should be documented in the project's `gotchas.md` or a commit message trailer). The override bypasses only the PR-flow policy, not the merge gate below — `run-all.sh` still runs in merge mode.
-  2. **The merge gate** — `process-gate/scripts/run-all.sh --mode=<merge|push>`, derived from the pushed refs: a push targeting `main`/`master` runs `--mode=merge` (full BLOCKED semantics, no downgrade), a WIP feature-branch push runs the lenient `--mode=push`. This single call supersedes the old standalone typecheck+lint+test block (`check-tests.sh` is a strict superset of those). It covers the deterministic gate set: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. rc 1 → block (exit 1); rc 2 → warn (exit 0); rc 0 → ok.
+  2. **Mandatory spec gate** — `spec-gate.sh --gate`; disabled by default and blocking only when explicitly enabled.
+  3. **AEO warn adapter** — `lib/aeo-gate-warn.sh`; instance-only, disabled by default, relevant-page-only, exactly one non-blocking verdict when enabled.
+  4. **The merge gate** — `process-gate/scripts/run-all.sh --mode=<merge|push>`, derived from the pushed refs: a push targeting `main`/`master` runs `--mode=merge` (full BLOCKED semantics, no downgrade), a WIP feature-branch push runs the lenient `--mode=push`. This single call supersedes the old standalone typecheck+lint+test block (`check-tests.sh` is a strict superset of those). It covers the deterministic gate set: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. rc 1 → block (exit 1); rc 2 → warn (exit 0); rc 0 → ok.
 - **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy + the deterministic merge gate at the git boundary.
 - **Block:** PR-flow guard trips, or `run-all.sh --mode=merge` returns a hard failure.
 - **Cross-harness reach.** Git hooks are harness-agnostic — they run under Claude Code, Codex, and OMP. This local `pre-push` git hook is therefore the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire that an optional operator bypass audit can surface after the fact. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`; those turn-level gates are enforced through each enabled harness's native session path, not at the git boundary.
@@ -256,7 +268,7 @@ The gate that makes "every feature gets specced" enforceable rather than aspirat
 - **Teeth location:** `core-rules/husky/pre-push` and `core-rules/githooks/pre-push` invoke `.claude/hooks/spec-gate.sh --gate` (`.agents/` fallback) **after** the PR-flow guard, **before** the process-gate. A block exits non-zero → the push is refused. This is the load-bearing enforcement point.
 - **Parity by construction:** the verdict engine `lib/spec-gate-core.sh` is a **pure function of git + filesystem state** (branch diff size, changed paths, in-range spec triad, bound `/surgical` marker) with **zero model classification**. Same repository state → same verdict on Claude Code, Codex, and OMP. Codex shares the identical core; OMP invokes the canonical script through its adapter. Determinism, not prose, does the enforcing.
 - **Early-warning:** Claude Code and Codex register the script first in their Stop manifests; the OMP adapter invokes it first in `session_stop`. Each surfaces the block before push, while the git-boundary invocation remains the load-bearing gate.
-- **Thresholds** (config, most-specific wins: project-local `.trellis.config.json` → central `trellis.config.json` → built-in): `spec_required_diff_lines` (floor, default **80**) and `surgical_max_diff_lines` (surgical ceiling, default **400**).
+- **Thresholds** (config, most-specific wins: project-local `.trellis.json` → deprecated project-local `.trellis.config.json` → immutable runtime `trellis.config.json` → built-in): `spec_required_diff_lines` (floor, default **80**) and `surgical_max_diff_lines` (surgical ceiling, default **400**).
 - **Gated diff:** net added+deleted vs the protected merge-base, with non-feature paths excluded (tests, `docs/`, `specs/`, `audits/`, lockfiles, generated, and operational config like `*.yml`/`package.json`/`trellis.config.json`). Below the floor → passes with no spec (surgical-by-default). Above the floor → one of three routes required.
 - **The three routes** (above the floor):
   1. **Spec** — a full `specs/NNN-*/{spec,plan,tasks}.md` triad **added or modified in this branch's range** (merely existing on `main` does not count — C-CRIT-1), each file non-template (≥200 bytes, no `<NNN>`/`<slug>`/`TODO-SPEC`/`SCAFFOLD-PLACEHOLDER` — C-CRIT-2), **plus** an interview artifact tied to autonomy: L1–3 needs `clarify.md` in the triad or a `.claude/spec-waiver`; L4–5 needs a `decisions-log.md` entry naming this branch.
@@ -266,6 +278,16 @@ The gate that makes "every feature gets specced" enforceable rather than aspirat
 - **Audit log:** `sg_valid_marker` appends to `<canonical-root>/.claude/spec-gate-audit.log` — `emergency-override` on every emergency push, `oversized-surgical` when a surgical claim grows past the ceiling. Both are gitignored; the `cross-project-process-audit` surfaces them (an emergency with no follow-up spec is a visible debt).
 - **Fail semantics:** fail-**open** on a broken environment (git error, absent `jq`, unresolvable baseline → `advisory`, never blocks — a hiccup must not brick a push); fail-**closed** on a present-but-malformed `mandatory_pipeline` block (an opted-in project must not be silently disabled by a typo). Absence of the block, or `enabled:false`, is byte-identical to pre-006 behavior.
 - **Block message:** the three-route remedy prints to stderr on a blocked push; see `sg_remedy_message`.
+
+### AEO diff adapter (spec 033)
+
+`core-rules/hooks/lib/aeo-gate-warn.sh` is the git-boundary adapter for deterministic AEO Mode 2. It is deliberately not a Claude or Codex event hook; both canonical pre-push files call the same library after spec-gate and before process-gate.
+
+- `aeo_gate.enabled` defaults to `false`. Enabling requires `project`, `url`, `marker_file`, `marker`, and an accepted `baseline` path in the repository config.
+- Only changed `.html`, `.htm`, `.md`, `.mdx`, `.ts`, `.tsx`, `.js`, or `.jsx` paths invoke the diff runner.
+- Evidence lands below `.git/trellis-aeo/<HEAD>` and cannot dirty source.
+- PASS, REGRESSION, runner failure, missing baseline, and malformed configuration all exit zero. An enabled relevant invocation emits exactly one `[aeo-gate]` verdict on stderr; absence, disabled state, and irrelevant diffs are silent.
+- This is an instance rollout surface, not fleet enforcement. Blocking requires the later operator decision named in Spec 033.
 
 ---
 

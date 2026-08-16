@@ -2,19 +2,22 @@
  * trellis.ts — Oh My Pi extension factory bridging OMP lifecycle events to the
  * canonical Trellis shell hooks. Live runtime adapter; never copied policy.
  *
- * Source: Trellis / core-rules / omp hooks. Projects reach it via the
- * machine-local link `<project>/.omp/hooks -> <trellis_root>/core-rules/omp/hooks`
- * (see docs/specs/2026-08-09-omp-full-inheritance-design.md).
+ * Attached projects reach this adapter through the immutable runtime leaf
+ * `<project>/.omp/hooks/pre/trellis.ts ->
+ * <project>/.trellis/runtime/core-rules/omp/hooks/pre/trellis.ts`.
  *
  * Contract:
  *   - Default export is the OMP extension factory (`(pi: ExtensionAPI) => void`).
- *   - Resolves `trellis_root` at load time: `TRELLIS_ROOT` env (when it carries
- *     `core-rules/hooks`), else walk up from this module's own directory. An
- *     unresolvable setup throws — a dangling/wrong-root install must never
- *     silently pass as parity.
- *   - Resolves the project dir live per event from `ctx.cwd`.
- *   - Normalizes OMP events into the canonical Claude hook envelope and executes
- *     the live scripts under `<trellis_root>/core-rules/hooks` with
+ *   - Default lifecycle resolution reads only the event context's attached
+ *     project `.trellis/runtime` anchor. It never reads `TRELLIS_ROOT` or
+ *     derives policy from this module's checkout.
+ *   - A raw/non-Trellis project is inert. A project carrying the managed OMP
+ *     adapter leaf whose runtime anchor or payload is missing or wrong fails
+ *     closed with a named error.
+ *   - Explicit `createTrellisAdapter` inputs remain supported for embeddings
+ *     and tests, but must resolve to the same immutable release payload.
+ *   - Normalizes OMP events into the canonical Claude hook envelope and
+ *     executes scripts from the attached immutable payload with
  *     `CLAUDE_PROJECT_DIR` and `TRELLIS_ROOT` exported.
  *   - Parses the scripts' decision JSON and maps it to OMP results:
  *       tool_call          -> `{block: true, reason}`      (fail closed)
@@ -24,9 +27,9 @@
  *       session_stop       -> `{decision: "block", reason}` (continuation request)
  *   - Injects the live project `CLAUDE.md` into sessions whose system prompt
  *     lacks it. Top-level sessions already carry it natively via
- *     `.omp/AGENTS.md -> <project>/CLAUDE.md`; OMP task children exclude
- *     `AGENTS.md` from inherited context files, so the marker check appends the
- *     policy to their system prompt before their first agent run.
+ *     `.omp/AGENTS.md`; OMP task children exclude `AGENTS.md` from inherited
+ *     context files, so the marker check appends the policy before their first
+ *     agent run.
  *   - Saves the Trellis context log on `session_before_compact` and
  *     `session_shutdown`.
  *   - Stop hooks receive an adapter-produced transcript (Claude JSONL shape)
@@ -41,8 +44,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
 // ============================================================================
 // Structural OMP types — subset of the installed extension contract. The host
@@ -206,6 +209,7 @@ const SESSION_START_SCRIPTS: ReadonlyArray<{ script: string; timeoutMs: number; 
 
 const STOP_SCRIPTS: ReadonlyArray<{ script: string; timeoutMs: number }> = [
 	{ script: "spec-gate.sh", timeoutMs: 15_000 },
+	{ script: "decision-receipt.sh", timeoutMs: 15_000 },
 	{ script: "stop-verify.sh", timeoutMs: 300_000 },
 	{ script: "code-review-subagent.sh", timeoutMs: 120_000 },
 	{ script: "propose-rules.sh", timeoutMs: 60_000 },
@@ -221,36 +225,469 @@ const POST_COMPACT_CONTEXT = "post-compact-context.sh";
 // ============================================================================
 
 /**
- * Resolve `trellis_root` for this adapter. `TRELLIS_ROOT` env wins when it
- * carries `core-rules/hooks`; otherwise walk up from `moduleDir` looking for an
- * ancestor that has a `core-rules/hooks` directory (the adapter itself lives at
- * `<trellis_root>/core-rules/omp/hooks/pre/`). Returns undefined when no valid
- * root exists — callers must refuse to operate in that case.
+ * Compatibility helper for embedding callers. The legacy environment argument
+ * remains in the public signature but is deliberately ignored: only a supplied
+ * immutable payload path may resolve. Default OMP lifecycle resolution uses
+ * `resolveTrellisRuntime` below instead.
  */
 export function resolveTrellisRoot(
 	moduleDir: string,
-	env: Record<string, string | undefined>,
+	_env: Record<string, string | undefined>,
 ): string | undefined {
-	const fromEnv = env.TRELLIS_ROOT;
-	if (fromEnv && isHooksDir(path.join(fromEnv, "core-rules", "hooks"))) {
-		return fromEnv;
-	}
 	let dir = path.resolve(moduleDir);
 	for (;;) {
-		if (isHooksDir(path.join(dir, "core-rules", "hooks"))) {
-			return dir;
-		}
+		const payloadRoot = immutablePayloadIdentity(dir);
+		if (payloadRoot && canonicalHooksDirectory(payloadRoot)) return payloadRoot;
 		const parent = path.dirname(dir);
 		if (parent === dir) return undefined;
 		dir = parent;
 	}
 }
 
-function isHooksDir(candidate: string): boolean {
+const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$/;
+const GIT_OID = /^[a-f0-9]{40}$/;
+const MANAGED_OMP_ADAPTER_TARGET = "../../../.trellis/runtime/core-rules/omp/hooks/pre/trellis.ts";
+
+interface ReleaseTreeEntry {
+	path: string;
+	mode: "100644" | "100755" | "120000";
+	oid: string;
+}
+
+interface ReleaseRecord {
+	version: string;
+	tree: ReleaseTreeEntry[];
+}
+
+interface ReleaseMetadata {
+	record: ReleaseRecord;
+	fingerprint: string;
+	stat: fs.Stats;
+}
+
+interface PayloadEntry {
+	fullPath: string;
+	stat: fs.Stats;
+}
+
+interface PayloadInspection {
+	files: Map<string, PayloadEntry>;
+	directories: Map<string, PayloadEntry>;
+	fingerprint: string;
+}
+
+interface ImmutablePayloadCacheEntry {
+	releaseFingerprint: string;
+	payloadFingerprint: string;
+}
+
+const immutablePayloadCache = new Map<string, ImmutablePayloadCacheEntry>();
+
+function pathIsContained(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative.length === 0 || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+function hasExactKeys(record: Record<string, unknown>, expected: string[]): boolean {
+	const actual = Object.keys(record).sort();
+	const sortedExpected = [...expected].sort();
+	return actual.length === sortedExpected.length && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+function isSafeReleasePath(candidate: string): boolean {
+	if (
+		candidate.length === 0 ||
+		candidate.startsWith("/") ||
+		candidate.endsWith("/") ||
+		candidate.includes("//") ||
+		candidate.includes("\0") ||
+		candidate.includes("\t") ||
+		candidate.includes("\n") ||
+		candidate.includes("\r")
+	) {
+		return false;
+	}
+	return candidate.split("/").every((component) => component !== "." && component !== ".." && component.length > 0);
+}
+
+function isSafeReleaseSymlinkTarget(linkPath: string, target: string): boolean {
+	if (
+		target.length === 0 ||
+		path.posix.isAbsolute(target) ||
+		target.includes("//") ||
+		target.includes("\0") ||
+		target.includes("\t") ||
+		target.includes("\n") ||
+		target.includes("\r")
+	) {
+		return false;
+	}
+	const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(linkPath), target));
+	return !path.posix.isAbsolute(resolved) && resolved !== ".." && !resolved.startsWith("../");
+}
+
+function statFingerprint(stat: fs.Stats): string {
+	return [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+}
+
+function releaseRecordFromBytes(bytes: Buffer): ReleaseRecord | undefined {
+	let parsed: unknown;
 	try {
-		return fs.statSync(candidate).isDirectory();
+		parsed = JSON.parse(bytes.toString("utf8"));
+	} catch {
+		return undefined;
+	}
+	const release = asRecord(parsed);
+	if (!release) return undefined;
+	const rootKeys =
+		typeof release.$schema === "string" && release.$schema.length > 0
+			? ["$schema", "schema_version", "version", "tag", "commit", "remote", "tree"]
+			: ["schema_version", "version", "tag", "commit", "remote", "tree"];
+	if (
+		!hasExactKeys(release, rootKeys) ||
+		release.schema_version !== 1 ||
+		typeof release.version !== "string" ||
+		!SEMVER.test(release.version) ||
+		release.tag !== `v${release.version}` ||
+		typeof release.commit !== "string" ||
+		!GIT_OID.test(release.commit) ||
+		typeof release.remote !== "string" ||
+		release.remote.length === 0 ||
+		!Array.isArray(release.tree) ||
+		release.tree.length === 0
+	) {
+		return undefined;
+	}
+
+	const paths = new Set<string>();
+	const tree: ReleaseTreeEntry[] = [];
+	for (const rawEntry of release.tree) {
+		const entry = asRecord(rawEntry);
+		if (
+			!entry ||
+			!hasExactKeys(entry, ["path", "mode", "oid"]) ||
+			typeof entry.path !== "string" ||
+			!isSafeReleasePath(entry.path) ||
+			(entry.mode !== "100644" && entry.mode !== "100755" && entry.mode !== "120000") ||
+			typeof entry.oid !== "string" ||
+			!GIT_OID.test(entry.oid) ||
+			paths.has(entry.path)
+		) {
+			return undefined;
+		}
+		paths.add(entry.path);
+		tree.push({ path: entry.path, mode: entry.mode, oid: entry.oid });
+	}
+	return { version: release.version, tree };
+}
+
+function readReleaseMetadata(releaseJson: string): ReleaseMetadata | undefined {
+	try {
+		const stat = fs.lstatSync(releaseJson);
+		if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+		const bytes = fs.readFileSync(releaseJson);
+		const record = releaseRecordFromBytes(bytes);
+		if (!record) return undefined;
+		return {
+			record,
+			fingerprint: `${statFingerprint(stat)}\0${bytes.toString("base64")}`,
+			stat,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function inspectPayloadTree(releaseDir: string, payloadRoot: string): PayloadInspection {
+	const files = new Map<string, PayloadEntry>();
+	const directories = new Map<string, PayloadEntry>();
+	const state: string[] = [`release:${statFingerprint(fs.lstatSync(releaseDir))}`];
+
+	function inspectDirectory(directory: string, relativeDirectory: string): void {
+		const stat = fs.lstatSync(directory);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) {
+			throw new Error(`invalid release payload directory: ${directory}`);
+		}
+		if (relativeDirectory.length > 0) {
+			directories.set(relativeDirectory, { fullPath: directory, stat });
+			state.push(JSON.stringify(["directory", relativeDirectory, statFingerprint(stat)]));
+		} else {
+			state.push(JSON.stringify(["payload", statFingerprint(stat)]));
+		}
+		for (const name of fs.readdirSync(directory).sort()) {
+			const fullPath = path.join(directory, name);
+			const relativePath = relativeDirectory.length > 0 ? `${relativeDirectory}/${name}` : name;
+			const entry = fs.lstatSync(fullPath);
+			if (entry.isDirectory()) {
+				inspectDirectory(fullPath, relativePath);
+				continue;
+			}
+			if (!entry.isFile() && !entry.isSymbolicLink()) {
+				throw new Error(`unexpected release payload content type: ${relativePath}`);
+			}
+			files.set(relativePath, { fullPath, stat: entry });
+			state.push(
+				JSON.stringify([
+					entry.isSymbolicLink() ? "symlink" : "file",
+					relativePath,
+					statFingerprint(entry),
+					entry.isSymbolicLink() ? fs.readlinkSync(fullPath) : "",
+				]),
+			);
+		}
+	}
+
+	inspectDirectory(payloadRoot, "");
+	return { files, directories, fingerprint: state.join("\n") };
+}
+
+function expectedPayloadDirectories(tree: ReleaseTreeEntry[]): Set<string> {
+	const directories = new Set<string>();
+	for (const entry of tree) {
+		const parts = entry.path.split("/");
+		for (let index = 1; index < parts.length; index += 1) {
+			directories.add(parts.slice(0, index).join("/"));
+		}
+	}
+	return directories;
+}
+
+function samePaths(actual: Iterable<string>, actualSize: number, expected: Set<string>): boolean {
+	if (actualSize !== expected.size) return false;
+	for (const entry of actual) {
+		if (!expected.has(entry)) return false;
+	}
+	return true;
+}
+
+function payloadPathForReleaseEntry(payloadRoot: string, relativePath: string): string | undefined {
+	const fullPath = path.resolve(payloadRoot, relativePath);
+	if (!pathIsContained(payloadRoot, fullPath) || fullPath === payloadRoot) return undefined;
+	let current = payloadRoot;
+	const components = relativePath.split("/");
+	for (const component of components.slice(0, -1)) {
+		current = path.join(current, component);
+		const stat = fs.lstatSync(current);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+	}
+	return fullPath;
+}
+
+function payloadMode(stat: fs.Stats): ReleaseTreeEntry["mode"] | undefined {
+	if (stat.isSymbolicLink()) return "120000";
+	if (!stat.isFile()) return undefined;
+	return (stat.mode & 0o111) === 0 ? "100644" : "100755";
+}
+
+function gitBlobOid(content: Buffer): string {
+	return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
+}
+
+function isWritable(stat: fs.Stats): boolean {
+	return (stat.mode & 0o222) !== 0;
+}
+
+function verifyImmutablePayload(
+	releaseDir: string,
+	payloadRoot: string,
+	metadata: ReleaseMetadata,
+	inspection: PayloadInspection,
+): boolean {
+	const topLevel = fs.readdirSync(releaseDir).sort();
+	if (
+		topLevel.length !== 2 ||
+		topLevel[0] !== "payload" ||
+		topLevel[1] !== "release.json" ||
+		isWritable(fs.lstatSync(releaseDir)) ||
+		isWritable(metadata.stat)
+	) {
+		return false;
+	}
+
+	const manifestPaths = new Set(metadata.record.tree.map((entry) => entry.path));
+	if (
+		!samePaths(inspection.files.keys(), inspection.files.size, manifestPaths) ||
+		!samePaths(
+			inspection.directories.keys(),
+			inspection.directories.size,
+			expectedPayloadDirectories(metadata.record.tree),
+		)
+	) {
+		return false;
+	}
+
+	for (const directory of inspection.directories.values()) {
+		if (isWritable(directory.stat)) return false;
+	}
+	if (isWritable(fs.lstatSync(payloadRoot))) return false;
+
+	for (const expected of metadata.record.tree) {
+		const actual = inspection.files.get(expected.path);
+		const fullPath = payloadPathForReleaseEntry(payloadRoot, expected.path);
+		if (!actual || !fullPath || actual.fullPath !== fullPath || payloadMode(actual.stat) !== expected.mode) {
+			return false;
+		}
+		let content: Buffer;
+		if (actual.stat.isSymbolicLink()) {
+			const target = fs.readlinkSync(actual.fullPath);
+			if (!isSafeReleaseSymlinkTarget(expected.path, target)) return false;
+			content = Buffer.from(target);
+		} else {
+			if (isWritable(actual.stat)) return false;
+			content = fs.readFileSync(actual.fullPath);
+		}
+		if (gitBlobOid(content) !== expected.oid) return false;
+	}
+	return true;
+}
+
+function immutablePayloadIdentity(candidate: string): string | undefined {
+	let payloadRoot: string | undefined;
+	try {
+		payloadRoot = fs.realpathSync(candidate);
+		if (!fs.lstatSync(payloadRoot).isDirectory() || path.basename(payloadRoot) !== "payload") return undefined;
+		const releaseDir = path.dirname(payloadRoot);
+		const releaseStat = fs.lstatSync(releaseDir);
+		const payloadPath = path.join(releaseDir, "payload");
+		if (
+			!path.isAbsolute(releaseDir) ||
+			!releaseStat.isDirectory() ||
+			releaseStat.isSymbolicLink() ||
+			fs.lstatSync(payloadPath).isSymbolicLink() ||
+			fs.realpathSync(payloadPath) !== payloadRoot
+		) {
+			return undefined;
+		}
+		const metadata = readReleaseMetadata(path.join(releaseDir, "release.json"));
+		if (
+			!metadata ||
+			path.basename(releaseDir) !== metadata.record.version ||
+			path.basename(path.dirname(releaseDir)) !== "releases"
+		) {
+			return undefined;
+		}
+		const inspection = inspectPayloadTree(releaseDir, payloadRoot);
+		const cached = immutablePayloadCache.get(payloadRoot);
+		if (
+			cached?.releaseFingerprint === metadata.fingerprint &&
+			cached.payloadFingerprint === inspection.fingerprint
+		) {
+			return payloadRoot;
+		}
+		if (!verifyImmutablePayload(releaseDir, payloadRoot, metadata, inspection)) {
+			immutablePayloadCache.delete(payloadRoot);
+			return undefined;
+		}
+		immutablePayloadCache.set(payloadRoot, {
+			releaseFingerprint: metadata.fingerprint,
+			payloadFingerprint: inspection.fingerprint,
+		});
+		return payloadRoot;
+	} catch {
+		if (payloadRoot) immutablePayloadCache.delete(payloadRoot);
+		return undefined;
+	}
+}
+
+function canonicalHooksDirectory(payloadRoot: string): string | undefined {
+	try {
+		const coreRules = path.join(payloadRoot, "core-rules");
+		const hooksDir = path.join(coreRules, "hooks");
+		const coreRulesStat = fs.lstatSync(coreRules);
+		const hooksStat = fs.lstatSync(hooksDir);
+		if (
+			!coreRulesStat.isDirectory() ||
+			coreRulesStat.isSymbolicLink() ||
+			!hooksStat.isDirectory() ||
+			hooksStat.isSymbolicLink()
+		) {
+			return undefined;
+		}
+		const canonicalHooks = fs.realpathSync(hooksDir);
+		return canonicalHooks === hooksDir && pathIsContained(payloadRoot, canonicalHooks) ? canonicalHooks : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function pathsResolveToSameTarget(left: string, right: string): boolean {
+	try {
+		return fs.realpathSync(left) === fs.realpathSync(right);
 	} catch {
 		return false;
+	}
+}
+
+function hasOmpAdapterLeaf(projectDir: string): boolean {
+	try {
+		const adapterLeaf = path.join(projectDir, ".omp", "hooks", "pre", "trellis.ts");
+		const entry = fs.lstatSync(adapterLeaf);
+		return entry.isSymbolicLink() && fs.readlinkSync(adapterLeaf) === MANAGED_OMP_ADAPTER_TARGET;
+	} catch {
+		return false;
+	}
+}
+
+function isGitProjectRoot(candidate: string): boolean {
+	try {
+		const git = fs.lstatSync(path.join(candidate, ".git"));
+		return git.isDirectory() || git.isFile();
+	} catch {
+		return false;
+	}
+}
+
+function nearestProjectBoundary(startDir: string): string {
+	let current = startDir;
+	for (;;) {
+		if (isGitProjectRoot(current)) return current;
+		const parent = path.dirname(current);
+		if (parent === current) return current;
+		current = parent;
+	}
+}
+
+export interface TrellisRuntime {
+	projectDir: string;
+	trellisRoot: string;
+	hooksDir: string;
+}
+
+/**
+ * Resolve an explicitly attached OMP project's immutable runtime. A project
+ * with no managed OMP adapter leaf is intentionally inert. Once that leaf is
+ * present, every invalid anchor state is a named failure rather than a fallback
+ * to a mutable checkout.
+ */
+export function resolveTrellisRuntime(startDir: string): TrellisRuntime | undefined {
+	if (typeof startDir !== "string" || startDir.length === 0) return undefined;
+	const boundary = nearestProjectBoundary(path.resolve(startDir));
+	let projectDir = path.resolve(startDir);
+	for (;;) {
+		if (hasOmpAdapterLeaf(projectDir)) {
+			const trellisRoot = path.join(projectDir, ".trellis", "runtime");
+			let anchor: fs.Stats;
+			try {
+				anchor = fs.lstatSync(trellisRoot);
+			} catch {
+				throw new Error(`trellis adapter: attached OMP project is missing immutable runtime anchor at ${trellisRoot}`);
+			}
+			if (!anchor.isSymbolicLink()) {
+				throw new Error(`trellis adapter: attached OMP runtime anchor is not a symlink at ${trellisRoot}`);
+			}
+			const payloadRoot = immutablePayloadIdentity(trellisRoot);
+			if (!payloadRoot) {
+				throw new Error(`trellis adapter: attached OMP runtime anchor does not resolve to an immutable payload at ${trellisRoot}`);
+			}
+			const hooksDir = path.join(trellisRoot, "core-rules", "hooks");
+			const canonicalHooks = canonicalHooksDirectory(payloadRoot);
+			if (!canonicalHooks || !pathsResolveToSameTarget(hooksDir, canonicalHooks)) {
+				throw new Error(`trellis adapter: attached OMP immutable payload lacks canonical hooks at ${hooksDir}`);
+			}
+			return { projectDir, trellisRoot, hooksDir };
+		}
+		if (projectDir === boundary) return undefined;
+		projectDir = path.dirname(projectDir);
 	}
 }
 
@@ -551,6 +988,22 @@ export type SpawnFn = (
 	options: SpawnSyncOptionsWithStringEncoding,
 ) => SpawnSyncReturns<string>;
 
+function canonicalHookScriptPath(options: RunHookOptions): string | undefined {
+	try {
+		if (!isSafeReleasePath(options.script)) return undefined;
+		const payloadRoot = immutablePayloadIdentity(options.trellisRoot);
+		if (!payloadRoot) return undefined;
+		const canonicalHooks = canonicalHooksDirectory(payloadRoot);
+		if (!canonicalHooks || !pathsResolveToSameTarget(options.hooksDir, canonicalHooks)) return undefined;
+		const requestedScript = path.join(options.hooksDir, options.script);
+		const canonicalScript = fs.realpathSync(requestedScript);
+		if (!pathIsContained(payloadRoot, canonicalScript) || !fs.statSync(canonicalScript).isFile()) return undefined;
+		return canonicalScript;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Execute a live canonical hook with the normalized envelope on stdin.
  * `CLAUDE_PROJECT_DIR` and `TRELLIS_ROOT` are exported for every script, plus
@@ -559,9 +1012,18 @@ export type SpawnFn = (
  * decide the fail-closed mapping.
  */
 export function runCanonicalHook(options: RunHookOptions, spawn: SpawnFn = spawnSync): RunHookResult {
-	const scriptPath = path.join(options.hooksDir, options.script);
-	if (!fs.existsSync(scriptPath)) {
-		return { stdout: "", stderr: `missing canonical hook: ${scriptPath}`, status: null, scriptPath };
+	const requestedScript = path.join(options.hooksDir, options.script);
+	if (!fs.existsSync(requestedScript)) {
+		return { stdout: "", stderr: `missing canonical hook: ${requestedScript}`, status: null, scriptPath: requestedScript };
+	}
+	const scriptPath = canonicalHookScriptPath(options);
+	if (!scriptPath) {
+		return {
+			stdout: "",
+			stderr: `canonical hook escapes immutable payload: ${requestedScript}`,
+			status: null,
+			scriptPath: requestedScript,
+		};
 	}
 	let result: SpawnSyncReturns<string>;
 	try {
@@ -606,7 +1068,9 @@ export function runCanonicalHook(options: RunHookOptions, spawn: SpawnFn = spawn
 // ============================================================================
 
 export interface TrellisAdapterOptions {
+	/** Attached runtime anchor or verified immutable payload root. */
 	trellisRoot: string;
+	/** Must resolve to `trellisRoot/core-rules/hooks`. */
 	hooksDir: string;
 	logger?: OmpLogger;
 	/** Override for transcript temp files (default os.tmpdir()). */
@@ -627,13 +1091,16 @@ export interface TrellisAdapter {
 }
 
 /**
- * Create the adapter. Throws when the canonical hooks directory is missing —
- * a broken/dangling Trellis install must not silently run with no policy.
+ * Create the adapter from an explicitly supplied immutable payload. A broken,
+ * mismatched, or mutable source input must never silently run as canonical
+ * policy.
  */
 export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAdapter {
-	if (!isHooksDir(options.hooksDir)) {
+	const payloadRoot = immutablePayloadIdentity(options.trellisRoot);
+	const canonicalHooks = payloadRoot ? canonicalHooksDirectory(payloadRoot) : undefined;
+	if (!canonicalHooks || !pathsResolveToSameTarget(options.hooksDir, canonicalHooks)) {
 		throw new Error(
-			`trellis adapter: canonical hooks directory missing at ${options.hooksDir} — re-run onboarding or fix the .omp/hooks link`,
+			`trellis adapter: canonical hooks directory missing or not from immutable payload at ${options.hooksDir} (root ${options.trellisRoot})`,
 		);
 	}
 	const logger = options.logger ?? defaultLogger;
@@ -825,14 +1292,12 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 
 		// Context parity: OMP task children exclude AGENTS.md from inherited
 		// context files, and OMP does not natively load Claude's managed preset
-		// rules. Append any missing live project policy and canonical presets
-		// before the first run. The private control-plane checkout has no root
-		// CLAUDE.md, so it points directly at canonical core-rules policy.
+		// rules. Append any missing project policy and the immutable payload
+		// fallback used by the managed `.omp/AGENTS.md` link.
 		const rootPolicyPath = path.join(projectDir, "CLAUDE.md");
-		const policyPath =
-			fs.existsSync(rootPolicyPath) || path.resolve(projectDir) !== path.resolve(options.trellisRoot)
-				? rootPolicyPath
-				: path.join(options.trellisRoot, "core-rules", "CLAUDE.md");
+		const policyPath = fs.existsSync(rootPolicyPath)
+			? rootPolicyPath
+			: path.join(options.trellisRoot, "core-rules", "CLAUDE.md");
 		const systemPrompt = typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : event.systemPrompt;
 		const additions: string[] = [];
 		if (fs.existsSync(policyPath)) {
@@ -964,6 +1429,9 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 				}
 				if (decision.kind === "error") {
 					logScriptFailure(entry.script, decision.message);
+					if (entry.script === "decision-receipt.sh") {
+						return { decision: "block", reason: decision.message };
+					}
 				}
 				// Advisory context on stop is deliberately not turned into a
 				// continuation — that would burn an OMP continuation pass.
@@ -991,29 +1459,50 @@ const defaultLogger: OmpLogger = {
 // ============================================================================
 
 /**
- * Default export consumed by the OMP extension loader. Resolves trellis_root
- * from this module's location and wires the canonical event mappings. Throws on
- * an unresolvable root so a broken install surfaces as an extension load error
- * instead of silently passing as parity.
+ * Default export consumed by the OMP extension loader. It resolves adapters
+ * lazily from each event context's attached `.trellis/runtime` anchor, so a
+ * raw project remains inert and no mutable source checkout can affect policy.
  */
 export default function trellisExtension(pi: OmpApi): void {
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-	const trellisRoot = resolveTrellisRoot(moduleDir, process.env);
-	if (!trellisRoot) {
-		throw new Error(
-			`trellis adapter: cannot resolve trellis_root (no TRELLIS_ROOT env and no core-rules/hooks ancestor of ${moduleDir})`,
-		);
-	}
-	const hooksDir = path.join(trellisRoot, "core-rules", "hooks");
-	const adapter = createTrellisAdapter({ trellisRoot, hooksDir, logger: pi.logger });
+	const adapters = new Map<string, TrellisAdapter>();
+	let labeled = false;
 
-	pi.setLabel("Trellis canonical policy adapter");
-	pi.on("input", adapter.onInput);
-	pi.on("tool_call", adapter.onToolCall);
-	pi.on("tool_result", adapter.onToolResult);
-	pi.on("before_agent_start", adapter.onBeforeAgentStart);
-	pi.on("session_before_compact", adapter.onBeforeCompact);
+	function adapterFor(ctx: OmpContext): TrellisAdapter | undefined {
+		const runtime = resolveTrellisRuntime(ctx.cwd);
+		if (!runtime) return undefined;
+		const existing = adapters.get(runtime.projectDir);
+		if (existing) return existing;
+		const adapter = createTrellisAdapter({
+			trellisRoot: runtime.trellisRoot,
+			hooksDir: runtime.hooksDir,
+			logger: pi.logger,
+		});
+		adapters.set(runtime.projectDir, adapter);
+		if (!labeled) {
+			pi.setLabel("Trellis canonical policy adapter");
+			labeled = true;
+		}
+		return adapter;
+	}
+
+	pi.on("input", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onInput(event as OmpInputEvent, ctx);
+	});
+	pi.on("tool_call", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onToolCall(event as OmpToolCallEvent, ctx);
+	});
+	pi.on("tool_result", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onToolResult(event as OmpToolResultEvent, ctx);
+	});
+	pi.on("before_agent_start", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onBeforeAgentStart(event as OmpBeforeAgentStartEvent, ctx);
+	});
+	pi.on("session_before_compact", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onBeforeCompact(event as OmpSessionBeforeCompactEvent, ctx);
+	});
 	pi.on("session_compact", async (event: unknown, ctx: OmpContext) => {
+		const adapter = adapterFor(ctx);
+		if (!adapter) return;
 		const context = await adapter.onCompact(event as OmpSessionCompactEvent, ctx);
 		if (!context) return;
 		if (!pi.sendMessage) {
@@ -1025,6 +1514,10 @@ export default function trellisExtension(pi: OmpApi): void {
 			{ triggerTurn: false },
 		);
 	});
-	pi.on("session_shutdown", adapter.onShutdown);
-	pi.on("session_stop", adapter.onStop);
+	pi.on("session_shutdown", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onShutdown(event as OmpSessionShutdownEvent, ctx);
+	});
+	pi.on("session_stop", (event: unknown, ctx: OmpContext) => {
+		return adapterFor(ctx)?.onStop(event as OmpSessionStopEvent, ctx);
+	});
 }

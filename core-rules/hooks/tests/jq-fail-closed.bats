@@ -1,11 +1,12 @@
 #!/usr/bin/env bats
-# Tests P1.5 jq-missing fail-closed across ALL 18 hook scripts (Claude + Codex).
+# Tests P1.5 jq-missing fail-closed across all 20 jq-dependent hooks.
 
 load helpers
 
 HOOKS=(
   "$HOOKS_DIR/block-destructive.sh"
   "$HOOKS_DIR/code-review-subagent.sh"
+  "$HOOKS_DIR/decision-receipt.sh"
   "$HOOKS_DIR/post-compact-context.sh"
   "$HOOKS_DIR/post-edit-verify.sh"
   "$HOOKS_DIR/save-context-log.sh"
@@ -15,6 +16,7 @@ HOOKS=(
   "$HOOKS_DIR/ui-verify.sh"
   "$CODEX_HOOKS_DIR/block-destructive.sh"
   "$CODEX_HOOKS_DIR/code-review-subagent.sh"
+  "$CODEX_HOOKS_DIR/decision-receipt.sh"
   "$CODEX_HOOKS_DIR/post-compact-context.sh"
   "$CODEX_HOOKS_DIR/post-edit-verify.sh"
   "$CODEX_HOOKS_DIR/save-context-log.sh"

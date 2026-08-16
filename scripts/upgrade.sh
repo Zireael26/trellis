@@ -1,245 +1,361 @@
-#!/usr/bin/env bash
-# Compare this clone's pinned core-rules version against the latest upstream
-# tag and (optionally) opt into the upgrade by writing the new version into
-# trellis.config.json.
+#!/bin/sh
+# The source wrapper is deliberately non-authoritative. It crosses an explicit
+# env -i boundary before Bash parses its body, then the body accepts only the
+# canonical payload identity minted by the stable launcher after verification.
+# shellcheck shell=bash
+# The `#!/bin/sh` line above is a POSIX bootstrap: it does nothing but `exec` a
+# clean `/bin/bash --noprofile --norc` through `env -i`, so every line of this
+# file after the bootstrap is Bash and must be linted as Bash. Without this
+# directive ShellCheck believed the shebang and buried ~30 real findings under
+# ~250 SC30xx dialect complaints about a dialect that never runs.
 #
-# Two run contexts:
-#   1. Consumer clone of the public template. origin points at the template
-#      remote; tags live on origin. The script fetches origin and compares.
-#   2. Private canonical (this repo). origin may not carry release tags;
-#      template.remote in trellis.config.json points at the public mirror,
-#      so the script falls back to that remote.
-#
-# Read-only by default — prints diff preview, exits without writing. Pass
-# --opt-in to update trellis.config.json's trellis_version field to the
-# latest tag. Schema validation runs after the write.
-#
-# Usage:
-#   scripts/upgrade.sh                  # show diff preview, no write
-#   scripts/upgrade.sh --opt-in         # write new pin after preview + prompt
-#   scripts/upgrade.sh --yes --opt-in   # non-interactive (CI)
-#   scripts/upgrade.sh --check          # exit 0 if pinned == latest, 1 if drift
-#   scripts/upgrade.sh -h
-
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Parse --help BEFORE sourcing config-load so help works even when the local
-# config is broken (e.g. fresh clone before paths are filled in).
-for arg in "$@"; do
-  case "$arg" in
-    --help|-h) sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+# ShellCheck only honours `shell=` at the top of a file, so the directive covers
+# the POSIX prologue too. `scripts/tests/posix-bootstrap-prologue.bats` re-checks
+# each prologue as `sh` to keep that guarantee, since this line removes it here.
+upgrade_home=${HOME-}
+upgrade_trellis_home=${TRELLIS_HOME-}
+upgrade_verified_payload=${TRELLIS_VERIFIED_PAYLOAD-}
+upgrade_verified_release_version=${TRELLIS_VERIFIED_RELEASE_VERSION-}
+upgrade_verified_ssh_auth_sock=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}
+# shellcheck disable=SC2093  # Deliberate: the POSIX bootstrap must not continue after handing
+# control to the clean Bash. Continuing here would run the body under the wrong shell.
+exec /usr/bin/env -i \
+  "HOME=$upgrade_home" "TRELLIS_HOME=$upgrade_trellis_home" \
+  "TRELLIS_VERIFIED_PAYLOAD=$upgrade_verified_payload" \
+  "TRELLIS_VERIFIED_RELEASE_VERSION=$upgrade_verified_release_version" \
+  "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$upgrade_verified_ssh_auth_sock" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  /bin/bash --noprofile --norc -c '
+set -u
+umask 077
+upgrade_source="$1"
+shift
+upgrade_name="$(/usr/bin/basename "$upgrade_source")"
+upgrade_source_dir="$(CDPATH= cd "$(/usr/bin/dirname "$upgrade_source")" && /bin/pwd -P)" || {
+  /usr/bin/printf "%s\n" "trellis upgrade: could not resolve source wrapper" >&2
+  exit 5
+}
+[ "$upgrade_name" = "upgrade.sh" ] &&
+  [ ! -L "$upgrade_source_dir/$upgrade_name" ] &&
+  [ -f "$upgrade_source_dir/$upgrade_name" ] || {
+  /usr/bin/printf "%s\n" "trellis upgrade: invalid source wrapper" >&2
+  exit 5
+}
+upgrade_bootstrap_clean_absolute_path() {
+  local path="${1:-}"
+  [ -n "$path" ] && [ "$path" != "/" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
   esac
-done
-
-SEMVER_LIB="$SCRIPT_DIR/lib/semver.sh"
-[ -f "$SEMVER_LIB" ] || { echo "upgrade: SemVer helper missing at $SEMVER_LIB" >&2; exit 1; }
-# shellcheck source=lib/semver.sh disable=SC1090,SC1091
-. "$SEMVER_LIB"
-
-# shellcheck source=lib/config-load.sh disable=SC1090,SC1091
-. "$SCRIPT_DIR/lib/config-load.sh"
-
-OPT_IN=false
-ASSUME_YES=false
-CHECK_ONLY=false
-
-for arg in "$@"; do
-  case "$arg" in
-    --opt-in)  OPT_IN=true ;;
-    --yes|-y)  ASSUME_YES=true ;;
-    --check)   CHECK_ONLY=true ;;
-    --help|-h) ;; # already handled above
-    *)         echo "unknown option: $arg" >&2; exit 2 ;;
+  case "$path" in
+    *[[:cntrl:]]*|*//*|*/./*|*/../*|*/.|*/..|*/) return 1 ;;
   esac
-done
+  return 0
+}
+upgrade_bootstrap_reject_source() {
+  /usr/bin/printf "%s\n" "trellis upgrade: direct source execution is unsupported; run trellis upgrade from the installed stable launcher" >&2
+  exit 2
+}
+upgrade_bootstrap_clean_absolute_path "${TRELLIS_HOME:-}" &&
+  upgrade_bootstrap_clean_absolute_path "${TRELLIS_VERIFIED_PAYLOAD:-}" &&
+  [ -n "${TRELLIS_VERIFIED_RELEASE_VERSION:-}" ] &&
+  [ "${TRELLIS_VERIFIED_RELEASE_VERSION#*/}" = "${TRELLIS_VERIFIED_RELEASE_VERSION}" ] &&
+  [ ! -L "$TRELLIS_VERIFIED_PAYLOAD" ] &&
+  [ -d "$TRELLIS_VERIFIED_PAYLOAD" ] || upgrade_bootstrap_reject_source
+upgrade_canonical_home="$(CDPATH= cd "$TRELLIS_HOME" && /bin/pwd -P)" ||
+  upgrade_bootstrap_reject_source
+upgrade_canonical_payload="$(CDPATH= cd "$TRELLIS_VERIFIED_PAYLOAD" && /bin/pwd -P)" ||
+  upgrade_bootstrap_reject_source
+[ "$upgrade_canonical_payload" = "$upgrade_canonical_home/releases/$TRELLIS_VERIFIED_RELEASE_VERSION/payload" ] &&
+  [ "$upgrade_source_dir" = "$upgrade_canonical_payload/scripts" ] ||
+  upgrade_bootstrap_reject_source
+upgrade_body="$(/usr/bin/mktemp /tmp/trellis-upgrade.XXXXXX)" || {
+  /usr/bin/printf "%s\n" "trellis upgrade: could not prepare trusted bootstrap" >&2
+  exit 5
+}
+upgrade_cleanup() {
+  /bin/rm -f "$upgrade_body"
+}
+trap upgrade_cleanup EXIT
+trap "upgrade_cleanup; exit 129" HUP
+trap "upgrade_cleanup; exit 130" INT
+trap "upgrade_cleanup; exit 143" TERM
+if ! /usr/bin/awk "body { print } /^# -- trellis upgrade body --\$/ { body = 1 }" "$upgrade_source_dir/$upgrade_name" > "$upgrade_body" ||
+  ! /bin/test -s "$upgrade_body" ||
+  ! /bin/chmod 600 "$upgrade_body"; then
+  /usr/bin/printf "%s\n" "trellis upgrade: could not prepare trusted bootstrap" >&2
+  exit 5
+fi
+/usr/bin/env -i \
+  "HOME=${HOME-}" "TRELLIS_HOME=$upgrade_canonical_home" \
+  "TRELLIS_VERIFIED_PAYLOAD=$upgrade_canonical_payload" \
+  "TRELLIS_VERIFIED_RELEASE_VERSION=${TRELLIS_VERIFIED_RELEASE_VERSION-}" \
+  "TRELLIS_VERIFIED_SSH_AUTH_SOCK=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}" \
+  "TRELLIS_UPGRADE_SOURCE_DIR=$upgrade_source_dir" \
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  /bin/bash --noprofile --norc "$upgrade_body" "$@"
+upgrade_status=$?
+exit "$upgrade_status"
+' trellis-upgrade-bootstrap "$0" "$@"
 
-# --- Resolve upstream candidates we'll try fetching tags from ------------
-# Two run contexts to support:
-#   1. Consumer clone — origin IS the public template. Tags live there.
-#   2. Canonical private clone — origin is the private mirror (no release
-#      tags); template.remote in config points at the public mirror.
-# Build a candidate list and try each until one yields a v*.*.* tag.
-ORIGIN_URL="$(git -C "$TRELLIS_ROOT" remote get-url origin 2>/dev/null || true)"
+# -- trellis upgrade body --
+# Explicit immutable release upgrade convenience command.
+#
+# This command never reads a tracked version pin, scans tags, or writes mutable
+# source configuration. It installs one named annotated release, verifies the
+# installed payload, then performs one explicit registry-selected adoption.
 
-UPSTREAM_CANDIDATES=()
-if [ -n "$ORIGIN_URL" ]; then
-  UPSTREAM_CANDIDATES+=("origin|$ORIGIN_URL")
-fi
-if [ -n "$TEMPLATE_REMOTE" ] && [ "$TEMPLATE_REMOTE" != "$ORIGIN_URL" ]; then
-  # Synthesized transient name; we never add it as a permanent remote.
-  UPSTREAM_CANDIDATES+=("trellis-upstream-tmp|$TEMPLATE_REMOTE")
-fi
-if [ "${#UPSTREAM_CANDIDATES[@]}" -eq 0 ]; then
-  echo "upgrade: no origin and no template.remote configured — cannot fetch upstream" >&2
-  exit 1
-fi
+set -u
 
-# --- Local pinned version ------------------------------------------------
-# Pinned version lives in config (trellis_version). If absent, fall back to
-# the on-disk core-rules/VERSION as the implicit pin.
-PINNED="${TRELLIS_VERSION:-}"
-LOCAL_VERSION_FILE="$TRELLIS_ROOT/core-rules/VERSION"
-if [ -z "$PINNED" ] && [ -f "$LOCAL_VERSION_FILE" ]; then
-  PINNED="$(tr -d '[:space:]' < "$LOCAL_VERSION_FILE")"
-  PINNED_SOURCE="core-rules/VERSION (no explicit pin)"
-else
-  PINNED_SOURCE="trellis.config.json.trellis_version"
+# A stable launcher may feed this body as an already verified, in-memory command
+# bundle alongside the release body. A pathname execution never accepts that
+# mode: the pathname bootstrap always exports TRELLIS_UPGRADE_SOURCE_DIR across
+# its env -i boundary, and the bundle attestation is available only to the clean
+# Bash that receives the buffered libraries and command bodies from the launcher.
+upgrade_bundle_mode=false
+if [ -z "${TRELLIS_UPGRADE_SOURCE_DIR:-}" ] &&
+  [ "${TRELLIS_VERIFIED_COMMAND_BUNDLE:-}" = upgrade ] &&
+  command -v trellis_command_bundle_is_verified >/dev/null 2>&1 &&
+  trellis_command_bundle_is_verified upgrade "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN:-}"; then
+  upgrade_bundle_mode=true
 fi
 
-if [ -z "$PINNED" ]; then
-  echo "upgrade: no pinned version and no core-rules/VERSION — cannot compare" >&2
-  exit 1
-fi
-if ! semver_is_valid "$PINNED"; then
-  echo "upgrade: pinned version '$PINNED' is not valid SemVer" >&2
-  exit 1
-fi
+upgrade_absolute_path_is_clean() {
+  local path="${1:-}"
+  [ -n "$path" ] && [ "$path" != "/" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    *$'\t'*|*$'\n'*|*$'\r'*|*'//'*|*/./*|*/../*|*/.|*/..|*/) return 1 ;;
+  esac
+  return 0
+}
 
-# --- Fetch upstream tags, iterating candidates until one yields a tag ----
-fetch_from() {
-  local name="$1" url="$2"
-  if [ "$name" = "origin" ]; then
-    git -C "$TRELLIS_ROOT" fetch --tags --quiet origin
+# Byte-identical copy of trellis_home_snapshot_payload_matches (see
+# scripts/lib/trellis-home.sh for the normative definition and the reason the
+# version segment must be matched whole rather than as a prefix). This gate
+# decides whether this copy may run its own libraries at all, so no library is
+# available to call and the body is pinned by
+# scripts/tests/release-snapshot-predicate.bats instead.
+upgrade_payload_matches_release() {
+  local home="$1" payload="$2" version="$3" snapshot_root snapshot_base rest suffix
+  [ "$payload" = "$home/releases/$version/payload" ] && return 0
+  snapshot_root="${payload%/payload}"
+  [ "$snapshot_root" != "$payload" ] || return 1
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
+  snapshot_base="${snapshot_root##*/}"
+  rest="${snapshot_base#.tmp.}"
+  [ "$rest" != "$snapshot_base" ] || return 1
+  suffix="${rest#"$version".exec.}"
+  [ "$suffix" != "$rest" ] || return 1
+  case "$suffix" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+upgrade_requires_verified_payload() {
+  local payload="${TRELLIS_VERIFIED_PAYLOAD:-}" version="${TRELLIS_VERIFIED_RELEASE_VERSION:-}"
+  local home="${TRELLIS_HOME:-}" canonical_home canonical_payload expected_payload
+
+  upgrade_absolute_path_is_clean "$home" || return 1
+  upgrade_absolute_path_is_clean "$payload" || return 1
+  case "$version" in ''|*/*|*$'\t'*|*$'\n'*|*$'\r'*|.*) return 1 ;; esac
+  canonical_home="$(CDPATH='' cd "$home" && pwd -P)" || return 1
+  [ "$canonical_home" = "$home" ] || return 1
+  canonical_payload="$(CDPATH='' cd "$payload" && pwd -P)" || return 1
+  [ "$canonical_payload" = "$payload" ] || return 1
+  if [ "$upgrade_bundle_mode" = true ]; then
+    # The launcher executes a sealed private snapshot of the configured
+    # release, so the verified payload is either the installed release
+    # pathname or that release's own execution snapshot — never some other
+    # release-store entry.
+    upgrade_payload_matches_release "$home" "$payload" "$version" ||
+      return 1
   else
-    git -C "$TRELLIS_ROOT" fetch --tags --quiet "$url" "${TEMPLATE_BRANCH:-main}"
+    expected_payload="$home/releases/$version/payload"
+    [ "$payload" = "$expected_payload" ] ||
+      return 1
   fi
+  [ "$SCRIPT_DIR" = "$payload/scripts" ] ||
+    return 1
+  [ ! -L "$payload" ] && [ -d "$payload" ] &&
+    [ ! -L "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR" ] &&
+    [ ! -L "$SCRIPT_DIR/upgrade.sh" ] && [ -f "$SCRIPT_DIR/upgrade.sh" ]
 }
 
-pick_latest_local_tag() {
-  git -C "$TRELLIS_ROOT" tag --list 'v*' | semver_max
+if [ "$upgrade_bundle_mode" = true ]; then
+  SCRIPT_DIR="${TRELLIS_VERIFIED_PAYLOAD:-}/scripts"
+else
+  SCRIPT_DIR="${TRELLIS_UPGRADE_SOURCE_DIR:-}"
+fi
+upgrade_absolute_path_is_clean "$SCRIPT_DIR" &&
+  [ -d "$SCRIPT_DIR" ] &&
+  [ "$(CDPATH='' cd "$SCRIPT_DIR" && pwd -P)" = "$SCRIPT_DIR" ] || {
+  printf '%s\n' 'trellis upgrade: invalid installed payload script directory' >&2
+  exit 5
+}
+upgrade_requires_verified_payload || {
+  printf '%s\n' 'trellis upgrade: direct source execution is unsupported; run trellis upgrade from the installed stable launcher' >&2
+  exit 2
+}
+RELEASE="$SCRIPT_DIR/release.sh"
+
+# Release work runs only as verified in-memory bytes. In a bundle the release
+# body is already preloaded in this shell, so install, verify, and adopt are
+# called in a subshell; no release-script pathname is ever executed.
+#
+# stdin is the bundle itself: the launcher pipes the command carrier into
+# 'bash -s', so this shell's own not-yet-executed source (the verify and adopt
+# calls below) is still queued on descriptor 0. Any descendant that reads stdin
+# — git prompting, a hook, jq without a file operand — would swallow that
+# source. Every release call therefore runs with stdin detached.
+upgrade_release_command() {
+  [ "$upgrade_bundle_mode" = true ] || {
+    printf '%s\n' 'trellis upgrade: verified release execution is unavailable; run trellis upgrade from the installed stable launcher' >&2
+    return 2
+  }
+  ( release_command_main "$@" ) </dev/null
 }
 
-UPSTREAM_REMOTE=""
-UPSTREAM_URL=""
-LATEST_TAG=""
-for entry in "${UPSTREAM_CANDIDATES[@]}"; do
-  cand_name="${entry%%|*}"
-  cand_url="${entry#*|}"
-  echo "fetching tags from $cand_name → $cand_url..."
-  if ! fetch_from "$cand_name" "$cand_url" 2>/dev/null; then
-    echo "  fetch failed for $cand_name — trying next candidate" >&2
-    continue
-  fi
-  candidate_tag="$(pick_latest_local_tag || true)"
-  if [ -n "$candidate_tag" ]; then
-    UPSTREAM_REMOTE="$cand_name"
-    UPSTREAM_URL="$cand_url"
-    LATEST_TAG="$candidate_tag"
-    break
-  fi
-  echo "  no v*.*.* tags on $cand_name — trying next candidate" >&2
+# Named for the shell they share: a bundle loads the release body first, so a
+# bare usage/usage_error here would shadow the release command's own helpers.
+upgrade_usage() {
+  cat <<'EOF'
+Usage:
+  trellis upgrade VERSION [--remote URL] --project ID [--fleet NAME]
+  trellis upgrade VERSION [--remote URL] --fleet NAME
+  trellis upgrade VERSION [--remote URL] --all
+
+VERSION is required. The command installs and verifies immutable annotated
+vVERSION before adoption. --remote is optional only when TRELLIS_HOME/config.json
+contains release_remote. There is no latest-tag lookup, tracked pin rewrite,
+--check, --opt-in, or implicit adoption.
+EOF
+}
+
+upgrade_usage_error() {
+  printf 'trellis upgrade: %s\n' "$*" >&2
+  upgrade_usage >&2
+  return 2
+}
+
+if [ "$upgrade_bundle_mode" = true ]; then
+  command -v release_command_main >/dev/null 2>&1 ||
+    { printf '%s\n' 'trellis upgrade: verified command bundle is incomplete' >&2; exit 5; }
+else
+  [ -x "$RELEASE" ] || { printf 'trellis upgrade: release CLI is unavailable: %s\n' "$RELEASE" >&2; exit 5; }
+fi
+
+version=''
+remote=''
+remote_seen=false
+project=''
+project_seen=false
+fleet=''
+fleet_seen=false
+all=false
+
+if [ "$#" -eq 0 ]; then
+  upgrade_usage_error 'VERSION is required'
+  exit $?
+fi
+
+case "$1" in
+  --help|-h) upgrade_usage; exit 0 ;;
+  -*) upgrade_usage_error 'VERSION is required before options'; exit $? ;;
+  *) version="$1"; shift ;;
+esac
+
+[ -n "$version" ] || { upgrade_usage_error 'VERSION is required'; exit $?; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote)
+      shift
+      [ "$#" -gt 0 ] || { upgrade_usage_error '--remote requires URL'; exit $?; }
+      [ "$remote_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --remote'; exit $?; }
+      [ -n "$1" ] || { upgrade_usage_error '--remote requires URL'; exit $?; }
+      remote="$1"
+      remote_seen=true
+      ;;
+    --remote=*)
+      [ "$remote_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --remote'; exit $?; }
+      remote="${1#--remote=}"
+      [ -n "$remote" ] || { upgrade_usage_error '--remote requires URL'; exit $?; }
+      remote_seen=true
+      ;;
+    --project)
+      shift
+      [ "$#" -gt 0 ] || { upgrade_usage_error '--project requires ID'; exit $?; }
+      [ "$project_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --project'; exit $?; }
+      [ -n "$1" ] || { upgrade_usage_error '--project requires ID'; exit $?; }
+      project="$1"
+      project_seen=true
+      ;;
+    --project=*)
+      [ "$project_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --project'; exit $?; }
+      project="${1#--project=}"
+      [ -n "$project" ] || { upgrade_usage_error '--project requires ID'; exit $?; }
+      project_seen=true
+      ;;
+    --fleet)
+      shift
+      [ "$#" -gt 0 ] || { upgrade_usage_error '--fleet requires NAME'; exit $?; }
+      [ "$fleet_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --fleet'; exit $?; }
+      [ -n "$1" ] || { upgrade_usage_error '--fleet requires NAME'; exit $?; }
+      fleet="$1"
+      fleet_seen=true
+      ;;
+    --fleet=*)
+      [ "$fleet_seen" = false ] || { upgrade_usage_error 'upgrade accepts one --fleet'; exit $?; }
+      fleet="${1#--fleet=}"
+      [ -n "$fleet" ] || { upgrade_usage_error '--fleet requires NAME'; exit $?; }
+      fleet_seen=true
+      ;;
+    --all)
+      [ "$all" = false ] || { upgrade_usage_error 'upgrade accepts one selector'; exit $?; }
+      all=true
+      ;;
+    --help|-h)
+      upgrade_usage_error '--help cannot be combined with an upgrade request'
+      exit $?
+      ;;
+    *)
+      upgrade_usage_error "unknown upgrade option: $1"
+      exit $?
+      ;;
+  esac
+  shift
 done
 
-if [ -z "$LATEST_TAG" ]; then
-  echo "upgrade: no v*.*.* tags found on any candidate upstream. Nothing to compare against." >&2
-  exit 1
+if [ -n "$project" ]; then
+  [ "$all" = false ] || { upgrade_usage_error '--all cannot be combined with --project'; exit $?; }
+elif [ -n "$fleet" ]; then
+  [ "$all" = false ] || { upgrade_usage_error '--all cannot be combined with --fleet'; exit $?; }
+elif [ "$all" = false ]; then
+  upgrade_usage_error 'upgrade requires --project, --fleet, or --all'
+  exit $?
 fi
 
-echo "upstream: $UPSTREAM_REMOTE → $UPSTREAM_URL"
-LATEST="${LATEST_TAG#v}"
-
-echo "pinned:  $PINNED  ($PINNED_SOURCE)"
-echo "latest:  $LATEST  ($LATEST_TAG)"
-
-if [ "$PINNED" = "$LATEST" ]; then
-  echo "up-to-date."
-  exit 0
+install_args=(install "$version")
+if [ -n "$remote" ]; then
+  install_args+=(--remote "$remote")
 fi
+upgrade_release_command "${install_args[@]}" || exit $?
+upgrade_release_command verify "$version" || exit $?
 
-# Direction check: is PINNED strictly ahead of LATEST? If so, this is the
-# "ahead-of-canonical" state that the version-drift audit flags as a
-# warning ("parent likely needs a tag bump"). Never downgrade an ahead
-# pin via --opt-in — that's silent regression. Exit cleanly with a
-# warning instead.
-VERSION_ORDER=$(semver_compare "$PINNED" "$LATEST") || {
-  echo "upgrade: unable to compare '$PINNED' and '$LATEST' as SemVer" >&2
-  exit 1
-}
-if [ "$VERSION_ORDER" -gt 0 ]; then
-  echo
-  echo "ahead-of-canonical: local pin ($PINNED) is newer than latest upstream tag ($LATEST)."
-  echo "Likely cause: the canonical repo wasn't tagged after a forward bump."
-  echo "Not downgrading. Tag the canonical repo at $PINNED (or higher) and rerun."
-  if $CHECK_ONLY; then
-    exit 1
-  fi
-  exit 0
-fi
-
-if $CHECK_ONLY; then
-  echo "drift detected."
-  exit 1
-fi
-
-# --- Diff preview of core-rules/ between pinned and latest --------------
-# Use a synthetic ref for the pinned version if no matching tag exists locally
-# (e.g., pinned was never released as a tag because it lives on the canonical
-# clone). Fall back to a no-op diff and warn.
-PINNED_REF="v$PINNED"
-if ! git -C "$TRELLIS_ROOT" rev-parse --verify --quiet "$PINNED_REF" >/dev/null; then
-  echo
-  echo "note: no local tag $PINNED_REF — diff preview would be empty. Showing latest tag's core-rules/ tree summary instead." >&2
-  echo
-  echo "core-rules/ at $LATEST_TAG:"
-  git -C "$TRELLIS_ROOT" ls-tree --name-only -r "$LATEST_TAG" -- core-rules/ | head -40
-  echo "(showing first 40 paths; use 'git show $LATEST_TAG --stat -- core-rules/' for full)"
+adopt_args=(adopt "$version")
+if [ -n "$project" ]; then
+  adopt_args+=(--project "$project")
+  [ -z "$fleet" ] || adopt_args+=(--fleet "$fleet")
+elif [ -n "$fleet" ]; then
+  adopt_args+=(--fleet "$fleet")
 else
-  echo
-  echo "diff core-rules/ ($PINNED_REF → $LATEST_TAG):"
-  git -C "$TRELLIS_ROOT" diff --stat "$PINNED_REF".."$LATEST_TAG" -- core-rules/ || true
+  adopt_args+=(--all)
 fi
-
-if ! $OPT_IN; then
-  echo
-  echo "read-only: rerun with --opt-in to update the pin in trellis.config.json."
-  exit 0
-fi
-
-# --- Opt-in: rewrite trellis_version in trellis.config.json -------------
-if ! $ASSUME_YES; then
-  printf "Update trellis.config.json's trellis_version from %s → %s? [y/N] " "$PINNED" "$LATEST"
-  read -r ans
-  case "$ans" in
-    y|Y) ;;
-    *)   echo "aborted."; exit 0 ;;
-  esac
-fi
-
-TMP="$(mktemp)"
-jq --arg v "$LATEST" '.trellis_version = $v' "$TRELLIS_CONFIG_PATH" > "$TMP"
-mv "$TMP" "$TRELLIS_CONFIG_PATH"
-echo "updated: $TRELLIS_CONFIG_PATH (trellis_version=$LATEST)"
-
-# Re-run schema validation as a tripwire.
-if ! _pgcfg_validate "$TRELLIS_CONFIG_PATH" >/dev/null 2>&1; then
-  echo "WARN: post-write schema validation reported issues — inspect $TRELLIS_CONFIG_PATH" >&2
-  exit 1
-fi
-
-# --- Post-adopt verification: run the read-only doctor -------------------
-# Reaching here means the --opt-in version pin was adopted successfully (the
-# control flow guards this: every non-opt-in / read-only / ahead / drift path
-# exits above, and the schema tripwire exits 1 on failure). Run doctor in
-# READ-ONLY mode as the verification gate. This is informational only — it
-# must NOT change the upgrade's success semantics, so a drift (doctor exit 1)
-# is reported but does not fail the adoption. Never invoke --fix from here.
-DOCTOR="$SCRIPT_DIR/doctor.sh"
-if [ "${TRELLIS_SKIP_DOCTOR:-0}" = 1 ]; then
-  echo "doctor: skipped (TRELLIS_SKIP_DOCTOR=1)."
-elif [ -x "$DOCTOR" ]; then
-  echo
-  echo "running doctor (read-only) to verify the adopted pin..."
-  # `if !` keeps this non-fatal under `set -e` AND lets us branch on drift.
-  if ! "$DOCTOR"; then
-    echo
-    echo "doctor reported drift (the version-pin adoption itself succeeded)."
-    echo "  preview the repair: $DOCTOR --fix --dry-run"
-    echo "  apply the repair:   $DOCTOR --fix"
-  fi
-else
-  echo "doctor: $DOCTOR not found or not executable — skipping verification." >&2
-fi
-
-echo "next: review the diff, run hooks/tests, commit the pin change."
+upgrade_release_command "${adopt_args[@]}"
+exit $?

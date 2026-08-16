@@ -18,7 +18,7 @@ You are running `trellis doctor` to check that every active project is still cor
 
 ### 0. Run from the canonical Trellis checkout
 
-`scripts/doctor.sh` lives in the canonical Trellis instance, not in a managed project. Run it from the canonical checkout. It resolves `$TRELLIS_ROOT` from `trellis.config.json` and probes the canonical clone via `git -C "$TRELLIS_ROOT" …` regardless of your cwd — there is no per-project root ceremony to perform here.
+`scripts/doctor.sh` lives in the canonical Trellis instance, not in a managed project. Run it from the canonical checkout. It resolves local fleet state from `$TRELLIS_HOME` and, in explicit legacy diagnosis mode, the canonical clone from the supplied legacy config — regardless of your cwd, with no per-project root ceremony to perform here.
 
 ### 1. Diagnose (read-only)
 
@@ -70,15 +70,23 @@ scripts/doctor.sh
 
 A repair is not done until this confirmation run reports green.
 
-### 4. The `--fix-hooks` gate
+### 4. Hook drift is a `[manual]` remedy — doctor does not re-sync hooks
 
-Hook re-sync is deliberately *not* part of a plain `--fix`. Re-syncing hooks changes a project's enforcement behavior, so it is gated behind an explicit flag:
+`doctor` has no hook-repair action at all. Claude/Codex hook drift is classified `[manual]` in **every** mode — plain, `--fix`, and `--fix --dry-run` — and is reported, never rewritten.
+
+The reason is mechanical, not a policy gate: `sync-hooks.sh` / `sync-codex-hooks.sh` reconcile a hook surface **only** through the recorded immutable release of a registered, attached row. They never copy a hook out of the mutable checkout that launched them. A legacy direct-link project has no local registry row and no recorded release, so there is nothing for `doctor` to delegate to.
+
+The honest remedy `doctor` prints is to adopt a release and attach the project:
 
 ```
-scripts/doctor.sh --fix --fix-hooks
+scripts/attach-project.sh attach <project-root>
 ```
 
-Only add `--fix-hooks` when the user has specifically agreed to update stale hook copies. Without it, drifted hooks are reported, not rewritten.
+After that the portable flow owns hook reconciliation. Relay this to the user as a manual action — do not run it as part of a `/trellis-doctor` repair.
+
+`--fix-hooks` is still accepted for compatibility but is **inert**: it implies `--fix` and otherwise does nothing, and `--fix` prints a line saying so. Do not offer it as a repair.
+
+One side effect worth stating when you relay a `--fix` plan: `onboard-project.sh` seeds *missing* hooks and a *missing* `settings.json` unconditionally (there is no `--skip-hooks`), so a plain `--fix` that runs onboard will install absent hooks. It never updates a **stale** hook.
 
 ## What this command does NOT do
 
@@ -94,7 +102,7 @@ symlinks ({primer,primer-refresh,primer-check,explore,autonomy,surgical}.md),
 and so is intentionally outside HC_CANONICAL_COMMANDS in
 scripts/lib/health-checks.sh. It is reachable because the canonical checkout
 seeds .claude/commands/trellis-doctor.md itself. doctor.sh self-resolves
-$TRELLIS_ROOT from trellis.config.json, so no git-common-dir canonical-root
+local state from $TRELLIS_HOME, so no git-common-dir canonical-root
 ceremony applies here. Design: docs/adr/2026-05-30-trellis-doctor.md.
 
 Renamed from /doctor (spec 019, audit C7): Claude Code ships a bundled /doctor,

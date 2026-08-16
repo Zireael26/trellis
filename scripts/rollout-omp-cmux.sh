@@ -12,20 +12,21 @@
 # Usage:
 #   rollout-omp-cmux.sh                 # interactive / standard rollout
 #   rollout-omp-cmux.sh --dry-run       # show planned changes without writing
-#   rollout-omp-cmux.sh --yes           # non-interactive mode
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TRELLIS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Rollouts resolve every path they read from SCRIPT_DIR. An inherited
+# preloaded-libs marker would half-initialize any library sourced from here.
+unset TRELLIS_LIBS_PRELOADED
+
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
+TRELLIS_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 
 DRY_RUN=false
-ASSUME_YES=false
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --yes|-y)  ASSUME_YES=true ;;
     --help|-h)
       sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
       exit 0

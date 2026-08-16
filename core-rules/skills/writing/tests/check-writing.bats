@@ -41,8 +41,8 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
 @test "red thread exits 1 and names count length and link offenses" {
   run "$SCRIPT" --thread "$FIXTURES/red-thread.txt"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"thread count:"* ]]
-  [[ "$output" == *"thread length:"* ]]
+  [[ "$output" == *"thread count:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"thread length:"* ]] || { echo "$output"; false; }
   [[ "$output" == *"thread link:"* ]]
 }
 
@@ -67,9 +67,9 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
 @test "red blog names extended slop terms (journey / comprehensive / landscape)" {
   run "$SCRIPT" --blog "$FIXTURES/red-blog.md"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"journey"* ]]
-  [[ "$output" == *"comprehensive"* ]]
-  [[ "$output" == *"landscape"* ]]
+  [[ "$output" == *"journey"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"comprehensive"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"landscape"* ]] || { echo "$output"; false; }
   [[ "$output" == *"navigate-the"* ]]
 }
 

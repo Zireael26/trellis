@@ -172,24 +172,20 @@ step of synthesis, after the teammate's output has passed the verify gate. The
 fan-out is not complete while any teammate it spawned is still live (`CLAUDE.md` §
 Definition of done, teammate clause).
 
-Synthesis also **collects what the units wrote down**. A unit that ran in its own
-worktree may have left an `implementation-notes.md` recording where it deviated from
-the plan (`../execute/SKILL.md`). Concatenate those, unit-labelled, into the PR
-description or the main checkout's file **before** reaping the worktree — a reaped
-tree must never silently discard its notes.
+Synthesis also **collects what the units wrote down**. A unit may have produced
+`implementation-notes.md` (`../execute/SKILL.md`); copy its contents into the PR
+description or another durable receipt before any cleanup owner removes it.
 
-**Then delete the file from the worktree, before you attempt the reap.** This is
-not tidiness, it is the difference between a tree that reaps and one that never
-can. Every reap predicate in Trellis refuses on *any* untracked content —
-`recipes/fanout-verify.wf.js` stops if `git status --porcelain` prints anything,
-and `dj_worktree_clean` in `scripts/lib/disk-janitor-lib.sh` deliberately omits
-`-uno` because untracked work is data we must never silently destroy. An
-`implementation-notes.md` left in place therefore blocks both the orchestrator's
-reap and the disk-janitor backstop, permanently, for exactly those units that had
-something worth recording. Do not reach for `.gitignore` instead:
-`dj_worktree_has_ignored_artifacts` vetoes a tree harboring an unrecognized
-ignored entry, which moves the block rather than removing it. Collect, delete,
-reap — in that order.
+For a `fanout-verify`-provisioned tree, the unit must return required notes in its
+structured verdict before the recipe-owned Teardown; callers must not depend on
+reading the tree afterward. For any other worktree, preserve the notes and leave
+tree removal to an attended disk-janitor/operator cleanup path. This section does
+not authorize automatic caller-provisioned main-loop reaping.
+
+Untracked notes remain protected data: cleanup refuses a dirty tree. After a
+durable copy is verified, the applicable cleanup owner may remove the note before
+its own clean-tree check. Do not hide it with `.gitignore`; collect first, then
+let the owning cleanup path decide.
 
 ## Pattern catalog
 
@@ -271,8 +267,8 @@ shape, and how it composes: [`references/skeptical-evaluator.md`](references/ske
 
 The recipes are **generic, parametric skeletons** — not one-shot scripts. Targets,
 dates, and scope come from `args` or a sidecar config (with a documented fallback to
-reading `registry.md` for targets), never baked-in literals, so every shipped recipe
-is path-neutral. The index lists one row per recipe with its intent, inputs,
+listing the machine-local registry for targets), never baked-in literals, so every
+shipped recipe is path-neutral. The index lists one row per recipe with its intent, inputs,
 capability needs, and degrade note.
 
 Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
@@ -292,11 +288,12 @@ Index: [`recipes/MANIFEST.md`](recipes/MANIFEST.md).
   main loop auto-merges the GREEN ones and HOLDs the rest. Target resolution and the
   Teardown reap phase are in its `recipes/MANIFEST.md` row.
 
-**Orchestrator reap-after-commit (general rule).** When the main loop — not a
-recipe — commits+pushes a worktree it provisioned, it reaps that tree right after
-the push; the disk-janitor predicate is the mechanical backstop. The recipe
-that documents caller-provisioned worktrees reaps nothing itself (ADR
-`2026-07-16-orchestrator-conflicting-unit-reap`).
+**Worktree reap boundary.** Current supported automation is the
+`fanout-verify` Teardown for worktrees that recipe provisions plus the generic
+disk-janitor safety net. PR #162 accepted an automatic caller-provisioned
+main-loop reap doctrine; commit `2ad1808` later retired it. ADR
+`2026-07-16-orchestrator-conflicting-unit-reap` is field evidence only, not
+current guidance.
 
 When running this under degrade tier 2 (subagents, no workflow tool), read the
 recipe's `meta.phases` and per-agent prompts as the stage spec and dispatch them by

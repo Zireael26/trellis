@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/trellis.registry.schema.json",
+  "title": "Trellis local machine registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "projects"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "projects": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/projectRecord" }
+    },
+    "discovery_ignores": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/fleetName" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/discoveryIgnoreRecord" }
+      }
+    }
+  },
+  "$defs": {
+    "absoluteSafePath": {
+      "type": "string",
+      "minLength": 2,
+      "allOf": [
+        { "pattern": "^/" },
+        { "not": { "pattern": "[\\u0000-\\u001F\\u007F-\\u009F]" } },
+        { "not": { "pattern": "(^|/)(\\.|\\.\\.)(/|$)" } },
+        { "not": { "pattern": "//" } }
+      ]
+    },
+    "fleetName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
+    "harness": {
+      "enum": ["claude", "codex", "omp"]
+    },
+    "discoveryIgnoreRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absoluteSafePath" },
+        "legacy_path": { "$ref": "#/$defs/absoluteSafePath" },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "pattern": "[\\u0000\\t\\n\\r]" }
+        }
+      }
+    },
+    "projectRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fleet", "project_id", "status", "metadata", "checkouts"],
+      "properties": {
+        "fleet": { "$ref": "#/$defs/fleetName" },
+        "project_id": { "$ref": "#/$defs/projectId" },
+        "status": { "enum": ["active", "unavailable", "detached"] },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "checkouts": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/sha256" },
+          "additionalProperties": { "$ref": "#/$defs/checkoutRecord" }
+        },
+        "unavailable_roots": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/absoluteSafePath" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "checkoutRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "git_common_dir", "harnesses", "worktrees"],
+      "properties": {
+        "root": { "$ref": "#/$defs/absoluteSafePath" },
+        "git_common_dir": { "$ref": "#/$defs/absoluteSafePath" },
+        "release": { "$ref": "#/$defs/version" },
+        "harnesses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/harness" },
+          "uniqueItems": true
+        },
+        "worktrees": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/sha256" },
+          "additionalProperties": { "$ref": "#/$defs/worktreeRecord" }
+        }
+      }
+    },
+    "worktreeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": { "$ref": "#/$defs/absoluteSafePath" },
+        "attachment_id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        }
+      }
+    }
+  }
+}

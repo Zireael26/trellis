@@ -13,11 +13,12 @@ patterns below — overlapping *different* work — never from redundant
 generation. Operator directive 2026-07-10.
 
 **What replaced racing.** Pick the leg per unit from the routing table
-(`docs/codex-routing.md §2`) and commit to it. If the chosen leg fails or
-degrades, the standard degrade path re-dispatches the unit — sequentially,
-never concurrently — to the other leg. Independent review of one produced diff
-is not duplication: generation happens once; only judgment is duplicated, at a
-fraction of the cost.
+(`docs/codex-routing.md §2`) and commit to it. If the selected leg fails or
+degrades, record and surface that failure; the unit fails closed on the selected
+lane. Do not automatically re-dispatch it. A sequential dispatch to another lane
+requires explicit caller/operator selection and never runs concurrently.
+Independent review of one produced diff is not duplication: generation happens
+once; only judgment is duplicated, at a fraction of the cost.
 
 **History.** Race-the-legs (launch both legs, first verify-pass wins) shipped
 in spec 013 and won its one recorded outing (013 plan authoring, pilot-ledger
@@ -40,7 +41,8 @@ order even though unrelated generation and verification overlap.
 
 **Receipt contract.** Record unit id, generator handle/model/effort, verifier
 handle/effort, generation start/end, verification start/end, overlap duration,
-diff stat, proof output, verdict, and any retry or degradation.
+diff stat, proof output, verdict, and any retry, selected-lane failure, or
+explicitly selected re-dispatch.
 
 ## Warm-thread pool
 
@@ -136,8 +138,8 @@ never on the sandboxless hatch. Ultra's injected instruction voids "don't
 spawn subagents" rules and high-persistence executors have a documented
 overreach failure mode (see `core-rules/references/model-prompting-deltas.md`)
 — output passes the same independent verification gate as any executor unit, and
-reported usage is the parent-thread lower bound (subagent aggregation
-unverified).
+reported usage is the parent-thread lower bound because child-session usage does
+not aggregate into the parent total.
 
 **Receipt contract.** Record the unlock-evidence pointer (the ADR), unit id,
 ×4 slot accounting, token telemetry from the JSONL, model/effort,

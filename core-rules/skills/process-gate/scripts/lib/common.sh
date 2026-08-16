@@ -143,26 +143,40 @@ pg_is_lockfile() {
 #   Echoes the resolved JS package manager (pnpm|npm|bun|yarn) for a project,
 #   or empty when no JS lockfile is present (lets Python/Go detection proceed).
 #   Mirror of core-rules/hooks/lib/pm.sh:trellis_resolve_pm — kept in sync by
-#   hand (Trellis avoids incidental cross-subsystem coupling). Config value
-#   "auto"/unset == lockfile detection: additive, no behaviour change unless a
-#   project/fleet sets .package_manager.
+#   hand (Trellis avoids incidental cross-subsystem coupling). Policy precedence
+#   is canonical project .trellis.json, then the DEPRECATED read-only
+#   .trellis.config.json (retained past v1.0.0-rc.25 only for held legacy
+#   checkouts), then the immutable runtime
+#   $TRELLIS_ROOT/trellis.config.json. "auto"/unset uses
+#   lockfile detection; an explicit supported manager wins. A malformed,
+#   non-object, or present invalid policy source suppresses lower-priority
+#   policy before falling through to lockfile detection.
 pg_resolve_pm() {
-  local dir="${1:-$(pg_project_dir)}" pm="" cand
-  if command -v jq >/dev/null 2>&1; then
-    for cand in "$dir/.trellis.config.json" "$dir/trellis.config.json"; do
-      if [ -f "$cand" ]; then
-        pm="$(jq -r '.package_manager // empty' "$cand" 2>/dev/null)"
-        [ -n "$pm" ] && break
-      fi
-    done
-    if [ -z "$pm" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
-      pm="$(jq -r '.package_manager // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null)"
-    fi
+  local dir="${1:-$(pg_project_dir)}" pm="" cand policy_seen=0
+  local config_paths=("$dir/.trellis.json" "$dir/.trellis.config.json")
+  if [ -n "${TRELLIS_ROOT:-}" ]; then
+    config_paths+=("$TRELLIS_ROOT/trellis.config.json")
   fi
-  # Explicit config wins even if no lockfile. "auto"/unset → detect; a project
-  # with no JS lockfile and no explicit value resolves to empty (not npm) so
-  # callers can fall through to non-JS toolchains.
-  if [ "$pm" = "auto" ]; then pm=""; fi
+  if command -v jq >/dev/null 2>&1; then
+    for cand in "${config_paths[@]}"; do
+      [ -f "$cand" ] || continue
+      if ! jq -e 'type == "object"' "$cand" >/dev/null 2>&1; then
+        policy_seen=1
+      elif jq -e 'has("package_manager")' "$cand" >/dev/null 2>&1; then
+        policy_seen=1
+        pm="$(jq -r 'if (.package_manager | type) == "string" then .package_manager else empty end' "$cand" 2>/dev/null)"
+      fi
+      [ "$policy_seen" -eq 1 ] && break
+    done
+  fi
+  # A present unsupported, empty, null, or invalid value suppresses lower
+  # policy sources, then falls through to detection. Never emit an untrusted
+  # package-manager string into callers that evaluate command names.
+  case "$pm" in
+    auto|"") pm="" ;;
+    pnpm|npm|bun|yarn) ;;
+    *) pm="" ;;
+  esac
   if [ -z "$pm" ]; then
     if   [ -f "$dir/pnpm-lock.yaml" ];                       then pm=pnpm
     elif [ -f "$dir/bun.lock" ] || [ -f "$dir/bun.lockb" ];  then pm=bun

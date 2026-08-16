@@ -1,7 +1,7 @@
-# Multi-model lane continuity: degrade at the caller, never substitute in the router
+# Multi-model lane continuity: fail closed at the caller; never substitute in the router
 
 Date: 2026-07-26
-Status: Accepted
+Status: Accepted — amended to require explicit re-selection after a selected-lane failure.
 Spec: `specs/021-multi-model-lane-continuity/`
 
 ## Context
@@ -15,31 +15,39 @@ auth-cooling upstream, exposes a `degraded` state, and colours the statusline re
 next is return a bare 502/503, and the delegated agent dies. So an outage or a hit rate limit does
 not degrade the work — it ends the unit, and the operator reconstructs why from a red statusline.
 
-Separately, the agents that target the lane pin the lane's model name in their frontmatter. On any
-host without the router that name resolves to nothing, so the agent hard-fails at dispatch. This is
-why the surface has never been publishable: the artifacts only work where the infrastructure
-already exists.
+At acceptance, the agents that targeted the lane pinned the lane's model name in their
+frontmatter. On a host without the router that name resolved to nothing, so the agent hard-failed
+at dispatch. This is why the pre-amendment surface was not publishable: the artifacts only worked
+where the infrastructure already existed.
 
-The repo solved this exact shape once before, for a different foreign backend
-(`core-rules/agents/codex-worker.md`): pin a **first-party** model, reach the foreign backend over
-`Bash`, and return a structured UNAVAILABLE receipt so the caller re-runs the identical unit
-locally. The pattern was simply never applied to the newer lane.
+At acceptance, the repo had solved this shape once before for a different foreign backend
+(`core-rules/agents/codex-worker.md`, later retired by commit `2ad1808`): pin a
+**first-party** model, reach the foreign backend over `Bash`, and return a structured
+UNAVAILABLE receipt that then led the caller to repeat the identical unit locally. That
+worker and automatic-repeat pattern is historical evidence only, not a current route.
 
 ## Decision
 
-**Degrade at the caller. Never substitute in the router.**
+**Fail closed at the caller. Never substitute in the router or caller.**
 
-1. Agents that target the lane pin a first-party model in frontmatter and reach the lane through
-   `Bash`. The lane becomes an enhancement, not a prerequisite. The artifact works everywhere.
-2. A fail-closed probe (`scripts/lane-preflight.sh`) reports availability and nothing else. It
-   always exits 0; unknown, error, and timeout all resolve to unavailable. Callers decide.
-3. On unavailable, the agent returns a structured receipt — `STATUS: UNAVAILABLE`,
-   `CODE: LANE_UNAVAILABLE`, a reason, and an explicit instruction that the caller must re-run the
-   identical unit on the first-party model. UNAVAILABLE is a capability result, never SUCCESS.
+1. At acceptance, agents explicitly selected to target the lane pinned a first-party model in
+   frontmatter and reached the lane through `Bash`. The lane was an enhancement, not a
+   prerequisite, and a failed foreign lane never selected the first-party route automatically.
+   That Trellis-owned agent implementation is retired; current lane selection follows
+   `core-rules/references/model-lanes.md`.
+2. The retired `scripts/lane-preflight.sh` reported availability and nothing else: unknown,
+   error, and timeout resolved to unavailable. A current lane may use an operator-supplied
+   fail-closed probe under the same `model-lanes.md` contract; Trellis ships no such probe.
+3. At acceptance, an unavailable agent returned `STATUS: UNAVAILABLE`,
+   `CODE: LANE_UNAVAILABLE`, a reason, endpoint-configuration and probe-time fields, the target
+   working directory, and an instruction to rerun the identical unit on the first-party route.
+   That receipt shape and automatic-repeat instruction are historical. Current policy retains
+   only the invariant that a selected failure ends the attempt; another provider or lane may run
+   only after explicit caller/operator selection.
 4. The router's change is confined to what it *emits*: a structured 503 with a machine-readable
    reason, so callers can tell "lane is down" from "your request was malformed."
-5. The public template carries the capability contract — lanes, the predicate, the degrade tiers —
-   and never names the specific third-party proxy this instance happens to use.
+5. The public template carries the capability contract — lanes, the predicate, and failure/
+   continuity tiers — and never names the specific third-party proxy this instance happens to use.
 
 ## Alternatives considered
 
@@ -58,8 +66,8 @@ that were in fact running a first-party model — the `model` parameter at spawn
 definition — quietly consuming that quota and producing every one of the session's first-party rate
 limits. A router-level silent fallback would make that behaviour the design instead of a bug.
 
-Degrading at the caller costs one extra round trip and makes the substitution a visible, logged
-decision. That trade is correct.
+The original caller-side repeat made a provider change visible and logged. That automatic-repeat
+clause is historical only: current policy requires explicit caller/operator re-selection first.
 
 **Teach the orchestrator to notice the red statusline and reroute.** Rejected: it depends on the
 orchestrator noticing. The repo has a recorded finding that availability is not adoption — a
@@ -75,13 +83,14 @@ regardless. Reversible in one line if the operator intended otherwise.
 
 ## Consequences
 
-- The published agent always works. Without a lane it is a first-party agent; with one it
-  delegates. No inert artifacts.
-- Degrades are visible and logged. A long outage shows up as a stream of explicit degrade notes,
-  not as a mystery bill.
-- `merged`-ness and lane availability are now independent concerns; nothing in the degrade path
+- No Trellis-owned public agent or probe remains. An explicitly selected first-party route may
+  continue; a selected foreign lane fails closed with a visible receipt and requires explicit
+  reselection before another provider or lane runs.
+- Failures are visible and logged. An explicit new selection, not the failure receipt itself,
+  permits a rerun, so an outage cannot become a mystery bill.
+- `merged`-ness and lane availability are independent concerns; nothing in the failure path
   depends on the statusline being read by a human.
 - The instance keeps a private binding. The public contract has no way to name it, which is
   intentional and enforced by the lint rather than by discipline.
-- Cost: one extra probe per delegated unit, and callers must handle a receipt they could
-  previously ignore.
+- Historical cost was one probe per delegated unit plus receipt handling. Current
+  operator-supplied lane integrations bear their own probe cost.

@@ -1,256 +1,444 @@
 #!/usr/bin/env bats
-# Isolated dry-run simulation coverage for sync-to-template.sh. Every test uses
-# temporary source and mirror repos; the live Trellis checkout and public mirror
-# are never targets.
+# Mirror publication contracts run through the stable launcher. Each fixture
+# creates a verified immutable payload from one committed source tree; a dirty
+# source checkout is deliberately untrusted input and must never be executed.
+
+REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+RELEASE_VERSION="1.2.3"
 
 setup() {
-  REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  SANDBOX="$BATS_TEST_TMPDIR/work"
+  mkdir -p "$BATS_TEST_TMPDIR/portable-mirror"
+  SANDBOX="$(CDPATH= cd "$BATS_TEST_TMPDIR/portable-mirror" && pwd -P)"
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
-  PROJECTS="$SANDBOX/projects"
-  SECURITY_REL="docs/adr/public-security-boundary.md"
-  LEGACY_REL="docs/legacy/codex-plugin.md"
-  RETIRED_DOCS=(
-    "AGENT_ONBOARD_G""PTX.md"
-    "docs/g""ptx.md"
-    "docs/g""ptx-security.md"
-    "docs/g""ptx-session-policy-matrix.md"
-    "docs/g""ptx-model-override-matrix.md"
-  )
-  mkdir -p "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/audits" \
-    "$SOURCE/docs" "$SOURCE/local" "$SOURCE/shared-runtime" \
-    "$SOURCE/$(dirname "$SECURITY_REL")" "$SOURCE/$(dirname "$LEGACY_REL")" \
-    "$MIRROR" "$PROJECTS"
-  SHARED_RUNTIME="$(cd "$SOURCE/shared-runtime" && pwd -P)"
+  VICTIM=""
+  SOURCE_EXECUTED="$SANDBOX/source-script-ran"
+  export HOME="$SANDBOX/home"
+  export TRELLIS_HOME="$SANDBOX/trellis-home"
+  LAUNCHER="$HOME/.local/bin/trellis"
+  RELEASE_DIR="$TRELLIS_HOME/releases/$RELEASE_VERSION"
+  PAYLOAD="$RELEASE_DIR/payload"
 
-  printf 'Public security boundary fixture.\n' > "$SOURCE/$SECURITY_REL"
-  printf 'Public legacy compatibility fixture.\n' > "$SOURCE/$LEGACY_REL"
+  mkdir -p \
+    "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/docs" "$SOURCE/audits" \
+    "$MIRROR" "$SANDBOX/projects" "$HOME/.local/bin" "$TRELLIS_HOME/releases"
+  chmod 700 "$TRELLIS_HOME"
 
+  cp "$REPO_ROOT/scripts/trellis" "$SOURCE/scripts/"
   cp "$REPO_ROOT/scripts/sync-to-template.sh" "$SOURCE/scripts/"
-  cp "$REPO_ROOT/scripts/lint-prompt-shell-blocks.sh" "$SOURCE/scripts/"
-  cp "$REPO_ROOT/scripts/lib/config-load.sh" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/mirror-lint.sh" "$SOURCE/scripts/lib/"
-  cp "$REPO_ROOT/scripts/lib/sed-portable.sh" "$SOURCE/scripts/lib/"
-  cp "$REPO_ROOT/scripts/lib/sync-coverage.sh" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/trellis.config.schema.json" "$SOURCE/scripts/lib/"
-
   cat > "$SOURCE/trellis.config.json" <<EOF
 {
+  "schema_version": 2,
   "trellis_root": "$SOURCE",
-  "projects_root": "$PROJECTS",
-  "shared_infra_root": "$SHARED_RUNTIME",
-  "user_home": "$SANDBOX",
-  "maintainer_name": "Test Maintainer",
-  "github_user": "testuser",
-  "harnesses": ["claude"],
-  "template": { "branch": "main" }
+  "projects_root": "$SANDBOX/projects",
+  "maintainer_name": "Private Operator",
+  "github_user": "private-operator",
+  "harnesses": ["claude"]
 }
 EOF
+  printf '# Reviewed portable process\n' > "$SOURCE/engineering-process.md"
+  printf '# Changelog\n' > "$SOURCE/CHANGELOG.md"
+  printf '# Portable infrastructure guidance\n' > "$SOURCE/docs/local-development-infrastructure.md"
+  printf '{"schema_version":1,"toolchains":[{"name":"private"}]}' > "$SOURCE/dependency-baseline.json"
+  printf '{"schema_version":1,"source_reports":["private"]}' > "$SOURCE/audits/fleet-remediation-ledger.json"
+  printf '# Portable core policy\n' > "$SOURCE/core-rules/CLAUDE.md"
+  # The real tree tracks core-rules/AGENTS.md as a relative symlink to
+  # CLAUDE.md and publishes it explicitly, so the fixture must too. A fixture
+  # without it cannot reach the symlink-destination paths at all.
+  ln -s CLAUDE.md "$SOURCE/core-rules/AGENTS.md"
 
-  cat > "$SOURCE/dependency-baseline.json" <<EOF
-{
-  "schema_version": 1,
-  "policy": {
-    "shared_project_minimum": 2,
-    "direct_versions": "exact-per-lane",
-    "peer_versions": "compatible-range",
-    "expired_exceptions": "fail"
-  },
-  "toolchains": [{"name":"private-project-$SANDBOX","lanes":[]}],
-  "packages": [],
-  "security_floors": [],
-  "exceptions": []
-}
-EOF
-  cat > "$SOURCE/audits/fleet-remediation-ledger.json" <<EOF
-{
-  "schema_version": 1,
-  "audit_date": "2026-07-21",
-  "source_reports": ["private-project-$SANDBOX"],
-  "findings": []
-}
-EOF
+  git -C "$SOURCE" init -q
+  git -C "$SOURCE" config user.email ci-bats@trellis.test
+  git -C "$SOURCE" config user.name 'Trellis CI'
+  git -C "$SOURCE" add -A
+  git -C "$SOURCE" commit -qm source
+  SOURCE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 
-  cat > "$SOURCE/docs/local-development-infrastructure.md" <<'EOF'
-# Private local infrastructure inventory
+  mkdir -p "$PAYLOAD"
+  git -C "$SOURCE" archive --format=tar "$SOURCE_COMMIT" | tar -x -C "$PAYLOAD"
+  write_machine_config
+  write_release_record
+  find "$PAYLOAD" -type f -exec chmod a-w {} \;
+  find "$PAYLOAD" -type d -exec chmod a-w {} \;
+  chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
 
-Private project `sentinel-private-app` binds registered port `45678`.
-EOF
-  cat > "$SOURCE/CHANGELOG.md" <<'EOF'
-# Changelog
-
-- The current fixture manifest includes `sentinel-private-app` with `services: {}` and `ports: {}`. Its project port is `45678`.
-EOF
-  printf 'Configured shared root: `%s`.\n' "$SHARED_RUNTIME" \
-    > "$SOURCE/engineering-process.md"
-  cat > "$SOURCE/local/shared-infra-public-denylist.txt" <<'EOF'
-# Fake fixture tokens only.
-`sentinel-private-app`
-`45678`
-EOF
-  cat > "$SOURCE/local/shared-infra-public-changelog-denylist.txt" <<'EOF'
-# Fake fixture tokens only.
-`sentinel-private-app`
-`45678`
-EOF
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$LAUNCHER"
+  chmod 755 "$LAUNCHER"
 
   git -C "$MIRROR" init -q
-  git -C "$MIRROR" config user.email "ci-bats@trellis.test"
-  git -C "$MIRROR" config user.name "trellis ci"
+  git -C "$MIRROR" config user.email ci-bats@trellis.test
+  git -C "$MIRROR" config user.name 'Trellis CI'
 }
 
-run_sync_dry() {
-  run env TRELLIS_CONFIG="$SOURCE/trellis.config.json" \
-    bash "$SOURCE/scripts/sync-to-template.sh" --dry-run --template-dir="$MIRROR"
+teardown() {
+  if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
+    find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
+    rm -rf "$SANDBOX"
+  fi
+  [ -z "${VICTIM:-}" ] || rm -rf "$VICTIM"
 }
 
-@test "dry-run simulated mirror catches a dirty public-only leak without touching the mirror" {
-  printf 'Clean public README.\n' > "$MIRROR/README.md"
-  git -C "$MIRROR" add README.md
-  git -C "$MIRROR" commit -qm seed
-  printf 'Operator path: %s/private\n' "$SANDBOX" > "$MIRROR/README.md"
-  local before_status before_sha
-  before_status="$(git -C "$MIRROR" status --short)"
-  before_sha="$(shasum -a 256 "$MIRROR/README.md" | awk '{print $1}')"
-
-  run_sync_dry
-
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"MIRROR LINT FAILED"* ]]
-  [[ "$output" == *"README.md: absolute-path leak"* ]]
-  [ "$(git -C "$MIRROR" status --short)" = "$before_status" ]
-  [ "$(shasum -a 256 "$MIRROR/README.md" | awk '{print $1}')" = "$before_sha" ]
+write_machine_config() {
+  cat > "$TRELLIS_HOME/config.json" <<EOF
+{
+  "schema_version": 1,
+  "source_root": "$SOURCE",
+  "release_remote": "fixture://release",
+  "active_cli_release": "$RELEASE_VERSION",
+  "default_fleet": "personal",
+  "fleets": {
+    "personal": {
+      "discovery_roots": ["$SANDBOX/projects"]
+    }
+  }
+}
+EOF
+  chmod 600 "$TRELLIS_HOME/config.json"
 }
 
-@test "dry-run simulated mirror accepts a pending scheduled-tasks prune without touching the mirror" {
-  mkdir -p "$MIRROR/scheduled-tasks"
-  printf 'Clean public README.\n' > "$MIRROR/README.md"
-  printf 'private fleet task\n' > "$MIRROR/scheduled-tasks/prompt.md"
+write_release_record() {
+  local manifest file relative mode oid target
+  manifest="$SANDBOX/release-tree.jsonl"
+  : > "$manifest"
+  while IFS= read -r file; do
+    relative="${file#"$PAYLOAD"/}"
+    if [ -L "$file" ]; then
+      mode=120000
+      target="$(readlink "$file")"
+      oid="$(printf '%s' "$target" | git hash-object --no-filters --stdin)"
+    elif [ -x "$file" ]; then
+      mode=100755
+      oid="$(git hash-object --no-filters "$file")"
+    else
+      mode=100644
+      oid="$(git hash-object --no-filters "$file")"
+    fi
+    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
+      '{path: $path, mode: $mode, oid: $oid}' >> "$manifest"
+  done < <(find -P "$PAYLOAD" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  jq -n --arg version "$RELEASE_VERSION" --arg commit "$SOURCE_COMMIT" --slurpfile tree "$manifest" '
+    {
+      schema_version: 1,
+      version: $version,
+      tag: ("v" + $version),
+      commit: $commit,
+      remote: "fixture://release",
+      tree: $tree
+    }
+  ' > "$RELEASE_DIR/release.json"
+}
+
+run_sync() {
+  run "$LAUNCHER" mirror --template-dir "$MIRROR" "$@"
+}
+
+# Seed the mirror with a committed core-rules/AGENTS.md symlink pointing at the
+# given target, so the sync meets a destination link it did not just create.
+seed_mirror_agents_link() {
+  mkdir -p "$MIRROR/core-rules"
+  printf '# Portable core policy\n' > "$MIRROR/core-rules/CLAUDE.md"
+  ln -s "$1" "$MIRROR/core-rules/AGENTS.md"
   git -C "$MIRROR" add -A
   git -C "$MIRROR" commit -qm seed
+}
 
-  run_sync_dry
+@test "template directory is explicit through the verified launcher" {
+  run "$LAUNCHER" mirror --dry-run
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'--template-dir PATH'* ]] || { echo "$output"; false; }
+}
+
+@test "direct source execution is refused before it can inspect or mutate a mirror" {
+  printf 'unchanged mirror\n' > "$MIRROR/README.md"
+  before="$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)"
+
+  run bash "$SOURCE/scripts/sync-to-template.sh" --apply --template-dir "$MIRROR"
+
+  [ "$status" -eq 2 ]
+  # The refusal comes from the BOOTSTRAP, which is the earliest gate and the
+  # only one reached here: the body's own "run trellis mirror from the verified
+  # stable launcher" wording is downstream of an `env -i` re-exec that a direct
+  # source run never gets to. This assertion asked for the body's wording and
+  # was inert (a bare mid-test `[[ … ]]` does not fail a bats test on this
+  # host), so it never noticed it was checking for a string this path cannot
+  # produce. Assert the message the gate actually emits.
+  [[ "$output" == *'direct source execution is unsupported; run trellis mirror from the installed stable launcher'* ]] ||
+    { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before" ]
+}
+
+@test "dirty and untracked source checkout bytes cannot influence verified publication" {
+  cat > "$SOURCE/scripts/sync-to-template.sh" <<EOF
+#!/bin/bash
+printf 'source script ran\n' > "$SOURCE_EXECUTED"
+exit 99
+EOF
+  cat > "$SOURCE/scripts/trellis" <<EOF
+#!/bin/bash
+printf 'source dispatcher ran\n' > "$SOURCE_EXECUTED"
+exit 98
+EOF
+  printf 'unreviewed source bytes\n' > "$SOURCE/engineering-process.md"
+  printf 'untracked source bytes\n' > "$SOURCE/scripts/untracked-publication.sh"
+  printf 'existing reviewed destination\n' > "$MIRROR/engineering-process.md"
+
+  run_sync --apply
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"simulated mirror clean"* ]]
+  [ ! -e "$SOURCE_EXECUTED" ]
+  [ -n "$(git -C "$SOURCE" status --short)" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
+  [ "$(cat "$MIRROR/engineering-process.md")" = '# Reviewed portable process' ]
+}
+
+# This fixture is the end-to-end proof that `lint_mirror`'s structural reject
+# terms and `sync-to-template.sh`'s `delist_prune` stay paired. Every private
+# root seeded here must be pruned by the simulation, otherwise the lint still
+# sees it and "simulated mirror clean." never prints — which is exactly the
+# permanently unpublishable state an unpaired reject term would create. Seed a
+# real on-disk layout for each root so the assertion cannot pass vacuously.
+@test "dry-run simulates pruning private machine state without changing the mirror" {
+  mkdir -p "$MIRROR/.trellis/releases/1.2.3" "$MIRROR/scheduled-tasks" \
+    "$MIRROR/state/attachments/0f1e2d3c" "$MIRROR/state/git-hooks/0f1e2d3c" \
+    "$MIRROR/tasks/parent/conductor" "$MIRROR/locks/registry.lock" \
+    "$MIRROR/releases/1.2.3/payload" "$MIRROR/local"
+  printf '{}\n' > "$MIRROR/.trellis/registry.json"
+  printf '{}\n' > "$MIRROR/config.json"
+  printf '{}\n' > "$MIRROR/registry.json"
+  source_before="$(git -C "$SOURCE" status --short)"
+  printf 'private attachment\n' > "$MIRROR/state/attachment.json"
+  printf '{}\n' > "$MIRROR/state/attachments/0f1e2d3c/worktree-a.json"
+  printf '#!/bin/sh\nexit 0\n' > "$MIRROR/state/git-hooks/0f1e2d3c/pre-push"
+  printf 'private prompt\n' > "$MIRROR/scheduled-tasks/prompt.md"
+  printf '{}\n' > "$MIRROR/tasks/parent/conductor/snapshot.json"
+  printf '{}\n' > "$MIRROR/tasks/parent/conductor/backlog.json"
+  printf '4321\n' > "$MIRROR/locks/registry.lock/pid"
+  printf '{}\n' > "$MIRROR/releases/1.2.3/release.json"
+  printf 'policy\n' > "$MIRROR/releases/1.2.3/payload/CLAUDE.md"
+  printf 'private\n' > "$MIRROR/local/notes.md"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+  before="$(git -C "$MIRROR" status --short)"
+
+  run_sync --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
+  [ "$(git -C "$SOURCE" status --short)" = "$source_before" ]
+  [ -f "$MIRROR/.trellis/registry.json" ]
   [ -f "$MIRROR/scheduled-tasks/prompt.md" ]
-  [ -z "$(git -C "$MIRROR" status --short)" ]
+  [ -f "$MIRROR/config.json" ]
+  [ -f "$MIRROR/registry.json" ]
+  [ -f "$MIRROR/state/attachment.json" ]
+  [ -f "$MIRROR/state/attachments/0f1e2d3c/worktree-a.json" ]
+  [ -f "$MIRROR/state/git-hooks/0f1e2d3c/pre-push" ]
+  [ -f "$MIRROR/tasks/parent/conductor/snapshot.json" ]
+  [ -f "$MIRROR/locks/registry.lock/pid" ]
+  [ -f "$MIRROR/releases/1.2.3/release.json" ]
+  [ -f "$MIRROR/local/notes.md" ]
+  [ "$(git -C "$MIRROR" status --short)" = "$before" ]
 }
 
-@test "apply generates the public guide even when the private source is absent" {
-  rm -f "$SOURCE/docs/local-development-infrastructure.md"
-  printf 'Clean public README.\n' > "$MIRROR/README.md"
+@test "dry-run catches a leaked public-only operator path without touching the mirror" {
+  operator_path="/Users/${BATS_TEST_NUMBER:-fixture}-operator/private/mirror"
+  printf 'Leak: %s\n' "$operator_path" > "$MIRROR/README.md"
   git -C "$MIRROR" add README.md
   git -C "$MIRROR" commit -qm seed
+  before_sha="$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)"
 
-  run env TRELLIS_CONFIG="$SOURCE/trellis.config.json" \
-    bash "$SOURCE/scripts/sync-to-template.sh" --apply --template-dir="$MIRROR"
+  run_sync --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'MIRROR LINT FAILED'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before_sha" ]
+}
+
+@test "clean-tree apply publishes committed engineering bytes and portable config" {
+  mkdir -p "$MIRROR/.trellis/state/attachments" "$MIRROR/local" "$MIRROR/state"
+  printf '{}\n' > "$MIRROR/.trellis/config.json"
+  printf '{}\n' > "$MIRROR/config.json"
+  printf 'private attachment\n' > "$MIRROR/state/attachment.json"
+  printf 'private\n' > "$MIRROR/local/operator.txt"
+
+  run_sync --apply
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$MIRROR/docs/local-development-infrastructure.md" ]
-  grep -F 'The public Trellis template does **not** ship or own that external runtime repository' \
-    "$MIRROR/docs/local-development-infrastructure.md"
-}
-
-@test "changelog receipt replacement fails closed when its private sentence shape drifts" {
-  python3 - "$SOURCE/CHANGELOG.md" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-text = path.read_text()
-path.write_text(text.replace(" with `services: {}` and `ports: {}`.", " carries a reviewed declaration."))
-PY
-
-  run_sync_dry
-
+  [[ "$output" == *'applied.'* ]] || { echo "$output"; false; }
+  [ ! -e "$MIRROR/.trellis" ]
+  [ ! -e "$MIRROR/local" ]
+  [ ! -e "$MIRROR/config.json" ]
+  [ ! -e "$MIRROR/state" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
+  jq -e '
+    .schema_version == 2
+    and (.trellis_root? | not)
+    and (.projects_root? | not)
+    and (.template.redact_paths? | not)
+    and .maintainer_name == "__MAINTAINER_NAME__"
+  ' "$MIRROR/trellis.config.json" >/dev/null
+  run grep -F "$SOURCE" "$MIRROR/trellis.config.json"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"shared-infrastructure changelog receipt replacement did not fire; aborting"* ]]
-  [[ "$output" != *"sentinel-private-app"* ]]
-  [[ "$output" != *"45678"* ]]
 }
 
-@test "staged public guide denylist fails closed without disclosing the token" {
-  python3 - "$SOURCE/scripts/sync-to-template.sh" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-text = path.read_text()
-needle = "# Optional shared local infrastructure"
-replacement = needle + "\n\nPrivate allocation: `SENTINEL-PRIVATE-APP`."
-path.write_text(text.replace(needle, replacement, 1))
-PY
+@test "dry-run rejects a non-directory destination parent before mutation" {
+  printf 'not a directory\n' > "$MIRROR/core-rules"
+  before="$(shasum -a 256 "$MIRROR/core-rules" | cut -d ' ' -f 1)"
 
-  run env TRELLIS_CONFIG="$SOURCE/trellis.config.json" \
-    bash "$SOURCE/scripts/sync-to-template.sh" --dry-run --template-dir="$MIRROR"
+  run_sync --dry-run
 
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"staged shared-infrastructure guide contains a private fleet identifier"* ]]
-  [[ "$output" == *"shared-infrastructure publication redaction failed; aborting"* ]]
-  [[ "$output" != *"sentinel-private-app"* ]]
-  [[ "$output" != *"SENTINEL-PRIVATE-APP"* ]]
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'destination parent is not a directory: core-rules'* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/core-rules" | cut -d ' ' -f 1)" = "$before" ]
 }
 
-@test "apply still overlays staged paths, prunes de-listed content, and lints the real mirror" {
-  mkdir -p "$MIRROR/scheduled-tasks"
-  printf 'Clean public README.\n' > "$MIRROR/README.md"
-  printf 'private fleet task\n' > "$MIRROR/scheduled-tasks/prompt.md"
-  local retired
-  for retired in "${RETIRED_DOCS[@]}"; do
-    mkdir -p "$MIRROR/$(dirname "$retired")"
-    printf 'retired feature doc\n' > "$MIRROR/$retired"
+@test "dry-run rejects a safe relative symlinked file destination" {
+  printf 'public target\n' > "$MIRROR/README.md"
+  ln -s README.md "$MIRROR/engineering-process.md"
+
+  run_sync --dry-run
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'destination is a symlink: engineering-process.md'* ]] || { echo "$output"; false; }
+  [ "$(readlink "$MIRROR/engineering-process.md")" = 'README.md' ]
+}
+
+@test "dry-run and apply reject a relative symlinked sync parent before external mutation" {
+  VICTIM="$SANDBOX/victim"
+  mkdir -p "$VICTIM"
+  printf 'external victim\n' > "$VICTIM/sentinel"
+  ln -s ../victim "$MIRROR/scripts"
+  victim_before="$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)"
+  source_before="$(git -C "$SOURCE" status --short)"
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  for mode in --dry-run --apply; do
+    run_sync "$mode"
+
+    [ "$status" -eq 4 ]
+    [[ "$output" == *'template destination has unsafe mutation path'* ]] || { echo "$output"; false; }
+    [ "$(git -C "$SOURCE" status --short)" = "$source_before" ]
+    [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+    [ "$(readlink "$MIRROR/scripts")" = '../victim' ]
+    [ "$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)" = "$victim_before" ]
   done
-  git -C "$MIRROR" add -A
-  git -C "$MIRROR" commit -qm seed
+}
 
-  run env TRELLIS_CONFIG="$SOURCE/trellis.config.json" \
-    bash "$SOURCE/scripts/sync-to-template.sh" --apply --template-dir="$MIRROR"
+# The published tree contains a tracked symlink, so the simulation installs one
+# into the simulated mirror and then re-preflights it. Preflight must be
+# idempotent over its own output or publication is blocked outright.
+@test "dry-run and apply publish the tracked core-rules AGENTS.md symlink" {
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  run_sync --dry-run
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"applied."* ]]
-  [[ "$output" == *"pruned: scheduled-tasks"* ]]
-  [[ "$output" == *"mirror clean."* ]]
-  [ ! -e "$MIRROR/scheduled-tasks" ]
-  for retired in "${RETIRED_DOCS[@]}"; do
-    [ ! -e "$MIRROR/$retired" ]
-    [[ "$output" == *"pruned: $retired"* ]]
+  [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
+  [ ! -L "$MIRROR/core-rules/AGENTS.md" ]
+  [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$MIRROR/core-rules/AGENTS.md" ]
+  [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = 'CLAUDE.md' ]
+}
+
+# Any mirror published once already carries that symlink, so the very first
+# preflight of the next run meets it.
+@test "a mirror already carrying the published AGENTS.md symlink re-syncs" {
+  seed_mirror_agents_link CLAUDE.md
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  run_sync --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
+  [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = 'CLAUDE.md' ]
+  [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'applied.'* ]] || { echo "$output"; false; }
+  [ -L "$MIRROR/core-rules/AGENTS.md" ]
+  [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = 'CLAUDE.md' ]
+}
+
+@test "dry-run and apply reject a destination symlink with an absolute target" {
+  seed_mirror_agents_link "$MIRROR/core-rules/CLAUDE.md"
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  for mode in --dry-run --apply; do
+    run_sync "$mode"
+
+    [ "$status" -eq 4 ] || { echo "$output"; false; }
+    [[ "$output" == *'core-rules/AGENTS.md: symlink target leaks absolute path'* ]] ||
+      { echo "$output"; false; }
+    [[ "$output" == *'template destination has unsafe mutation path'* ]] || { echo "$output"; false; }
+    [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = "$MIRROR/core-rules/CLAUDE.md" ]
+    [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
   done
-  [ -f "$MIRROR/scripts/sync-to-template.sh" ]
-  [ -f "$MIRROR/dependency-baseline.json" ]
-  [ -f "$MIRROR/audits/fleet-remediation-ledger.json" ]
-  [ -f "$MIRROR/docs/local-development-infrastructure.md" ]
-  [ "$(< "$MIRROR/$SECURITY_REL")" = "Public security boundary fixture." ]
-  [ "$(< "$MIRROR/$LEGACY_REL")" = "Public legacy compatibility fixture." ]
-  [ "$(jq '.toolchains | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
-  [ "$(jq '.packages | length' "$MIRROR/dependency-baseline.json")" -eq 0 ]
-  [ "$(jq '.source_reports | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
-  [ "$(jq '.findings | length' "$MIRROR/audits/fleet-remediation-ledger.json")" -eq 0 ]
-  run grep -n 'private-project-' "$MIRROR/dependency-baseline.json" "$MIRROR/audits/fleet-remediation-ledger.json"
-  [ "$status" -eq 1 ]
+}
 
-  run grep -F 'The public Trellis template does **not** ship or own that external runtime repository' \
-    "$MIRROR/docs/local-development-infrastructure.md"
-  [ "$status" -eq 0 ]
-  run grep -F "jq -r '.shared_infra_root // empty'" \
-    "$MIRROR/docs/local-development-infrastructure.md"
-  [ "$status" -eq 0 ]
-  run grep -E 'sentinel-private-app|45678|Private local infrastructure inventory' \
-    "$MIRROR/docs/local-development-infrastructure.md"
-  [ "$status" -eq 1 ]
-  run grep -F 'Shared local-infrastructure integration now validates optional external manifests' \
-    "$MIRROR/CHANGELOG.md"
-  [ "$status" -eq 0 ]
-  run grep -E 'sentinel-private-app|45678|current fixture manifest' \
-    "$MIRROR/CHANGELOG.md"
-  [ "$status" -eq 1 ]
-  run grep -F 'Configured shared root: `__SHARED_INFRA_PATH__`.' \
-    "$MIRROR/engineering-process.md"
-  [ "$status" -eq 0 ]
-  run grep -F "$SHARED_RUNTIME" "$MIRROR/engineering-process.md"
-  [ "$status" -eq 1 ]
+@test "dry-run and apply reject a destination symlink whose relative target escapes the mirror" {
+  VICTIM="$SANDBOX/victim"
+  mkdir -p "$VICTIM"
+  printf 'external victim\n' > "$VICTIM/sentinel"
+  seed_mirror_agents_link ../../victim/sentinel
+  victim_before="$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)"
+  mirror_before="$(git -C "$MIRROR" status --short)"
 
-  run bash "$MIRROR/scripts/lint-prompt-shell-blocks.sh"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"clean (0 files, 0 bash/sh blocks scanned)"* ]]
-  [[ "$output" != *"No such file or directory"* ]]
+  for mode in --dry-run --apply; do
+    run_sync "$mode"
+
+    [ "$status" -eq 4 ] || { echo "$output"; false; }
+    [[ "$output" == *'core-rules/AGENTS.md: symlink target escapes mirror'* ]] ||
+      { echo "$output"; false; }
+    [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = '../../victim/sentinel' ]
+    [ "$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)" = "$victim_before" ]
+    [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+  done
+}
+
+# Contained and relative, so the mirror-wide symlink scan passes it. Only the
+# link-text equality rule stands between this redirect and a write through it.
+@test "dry-run and apply reject a destination symlink whose link text differs from the staged link" {
+  seed_mirror_agents_link ../engineering-process.md
+  printf 'reviewed destination\n' > "$MIRROR/engineering-process.md"
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  for mode in --dry-run --apply; do
+    run_sync "$mode"
+
+    [ "$status" -eq 4 ] || { echo "$output"; false; }
+    [[ "$output" == *'destination is a symlink: core-rules/AGENTS.md'* ]] || { echo "$output"; false; }
+    [ "$(readlink "$MIRROR/core-rules/AGENTS.md")" = '../engineering-process.md' ]
+    [ "$(cat "$MIRROR/engineering-process.md")" = 'reviewed destination' ]
+    [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+  done
+}
+
+@test "dry-run and apply reject a relative symlinked prune target before external mutation" {
+  VICTIM="$SANDBOX/victim"
+  mkdir -p "$VICTIM"
+  printf 'external victim\n' > "$VICTIM/sentinel"
+  ln -s ../victim "$MIRROR/local"
+  victim_before="$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)"
+  source_before="$(git -C "$SOURCE" status --short)"
+  mirror_before="$(git -C "$MIRROR" status --short)"
+
+  for mode in --dry-run --apply; do
+    run_sync "$mode"
+
+    [ "$status" -eq 4 ]
+    [[ "$output" == *'template destination has unsafe mutation path'* ]] || { echo "$output"; false; }
+    [ "$(git -C "$SOURCE" status --short)" = "$source_before" ]
+    [ "$(git -C "$MIRROR" status --short)" = "$mirror_before" ]
+    [ "$(readlink "$MIRROR/local")" = '../victim' ]
+    [ "$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)" = "$victim_before" ]
+  done
 }

@@ -40,7 +40,7 @@ Body of the entry.
 EOF
   out="$(run_hook "$HOOK")"
   ctx="$(extract_ctx "$out")"
-  [[ "$ctx" == *"Unresolved gotchas"* ]]
+  [[ "$ctx" == *"Unresolved gotchas"* ]] || { echo "$ctx"; false; }
   [[ "$ctx" == *"## Unresolved"* ]]
 }
 
@@ -164,7 +164,7 @@ EOF
     done
   } > "$PROJECT_DIR/context-log.md"
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" == *"context-log.md (previous session)"* ]]
+  [[ "$ctx" == *"context-log.md (previous session)"* ]] || { echo "$ctx"; false; }
   # More than 1000 chars of log body must reach the injection. The pre-fix
   # 800-char window would fail this; the new 1200-char window passes.
   log_len=$(printf '%s' "$ctx" | awk '/context-log.md \(previous session\)/{flag=1;next} /Unresolved gotchas/{flag=0} flag' | wc -c)

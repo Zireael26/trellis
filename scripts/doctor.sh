@@ -1,78 +1,74 @@
 #!/usr/bin/env bash
-# trellis doctor — P1 read-only diagnosis + P2 --fix repair
+# trellis doctor — portable local-state health with explicit legacy diagnosis.
 #
-# Deterministic, on-demand inheritance health check (the `brew doctor` shape).
-#   - Tier 0: global preconditions against the CANONICAL clone ($TRELLIS_ROOT,
-#     resolved from trellis.config.json — NOT doctor's cwd; doctor runs from
-#     worktrees). Probes via `git -C "$TRELLIS_ROOT" ...`.
-#   - Tier 1: per active project (registry.md MINUS blacklist.md): rules
-#     symlink, @-import, skills/commands symlinks, harness-conditional
-#     artifacts, hook freshness + settings wiring, version-pin lag, and the
-#     OMP surface (design 2026-08-09): the five live .omp links + target
-#     kinds/containment, the project CLAUDE.md parent import, canonical
-#     manifest layout/frontmatter, and adapter existence.
+# The portable path reads only TRELLIS_HOME local state. A legacy inheritance
+# diagnosis is available only when a valid legacy TRELLIS_CONFIG is supplied
+# explicitly; it never discovers a config or reads the operator's HOME.
 #
-# WITHOUT --fix: READ-ONLY. doctor only PRINTS the fix command a human/agent
-# would run; it never calls onboard-project.sh / sync-hooks.sh /
-# sync-codex-hooks.sh and never mutates anything. This path is byte-identical
-# to P1.
-#
-# WITH --fix (P2): for each project, after diagnosis, the auto-fixable
-# treatments are applied by delegating to the idempotent never-clobber engines:
-#   - missing rules/skill/command symlink, missing harness artifact, missing
-#     settings.json  -> onboard-project.sh "<ABS path>" (run ONCE per project,
-#     with TRELLIS_SKIP_SECURITY_BASELINE=1 so a symlink repair does not also
-#     run the security baseline).
-#   - STALE/WRONG-TARGET trellis-managed symlink -> onboard's never-clobber
-#     would leave it as-is, so --fix `rm`s the known-bad link FIRST (each rm is
-#     printed before it runs), then onboard recreates it.
-#   - Claude/Codex hook drift -> SKIPPED unless --fix-hooks is ALSO given
-#     (it changes enforcement behavior). With --fix-hooks: sync-hooks.sh /
-#     sync-codex-hooks.sh --yes <registry-name>.
-#   - dead/missing @-import, settings.json .hooks drift, version-pin lag,
-#     Tier-0 issues -> reported as MANUAL/INFO, NEVER auto-applied.
-# After fixing a project, its checks are re-run and the resulting status shown.
-#
-# KNOWN onboard side effect (cannot be suppressed — there is no --skip-hooks,
-# only TRELLIS_SKIP_SECURITY_BASELINE): onboard-project.sh unconditionally seeds
-# MISSING hook copies + a MISSING settings.json (seed_claude_hooks /
-# seed_codex_hooks skip only files that already exist). So a plain `--fix` that
-# runs onboard to repair a symlink WILL also install any MISSING hooks/settings
-# as a side effect — even without --fix-hooks. The --fix-hooks gate is only
-# fully honored for STALE hooks: onboard never-clobbers, so it never UPDATES a
-# drifted hook; that always needs --fix-hooks.
-#
-# --dry-run (only valid with --fix): prints exactly what --fix WOULD do per
-# project (each delegated command, each rm, each manual item) and touches
-# NOTHING. Always exits 0.
-#
-# Exit code (no flags / --fix): 0 if healthy (no ERROR; WARN/INFO are allowed),
-# non-zero if any ERROR is found. Under --fix the exit reflects POST-FIX state.
-# Under --dry-run the exit is always 0.
-#
-# Usage:
-#   doctor.sh                          # check all active projects (read-only)
-#   doctor.sh --project NAME           # limit to one registry project
-#   doctor.sh --fix [--project NAME]   # diagnose + auto-repair (symlinks)
-#   doctor.sh --fix --fix-hooks ...    # ALSO re-sync hook copies (gated)
-#   doctor.sh --fix --dry-run ...      # print the repair plan; change nothing
-#   doctor.sh --help
-#
-# bash 3.2 compatible.
+# Cutover boundary (v1.0.0-rc.25): doctor still RECOGNIZES a pre-cutover
+# direct-link checkout — the portable classifier reports `compatibility-legacy`
+# / `mixed/conflict`, and the explicit legacy mode below enumerates its rows —
+# but it never CREATES a direct link. The writers it used to delegate to
+# (onboard-project.sh --legacy, seed-inheritance-symlinks.sh --legacy-mirror)
+# refuse at cutover, so `--fix` reports the owning migration instead.
+set -u
 
-set -euo pipefail
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DOCTOR_EX_USAGE=2
+DOCTOR_EX_CONFLICT=3
+DOCTOR_EX_STATE=4
+DOCTOR_EX_UNAVAILABLE=5
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Preserve the project-side environment/Make override before config-load replaces
-# SHARED_INFRA_ROOT with the configured canonical path.
-DOCTOR_SHARED_INFRA_OVERRIDE="${SHARED_INFRA_ROOT:-}"
-# shellcheck source=lib/config-load.sh
-. "$SCRIPT_DIR/lib/config-load.sh"
-# shellcheck source=lib/blacklist-parser.sh
-. "$SCRIPT_DIR/lib/blacklist-parser.sh"
-# shellcheck source=lib/health-checks.sh
-. "$SCRIPT_DIR/lib/health-checks.sh"
+# The single validating reader for the historic machine-local config shape.
+# Since the cutover removed onboard-project.sh --legacy, doctor is this
+# library's ONLY consumer: it exists so a leftover legacy layout can still be
+# diagnosed against a validated config rather than guessed at.
+# shellcheck source=lib/legacy-config.sh
+. "$SCRIPT_DIR/lib/legacy-config.sh"
 
+# An explicitly supplied config with any historic machine-local key is the
+# compatibility contract. Do not fall through to TRELLIS_HOME for a malformed
+# explicit config: that would turn a deterministic legacy invocation into an
+# operator-home lookup.
+doctor_select_mode() {
+  local cfg="${TRELLIS_CONFIG:-}"
+  if [ -z "$cfg" ]; then
+    printf '%s\n' portable
+    return 0
+  fi
+  legacy_config_preconditions doctor "$cfg" || return "$?"
+  if legacy_config_has_machine_local_key "$cfg"; then
+    printf '%s\n' legacy
+  else
+    printf '%s\n' portable
+  fi
+}
+
+# --home and --fleet are portable-only selectors. --project is shared with
+# compatibility diagnosis and is interpreted after the mode is selected.
+doctor_args_force_portable_mode() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --home|--fleet) return 0 ;;
+    esac
+    shift
+  done
+  return 1
+}
+
+legacy_doctor_load_config() {
+  # Schema validation, semantic checks and the exported view all live in
+  # lib/legacy-config.sh. legacy_config_load also defines pg_has_harness over
+  # the HARNESSES it just read, so there is one reader and one accessor.
+  legacy_config_read doctor "${TRELLIS_CONFIG:-}"
+}
+
+legacy_doctor_main() {
+  set -euo pipefail
+  DOCTOR_SHARED_INFRA_OVERRIDE="${SHARED_INFRA_ROOT:-}"
+  legacy_doctor_load_config || exit "$?"
+  . "$SCRIPT_DIR/lib/blacklist-parser.sh"
+  . "$SCRIPT_DIR/lib/health-checks.sh"
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
@@ -82,50 +78,52 @@ DO_FIX_HOOKS=0
 DO_DRY_RUN=0
 print_help() {
   cat <<'EOF'
-trellis doctor — inheritance health check + repair
+trellis doctor — legacy-layout diagnosis (compatibility mode)
 
 Usage:
   doctor.sh                          Check Tier-0 preconditions + all projects.
   doctor.sh --project NAME           Limit Tier-1 checks to one registry project.
-  doctor.sh --fix [--project NAME]   Diagnose, then auto-repair (see below).
-  doctor.sh --fix --fix-hooks ...    ALSO re-sync drifted hook copies (gated).
-  doctor.sh --fix --dry-run ...      Print the repair plan; change NOTHING.
+  doctor.sh --fix [--project NAME]   Diagnose; report the migration each row needs.
+  doctor.sh --fix --fix-hooks ...    Accepted for compatibility; INERT here.
+  doctor.sh --fix --dry-run ...      Print the plan; change NOTHING.
   doctor.sh --help                   Show this help.
 
-WITHOUT --fix this command is READ-ONLY: it prints the repair command to run
-and never mutates projects or the canonical clone.
+This is the explicit legacy compatibility mode, selected only by a TRELLIS_CONFIG
+carrying historic machine-local keys. It DIAGNOSES a pre-cutover direct-link
+layout. It never creates one.
 
-WITH --fix, per project (after diagnosis):
-  [auto]   missing rules/skill/command symlink, missing harness artifact, or
-           missing .claude/settings.json -> delegated to onboard-project.sh
-           (idempotent, never-clobber). A STALE/wrong-target trellis-managed
-           symlink is `rm`'d first (each rm is printed) because onboard's
-           never-clobber would otherwise leave it as-is, then re-seeded.
-           The five OMP surface links (.omp/*) follow the same rm+onboard path.
-  [hooks]  Claude/Codex hook drift -> SKIPPED unless --fix-hooks is also given
-           (it changes enforcement behavior). With --fix-hooks: sync-hooks.sh /
-           sync-codex-hooks.sh --yes <name>.
+Since v1.0.0-rc.25 this command is READ-ONLY in every mode. The direct-link
+writers it used to delegate to were removed at cutover: onboard-project.sh
+--legacy and seed-inheritance-symlinks.sh --legacy-mirror both refuse (exit 2).
+--fix therefore applies nothing; it exists so the same invocation keeps working
+and prints the migration each row needs.
+
+Per project (after diagnosis):
+  [manual] missing/stale rules, skill, command, harness, settings.json, or OMP
+           surface -> reported with the migration that owns the repair:
+             trellis migrate --prepare <project-path>
+             trellis attach --fleet NAME <project-path>
+           After attach, the portable flow owns every one of those surfaces.
+  [manual] Claude/Codex hook drift -> reported only. A legacy direct-link
+           project has no local registry row and no recorded immutable release,
+           and sync-hooks.sh / sync-codex-hooks.sh reconcile a hook surface ONLY
+           through the recorded release of a registered, attached row.
+  [manual] linked worktrees missing inheritance -> reported only. Attach the
+           clone; `trellis attach` and scripts/seed-inheritance-symlinks.sh then
+           reconcile each worktree from the recorded release.
   [manual] dead/missing @-import (never auto-edit a user's CLAUDE.md),
            settings.json .hooks drift (no engine fixes it), the OMP parent
            import (first @-import in CLAUDE.md — never auto-edited), and
            canonical OMP manifest/adapter gaps (canonical-side, never
            auto-applied) -> reported only.
   [info]   version-pin lag, Tier-0 canonical issues -> reported only.
-After repair, the project's checks re-run and the resulting status is shown.
-
-NOTE: onboard-project.sh seeds MISSING hooks + a MISSING settings.json
-unconditionally (there is no --skip-hooks). So a plain --fix that runs onboard
-WILL install missing hooks/settings as a side effect — but it NEVER updates a
-STALE hook; that always requires --fix-hooks.
 
 Flag rules: --dry-run requires --fix (plain doctor is already read-only).
---fix-hooks implies --fix. Tier-0 issues are always report-only; --fix never
-mutates the canonical clone, and skips [auto] repair while a Tier-0 ERROR
-stands (onboard would re-link to an off-main/dirty canonical's rules).
+--fix-hooks implies --fix. Tier-0 issues are always report-only.
 
 Output: per-project ✓ / ⚠ / ✗ table + a summary line + actionable fix hints.
 Exit code: 0 if healthy (no ✗ ERRORs); non-zero if any ERROR is found.
-Under --fix the exit reflects POST-FIX state; under --dry-run it is always 0.
+Under --dry-run it is always 0.
 EOF
 }
 
@@ -170,7 +168,11 @@ while [ "$i" -le "$#" ]; do
 done
 
 # Flag-relationship rules (documented in --help):
-#   --fix-hooks implies --fix ("ALSO re-sync hooks" rides on a --fix run).
+#   --fix-hooks still implies --fix, but only so the historic spelling keeps
+#     running the [auto] repairs it always rode on. There is no hook re-sync
+#     action any more (hook drift is [manual] — see apply_project_fix), so the
+#     flag itself is INERT; --fix prints a line saying so rather than ignoring
+#     it silently.
 #   --dry-run is only meaningful with --fix (plain doctor is already read-only).
 [ "$DO_FIX_HOOKS" -eq 1 ] && DO_FIX=1
 if [ "$DO_DRY_RUN" -eq 1 ] && [ "$DO_FIX" -eq 0 ]; then
@@ -300,7 +302,7 @@ if [ "$DO_FIX" -eq 0 ]; then
 elif [ "$DO_DRY_RUN" -eq 1 ]; then
   echo "trellis doctor — --fix --dry-run (repair PLAN; nothing applied)"
 else
-  echo "trellis doctor — --fix (diagnose + repair)"
+  echo "trellis doctor — --fix (diagnose; legacy repair removed in v1.0.0-rc.25)"
 fi
 echo "canonical clone: $CANON"
 echo "projects root:   $PROJECTS_ROOT"
@@ -323,11 +325,69 @@ run_tier0() {
   return 0
 }
 
+# How many lines of a delegated tool's own diagnostic reach the report, per
+# stream. Bounded because the delegated Make surface is free to print an
+# arbitrarily long log and a Tier-0 row is one line.
+SHARED_INFRA_DETAIL_LINES=3
+
+# Terminal-safe rendering of one line of delegated output. Same unsafe set as
+# `local_registry_safe_display` (C0, DEL, and C1 in its UTF-8 spelling); that
+# helper lives in the portable libraries, which legacy mode does not source, so
+# the check is inlined rather than reached for across the mode boundary.
+shared_infra_safe_line() {
+  local LC_ALL=C value="${1:-}"
+  case "$value" in
+    *[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*)
+      printf '<unsafe tool diagnostic>' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+# Reduce one captured stream to the delegated tool's OWN failure lines.
+#
+# `make` prints its recipe-failure bookkeeping LAST — `make: *** [target] Error
+# N`, plus a `make[1]:` line per sub-make — so the previous `tail -n 1` of the
+# combined streams reported make's wrapper every single time and the tool's
+# actual reason never reached the operator. Drop make's own lines, keep the last
+# $SHARED_INFRA_DETAIL_LINES of what remains, and escape each line individually
+# so one hostile byte cannot take the readable rest of the report with it.
+shared_infra_detail_lines() {
+  local text="${1:-}" kept line out=""
+  [ -n "$text" ] || return 0
+  kept="$(printf '%s\n' "$text" | awk -v limit="$SHARED_INFRA_DETAIL_LINES" '
+    /^make(\[[0-9]+\])?: / { next }
+    { sub(/[ \t\r]+$/, ""); if (length($0) > 0) lines[++n] = $0 }
+    END {
+      start = n - limit + 1
+      if (start < 1) start = 1
+      for (i = start; i <= n; i++) print lines[i]
+    }
+  ')"
+  [ -n "$kept" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    out="${out:+$out; }$(shared_infra_safe_line "$line")"
+  done <<EOF
+$kept
+EOF
+  printf '%s' "$out"
+}
+
+# Compose the reportable detail for a failed delegation. The tool's diagnostics
+# go to stderr by convention, so that stream is preferred; stdout is the
+# fallback for a tool that reports on it instead.
+shared_infra_failure_detail() {
+  local err_file="${1:-}" out_file="${2:-}" detail
+  detail="$(shared_infra_detail_lines "$(cat "$err_file" 2>/dev/null)")"
+  [ -n "$detail" ] || detail="$(shared_infra_detail_lines "$(cat "$out_file" 2>/dev/null)")"
+  printf '%s' "$detail"
+}
+
 # Shared checks are a run-once Tier-0 delegation. They call only the read-only
 # Make surface from the accepted contract: validate and doctor. Neither normal
 # diagnosis nor --fix registers, reconciles, or changes an allocation.
 run_shared_infra_checks() {
-  local output rc detail resolved_candidate resolved_path
+  local rc detail resolved_candidate resolved_path shared_out shared_err
   [ -n "${SHARED_INFRA_ROOT:-}" ] || return 0
 
   resolved_candidate="${DOCTOR_SHARED_INFRA_OVERRIDE:-${HOME:-$USER_HOME}/projects/shared-infra}"
@@ -354,21 +414,44 @@ run_shared_infra_checks() {
     return 0
   fi
 
-  if output="$(make --no-print-directory -C "$SHARED_INFRA_ROOT" validate 2>&1)"; then
+  # Captured SEPARATELY, not merged with 2>&1: the whole point is to report the
+  # tool's diagnostic, and merging is what let make's trailing bookkeeping line
+  # displace it.
+  # Loud, not silent: without the capture files the two delegated rows below
+  # would simply not be reported, and a Tier-0 row that quietly disappears reads
+  # as a row that passed.
+  if shared_out="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-shared-out.XXXXXX")"; then
+    :
+  else
+    report_line "  " "$HC_ERROR" "shared-infra delegation: could not create a diagnostic capture file"
+    return 0
+  fi
+  if shared_err="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-shared-err.XXXXXX")"; then
+    :
+  else
+    rm -f "$shared_out"
+    report_line "  " "$HC_ERROR" "shared-infra delegation: could not create a diagnostic capture file"
+    return 0
+  fi
+
+  if make --no-print-directory -C "$SHARED_INFRA_ROOT" validate \
+      >"$shared_out" 2>"$shared_err"; then
     report_line "  " "$HC_OK" "shared-infra manifest: schema and allocation validation passed"
   else
     rc=$?
-    detail="$(printf '%s\n' "$output" | tail -n 1)"
+    detail="$(shared_infra_failure_detail "$shared_err" "$shared_out")"
     report_line "  " "$HC_ERROR" "shared-infra manifest: validation failed (exit $rc)${detail:+ — $detail}"
   fi
 
-  if output="$(make --no-print-directory -C "$SHARED_INFRA_ROOT" doctor "REGISTRY_FILE=$REGISTRY" 2>&1)"; then
+  if make --no-print-directory -C "$SHARED_INFRA_ROOT" doctor "REGISTRY_FILE=$REGISTRY" \
+      >"$shared_out" 2>"$shared_err"; then
     report_line "  " "$HC_OK" "shared-infra doctor: registry parity, runtime, and fixed-port checks passed"
   else
     rc=$?
-    detail="$(printf '%s\n' "$output" | tail -n 1)"
+    detail="$(shared_infra_failure_detail "$shared_err" "$shared_out")"
     report_line "  " "$HC_ERROR" "shared-infra doctor: read-only checks failed (exit $rc)${detail:+ — $detail}"
   fi
+  rm -f "$shared_out" "$shared_err"
 }
 
 run_tier0 hc_canonical_on_main "$CANON"
@@ -388,8 +471,8 @@ run_tier0 hc_claudemd_budget "$CANON"
 # teeth — silently no-op unless the runtime has [features] hooks = true. Global,
 # no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
 run_tier0 hc_codex_hooks_enabled
-# Codex plugin surface: companion enum drift + teammate node/PATH hooks.json
-# patch (re-applies idempotently) — ADR 2026-07-10-sol-ultra-capability-reground.
+# Codex plugin hook health: node shim + hooks.json PATH patch, re-applied
+# idempotently for installed plugins.
 run_tier0 hc_codex_plugin_surface
 
 # Capture only canonical-clone precondition errors for the repair gate. Shared
@@ -409,7 +492,7 @@ if [ "$TIER0_ERROR" -eq 1 ]; then
   if [ "$DO_FIX" -eq 1 ]; then
     echo "  [info] Tier-0 is report-only — --fix never touches the canonical clone."
     echo "  [info] remediate: git -C \"$CANON\" checkout main  (then commit or stash any changes)"
-    echo "  [info] --fix will SKIP [auto] symlink repair until this Tier-0 ERROR clears (onboard would re-link projects to off-main/dirty rules)."
+    echo "  [info] --fix has applied nothing since v1.0.0-rc.25; every legacy row is reported [manual] with its migration."
   fi
 fi
 echo
@@ -471,31 +554,18 @@ emit() {
 # --fix plan accumulators (globals; read by the caller after run_project_checks)
 # ---------------------------------------------------------------------------
 # run_project_checks() resets these at entry and fills them as it classifies.
-#   PLAN_NEEDS_ONBOARD  — 1 if any onboard-fixable failure was seen.
-#   PLAN_RM_LIST        — indexed array of absolute paths of known-bad
-#                         trellis-managed symlinks to `rm` BEFORE onboard.
-#   PLAN_AUTO           — newline-joined human descriptions of [auto] actions.
-#   PLAN_HOOKS_CLAUDE   — 1 if Claude hook drift needs sync-hooks (gated).
-#   PLAN_HOOKS_CODEX    — 1 if Codex hook drift needs sync-codex-hooks (gated).
-#   PLAN_MANUAL         — newline-joined [manual] descriptions (never auto-applied).
+#   PLAN_MANUAL         — newline-joined [manual] descriptions (never applied).
 #   PLAN_INFO           — newline-joined [info] descriptions (report-only).
-PLAN_NEEDS_ONBOARD=0
-PLAN_RM_LIST=()
-PLAN_AUTO=""
-PLAN_HOOKS_CLAUDE=0
-PLAN_HOOKS_CODEX=0
+#   PLAN_SEED_WORKTREES — newline-joined worktree roots missing inheritance,
+#                         enumerated so the migration's scope is visible.
+#
+# There is deliberately NO [auto] accumulator (and no PLAN_HOOKS_* one). Since
+# v1.0.0-rc.25 every writer that could repair a legacy direct-link row is gone,
+# so all of them classify [manual]: doctor recognizes the layout and names the
+# migration that owns it.
 PLAN_MANUAL=""
 PLAN_INFO=""
 PLAN_SEED_WORKTREES=""
-
-# plan_add_rm <abs-path> — queue a known-bad symlink for rm (deduped).
-plan_add_rm() {
-  local p="$1" existing
-  for existing in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
-    [ "$existing" = "$p" ] && return 0
-  done
-  PLAN_RM_LIST+=("$p")
-}
 
 # A literal newline, used to join multi-line plan strings (bash 3.2-safe — no
 # $'\n' inside eval).
@@ -521,17 +591,22 @@ plan_add() {
 # always does both; the caller decides which channel to print and whether to
 # act. Plan globals are RESET at entry so an under-fix re-check starts clean.
 # Returns 0 always (per-check status is reflected in the printed rows + tallies).
+# plan_add_migrate <name> <proj> <what> — the ONLY disposition a broken legacy
+# surface has after cutover. There is no [auto] channel left: every writer that
+# could re-seed a direct link refuses, so doctor reports the migration that owns
+# the repair and mutates nothing.
+plan_add_migrate() {
+  local name="$1" proj="$2" what="$3"
+  add_hint "$name: $what — legacy direct-link re-seeding was removed in v1.0.0-rc.25; migrate then attach: trellis migrate --prepare \"$proj\""
+  plan_add PLAN_MANUAL "$what — no engine re-seeds a legacy direct-link project; run: trellis migrate --prepare \"$proj\" then trellis attach --fleet NAME \"$proj\""
+}
+
 run_project_checks() {
   local name="$1" proj="$2"
   local rc h
   local codex_missing codex_stale codex_detail csrc cfn cdst csha dsha
 
   # Reset plan for this project (caller reads these after the call).
-  PLAN_NEEDS_ONBOARD=0
-  PLAN_RM_LIST=()
-  PLAN_AUTO=""
-  PLAN_HOOKS_CLAUDE=0
-  PLAN_HOOKS_CODEX=0
   PLAN_MANUAL=""
   PLAN_INFO=""
   PLAN_SEED_WORKTREES=""
@@ -543,14 +618,9 @@ run_project_checks() {
       # Distinguish missing (onboard fixes) vs stale/wrong (onboard will NOT,
       # never-clobber leaves wrong links — must rm then re-onboard).
       if [ -L "$proj/.claude/rules/trellis.md" ]; then
-        add_hint "$name: stale/wrong rules symlink — onboard will NOT repair it (never-clobber). Run: rm \"$proj/.claude/rules/trellis.md\" && scripts/onboard-project.sh \"$proj\""
-        plan_add_rm "$proj/.claude/rules/trellis.md"
-        PLAN_NEEDS_ONBOARD=1
-        plan_add PLAN_AUTO "rm stale rules symlink .claude/rules/trellis.md, then onboard re-seeds it"
+        plan_add_migrate "$name" "$proj" "stale/wrong rules symlink .claude/rules/trellis.md"
       else
-        add_hint "$name: missing rules symlink — run: scripts/onboard-project.sh \"$proj\""
-        PLAN_NEEDS_ONBOARD=1
-        plan_add PLAN_AUTO "onboard re-seeds missing rules symlink .claude/rules/trellis.md"
+        plan_add_migrate "$name" "$proj" "missing rules symlink .claude/rules/trellis.md"
       fi
     fi
   fi
@@ -581,25 +651,12 @@ run_project_checks() {
   if pg_has_harness omp; then
     # --- OMP links: symlink type, exact target, resolvability (ERROR) ---
     if emit "  " hc_omp_symlinks "$proj" "$CANON"; then :; else
-      add_hint "$name: OMP surface link missing/wrong/dangling — re-seed: scripts/onboard-project.sh \"$proj\""
-      PLAN_NEEDS_ONBOARD=1
-      # rm only wrong-target trellis-managed OMP links so onboard can recreate
-      # them (never-clobber would skip a wrong-target link) — mirrors the
-      # skills/commands re-walk above.
-      for p in AGENTS.md skills commands agents hooks; do
-        if [ -L "$proj/.omp/$p" ] && [ "$(readlink "$proj/.omp/$p")" != "$(hc_omp_expected_target "$proj" "$CANON" "$p")" ]; then
-          plan_add_rm "$proj/.omp/$p"
-          plan_add PLAN_AUTO "rm wrong-target OMP link .omp/$p, then onboard re-seeds it"
-        fi
-      done
-      plan_add PLAN_AUTO "onboard re-seeds missing OMP surface links under .omp/"
+      plan_add_migrate "$name" "$proj" "OMP surface link missing/wrong/dangling under .omp/"
     fi
 
     # --- OMP target kinds + canonical realpath containment (ERROR) ---
     if emit "  " hc_omp_target_kinds "$proj" "$CANON"; then :; else
-      add_hint "$name: OMP link resolves to a wrong target kind or escapes trellis_root — re-seed: scripts/onboard-project.sh \"$proj\""
-      PLAN_NEEDS_ONBOARD=1
-      plan_add PLAN_AUTO "onboard re-seeds OMP links with the correct target kinds (file vs dir) under the canonical root"
+      plan_add_migrate "$name" "$proj" "OMP link resolves to a wrong target kind or escapes trellis_root"
     fi
 
     # --- OMP parent import (ERROR) — MANUAL-only (never auto-edit CLAUDE.md) ---
@@ -623,39 +680,18 @@ run_project_checks() {
 
   # --- skills symlinks (WARN) ---
   if emit "  " hc_skills_symlinks "$proj" "$CANON"; then :; else
-    add_hint "$name: incomplete skill set — run: scripts/onboard-project.sh \"$proj\""
-    PLAN_NEEDS_ONBOARD=1
-    # rm only the wrong-target trellis-managed skill links so onboard can
-    # recreate them (never-clobber would skip a wrong-target link). Re-walk the
-    # canonical set; rm ONLY `[ -L ]` whose readlink != expected canonical.
-    for h in $HC_CANONICAL_SKILLS; do
-      if [ -L "$proj/.claude/skills/$h" ] && [ "$(readlink "$proj/.claude/skills/$h")" != "$CANON/core-rules/skills/$h" ]; then
-        plan_add_rm "$proj/.claude/skills/$h"
-        plan_add PLAN_AUTO "rm wrong-target skill link .claude/skills/$h, then onboard re-seeds it"
-      fi
-    done
-    plan_add PLAN_AUTO "onboard re-seeds any missing canonical skill links under .claude/skills/"
+    plan_add_migrate "$name" "$proj" "incomplete skill set under .claude/skills/"
   fi
 
   # --- commands symlinks (WARN) ---
   if emit "  " hc_commands_symlinks "$proj" "$CANON"; then :; else
-    add_hint "$name: incomplete command set — run: scripts/onboard-project.sh \"$proj\""
-    PLAN_NEEDS_ONBOARD=1
-    for h in $HC_CANONICAL_COMMANDS; do
-      if [ -L "$proj/.claude/commands/$h.md" ] && [ "$(readlink "$proj/.claude/commands/$h.md")" != "$CANON/core-rules/commands/$h.md" ]; then
-        plan_add_rm "$proj/.claude/commands/$h.md"
-        plan_add PLAN_AUTO "rm wrong-target command link .claude/commands/$h.md, then onboard re-seeds it"
-      fi
-    done
-    plan_add PLAN_AUTO "onboard re-seeds any missing canonical command links under .claude/commands/"
+    plan_add_migrate "$name" "$proj" "incomplete command set under .claude/commands/"
   fi
 
   # --- harness-conditional artifacts (WARN), one row per enabled harness ---
   for h in "${HARNESSES[@]}"; do
     if emit "  " hc_harness_artifacts "$proj" "$h"; then :; else
-      add_hint "$name: missing $h harness artifacts — run: scripts/onboard-project.sh \"$proj\""
-      PLAN_NEEDS_ONBOARD=1
-      plan_add PLAN_AUTO "onboard re-seeds missing $h harness artifacts without rewriting the other enabled harness surfaces"
+      plan_add_migrate "$name" "$proj" "missing $h harness artifacts"
     fi
   done
 
@@ -669,25 +705,28 @@ run_project_checks() {
     fi
   fi
 
-  # --- hook freshness (WARN) — GATED behind --fix-hooks ---
+  # --- hook freshness (WARN) — [manual], never auto-repairable here ---
+  # sync-hooks.sh reconciles a hook surface ONLY through the recorded immutable
+  # release of a registered, attached row. A legacy direct-link project has
+  # neither, so the delegation can only ever refuse; advertising it as an
+  # [auto]/[hooks] repair promised a fix that cannot land. Report the remedy
+  # that actually works instead.
   if emit "  " hc_hook_freshness "$proj" "$CANON"; then :; else
-    add_hint "$name: Claude hook copies drift from canonical — run (gated, changes enforcement): scripts/sync-hooks.sh $name   (preview: scripts/sync-hooks.sh --dry-run $name)"
-    PLAN_HOOKS_CLAUDE=1
+    add_hint "$name: Claude hook copies drift from canonical — NOT auto-repairable for a legacy direct-link project (sync-hooks.sh reconciles only a registered, attached row through its recorded immutable release). Adopt a release and attach the project: scripts/attach-project.sh attach \"$proj\""
+    plan_add PLAN_MANUAL "Claude hook copies drift from canonical — no engine repairs a legacy direct-link project's hooks; attach it (scripts/attach-project.sh attach \"$proj\") so the portable flow owns hook reconciliation"
   fi
 
   # --- settings wiring (WARN) ---
   if emit "  " hc_settings_wiring "$proj" "$CANON"; then :; else
     rc=$?
     if [ ! -f "$proj/.claude/settings.json" ]; then
-      add_hint "$name: missing .claude/settings.json — run: scripts/onboard-project.sh \"$proj\""
-      PLAN_NEEDS_ONBOARD=1
-      plan_add PLAN_AUTO "onboard re-seeds missing .claude/settings.json from the canonical template"
+      plan_add_migrate "$name" "$proj" "missing .claude/settings.json"
     else
       # PRESENT but .hooks wiring drifts — MANUAL only. onboard skips an existing
       # settings.json (never-clobber); rollout-settings.sh only unions
       # .permissions.deny and leaves .hooks alone. Do NOT rm-then-reseed: the
       # file holds user-owned permissions.allow/ask + local deny entries.
-      add_hint "$name: settings.json hook wiring differs from canonical — re-seed via onboard (onboard skips an existing settings.json; remove it first if a re-seed is intended): scripts/onboard-project.sh \"$proj\""
+      add_hint "$name: settings.json hook wiring differs from canonical — no engine fixes it; the file holds user-owned permissions. Review .claude/settings.json .hooks against core-rules/templates/claude-settings.json"
       plan_add PLAN_MANUAL "settings.json .hooks wiring drifts — no engine fixes it (do NOT rm/reseed; it holds user permissions). Review .claude/settings.json .hooks against core-rules/templates/claude-settings.json"
     fi
   fi
@@ -729,7 +768,7 @@ run_project_checks() {
           [ "$csha" != "$dsha" ] && codex_stale="$codex_stale $cfn"
         done
       fi
-      for cfn in code-reviewer.sh ui-verify-core.sh spec-gate-core.sh; do
+      for cfn in code-reviewer.sh ui-verify-core.sh spec-gate-core.sh aeo-gate-warn.sh; do
         csrc="$CANON/core-rules/hooks/lib/$cfn"
         [ -f "$csrc" ] || continue
         cdst="$proj/.codex/hooks/lib/$cfn"
@@ -743,26 +782,29 @@ run_project_checks() {
         [ -n "$codex_missing" ] && codex_detail="missing:${codex_missing}"
         [ -n "$codex_stale" ] && codex_detail="$codex_detail stale:${codex_stale}"
         report_line "  " "$HC_WARN" "codex-hooks: drift vs canonical —${codex_detail# }"
-        add_hint "$name: Codex hook copies drift — run (gated): scripts/sync-codex-hooks.sh $name   (preview: scripts/sync-codex-hooks.sh --dry-run $name)"
-        PLAN_HOOKS_CODEX=1
+        add_hint "$name: Codex hook copies drift — NOT auto-repairable for a legacy direct-link project (sync-codex-hooks.sh reconciles only a registered, attached row through its recorded immutable release). Adopt a release and attach the project: scripts/attach-project.sh attach \"$proj\""
+        plan_add PLAN_MANUAL "Codex hook copies drift from canonical — no engine repairs a legacy direct-link project's hooks; attach it (scripts/attach-project.sh attach \"$proj\") so the portable flow owns hook reconciliation"
       else
         report_line "  " "$HC_OK" "codex-hooks: in sync with canonical"
       fi
     fi
   fi
 
-  # --- worktree inheritance (WARN) — [auto]-fixable via seed-inheritance-symlinks.sh ---
+  # --- worktree inheritance (WARN) — [manual] since the cutover ---
+  # seed-inheritance-symlinks.sh --legacy-mirror was removed at v1.0.0-rc.25.
+  # Its replacement reconciles a worktree from the clone's REGISTRATION, which a
+  # legacy direct-link clone does not have, so the repair is the clone's
+  # migration — not a per-worktree command. Offenders are still enumerated so
+  # the operator sees exactly which worktrees the migration has to cover.
   if emit "  " hc_worktree_inheritance "$proj" "$CANON"; then :; else
-    # Re-enumerate offenders here (same data hc_worktree_inheritance used) so
-    # the plan lists only the actually-broken worktrees rather than all of them.
     local wt_offenders wt_path
     wt_offenders="$(hc_worktree_offenders "$proj" "$CANON")"
     if [ -n "$wt_offenders" ]; then
-      add_hint "$name: linked worktree(s) missing inheritance symlinks — run: scripts/seed-inheritance-symlinks.sh --target <wt>"
+      add_hint "$name: linked worktree(s) missing inheritance symlinks — legacy mirroring was removed in v1.0.0-rc.25; migrate and attach the clone: trellis migrate --prepare \"$proj\""
       while IFS= read -r wt_path; do
         [ -n "$wt_path" ] || continue
         plan_add PLAN_SEED_WORKTREES "$wt_path"
-        plan_add PLAN_AUTO "seed inheritance symlinks into worktree: $wt_path"
+        plan_add PLAN_MANUAL "linked worktree missing inheritance: $wt_path — attach the clone (trellis migrate --prepare \"$proj\" then trellis attach), which reconciles each worktree from the recorded release"
       done <<EOF
 $wt_offenders
 EOF
@@ -812,41 +854,16 @@ EOF
   return 0
 }
 
-# print_project_plan <name> <proj> — print the tagged [auto]/[hooks]/[manual]/
-# [info] plan built by the last run_project_checks call. Used by --dry-run and
-# as the apply-time narration for --fix. Touches NOTHING.
+# print_project_plan <name> <proj> — print the tagged [manual]/[info] plan built
+# by the last run_project_checks call. Used by --dry-run and as the narration
+# for --fix. Touches NOTHING.
+#
+# There is deliberately NO [auto] channel: the cutover removed every writer that
+# could re-seed a legacy direct link, so a legacy row's only honest disposition
+# is the migration that owns it.
 print_project_plan() {
-  local name="$1" proj="$2" p line
+  local name="$1" proj="$2" line
   echo "  -- plan for $name --"
-  if [ "$TIER0_ERROR" -eq 1 ] && [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
-    echo "  [auto] SKIPPED — Tier-0 ERROR stands; --fix will not onboard against an off-main/dirty canonical."
-  elif [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
-    for p in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
-      echo "  [auto] rm \"$p\""
-    done
-    echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh \"$proj\""
-    if [ -n "$PLAN_AUTO" ]; then
-      while IFS= read -r line; do
-        [ -n "$line" ] && echo "         - $line"
-      done <<EOF
-$PLAN_AUTO
-EOF
-    fi
-  fi
-  if [ "$PLAN_HOOKS_CLAUDE" -eq 1 ]; then
-    if [ "$DO_FIX_HOOKS" -eq 1 ]; then
-      echo "  [hooks] scripts/sync-hooks.sh --yes $name"
-    else
-      echo "  [hooks] Claude hook drift — skipped (run with --fix-hooks). Would run: scripts/sync-hooks.sh --yes $name"
-    fi
-  fi
-  if [ "$PLAN_HOOKS_CODEX" -eq 1 ]; then
-    if [ "$DO_FIX_HOOKS" -eq 1 ]; then
-      echo "  [hooks] scripts/sync-codex-hooks.sh --yes $name"
-    else
-      echo "  [hooks] Codex hook drift — skipped (run with --fix-hooks). Would run: scripts/sync-codex-hooks.sh --yes $name"
-    fi
-  fi
   if [ -n "$PLAN_MANUAL" ]; then
     while IFS= read -r line; do
       [ -n "$line" ] && echo "  [manual] $line"
@@ -861,128 +878,30 @@ EOF
 $PLAN_INFO
 EOF
   fi
-  if [ -n "$PLAN_SEED_WORKTREES" ]; then
-    if [ "$TIER0_ERROR" -eq 1 ]; then
-      echo "  [auto] SKIPPED — Tier-0 ERROR stands; --fix will not seed worktrees against an off-main/dirty canonical."
-    else
-      while IFS= read -r line; do
-        [ -n "$line" ] && echo "  [auto] scripts/seed-inheritance-symlinks.sh --target \"$line\""
-      done <<EOF
-$PLAN_SEED_WORKTREES
-EOF
-    fi
-  fi
-  if [ "$PLAN_NEEDS_ONBOARD" -eq 0 ] && [ "$PLAN_HOOKS_CLAUDE" -eq 0 ] && \
-     [ "$PLAN_HOOKS_CODEX" -eq 0 ] && [ -z "$PLAN_MANUAL" ] && [ -z "$PLAN_INFO" ] && \
-     [ -z "$PLAN_SEED_WORKTREES" ]; then
+  if [ -z "$PLAN_MANUAL" ] && [ -z "$PLAN_INFO" ]; then
     echo "  (nothing to do — healthy)"
   fi
 }
 
-# run_cmd <description> <cmd...> — run a mutating command under `set -e` without
-# aborting the loop. Prints a FAILED line and returns non-zero on error so the
-# caller can note it instead of dying mid-project.
-run_cmd() {
-  local desc="$1"; shift
-  local rc
-  if "$@"; then rc=0; else rc=$?; fi
-  if [ "$rc" -ne 0 ]; then
-    echo "  [auto] FAILED ($desc, exit $rc): $*" >&2
-  fi
-  return "$rc"
-}
-
-# apply_project_fix <name> <proj> — execute the [auto] (rm-list + onboard once)
-# and, only if --fix-hooks, the [hooks] (sync-hooks/sync-codex) actions built by
-# the preceding run_project_checks call. Reads the BEFORE plan globals; must run
-# BEFORE the after-pass re-check rebuilds them. Prints each rm before doing it.
-# [manual]/[info]/Tier-0 are reported, never applied.
+# apply_project_fix <name> <proj> — since v1.0.0-rc.25 this APPLIES NOTHING.
+# The cutover removed onboard-project.sh --legacy and
+# seed-inheritance-symlinks.sh --legacy-mirror, which were the only mutating
+# actions doctor ever delegated for a legacy direct-link row. Both now refuse
+# (exit 2), so attempting them would only manufacture a failure. The function is
+# retained so `--fix` keeps working as an invocation and re-prints the migration
+# each row needs, in the same place the applied actions used to appear.
 apply_project_fix() {
   local name="$1" proj="$2" p
   echo "  -- applying fixes for $name --"
-
-  # Tier-0 gate: never onboard against an off-main/dirty canonical.
-  if [ "$TIER0_ERROR" -eq 1 ] && [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
-    echo "  [auto] SKIPPED — Tier-0 ERROR stands; not onboarding against an off-main/dirty canonical. Clear Tier-0 first."
-  elif [ "$PLAN_NEEDS_ONBOARD" -eq 1 ]; then
-    if [ ! -d "$proj" ]; then
-      echo "  [auto] SKIPPED — $proj is not on disk (onboard needs an existing git repo)." >&2
-    else
-      # rm known-bad trellis-managed symlinks FIRST (onboard never-clobbers).
-      for p in "${PLAN_RM_LIST[@]+"${PLAN_RM_LIST[@]}"}"; do
-        echo "  [auto] rm \"$p\""
-        run_cmd "rm $p" rm "$p" || true
-      done
-      # Run onboard ONCE. Absolute project path; skip the security baseline.
-      # NOTE: onboard-project.sh's LAST statement is a `{ ... } && echo ...`
-      # short-circuit that returns non-zero for a claude-only project (the
-      # trailing `&&` is false when codex is not enabled),
-      # so onboard can exit non-zero even on a fully successful seed. We
-      # therefore DO NOT treat a non-zero onboard exit as failure here — the
-      # AFTER-pass re-check is the authoritative verdict on whether the repair
-      # landed. We just record the exit code informationally.
-      echo "  [auto] TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 scripts/onboard-project.sh \"$proj\""
-      local onb_rc
-      if TRELLIS_SKIP_SECURITY_BASELINE=1 TRELLIS_SKIP_INFRA=1 \
-        "$SCRIPT_DIR/onboard-project.sh" "$proj" >/dev/null 2>&1; then
-        onb_rc=0
-      else
-        onb_rc=$?
-      fi
-      if [ "$onb_rc" -eq 0 ]; then
-        echo "  [auto] onboard ran (exit 0); see the re-check below for the result."
-      else
-        echo "  [auto] onboard ran (exit $onb_rc — may be the benign trailing-&& quirk on claude-only projects); the re-check below is authoritative."
-      fi
-    fi
+  echo "  [manual] legacy direct-link repair was removed in v1.0.0-rc.25; doctor diagnoses this layout and never re-seeds it."
+  if [ -n "$PLAN_MANUAL" ] || [ -n "$PLAN_SEED_WORKTREES" ]; then
+    echo "  [manual] migrate the checkout, then attach it:"
+    echo "  [manual]   trellis migrate --prepare \"$proj\""
+    echo "  [manual]   trellis attach --fleet NAME \"$proj\""
   fi
-
-  # [hooks] — gated behind --fix-hooks (changes enforcement behavior).
-  if [ "$PLAN_HOOKS_CLAUDE" -eq 1 ]; then
-    if [ "$DO_FIX_HOOKS" -eq 1 ]; then
-      echo "  [hooks] scripts/sync-hooks.sh --yes $name"
-      if "$SCRIPT_DIR/sync-hooks.sh" --yes "$name" >/dev/null 2>&1; then
-        echo "  [hooks] Claude hooks synced."
-      else
-        echo "  [hooks] sync-hooks FAILED — see: scripts/sync-hooks.sh --yes $name" >&2
-      fi
-    else
-      echo "  [hooks] Claude hook drift — skipped (run with --fix-hooks)."
-    fi
+  if [ "$DO_FIX_HOOKS" -eq 1 ]; then
+    echo "  [manual] --fix-hooks is inert: a legacy direct-link project has no registered, attached row for sync-hooks.sh/sync-codex-hooks.sh to reconcile through its recorded immutable release."
   fi
-  if [ "$PLAN_HOOKS_CODEX" -eq 1 ]; then
-    if [ "$DO_FIX_HOOKS" -eq 1 ]; then
-      echo "  [hooks] scripts/sync-codex-hooks.sh --yes $name"
-      if "$SCRIPT_DIR/sync-codex-hooks.sh" --yes "$name" >/dev/null 2>&1; then
-        echo "  [hooks] Codex hooks synced."
-      else
-        echo "  [hooks] sync-codex-hooks FAILED — see: scripts/sync-codex-hooks.sh --yes $name" >&2
-      fi
-    else
-      echo "  [hooks] Codex hook drift — skipped (run with --fix-hooks)."
-    fi
-  fi
-
-  # [seed-worktrees] — Tier-0 gated, [auto] repair via seed-inheritance-symlinks.sh.
-  if [ -n "$PLAN_SEED_WORKTREES" ]; then
-    if [ "$TIER0_ERROR" -eq 1 ]; then
-      echo "  [auto] SKIPPED — Tier-0 ERROR stands; not seeding worktrees against an off-main/dirty canonical. Clear Tier-0 first."
-    else
-      local wt_path
-      while IFS= read -r wt_path; do
-        [ -n "$wt_path" ] || continue
-        echo "  [auto] scripts/seed-inheritance-symlinks.sh --target \"$wt_path\""
-        if run_cmd "seed worktree $wt_path" \
-              bash "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$wt_path" --quiet; then
-          echo "  [auto] worktree seeded: $wt_path"
-        fi
-      done <<EOF
-$PLAN_SEED_WORKTREES
-EOF
-    fi
-  fi
-
-  # [manual]/[info] — reported, never applied.
   if [ -n "$PLAN_MANUAL" ]; then
     while IFS= read -r p; do
       [ -n "$p" ] && echo "  [manual] $p"
@@ -1008,9 +927,9 @@ if [ "${#TARGETS[@]}" -gt 0 ]; then
     # git repo). Report identically in every mode and move on.
     if [ ! -d "$proj" ]; then
       report_line "" "$HC_ERROR" "$name — project dir not on disk ($proj)"
-      add_hint "$name: project directory missing at $proj — clone/restore it, then: scripts/onboard-project.sh \"$proj\""
+      add_hint "$name: project directory missing at $proj — clone/restore it, then: trellis migrate --prepare \"$proj\" && trellis attach --fleet NAME \"$proj\""
       if [ "$DO_FIX" -eq 1 ]; then
-        echo "  [manual] project dir not on disk — not auto-fixable (onboard needs an existing git repo). Clone/restore $proj, then: scripts/onboard-project.sh \"$proj\""
+        echo "  [manual] project dir not on disk — nothing to diagnose or migrate. Clone/restore $proj, then: trellis migrate --prepare \"$proj\" && trellis attach --fleet NAME \"$proj\""
       fi
       continue
     fi
@@ -1105,7 +1024,7 @@ if [ "$DO_DRY_RUN" -eq 1 ]; then
   echo "== Summary (--dry-run: nothing applied) =="
   printf '%s %d error(s)  %s %d warning(s)  %s %d info — diagnosed, NOT fixed\n' \
     "$GLYPH_ERR" "$N_ERROR" "$GLYPH_WARN" "$N_WARN" "$GLYPH_INFO" "$N_INFO"
-  echo "(dry-run: re-run without --dry-run to apply the [auto]/[hooks] actions above)"
+  echo "(dry-run: every action above is [manual] — since v1.0.0-rc.25 --fix applies nothing to a legacy layout)"
   exit 0
 fi
 
@@ -1130,4 +1049,626 @@ else
   # degraded, so use the info glyph rather than the WARN glyph here.
   echo "$GLYPH_INFO informational notes only — inheritance healthy."
 fi
+exit 0
+
+}
+
+if doctor_args_force_portable_mode "$@"; then
+  DOCTOR_MODE=portable
+else
+  DOCTOR_MODE="$(doctor_select_mode)" || exit "$?"
+fi
+if [ "$DOCTOR_MODE" = legacy ]; then
+  legacy_doctor_main "$@"
+  exit "$?"
+fi
+
+. "$SCRIPT_DIR/lib/trellis-home.sh"
+. "$SCRIPT_DIR/lib/release-store.sh"
+. "$SCRIPT_DIR/lib/local-registry.sh"
+. "$SCRIPT_DIR/lib/surface-plan.sh"
+. "$SCRIPT_DIR/lib/attachment.sh"
+. "$SCRIPT_DIR/lib/health-checks.sh"
+
+ONLY_PROJECT=""; ONLY_FLEET=""; DO_FIX=0; DO_DRY_RUN=0
+usage() {
+  cat <<'EOF'
+Usage: trellis doctor [--home PATH] [--fleet NAME] [--project ID]
+       trellis doctor --fix [--home PATH] [--fleet NAME] [--project ID] [--dry-run]
+
+Enumerates local registry rows including unavailable paths. Validates immutable
+releases, exact local attachment ownership, local excludes, and manifest-driven
+Claude/Codex/OMP leaves. --fix uses attach/relink/recover only; it never deletes
+project-owned files or migrates legacy/mixed layouts.
+EOF
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --home) [ "$#" -ge 2 ] || { echo 'doctor: --home requires PATH' >&2; exit 2; }; TRELLIS_HOME="$2"; export TRELLIS_HOME; shift 2 ;;
+    --fleet) [ "$#" -ge 2 ] || { echo 'doctor: --fleet requires NAME' >&2; exit 2; }; ONLY_FLEET="$2"; shift 2 ;;
+    --project) [ "$#" -ge 2 ] || { echo 'doctor: --project requires ID' >&2; exit 2; }; ONLY_PROJECT="$2"; shift 2 ;;
+    --fix) DO_FIX=1; shift ;;
+    --dry-run) DO_DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "doctor: unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+[ "$DO_DRY_RUN" -eq 0 ] || [ "$DO_FIX" -eq 1 ] || { echo 'doctor: --dry-run requires --fix' >&2; exit 2; }
+[ -z "$ONLY_FLEET" ] || trellis_home_require_fleet_name "$ONLY_FLEET" || exit "$?"
+[ -z "$ONLY_PROJECT" ] || local_registry_require_project_id "$ONLY_PROJECT" || exit "$?"
+command -v jq >/dev/null 2>&1 || { echo 'doctor: jq is required' >&2; exit "$TRELLIS_EX_UNAVAILABLE"; }
+
+HOME_PATH="$(trellis_home_resolve "")" || exit "$?"
+REGISTRY_PATH="$(local_registry_path "$HOME_PATH")" || exit "$?"
+GLYPH_OK='✓'; GLYPH_WARN='⚠'; GLYPH_ERR='✗'; GLYPH_INFO='i'
+N_ERROR=0; N_WARN=0; N_INFO=0; ROWS_CHECKED=0; DOCTOR_EXIT=0
+
+# Portable diagnostics preserve their public outcome class even though the
+# shared health predicates use HC_ERROR as a boolean. Legacy compatibility
+# checks retain their historical boolean exit behavior in legacy_doctor_main.
+record_portable_exit_class() {
+  local code="${1:-$DOCTOR_EX_STATE}"
+  case "$code" in
+    1|"$DOCTOR_EX_USAGE"|"$DOCTOR_EX_CONFLICT"|"$DOCTOR_EX_STATE"|"$DOCTOR_EX_UNAVAILABLE") ;;
+    *) code="$DOCTOR_EX_STATE" ;;
+  esac
+  if [ "$code" -gt "$DOCTOR_EXIT" ]; then
+    DOCTOR_EXIT="$code"
+  fi
+}
+
+portable_check_failure_class() {
+  local fn="$1" output="$2"
+  case "$fn" in
+    hc_portable_source_root)
+      printf '%s\n' "$DOCTOR_EX_UNAVAILABLE"
+      ;;
+    hc_portable_release|hc_portable_active_cli_release)
+      case "$output" in
+        *' is unavailable'*|*'no usable active_cli_release'*)
+          printf '%s\n' "$DOCTOR_EX_UNAVAILABLE" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
+    hc_portable_owner)
+      case "${HC_PORTABLE_OWNER_STATE:-}" in
+        conflict|runtime-missing) printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
+    hc_portable_layout)
+      case "${HC_PORTABLE_LAYOUT:-}:${HC_PORTABLE_OWNER_STATE:-}" in
+        mixed/conflict:*|portable-attached:*|corrupt:conflict|corrupt:runtime-missing)
+          printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
+    hc_portable_excludes)
+      case "$output" in
+        *'owner block does not match'*|*'changed at '*|*'missing, duplicated, or modified'*)
+          printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
+    hc_portable_native_surfaces)
+      case "$output" in
+        *'selection does not exactly match'*|*'committed leaves differ'*|*'committed render bytes'* )
+          printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
+    *)
+      printf '%s\n' "$DOCTOR_EX_STATE"
+      ;;
+  esac
+}
+
+report() {
+  local indent="$1" status="$2" message="$3" exit_class="${4:-}" glyph
+  case "$status" in
+    "$HC_OK") glyph="$GLYPH_OK" ;;
+    "$HC_WARN") glyph="$GLYPH_WARN"; N_WARN=$((N_WARN + 1)) ;;
+    "$HC_ERROR")
+      glyph="$GLYPH_ERR"
+      N_ERROR=$((N_ERROR + 1))
+      [ -n "$exit_class" ] || exit_class="$DOCTOR_EX_STATE"
+      record_portable_exit_class "$exit_class"
+      ;;
+    "$HC_INFO") glyph="$GLYPH_INFO"; N_INFO=$((N_INFO + 1)) ;;
+    *)
+      glyph='?'
+      N_ERROR=$((N_ERROR + 1))
+      record_portable_exit_class "${exit_class:-$DOCTOR_EX_STATE}"
+      ;;
+  esac
+  printf '%s%s %s\n' "$indent" "$glyph" "$message"
+}
+# Keep the function execution in this shell: portable checks publish exact
+# ownership/layout state used to choose the bounded repair route.
+run_check() {
+  local indent="$1" fn="$2" output_file output status exit_class=""
+  shift 2
+  output_file="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-check.XXXXXX")" || { report "$indent" "$HC_ERROR" 'doctor could not create a diagnostic scratch file' "$DOCTOR_EX_STATE"; return "$HC_ERROR"; }
+  if "$fn" "$@" > "$output_file"; then status=0; else status=$?; fi
+  output="$(cat "$output_file")"; rm -f "$output_file"
+  if [ "$status" -eq "$HC_ERROR" ]; then
+    exit_class="$(portable_check_failure_class "$fn" "$output")"
+  fi
+  report "$indent" "$status" "$output" "$exit_class"
+  return "$status"
+}
+SAFE_REPAIR=""; SAFE_REPAIR_BLOCKED=""; SAFE_REPAIR_BLOCKED_CLASS=""; SAFE_REPAIR_HARNESSES=""
+SAFE_REPAIR_OWNER_SHA256=""; SAFE_REPAIR_OWNER_PARENT_DEV_INO=""
+journal_matches_registry_row() {
+  local candidate="$1" fleet="$2" project_id="$3" root="$4" checkout_id="$5"
+  local worktree_id="$6" attachment_id="$7" release="$8" status canonical
+  status="$(jq -r '.status // empty' "$candidate" 2>/dev/null)" || return 2
+  case "$status" in
+    prepared)
+      canonical="$(_attachment_journal_path "$HOME_PATH" "$attachment_id")"
+      [ "$candidate" = "$canonical" ] || return 1
+      _attachment_journal_json_valid "$candidate" >/dev/null 2>&1 || return 2
+      jq -e --arg fleet "$fleet" --arg project "$project_id" --arg root "$root" \
+        --arg checkout "$checkout_id" --arg worktree "$worktree_id" \
+        --arg attachment "$attachment_id" --arg release "$release" '
+          .fleet == $fleet and .project_id == $project
+          and .project_root == $root and .worktree_root == $root
+          and .checkout_id == $checkout and .worktree_id == $worktree
+          and .attachment_id == $attachment and .release == $release
+        ' "$candidate" >/dev/null 2>&1
+      ;;
+    detaching)
+      canonical="$(_attachment_detach_journal_path "$HOME_PATH" "$attachment_id")"
+      [ "$candidate" = "$canonical" ] || return 1
+      _attachment_detach_journal_valid "$candidate" >/dev/null 2>&1 || return 2
+      jq -e --arg fleet "$fleet" --arg project "$project_id" --arg root "$root" \
+        --arg checkout "$checkout_id" --arg worktree "$worktree_id" \
+        --arg attachment "$attachment_id" --arg release "$release" '
+          .checkout_id == $checkout and .worktree_id == $worktree
+          and .attachment_id == $attachment
+          and .original_owner.fleet == $fleet and .original_owner.project_id == $project
+          and .original_owner.project_root == $root and .original_owner.worktree_root == $root
+          and .original_owner.checkout_id == $checkout and .original_owner.worktree_id == $worktree
+          and .original_owner.attachment_id == $attachment and .original_owner.release == $release
+        ' "$candidate" >/dev/null 2>&1
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+safe_repair_capture_owner_binding() {
+  local owner="$1" parent digest parent_identity
+  SAFE_REPAIR_OWNER_SHA256=""
+  SAFE_REPAIR_OWNER_PARENT_DEV_INO=""
+  _attachment_canonical_file "$owner" || return 1
+  [ "$(_attachment_mode "$owner")" = 600 ] || return 1
+  parent="$(dirname "$owner")" || return 1
+  _attachment_canonical_dir "$parent" || return 1
+  [ "$(_attachment_mode "$parent")" = 700 ] || return 1
+  digest="$(_attachment_hash "$owner")" || return 1
+  parent_identity="$(_attachment_fs_identity "$parent")" || return 1
+  printf '%s' "$parent_identity" | LC_ALL=C grep -Eq '^[0-9][0-9]*:[0-9][0-9]*$' || return 1
+  SAFE_REPAIR_OWNER_SHA256="$digest"
+  SAFE_REPAIR_OWNER_PARENT_DEV_INO="$parent_identity"
+}
+plan_safe_repair() {
+  local root="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
+  local attachment_id="$6" release="$7" owner_state="$8" layout="$9" release_ok="${10}"
+  local excludes_ok="${11}" surfaces_ok="${12}" registry_status="${13}" excluded="${14}"
+  local identity_state="${15}" diagnostics_ok="${16}" harnesses="${17}" journal candidate journal_name status journal_root rc matches=0 normalized_harnesses matched_journal matched_journal_state manual_recover_command owner
+  SAFE_REPAIR=""; SAFE_REPAIR_BLOCKED=""; SAFE_REPAIR_BLOCKED_CLASS=""; SAFE_REPAIR_HARNESSES=""
+  SAFE_REPAIR_OWNER_SHA256=""; SAFE_REPAIR_OWNER_PARENT_DEV_INO=""
+  [ "$registry_status" = active ] || return 0
+  [ "$excluded" = false ] || return 0
+  [ "$identity_state" = verified ] || return 0
+  journal="$HOME_PATH/state/attachment-journals"
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    if ! _attachment_canonical_dir "$journal" || [ "$(_attachment_mode "$journal")" != 700 ]; then
+      SAFE_REPAIR_BLOCKED='attachment journal directory is a symlink, non-directory, or has unsafe permissions'
+      return 0
+    fi
+    for candidate in "$journal"/* "$journal"/.[!.]* "$journal"/..?*; do
+      [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+      journal_name="${candidate##*/}"
+      case "$journal_name" in
+        *.json) ;;
+        *)
+          SAFE_REPAIR_BLOCKED='attachment journal directory has an unexpected entry'
+          return 0
+          ;;
+      esac
+      if [ -L "$candidate" ] || [ ! -f "$candidate" ] || ! _attachment_no_symlink_components "$candidate" 0; then
+        SAFE_REPAIR_BLOCKED='attachment journal entry is a symlink or non-regular file'
+        return 0
+      fi
+      if [ "$(_attachment_mode "$candidate")" != 600 ]; then
+        SAFE_REPAIR_BLOCKED='attachment journal entry has unsafe permissions'
+        return 0
+      fi
+      status="$(jq -r '.status // empty' "$candidate" 2>/dev/null)" || {
+        SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+        return 0
+      }
+      case "$status" in
+        prepared)
+          _attachment_journal_json_valid "$candidate" >/dev/null 2>&1 || {
+            SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+            return 0
+          }
+          journal_root="$(jq -r '.worktree_root // empty' "$candidate" 2>/dev/null)" || {
+            SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+            return 0
+          }
+          ;;
+        detaching)
+          _attachment_detach_journal_valid "$candidate" >/dev/null 2>&1 || {
+            SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+            return 0
+          }
+          journal_root="$(jq -r '.original_owner.worktree_root // empty' "$candidate" 2>/dev/null)" || {
+            SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+            return 0
+          }
+          ;;
+        *)
+          SAFE_REPAIR_BLOCKED='attachment journal entry is corrupt or has an unsafe shape'
+          return 0
+          ;;
+      esac
+      [ "$journal_root" = "$root" ] || continue
+      if journal_matches_registry_row "$candidate" "$fleet" "$project_id" "$root" \
+          "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then
+        matches=$((matches + 1))
+        matched_journal="$candidate"
+        matched_journal_state="$status"
+        if [ "$matches" -gt 1 ]; then
+          SAFE_REPAIR_BLOCKED='multiple exact attachment journals match this registry row'
+          return 0
+        fi
+      else
+        rc=$?
+        if [ "$rc" -eq 1 ]; then
+          SAFE_REPAIR_BLOCKED='attachment journal does not exactly match this registry row'
+        else
+          SAFE_REPAIR_BLOCKED='attachment journal is corrupt or has an unsafe shape'
+        fi
+        return 0
+      fi
+    done
+  fi
+  if [ "$matches" -eq 1 ]; then
+    printf -v manual_recover_command 'trellis recover --home %q %q' "$HOME_PATH" "$root"
+    SAFE_REPAIR_BLOCKED="attachment journal at $matched_journal (state=$matched_journal_state) requires manual recovery; review it, then run $manual_recover_command. Automatic recovery is withheld because its plan provenance cannot be proven"
+    SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_STATE"
+    return 0
+  fi
+  case "$layout:$owner_state:$release_ok" in
+    inert-non-user:missing:true)
+      normalized_harnesses="$(local_registry_normalize_harnesses "$harnesses" 2>/dev/null || true)"
+      if [ -z "$normalized_harnesses" ] || [ "$normalized_harnesses" = '[]' ]; then
+        SAFE_REPAIR_BLOCKED='registry harness selection is empty or invalid; attach cannot choose native surfaces'
+        return 0
+      fi
+      if [ "$diagnostics_ok" = true ] && [ -f "$root/.trellis.json" ]; then
+        SAFE_REPAIR=attach
+        SAFE_REPAIR_HARNESSES="$normalized_harnesses"
+      fi
+      ;;
+    portable-attached:runtime-missing:true)
+      if [ "$excludes_ok" = true ] && [ "$surfaces_ok" = true ]; then
+        owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"
+        if safe_repair_capture_owner_binding "$owner"; then
+          SAFE_REPAIR=relink
+        else
+          SAFE_REPAIR_BLOCKED='attachment owner changed or cannot be safely bound for relink'
+          SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_CONFLICT"
+        fi
+      fi
+      ;;
+  esac
+}
+print_auto_command() {
+  local argument
+  printf '  [auto]'
+  for argument in "$@"; do printf ' %q' "$argument"; done
+  printf '\n'
+}
+active_cli_repair_tool() {
+  local active_release release_path repair_tool
+  hc_portable_machine_config "$HOME_PATH" >/dev/null || return "$TRELLIS_EX_STATE"
+  active_release="$(jq -r '.active_cli_release // empty' "$HOME_PATH/config.json")" || return "$TRELLIS_EX_STATE"
+  release_path="$(TRELLIS_HOME="$HOME_PATH" release_store_locate "$active_release" 2>/dev/null)" || return "$?"
+  repair_tool="$release_path/payload/scripts/attach-project.sh"
+  if ! _attachment_canonical_file "$repair_tool" || [ ! -x "$repair_tool" ]; then
+    return "$TRELLIS_EX_STATE"
+  fi
+  printf '%s\n' "$repair_tool"
+}
+apply_safe_repair() {
+  local mode="$1" root="$2" fleet="$3" project_id="$4" checkout_id="$5" worktree_id="$6"
+  local attachment_id="$7" release="$8" harnesses="$9" owner_sha256="${10}" owner_parent_dev_ino="${11}" harness repair_tool=""
+  local -a args=() binding=()
+  binding=(
+    --expected-fleet "$fleet"
+    --expected-project-id "$project_id"
+    --expected-root "$root"
+    --expected-checkout-id "$checkout_id"
+    --expected-worktree-id "$worktree_id"
+    --expected-attachment-id "$attachment_id"
+    --expected-release "$release"
+    --expected-harnesses-json "$harnesses"
+  )
+  case "$mode" in
+    attach)
+      while IFS= read -r harness; do [ -n "$harness" ] && args+=(--harness "$harness"); done < <(printf '%s\n' "$harnesses" | jq -r '.[]')
+      if [ "$DO_DRY_RUN" -eq 1 ]; then
+        print_auto_command trellis attach --home "$HOME_PATH" --fleet "$fleet" --release "$release" "${binding[@]}" "${args[@]}" "$root"
+        return 0
+      fi
+      repair_tool="$(active_cli_repair_tool)" || return "$?"
+      "$repair_tool" attach --home "$HOME_PATH" --fleet "$fleet" --release "$release" "${binding[@]}" "${args[@]}" "$root"
+      ;;
+    relink)
+      [ -n "$owner_sha256" ] && [ -n "$owner_parent_dev_ino" ] || return "$TRELLIS_EX_STATE"
+      binding+=(--expected-owner-sha256 "$owner_sha256" --expected-owner-parent-dev-ino "$owner_parent_dev_ino")
+      if [ "$DO_DRY_RUN" -eq 1 ]; then
+        print_auto_command trellis relink --home "$HOME_PATH" --fleet "$fleet" "${binding[@]}" "$root"
+        return 0
+      fi
+      repair_tool="$(active_cli_repair_tool)" || return "$?"
+      "$repair_tool" relink --home "$HOME_PATH" --fleet "$fleet" "${binding[@]}" "$root"
+      ;;
+    *) return "$TRELLIS_EX_USAGE" ;;
+  esac
+}
+
+# A successful repair command is not evidence that the original error is gone.
+# Re-read the authoritative registry and prove the same worktree reaches the
+# strict attachment/layout predicate before clearing this row's pre-repair
+# diagnostics from the aggregate.
+verify_safe_repair_result() (
+  local home="$1" root="$2" fleet="$3" project_id="$4" snapshot rows row
+  local checkout_id worktree_id attachment_id release harnesses owner
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-post-repair.XXXXXX")" || return 1
+  trap 'rm -f "$snapshot"' EXIT
+  local_registry_list_diagnostic_json "$home" "$fleet" > "$snapshot" || return 1
+  rows="$(jq -c --arg root "$root" --arg fleet "$fleet" --arg project "$project_id" '
+    [.entries[]
+      | select(.kind == "worktree" and .root == $root and .fleet == $fleet and .project_id == $project)]
+  ' "$snapshot")" || return 1
+  [ "$(printf '%s\n' "$rows" | jq 'length')" -eq 1 ] || return 1
+  row="$(printf '%s\n' "$rows" | jq -c '.[0]')" || return 1
+  [ "$(printf '%s\n' "$row" | jq -r '.status')" = active ] &&
+    [ "$(printf '%s\n' "$row" | jq -r '.excluded')" = false ] &&
+    [ "$(printf '%s\n' "$row" | jq -r '.availability')" = available ] &&
+    [ "$(printf '%s\n' "$row" | jq -r '.identity.state')" = verified ] || return 1
+  checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // empty')" || return 1
+  worktree_id="$(printf '%s\n' "$row" | jq -r '.worktree_id // empty')" || return 1
+  attachment_id="$(printf '%s\n' "$row" | jq -r '.attachment_id // empty')" || return 1
+  release="$(printf '%s\n' "$row" | jq -r '.release // empty')" || return 1
+  harnesses="$(printf '%s\n' "$row" | jq -c '.harnesses // []')" || return 1
+  [ -n "$checkout_id" ] && [ -n "$worktree_id" ] &&
+    [ -n "$attachment_id" ] && [ -n "$release" ] || return 1
+  owner="$home/state/attachments/$checkout_id/$worktree_id.json"
+  hc_portable_attachment "$home" "$owner" "$root" "$fleet" "$project_id" \
+    "$checkout_id" "$worktree_id" "$attachment_id" "$release" "$harnesses" >/dev/null || return 1
+  [ "$HC_PORTABLE_ATTACHMENT_STATE" = attached ] || return 1
+  hc_portable_layout "$root" attached "$project_id" >/dev/null &&
+    [ "$HC_PORTABLE_LAYOUT" = portable-attached ]
+)
+
+printf 'trellis doctor — %s\n' "$(if [ "$DO_FIX" -eq 1 ]; then echo 'safe attachment repair'; else echo 'read-only local health'; fi)"
+printf 'Trellis home: %s\nLocal registry: %s\n\n' "$HOME_PATH" "$REGISTRY_PATH"
+echo '== Local machine state =='
+if ! run_check '  ' hc_portable_machine_config "$HOME_PATH"; then
+  echo '== Summary =='; echo "$GLYPH_ERR local machine configuration is invalid; no registry paths were guessed."; exit "$DOCTOR_EXIT"
+fi
+if [ -n "$ONLY_FLEET" ] &&
+   ! jq -e --arg fleet "$ONLY_FLEET" '.fleets[$fleet] != null' "$HOME_PATH/config.json" >/dev/null 2>&1; then
+  echo "doctor: selected fleet is not configured locally: $ONLY_FLEET" >&2
+  exit "$TRELLIS_EX_USAGE"
+fi
+run_check '  ' hc_portable_source_root "$HOME_PATH" || true
+run_check '  ' hc_portable_release_store "$HOME_PATH" || true
+run_check '  ' hc_portable_active_cli_release "$HOME_PATH" || true
+SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-registry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+trap 'rm -f "$SNAPSHOT"' EXIT HUP INT TERM
+if local_registry_list_diagnostic_json "$HOME_PATH" "$ONLY_FLEET" > "$SNAPSHOT"; then :; else
+  status=$?; report '  ' "$HC_ERROR" "local registry: invalid, unsafe, or unavailable at $REGISTRY_PATH"; echo '== Summary =='; exit "$status"
+fi
+report '  ' "$HC_OK" 'local registry: validated local fleet inventory'
+echo; echo '== Registered checkouts and worktrees =='
+[ "$(jq '.entries | length' "$SNAPSHOT")" -ne 0 ] || echo '  (no locally registered checkout records)'
+# A registry state error is a property of the REGISTRY, not of the selection.
+# `--project` decides which rows this run INSPECTS and offers to repair; it must
+# not decide which rows count toward the exit class. The row loop below skips
+# non-selected rows before it ever reads `.identity.state`, so without this
+# pre-pass a `--project P` run over a healthy P reported clean over a registry
+# it had just listed as drifted. Reported here from the FULL snapshot, once,
+# and never repaired — a row outside the selection is not this run's target.
+#
+# `identity_error` is the ONE name the unified row classifier gives class 4, in
+# both `local_registry_list_json`'s `availability` and this listing's
+# `.identity.state`. It used to be `drift` here, and because the diagnostic
+# classifier also short-circuited on reachability before comparing stored
+# hashes, a row the strict path condemned class 4 could reach this select as
+# `unavailable` and be missed entirely.
+#
+# Both messages below interpolate registry-derived text and the selector into an
+# operator's terminal. `--project` is already refused at parse time unless it
+# matches the registry project-ID grammar, exactly as disk-janitor refuses it;
+# the drift lines carry roots and classifier details straight out of a file this
+# reader deliberately does not require to be strict-clean. Both go through the
+# same terminal-safety helper every other registry consumer prints roots with.
+if [ -n "$ONLY_PROJECT" ]; then
+  SAFE_ONLY_PROJECT="$(local_registry_safe_display "$ONLY_PROJECT")"
+  # Emitted as FIELDS, not as one composed sentence. `local_registry_safe_display`
+  # collapses its WHOLE argument, so escaping the composed line reported
+  # "<unsafe registry text>" and nothing else — the row identity, the only part
+  # that says which row drifted, was destroyed by whichever field was unsafe.
+  # Fleet, project ID, and kind are schema-constrained; root and detail are the
+  # free-form fields and are the only ones escaped. `@tsv` keeps one row on one
+  # line by rendering an embedded tab or newline as its two-character escape.
+  if UNSELECTED_DRIFT="$(jq -r --arg project "$ONLY_PROJECT" '
+    .entries[]
+    | select(.project_id != $project)
+    | select(.identity.state == "identity_error")
+    | ["\(.fleet)/\(.project_id) (\(.kind))", (.root // "(no recorded root)"),
+       (.identity.detail // "registered row cannot be verified")] | @tsv
+  ' "$SNAPSHOT" 2>/dev/null)"; then
+    while IFS=$'\t' read -r drift_label drift_root drift_detail; do
+      [ -n "$drift_label" ] || continue
+      report '  ' "$HC_ERROR" "identity drift outside --project $SAFE_ONLY_PROJECT: $drift_label at $(local_registry_safe_display "${drift_root:-(no recorded root)}"): $(local_registry_safe_display "${drift_detail:-registered row cannot be verified}") — no automatic mutation was attempted" "$DOCTOR_EX_CONFLICT"
+    done <<EOF
+$UNSELECTED_DRIFT
+EOF
+  else
+    report '  ' "$HC_ERROR" "local registry: could not inspect rows outside --project $SAFE_ONLY_PROJECT for identity drift" "$DOCTOR_EX_STATE"
+  fi
+fi
+while IFS= read -r row; do
+  fleet="$(printf '%s\n' "$row" | jq -r '.fleet')"
+  project_id="$(printf '%s\n' "$row" | jq -r '.project_id')"
+  kind="$(printf '%s\n' "$row" | jq -r '.kind')"
+  availability="$(printf '%s\n' "$row" | jq -r '.availability')"
+  registry_status="$(printf '%s\n' "$row" | jq -r '.status // empty')"
+  excluded="$(printf '%s\n' "$row" | jq -r '.excluded // false')"
+  identity_state="$(printf '%s\n' "$row" | jq -r '.identity.state // "unknown"')"
+  identity_detail="$(printf '%s\n' "$row" | jq -r '.identity.detail // empty')"
+  root="$(printf '%s\n' "$row" | jq -r '.root // empty')"
+  release="$(printf '%s\n' "$row" | jq -r '.release // empty')"
+  harnesses="$(printf '%s\n' "$row" | jq -c '.harnesses // []')"
+  checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // empty')"
+  worktree_id="$(printf '%s\n' "$row" | jq -r '.worktree_id // empty')"
+  attachment_id="$(printf '%s\n' "$row" | jq -r '.attachment_id // empty')"
+  # REPORTED spellings of the two free-form, registry-derived fields. This row
+  # comes from the diagnostic listing, which deliberately does not require the
+  # file to be strict-clean, so a root or classifier detail printed here must go
+  # through the same terminal-safety helper the selection-scoped reporter above
+  # uses. $root and $identity_detail keep the real bytes for the filesystem
+  # probes, the health checks, and the repair plan, which all need them.
+  safe_root="$(local_registry_safe_display "${root:-<no root>}")"
+  safe_identity_detail="$(local_registry_safe_display "${identity_detail:-registered row cannot be verified}")"
+  [ -z "$ONLY_PROJECT" ] || [ "$project_id" = "$ONLY_PROJECT" ] || continue
+  ROW_ERRORS_AT_START="$N_ERROR"
+  ROWS_CHECKED=$((ROWS_CHECKED + 1)); printf '\n%s/%s (%s)\n' "$fleet" "$project_id" "$kind"
+  payload=""; release_ok=false
+  if [ -n "$release" ]; then
+    if run_check '  ' hc_portable_release "$HOME_PATH" "$release"; then
+      if payload="$(TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" 2>/dev/null)"; then
+        release_ok=true
+      else
+        report '  ' "$HC_ERROR" 'immutable release: verified payload disappeared before row inspection'
+      fi
+    fi
+  fi
+  if [ "$kind" != worktree ]; then
+    # `not-applicable` is the IDENTITY-state word for a rootless project row, in
+    # this listing and in the classifier both listings share. It was never an
+    # availability word in `local_registry_list_json`, so keying on
+    # `.availability` here made doctor the only consumer that needed the two
+    # listings to name the same row differently.
+    if [ "$kind" = project ] && [ "$registry_status" = detached ] &&
+       [ "$identity_state" = not-applicable ]; then
+      report '  ' "$HC_WARN" 'detached inventory: retained project has no local worktree root to inspect'
+    elif [ "$availability" = unavailable ] || [ "$registry_status" = unavailable ] ||
+         [ "$kind" = unavailable ]; then
+      report '  ' "$HC_ERROR" "unavailable: retained local registry row at $safe_root — mount/restore it, then run trellis doctor again" "$DOCTOR_EX_UNAVAILABLE"
+    elif [ "$kind" = checkout ]; then
+      # A registered checkout that currently holds no worktree row. It carries a
+      # reachable root, so its identity is still reportable; there is simply no
+      # attachment surface to inspect or repair.
+      if [ "$identity_state" != verified ]; then
+        report '  ' "$HC_ERROR" "identity drift: $safe_identity_detail at $safe_root — no automatic mutation was attempted" "$DOCTOR_EX_CONFLICT"
+      else
+        report '  ' "$HC_WARN" "checkout inventory: registered checkout at $safe_root has no registered worktree to inspect"
+      fi
+    else
+      report '  ' "$HC_WARN" 'detached inventory: no registered worktree root to inspect'
+    fi
+    continue
+  fi
+  if [ "$availability" = unavailable ] || [ "$registry_status" = unavailable ] ||
+     [ -z "$root" ] || [ ! -d "$root" ]; then
+    report '  ' "$HC_ERROR" "unavailable: retained local registry row at $safe_root — mount/restore it, then run trellis doctor again" "$DOCTOR_EX_UNAVAILABLE"
+    continue
+  fi
+  if [ "$identity_state" != verified ]; then
+    report '  ' "$HC_ERROR" "identity drift: $safe_identity_detail at $safe_root — no automatic mutation was attempted" "$DOCTOR_EX_CONFLICT"
+    continue
+  fi
+  if [ "$registry_status" != active ]; then
+    report '  ' "$HC_WARN" "registry status: $registry_status — automatic attachment repair is withheld"
+  fi
+  if [ "$excluded" != false ]; then
+    report '  ' "$HC_WARN" 'registry exclusion: automatic attachment repair is withheld'
+  fi
+  owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"; owner_state=missing
+  if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
+  if [ -z "$release" ] && [ "$owner_state" != missing ]; then
+    report '  ' "$HC_ERROR" 'immutable release: registry worktree has no recorded release' "$DOCTOR_EX_STATE"
+  fi
+  excludes_ok=false; surfaces_ok=false
+  if [ "$owner_state" = attached ] || [ "$owner_state" = runtime-missing ]; then
+    if [ -n "$payload" ] &&
+       run_check '  ' hc_portable_excludes "$owner" "$payload/payload" "$harnesses"; then excludes_ok=true; fi
+    if [ -n "$payload" ] && run_check '  ' hc_portable_native_surfaces "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then surfaces_ok=true; fi
+  fi
+  run_check '  ' hc_portable_layout "$root" "$owner_state" "$project_id" || true
+  layout="$HC_PORTABLE_LAYOUT"
+  row_diagnostics_ok=false
+  [ "$N_ERROR" -eq "$ROW_ERRORS_AT_START" ] && row_diagnostics_ok=true
+  plan_safe_repair "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
+    "$attachment_id" "$release" "$owner_state" "$layout" "$release_ok" \
+    "$excludes_ok" "$surfaces_ok" "$registry_status" "$excluded" "$identity_state" "$row_diagnostics_ok" \
+    "$harnesses"
+  if [ -n "$SAFE_REPAIR_BLOCKED" ]; then
+    if [ -z "$SAFE_REPAIR_BLOCKED_CLASS" ]; then
+      case "$SAFE_REPAIR_BLOCKED" in
+        'multiple exact attachment journals match this registry row'|'attachment journal does not exactly match this registry row')
+          SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_CONFLICT"
+          ;;
+        *) SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_STATE" ;;
+      esac
+    fi
+    report '  ' "$HC_ERROR" "repair boundary: $SAFE_REPAIR_BLOCKED; no automatic mutation was attempted" "$SAFE_REPAIR_BLOCKED_CLASS"
+  elif [ -n "$SAFE_REPAIR" ]; then
+    if [ "$DO_FIX" -eq 1 ]; then
+      if apply_safe_repair "$SAFE_REPAIR" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
+        "$attachment_id" "$release" "${SAFE_REPAIR_HARNESSES:-$harnesses}" \
+        "$SAFE_REPAIR_OWNER_SHA256" "$SAFE_REPAIR_OWNER_PARENT_DEV_INO"; then
+        if [ "$DO_DRY_RUN" -eq 1 ]; then
+          report '  ' "$HC_ERROR" "safe repair through trellis $SAFE_REPAIR is planned but was not applied; state remains unresolved"
+        elif verify_safe_repair_result "$HOME_PATH" "$root" "$fleet" "$project_id"; then
+          N_ERROR="$ROW_ERRORS_AT_START"
+          report '  ' "$HC_INFO" "safe repair delegated through trellis $SAFE_REPAIR and passed strict post-repair verification"
+        else
+          report '  ' "$HC_ERROR" "safe repair through trellis $SAFE_REPAIR completed but strict post-repair verification failed; state remains unresolved"
+        fi
+      else
+        report '  ' "$HC_ERROR" "safe repair through trellis $SAFE_REPAIR failed; no direct filesystem repair was attempted"
+      fi
+    else
+      # $safe_root, like every other row line: this is the LAST registry-derived
+      # root printed in the loop and it was the one still emitting raw bytes.
+      report '  ' "$HC_INFO" "safe repair available: trellis $SAFE_REPAIR $safe_root (doctor --fix delegates; it never deletes project-owned files)"
+    fi
+  elif { [ "$layout" = inert-non-user ] || [ "$layout" = portable-attached ]; } && [ "$release_ok" != true ]; then
+    report '  ' "$HC_INFO" "repair boundary: attach/relink is withheld until recorded immutable release ${release:-<missing>} validates; no project-owned file was changed"
+  elif [ "$registry_status" = active ] && [ "$excluded" = false ] &&
+       [ "$layout" = portable-attached ] && [ "$owner_state" = runtime-missing ]; then
+    report '  ' "$HC_INFO" 'repair boundary: relink is withheld until committed exclude and native-surface checks pass'
+  elif [ "$layout" = compatibility-legacy ] || [ "$layout" = mixed/conflict ] || [ "$layout" = corrupt ]; then
+    report '  ' "$HC_INFO" 'repair boundary: no automatic mutation; review migration/ownership conflict without deleting project-owned files'
+  fi
+done < <(jq -c '.entries[]' "$SNAPSHOT")
+if [ "$ROWS_CHECKED" -eq 0 ] && [ -n "$ONLY_PROJECT" ]; then report '  ' "$HC_ERROR" "local registry has no record for requested project $ONLY_PROJECT"; fi
+echo; echo '== Summary =='
+printf '%s %d error(s)  %s %d warning(s)  %s %d info  (%d local row(s) checked)\n' "$GLYPH_ERR" "$N_ERROR" "$GLYPH_WARN" "$N_WARN" "$GLYPH_INFO" "$N_INFO" "$ROWS_CHECKED"
+if [ "$DO_DRY_RUN" -eq 1 ]; then
+  echo "$GLYPH_INFO dry-run: no repair was applied"
+  [ "$N_ERROR" -eq 0 ] || exit "${DOCTOR_EXIT:-1}"
+  exit 0
+fi
+[ "$N_ERROR" -eq 0 ] || exit "${DOCTOR_EXIT:-1}"
 exit 0

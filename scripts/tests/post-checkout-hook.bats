@@ -1,125 +1,169 @@
 #!/usr/bin/env bats
-# Tests for core-rules/githooks/post-checkout hook (worktree inheritance).
 #
-# FULLY ISOLATED — every test builds its own fixture in a mktemp dir.
-# No absolute paths are hardcoded; all paths derived from $BATS_TEST_DIRNAME.
-#
-# Fixture layout:
-#   $SANDBOX/root/        — fake TRELLIS_ROOT (with real seeder + core-rules/)
-#   $SANDBOX/main/        — fake MAIN git repo (.githooks/post-checkout = hook)
-#   $SANDBOX/wt/          — linked worktree created via git worktree add
+# T14 clone-local post-checkout dispatcher contracts. The tracked compatibility
+# hook is intentionally inert; attachment owns the local dispatcher.
 
-REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-HOOK="$REPO_ROOT/core-rules/githooks/post-checkout"
-SEEDER="$REPO_ROOT/scripts/seed-inheritance-symlinks.sh"
+REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+ATTACH="$REPO_ROOT/scripts/attach-project.sh"
+load helpers/t14-worktree
 
 setup() {
-  SANDBOX="$(mktemp -d)"
-  # Resolve real path so /var vs /private/var cannot diverge
-  SANDBOX="$(cd "$SANDBOX" && pwd -P)"
-
-  ROOT="$SANDBOX/root"
-  MAIN="$SANDBOX/main"
-  WT="$SANDBOX/wt"
-
-  # ---- Build fake TRELLIS_ROOT ----
-  mkdir -p \
-    "$ROOT/core-rules/skills/process-gate" \
-    "$ROOT/scripts"
-  printf '# Trellis rules\n' > "$ROOT/core-rules/CLAUDE.md"
-  printf 'x\n' > "$ROOT/core-rules/skills/process-gate/SKILL.md"
-
-  # Copy the REAL seeder into $ROOT/scripts/ so the hook can call it
-  cp "$SEEDER" "$ROOT/scripts/seed-inheritance-symlinks.sh"
-  chmod +x "$ROOT/scripts/seed-inheritance-symlinks.sh"
-
-  # ---- Build fake MAIN checkout ----
-  mkdir -p "$MAIN"
-  (
-    cd "$MAIN"
-    git init -q
-    git config user.email "test@example.com"
-    git config user.name  "test"
-    git config commit.gpgsign false
-    git config core.hooksPath ".githooks"
-
-    # .gitignore — ignore the inheritance symlink directories
-    printf '.claude/rules\n.claude/skills\n.agents/rules\n.agents/skills\n' > .gitignore
-
-    # Tracked file so git worktree add works
-    printf 'tracked\n' > README.md
-
-    # Set up the .githooks dir (tracked) with the canonical hook
-    mkdir -p .githooks
-    cp "$HOOK" .githooks/post-checkout
-    chmod +x .githooks/post-checkout
-
-    git add README.md .gitignore .githooks/post-checkout
-    git commit -q -m "init"
-  )
-
-  # Create inheritance symlinks in MAIN (gitignored, not committed)
-  mkdir -p \
-    "$MAIN/.claude/rules" \
-    "$MAIN/.claude/skills"
-  ln -s "$ROOT/core-rules/CLAUDE.md"           "$MAIN/.claude/rules/trellis.md"
-  ln -s "$ROOT/core-rules/skills/process-gate" "$MAIN/.claude/skills/process-gate"
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  T14_WORKTREE=""
 }
 
 teardown() {
-  if [ -n "${MAIN:-}" ] && [ -d "$MAIN" ]; then
-    git -C "$MAIN" worktree remove --force "$WT" 2>/dev/null || true
+  if [ -n "${T14_WORKTREE:-}" ] && [ -d "$T14_WORKTREE" ] && [ -d "${T14_PROJECT:-}" ]; then
+    git -C "$T14_PROJECT" worktree remove --force "$T14_WORKTREE" 2>/dev/null || true
   fi
-  if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
-    rm -rf "$SANDBOX"
-  fi
+  t14_teardown_sandbox
 }
 
-# ---------------------------------------------------------------------------
-# Test 1: git worktree add auto-creates inheritance symlinks via hook
-# ---------------------------------------------------------------------------
-@test "git worktree add triggers hook and seeds inheritance symlinks" {
-  # Use -b to create a branch checkout so git passes $3=1 to the hook
-  git -C "$MAIN" worktree add -b wt-branch "$WT" >/dev/null 2>&1
-
-  # The hook should have fired and called the seeder, creating the symlinks
-  [ -L "$WT/.claude/rules/trellis.md" ]
-  [ -L "$WT/.claude/skills/process-gate" ]
-
-  # Targets must match MAIN's inheritance symlinks (pointing into $ROOT)
-  [ "$(readlink "$WT/.claude/rules/trellis.md")"      = "$ROOT/core-rules/CLAUDE.md" ]
-  [ "$(readlink "$WT/.claude/skills/process-gate")"   = "$ROOT/core-rules/skills/process-gate" ]
+dispatcher_path() {
+  local owner
+  owner="$(t14_owner_for_root "$T14_PROJECT")"
+  jq -r '.git_hooks.managed_hooks_path' "$owner"
 }
 
-# ---------------------------------------------------------------------------
-# Test 2: $3 != 1 is a no-op (e.g. file checkout, not branch checkout)
-# ---------------------------------------------------------------------------
-@test "hook with flag=0 is a no-op and exits 0" {
-  # Create the worktree but then run the hook manually with flag=0
-  git -C "$MAIN" worktree add -b wt-branch2 "$WT" >/dev/null 2>&1
+write_prior_hook() {
+  local hooks="$1" marker="$2" exit_status="$3"
+  mkdir -p "$hooks"
+  cat > "$hooks/post-checkout" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$@" > "$marker.args"
+cat > "$marker.stdin"
+exit $exit_status
+EOF
+  chmod +x "$hooks/post-checkout"
+}
 
-  # Remove any symlinks that the auto-firing may have created
-  rm -rf "$WT/.claude"
+@test "dispatcher chains the default Git hook with unchanged arguments stdin and exit status" {
+  marker="$T14_SANDBOX/default prior"
+  write_prior_hook "$T14_PROJECT/.git/hooks" "$marker" 23
 
-  # Run the hook body directly with flag=0 from within the worktree
-  run bash "$HOOK" "prev-sha" "new-sha" "0"
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  [ "$(git -C "$T14_PROJECT" config --local --get core.hooksPath)" = "$managed" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    'cd "$1" && printf "hook stdin\\n" | "$2" old new 1' \
+    dispatcher "$T14_PROJECT" "$managed/post-checkout"
+
+  [ "$status" -eq 23 ]
+  [ "$(cat "$marker.args")" = $'old\nnew\n1' ]
+  [ "$(cat "$marker.stdin")" = "hook stdin" ]
+}
+
+@test "dispatcher chains a symlinked configured hook manager and preserves its status" {
+  target="$T14_SANDBOX/configured hooks target"
+  previous="$T14_SANDBOX/configured hooks link"
+  marker="$T14_SANDBOX/configured prior"
+  write_prior_hook "$target" "$marker" 29
+  ln -s "$target" "$previous"
+  git -C "$T14_PROJECT" config --local core.hooksPath "$previous"
+
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  owner="$(t14_owner_for_root "$T14_PROJECT")"
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$previous" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    'cd "$1" && printf "configured stdin\\n" | "$2" first second 1' \
+    dispatcher "$T14_PROJECT" "$managed/post-checkout"
+
+  [ "$status" -eq 29 ]
+  [ "$(cat "$marker.args")" = $'first\nsecond\n1' ]
+  [ "$(cat "$marker.stdin")" = "configured stdin" ]
+}
+
+@test "first and linked attachments preserve dispatcher lifecycle until final detach restores prior hooks" {
+  previous="$T14_SANDBOX/lifecycle prior"
+  marker="$T14_SANDBOX/lifecycle marker"
+  write_prior_hook "$previous" "$marker" 0
+  git -C "$T14_PROJECT" config --local core.hooksPath "$previous"
+
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  first_owner="$(t14_owner_for_root "$T14_PROJECT")"
+  first_owner_hash="$(t14_sha256_text "$(cat "$first_owner")")"
+  t14_attach
+  [ "$?" -eq 0 ]
+  [ "$(t14_sha256_text "$(cat "$first_owner")")" = "$first_owner_hash" ]
+  [ "$(git -C "$T14_PROJECT" config --local --get core.hooksPath)" = "$managed" ]
+
+  T14_WORKTREE="$T14_SANDBOX/lifecycle linked worktree"
+  git -C "$T14_PROJECT" worktree add -qb t14-lifecycle "$T14_WORKTREE"
+  t14_attach "$T14_WORKTREE"
+  [ "$?" -eq 0 ]
+  [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
+
+  t14_detach "$T14_PROJECT"
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  jq -e --arg managed "$managed" '.git_hooks.enabled == true and .git_hooks.managed_hooks_path == $managed' "$linked_owner"
+  [ -d "$managed" ]
+  [ "$(git -C "$T14_WORKTREE" config --local --get core.hooksPath)" = "$managed" ]
+
+  t14_detach "$T14_WORKTREE"
+  [ "$(git -C "$T14_PROJECT" config --local --get core.hooksPath)" = "$previous" ]
+  [ ! -e "$managed" ]
+  [ -x "$previous/post-checkout" ]
+}
+
+@test "dispatcher pins the managed custom home under a hostile process environment" {
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  T14_WORKTREE="$T14_SANDBOX/hostile dispatcher linked worktree"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-hostile-dispatcher "$T14_WORKTREE"
+
+  marker="$T14_SANDBOX/hostile dispatcher ran"
+  hostile_bin="$T14_SANDBOX/hostile bin"
+  hostile_home="$T14_SANDBOX/hostile home"
+  hostile_tmp="$T14_SANDBOX/hostile tmp"
+  hostile_env="$T14_SANDBOX/hostile bash env"
+  hostile_monitor="$T14_SANDBOX/hostile fsmonitor"
+  hostile_config="$T14_SANDBOX/hostile gitconfig"
+  mkdir -p "$hostile_bin" "$hostile_home" "$hostile_tmp"
+  cat > "$hostile_bin/bash" <<EOF
+#!/bin/sh
+/usr/bin/touch "$marker"
+exec /bin/bash "\$@"
+EOF
+  cat > "$hostile_bin/git" <<EOF
+#!/bin/sh
+/usr/bin/touch "$marker"
+exec /usr/bin/git "\$@"
+EOF
+  cat > "$hostile_env" <<EOF
+/usr/bin/touch "$marker"
+EOF
+  cat > "$hostile_monitor" <<EOF
+#!/bin/sh
+/usr/bin/touch "$marker"
+printf '%s\n' token
+EOF
+  chmod 755 "$hostile_bin/bash" "$hostile_bin/git" "$hostile_monitor"
+  printf '[core]\n\tfsmonitor = %s\n' "$hostile_monitor" > "$hostile_config"
+  hostile_function="() { /usr/bin/touch '$marker'; }"
+
+  cd "$T14_WORKTREE"
+  run env \
+    "PATH=$hostile_bin" "HOME=$hostile_home" "TRELLIS_HOME=$hostile_home/.trellis" \
+    "TMPDIR=$hostile_tmp" "TMP=$hostile_tmp" "TEMP=$hostile_tmp" \
+    "BASH_ENV=$hostile_env" "ENV=$hostile_env" \
+    "GIT_CONFIG_NOSYSTEM=0" "GIT_CONFIG_GLOBAL=$hostile_config" \
+    "GIT_CONFIG_COUNT=1" "GIT_CONFIG_KEY_0=core.fsmonitor" "GIT_CONFIG_VALUE_0=$hostile_monitor" \
+    "BASH_FUNC_bash%%=$hostile_function" \
+    "$managed/post-checkout" old new 1
+
   [ "$status" -eq 0 ]
-
-  # No symlinks should have been created (hook must have exited early)
-  [ ! -e "$WT/.claude/rules/trellis.md" ]
-  [ ! -e "$WT/.claude/skills/process-gate" ]
-}
-
-# ---------------------------------------------------------------------------
-# Test 3: running hook in the MAIN checkout (common==gitdir) is a no-op
-# ---------------------------------------------------------------------------
-@test "hook in main checkout (not a linked worktree) is a no-op and exits 0" {
-  # Run from MAIN (not from a linked worktree) — common == gitdir → skip
-  run bash -c "cd '$MAIN' && bash '$HOOK' 'prev-sha' 'new-sha' '1'"
-  [ "$status" -eq 0 ]
-
-  # MAIN had its own symlinks already; we only check nothing BROKE
-  # (The hook must not abort; in MAIN, common==gitdir so it exits immediately)
-  [ -L "$MAIN/.claude/rules/trellis.md" ]
-  [ -L "$MAIN/.claude/skills/process-gate" ]
+  [ ! -e "$marker" ]
+  [ -L "$T14_WORKTREE/.trellis/runtime" ]
+  [ "$(readlink "$T14_WORKTREE/.trellis/runtime")" = "$TRELLIS_HOME/releases/$T14_RELEASE/payload" ]
+  [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
 }

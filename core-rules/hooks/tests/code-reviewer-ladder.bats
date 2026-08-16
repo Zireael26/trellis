@@ -90,9 +90,9 @@ EOF
   rm -rf "$stub_dir"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"from-override"'* ]]
+  [[ "$output" == *'"from-override"'* ]] || { echo "$output"; false; }
   # Override won, so the rung-3 AWS-key critical must NOT appear.
-  [[ "$output" != *"AWS access key"* ]]
+  [[ "$output" != *"AWS access key"* ]] || { echo "$output"; false; }
   assert_valid_findings
 }
 
@@ -112,7 +112,7 @@ EOF
   export PATH="$PATH_BACKUP"; rm -rf "$stub_path"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"from-llm-stub"'* ]]
+  [[ "$output" == *'"from-llm-stub"'* ]] || { echo "$output"; false; }
   assert_valid_findings
 }
 
@@ -131,7 +131,7 @@ EOF
   [ "$status" -eq 0 ]
   assert_valid_findings
   # Fell through to rung 3 on the secret diff → the critical is recovered.
-  [[ "$output" == *'"critical"'* ]]
+  [[ "$output" == *'"critical"'* ]] || { echo "$output"; false; }
   [[ "$output" == *"AWS access key"* ]]
 }
 
@@ -158,7 +158,7 @@ EOF
 
   [ "$status" -eq 0 ]
   assert_valid_findings
-  [[ "$output" == *'"severity":"critical"'* ]]
+  [[ "$output" == *'"severity":"critical"'* ]] || { echo "$output"; false; }
   [[ "$output" == *"AWS access key"* ]]
 }
 
@@ -217,7 +217,7 @@ EOF
   [ "$status" -eq 0 ]
   assert_valid_findings
   # The .diff inside the envelope is extracted and scanned → key is found.
-  [[ "$output" == *'"critical"'* ]]
+  [[ "$output" == *'"critical"'* ]] || { echo "$output"; false; }
   [[ "$output" == *"AWS access key"* ]]
 }
 
@@ -258,7 +258,7 @@ EOF
   [ "$status" -eq 0 ]
   # LLM rung skipped → stub payload never appears; deterministic rung on a
   # clean diff yields the empty verdict.
-  [[ "$output" != *"from-llm-stub"* ]]
+  [[ "$output" != *"from-llm-stub"* ]] || { echo "$output"; false; }
   [ "$output" = '{"findings":[]}' ]
 }
 
@@ -270,7 +270,7 @@ EOF
 @test "unit: deterministic_review (sourced) flags planted AWS key" {
   run bash -c 'source "$1"; printf "%s" "$2" | deterministic_review' _ "$LIB" "$SECRET_DIFF"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"severity":"critical"'* ]]
+  [[ "$output" == *'"severity":"critical"'* ]] || { echo "$output"; false; }
   assert_valid_findings
 }
 

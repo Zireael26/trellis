@@ -1,0 +1,855 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/trellis.attachment.schema.json",
+  "title": "Trellis attachment transaction state",
+  "description": "Plan, prepared and detaching journals, and committed ownership records. Runtime additionally enforces canonical filesystem identity, artifact prefix ordering, and collision rules.",
+  "oneOf": [
+    { "$ref": "#/$defs/plan" },
+    { "$ref": "#/$defs/journal" },
+    { "$ref": "#/$defs/ownership" },
+    { "$ref": "#/$defs/detachJournal" }
+  ],
+  "$defs": {
+    "absoluteCanonicalPath": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^/[^/\\u0000-\\u001f\\u007f]+(?:/[^/\\u0000-\\u001f\\u007f]+)*$",
+      "not": { "pattern": "(^|/)\\.{1,2}(/|$)" }
+    },
+    "relativeCanonicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\u0000-\\u001f\\u007f]+(?:/[^/\\u0000-\\u001f\\u007f]+)*$",
+      "not": { "pattern": "(^|/)\\.{1,2}(/|$)" }
+    },
+    "symlinkTarget": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "[\\u0000-\\u001f\\u007f]" }
+    },
+    "hookPath": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "[\\u0000-\\u001f\\u007f]" }
+    },
+    "filesystemIdentity": {
+      "type": "string",
+      "pattern": "^[0-9]+:[0-9]+$"
+    },
+    "fleet": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "base64": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+([0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "replacementState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_base64", "before_mode", "before_sha256"],
+      "properties": {
+        "before_base64": { "$ref": "#/$defs/base64" },
+        "before_mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+        "before_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "fileArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "file" },
+        "source": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "content_base64": { "$ref": "#/$defs/base64" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+        "replace": { "$ref": "#/$defs/replacementState" }
+      },
+      "oneOf": [
+        { "required": ["source"] },
+        { "required": ["content_base64"] }
+      ]
+    },
+    "symlinkArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "target"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "symlink" },
+        "target": { "$ref": "#/$defs/symlinkTarget" }
+      }
+    },
+    "directoryArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "directory" }
+      }
+    },
+    "parentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "parent" }
+      }
+    },
+    "artifact": {
+      "oneOf": [
+        { "$ref": "#/$defs/fileArtifact" },
+        { "$ref": "#/$defs/symlinkArtifact" },
+        { "$ref": "#/$defs/directoryArtifact" },
+        { "$ref": "#/$defs/parentArtifact" }
+      ]
+    },
+    "ownedFileArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "file" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "mode": { "type": "string", "pattern": "^0[0-7]{3}$" }
+      }
+    },
+    "ownedSymlinkArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "target"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "symlink" },
+        "target": { "$ref": "#/$defs/symlinkTarget" }
+      }
+    },
+    "ownedDirectoryArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "directory" }
+      }
+    },
+    "ownedParentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "const": "parent" }
+      }
+    },
+    "ownedArtifact": {
+      "oneOf": [
+        { "$ref": "#/$defs/ownedFileArtifact" },
+        { "$ref": "#/$defs/ownedSymlinkArtifact" },
+        { "$ref": "#/$defs/ownedDirectoryArtifact" },
+        { "$ref": "#/$defs/ownedParentArtifact" }
+      ]
+    },
+
+    "jsonPath": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1, "not": { "pattern": "[\\u0000-\\u001f\\u007f]" } }
+    },
+    "ownedJsonKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "value"],
+      "properties": {
+        "path": { "$ref": "#/$defs/jsonPath" },
+        "value": {}
+      }
+    },
+    "explicitJsonRender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "merge", "mode", "before_exists", "before_sha256", "before_base64", "before_mode", "after_sha256", "after_base64", "after_mode", "owned_keys", "created_paths"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "merge": { "const": "explicit-json" },
+        "mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+        "before_exists": { "type": "boolean" },
+        "before_sha256": { "$ref": "#/$defs/sha256" },
+        "before_base64": { "$ref": "#/$defs/base64" },
+        "before_mode": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^0[0-7]{3}$" }
+          ]
+        },
+        "after_sha256": { "$ref": "#/$defs/sha256" },
+        "after_base64": { "$ref": "#/$defs/base64" },
+        "after_mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+        "owned_keys": { "type": "array", "items": { "$ref": "#/$defs/ownedJsonKey" } },
+        "created_paths": { "type": "array", "items": { "$ref": "#/$defs/jsonPath" } }
+      }
+    },
+    "renderContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "user_home",
+        "trellis_home",
+        "launcher",
+        "user_home_shell",
+        "trellis_home_shell",
+        "launcher_shell"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "user_home": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "trellis_home": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "launcher": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "user_home_shell": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^'.*'$",
+          "not": { "pattern": "[\\u0000-\\u001f\\u007f]" }
+        },
+        "trellis_home_shell": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^'.*'$",
+          "not": { "pattern": "[\\u0000-\\u001f\\u007f]" }
+        },
+        "launcher_shell": {
+          "type": "string",
+          "minLength": 2,
+          "pattern": "^'.*'$",
+          "not": { "pattern": "[\\u0000-\\u001f\\u007f]" }
+        }
+      }
+    },
+    "deferredLeaf": {
+      "description": "A manifest leaf the project already owns, so attach deferred to it instead of creating it. Never an owned artifact: detach must never remove one, and it is absent from the managed exclude block. Doctor re-derives the same decision from the immutable manifest and the checkout rather than trusting this record. A symlink leaf defers either because the destination is already the exact planned link (pre-existing-symlink) or because it holds a project-authored regular file (project-authored-file); target names the planned link in both cases, so diagnosis can hold the entry against the same manifest leaf.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "target", "reason"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativeCanonicalPath" },
+        "kind": { "enum": ["symlink", "file"] },
+        "target": {
+          "oneOf": [
+            { "$ref": "#/$defs/symlinkTarget" },
+            { "type": "null" }
+          ]
+        },
+        "reason": { "enum": ["pre-existing-symlink", "project-authored-file", "project-authored-render"] }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "symlink" } } },
+          "then": {
+            "properties": {
+              "target": { "$ref": "#/$defs/symlinkTarget" },
+              "reason": { "enum": ["pre-existing-symlink", "project-authored-file"] }
+            }
+          }
+        },
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "file" } } },
+          "then": {
+            "properties": {
+              "target": { "type": "null" },
+              "reason": { "const": "project-authored-render" }
+            }
+          }
+        }
+      ]
+    },
+    "contextualRenderContextState": {
+      "allOf": [
+        {
+          "if": {
+            "required": ["renders"],
+            "properties": {
+              "renders": {
+                "contains": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": {
+                      "enum": [
+                        ".claude/settings.local.json",
+                        ".codex/hooks.json"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": ["render_context"],
+            "properties": {
+              "render_context": { "$ref": "#/$defs/renderContext" }
+            }
+          },
+          "else": {
+            "properties": {
+              "render_context": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "gitHooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "previous_hooks_path": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/hookPath" }
+          ]
+        },
+        "managed_hooks_path": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absoluteCanonicalPath" }
+          ]
+        },
+        "pre_push_source": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "enum": [
+                "core-rules/husky/pre-push",
+                "core-rules/githooks/pre-push"
+              ]
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": { "const": true }
+            }
+          },
+          "then": {
+            "required": [
+              "managed_hooks_path",
+              "previous_hooks_path",
+              "pre_push_source"
+            ],
+            "properties": {
+              "managed_hooks_path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+              "previous_hooks_path": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "$ref": "#/$defs/hookPath" }
+                ]
+              },
+              "pre_push_source": {
+                "type": "string",
+                "enum": [
+                  "core-rules/husky/pre-push",
+                  "core-rules/githooks/pre-push"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "managed_hooks_path": { "type": "null" },
+              "previous_hooks_path": { "type": "null" },
+              "pre_push_source": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "excludeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "git_common_dir",
+        "before_exists",
+        "before_sha256",
+        "before_base64",
+        "managed_block_sha256",
+        "managed_block_base64",
+        "after_exists",
+        "after_sha256",
+        "after_base64",
+        "managed_by_attachment"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "git_common_dir": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "before_exists": { "type": "boolean" },
+        "before_sha256": { "$ref": "#/$defs/sha256" },
+        "before_base64": { "$ref": "#/$defs/base64" },
+        "managed_block_sha256": { "$ref": "#/$defs/sha256" },
+        "managed_block_base64": { "$ref": "#/$defs/base64" },
+        "after_exists": { "type": "boolean" },
+        "after_sha256": { "$ref": "#/$defs/sha256" },
+        "after_base64": { "$ref": "#/$defs/base64" },
+        "managed_by_attachment": { "type": "boolean" }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "fleet",
+        "project_id",
+        "checkout_id",
+        "worktree_id",
+        "attachment_id",
+        "project_root",
+        "worktree_root",
+        "release",
+        "artifacts"
+      ],
+      "properties": {
+        "$schema": { "type": "string", "minLength": 1 },
+        "schema_version": { "const": 1 },
+        "status": { "const": "prepared" },
+        "fleet": { "$ref": "#/$defs/fleet" },
+        "project_id": { "$ref": "#/$defs/projectId" },
+        "checkout_id": { "$ref": "#/$defs/sha256" },
+        "worktree_id": { "$ref": "#/$defs/sha256" },
+        "attachment_id": { "$ref": "#/$defs/uuid" },
+        "project_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "worktree_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "release": { "$ref": "#/$defs/semver" },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "pre_existing": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/deferredLeaf" }
+        },
+        "renders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/explicitJsonRender" }
+        },
+        "render_context": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/renderContext" }
+          ]
+        },
+        "exclude_block_hash": { "$ref": "#/$defs/sha256" },
+        "git_hooks": { "$ref": "#/$defs/gitHooks" },
+        "exclude": { "$ref": "#/$defs/excludeState" }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/contextualRenderContextState" }
+      ]
+    },
+    "pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "staging_path", "staging_identity", "destination_identity"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "staging_path": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absoluteCanonicalPath" }
+          ]
+        },
+        "staging_identity": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/filesystemIdentity" }
+          ]
+        },
+        "destination_identity": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/filesystemIdentity" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "artifact": {
+                "properties": { "kind": { "enum": ["directory", "parent"] } },
+                "required": ["kind"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "staging_path": { "type": "null" },
+              "staging_identity": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "staging_path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+              "destination_identity": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "removal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "nonce"],
+      "properties": {
+        "path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "nonce": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "renderPending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "render",
+        "source_identity",
+        "source_sha256",
+        "source_mode",
+        "result_exists",
+        "result_base64",
+        "result_sha256",
+        "result_mode",
+        "staging_path",
+        "staging_identity"
+      ],
+      "properties": {
+        "render": { "$ref": "#/$defs/explicitJsonRender" },
+        "source_identity": { "$ref": "#/$defs/filesystemIdentity" },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "source_mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+        "result_exists": { "type": "boolean" },
+        "result_base64": { "$ref": "#/$defs/base64" },
+        "result_sha256": { "$ref": "#/$defs/sha256" },
+        "result_mode": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^0[0-7]{3}$" }
+          ]
+        },
+        "staging_path": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/absoluteCanonicalPath" }
+          ]
+        },
+        "staging_identity": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/filesystemIdentity" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "result_exists": { "const": false } }, "required": ["result_exists"] },
+          "then": {
+            "properties": {
+              "result_base64": { "const": "" },
+              "result_sha256": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+              "result_mode": { "type": "null" },
+              "staging_path": { "type": "null" },
+              "staging_identity": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "result_exists": { "const": true } }, "required": ["result_exists"] },
+          "then": {
+            "properties": {
+              "result_mode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+              "staging_path": { "$ref": "#/$defs/absoluteCanonicalPath" }
+            }
+          }
+        }
+      ]
+    },
+    "detachTransfer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_path", "expected", "after"],
+      "properties": {
+        "owner_path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "expected": { "$ref": "#/$defs/ownership" },
+        "after": { "$ref": "#/$defs/ownership" }
+      }
+    },
+    "detachExternal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "transfer",
+        "renders",
+        "exclude_action",
+        "restore_hooks",
+        "clear_registry",
+        "render_phase",
+        "render_pending"
+      ],
+      "properties": {
+        "phase": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "transfer": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/detachTransfer" }
+          ]
+        },
+        "renders": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/explicitJsonRender" }
+        },
+        "exclude_action": { "enum": ["none", "transfer", "restore"] },
+        "restore_hooks": { "type": "boolean" },
+        "clear_registry": { "type": "boolean" },
+        "render_phase": { "type": "integer", "minimum": 0 },
+        "render_pending": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/renderPending" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "render_pending": { "not": { "type": "null" } } },
+            "required": ["render_pending"]
+          },
+          "then": { "properties": { "phase": { "const": 1 } } }
+        },
+        {
+          "if": {
+            "properties": { "phase": { "minimum": 2 } },
+            "required": ["phase"]
+          },
+          "then": { "properties": { "render_pending": { "type": "null" } } }
+        }
+      ]
+    },
+    "detachJournal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "attachment_id",
+        "checkout_id",
+        "worktree_id",
+        "original_owner",
+        "next_owner",
+        "remove",
+        "phase",
+        "owner_committed",
+        "removal",
+        "external"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "const": "detaching" },
+        "attachment_id": { "$ref": "#/$defs/uuid" },
+        "checkout_id": { "$ref": "#/$defs/sha256" },
+        "worktree_id": { "$ref": "#/$defs/sha256" },
+        "original_owner": { "$ref": "#/$defs/ownership" },
+        "next_owner": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/ownership" }
+          ]
+        },
+        "remove": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ownedArtifact" }
+        },
+        "phase": { "type": "integer", "minimum": 0 },
+        "owner_committed": { "type": "boolean" },
+        "removal": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/removal" }
+          ]
+        },
+        "external": { "$ref": "#/$defs/detachExternal" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "external": {
+                "properties": { "phase": { "minimum": 1 } },
+                "required": ["phase"]
+              }
+            },
+            "required": ["external"]
+          },
+          "then": { "properties": { "owner_committed": { "const": true } } }
+        }
+      ]
+    },
+    "journal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "fleet",
+        "project_id",
+        "checkout_id",
+        "worktree_id",
+        "attachment_id",
+        "project_root",
+        "worktree_root",
+        "release",
+        "artifacts",
+        "applied",
+        "phase",
+        "pending",
+        "removal"
+      ],
+      "properties": {
+        "$schema": { "type": "string", "minLength": 1 },
+        "schema_version": { "const": 1 },
+        "status": { "const": "prepared" },
+        "fleet": { "$ref": "#/$defs/fleet" },
+        "project_id": { "$ref": "#/$defs/projectId" },
+        "checkout_id": { "$ref": "#/$defs/sha256" },
+        "worktree_id": { "$ref": "#/$defs/sha256" },
+        "attachment_id": { "$ref": "#/$defs/uuid" },
+        "project_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "worktree_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "release": { "$ref": "#/$defs/semver" },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "renders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/explicitJsonRender" }
+        },
+        "render_context": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/renderContext" }
+          ]
+        },
+        "exclude_block_hash": { "$ref": "#/$defs/sha256" },
+        "git_hooks": { "$ref": "#/$defs/gitHooks" },
+        "exclude": { "$ref": "#/$defs/excludeState" },
+        "applied": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "phase": { "type": "integer", "minimum": 0 },
+        "pending": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/pending" }
+          ]
+        },
+        "removal": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/removal" }
+          ]
+        }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/contextualRenderContextState" }
+      ]
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "status",
+        "fleet",
+        "project_id",
+        "checkout_id",
+        "worktree_id",
+        "attachment_id",
+        "project_root",
+        "worktree_root",
+        "release",
+        "artifacts"
+      ],
+      "properties": {
+        "$schema": { "type": "string", "minLength": 1 },
+        "schema_version": { "const": 1 },
+        "status": { "const": "committed" },
+        "fleet": { "$ref": "#/$defs/fleet" },
+        "project_id": { "$ref": "#/$defs/projectId" },
+        "checkout_id": { "$ref": "#/$defs/sha256" },
+        "worktree_id": { "$ref": "#/$defs/sha256" },
+        "attachment_id": { "$ref": "#/$defs/uuid" },
+        "project_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "worktree_root": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "release": { "$ref": "#/$defs/semver" },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ownedArtifact" }
+        },
+        "pre_existing": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/deferredLeaf" }
+        },
+        "renders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/explicitJsonRender" }
+        },
+        "render_context": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/renderContext" }
+          ]
+        },
+        "exclude_block_hash": { "$ref": "#/$defs/sha256" },
+        "git_hooks": { "$ref": "#/$defs/gitHooks" },
+        "exclude": { "$ref": "#/$defs/excludeState" }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/contextualRenderContextState" }
+      ]
+    }
+  }
+}

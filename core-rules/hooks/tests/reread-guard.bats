@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
-# Tests for the Phase 5a E2 re-read-before-edit guard (Claude side):
-#   reread-guard.sh (PreToolUse Edit|MultiEdit|Write — warn→block at all levels)
-#   track-read.sh   (PostToolUse recorder — owns reads.tsv)
-#   stamp-turn.sh   (Stop hook — sole writer of .epoch)
+# Tests for the Claude and Codex E2 re-read-before-edit guards:
+#   Claude reread-guard.sh (PreToolUse Edit|MultiEdit|Write — warn→block)
+#   Codex reread-guard.sh  (PreToolUse Edit|MultiEdit|Write — warn→block)
+#   track-read.sh / stamp-turn.sh (Claude state ownership)
 #
 # Epoch discipline: NEVER drive these tests off wall-clock comparisons. date +%s
 # can return the same second twice, so a freshly-recorded read could land at
@@ -18,6 +18,7 @@
 load helpers
 
 GUARD="$HOOKS_DIR/reread-guard.sh"
+CODEX_GUARD="$CODEX_HOOKS_DIR/reread-guard.sh"
 TRACK="$HOOKS_DIR/track-read.sh"
 STAMP="$HOOKS_DIR/stamp-turn.sh"
 
@@ -28,10 +29,12 @@ setup() {
   # Real project root with a git repo so _se_repo_root resolves cleanly.
   PROJECT_DIR="$(mktemp -d)"
   ( cd "$PROJECT_DIR" && git init -q && git commit --allow-empty -q -m init )
+  unset CODEX_PROJECT_DIR RUNTIME_DIR TRELLIS_ROOT
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   STATE_DIR="$PROJECT_DIR/.claude/.reread-state"
+  CODEX_STATE_DIR="$PROJECT_DIR/.codex/.reread-state"
   KEY="$(printf '%s' "$TP" | shasum -a 256 | awk '{print $1}' | cut -c1-16)"
-  mkdir -p "$STATE_DIR"
+  mkdir -p "$STATE_DIR" "$CODEX_STATE_DIR"
 }
 
 teardown() {
@@ -39,6 +42,10 @@ teardown() {
     chmod -R u+rwx "$PROJECT_DIR" 2>/dev/null || true
     rm -rf "$PROJECT_DIR"
   fi
+  if [ -n "${RUNTIME_DIR:-}" ] && [ -d "$RUNTIME_DIR" ]; then
+    rm -rf "$RUNTIME_DIR"
+  fi
+  unset CODEX_PROJECT_DIR RUNTIME_DIR TRELLIS_ROOT
 }
 
 # --- helpers -----------------------------------------------------------------
@@ -62,6 +69,45 @@ warn_rows() {
   [ -f "$STATE_DIR/$KEY.warns.tsv" ] || { echo 0; return; }
   T="$1" E="$2" awk -F '\t' '$2==ENVIRON["T"] && $1==ENVIRON["E"]{n++} END{print n+0}' \
     "$STATE_DIR/$KEY.warns.tsv"
+}
+
+# Run the Codex guard for $1. Its state is deliberately separate from Claude's.
+run_codex_guard() {
+  local target="$1"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  run_with_stderr "$CODEX_GUARD" "$(jq -nc --arg tp "$TP" --arg t "$target" \
+    '{transcript_path: $tp, tool_input: {file_path: $t}}')"
+  unset CODEX_PROJECT_DIR
+}
+
+set_codex_turn_epoch() { printf '%s\n' "$1" > "$CODEX_STATE_DIR/$KEY.epoch"; }
+
+# Install an attached immutable payload anchor exactly as deployed projects use.
+attach_runtime() {
+  RUNTIME_DIR="$(mktemp -d)"
+  mkdir -p "$PROJECT_DIR/.trellis"
+  ln -s "$RUNTIME_DIR" "$PROJECT_DIR/.trellis/runtime"
+  export TRELLIS_ROOT="$PROJECT_DIR/.trellis/runtime"
+}
+
+write_runtime_autonomy() {
+  printf '{"autonomy_default":%s}\n' "$1" > "$RUNTIME_DIR/trellis.config.json"
+}
+
+write_canonical_autonomy() {
+  printf '{"schema_version":1,"project_id":"reread-guard-fixture","autonomy":%s}\n' "$1" \
+    > "$PROJECT_DIR/.trellis.json"
+}
+
+write_legacy_autonomy() {
+  printf '{"autonomy":%s}\n' "$1" > "$PROJECT_DIR/.trellis.config.json"
+}
+
+run_guard_with_home() {
+  local target="$1" home="$2" original_home="$HOME"
+  export HOME="$home"
+  run_guard "$target"
+  export HOME="$original_home"
 }
 
 # =============================================================================
@@ -88,23 +134,23 @@ warn_rows() {
   # Call 1 — WARN, not a block.
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]      # NEVER an immediate block
-  [[ "$stderr" == *"warn 1/2"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }  # NEVER an immediate block
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 1 ]
 
   # Call 2 — WARN, still not a block.
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
-  [[ "$stderr" == *"warn 2/2"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 2 ]
 
   # Call 3 — budget exhausted → BLOCK on stdout, no further warn row.
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" == *deny* ]]
-  [[ "$output" == *"$f"* ]]
-  [[ "$output" == *"TRELLIS_REREAD_OVERRIDE=1"* ]]
+  [[ "$output" == *deny* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$f"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"TRELLIS_REREAD_OVERRIDE=1"* ]] || { echo "$output"; false; }
   [ -z "$stderr" ]
   [ "$(warn_rows "$f" 1000)" -eq 2 ]   # block did not append a warn
 }
@@ -121,14 +167,84 @@ warn_rows() {
   # Call 1 — single warn, NOT a block (the L5 warn is never skipped).
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
-  [[ "$stderr" == *"warn 1/1"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
+  [[ "$stderr" == *"warn 1/1"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 1 ]
 
   # Call 2 — block.
   run_guard "$f"
   [ "$status" -eq 0 ]
   [[ "$output" == *deny* ]]
+}
+
+# =============================================================================
+# Policy resolution is centralized in lib/autonomy.sh. The guards only consume
+# its resolved AUTONOMY_LEVEL to choose a warn budget.
+# =============================================================================
+@test "policy precedence: canonical project policy gives Claude L5 budget and deny JSON" {
+  attach_runtime
+  write_runtime_autonomy 2
+  write_legacy_autonomy 4
+  write_canonical_autonomy 5
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/canonical.txt"; echo "old" > "$f"
+
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"warn 1/1"* ]] || { echo "$stderr"; false; }
+
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.hookEventName // empty')" = "PreToolUse" ]
+  [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty')" = "deny" ]
+  [[ "$output" == *"$f"* ]]
+}
+
+@test "policy precedence: legacy project policy falls back ahead of attached runtime" {
+  attach_runtime
+  write_runtime_autonomy 3
+  write_legacy_autonomy 4
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/legacy.txt"; echo "old" > "$f"
+
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"warn 1/1"* ]]
+}
+
+@test "policy precedence: attached immutable runtime supplies Codex fallback and block contract" {
+  attach_runtime
+  write_runtime_autonomy 5
+  set_codex_turn_epoch 1000
+  f="$PROJECT_DIR/runtime.txt"; echo "old" > "$f"
+
+  run_codex_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"warn 1/1"* ]] || { echo "$stderr"; false; }
+
+  run_codex_guard "$f"
+  [ "$status" -eq 2 ]
+  [ -z "$stderr" ]
+  [ "$(printf '%s' "$output" | jq -r '.decision // empty')" = "block" ]
+  [[ "$output" == *"$f"* ]]
+}
+
+@test "policy resolution: absent attachment ignores machine and source fallback" {
+  fake_home="$PROJECT_DIR/fake-home"
+  mkdir -p "$fake_home/.trellis"
+  printf '{"autonomy_default":5}\n' > "$fake_home/.trellis/config.json"
+  printf '{"autonomy":5,"autonomy_default":5}\n' > "$PROJECT_DIR/trellis.config.json"
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/no-attachment.txt"; echo "old" > "$f"
+
+  run_guard_with_home "$f" "$fake_home"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [[ "$stderr" == *"warn 1/2"* ]]
 }
 
 # =============================================================================
@@ -220,8 +336,8 @@ warn_rows() {
   # First Edit A — A is stale → WARN (a pass), not a block.
   run_guard "$a"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
-  [[ "$stderr" == *"warn 1/"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
+  [[ "$stderr" == *"warn 1/"* ]] || { echo "$stderr"; false; }
 
   # The Edit succeeded; track-read records A.
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$a" \
@@ -245,8 +361,8 @@ warn_rows() {
 
   # First guard call warns.
   run_guard "$f"
-  [[ "$output" != *deny* ]]
-  [[ "$stderr" == *"warn 1/2"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
 
   # The Edit FAILED (old_string mismatch). track-read must NOT record it.
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
@@ -256,8 +372,8 @@ warn_rows() {
 
   # Second guard call — still stale → second warn.
   run_guard "$f"
-  [[ "$output" != *deny* ]]
-  [[ "$stderr" == *"warn 2/2"* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
 
   # Third — budget exhausted → BLOCK.
   run_guard "$f"
@@ -275,13 +391,13 @@ warn_rows() {
     '{transcript_path: $tp, tool_input: {file_path: $t}}')"
   unset TRELLIS_REREAD_OVERRIDE
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]      # permitted
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }  # permitted
   # Logged escape: a breadcrumb landed in warns.tsv (or, if unwritable, stderr).
   if [ -f "$STATE_DIR/$KEY.warns.tsv" ]; then
     run grep -F -- "OVERRIDE:$f" "$STATE_DIR/$KEY.warns.tsv"
     [ "$status" -eq 0 ]
   else
-    [[ "$stderr" == *"TRELLIS_REREAD_OVERRIDE=1"* ]]
+    [[ "$stderr" == *"TRELLIS_REREAD_OVERRIDE=1"* ]] || { echo "$stderr"; false; }
   fi
 }
 
@@ -298,7 +414,7 @@ warn_rows() {
   while [ "$i" -lt 5 ]; do
     run_guard "$f"
     [ "$status" -eq 0 ]
-    [[ "$output" != *deny* ]]        # never a block
+    [[ "$output" != *deny* ]] || { echo "$output"; false; }  # never a block
     i=$((i + 1))
   done
   chmod 755 "$PROJECT_DIR/.claude"
@@ -352,7 +468,7 @@ warn_rows() {
   # → editing the same file warns (stale).
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
+  [[ "$output" != *deny* ]] || { echo "$output"; false; }
   [[ "$stderr" == *"not Read this turn"* ]]
 }
 

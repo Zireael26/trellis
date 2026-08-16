@@ -1,6 +1,13 @@
-# ADR — Worktree lifecycle: janitor reaps pushed+clean trees; fan-out self-reaps; early tripwire
+# ADR — Worktree lifecycle: janitor reaps pushed+clean trees; `fanout-verify` self-reaps; early tripwire
 
 **Date:** 2026-07-16 · **Status:** accepted
+> **Retirement boundary — former `codex-fanout` follow-up #1.** PR #162
+> accepted the caller-provisioned conflicting-unit reap doctrine; commit
+> `2ad1808` later retired it. Its [companion ADR](2026-07-16-orchestrator-conflicting-unit-reap.md)
+> remains field evidence only, not current reaping guidance. This leaves Spec
+> 016's `fanout-verify` teardown, generic `disk-janitor` safe reaping (including
+> manual-delegation worktrees), manual `--apply`, and the separately accepted
+> opt-in scheduled merged-only `--safe-only` apply path live.
 
 ## Context
 
@@ -72,9 +79,14 @@ place; after fan-out, a bounded reap agent **re-verifies at reap time** (linked
 non-main worktree, absolute non-root path, porcelain-empty, pushed) before
 `git worktree remove` (never `--force`). Teardown is failure-isolated — a
 lock/race/refusal leaves the tree (status quo) and never aborts the run or
-mutates a verdict. `codex-fanout`'s conflicting-unit worktree is
-caller-provisioned with an uncommitted diff, so the recipe documents that the
-**orchestrator** reaps it after its own commit+push (follow-up #1).
+mutates a verdict.
+
+> **Historical retired exception — former `codex-fanout` / follow-up #1.** Its
+> caller-provisioned conflicting-unit worktree carried an uncommitted diff; the
+> post-commit+push orchestrator reap was accepted in PR #162, then retired by
+> commit `2ad1808`. The
+> [companion ADR](2026-07-16-orchestrator-conflicting-unit-reap.md) preserves
+> that field evidence; it is not current routing or reaping guidance.
 
 New config (all under `disk_janitor`, all defaulted):
 `reap_pushed_worktrees=true`, `ephemeral_tmp_ttl_days=2`,
@@ -86,18 +98,17 @@ New config (all under `disk_janitor`, all defaulted):
   (reclaim is now one `--apply` over a provably-safe, secret-aware set). The
   janitor can finally *see* the fan-out flood it previously reported as
   `0 B reclaimable`.
-- **Not yet hands-off.** launchd runs `--report` only; `--apply` stays manual by
-  design. Layer 1 auto-cleans **only `fanout-verify`** — not the primary
-  historical source (`codex-fanout` / manual delegation trees). So trees still
-  accumulate between manual `--apply` runs. Fully closing "don't do this every
-  week" needs **either** follow-up #1 (orchestrator-side reap) **or** a scheduled
-  `--apply` restricted to the provably-safe set — an operator decision, not
-  assumed here.
-- **Blast radius** of the one genuinely-destructive line (janitor now `rm`s more
-  trees) is bounded by report-first, manual per-category `--apply` confirm, the
-  porcelain-dirty and secret guards, and `git worktree remove` preserving every
-  branch ref. Verified: 73/73 bats green, shellcheck clean, both recipes
-  `node --check` clean.
+- **Hands-off follow-on shipped separately.** PR #160 initially left `--apply`
+  manual. The accepted scheduled-safe-reap ADR later added a separate, opt-in
+  `org.trellis.disk-janitor-apply` LaunchAgent that runs the stricter
+  merged-only `--safe-only` predicate; the report-only agent remains the default.
+  Rollback must unload/remove the apply job before changing the predicate or
+  reverting PR #160.
+- **Blast radius** of the destructive path is bounded by report-first, manual
+  confirmation by default, the scheduled path's merged-only `--safe-only`
+  tightening, porcelain-dirty and secret guards, and `git worktree remove`
+  preserving every branch ref. PR #160 verified 73/73 bats, shellcheck, and both
+  then-present recipes with `node --check`.
 
 ## Alternatives considered
 

@@ -4,6 +4,8 @@
 **Status:** Accepted
 **Supersedes / relates to:** builds on `2026-07-05-dual-harness-orchestration.md` (the Codex executor node + wrapped tracked path this tier uses).
 
+> **Post-retirement qualification (2026-08-11):** This dated record is non-executable. Since `2ad1808`, its named `codex:codex-rescue`, Trellis-owned worker/recipe/preflight/rollout, automatic provider-degrade/takeover, and `/effort max` paths are retired. Current authority is `docs/codex-routing.md` and `core-rules/references/delegation.md`: deliberate direct `codex exec` or an explicitly selected plugin command; selected-lane failure remains visible and fail-closed until explicit caller/operator re-selection.
+
 ## Context
 
 Three pressures converged: (1) the RC.4 release proved the public-mirror sync has blind spots (stale AntiGravity survived in unsynced public-only docs); (2) `addyosmani/agent-skills` offered opinionated SDLC primitives worth evaluating for fold-in; (3) the user asked for the dev process to run **more automatically without being asked**, on both the Trellis and project ends. The `last30days` trend signal was clear and two-directional: "review is the new bottleneck" (pushes toward more automation + cross-model verification) but also strong unease about **unbounded agent loops** (pushes toward restraint, bounded autonomy, and human-in-the-loop on anything irreversible).

@@ -15,7 +15,11 @@ setup() {
       commit --allow-empty -q -m init
   )
   export CODEX_PROJECT_DIR="$PROJECT_DIR"
-  unset CLAUDE_PROJECT_DIR TRELLIS_ROOT
+  # The resolver locates runtime policy and presets through $TRELLIS_ROOT only
+  # (lib/autonomy.sh) — a `trellis_root` key inside the project manifest is not
+  # read and never was in the portable resolver.
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
+  unset CLAUDE_PROJECT_DIR
 }
 
 teardown() {
@@ -29,15 +33,16 @@ write_fleet_config() {
     > "$TRELLIS_FIXTURE/trellis.config.json"
 }
 
+# Portable project policy is the canonical `.trellis.json` manifest;
+# `.trellis.config.json` survives only as the legacy fallback.
 write_project_config() {
   local autonomy_json="$1" presets_json="$2"
   jq -n \
-    --arg root "$TRELLIS_FIXTURE" \
     --argjson autonomy "$autonomy_json" \
     --argjson presets "$presets_json" \
-    '{trellis_root: $root, presets: $presets}
+    '{schema_version: 1, project_id: "fixture-project", presets: $presets}
      + (if $autonomy == null then {} else {autonomy: $autonomy} end)' \
-    > "$PROJECT_DIR/.trellis.config.json"
+    > "$PROJECT_DIR/.trellis.json"
 }
 
 additional_context() {
@@ -103,5 +108,8 @@ EOF
   additional_context | grep -q 'Recent decisions (L4/L5)'
   additional_context | grep -q 'decision-03'
   additional_context | grep -q 'decision-12'
-  ! additional_context | grep -q 'decision-02'
+  # Counted zero, not a leading `!`: the negation is enforced here only because
+  # it happens to be the LAST statement, so any line appended below it would
+  # silently make the absence claim vacuous.
+  [ "$(additional_context | grep -c 'decision-02')" -eq 0 ] || { additional_context; false; }
 }

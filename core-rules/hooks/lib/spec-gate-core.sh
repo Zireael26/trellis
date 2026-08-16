@@ -22,6 +22,11 @@
 _sg_lib_dir=$(unset CDPATH; cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)
 # shellcheck source=/dev/null
 [ -f "$_sg_lib_dir/deps.sh" ] && . "$_sg_lib_dir/deps.sh"
+# The interview gate shares the canonical autonomy resolver with every other
+# harness-facing hook. A deployed runtime carries this sibling beside the core.
+# shellcheck source=/dev/null
+[ -f "$_sg_lib_dir/autonomy.sh" ] && . "$_sg_lib_dir/autonomy.sh"
+
 
 # Built-in fallbacks (documented in core-rules/hooks.md; overridable via config).
 SG_DEFAULT_FLOOR=80
@@ -29,15 +34,64 @@ SG_DEFAULT_CEILING=400
 SG_TEMPLATE_MIN_BYTES=200
 
 # --- config resolution ------------------------------------------------------
+# Policy is field-resolved so a portable project manifest can override only the
+# value it owns. Attached projects consume the immutable runtime only; an
+# unattached checkout has project policy plus built-ins, never mutable source
+# policy at its repository root.
+_sg_policy_files() {
+  local root="$1"
+  # `.trellis.config.json` is a DEPRECATED read-only fallback, retained past
+  # v1.0.0-rc.25 only for checkouts still held on the legacy layout.
+  printf '%s\n' \
+    "$root/.trellis.json" \
+    "$root/.trellis.config.json"
+  [ -n "${TRELLIS_ROOT:-}" ] && printf '%s\n' "$TRELLIS_ROOT/trellis.config.json"
+}
+
+# Echoes TAB-separated: "<value>\t<status>\t<file>"
+#   status: ok | disabled | malformed | nojq
+# `null` means the field was absent. A status of `ok` with `null` means that a
+# valid block was present but did not declare this field, so its caller applies
+# the field's built-in fallback.
+_sg_resolve_block_field() {
+  local root="$1" block="$2" field="$3" extra="${4:-}" f match="" value=""
+  if ! command -v jq >/dev/null 2>&1; then printf 'null\tnojq\t\n'; return; fi
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    # A present unparseable or non-object config is malformed => fail closed.
+    if ! jq -e 'type == "object"' "$f" >/dev/null 2>&1; then
+      printf 'null\tmalformed\t\n'; return
+    fi
+    if ! jq -e --arg b "$block" 'has($b)' "$f" >/dev/null 2>&1; then
+      continue
+    fi
+    if ! jq -e --arg b "$block" '.[$b] | type == "object"' "$f" >/dev/null 2>&1; then
+      printf 'null\tmalformed\t\n'; return
+    fi
+    if [ -n "$extra" ] && ! jq -e --arg b "$block" ".[\$b] | ( $extra )" "$f" >/dev/null 2>&1; then
+      printf 'null\tmalformed\t\n'; return
+    fi
+    [ -n "$match" ] || match="$f"
+    if jq -e --arg b "$block" --arg k "$field" '.[$b] | has($k)' "$f" >/dev/null 2>&1; then
+      value=$(jq -r --arg b "$block" --arg k "$field" '.[$b][$k]' "$f" 2>/dev/null)
+      printf '%s\tok\t%s\n' "$value" "$f"
+      return
+    fi
+  done < <(_sg_policy_files "$root")
+  if [ -n "$match" ]; then
+    printf 'null\tok\t%s\n' "$match"
+  else
+    printf 'null\tdisabled\t\n'
+  fi
+}
+
 # ONE parser, N blocks. Every boolean-gated Trellis config block shares the
-# same resolution order, the same unparseable-config rule, and the same
-# enabled-key validation, so those live here once instead of being
-# re-implemented per block.
+# same source order, unparseable-config rule, and enabled-key validation.
 #
 # Echoes TAB-separated: "<enabled>\t<status>\t<file>"
 #   status: ok | disabled | malformed | nojq
-#   file:   the config that declared the block; empty unless status is ok.
-#           (Tab-separated because a config path may contain spaces.)
+#   file:   the config that supplied `enabled`, or the first declaring config
+#           when a valid block omits that key.
 #
 # Args: $1 repo root, $2 block name, $3 optional jq filter evaluated against the
 # block for block-specific key validation — must output true to pass.
@@ -46,78 +100,86 @@ SG_TEMPLATE_MIN_BYTES=200
 # what false means; `mandatory_pipeline` escalates `malformed` to a hard block
 # (an opted-in project must not be silently disabled by a typo).
 sg_resolve_block() {
-  local root="$1" block="$2" extra="${3:-}" f enabled="" present=0 match=""
-  if ! command -v jq >/dev/null 2>&1; then printf 'false\tnojq\t\n'; return; fi
-  for f in "$root/.trellis.config.json" "$root/trellis.config.json"; do
-    [ -f "$f" ] || continue
-    # A present but unparseable config, or a present block that is not an
-    # object, is malformed => fail closed.
-    if ! jq -e . "$f" >/dev/null 2>&1; then printf 'false\tmalformed\t\n'; return; fi
-    if jq -e --arg b "$block" 'has($b)' "$f" >/dev/null 2>&1; then
-      present=1
-      if ! jq -e --arg b "$block" '.[$b] | type == "object"' "$f" >/dev/null 2>&1; then
-        printf 'false\tmalformed\t\n'; return
-      fi
-      if [ -n "$extra" ] && ! jq -e --arg b "$block" ".[\$b] | ( $extra )" "$f" >/dev/null 2>&1; then
-        printf 'false\tmalformed\t\n'; return
-      fi
-      # First config that declares the block wins (project-local over central).
-      # NB: do NOT use `// empty` on `enabled` — jq's `//` treats the boolean
-      # `false` as absent, which would collapse `enabled:false` to empty.
-      enabled=$(jq -r --arg b "$block" '.[$b].enabled' "$f" 2>/dev/null)
-      match="$f"
-      break
-    fi
-  done
-  [ "$present" -eq 1 ] || { printf 'false\tdisabled\t\n'; return; }
-  # Validate enabled true/false (a missing key defaults to disabled).
+  local root="$1" block="$2" extra="${3:-}" out enabled status file
+  out=$(_sg_resolve_block_field "$root" "$block" enabled "$extra")
+  IFS=$'\t' read -r enabled status file <<EOF
+$out
+EOF
+  case "$status" in
+    nojq|malformed|disabled) printf 'false\t%s\t\n' "$status"; return ;;
+  esac
+  # NB: do NOT use jq's `//` on enabled — it treats boolean false as absent.
   case "$enabled" in
     true|false) ;;
     null|'') enabled=false ;;
     *) printf 'false\tmalformed\t\n'; return ;;
   esac
-  printf '%s\tok\t%s\n' "$enabled" "$match"
+  printf '%s\tok\t%s\n' "$enabled" "$file"
 }
 
 # Echoes: "<enabled> <floor> <ceiling> <status>"
 #   status: ok | disabled | malformed | nojq
-# Reads mandatory_pipeline from project-local then central config at REPO_ROOT.
+# Resolves each mandatory-pipeline field independently from canonical project,
+# legacy project, immutable runtime, then its built-in default.
 sg_resolve_cfg() {
   local root="$1" out enabled status file floor="" ceiling=""
-  # Threshold keys are optional, but a present value must be a positive JSON
-  # integer. Do not let strings, fractions, zero, negatives, booleans, or null
-  # silently collapse to a built-in default in an opted-in block.
-  out=$(sg_resolve_block "$root" mandatory_pipeline '
+  local validation='
+        def optional_boolean($key):
+            if (has($key) | not) then true
+            else (.[$key] | type == "boolean" or type == "null")
+            end;
         def positive_integer($key):
             if (has($key) | not) then true
             else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end)
             end;
-          positive_integer("spec_required_diff_lines")
-          and positive_integer("surgical_max_diff_lines")')
+          optional_boolean("enabled")
+          and positive_integer("spec_required_diff_lines")
+          and positive_integer("surgical_max_diff_lines")'
+
+  out=$(sg_resolve_block "$root" mandatory_pipeline "$validation")
   IFS=$'\t' read -r enabled status file <<EOF
 $out
 EOF
   if [ "$status" != ok ]; then
     echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING $status"; return
   fi
-  floor=$(jq -r '.mandatory_pipeline.spec_required_diff_lines // empty' "$file" 2>/dev/null)
-  ceiling=$(jq -r '.mandatory_pipeline.surgical_max_diff_lines // empty' "$file" 2>/dev/null)
-  [ -n "$floor" ] || floor=$SG_DEFAULT_FLOOR
-  [ -n "$ceiling" ] || ceiling=$SG_DEFAULT_CEILING
+
+  out=$(_sg_resolve_block_field "$root" mandatory_pipeline spec_required_diff_lines "$validation")
+  IFS=$'\t' read -r floor status file <<EOF
+$out
+EOF
+  if [ "$status" != ok ]; then
+    echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING $status"; return
+  fi
+  out=$(_sg_resolve_block_field "$root" mandatory_pipeline surgical_max_diff_lines "$validation")
+  IFS=$'\t' read -r ceiling status file <<EOF
+$out
+EOF
+  if [ "$status" != ok ]; then
+    echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING $status"; return
+  fi
+
+  case "$floor" in null|'') floor=$SG_DEFAULT_FLOOR ;; esac
+  case "$ceiling" in null|'') ceiling=$SG_DEFAULT_CEILING ;; esac
   echo "$enabled $floor $ceiling ok"
 }
 
 # --- protected branch + diff baseline ---------------------------------------
 sg_protected_branch() {
-  local root="$1" b=""
-  if command -v jq >/dev/null 2>&1; then
-    for f in "$root/.trellis.config.json" "$root/trellis.config.json"; do
-      [ -f "$f" ] || continue
-      b=$(jq -r '.template.branch // empty' "$f" 2>/dev/null)
-      [ -n "$b" ] && break
-    done
+  local root="$1" out b status file
+  local validation='
+    if (has("branch") | not) then true
+    else (.branch | type == "string" and length > 0)
+    end'
+  out=$(_sg_resolve_block_field "$root" template branch "$validation")
+  IFS=$'\t' read -r b status file <<EOF
+$out
+EOF
+  if [ "$status" = ok ] && [ -n "$b" ] && [ "$b" != null ]; then
+    printf '%s' "$b"
+  else
+    printf 'main'
   fi
-  printf '%s' "${b:-main}"
 }
 
 # Echoes the merge-base SHA against the protected branch, or empty on failure.
@@ -235,80 +297,13 @@ sg_autonomy_frontmatter_value() {
 }
 
 sg_autonomy_level() {
-  local root="$1" project_cfg="" trellis_root="" fleet_cfg=""
-  local lvl=3 project_level="" preset_default="" ceiling=5
-  local candidate preset preset_file value session_file
-
+  local root="$1"
   command -v jq >/dev/null 2>&1 || { printf '3'; return; }
-
-  # Project-local config selects presets and may provide the project override.
-  # The dotfile is canonical; the non-dot filename remains a compatibility path.
-  for candidate in "$root/.trellis.config.json" "$root/trellis.config.json"; do
-    if [ -f "$candidate" ]; then
-      project_cfg="$candidate"
-      break
-    fi
-  done
-
-  # Locate the fleet config and canonical preset directory. A deployed hook may
-  # receive TRELLIS_ROOT, while project configs carry the same pointer for normal
-  # pre-push use. The Trellis control-plane repo can resolve to itself.
-  if [ -n "${TRELLIS_ROOT:-}" ]; then
-    trellis_root="$TRELLIS_ROOT"
-  elif [ -n "$project_cfg" ]; then
-    trellis_root=$(jq -r '(.trellis_root // empty) | strings' "$project_cfg" 2>/dev/null || true)
-  fi
-  if [ -z "$trellis_root" ] && [ -f "$root/trellis.config.json" ]; then
-    trellis_root="$root"
-  fi
-  if [ -n "$trellis_root" ] && [ -f "$trellis_root/trellis.config.json" ]; then
-    fleet_cfg="$trellis_root/trellis.config.json"
-  fi
-
-  if [ -n "$fleet_cfg" ]; then
-    value=$(jq -r '.autonomy_default // empty' "$fleet_cfg" 2>/dev/null || true)
-    sg_valid_autonomy_level "$value" && lvl="$value"
-  fi
-
-  if [ -n "$project_cfg" ]; then
-    value=$(jq -r '.autonomy // empty' "$project_cfg" 2>/dev/null || true)
-    sg_valid_autonomy_level "$value" && project_level="$value"
-
-    # Preset order is declaration order: first valid default wins, while the
-    # lowest valid ceiling wins across every active preset.
-    while IFS= read -r preset; do
-      [ -n "$preset" ] || continue
-      preset_file="$trellis_root/core-rules/presets/$preset.md"
-      [ -f "$preset_file" ] || continue
-
-      value=$(sg_autonomy_frontmatter_value "$preset_file" autonomy_default)
-      if [ -z "$preset_default" ] && sg_valid_autonomy_level "$value"; then
-        preset_default="$value"
-      fi
-
-      value=$(sg_autonomy_frontmatter_value "$preset_file" autonomy_ceiling)
-      if sg_valid_autonomy_level "$value" && [ "$value" -lt "$ceiling" ]; then
-        ceiling="$value"
-      fi
-    done < <(jq -r '(.presets // [])[]? | strings' "$project_cfg" 2>/dev/null || true)
-  fi
-
-  # Pick phase: fleet -> preset default (only without project override) ->
-  # project -> shared cross-harness session marker at the canonical repo root.
-  if [ -n "$preset_default" ] && [ -z "$project_level" ]; then
-    lvl="$preset_default"
-  fi
-  [ -n "$project_level" ] && lvl="$project_level"
-
-  session_file="$root/.claude/session-autonomy"
-  if [ -f "$session_file" ]; then
-    value=$(head -1 "$session_file" 2>/dev/null | tr -d '[:space:]')
-    sg_valid_autonomy_level "$value" && lvl="$value"
-  fi
-
-  # Clamp phase: presets are additive, so the most restrictive ceiling wins.
-  [ "$lvl" -gt "$ceiling" ] && lvl="$ceiling"
-  printf '%s' "$lvl"
+  # Never repeat project/runtime lookup here: the shared resolver is the
+  # cross-harness authority for precedence, session overrides, and ceilings.
+  type _se_resolve_autonomy >/dev/null 2>&1 || { printf '3'; return; }
+  _se_resolve_autonomy "$root"
+  printf '%s' "${AUTONOMY_LEVEL:-3}"
 }
 
 # L1-3: real interview => clarify.md in the triad OR an explicit spec-waiver.

@@ -1,6 +1,6 @@
 # ADR — Sol ultra capability re-ground: mechanism verified, D4a satisfied, race-the-legs retired
 
-**Date:** 2026-07-10 · **Status:** accepted
+**Date:** 2026-07-10 · **Status:** accepted for the 2026-07-10 Bash-direct/direct-CLI ultra mechanics and evidence. Current effort admission is governed by `docs/codex-routing.md` §3; the rc.10 worker, recipe, preflight, and revisit clauses are historical and retired by commit `2ad1808`.
 
 ## Context
 
@@ -28,10 +28,12 @@ below. Full sources live in the research workflow transcript; probe JSONL in
 3. **Scope.** Ultra on sol + terra (`multi_agent_version: v2`); luna caps at
    max. Native 5.6 requires CLI ≥ 0.144 (installed: 0.144.0). No `--effort`
    flag on `codex exec`; tier set via `-c model_reasoning_effort=...`.
-4. **Surface split.** Companion v1.0.5 (`codex-companion.mjs:71`) rejects
-   everything above xhigh — max AND ultra are Bash-direct only. Recipes
-   (codex-worker → companion) therefore physically cap at xhigh regardless of
-   doctrine; the D6 preflight fail-close already handles this correctly.
+4. **Retired rc.10 worker surface (historical).** Companion v1.0.5
+   (`codex-companion.mjs:71`) rejected everything above xhigh — max AND ultra
+   were Bash-direct only. The former `codex-worker → companion` recipes therefore
+   capped at xhigh, and the D6 preflight handled that route. Commit `2ad1808`
+   retired those Trellis-owned surfaces; this is field evidence only, not an
+   installed cap or an instruction to run or revisit a preflight.
 5. **Telemetry.** `codex exec --json` streams `turn.completed` usage
    (input/cached/output/reasoning tokens). *Addendum (same day, source dig):*
    those totals are **parent-thread-only** — child threads are independent
@@ -80,27 +82,50 @@ from stdin...".
    `-c model_max_output_tokens=<N>` plus a declared per-unit token ceiling
    checked against `turn.completed` usage in the receipt (breach halts further
    ultra dispatch for the run); justification + receipts, never a default.
-3. **Ultra stays hard-rejected in `.wf.js` recipes** — the dispatch surface
-   caps at xhigh, and prompt-nudged delegation is invisible/non-resumable
-   inside a deterministic workflow. Revisit when the companion accepts >xhigh
-   AND per-subagent visibility exists.
+   This dated acceptance is carried forward only through the current §3
+   admission: ultra remains a separately admitted attended direct-CLI harness
+   mode, not a general tier or a retired recipe route.
+3. **Historical retired recipe constraint.** In rc.10, `.wf.js` recipes
+   hard-rejected ultra because the `codex-worker → companion` route capped at xhigh
+   and prompt-nudged delegation was invisible/non-resumable in a deterministic
+   workflow. Commit `2ad1808` retired the recipes, worker integration, D6
+   preflight, and the “revisit when companion accepts >xhigh and per-subagent
+   visibility exists” clause. Do not use that mechanism as current rollout
+   guidance. Plugin-owned commands remain a separately selected, fail-closed lane:
+   plugin failure never selects direct CLI, and direct-CLI failure never selects the
+   plugin.
 4. **Claude keeps orchestration** — now on capability evidence, not just
-   policy: ultra is a per-unit depth tier, never a competing orchestration
-   surface (spec 011 D7 topology re-check: answered; Phase B §2 strength
-   re-ground stays predicate-gated).
+   policy: ultra is a per-unit attended harness mode, never a competing
+   orchestration surface (spec 011 D7 topology re-check: answered; Phase B §2
+   strength re-ground stays predicate-gated).
 5. **Race-the-legs retired** (operator: no duplicate work across agents).
-   Sequential degrade replaces racing; cross-model review of one produced diff
-   remains legitimate. `speed-doctrine.md` carries the rule; pattern text
+   An explicit caller/operator selection may start a sequential dispatch on another
+   lane after a visible failure; cross-model review of one produced diff remains
+   legitimate. `speed-doctrine.md` carries the rule; pattern text
    stays in git history.
 
 ## Consequences
 
-- Speed doctrine is now five live patterns + one retired; duplicate-generation
-  spend is structurally impossible.
-- Max remains permitted-band but recipe-degraded (surface); doctrine now says
-  so explicitly instead of papering over it.
-- Companion upgrade (> 1.0.5) is the single blocker for recipe-side **max**;
-  recipe-side **ultra** additionally requires per-subagent visibility
-  (Decision 3). Re-check both on plugin updates.
-- The effort band itself (xhigh+max only, medium/high suspended) is unchanged
-  by this ADR — see PR #136.
+**Current policy.** This ADR preserves the 2026-07-10 capability evidence and
+acceptance; it is not the current effort-selection authority. Use
+`docs/codex-routing.md` §3 for every selected direct-CLI or plugin-owned
+command: select `medium`, `high`, or `xhigh` explicitly; `max` is retired and
+has no admitting path; and `ultra` remains separately admitted only as an
+attended direct-CLI harness mode. An explicitly selected provider lane fails
+closed rather than rerouting to another provider.
+
+**Historical 2026-07-10 consequences and receipts.**
+
+- Speed doctrine then recorded five live patterns + one retired; duplicate-generation
+  spend was structurally impossible.
+- `max` was then a permitted direct-CLI exception tier, subject to the same explicit
+  justification and receipt discipline as ultra; no Trellis recipe mediated it.
+- **Historical retired rc.10 revisit condition.** A Companion upgrade (> 1.0.5)
+  was the proposed blocker check for recipe-side **max**, with per-subagent
+  visibility additionally required for recipe-side **ultra**. Since commit
+  `2ad1808` retired the recipes and preflight, neither condition is a current
+  Trellis rollout check. Plugin-owned commands remain explicitly selected and
+  fail closed; their availability never reroutes a direct-CLI unit.
+- The effort band at this acceptance was `xhigh` + `max`, with `medium`/`high`
+  suspended (PR #136). That interim posture is historical only and is
+  superseded by the current §3 band above.

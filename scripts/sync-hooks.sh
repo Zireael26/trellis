@@ -1,351 +1,613 @@
 #!/usr/bin/env bash
-# Sync canonical hook scripts to all registered projects, AND reconcile each
-# project's .claude/settings.json .hooks wiring with the canonical baseline.
+# Reconcile one attached harness across a local fleet.
 #
-# Reads trellis.config.json for paths.
-# Reads registry.md for the project list (rows in "Active projects" table).
-# Skips blacklisted projects.
+# This command never derives a checkout from tracked policy and never copies a
+# hook or settings file from the mutable checkout that launched it. Each
+# mutation is delegated to the verified immutable active-release reconciler
+# after strict registry identity and committed attachment ownership checks.
 #
-# Two things happen per project:
-#   1. Hook FILE copies — every canonical .sh under core-rules/hooks/ (and its
-#      lib/ siblings) is sha-compared and overwritten if stale.
-#   2. settings.json .hooks RECONCILE — the project's .hooks object is rebuilt
-#      from the canonical .hooks baseline (core-rules/templates/claude-settings
-#      .json) PLUS any project-specific hook block re-appended verbatim into its
-#      original event array. A block is project-specific iff none of its command
-#      basenames appear in the canonical command-basename set. Every non-.hooks
-#      key (permissions, effortLevel, …) is preserved untouched. Projects with
-#      no settings.json are skipped with a note (run onboard-project.sh first) —
-#      this script operates on existing projects and never creates settings.json.
-#
-# Skill symlinks are not synced — they are symlinks to canonical and
-# update automatically. This script handles only the .sh hook *copies*
-# under <project>/.claude/hooks/ plus the settings.json .hooks wiring.
-#
-# Usage:
-#   sync-hooks.sh                  # interactive: confirm before each project
-#   sync-hooks.sh --dry-run        # show what would change, no writes
-#   sync-hooks.sh --yes            # non-interactive, sync everywhere
-#   sync-hooks.sh <name>           # only that project (must be in registry)
-#   sync-hooks.sh --from-main-only # refuse to run from a worktree / detached HEAD
-#
-# Provenance: every run prints SOURCE_ROOT, HEAD SHA, and the SHA of one
-# bellwether hook before touching any project. The 2026-05-09 cross-project
-# sync silently used a stale source (pre-May-8 canonical) and missed the
-# context-log hooks; see audits/2026-05-11-sync-tool-rca.md.
+# sync-codex-hooks.sh invokes this program with TRELLIS_SYNC_HARNESS=codex.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=lib/config-load.sh
-. "$SCRIPT_DIR/lib/config-load.sh"
-# shellcheck source=lib/blacklist-parser.sh
-. "$SCRIPT_DIR/lib/blacklist-parser.sh"
-# shellcheck source=lib/settings-hooks-merge.sh
-. "$SCRIPT_DIR/lib/settings-hooks-merge.sh"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib/trellis-home.sh
+. "$SCRIPT_DIR/lib/trellis-home.sh"
+# shellcheck source=lib/local-registry.sh
+. "$SCRIPT_DIR/lib/local-registry.sh"
+# shellcheck source=lib/release-store.sh
+. "$SCRIPT_DIR/lib/release-store.sh"
+# shellcheck source=lib/surface-plan.sh
+. "$SCRIPT_DIR/lib/surface-plan.sh"
+# shellcheck source=lib/attachment.sh
+. "$SCRIPT_DIR/lib/attachment.sh"
+
+SYNC_HARNESS="${TRELLIS_SYNC_HARNESS:-claude}"
+SYNC_NAME="${TRELLIS_SYNC_NAME:-sync-hooks.sh}"
+
+# Bash's %q emits a one-line terminal-safe representation: control bytes become
+# visible escapes rather than terminal instructions. Keep every dynamic
+# diagnostic behind this boundary, including captured child-process output.
+diagnostic_escape() {
+  LC_ALL=C printf '%q' "${1-}"
+}
+
+case "$SYNC_HARNESS" in
+  claude) SYNC_LABEL="Claude hooks" ;;
+  codex) SYNC_LABEL="Codex hooks" ;;
+  *)
+    printf '%s: unsupported attached harness: %s\n' \
+      "$(diagnostic_escape "$SYNC_NAME")" "$(diagnostic_escape "$SYNC_HARNESS")" >&2
+    exit "$TRELLIS_EX_USAGE"
+    ;;
+esac
+
+usage() {
+  printf 'Usage: %s [--home PATH] [--fleet NAME] [--dry-run] [--yes] [PROJECT_ID]\n' \
+    "$(diagnostic_escape "$SYNC_NAME")"
+  printf '       %s --from-main-only [--home PATH] [--fleet NAME] [--dry-run] [--yes] [PROJECT_ID]\n' \
+    "$(diagnostic_escape "$SYNC_NAME")"
+  cat <<EOF
+
+Reconciles the locally attached $SYNC_LABEL surface through the recorded
+immutable release. PROJECT_ID selects all registered worktrees for that project
+in the selected fleet. Without PROJECT_ID, every row in that fleet is examined.
+
+Unavailable, excluded, legacy, and unattached rows are reported and never
+mutated. --dry-run reports attachment relinks without invoking them.
+EOF
+}
 
 DRY_RUN=false
 ASSUME_YES=false
 ONLY_PROJECT=""
 FROM_MAIN_ONLY=false
+HOME_OPT=""
+FLEET_OPT=""
 
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run)         DRY_RUN=true ;;
-    --yes|-y)          ASSUME_YES=true ;;
-    --from-main-only)  FROM_MAIN_ONLY=true ;;
-    --help|-h)
-      sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
-      exit 0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --home)
+      [ "$#" -ge 2 ] || {
+        printf '%s: --home requires PATH\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+        exit "$TRELLIS_EX_USAGE"
+      }
+      HOME_OPT="$2"
+      shift 2
+      ;;
+    --fleet)
+      [ "$#" -ge 2 ] || {
+        printf '%s: --fleet requires NAME\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+        exit "$TRELLIS_EX_USAGE"
+      }
+      FLEET_OPT="$2"
+      shift 2
+      ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --yes|-y) ASSUME_YES=true; shift ;;
+    --from-main-only) FROM_MAIN_ONLY=true; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --)
+      shift
+      [ "$#" -le 1 ] || {
+        printf '%s: accepts at most one PROJECT_ID\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+        exit "$TRELLIS_EX_USAGE"
+      }
+      if [ "$#" -eq 1 ]; then ONLY_PROJECT="$1"; fi
+      break
       ;;
     -*)
-      echo "unknown option: $arg" >&2
-      exit 2
+      printf '%s: unknown option: %s\n' \
+        "$(diagnostic_escape "$SYNC_NAME")" "$(diagnostic_escape "$1")" >&2
+      exit "$TRELLIS_EX_USAGE"
       ;;
     *)
-      ONLY_PROJECT="$arg"
+      [ -z "$ONLY_PROJECT" ] || {
+        printf '%s: accepts at most one PROJECT_ID\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+        exit "$TRELLIS_EX_USAGE"
+      }
+      ONLY_PROJECT="$1"
+      shift
       ;;
   esac
 done
 
-CANONICAL_HOOKS_DIR="$SOURCE_ROOT/core-rules/hooks"
-# Canonical .hooks baseline lives in the settings template (same path
-# rollout-settings.sh resolves via TRELLIS_ROOT). Used by the settings.json
-# .hooks reconcile step at the end of sync_one.
-CANONICAL_SETTINGS_TEMPLATE="$TRELLIS_ROOT/core-rules/templates/claude-settings.json"
-REGISTRY="$TRELLIS_ROOT/registry.md"
-BLACKLIST="$TRELLIS_ROOT/blacklist.md"
+command -v jq >/dev/null 2>&1 || {
+  printf '%s: jq is required for local registry reconciliation\n' \
+    "$(diagnostic_escape "$SYNC_NAME")" >&2
+  exit "$TRELLIS_EX_UNAVAILABLE"
+}
 
-[ -d "$CANONICAL_HOOKS_DIR" ] || { echo "canonical hooks dir missing: $CANONICAL_HOOKS_DIR" >&2; exit 1; }
-[ -f "$REGISTRY" ]            || { echo "registry.md missing: $REGISTRY" >&2; exit 1; }
-# jq is required for the settings.json .hooks reconcile (config-load already
-# checked it, but be explicit since this script now depends on it directly).
-command -v jq >/dev/null 2>&1 || { echo "jq required for settings reconcile" >&2; exit 1; }
-[ -f "$CANONICAL_SETTINGS_TEMPLATE" ] || { echo "canonical settings template missing: $CANONICAL_SETTINGS_TEMPLATE" >&2; exit 1; }
-
-# --- Provenance breadcrumbs ---
-# Loudly identify the source the sync is reading from. The 2026-05-09 incident
-# was a stale source that silently shipped pre-May-8 hooks to every project;
-# logging this up front makes that class of bug visible in retrospect.
-SOURCE_HEAD="(no git)"
-if command -v git >/dev/null 2>&1 && git -C "$SOURCE_ROOT" rev-parse HEAD >/dev/null 2>&1; then
-  SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD)"
+if HOME_PATH="$(trellis_home_resolve "$HOME_OPT" 2>/dev/null)"; then
+  :
+else
+  rc=$?
+  printf '%s: could not resolve local Trellis home\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+  exit "$rc"
 fi
-BELLWETHER="$CANONICAL_HOOKS_DIR/session-context.sh"
-BELLWETHER_SHA="(missing)"
-[ -f "$BELLWETHER" ] && BELLWETHER_SHA="$(shasum -a 256 "$BELLWETHER" | awk '{print $1}')"
+CONFIG_PATH="$(trellis_home_config_path "$HOME_PATH")"
+if FLEET="$(trellis_home_resolve_fleet "$FLEET_OPT" "$CONFIG_PATH" 2>/dev/null)"; then
+  :
+else
+  rc=$?
+  printf '%s: could not resolve local fleet\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+  exit "$rc"
+fi
+export TRELLIS_HOME="$HOME_PATH"
 
-echo "Source:        $SOURCE_ROOT"
-echo "Source HEAD:   $SOURCE_HEAD"
-echo "Bellwether:    session-context.sh sha=${BELLWETHER_SHA:0:12}"
-
-# Worktree / stale-source guard.
-case "$SOURCE_ROOT" in
-  */.claude/worktrees/*)
-    if $FROM_MAIN_ONLY; then
-      echo "refusing to run: SOURCE_ROOT is inside a worktree and --from-main-only is set" >&2
-      exit 1
-    fi
-    echo "WARNING: SOURCE_ROOT is inside a worktree (.claude/worktrees/...) — pass --from-main-only to refuse this configuration." >&2
-    ;;
-esac
-
-# Linked-worktree guard (generalizes the path check above): a linked worktree
-# whose path is NOT under .claude/worktrees/ — e.g. a sibling dir — is just as
-# stale-prone. A linked worktree's --git-dir is <main>/.git/worktrees/<name>;
-# the main work tree's is a plain .git. This catches the path-pattern-miss case.
-if command -v git >/dev/null 2>&1 \
-   && git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  __sh_gitdir="$(git -C "$SOURCE_ROOT" rev-parse --git-dir 2>/dev/null || true)"
-  case "$__sh_gitdir" in
+# Keep the historical --from-main-only safety switch. It guards only the
+# synchronizer program now: all project payloads are resolved from releases.
+PROGRAM_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
+if command -v git >/dev/null 2>&1 &&
+   git -C "$PROGRAM_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  PROGRAM_GIT_DIR="$(git -C "$PROGRAM_ROOT" rev-parse --git-dir 2>/dev/null || true)"
+  case "$PROGRAM_GIT_DIR" in
     */worktrees/*)
       if $FROM_MAIN_ONLY; then
-        echo "refusing to run: SOURCE_ROOT is a linked git worktree and --from-main-only is set" >&2
+        printf '%s: refusing to run from a linked git worktree with --from-main-only\n' \
+          "$(diagnostic_escape "$SYNC_NAME")" >&2
         exit 1
       fi
-      echo "WARNING: SOURCE_ROOT is a linked git worktree — pass --from-main-only to refuse this configuration." >&2
       ;;
   esac
+  if $FROM_MAIN_ONLY && ! git -C "$PROGRAM_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    printf '%s: refusing to run with a detached program HEAD and --from-main-only\n' \
+      "$(diagnostic_escape "$SYNC_NAME")" >&2
+    exit 1
+  fi
 fi
 
-# Detached-HEAD guard: --from-main-only promises to refuse a detached HEAD too
-# (a detached source is as stale-prone as a worktree). symbolic-ref -q fails on
-# a detached HEAD; only enforce when the flag is set and SOURCE_ROOT is a repo.
-if $FROM_MAIN_ONLY && command -v git >/dev/null 2>&1 \
-   && git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-   && ! git -C "$SOURCE_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
-  echo "refusing to run: SOURCE_ROOT HEAD is detached and --from-main-only is set" >&2
+SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/trellis.sync-registry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+TARGETS="$(mktemp "${TMPDIR:-/tmp}/trellis.sync-targets.XXXXXX")" || {
+  rm -f "$SNAPSHOT"
+  exit "$TRELLIS_EX_UNAVAILABLE"
+}
+ACTIVE_REPAIR_SNAPSHOT=""
+ACTIVE_REPAIR_RELEASE_DIGEST=""
+ACTIVE_REPAIR_RELEASE_VERSION=""
+
+cleanup_sync() {
+  local status="${1:-0}" cleanup_output cleanup_rc
+  rm -f "$SNAPSHOT" "$TARGETS"
+  if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ]; then
+    if cleanup_output="$(TRELLIS_HOME="$HOME_PATH" \
+        release_store_remove_snapshot "$ACTIVE_REPAIR_SNAPSHOT" \
+          "$ACTIVE_REPAIR_RELEASE_VERSION" 2>&1)"; then
+      :
+    else
+      cleanup_rc=$?
+      printf '  WARN: active immutable execution snapshot cleanup failed (%s): %s\n' \
+        "$cleanup_rc" "$(diagnostic_escape "${cleanup_output:-no diagnostic}")" >&2
+      if [ "$cleanup_rc" -gt "${RESULT_STATUS:-0}" ]; then
+        RESULT_STATUS="$cleanup_rc"
+      fi
+    fi
+    ACTIVE_REPAIR_SNAPSHOT=""
+    ACTIVE_REPAIR_RELEASE_DIGEST=""
+    ACTIVE_REPAIR_RELEASE_VERSION=""
+  fi
+  trap - EXIT HUP INT TERM
+  if [ "${RESULT_STATUS:-0}" -gt "$status" ]; then
+    status="$RESULT_STATUS"
+  fi
+  exit "$status"
+}
+
+trap 'cleanup_sync "$?"' EXIT
+trap 'cleanup_sync 129' HUP
+trap 'cleanup_sync 130' INT
+trap 'cleanup_sync 143' TERM
+
+if local_registry_list_json "$HOME_PATH" "$FLEET" > "$SNAPSHOT" 2>/dev/null; then
+  :
+else
+  rc=$?
+  printf '%s: could not read strict local registry for fleet %s\n' \
+    "$(diagnostic_escape "$SYNC_NAME")" "$(diagnostic_escape "$FLEET")" >&2
+  exit "$rc"
+fi
+
+# The aggregate is armed BEFORE the selection so that every exit path below —
+# including the preflight "project not in this fleet" refusal — is floored by
+# whatever the FULL listing already proved about registry state.
+RESULT_STATUS=0
+
+record_failure() {
+  local status="$1"
+  if [ "$status" -gt "$RESULT_STATUS" ]; then
+    RESULT_STATUS="$status"
+  fi
+}
+
+if [ -n "$ONLY_PROJECT" ]; then
+  jq -c --arg project_id "$ONLY_PROJECT" \
+    '.entries[] | select(.project_id == $project_id)' "$SNAPSHOT" > "$TARGETS"
+else
+  jq -c '.entries[]' "$SNAPSHOT" > "$TARGETS"
+fi
+
+# A registry state error is a property of the REGISTRY, not of the selection.
+# `sync_one` reports the drifted rows this run would have visited; the rows the
+# `--project` filter just removed are reported here instead, from the full
+# fleet listing, so a scoped run over a healthy project can never exit 0 (or on
+# a lower preflight class) over a registry it has been shown to be corrupt.
+# Unscoped, every row is selected and this reports nothing.
+if local_registry_report_unselected_state_errors "$(cat "$SNAPSHOT")" "$(cat "$TARGETS")"; then
+  :
+else
+  record_failure "$?"
+fi
+
+TARGET_COUNT="$(wc -l < "$TARGETS" | tr -d ' ')"
+if [ "$TARGET_COUNT" -eq 0 ] && [ -n "$ONLY_PROJECT" ]; then
+  printf '%s: project not in local registry fleet %s: %s\n' \
+    "$(diagnostic_escape "$SYNC_NAME")" "$(diagnostic_escape "$FLEET")" \
+    "$(diagnostic_escape "$ONLY_PROJECT")" >&2
   exit 1
 fi
 
-# Parse Active projects table from registry.md
-# Format: | name | `/personal/<dir>` | class | notes |
-# Skips the header row ("| Project |") and separator ("|---|").
-read_registry() {
-  awk '
-    /^## Active projects/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0
-      gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
-      print name
-    }
-  ' "$REGISTRY"
+printf 'Trellis home: %s\nFleet: %s\nTargets: %s\n' \
+  "$(diagnostic_escape "$HOME_PATH")" "$(diagnostic_escape "$FLEET")" "$TARGET_COUNT"
+$DRY_RUN && printf '%s\n' '(dry-run mode - attachment state is not changed)'
+
+if ! $ASSUME_YES && ! $DRY_RUN && [ "$TARGET_COUNT" -gt 0 ]; then
+  printf 'Proceed? [y/N] '
+  read -r answer
+  [ "$answer" = y ] || [ "$answer" = Y ] || {
+    printf '%s\n' 'aborted'
+    exit 0
+  }
+fi
+
+RELINK_SUCCEEDED=false
+
+row_is_legacy() {
+  printf '%s\n' "$1" | jq -e '.metadata.legacy? != null' >/dev/null 2>&1
 }
 
-resolve_project_path() {
-  # Map a registry name to absolute path under PROJECTS_ROOT.
-  # registry uses paths like `/personal/<name>` — we strip /personal/ and
-  # join with PROJECTS_ROOT.
-  local name="$1"
-  printf "%s/%s" "$PROJECTS_ROOT" "$name"
+row_matches_resolved_root() {
+  local row="$1" resolution="$2"
+  jq -e \
+    --arg fleet "$(printf '%s\n' "$row" | jq -r '.fleet' 2>/dev/null)" \
+    --arg project_id "$(printf '%s\n' "$row" | jq -r '.project_id' 2>/dev/null)" \
+    --arg root "$(printf '%s\n' "$row" | jq -r '.root // empty' 2>/dev/null)" \
+    --arg checkout_id "$(printf '%s\n' "$row" | jq -r '.checkout_id // empty' 2>/dev/null)" \
+    --arg worktree_id "$(printf '%s\n' "$row" | jq -r '.worktree_id // empty' 2>/dev/null)" '
+      .fleet == $fleet and .project_id == $project_id and .root == $root
+      and .checkout_id == $checkout_id and .worktree_id == $worktree_id
+    ' <<<"$resolution" >/dev/null 2>&1
 }
 
-REGISTRY_NAMES=()
-while IFS= read -r line; do
-  [ -n "$line" ] && REGISTRY_NAMES+=("$line")
-done < <(read_registry)
+owner_harnesses_json() {
+  jq -ce '
+    def attachment_harness($path):
+      if $path == "AGENTS.md" or ($path | startswith(".agents/")) or ($path | startswith(".codex/"))
+      then "codex"
+      elif ($path | startswith(".claude/")) then "claude"
+      elif ($path | startswith(".omp/")) then "omp"
+      else empty end;
+    [.artifacts[] | attachment_harness(.path)] | unique | sort
+  ' "$1" 2>/dev/null
+}
 
-BLACKLIST_NAMES=()
-while IFS= read -r line; do
-  [ -n "$line" ] && BLACKLIST_NAMES+=("$line")
-done < <(read_blacklist_names "$BLACKLIST")
+owner_matches_row() {
+  local owner="$1" row="$2" row_harnesses owner_harnesses
+  if row_harnesses="$(printf '%s\n' "$row" | jq -c '.harnesses // []' 2>/dev/null)"; then
+    :
+  else
+    return 1
+  fi
+  if row_harnesses="$(local_registry_normalize_harnesses "$row_harnesses" 2>/dev/null)"; then
+    :
+  else
+    return 1
+  fi
+  if owner_harnesses="$(owner_harnesses_json "$owner")"; then
+    :
+  else
+    return 1
+  fi
+  [ "$owner_harnesses" = "$row_harnesses" ] || return 1
 
-is_blacklisted() {
-  local name="$1" b
-  [ "${#BLACKLIST_NAMES[@]}" -eq 0 ] && return 1
-  for b in "${BLACKLIST_NAMES[@]}"; do
-    [ "$b" = "$name" ] && return 0
-  done
-  return 1
+  jq -e \
+    --arg fleet "$(printf '%s\n' "$row" | jq -r '.fleet' 2>/dev/null)" \
+    --arg project_id "$(printf '%s\n' "$row" | jq -r '.project_id' 2>/dev/null)" \
+    --arg root "$(printf '%s\n' "$row" | jq -r '.root // empty' 2>/dev/null)" \
+    --arg checkout_id "$(printf '%s\n' "$row" | jq -r '.checkout_id // empty' 2>/dev/null)" \
+    --arg worktree_id "$(printf '%s\n' "$row" | jq -r '.worktree_id // empty' 2>/dev/null)" \
+    --arg attachment_id "$(printf '%s\n' "$row" | jq -r '.attachment_id // empty' 2>/dev/null)" \
+    --arg release "$(printf '%s\n' "$row" | jq -r '.release // empty' 2>/dev/null)" '
+      .status == "committed"
+      and .fleet == $fleet and .project_id == $project_id
+      and .project_root == $root and .worktree_root == $root
+      and .checkout_id == $checkout_id and .worktree_id == $worktree_id
+      and .attachment_id == $attachment_id and .release == $release
+    ' "$owner" >/dev/null 2>&1
+}
+
+plan_has_attached_leaves() {
+  jq -e '.artifacts | length > 0' <<<"$1" >/dev/null 2>&1
+}
+
+# Resolve one private snapshot record from the active installed release. The
+# only later consumer of its pathname is the verified in-memory bundle emitter;
+# no snapshot path is ever executed directly.
+active_cli_repair_bundle() {
+  local active_release version record snapshot digest
+  if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ] && [ -n "$ACTIVE_REPAIR_RELEASE_DIGEST" ] &&
+     [ -n "$ACTIVE_REPAIR_RELEASE_VERSION" ]; then
+    return 0
+  fi
+  if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ] || [ -n "$ACTIVE_REPAIR_RELEASE_DIGEST" ] ||
+     [ -n "$ACTIVE_REPAIR_RELEASE_VERSION" ]; then
+    return "$TRELLIS_EX_STATE"
+  fi
+  trellis_home_validate_config "$CONFIG_PATH" >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
+  if active_release="$(jq -er '.active_cli_release' "$CONFIG_PATH" 2>/dev/null)"; then
+    :
+  else
+    return "$TRELLIS_EX_STATE"
+  fi
+  # The snapshot the store seals is named for the NORMALIZED version (a leading
+  # `v` is stripped), and every later gate on that name — cleanup and bundle
+  # emission — binds the name to the version it is handed. Normalize here so the
+  # two agree; the same call inside the store is what decides the name.
+  if version="$(release_store_normalize_version "$active_release" 2>/dev/null)"; then
+    :
+  else
+    return "$TRELLIS_EX_STATE"
+  fi
+  if record="$(TRELLIS_HOME="$HOME_PATH" \
+      release_store_snapshot_verified_release "$active_release" 2>/dev/null)"; then
+    :
+  else
+    return "$?"
+  fi
+  case "$record" in
+    *$'\t'*)
+      snapshot="${record%%$'\t'*}"
+      digest="${record#*$'\t'}"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+  if [ -z "$snapshot" ] || ! release_store_absolute_path_is_clean "$snapshot"; then
+    return "$TRELLIS_EX_STATE"
+  fi
+  case "$digest" in
+    ''|*[!0-9a-f]*|*$'\t'*|*$'\r'*|*$'\n'*) return "$TRELLIS_EX_STATE" ;;
+  esac
+  [ "${#digest}" -eq 64 ] || return "$TRELLIS_EX_STATE"
+  ACTIVE_REPAIR_SNAPSHOT="$snapshot"
+  ACTIVE_REPAIR_RELEASE_DIGEST="$digest"
+  ACTIVE_REPAIR_RELEASE_VERSION="$version"
+  return 0
+}
+
+relink_one() {
+  local root="$1" label="$2" fleet="$3" project_id="$4" checkout_id="$5"
+  local worktree_id="$6" attachment_id="$7" release="$8" harnesses="$9"
+  local output rc
+  local -a binding_args=(
+    --expected-fleet "$fleet"
+    --expected-project-id "$project_id"
+    --expected-root "$root"
+    --expected-checkout-id "$checkout_id"
+    --expected-worktree-id "$worktree_id"
+    --expected-attachment-id "$attachment_id"
+    --expected-release "$release"
+    --expected-harnesses-json "$harnesses"
+  )
+
+  RELINK_SUCCEEDED=false
+  if $DRY_RUN; then
+    printf '  ~ would reconcile attachment through relink: %s\n' "$(diagnostic_escape "$label")"
+    return 0
+  fi
+
+  if active_cli_repair_bundle; then
+    :
+  else
+    rc=$?
+    printf '  WARN: active immutable repair bundle is unavailable (%s)\n' "$rc" >&2
+    record_failure "$rc"
+    return 0
+  fi
+
+  printf '%s\n' '  ~ reconciling attachment through relink'
+  if output="$(
+    set -o pipefail
+    {
+      TRELLIS_HOME="$HOME_PATH" \
+        release_store_emit_verified_attachment_bundle \
+          "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_DIGEST" \
+          "$ACTIVE_REPAIR_RELEASE_VERSION" |
+        /usr/bin/env -i \
+          "HOME=${HOME:-}" \
+          "TRELLIS_HOME=$HOME_PATH" \
+          "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+          "LC_ALL=C" \
+          "TRELLIS_LIBS_PRELOADED=1" \
+          /bin/bash --noprofile --norc -s -- relink --home "$HOME_PATH" --fleet "$fleet" \
+            "${binding_args[@]}" "$root"
+    } 2>&1
+  )"; then
+    RELINK_SUCCEEDED=true
+    printf '%s\n' '  + attachment relinked'
+    return 0
+  else
+    rc=$?
+  fi
+  printf '  WARN: attachment relink failed (%s): %s\n' "$rc" \
+    "$(diagnostic_escape "${output:-no diagnostic}")" >&2
+  record_failure "$rc"
+  return 0
 }
 
 sync_one() {
-  local name="$1"
-  local proj
-  proj="$(resolve_project_path "$name")"
+  local row="$1" fleet project_id kind availability status excluded root
+  local release attachment_id checkout_id worktree_id row_harnesses owner_harnesses
+  local label resolution owner release_dir payload plan rc
 
-  if [ ! -d "$proj" ]; then
-    echo "skip (not on disk): $name → $proj"
-    return
-  fi
-  if [ ! -d "$proj/.claude/hooks" ]; then
-    # Single-project explicit invocation is treated as opt-in to onboarding.
-    # Bulk runs still skip silently so a stale project does not get a fresh
-    # hook stack by accident.
-    if [ -n "$ONLY_PROJECT" ] && [ "$ONLY_PROJECT" = "$name" ]; then
-      echo "  + creating .claude/hooks/ (explicit single-project run)"
-      $DRY_RUN || mkdir -p "$proj/.claude/hooks"
-    else
-      echo "skip (no .claude/hooks/): $name"
-      return
-    fi
-  fi
-
-  echo "== $name =="
-  local changed=0
-  for src in "$CANONICAL_HOOKS_DIR"/*.sh; do
-    local fn dst src_sha dst_sha
-    fn="$(basename "$src")"
-    dst="$proj/.claude/hooks/$fn"
-
-    if [ ! -f "$dst" ]; then
-      echo "  + would add: $fn"
-      $DRY_RUN || { cp "$src" "$dst"; chmod +x "$dst"; }
-      changed=$((changed+1))
-      continue
-    fi
-
-    src_sha="$(shasum -a 256 "$src" | awk '{print $1}')"
-    dst_sha="$(shasum -a 256 "$dst" | awk '{print $1}')"
-    if [ "$src_sha" != "$dst_sha" ]; then
-      echo "  ~ would update: $fn"
-      $DRY_RUN || { cp "$src" "$dst"; chmod +x "$dst"; }
-      changed=$((changed+1))
-    fi
-  done
-
-  # Sibling lib/: ship shared helpers (P3.5) alongside the hook scripts.
-  if [ -d "$CANONICAL_HOOKS_DIR/lib" ]; then
-    for src in "$CANONICAL_HOOKS_DIR/lib"/*.sh; do
-      local fn dst src_sha dst_sha
-      fn="$(basename "$src")"
-      dst="$proj/.claude/hooks/lib/$fn"
-
-      if [ ! -f "$dst" ]; then
-        echo "  + would add: lib/$fn"
-        $DRY_RUN || { mkdir -p "$proj/.claude/hooks/lib"; cp "$src" "$dst"; }
-        changed=$((changed+1))
-        continue
-      fi
-
-      src_sha="$(shasum -a 256 "$src" | awk '{print $1}')"
-      dst_sha="$(shasum -a 256 "$dst" | awk '{print $1}')"
-      if [ "$src_sha" != "$dst_sha" ]; then
-        echo "  ~ would update: lib/$fn"
-        $DRY_RUN || cp "$src" "$dst"
-        changed=$((changed+1))
-      fi
-    done
-  fi
-
-  # --- settings.json .hooks reconcile (Gap A) -------------------------------
-  # Bring the project's .hooks wiring up to the canonical baseline while
-  # preserving project-specific blocks and every non-.hooks key. The
-  # load-bearing merge is reconcile_settings_hooks() in lib/settings-hooks-
-  # merge.sh; here we own change-detection + DRY_RUN + the temp-file write.
-  local settings="$proj/.claude/settings.json"
-  if [ ! -f "$settings" ]; then
-    # sync-hooks operates on existing projects only — never create settings.json.
-    echo "  note: settings.json missing — run onboard-project.sh first (skipping settings reconcile)"
+  # Extract nullable columns independently. IFS treats tab as whitespace and
+  # would collapse an empty attachment_id, shifting every later binding field.
+  if fleet="$(printf '%s\n' "$row" | jq -er '.fleet' 2>/dev/null)" &&
+     project_id="$(printf '%s\n' "$row" | jq -er '.project_id' 2>/dev/null)" &&
+     kind="$(printf '%s\n' "$row" | jq -er '.kind' 2>/dev/null)" &&
+     availability="$(printf '%s\n' "$row" | jq -er '.availability' 2>/dev/null)" &&
+     status="$(printf '%s\n' "$row" | jq -er '.status' 2>/dev/null)" &&
+     excluded="$(printf '%s\n' "$row" | jq -er '((.excluded // false) | tostring)' 2>/dev/null)" &&
+     root="$(printf '%s\n' "$row" | jq -r '(.root // "")' 2>/dev/null)" &&
+     release="$(printf '%s\n' "$row" | jq -r '(.release // "")' 2>/dev/null)" &&
+     attachment_id="$(printf '%s\n' "$row" | jq -r '(.attachment_id // "")' 2>/dev/null)" &&
+     checkout_id="$(printf '%s\n' "$row" | jq -r '(.checkout_id // "")' 2>/dev/null)" &&
+     worktree_id="$(printf '%s\n' "$row" | jq -r '(.worktree_id // "")' 2>/dev/null)" &&
+     row_harnesses="$(printf '%s\n' "$row" | jq -c '(.harnesses // [])' 2>/dev/null)"; then
+    :
   else
-    # Non-fatal per project: a malformed settings.json that makes jq error must
-    # NOT abort the whole fleet sync. Capture the reconcile status explicitly and
-    # skip ONLY this project's settings on failure (the rest of the run, and this
-    # project's hook-file copies above, still stand).
-    local merged tmp_err
-    tmp_err="$(mktemp)"
-    if ! merged="$(reconcile_settings_hooks "$CANONICAL_SETTINGS_TEMPLATE" "$settings" 2>"$tmp_err")"; then
-      echo "  WARN: settings reconcile failed (skipping settings for this project): $(cat "$tmp_err")" >&2
+    printf '%s\n' 'blocked (invalid strict registry row)' >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  label="$fleet/$project_id"
+
+  # identity_error is tested BEFORE the excluded/legacy skips. Registry drift is
+  # a property of the row's recorded identity, not of whether this run would
+  # have acted on it, so an excluded or legacy row's drift must still be
+  # reported and aggregated instead of being swallowed into an exit 0. The
+  # report is report-only: this returns without processing the row, so the
+  # excluded/legacy contract — never act on such a row — is unchanged.
+  if [ "$availability" = identity_error ]; then
+    printf 'blocked (registry row failed identity validation): %s\n' "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  if [ "$excluded" = true ]; then
+    printf 'skip (excluded): %s\n' "$(diagnostic_escape "$label")"
+    return 0
+  fi
+  if row_is_legacy "$row"; then
+    printf 'skip (legacy row): %s\n' "$(diagnostic_escape "$label")"
+    return 0
+  fi
+  if [ "$availability" = unavailable ] || [ "$status" = unavailable ] || [ "$kind" = unavailable ]; then
+    if [ -n "$root" ]; then
+      printf 'skip (unavailable): %s -> %s\n' \
+        "$(diagnostic_escape "$label")" "$(diagnostic_escape "$root")"
     else
-      # Change-detection: only write if the canonicalized merged differs from
-      # current (mirrors rollout-settings.sh idiom).
-      if printf '%s' "$merged" | jq -S . | diff -q - <(jq -S . "$settings") >/dev/null 2>&1; then
-        : # settings already current — no change
-      else
-        changed=$((changed+1))
-        if $DRY_RUN; then
-          echo "  ~ would update settings.json .hooks (diff below)"
-          # diff returns 1 when the inputs differ — which is exactly when this
-          # line runs — so `|| true` keeps pipefail+set -e from aborting the run
-          # at the first changed project (defeating --dry-run).
-          diff <(jq -S '.hooks' "$settings") <(printf '%s' "$merged" | jq -S '.hooks') | sed 's/^/    /' || true
-        else
-          echo "  ~ updating settings.json .hooks"
-          # Non-fatal write: a printf/mv failure (disk full, perms) must not
-          # abort the whole fleet run either — WARN + skip this project's
-          # settings, matching the reconcile-failure branch above.
-          if printf '%s\n' "$merged" > "$settings.tmp" && mv "$settings.tmp" "$settings"; then
-            :
-          else
-            echo "  WARN: settings.json write failed (skipping settings for this project)" >&2
-            rm -f "$settings.tmp"
-          fi
-        fi
-      fi
+      printf 'skip (unavailable): %s\n' "$(diagnostic_escape "$label")"
     fi
-    rm -f "$tmp_err"
+    return 0
+  fi
+  if [ "$status" != active ]; then
+    printf 'skip (registry status %s): %s\n' \
+      "$(diagnostic_escape "$status")" "$(diagnostic_escape "$label")"
+    return 0
+  fi
+  if [ "$kind" != worktree ] || [ -z "$root" ] || [ ! -d "$root" ]; then
+    printf 'skip (no available worktree): %s\n' "$(diagnostic_escape "$label")"
+    return 0
+  fi
+  if [ -z "$attachment_id" ] || [ -z "$checkout_id" ] || [ -z "$worktree_id" ] || [ -z "$release" ]; then
+    printf 'skip (unattached): %s\n' "$(diagnostic_escape "$label")"
+    return 0
   fi
 
-  if [ "$changed" -eq 0 ]; then
-    echo "  (in sync)"
+  if resolution="$(local_registry_resolve_root "$HOME_PATH" "$root" 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    printf 'skip (registered root identity unavailable or drifted): %s -> %s\n' \
+      "$(diagnostic_escape "$label")" "$(diagnostic_escape "$root")" >&2
+    record_failure "$rc"
+    return 0
   fi
+  if ! row_matches_resolved_root "$row" "$resolution"; then
+    printf 'skip (registered root identity conflicts with row): %s\n' \
+      "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_CONFLICT"
+    return 0
+  fi
+
+  owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"
+  if ! _attachment_canonical_file "$owner"; then
+    printf 'blocked (corrupt attachment owner record): %s\n' \
+      "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  if ! _attachment_owner_json_valid "$owner"; then
+    printf 'blocked (corrupt attachment owner record): %s\n' \
+      "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  if ! owner_matches_row "$owner" "$row"; then
+    printf 'skip (owner record conflicts with strict registry): %s\n' \
+      "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_CONFLICT"
+    return 0
+  fi
+  if owner_harnesses="$(owner_harnesses_json "$owner")"; then
+    :
+  else
+    printf 'blocked (unreadable attachment owner harnesses): %s\n' \
+      "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  if ! printf '%s\n' "$owner_harnesses" | jq -e --arg harness "$SYNC_HARNESS" \
+      'index($harness) != null' >/dev/null 2>&1; then
+    printf 'skip (harness %s is not attached): %s\n' \
+      "$(diagnostic_escape "$SYNC_HARNESS")" "$(diagnostic_escape "$label")"
+    return 0
+  fi
+
+  if release_dir="$(TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" 2>/dev/null)"; then
+    :
+  else
+    rc=$?
+    printf 'skip (recorded immutable release unavailable): %s @ %s\n' \
+      "$(diagnostic_escape "$label")" "$(diagnostic_escape "$release")" >&2
+    record_failure "$rc"
+    return 0
+  fi
+  payload="$release_dir/payload"
+  if [ ! -d "$payload" ] || [ -L "$payload" ]; then
+    printf 'blocked (recorded release lacks a safe payload): %s @ %s\n' \
+      "$(diagnostic_escape "$label")" "$(diagnostic_escape "$release")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+  if plan="$(surface_plan_emit "$payload" "$SYNC_HARNESS" 2>/dev/null)" &&
+     plan_has_attached_leaves "$plan"; then
+    :
+  else
+    printf 'blocked (immutable manifest has no usable %s surface): %s\n' \
+      "$(diagnostic_escape "$SYNC_HARNESS")" "$(diagnostic_escape "$label")" >&2
+    record_failure "$TRELLIS_EX_STATE"
+    return 0
+  fi
+
+  printf '== %s ==\n' "$(diagnostic_escape "$label")"
+  if attachment_verify "$HOME_PATH" "$owner" >/dev/null 2>&1; then
+    printf '  (in sync: attached immutable release %s)\n' "$(diagnostic_escape "$release")"
+    return 0
+  fi
+
+  relink_one "$root" "$label" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
+    "$attachment_id" "$release" "$owner_harnesses"
+  if ! $DRY_RUN && $RELINK_SUCCEEDED &&
+     ! attachment_verify "$HOME_PATH" "$owner" >/dev/null 2>&1; then
+    printf '%s\n' '  WARN: attachment remains unhealthy after relink; no direct file overwrite was attempted' >&2
+    record_failure "$TRELLIS_EX_STATE"
+  fi
+  return 0
 }
 
-# Filter target list. NOTE (bash 3.2 + set -u): every array expansion that can be
-# empty must be length-guarded — an empty registry/blacklist/target list would
-# otherwise trip "unbound variable". Use a `[ ${#arr[@]} -gt 0 ] && for` guard
-# (NOT "${arr[@]:-}", which iterates once with an empty string and would append
-# a spurious "" element to TARGETS).
-TARGETS=()
-if [ -n "$ONLY_PROJECT" ]; then
-  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
-    for n in "${REGISTRY_NAMES[@]}"; do
-      [ "$n" = "$ONLY_PROJECT" ] && TARGETS+=("$n")
-    done
-  fi
-  if [ "${#TARGETS[@]}" -eq 0 ]; then
-    echo "project not in registry: $ONLY_PROJECT" >&2
-    exit 1
-  fi
-else
-  if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
-    for n in "${REGISTRY_NAMES[@]}"; do
-      if is_blacklisted "$n"; then
-        echo "skip (blacklisted): $n"
-        continue
-      fi
-      TARGETS+=("$n")
-    done
-  fi
-fi
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  sync_one "$row"
+done < "$TARGETS"
 
-echo "Targets: ${TARGETS[*]:-(none)}"
-$DRY_RUN && echo "(dry-run mode — no writes)"
-
-if ! $ASSUME_YES && ! $DRY_RUN; then
-  printf "Proceed? [y/N] "
-  read -r ans
-  [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "aborted"; exit 0; }
-fi
-
-if [ "${#TARGETS[@]}" -gt 0 ]; then
-  for n in "${TARGETS[@]}"; do
-    sync_one "$n"
-  done
-fi
-
-echo "== done =="
-$DRY_RUN || echo "Reminder: commit changes in each project (chore: sync hooks to canonical)."
+printf '%s\n' '== done =='
+exit "$RESULT_STATUS"

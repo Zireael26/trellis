@@ -1,15 +1,13 @@
 #!/usr/bin/env bats
-# Unit tests for scripts/lib/disk-janitor-lib.sh — the pure scanners + the two
-# injectable predicates. NO deletion happens here (those are the safety suite,
-# disk-janitor-apply.bats); this file exercises the size/format math, the cache
-# finder TSV, the staleness boundary, the worktree porcelain parser, the
-# clean-tree predicate, and the turbo-outputs jq predicate.
+# Unit tests for scripts/lib/disk-janitor-lib.sh — the pure scanners,
+# injectable predicates, and registry-owned deletion primitives. Scanner math,
+# cache discovery, worktree parsing, clean-tree checks, and turbo-output
+# predicates stay unit-level here; the orchestration-level --apply safety
+# matrix lives in disk-janitor-apply.bats.
 #
-# HERMETIC: the lib functions take EXPLICIT path arguments, so every fixture
-# lives under a fresh `mktemp -d` in $BATS_TMPDIR. Nothing here resolves a
-# config or reaches ~/projects. We still export PROJECTS_ROOT pointing at the
-# sandbox so any guard that reads it (the OWNED funcs are NOT called here) can
-# only ever see the sandbox.
+# HERMETIC: scanner inputs and registry fixtures live under a fresh `mktemp -d`.
+# The ownership tests use a private TRELLIS_HOME, never the operator's machine
+# state.
 #
 # Path note: the lib is located relative to this test file ($BATS_TEST_DIRNAME
 # is scripts/tests/, so ../.. is the repo/worktree root) — never a hardcoded
@@ -25,7 +23,11 @@ setup() {
   # Resolve through the real path so /var vs /private/var cannot diverge between
   # what we create and what dj__abspath canonicalizes.
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
-  export PROJECTS_ROOT="$SANDBOX"
+  TRELLIS_HOME="$SANDBOX/.trellis"
+  mkdir -p "$TRELLIS_HOME"
+  chmod 700 "$TRELLIS_HOME"
+  printf '%s\n' '{"schema_version":1,"projects":{},"discovery_ignores":{}}' > "$TRELLIS_HOME/registry.json"
+  chmod 600 "$TRELLIS_HOME/registry.json"
   # Source the lib into THIS shell so we can call its functions directly.
   # shellcheck disable=SC1090
   . "$LIB"
@@ -35,6 +37,9 @@ teardown() {
   if [ -n "${HOLDER_PID:-}" ]; then
     kill "$HOLDER_PID" 2>/dev/null || true
     wait "$HOLDER_PID" 2>/dev/null || true
+  fi
+  if [ -n "${BIND_MOUNT:-}" ] && [ -d "$BIND_MOUNT" ]; then
+    umount "$BIND_MOUNT" 2>/dev/null || umount -l "$BIND_MOUNT" 2>/dev/null || true
   fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
@@ -58,6 +63,12 @@ git_init_at() {
   )
 }
 
+register_fixture_root() {
+  local root="$1" project_id="${2:-fixture}"
+  local_registry_register_worktree "$TRELLIS_HOME" personal "$project_id" \
+    "$root" 1.2.3 '["claude"]' "" >/dev/null
+}
+
 # ===========================================================================
 # size + format
 # ===========================================================================
@@ -70,8 +81,8 @@ git_init_at() {
   # 12.6 GB ≈ 13529146982 (12.6 * 1024^3)
   run dj_human_bytes 13529146982
   [ "$status" -eq 0 ]
-  [[ "$output" == *"GB"* ]]
-  [[ "$output" == 12.* ]]
+  [[ "$output" == *"GB"* ]] || { echo "$output"; false; }
+  [[ "$output" == 12.* ]] || { echo "$output"; false; }
   # 1 TiB exactly
   [ "$(dj_human_bytes 1099511627776)" = "1.0 TB" ]
 }
@@ -96,8 +107,87 @@ git_init_at() {
   printf 'x\n' > "$SANDBOX/f"
   run dj_mtime "$SANDBOX/f"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ ^[0-9]+$ ]]
+  [[ "$output" =~ ^[0-9]+$ ]] || { echo "$output"; false; }
   [ "$output" -gt 0 ]
+}
+
+# Install a `stat` that behaves like GNU coreutils: `-f` is --file-system and
+# takes NO format argument, so it reports on every operand — printing a
+# filesystem block for the real path on STDOUT — and exits non-zero because the
+# format string is not a file. This is the dialect the chained
+# `stat -f … || stat -c …` idiom silently corrupted.
+#
+# The real Linux binary is not available on the macOS dev host this suite runs
+# on, so the GNU dialect itself is established here BY INSPECTION; the shim
+# reproduces the exact observable shape (stdout block + non-zero exit) that the
+# inspection identified, and the assertions below run against it for real.
+#
+# This suite has NOT been run on Linux. T27's ubuntu:24.04 container run covered
+# the doctor/attach contracts lane (scripts/tests/doctor.bats — see the note on
+# the "Run doctor suite" step in .github/workflows/bats.yml), which is where the
+# same chained-`stat` defect was confirmed against the real GNU binary. That
+# confirmation is what this shim models; it is not a container run of
+# disk-janitor-lib.bats, and this suite is on no CI job.
+install_gnu_stat_shim() {
+  GNU_BIN="$SANDBOX/gnu-bin"
+  mkdir -p "$GNU_BIN"
+  cat > "$GNU_BIN/stat" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "-f" ]; then
+  shift
+  printf 'stat: cannot read file system information for %s\n' "${1:-}" >&2
+  shift
+  for operand in "$@"; do
+    printf '  File: "%s"\n' "$operand"
+    printf '    ID: 0 Namelen: 255 Type: apfs\n'
+  done
+  exit 1
+fi
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    %Y) exec /usr/bin/stat -f %m "$3" ;;
+    %a) exec /usr/bin/stat -f %Lp "$3" ;;
+    '%d:%i') exec /usr/bin/stat -f '%d:%i' "$3" ;;
+  esac
+fi
+exit 2
+SH
+  chmod 755 "$GNU_BIN/stat"
+}
+
+@test "stat-dialect helpers stay single-valued under the GNU dialect (-f is --file-system)" {
+  install_gnu_stat_shim
+  printf 'x\n' > "$SANDBOX/f"
+  mkdir -p "$SANDBOX/dir"
+  local real_mtime real_ident
+  real_mtime="$(/usr/bin/stat -f %m "$SANDBOX/f")"
+  real_ident="$(/usr/bin/stat -f '%d:%i' "$SANDBOX/dir")"
+
+  # The shim really is GNU-shaped: the OLD chained idiom emits the filesystem
+  # block AND the epoch, so it hands its caller multi-line garbage at exit 0.
+  run env PATH="$GNU_BIN:$PATH" bash -c \
+    'stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0' _ "$SANDBOX/f"
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -gt 1 ] || { echo "$output"; false; }
+  [ "$output" != "$real_mtime" ]
+
+  # dj_mtime captures the dialects separately and shape-checks the BSD probe.
+  run env PATH="$GNU_BIN:$PATH" bash -c '. "$1"; dj_mtime "$2"' _ "$LIB" "$SANDBOX/f"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "${#lines[@]}" -eq 1 ] || { echo "$output"; false; }
+  [ "$output" = "$real_mtime" ] || { echo "$output"; false; }
+
+  # And so does dj_stat_device_inode — which previously refused every real
+  # directory on the GNU dialect because the block failed its shape check.
+  run env PATH="$GNU_BIN:$PATH" bash -c '. "$1"; dj_stat_device_inode "$2"' _ "$LIB" "$SANDBOX/dir"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "${#lines[@]}" -eq 1 ] || { echo "$output"; false; }
+  [ "$output" = "$real_ident" ] || { echo "$output"; false; }
+
+  # A missing path still fails closed rather than emitting a partial identity.
+  run env PATH="$GNU_BIN:$PATH" bash -c '. "$1"; dj_stat_device_inode "$2"' _ "$LIB" "$SANDBOX/nope"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -121,11 +211,11 @@ git_init_at() {
   # One row per cache dir (4 total).
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 4 ]
   # Each kind classification is present.
-  [[ "$output" == *"turbo-cache"$'\t'* ]]
-  [[ "$output" == *"next-cache"$'\t'* ]]
-  [[ "$output" == *"next-dev"$'\t'* ]]
+  [[ "$output" == *"turbo-cache"$'\t'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"next-cache"$'\t'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"next-dev"$'\t'* ]] || { echo "$output"; false; }
   # The nested apps/*/.next/cache is found too.
-  [[ "$output" == *"$proj/apps/web/.next/cache"* ]]
+  [[ "$output" == *"$proj/apps/web/.next/cache"* ]] || { echo "$output"; false; }
 }
 
 @test "dj_find_caches does NOT descend into node_modules (prunes other tools' trees)" {
@@ -138,7 +228,7 @@ git_init_at() {
   run dj_find_caches "$proj"
   [ "$status" -eq 0 ]
   # node_modules is pruned: no cache rows from inside it.
-  [[ "$output" != *"node_modules"* ]]
+  [[ "$output" != *"node_modules"* ]] || { echo "$output"; false; }
 }
 
 @test "dj_find_caches returns nothing for a project with no cache dirs" {
@@ -147,6 +237,24 @@ git_init_at() {
   run dj_find_caches "$proj"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "dj_find_caches skips a Linux bind-mounted cache outside the registered root" {
+  [ "$(uname -s)" = "Linux" ] || skip "bind mounts are Linux-specific"
+  command -v mount >/dev/null 2>&1 || skip "mount command unavailable"
+  local proj="$SANDBOX/project" external="$SANDBOX/external-cache"
+  local cache="$proj/.next/cache"
+  mkdir -p "$cache" "$external"
+  printf 'keep\n' > "$external/keep"
+  if ! mount --bind "$external" "$cache" 2>/dev/null; then
+    skip "bind mounts are unavailable in this test environment"
+  fi
+  BIND_MOUNT="$cache"
+
+  run dj_find_caches "$proj"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$cache"* ]] || { echo "$output"; false; }
+  [ -f "$external/keep" ]
 }
 
 # ===========================================================================
@@ -235,56 +343,42 @@ git_init_at() {
   [ "$status" -ne 0 ]
 }
 
-@test "dj_worktree_clean: a sensitive gitignored file (.env) blocks; a recoverable artifact (node_modules) does not" {
+@test "dj_worktree_clean: every gitignored entry blocks, including build artifacts" {
   local repo="$SANDBOX/repo"
   git_init_at "$repo"
   printf '.env\nnode_modules/\n' > "$repo/.gitignore"
   ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
-  # Tree is clean (only the tracked .gitignore changed, now committed).
+  # The tracked .gitignore is committed, so the tree starts content-clean.
   run dj_worktree_clean "$repo"
   [ "$status" -eq 0 ]
-  # A gitignored secret would be silently destroyed by `git worktree remove` and
-  # is NOT recoverable from git — refuse.
+  # A gitignored secret would be destroyed by `git worktree remove` — refuse.
   printf 'API_KEY=shhh\n' > "$repo/.env"
   run dj_worktree_clean "$repo"
   [ "$status" -ne 0 ]
   rm -f "$repo/.env"
-  # A gitignored build artifact IS recoverable (reinstall) — it must NOT block,
-  # or no real dev worktree could ever be reaped.
+  # A build artifact can carry operator state too; no basename allowlist is
+  # sufficient proof that it is recoverable, so it also blocks auto-reap.
   mkdir -p "$repo/node_modules/pkg"
   printf 'x\n' > "$repo/node_modules/pkg/index.js"
   run dj_worktree_clean "$repo"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
 }
 
-@test "dj_worktree_clean: allowlist fails closed — an unlisted ignored secret (.npmrc) blocks even though no denylist names it" {
+@test "dj_worktree_clean: an unknown gitignored path blocks even with a harmless name" {
   local repo="$SANDBOX/repo"
   git_init_at "$repo"
-  # .npmrc carries npm auth tokens and is gitignored in most JS monorepos. The
-  # old denylist never named it, so it would have been silently destroyed; the
-  # allowlist refuses any entry it doesn't recognise as recoverable.
-  printf '.npmrc\nnode_modules/\n' > "$repo/.gitignore"
+  # .vercel is neither a conventional secret basename nor proof of
+  # recoverability; auto-reap must preserve it for explicit operator review.
+  printf '.vercel/\n' > "$repo/.gitignore"
   ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
-  printf '//registry.npmjs.org/:_authToken=secret\n' > "$repo/.npmrc"
+  mkdir -p "$repo/.vercel"
+  printf '{}\n' > "$repo/.vercel/project.json"
   run dj_worktree_clean "$repo"
   [ "$status" -ne 0 ]
-  # A nested recoverable artifact (apps/web/.next/) is still recognised by
-  # basename. Seed tracked source under apps/web/ so git reports the specific
-  # "apps/web/.next/" rather than collapsing the whole tree to "apps/" (it only
-  # collapses a parent that is ENTIRELY ignored — a real package dir is not).
-  rm -f "$repo/.npmrc"
-  printf 'apps/web/.next/\n' >> "$repo/.gitignore"
-  mkdir -p "$repo/apps/web"
-  printf '{}\n' > "$repo/apps/web/package.json"
-  ( cd "$repo" && git add -A && git commit -q -m "ignore nested next" )
-  mkdir -p "$repo/apps/web/.next/cache"
-  printf 'x\n' > "$repo/apps/web/.next/cache/x"
-  run dj_worktree_clean "$repo"
-  [ "$status" -eq 0 ]
 }
 
 # ===========================================================================
-# dj_worktree_porcelain_clean — the Layer-2 cleanliness gate (no allowlist)
+# dj_worktree_porcelain_clean — tracked/untracked distinction
 # ===========================================================================
 
 @test "dj_worktree_porcelain_clean: clean -> 0; untracked -> non-zero; gitignored-only -> 0" {
@@ -298,10 +392,9 @@ git_init_at() {
   run dj_worktree_porcelain_clean "$repo"
   [ "$status" -ne 0 ]
   rm -f "$repo/untracked.txt"
-  # Unlike dj_worktree_clean's allowlist, porcelain NEVER inspects gitignored
-  # files: a tree carrying only a gitignored node_modules AND a gitignored .env
-  # is still porcelain-clean. (This is exactly why the secret denylist is a
-  # SEPARATE gate — porcelain alone would let the .env through.)
+  # Porcelain intentionally does not inspect ignored paths. The caller uses
+  # this only to distinguish untracked work from ignored local content, then
+  # runs dj_worktree_clean before any automatic reap.
   printf 'node_modules/\n.env\n' > "$repo/.gitignore"
   ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
   mkdir -p "$repo/node_modules/pkg"
@@ -311,42 +404,6 @@ git_init_at() {
   [ "$status" -eq 0 ]
 }
 
-# ===========================================================================
-# dj_worktree_has_secret_ignored — minimal fail-closed secret denylist
-# ===========================================================================
-
-@test "dj_worktree_has_secret_ignored: .env / .env.* / .npmrc / *.pem match; recoverable artifacts do not" {
-  local repo="$SANDBOX/repo"
-  git_init_at "$repo"
-  printf 'node_modules/\n.next/\n.vercel/\n.env\n.env.local\n.npmrc\n*.pem\n' > "$repo/.gitignore"
-  ( cd "$repo" && git add -A && git commit -q -m "gitignore" )
-  # Only recoverable build artifacts ignored -> NO secret (safe to auto-reap).
-  mkdir -p "$repo/node_modules/pkg" "$repo/.next/cache" "$repo/.vercel"
-  printf 'x\n' > "$repo/node_modules/pkg/i.js"
-  printf 'x\n' > "$repo/.next/cache/x"
-  printf 'x\n' > "$repo/.vercel/project.json"
-  run dj_worktree_has_secret_ignored "$repo"
-  [ "$status" -ne 0 ]
-  # A gitignored .env -> secret.
-  printf 'S=1\n' > "$repo/.env"
-  run dj_worktree_has_secret_ignored "$repo"
-  [ "$status" -eq 0 ]
-  rm -f "$repo/.env"
-  # .env.local matches the .env.* pattern -> secret.
-  printf 'S=1\n' > "$repo/.env.local"
-  run dj_worktree_has_secret_ignored "$repo"
-  [ "$status" -eq 0 ]
-  rm -f "$repo/.env.local"
-  # .npmrc (npm auth token) -> secret.
-  printf '//registry.npmjs.org/:_authToken=secret\n' > "$repo/.npmrc"
-  run dj_worktree_has_secret_ignored "$repo"
-  [ "$status" -eq 0 ]
-  rm -f "$repo/.npmrc"
-  # A top-level *.pem (basename match) -> secret.
-  printf 'k\n' > "$repo/server.pem"
-  run dj_worktree_has_secret_ignored "$repo"
-  [ "$status" -eq 0 ]
-}
 
 # ===========================================================================
 # dj_worktree_pushed — upstream-on-origin recoverability (override + real check)
@@ -390,7 +447,7 @@ git_init_at() {
   git_init_at "$repo" "2020-01-01T00:00:00 +0000"
   run dj_worktree_mtime "$repo"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ ^[0-9]+$ ]]
+  [[ "$output" =~ ^[0-9]+$ ]] || { echo "$output"; false; }
   # Far older than a recent epoch (2023-01-01 = 1672531200).
   [ "$output" -lt 1672531200 ]
 }
@@ -423,7 +480,7 @@ git_init_at() {
   [ "$status" -eq 0 ]
   run dj_worktree_in_use "$repo" "$snapshot"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"live process cwd or open file handle under worktree"* ]]
+  [[ "$output" == *"live process cwd or open file handle under worktree"* ]] || { echo "$output"; false; }
 
   kill "$HOLDER_PID" 2>/dev/null || true
   wait "$HOLDER_PID" 2>/dev/null || true
@@ -512,6 +569,114 @@ JSON
   run dj_turbo_fix_hint
   [ "$status" -eq 0 ]
   [ -n "$output" ]
-  [[ "$output" == *"!.next/cache/**"* ]]
-  [[ "$output" == *"!.next/dev/**"* ]]
+  [[ "$output" == *"!.next/cache/**"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"!.next/dev/**"* ]] || { echo "$output"; false; }
+}
+
+@test "dj_prune_cache_entry uses exact registered ownership across a path with spaces" {
+  local root="$SANDBOX/external volume/project with spaces" cache sibling identity
+  local checkout_id worktree_id common
+  git_init_at "$root"
+  register_fixture_root "$root" external-project
+  identity="$(local_registry_identity_for_root "$root")"
+  checkout_id="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
+  worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
+  cache="$root/.next/cache"
+  mkdir -p "$cache"
+  printf 'cache\n' > "$cache/blob"
+
+  run dj_prune_cache_entry "$TRELLIS_HOME" personal external-project "$checkout_id" \
+    "$worktree_id" "$common" "$root" "$cache"
+  [ "$status" -eq 0 ]
+  [ ! -d "$cache" ]
+
+  sibling="$SANDBOX/sibling/.next/cache"
+  mkdir -p "$sibling"
+  printf 'keep\n' > "$sibling/blob"
+  run dj_prune_cache_entry "$TRELLIS_HOME" personal external-project "$checkout_id" \
+    "$worktree_id" "$common" "$root" "$sibling"
+  [ "$status" -ne 0 ]
+  [ -d "$sibling" ]
+  mkdir -p "$root/.next"
+  ln -s "$sibling" "$cache"
+  run dj_prune_cache_entry "$TRELLIS_HOME" personal external-project "$checkout_id" \
+    "$worktree_id" "$common" "$root" "$cache"
+  [ "$status" -ne 0 ]
+  [ -d "$sibling" ]
+}
+
+@test "dj_remove_cache_tree_safely refuses an intermediate symlink and preserves its target" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local root="$SANDBOX/root" victim="$SANDBOX/victim"
+  local cache="$root/apps/web/.next/cache"
+  mkdir -p "$root/apps" "$victim/.next/cache"
+  printf 'keep\n' > "$victim/.next/cache/keep"
+  ln -s "$victim" "$root/apps/web"
+
+  run dj_remove_cache_tree_safely "$root" "$cache"
+  [ "$status" -ne 0 ]
+  [ -d "$victim/.next/cache" ]
+  [ -f "$victim/.next/cache/keep" ]
+}
+
+@test "dj_remove_cache_tree_safely refuses a Linux bind-mounted cache and preserves its source" {
+  [ "$(uname -s)" = "Linux" ] || skip "bind mounts are Linux-specific"
+  command -v mount >/dev/null 2>&1 || skip "mount command unavailable"
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local root="$SANDBOX/root" external="$SANDBOX/external-cache"
+  local cache="$root/.next/cache"
+  mkdir -p "$cache" "$external"
+  printf 'keep\n' > "$external/keep"
+  if ! mount --bind "$external" "$cache" 2>/dev/null; then
+    skip "bind mounts are unavailable in this test environment"
+  fi
+  BIND_MOUNT="$cache"
+
+  run dj_remove_cache_tree_safely "$root" "$cache"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mount boundary"* ]] || { echo "$output"; false; }
+  [ -f "$external/keep" ]
+}
+
+@test "dj_reap_worktree removes only a registered linked worktree, never its main checkout" {
+  local root="$SANDBOX/checkout" linked="$SANDBOX/outside volume/linked worktree"
+  local identity checkout_id worktree_id common
+  git_init_at "$root"
+  register_fixture_root "$root" fixture
+  mkdir -p "$(dirname "$linked")"
+  ( cd "$root" && git worktree add -q -b feat/x "$linked" >/dev/null 2>&1 )
+  register_fixture_root "$linked" fixture
+  identity="$(local_registry_identity_for_root "$linked")"
+  checkout_id="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
+  worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
+
+  run dj_reap_worktree "$TRELLIS_HOME" personal fixture "$checkout_id" "$worktree_id" \
+    "$common" "$linked"
+  [ "$status" -eq 0 ]
+  [ ! -d "$linked" ]
+  [ -d "$root" ]
+}
+
+@test "dj_reap_worktree refuses ignored local content at the destructive sink" {
+  local root="$SANDBOX/checkout" linked="$SANDBOX/linked"
+  local identity checkout_id worktree_id common
+  git_init_at "$root"
+  register_fixture_root "$root" fixture
+  ( cd "$root" && git worktree add -q -b feat/x "$linked" >/dev/null 2>&1 )
+  register_fixture_root "$linked" fixture
+  printf '.env\n' > "$linked/.gitignore"
+  ( cd "$linked" && git add .gitignore && git commit -q -m "ignore local state" )
+  printf 'TOKEN=secret\n' > "$linked/.env"
+  identity="$(local_registry_identity_for_root "$linked")"
+  checkout_id="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
+  worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
+
+  run dj_reap_worktree "$TRELLIS_HOME" personal fixture "$checkout_id" "$worktree_id" \
+    "$common" "$linked"
+  [ "$status" -ne 0 ]
+  [ -d "$linked" ]
+  [ -f "$linked/.env" ]
 }

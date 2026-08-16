@@ -1,0 +1,15 @@
+{
+  "score": 42,
+  "findings": [
+    {
+      "rule": "llms.txt-missing",
+      "severity": "high",
+      "message": "llms.txt is missing"
+    },
+    {
+      "rule": "answer-first",
+      "severity": "medium",
+      "message": "Answer structure requires triage"
+    }
+  ]
+}

@@ -294,8 +294,8 @@ setup() {
 
   run_hook
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
-  [[ "$output" == *'AWS access key'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'AWS access key'* ]] || { echo "$output"; false; }
   # A blocked turn must NOT advise; it blocks.
   [[ "$output" != *'systemMessage'* ]]
 }
@@ -310,10 +310,10 @@ setup() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"systemMessage"'* ]]
-  [[ "$output" == *'<review>'* ]]
-  [[ "$output" == *'[important]'* ]]
-  [[ "$output" == *'debugger'* ]]
+  [[ "$output" == *'"systemMessage"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'<review>'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'[important]'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'debugger'* ]] || { echo "$output"; false; }
   [[ "$output" != *'"decision":"block"'* ]]
 }
 
@@ -342,7 +342,7 @@ setup() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" != *'systemMessage'* ]]
 }
 
@@ -400,7 +400,7 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *'[minor]'* ]]
+  [[ "$output" == *'[minor]'* ]] || { echo "$output"; false; }
   run_hook
   [ "$status" -eq 0 ]
 
@@ -434,7 +434,7 @@ EOF
   [ "$(call_count "$CLAUDE_COUNT")" -ge 1 ]
   # And its critical finding propagated to a block.
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'eval injection'* ]]
 }
 
@@ -448,12 +448,13 @@ EOF
   setup_triggering_repo
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  # Presets and runtime policy resolve through $TRELLIS_ROOT only; a
+  # `trellis_root` key inside the project manifest is not read by lib/autonomy.sh.
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
   printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
     > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
-  jq -n --arg root "$TRELLIS_FIXTURE" \
-    '{trellis_root: $root, presets: ["experimental"]}' \
-    > "$PROJECT_DIR/.trellis.config.json"
+  jq -n '{presets: ["experimental"]}' > "$PROJECT_DIR/.trellis.config.json"
   printf '%s\n' '- 2026-07-14T00:00:00Z [L4] [pattern] chose shared resolver. Reasoning: parity. Alternatives considered: duplicate logic.' \
     > "$PROJECT_DIR/decisions-log.md"
 

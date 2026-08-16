@@ -1,283 +1,635 @@
 #!/usr/bin/env bats
-# Tests for the pre-push merge-gate re-sync (Gap B) — the load-bearing target
-# resolver in scripts/lib/prepush-target.sh (resolve_prepush_target), plus the
-# overwrite + idempotency behavior driven through the lib.
-#
-# FULLY PORTABLE — every test builds a throwaway git repo in $BATS_TEST_TMPDIR.
-# No absolute operator paths are hardcoded (the public mirror does not
-# placeholder-substitute .bats files, so any hardcoded home-dir path literal
-# would trip the redaction tripwire). Canonical pre-push sources are the real
-# core-rules/husky/pre-push and core-rules/githooks/pre-push, resolved relative
-# to $BATS_TEST_DIRNAME.
-#
-# DL-P5-11 discipline (EMPIRICALLY-CORRECT RULE): under bats `set -eET`, a
-# NON-FINAL simple command that fails — `[ ]`, grep, cmp, jq, diff — DOES abort
-# the test, but a NON-FINAL compound `[[ ]]` does NOT (its non-zero status is
-# swallowed). So a load-bearing assertion must NEVER be a non-final `[[ ]]`:
-# make it the FINAL statement, or write it as a set-e-catchable simple command
-# (prefer `grep -qF <<<"$output"`). Every discriminating (post-state) assertion
-# below is the FINAL enforced statement or a set-e-catchable simple command.
+# Portable merge-dispatcher reconciliation coverage. The dispatcher is owned by
+# the attachment in TRELLIS_HOME, never by .husky/.githooks/.git hooks files.
 
-# shellcheck source=../lib/prepush-target.sh
-source "$BATS_TEST_DIRNAME/../lib/prepush-target.sh"
+REPO="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+VERSION="1.2.3"
+PROJECT_ID="merge-project"
 
 setup() {
-  SRC_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  CANON_HUSKY="$SRC_ROOT/core-rules/husky/pre-push"
-  CANON_GITHOOKS="$SRC_ROOT/core-rules/githooks/pre-push"
-  # HERMETICITY: resolve_prepush_target reads MERGED git config, so a global
-  # core.hooksPath on the operator/CI box would leak into the "plain per-clone"
-  # decision. Pin an empty per-test global config and disable the system one so
-  # the resolver sees only the repo-local config we set explicitly. Use a temp
-  # path (mirror-clean: no hardcoded operator path literal).
-  export GIT_CONFIG_GLOBAL="$BATS_TEST_TMPDIR/gitconfig"
-  export GIT_CONFIG_NOSYSTEM=1
-  : > "$GIT_CONFIG_GLOBAL"
-  WORK="$BATS_TEST_TMPDIR/proj"
-  mkdir -p "$WORK"
-  # Resolve through realpath so /var vs /private/var cannot diverge in the
-  # inside/outside-worktree comparison.
-  WORK="$(cd "$WORK" && pwd -P)"
-  git -C "$WORK" init -q
-  git -C "$WORK" config user.email "ci-bats@trellis.test"
-  git -C "$WORK" config user.name "trellis ci"
+  SANDBOX="$BATS_TEST_TMPDIR/merge gate fixture"
+  mkdir -p "$SANDBOX"
+  SANDBOX="$(CDPATH= cd "$SANDBOX" && pwd -P)"
+  export HOME="$SANDBOX/operator home"
+  export TRELLIS_HOME="$SANDBOX/trellis home"
+  HOME_PATH="$TRELLIS_HOME"
+  PROJECT="$SANDBOX/projects/Merge Project With Spaces"
+  SOURCE="$SANDBOX/release source"
+  RUNNER="$SANDBOX/old mutable source"
+  MOVED_RUNNER="$SANDBOX/moved synchronizer"
+  UNAVAILABLE_ROOT="$SANDBOX/Missing Volume/merge project"
+  mkdir -p "$HOME" "$HOME_PATH"
+  chmod 700 "$HOME" "$HOME_PATH"
+  bootstrap_release_admin
 }
 
-# _make_mg_instance — assemble a minimal Trellis instance to drive the REAL
-# sync-merge-gate.sh binary (the sync_one overwrite-safety branch lives there,
-# NOT in resolve_prepush_target, so the marker tests MUST go through the binary).
-# Registry rows are passed as args. Exports MG_ROOT / MG_PROJECTS.
-_make_mg_instance() {
-  MG_ROOT="$BATS_TEST_TMPDIR/instance"
-  MG_PROJECTS="$BATS_TEST_TMPDIR/projects"
-  mkdir -p "$MG_ROOT/core-rules/husky" "$MG_ROOT/core-rules/githooks" "$MG_ROOT/scripts/lib" "$MG_PROJECTS"
-  cp "$CANON_HUSKY" "$MG_ROOT/core-rules/husky/pre-push"
-  cp "$CANON_GITHOOKS" "$MG_ROOT/core-rules/githooks/pre-push"
-  cp "$SRC_ROOT/scripts/sync-merge-gate.sh" "$MG_ROOT/scripts/sync-merge-gate.sh"
-  cp "$SRC_ROOT/scripts/lib/blacklist-parser.sh" "$MG_ROOT/scripts/lib/"
-  cp "$SRC_ROOT/scripts/lib/config-load.sh" "$MG_ROOT/scripts/lib/"
-  cp "$SRC_ROOT/scripts/lib/prepush-target.sh" "$MG_ROOT/scripts/lib/"
-  cp "$SRC_ROOT/scripts/lib/trellis.config.schema.json" "$MG_ROOT/scripts/lib/"
-  {
-    printf '%s\n' '## Active projects' '' '| Project | Path | Class | Notes |' '|---|---|---|---|'
-    local n
-    for n in "$@"; do printf '| %s | `/personal/%s` | x | y |\n' "$n" "$n"; done
-    printf '%s\n' '' '---'
-  } > "$MG_ROOT/registry.md"
-  cat > "$MG_ROOT/trellis.config.json" <<EOF
-{
-  "trellis_root": "$MG_ROOT",
-  "projects_root": "$MG_PROJECTS",
-  "user_home": "$BATS_TEST_TMPDIR",
-  "maintainer_name": "Test Maintainer",
-  "github_user": "testuser",
-  "harnesses": ["claude"]
-}
-EOF
+teardown() {
+  [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ] || return 0
+  chmod -R u+w "$SANDBOX" 2>/dev/null || true
+  rm -rf "$SANDBOX"
 }
 
-# _seed_husky_project <name> <pre-push-body>  — husky project with a given
-# pre-push content (so resolve_prepush_target picks the husky carrier).
-_seed_husky_project() {
-  local name="$1" body="$2"
-  mkdir -p "$MG_PROJECTS/$name/.husky"
-  git -C "$MG_PROJECTS/$name" init -q
-  git -C "$MG_PROJECTS/$name" config user.email "ci-bats@trellis.test"
-  git -C "$MG_PROJECTS/$name" config user.name "trellis ci"
-  printf '%s' "$body" > "$MG_PROJECTS/$name/.husky/pre-push"
+canonical_dir() {
+  (CDPATH= cd "$1" && pwd -P)
 }
 
-# Tab-field extractor (the resolver emits tab-separated ACTION\tTARGET\tKIND).
-_field() { printf '%s' "$1" | cut -f"$2"; }
+bootstrap_release_admin() {
+  local bootstrap="$SANDBOX/bootstrap release source" config user_home trellis_home
 
-# Apply the lib decision the way sync-merge-gate.sh's sync_one does: sha-compare
-# then overwrite. Kept tiny so tests exercise the real resolver + overwrite path
-# without spinning up registry/config plumbing.
-_apply() {
-  local proj="$1" decision verb target kind src
-  decision="$(resolve_prepush_target "$proj")"
-  verb="$(_field "$decision" 1)"
-  [ "$verb" = "WRITE" ] || return 0
-  target="$(_field "$decision" 2)"
-  kind="$(_field "$decision" 3)"
-  case "$kind" in
-    husky)    src="$CANON_HUSKY" ;;
-    githooks) src="$CANON_GITHOOKS" ;;
-  esac
-  if [ ! -f "$target" ] || ! cmp -s "$src" "$target"; then
-    mkdir -p "$(dirname "$target")"
-    cp "$src" "$target"
-    chmod +x "$target"
+  mkdir -p "$HOME/.local/bin" "$HOME_PATH" "$bootstrap/scripts"
+  user_home="$(canonical_dir "$HOME")"
+  trellis_home="$(canonical_dir "$HOME_PATH")"
+  HOME="$user_home"
+  HOME_PATH="$trellis_home"
+  TRELLIS_HOME="$trellis_home"
+  export HOME TRELLIS_HOME
+  chmod 700 "$HOME" "$HOME_PATH"
+  cp "$REPO/scripts/trellis-launcher.sh" "$HOME/.local/bin/trellis"
+  chmod 755 "$HOME/.local/bin/trellis"
+  cp "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$REPO/scripts/attach-project.sh" \
+    "$bootstrap/scripts/"
+  cp -R "$REPO/scripts/lib" "$bootstrap/scripts/lib"
+  cat >> "$bootstrap/scripts/attach-project.sh" <<'SH'
+
+if [ "${1:-}" = relink ]; then
+  printf '%s\n' "$@" > "$TRELLIS_HOME/test-relink-arguments"
+  if [ -f "$TRELLIS_HOME/test-relink-child-diagnostic" ]; then
+    cat "$TRELLIS_HOME/test-relink-child-diagnostic" >&2
+    exit 5
   fi
+fi
+SH
+  chmod 755 "$bootstrap/scripts/trellis" "$bootstrap/scripts/release.sh" \
+    "$bootstrap/scripts/attach-project.sh"
+  mkdir -p "$bootstrap/core-rules"
+  printf '0.0.0\n' > "$bootstrap/core-rules/VERSION"
+  git -C "$bootstrap" init -q
+  git -C "$bootstrap" config user.email 'merge-fixture@trellis.test'
+  git -C "$bootstrap" config user.name 'Merge Fixture'
+  git -C "$bootstrap" config commit.gpgsign false
+  git -C "$bootstrap" config tag.gpgSign false
+  git -C "$bootstrap" add core-rules scripts
+  git -C "$bootstrap" commit -qm 'bootstrap release'
+  git -C "$bootstrap" tag --no-sign -a v0.0.0 -m v0.0.0
+  bootstrap="$(canonical_dir "$bootstrap")"
+  TRELLIS_HOME="$HOME_PATH" bash -c \
+    '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
+    sync-merge-bootstrap "$REPO/scripts/lib/release-store.sh" 0.0.0 "$bootstrap"
+  config="$HOME_PATH/config.json"
+  jq -n --arg source "$bootstrap" --arg root "$SANDBOX" '{
+    schema_version:1,
+    source_root:$source,
+    release_remote:$source,
+    active_cli_release:"0.0.0",
+    default_fleet:"personal",
+    fleets:{personal:{discovery_roots:[$root]}}
+  }' > "$config"
+  chmod 600 "$config"
 }
 
-# ---------------------------------------------------------------------------
-# HUSKY: .husky/pre-push is a stale copy -> after apply, file == canonical
-# husky/pre-push (assert the run-all reference present as the FINAL check).
-# ---------------------------------------------------------------------------
-@test "husky: stale .husky/pre-push overwritten with canonical" {
-  mkdir -p "$WORK/.husky"
-  printf '#!/usr/bin/env sh\n# STALE husky pre-push\nexit 0\n' > "$WORK/.husky/pre-push"
+build_installed_release() {
+  # release_store_locate verifies every payload file during attachment and sync,
+  # so retain only the trusted assets this reconciliation fixture exercises.
+  mkdir -p \
+    "$SOURCE/core-rules/templates" \
+    "$SOURCE/core-rules/hooks" \
+    "$SOURCE/core-rules/codex/hooks" \
+    "$SOURCE/core-rules/githooks" \
+    "$SOURCE/scripts"
+  cp "$REPO/core-rules/CLAUDE.md" "$SOURCE/core-rules/CLAUDE.md"
+  cp "$REPO/core-rules/templates/claude-settings.local.json" \
+    "$SOURCE/core-rules/templates/claude-settings.local.json"
+  cp "$REPO/core-rules/templates/codex-hooks.local.json" \
+    "$SOURCE/core-rules/templates/codex-hooks.local.json"
+  cp "$REPO/core-rules/githooks/pre-push" "$SOURCE/core-rules/githooks/pre-push"
+  cp "$REPO/core-rules/hooks/"*.sh "$SOURCE/core-rules/hooks/"
+  cp -R "$REPO/core-rules/hooks/lib" "$SOURCE/core-rules/hooks/"
+  cp "$REPO/core-rules/codex/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"
+  cp -R "$REPO/core-rules/codex/hooks/lib" "$SOURCE/core-rules/codex/hooks/"
+  cp "$REPO/scripts/attach-project.sh" "$REPO/scripts/seed-inheritance-symlinks.sh" \
+    "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$SOURCE/scripts/"
+  cp -R "$REPO/scripts/lib" "$SOURCE/scripts/lib"
+  chmod 755 "$SOURCE/core-rules/githooks/pre-push" \
+    "$SOURCE/core-rules/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"*.sh \
+    "$SOURCE/scripts/attach-project.sh" "$SOURCE/scripts/seed-inheritance-symlinks.sh" \
+    "$SOURCE/scripts/trellis" "$SOURCE/scripts/release.sh"
+  printf '%s\n' "$VERSION" > "$SOURCE/core-rules/VERSION"
+  cat > "$SOURCE/core-rules/inheritance-manifest.json" <<'JSON'
+{
+  "schema_version": 1,
+  "harnesses": {
+    "claude": {
+      "links": [
+        {"source": "core-rules/CLAUDE.md", "destination": ".claude/rules/trellis.md"},
+        {"source_children": "core-rules/hooks", "destination_dir": ".claude/hooks", "entry_type": "file", "suffix": ".sh", "executable": true},
+        {"source_children": "core-rules/hooks/lib", "destination_dir": ".claude/hooks/lib", "entry_type": "file", "suffix": ".sh", "executable": true}
+      ],
+      "render": [
+        {"template": "core-rules/templates/claude-settings.local.json", "destination": ".claude/settings.local.json", "merge": "explicit-json", "mode": "0600", "required": false}
+      ]
+    },
+    "codex": {
+      "links": [
+        {"project_target": "CLAUDE.md", "fallback_source": "core-rules/CLAUDE.md", "destination": "AGENTS.md"},
+        {"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"},
+        {"source_children": "core-rules/codex/hooks", "destination_dir": ".codex/hooks", "entry_type": "file", "suffix": ".sh", "executable": true},
+        {"source_children": "core-rules/codex/hooks/lib", "destination_dir": ".codex/hooks/lib", "entry_type": "file", "suffix": ".sh", "executable": true}
+      ],
+      "render": [
+        {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": false}
+      ]
+    },
+    "omp": {"links": [], "render": []}
+  }
+}
+JSON
 
-  _apply "$WORK"
-  # Byte-identical to canonical, AND the run-all carrier reference is present.
-  cmp -s "$CANON_HUSKY" "$WORK/.husky/pre-push" \
-    && grep -q "run-all.sh" "$WORK/.husky/pre-push"
+  git -C "$SOURCE" init -q
+  git -C "$SOURCE" config user.email 'merge-fixture@trellis.test'
+  git -C "$SOURCE" config user.name 'Merge Fixture'
+  git -C "$SOURCE" config commit.gpgsign false
+  git -C "$SOURCE" config tag.gpgSign false
+  git -C "$SOURCE" add -A
+  git -C "$SOURCE" commit -qm 'fixture release'
+  git -C "$SOURCE" tag --no-sign -a "v$VERSION" -m "v$VERSION"
+
+  run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
+    "$HOME/.local/bin/trellis" release install "$VERSION" --remote "$SOURCE"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
-# ---------------------------------------------------------------------------
-# NATIVE: core.hooksPath=.githooks + stale .githooks/pre-push -> after apply,
-# .githooks/pre-push == canonical githooks/pre-push.
-# ---------------------------------------------------------------------------
-@test "native: hooksPath=.githooks stale pre-push overwritten with canonical" {
-  mkdir -p "$WORK/.githooks"
-  printf '#!/usr/bin/env sh\n# STALE native pre-push\nexit 0\n' > "$WORK/.githooks/pre-push"
-  git -C "$WORK" add .githooks/pre-push
-  git -C "$WORK" commit -qm "seed githooks"
-  git -C "$WORK" config core.hooksPath .githooks
-
-  _apply "$WORK"
-  # FINAL: byte-identical to canonical githooks source.
-  cmp -s "$CANON_GITHOOKS" "$WORK/.githooks/pre-push"
+create_project() {
+  mkdir -p "$PROJECT"
+  git -C "$PROJECT" init -q
+  git -C "$PROJECT" config user.email 'project-fixture@trellis.test'
+  git -C "$PROJECT" config commit.gpgsign false
+  git -C "$PROJECT" config user.name 'Project Fixture'
+  printf '{"schema_version":1,"project_id":"%s"}\n' "$PROJECT_ID" > "$PROJECT/.trellis.json"
+  printf '# merge project fixture\n' > "$PROJECT/README.md"
+  git -C "$PROJECT" add .
+  git -C "$PROJECT" commit -qm 'fixture project'
 }
 
-@test "native: resolver picks the githooks source kind for in-repo hooksPath" {
-  mkdir -p "$WORK/.githooks"
-  : > "$WORK/.githooks/pre-push"
-  git -C "$WORK" add .githooks/pre-push
-  git -C "$WORK" commit -qm "seed githooks"
-  git -C "$WORK" config core.hooksPath .githooks
-
-  decision="$(resolve_prepush_target "$WORK")"
-  # FINAL: verb WRITE, target under .githooks, kind githooks.
-  [ "$(_field "$decision" 1)" = "WRITE" ] \
-    && [ "$(_field "$decision" 3)" = "githooks" ] \
-    && [ "$(basename "$(dirname "$(_field "$decision" 2)")")" = ".githooks" ]
+attach_project() {
+  run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
+    bash "$REPO/scripts/attach-project.sh" attach --home "$HOME_PATH" \
+      --fleet personal --release "$VERSION" --harness claude "$PROJECT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
-# ---------------------------------------------------------------------------
-# CLUSTERBID MISCONFIG: core.hooksPath = absolute .git/hooks AND a tracked
-# .githooks/ present -> tool WARNs + SKIPs (pre-push NOT written to the absolute
-# .git/hooks path) as the FINAL check.
-# ---------------------------------------------------------------------------
-@test "clusterbid misconfig: WARN + SKIP, no pre-push written to .git/hooks" {
-  mkdir -p "$WORK/.githooks"
-  : > "$WORK/.githooks/pre-push"
-  git -C "$WORK" add .githooks/pre-push
-  git -C "$WORK" commit -qm "seed githooks"
-  # hooksPath pinned at the per-clone .git/hooks (absolute) while .githooks is tracked.
-  git -C "$WORK" config core.hooksPath "$WORK/.git/hooks"
+make_movable_runner() {
+  mkdir -p "$RUNNER/scripts"
+  cp "$REPO/scripts/sync-merge-gate.sh" "$RUNNER/scripts/"
+  cp -R "$REPO/scripts/lib" "$RUNNER/scripts/lib"
+  chmod 755 "$RUNNER/scripts/sync-merge-gate.sh"
 
-  decision="$(resolve_prepush_target "$WORK")"
-  # Resolver must WARN (so the caller skips) and NOT instruct a write.
-  [ "$(_field "$decision" 1)" = "WARN" ]
-  # Run the apply path (which must be a no-op for WARN) and confirm nothing was
-  # written into .git/hooks/pre-push.
-  _apply "$WORK"
-  # FINAL: no pre-push materialized at the absolute .git/hooks path.
-  [ ! -f "$WORK/.git/hooks/pre-push" ]
+  mv "$RUNNER" "$MOVED_RUNNER"
+  cat > "$MOVED_RUNNER/scripts/attach-project.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' source-poisoned >&2
+exit 99
+SH
+  chmod 755 "$MOVED_RUNNER/scripts/attach-project.sh"
+  mkdir -p "$RUNNER/core-rules/githooks"
+  printf '#!/usr/bin/env bash\nprintf source-poisoned\\n\n' > "$RUNNER/core-rules/githooks/pre-push"
 }
 
-@test "hooksPath outside worktree: WARN + SKIP" {
-  git -C "$WORK" config core.hooksPath "$BATS_TEST_TMPDIR/external-hooks"
-  decision="$(resolve_prepush_target "$WORK")"
-  # FINAL: resolver warns rather than writing outside the worktree.
-  [ "$(_field "$decision" 1)" = "WARN" ]
+capture_relink_arguments() {
+  RELINK_ARGS="$HOME_PATH/test-relink-arguments"
+  rm -f "$RELINK_ARGS"
 }
 
-@test "plain per-clone: no husky, no hooksPath -> .git/hooks/pre-push target" {
-  decision="$(resolve_prepush_target "$WORK")"
-  # FINAL: WRITE into .git/hooks via the githooks source.
-  [ "$(_field "$decision" 1)" = "WRITE" ] \
-    && [ "$(_field "$decision" 3)" = "githooks" ] \
-    && [ "$(basename "$(dirname "$(_field "$decision" 2)")")" = "hooks" ]
+install_snapshot_probe() {
+  local library="$MOVED_RUNNER/scripts/lib/release-store.sh"
+  local real_library="$MOVED_RUNNER/scripts/lib/release-store.real.sh"
+
+  mv "$library" "$real_library"
+  cat > "$library" <<'SH'
+#!/usr/bin/env bash
+_T16_REAL_RELEASE_STORE="$(CDPATH= cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/release-store.real.sh"
+. "$_T16_REAL_RELEASE_STORE"
+
+_t16_poison_attachment_source() {
+  local path="$1" marker="$2" label="$3"
+  chmod u+w "$(dirname "$path")" "$path"
+  printf '#!/usr/bin/env bash\nprintf %%s %q > %q\nexit 99\n' "$label" "$marker" > "$path"
+  chmod 755 "$path"
 }
 
-# ---------------------------------------------------------------------------
-# IDEMPOTENT: 2nd apply is a no-op (file already byte-identical to canonical).
-# ---------------------------------------------------------------------------
-@test "idempotent: 2nd husky apply is a no-op (unchanged mtime-independent)" {
-  mkdir -p "$WORK/.husky"
-  printf 'STALE\n' > "$WORK/.husky/pre-push"
-  _apply "$WORK"
-  first_sha="$(shasum -a 256 "$WORK/.husky/pre-push" | awk '{print $1}')"
-  _apply "$WORK"
-  second_sha="$(shasum -a 256 "$WORK/.husky/pre-push" | awk '{print $1}')"
-  canon_sha="$(shasum -a 256 "$CANON_HUSKY" | awk '{print $1}')"
-  # FINAL: both runs converge to canonical (2nd run changed nothing).
-  [ "$first_sha" = "$canon_sha" ] && [ "$second_sha" = "$canon_sha" ]
+release_store_snapshot_verified_release() {
+  local version="${1:-}" record snapshot digest marker carrier attachment_lib
+  if record="$(
+    /usr/bin/env -i \
+      "HOME=${HOME:-}" \
+      "TRELLIS_HOME=${TRELLIS_HOME:-}" \
+      "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+      /bin/bash --noprofile --norc -c '
+        . "$1"
+        release_store_snapshot_verified_release "$2"
+      ' _ "$_T16_REAL_RELEASE_STORE" "$version"
+  )"; then
+    :
+  else
+    return "$?"
+  fi
+
+  case "$record" in
+    *$'\t'*)
+      snapshot="${record%%$'\t'*}"
+      digest="${record#*$'\t'}"
+      ;;
+    *) return 4 ;;
+  esac
+  [ -n "$snapshot" ] && [ -n "$digest" ] || return 4
+  marker="${TRELLIS_TEST_CARRIER_MARKER:-}"
+  carrier="$TRELLIS_HOME/releases/$version/payload/scripts/attach-project.sh"
+  attachment_lib="$TRELLIS_HOME/releases/$version/payload/scripts/lib/attachment.sh"
+
+  case "${TRELLIS_TEST_SNAPSHOT_PROBE_MODE:-}" in
+    original)
+      _t16_poison_attachment_source "$carrier" "$marker" original-carrier-executed
+      _t16_poison_attachment_source "$attachment_lib" "$marker" original-lib-executed
+      ;;
+    snapshot-carrier)
+      _t16_poison_attachment_source "$snapshot/payload/scripts/attach-project.sh" \
+        "$marker" snapshot-carrier-executed
+      ;;
+    snapshot-lib)
+      _t16_poison_attachment_source "$snapshot/payload/scripts/lib/attachment.sh" \
+        "$marker" snapshot-lib-executed
+      ;;
+  esac
+  printf '%s\n' "$record"
 }
 
-# ---------------------------------------------------------------------------
-# OVERWRITE SAFETY (Pattern D) — these MUST drive the REAL sync-merge-gate.sh
-# binary: the managed-marker check lives in sync_one, NOT in resolve_prepush_
-# target / the _apply helper. Driving _apply would test nothing (green-while-
-# broken). Two projects per run so we prove the unknown one is skipped WHILE the
-# managed one still overwrites.
-# ---------------------------------------------------------------------------
-@test "binary overwrite-safety: unknown custom pre-push WARNs + SKIPs (not clobbered)" {
-  _make_mg_instance unknownproj managedproj
-  # unknownproj: NON-empty custom pre-push matching NO managed marker.
-  _seed_husky_project unknownproj '#!/usr/bin/env sh
-# my bespoke lint gate
-exit 0
-'
-  # managedproj: stale-but-managed (contains the "Trellis" marker) -> overwrites.
-  _seed_husky_project managedproj '#!/usr/bin/env sh
-# Trellis canonical pre-push (OLD VERSION)
-exit 0
-'
-  run env TRELLIS_CONFIG="$MG_ROOT/trellis.config.json" bash "$MG_ROOT/scripts/sync-merge-gate.sh" --yes
+release_store_remove_snapshot() {
+  if [ "${TRELLIS_TEST_SNAPSHOT_PROBE_MODE:-}" = cleanup ]; then
+    printf 'fixture cleanup diagnostic: \033\001\302\201\n' >&2
+    return "${TRELLIS_TEST_CLEANUP_STATUS:-5}"
+  fi
+  (
+    . "$_T16_REAL_RELEASE_STORE"
+    release_store_remove_snapshot "$@"
+  )
+}
+SH
+}
+
+assert_complete_relink_binding() {
+  local args fleet project_id root checkout_id worktree_id attachment_id release harnesses
+  args="$(jq -Rsc 'split("\n") | .[:-1]' "$RELINK_ARGS")" || return 1
+  fleet="$(jq -r '.fleet' "$OWNER")" || return 1
+  project_id="$(jq -r '.project_id' "$OWNER")" || return 1
+  root="$(jq -r '.project_root' "$OWNER")" || return 1
+  checkout_id="$(jq -r '.checkout_id' "$OWNER")" || return 1
+  worktree_id="$(jq -r '.worktree_id' "$OWNER")" || return 1
+  attachment_id="$(jq -r '.attachment_id' "$OWNER")" || return 1
+  release="$(jq -r '.release' "$OWNER")" || return 1
+  harnesses="$(jq -c '
+    [.artifacts[]
+     | if .path == "AGENTS.md" or (.path | startswith(".agents/")) or (.path | startswith(".codex/"))
+       then "codex"
+       elif (.path | startswith(".claude/")) then "claude"
+       elif (.path | startswith(".omp/")) then "omp"
+       else empty
+       end]
+    | unique | sort
+  ' "$OWNER")" || return 1
+  jq -e \
+    --arg home "$HOME_PATH" --arg fleet "$fleet" --arg project_id "$project_id" \
+    --arg root "$root" --arg checkout_id "$checkout_id" --arg worktree_id "$worktree_id" \
+    --arg attachment_id "$attachment_id" --arg release "$release" --arg harnesses "$harnesses" '
+      . == [
+        "relink",
+        "--home", $home,
+        "--fleet", $fleet,
+        "--expected-fleet", $fleet,
+        "--expected-project-id", $project_id,
+        "--expected-root", $root,
+        "--expected-checkout-id", $checkout_id,
+        "--expected-worktree-id", $worktree_id,
+        "--expected-attachment-id", $attachment_id,
+        "--expected-release", $release,
+        "--expected-harnesses-json", $harnesses,
+        $root
+      ]
+    ' <<<"$args" >/dev/null
+}
+
+owner_path() {
+  find "$HOME_PATH/state/attachments" -type f -name '*.json' -print | sed -n '1p'
+}
+
+prepare_fixture() {
+  build_installed_release
+  create_project
+  attach_project
+  make_movable_runner
+  OWNER="$(owner_path)"
+  [ -n "$OWNER" ] && [ -f "$OWNER" ]
+  MANAGED_HOOKS="$(jq -r '.git_hooks.managed_hooks_path' "$OWNER")"
+  [ -n "$MANAGED_HOOKS" ] && [ "$MANAGED_HOOKS" != null ]
+}
+
+record_unavailable_row() {
+  local project_id="${1:-unavailable-merge}" root="${2:-$UNAVAILABLE_ROOT}"
+  run env TRELLIS_HOME="$HOME_PATH" bash -c \
+    '. "$1"; local_registry_record_unavailable_root "$2" personal "$3" "$4" "{}"' \
+    _ "$REPO/scripts/lib/local-registry.sh" "$HOME_PATH" "$project_id" "$root"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+assert_terminal_safe() {
+  if printf '%s' "$1" | LC_ALL=C od -An -tu1 | tr -s ' ' '\n' | awk '
+    NF && ($1 == 27 || ($1 >= 0 && $1 <= 31 && $1 != 10) ||
+    $1 == 127 || ($1 >= 128 && $1 <= 159)) { exit 1 }
+  '; then
+    return 0
+  fi
+  return 1
+}
+
+install_terminal_registry_stub() {
+  cat >> "$MOVED_RUNNER/scripts/lib/local-registry.sh" <<'SH'
+eval "_terminal_stub_real_list_json() $(declare -f local_registry_list_json | sed '1d')"
+local_registry_list_json() {
+  if [ -z "${TRELLIS_TEST_TERMINAL_ROOT:-}" ]; then
+    _terminal_stub_real_list_json "$@"
+    return "$?"
+  fi
+  jq -n --arg root "$TRELLIS_TEST_TERMINAL_ROOT" '{
+    entries: [{
+      fleet: "personal",
+      project_id: "terminal-merge",
+      kind: "unavailable",
+      availability: "unavailable",
+      status: "unavailable",
+      excluded: false,
+      root: $root,
+      release: null,
+      attachment_id: null,
+      checkout_id: null,
+      worktree_id: null,
+      harnesses: [],
+      metadata: {}
+    }]
+  }'
+}
+SH
+}
+
+# Rewrite the owner record through FILTER. Used for both dispatcher-metadata
+# shapes below: the schema-legal one (no `git_hooks` block at all) and the
+# schema-illegal one (a block the owner validator rejects).
+rewrite_owner() {
+  local next="$OWNER.next"
+  chmod u+w "$OWNER"
+  jq "$1" "$OWNER" > "$next"
+  mv "$next" "$OWNER"
+  chmod 600 "$OWNER"
+}
+
+# The owner schema makes `git_hooks` optional, so this is a VALID record for an
+# attachment that manages no hooks — not corruption.
+drop_merge_dispatcher_metadata() {
+  rewrite_owner 'del(.git_hooks)'
+}
+
+# A PRESENT block the `hooks` definition rejects: `.enabled` must be a boolean.
+corrupt_merge_dispatcher_metadata() {
+  rewrite_owner '.git_hooks.enabled = "yes"'
+}
+
+remove_claude_owner_artifacts() {
+  local next
+  chmod u+w "$OWNER"
+  next="$OWNER.next"
+  jq '.artifacts |= map(select((.path | startswith(".claude/")) | not))' \
+    "$OWNER" > "$next"
+  mv "$next" "$OWNER"
+  chmod 600 "$OWNER"
+}
+
+@test "merge sync validates the moved attachment dispatcher and leaves project hooks untouched" {
+  prepare_fixture
+  owner_before="$(shasum -a 256 "$OWNER" | awk '{print $1}')"
+  dispatcher_before="$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF "matches no managed marker" <<<"$output"
-  # FINAL: the unknown custom hook was NOT clobbered (its bespoke marker remains).
-  grep -qF "bespoke lint gate" "$MG_PROJECTS/unknownproj/.husky/pre-push"
+  grep -qF "attachment-managed immutable dispatcher for $VERSION" <<<"$output"
+
+  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+  [ "$(cat "$MANAGED_HOOKS/release-payload")" = "$HOME_PATH/releases/$VERSION/payload" ]
+  [ ! -e "$PROJECT/.husky/pre-push" ]
+  [ ! -e "$PROJECT/.githooks/pre-push" ]
+  [ "$(shasum -a 256 "$OWNER" | awk '{print $1}')" = "$owner_before" ]
+  [ "$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')" = "$dispatcher_before" ]
 }
 
-@test "binary overwrite-safety: managed-marker (stale Trellis) pre-push is overwritten" {
-  _make_mg_instance unknownproj managedproj
-  _seed_husky_project unknownproj '#!/usr/bin/env sh
-# my bespoke lint gate
-exit 0
-'
-  _seed_husky_project managedproj '#!/usr/bin/env sh
-# Trellis canonical pre-push (OLD VERSION)
-exit 0
-'
-  run env TRELLIS_CONFIG="$MG_ROOT/trellis.config.json" bash "$MG_ROOT/scripts/sync-merge-gate.sh" --yes
+@test "merge sync dry-run preserves a stale dispatcher and relink restores it from the immutable release" {
+  prepare_fixture
+  rm "$MANAGED_HOOKS/pre-push"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # FINAL: the managed (stale) hook now equals canonical (overwrite proceeded).
-  cmp -s "$CANON_HUSKY" "$MG_PROJECTS/managedproj/.husky/pre-push"
-}
+  grep -qF 'would reconcile attachment-managed merge dispatcher' <<<"$output"
+  [ ! -e "$MANAGED_HOOKS/pre-push" ]
 
-# ---------------------------------------------------------------------------
-# An EMPTY existing pre-push is a placeholder, not a custom hook: it overwrites
-# normally (the [ -s "$target" ] guard treats zero-byte as overwritable).
-# ---------------------------------------------------------------------------
-@test "binary overwrite-safety: empty pre-push placeholder overwrites normally" {
-  _make_mg_instance emptyproj
-  _seed_husky_project emptyproj ''
-  run env TRELLIS_CONFIG="$MG_ROOT/trellis.config.json" bash "$MG_ROOT/scripts/sync-merge-gate.sh" --yes
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # FINAL: empty placeholder replaced with canonical.
-  cmp -s "$CANON_HUSKY" "$MG_PROJECTS/emptyproj/.husky/pre-push"
+  grep -qF 'attachment merge dispatcher relinked' <<<"$output"
+  [ "$(grep -cF source-poisoned <<<"$output")" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
+  [ ! -e "$PROJECT/.githooks/pre-push" ]
 }
 
-# ---------------------------------------------------------------------------
-# --from-main-only detached-HEAD guard (Pattern D LOW): when SOURCE_ROOT's HEAD
-# is detached, --from-main-only must refuse (exit 1) BEFORE touching projects.
-# Make SOURCE_ROOT itself a detached-HEAD repo so the guard fires on it.
-# ---------------------------------------------------------------------------
-@test "from-main-only: refuses to run on a detached-HEAD source" {
-  _make_mg_instance someproj
-  git -C "$MG_ROOT" init -q
-  git -C "$MG_ROOT" config user.email "ci-bats@trellis.test"
-  git -C "$MG_ROOT" config user.name "trellis ci"
-  git -C "$MG_ROOT" add -A
-  git -C "$MG_ROOT" commit -qm "seed"
-  git -C "$MG_ROOT" checkout -q --detach HEAD
-  run env TRELLIS_CONFIG="$MG_ROOT/trellis.config.json" bash "$MG_ROOT/scripts/sync-merge-gate.sh" --from-main-only --yes
-  [ "$status" -eq 1 ]
-  # FINAL: refusal reason printed (set-e-catchable simple command).
-  grep -qF "HEAD is detached" <<<"$output"
+@test "merge sync passes the complete strict binding to attachment relink" {
+  prepare_fixture
+  rm "$MANAGED_HOOKS/pre-push"
+  capture_relink_arguments
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_complete_relink_binding
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+}
+
+@test "merge sync treats a nonregular owner record as a state error" {
+  prepare_fixture
+  rm "$OWNER"
+  mkdir "$OWNER"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  grep -qF 'blocked (corrupt attachment owner record)' <<<"$output"
+  [ -d "$OWNER" ]
+}
+
+@test "merge sync reports unavailable strict rows without creating a guessed checkout" {
+  prepare_fixture
+  record_unavailable_row
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run unavailable-merge
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF 'skip (unavailable): personal/unavailable-merge' <<<"$output"
+  escaped_root="$(LC_ALL=C printf '%q' "$UNAVAILABLE_ROOT")"
+  grep -qF "$escaped_root" <<<"$output"
+  [ ! -e "$UNAVAILABLE_ROOT" ]
+}
+
+@test "merge sync rejects owner harness divergence as a strict conflict" {
+  prepare_fixture
+  remove_claude_owner_artifacts
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  grep -qF 'owner record conflicts with strict registry' <<<"$output"
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+}
+
+@test "merge sync preserves a failed dispatcher relink conflict" {
+  prepare_fixture
+  printf 'foreign dispatcher artifact\n' > "$MANAGED_HOOKS/pre-push"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  grep -qF 'attachment relink failed (3)' <<<"$output"
+  grep -qF 'foreign dispatcher artifact' "$MANAGED_HOOKS/pre-push"
+}
+
+@test "merge sync treats a missing owner record as a state error" {
+  prepare_fixture
+  rm "$OWNER"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  grep -qF 'blocked (corrupt attachment owner record)' <<<"$output"
+  [ ! -e "$OWNER" ]
+}
+
+@test "merge sync skips an owner record that declares no managed merge dispatcher" {
+  prepare_fixture
+  # `git_hooks` is optional in the owner schema (scripts/lib/attachment.sh's
+  # owner validator: `if has("git_hooks") then (.git_hooks | hooks) else true
+  # end`), so its absence is a legal record meaning "hooks are not managed" —
+  # exactly what `enabled: false` means. Reconciliation skips, and the
+  # dispatcher this attachment installed earlier is left untouched.
+  dispatcher_before="$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')"
+  drop_merge_dispatcher_metadata
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Counted, and guarded: this is the test's central claim, so it must print the
+  # run's output when it fails rather than dying silently mid-test.
+  [ "$(grep -cF 'skip (attachment has no managed merge dispatcher): personal/merge-project' <<<"$output")" -ge 1 ] ||
+    { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')" = "$dispatcher_before" ] ||
+    { echo "$output"; false; }
+}
+
+@test "merge sync treats a schema-invalid dispatcher block as a corrupt owner record" {
+  prepare_fixture
+  # The state-error branch this command used to keep for dispatcher metadata is
+  # unreachable: `_attachment_owner_json_valid` runs first and applies the full
+  # `hooks` definition, so a present-but-invalid block is reported one step
+  # earlier, as owner corruption, and never as dispatcher metadata.
+  corrupt_merge_dispatcher_metadata
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ "$(grep -cF 'blocked (corrupt attachment owner record): personal/merge-project' <<<"$output")" -ge 1 ] ||
+    { echo "$output"; false; }
+}
+
+@test "merge sync keeps root and child diagnostics terminal-safe" {
+  prepare_fixture
+  terminal_root="$SANDBOX/Missing$(printf '\033\001\302\201')Root"
+  install_terminal_registry_stub
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TRELLIS_TEST_TERMINAL_ROOT="$terminal_root" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run terminal-merge
+  # This test's whole subject is escape bytes in diagnostics, so a failure
+  # here must render them printably instead of replaying them.
+  [ "$status" -eq 0 ] || { cat -v <<<"$output"; false; }
+  grep -qF 'skip (unavailable): personal/terminal-merge' <<<"$output"
+  assert_terminal_safe "$output"
+
+  rm "$MANAGED_HOOKS/pre-push"
+  printf 'fixture child diagnostic: \033\001\302\201\n' > "$HOME_PATH/test-relink-child-diagnostic"
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 5 ] || { cat -v <<<"$output"; false; }
+  grep -qF 'attachment relink failed (5)' <<<"$output"
+  assert_terminal_safe "$output"
+}
+
+@test "merge sync executes the immutable bundle after active carrier and library swap" {
+  prepare_fixture
+  rm "$MANAGED_HOOKS/pre-push"
+  install_snapshot_probe
+  marker="$SANDBOX/active carrier or library executed"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=original \
+    TRELLIS_TEST_CARRIER_MARKER="$marker" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$marker" ]
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+}
+
+@test "merge sync refuses mixed immutable snapshot carrier and library before relink" {
+  prepare_fixture
+  rm "$MANAGED_HOOKS/pre-push"
+  install_snapshot_probe
+  marker="$SANDBOX/snapshot carrier or library executed"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=snapshot-lib \
+    TRELLIS_TEST_CARRIER_MARKER="$marker" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  grep -qF 'attachment relink failed (4)' <<<"$output"
+  [ ! -e "$marker" ]
+  [ ! -e "$MANAGED_HOOKS/pre-push" ]
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=snapshot-carrier \
+    TRELLIS_TEST_CARRIER_MARKER="$marker" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  grep -qF 'attachment relink failed (4)' <<<"$output"
+  [ ! -e "$marker" ]
+  [ ! -e "$MANAGED_HOOKS/pre-push" ]
+}
+
+@test "merge sync surfaces immutable snapshot cleanup failure above a relink conflict" {
+  prepare_fixture
+  printf 'foreign dispatcher artifact\n' > "$MANAGED_HOOKS/pre-push"
+  install_snapshot_probe
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=cleanup \
+    TRELLIS_TEST_CLEANUP_STATUS=5 \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  grep -qF 'attachment relink failed (3)' <<<"$output"
+  grep -qF 'active immutable execution snapshot cleanup failed (5)' <<<"$output"
+  assert_terminal_safe "$output"
+  grep -qF 'foreign dispatcher artifact' "$MANAGED_HOOKS/pre-push"
 }

@@ -1,0 +1,13 @@
+{
+  "$schema": "../../../lib/trellis.registry.schema.json",
+  "schema_version": 1,
+  "projects": {
+    "neev": {
+      "fleet": "personal",
+      "project_id": "neev",
+      "status": "active",
+      "metadata": {},
+      "checkouts": {}
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "$schema": "../../../lib/trellis.project.schema.json",
+  "schema_version": 1,
+  "project_id": "neev",
+  "presets": [],
+  "autonomy": 3,
+  "package_manager": "auto",
+  "trellis_root": "/Users/alex/src/trellis-instance",
+  "fleet": "personal",
+  "installed_release": "1.0.0-rc.24"
+}

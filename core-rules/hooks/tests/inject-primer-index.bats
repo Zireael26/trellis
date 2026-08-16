@@ -67,7 +67,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"STALE"* ]]
+  [[ "$output" == *"STALE"* ]] || { echo "$output"; false; }
   [[ "$output" == *"/primer-refresh"* ]]
 }
 
@@ -155,7 +155,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"real"* ]]
+  [[ "$output" == *"real"* ]] || { echo "$output"; false; }
   [[ "$output" != *"<slug>"* ]]
 }
 

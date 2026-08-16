@@ -176,6 +176,12 @@
           },
           {
             "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/decision-receipt.sh",
+            "timeout": 15,
+            "statusMessage": "Checking decision receipts..."
+          },
+          {
+            "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/stop-verify.sh",
             "timeout": 300,
             "statusMessage": "Running final verification..."

@@ -37,9 +37,10 @@ setup() {
   # tree (see "RED-GREEN DRIVER" below, DL-P7-08 item 2). Default is the
   # on-disk script; normal runs are unaffected.
   SCRIPT="${PG_TEST_SCRIPT:-$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-tests.sh}"
+  COMMON="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/lib/common.sh"
   PROJECT_DIR="$(mktemp -d)"
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
-  unset CODEX_PROJECT_DIR
+  unset CODEX_PROJECT_DIR TRELLIS_ROOT
   # Don't let an operator's ambient PROCESS_GATE_* config leak into auto-detect.
   unset PROCESS_GATE_TYPECHECK_CMD PROCESS_GATE_LINT_CMD PROCESS_GATE_TEST_CMD
   unset PROCESS_GATE_COVERAGE_CMD PROCESS_GATE_COVERAGE_FLOOR
@@ -53,6 +54,108 @@ teardown() {
 
 run_gate() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT'"
+}
+
+# run_resolver [runtime_root]
+run_resolver() {
+  local runtime="${1:-}"
+  run env "TRELLIS_ROOT=$runtime" bash -c 'source "$1"; pg_resolve_pm "$2"' \
+    _ "$COMMON" "$PROJECT_DIR"
+}
+
+@test "pg_resolve_pm uses canonical, legacy, then immutable runtime policy" {
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  local runtime="$PROJECT_DIR/.trellis/runtime"
+  mkdir -p "$runtime"
+  printf '%s\n' '{"package_manager":"auto"}' > "$PROJECT_DIR/.trellis.json"
+  printf '%s\n' '{"package_manager":"yarn"}' > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '{"package_manager":"npm"}' > "$runtime/trellis.config.json"
+  : > "$PROJECT_DIR/bun.lock"
+
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "bun" ]
+
+  printf '%s\n' '{"package_manager":"pnpm"}' > "$PROJECT_DIR/.trellis.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pnpm" ]
+
+  rm "$PROJECT_DIR/.trellis.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "yarn" ]
+
+  rm "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '{"package_manager":"yarn"}' > "$PROJECT_DIR/trellis.config.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "npm" ]
+}
+
+@test "pg_resolve_pm preserves explicit PM" {
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  printf '%s\n' '{"name":"fixture"}' > "$PROJECT_DIR/package.json"
+  printf '%s\n' '{"package_manager":"pnpm"}' > "$PROJECT_DIR/.trellis.json"
+
+  run_resolver
+  [ "$status" -eq 0 ]
+  [ "$output" = "pnpm" ]
+}
+
+@test "pg_resolve_pm preserves empty no-lockfile result" {
+  printf '%s\n' '{"name":"fixture"}' > "$PROJECT_DIR/package.json"
+
+  run_resolver
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pg_resolve_pm suppresses legacy/runtime PM after malformed or null canonical policy" {
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  local runtime="$PROJECT_DIR/.trellis/runtime"
+  mkdir -p "$runtime"
+  printf '%s\n' '{"package_manager":"yarn"}' > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '{"package_manager":"pnpm"}' > "$runtime/trellis.config.json"
+
+  printf '%s\n' '{"package_manager":' > "$PROJECT_DIR/.trellis.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  printf '%s\n' '{"package_manager":null}' > "$PROJECT_DIR/.trellis.json"
+  : > "$PROJECT_DIR/bun.lock"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "bun" ]
+
+  rm "$PROJECT_DIR/bun.lock"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pg_resolve_pm rejects hostile canonical PM values over lower policy" {
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  local runtime="$PROJECT_DIR/.trellis/runtime"
+  mkdir -p "$runtime"
+  printf '%s\n' '{"package_manager":"yarn"}' > "$PROJECT_DIR/.trellis.config.json"
+  printf '%s\n' '{"package_manager":"pnpm"}' > "$runtime/trellis.config.json"
+
+  printf '%s\n' '{"package_manager":true}' > "$PROJECT_DIR/.trellis.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  printf '%s\n' '{"package_manager":"/tmp/hostile-package-manager"}' > "$PROJECT_DIR/.trellis.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  : > "$PROJECT_DIR/package-lock.json"
+  run_resolver "$runtime"
+  [ "$status" -eq 0 ]
+  [ "$output" = "npm" ]
 }
 
 # make_toolbox <dir> [extra-tool ...]
@@ -87,7 +190,7 @@ make_toolbox() {
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The guard kept the cmd empty, so npm was never asked to run a missing
   # script — no "Missing script" / "npm error" text in the output.
-  [[ "$output" != *"Missing script"* ]]
+  [[ "$output" != *"Missing script"* ]] || { echo "$output"; false; }
   [[ "$output" != *"npm error"* ]]
 }
 
@@ -131,7 +234,7 @@ make_toolbox() {
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The broken root-level go commands were never built/run.
-  [[ "$output" != *"command not found"* ]]
+  [[ "$output" != *"command not found"* ]] || { echo "$output"; false; }
   [[ "$output" != *"go vet"* ]]
 }
 
@@ -245,8 +348,8 @@ JSON
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The absent vet/lint targets must NOT have been driven through make.
-  [[ "$output" != *"No rule to make target"* ]]
-  [[ "$output" != *"make vet"* ]]
+  [[ "$output" != *"No rule to make target"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"make vet"* ]] || { echo "$output"; false; }
   [[ "$output" != *"make lint"* ]]
 }
 
@@ -346,7 +449,11 @@ JSON
   # RED below would be a false negative against an un-rewritten copy). Use
   # fixed-string greps (-F): the assignment text contains ${...} which a BRE
   # would mis-parse as an interval/bracket and fail to match the literal line.
-  ! grep -qF "if grep -qE '^vet:'" "$tree/scripts/check-tests.sh"
+  # Counted, not `! grep -qF`: a leading `!` never trips `set -e`, so the bare
+  # form could not have caught an un-rewritten copy — the exact false negative
+  # this precondition exists to rule out.
+  [ "$(grep -cF "if grep -qE '^vet:'" "$tree/scripts/check-tests.sh")" -eq 0 ] ||
+    { grep -nF "if grep -qE '^vet:'" "$tree/scripts/check-tests.sh"; false; }
   grep -qF 'PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-make vet}"' "$tree/scripts/check-tests.sh"
   # The reconstructed script must still parse.
   bash -n "$tree/scripts/check-tests.sh"

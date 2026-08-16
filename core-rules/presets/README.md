@@ -100,7 +100,7 @@ autonomy_default: 3
 ```
 
 - `autonomy_ceiling` (integer 1–5) — clamp ceiling for any session running this preset. If multiple presets are active, the **lowest** ceiling wins (most restrictive). Session overrides via `/autonomy N` are clamped to ceiling and the command warns on clamp.
-- `autonomy_default` (integer 1–5) — overlays the fleet default when the preset is active and no project-local override exists. It remains lower priority than project-local `.trellis.config.json.autonomy` and a session override.
+- `autonomy_default` (integer 1–5) — overlays the fleet default when the preset is active and no project-local override exists. It remains lower priority than project-local `.trellis.json.autonomy` and a session override.
 
 Both fields are optional. A preset without frontmatter has no autonomy effect. See `core-rules/autonomy.md` for the full resolution algorithm.
 

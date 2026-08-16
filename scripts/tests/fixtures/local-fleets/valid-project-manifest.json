@@ -1,0 +1,19 @@
+{
+  "$schema": "../../../lib/trellis.project.schema.json",
+  "schema_version": 1,
+  "project_id": "neev",
+  "presets": ["web-app"],
+  "autonomy": 3,
+  "package_manager": "auto",
+  "loop_safety": {
+    "max_iterations": 80,
+    "no_progress_iterations": 3,
+    "budget_ceiling_usd": 1000,
+    "usd_per_mtok": 25
+  },
+  "mandatory_pipeline": {
+    "enabled": true,
+    "spec_required_diff_lines": 80,
+    "surgical_max_diff_lines": 400
+  }
+}

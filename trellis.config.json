@@ -1,25 +1,12 @@
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Edit this file after cloning. Replace placeholders with absolute paths and your details before invoking onboard-project.sh, sync-hooks.sh, sync-codex-hooks.sh, or sync-to-template.sh. Keep harnesses as [\"claude\"] for Claude-only installs; add \"codex\" and/or \"omp\" when opting into those native harness surfaces. Multiple harnesses may be enabled together.",
-
-  "trellis_root": "__TRELLIS_PATH__",
-  "projects_root": "__PROJECTS_ROOT__",
-  "user_home": "__USER_HOME__",
-
+  "schema_version": 2,
+  "comment": "Tracked portable Trellis policy. Configure machine roots, fleet settings, release remote, and attachment state in TRELLIS_HOME, never in this file.",
   "maintainer_name": "__MAINTAINER_NAME__",
   "github_user": "__GITHUB_USER__",
-
   "harnesses": ["claude"],
-
   "template": {
-    "remote": "git@github.com:__GITHUB_USER__/trellis.git",
-    "branch": "main",
-    "redact_paths": [
-      "audits/",
-      "blacklist.md",
-      "registry.md"
-    ]
-  },
-
-  "sed_flavor": "auto"
+    "remote": "https://example.invalid/trellis.git",
+    "branch": "main"
+  }
 }

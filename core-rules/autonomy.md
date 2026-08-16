@@ -84,7 +84,7 @@ Pick phase (later steps override earlier):
 1. Hard default = **L3**.
 2. `trellis.config.json.autonomy_default` (fleet default for this clone, 1–5).
 3. Active preset's `autonomy_default` if no project-local override.
-4. Project-local `<project>/.trellis.config.json.autonomy`.
+4. Project-local `<project>/.trellis.json.autonomy` (deprecated fallback: `<project>/.trellis.config.json.autonomy`).
 5. Session override at `<canonical-root>/.claude/session-autonomy` (single integer, written by `/autonomy N`).
 
 Clamp phase:
@@ -107,6 +107,8 @@ Append ` SURFACED INLINE` if the entry is `architectural` (so audit knows it was
 Kinds: `interpretation`, `pattern`, `scope`, `architectural`.
 
 End-of-turn assistant message renders a `## Decisions made (L<n>)` block pulling this turn's entries. When `gh pr create` runs, the PR description body includes the same block. `session-context.sh` injects the last 10 entries from `decisions-log.md` at session start when active level ≥ 4.
+
+At `Stop`, `decision-receipt.sh` enforces this contract only for substantive L4/L5 turns: a dirty worktree or a filled current-turn DoD marker requires exactly one block for the effective post-ceiling level. Each rendered entry must use the current UTC date and exist byte-for-byte in the canonical-root log; architectural entries require `SURFACED INLINE`. The gate is forward-only and never edits or retroactively validates historical entries. L1-L3 and clean read-only turns remain unchanged.
 
 ### Storage policy
 

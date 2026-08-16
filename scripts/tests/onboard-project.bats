@@ -21,70 +21,7 @@
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 ONBOARD="$REPO_ROOT/scripts/onboard-project.sh"
-
-RUNTIME_IGNORE_PATTERNS=(
-  "/context-log.md"
-  "/.claude/worktrees/"
-  "/.claude/settings.local.json"
-  "/.claude/checkpoints/"
-  "/.claude/mailbox/"
-  "/.claude/agent-registry.json"
-  "/.claude/agent-memory-local"
-  "/.claude/first-run"
-  "/.claude/assistant-daemon-state.json"
-  "/.claude/routines/.state/"
-  "/.claude/scheduled_tasks.lock"
-  "/.claude/scheduled_tasks.json"
-  "/.claude/session-autonomy"
-  "/.claude/session-surgical"
-  "/.claude/spec-gate-audit.log"
-  "/.claude/.fail-counter"
-  "/.codex/.fail-counter"
-  "/.claude/.reread-state/"
-  "/.codex/.reread-state/"
-  "/.claude/.review-done-*"
-  "/.codex/.review-done-*"
-  "/.claude/screenshots/"
-  "/.codex/screenshots/"
-  "/.claude/codex-thread-pool.json"
-)
-
-assert_runtime_ignore_contract() {
-  local project="$1"
-  local pattern fixture matches root_scoped_count
-
-  for pattern in "${RUNTIME_IGNORE_PATTERNS[@]}"; do
-    matches="$(grep -Fxc -- "$pattern" "$project/.gitignore" || true)"
-    [ "$matches" -eq 1 ] || {
-      echo "runtime ignore pattern must appear exactly once: $pattern"
-      return 1
-    }
-
-    fixture="${pattern#/}"
-    case "$fixture" in
-      */) fixture="${fixture}runtime-state" ;;
-      *\*) fixture="${fixture%\*}runtime-state" ;;
-    esac
-    mkdir -p "$(dirname "$project/$fixture")"
-    : > "$project/$fixture"
-    git -C "$project" check-ignore --no-index -q -- "$fixture" || {
-      echo "runtime state is not ignored: $fixture"
-      return 1
-    }
-  done
-
-  root_scoped_count="$(grep -Ec '^/' "$project/.gitignore" || true)"
-  [ "$root_scoped_count" -eq "${#RUNTIME_IGNORE_PATTERNS[@]}" ] || {
-    echo "unexpected root-scoped runtime ignore inventory"
-    return 1
-  }
-}
-
-seed_standalone_runtime_policy() {
-  local project="$1"
-  printf 'project-owned.log\n' > "$project/.gitignore"
-  printf '%s\n' "${RUNTIME_IGNORE_PATTERNS[@]}" >> "$project/.gitignore"
-}
+load helpers/portable-config
 
 setup() {
   SANDBOX="$(mktemp -d)"
@@ -93,7 +30,10 @@ setup() {
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
   CFG="$SANDBOX/trellis.config.json"
-  mkdir -p "$CANON" "$PROJECTS"
+  LOCAL_HOME="$SANDBOX/.trellis"
+  SHARED_INFRA="$SANDBOX/shared-infra"
+  mkdir -p "$CANON" "$PROJECTS" "$LOCAL_HOME" "$SHARED_INFRA"
+  chmod 700 "$LOCAL_HOME"
   export TRELLIS_CONFIG="$CFG"
 }
 
@@ -113,12 +53,14 @@ build_canonical_tree() {
   mkdir -p \
     "$CANON/core-rules/skills/process-gate" \
     "$CANON/core-rules/skills/security-gate" \
+    "$CANON/core-rules/skills/aeo-gate" \
     "$CANON/core-rules/commands/templates" \
     "$CANON/core-rules/agents" \
     "$CANON/core-rules/omp/hooks"
   printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
   printf 'x\n' > "$CANON/core-rules/skills/process-gate/SKILL.md"
   printf 'x\n' > "$CANON/core-rules/skills/security-gate/SKILL.md"
+  printf 'x\n' > "$CANON/core-rules/skills/aeo-gate/SKILL.md"
   printf 'x\n' > "$CANON/core-rules/commands/primer.md"
   printf 'x\n' > "$CANON/core-rules/commands/primer-refresh.md"
   printf 'x\n' > "$CANON/core-rules/commands/primer-check.md"
@@ -162,369 +104,339 @@ EOF
   )
 }
 
+# The sanctioned Spec 036 pair (tracked policy + machine state) lives in
+# helpers/portable-config.bash so shared-infra.bats models the same shape
+# rather than a second copy of the schema.
 write_config() {
-  local harnesses_json="${1:-\"claude\",\"omp\"}"
-  cat > "$CFG" <<EOF
-{
-  "trellis_root": "$CANON",
-  "projects_root": "$PROJECTS",
-  "user_home": "$SANDBOX",
-  "maintainer_name": "Test Maintainer",
-  "github_user": "tester",
-  "harnesses": [$harnesses_json]
-}
-EOF
-}
-
-run_onboard() {
-  run env TRELLIS_CONFIG="$CFG" TRELLIS_SKIP_SECURITY_BASELINE=1 \
-    bash "$ONBOARD" "$@"
+  portable_config_write "$CFG" "$CANON" "$LOCAL_HOME/config.json" \
+    "$PROJECTS" "$SHARED_INFRA" "${1:-\"claude\",\"omp\"}"
 }
 
 sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
-# ===========================================================================
-# 1. The five OMP links: exact absolute targets, resolving, nothing extra.
-# ===========================================================================
+# Emit each root-scoped local-runtime ignore pattern with a descendant or file
+# fixture that proves its behavior through git's ignore engine.
+runtime_ignore_fixtures() {
+  cat <<'EOF'
+/context-log.md|context-log.md
+/.claude/worktrees/|.claude/worktrees/fixture/state
+/.claude/settings.local.json|.claude/settings.local.json
+/.claude/checkpoints/|.claude/checkpoints/checkpoint.json
+/.claude/mailbox/|.claude/mailbox/message.json
+/.claude/agent-registry.json|.claude/agent-registry.json
+/.claude/agent-memory-local|.claude/agent-memory-local
+/.claude/first-run|.claude/first-run
+/.claude/assistant-daemon-state.json|.claude/assistant-daemon-state.json
+/.claude/routines/.state/|.claude/routines/.state/current
+/.claude/scheduled_tasks.lock|.claude/scheduled_tasks.lock
+/.claude/scheduled_tasks.json|.claude/scheduled_tasks.json
+/.claude/session-autonomy|.claude/session-autonomy
+/.claude/session-surgical|.claude/session-surgical
+/.claude/spec-gate-audit.log|.claude/spec-gate-audit.log
+/.claude/.fail-counter|.claude/.fail-counter
+/.codex/.fail-counter|.codex/.fail-counter
+/.claude/.reread-state/|.claude/.reread-state/current
+/.codex/.reread-state/|.codex/.reread-state/current
+/.claude/.review-done-*|.claude/.review-done-fixture
+/.codex/.review-done-*|.codex/.review-done-fixture
+/.claude/screenshots/|.claude/screenshots/capture.png
+/.codex/screenshots/|.codex/screenshots/capture.png
+/.claude/codex-thread-pool.json|.claude/codex-thread-pool.json
+EOF
+}
 
-@test "onboard seeds the five OMP links with exact absolute targets" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
+seed_standalone_runtime_ignores() {
+  local hp="$1" pattern fixture
+  printf 'project-owned.log\n' > "$hp/.gitignore"
+  while IFS='|' read -r pattern fixture; do
+    printf '%s\n' "$pattern" >> "$hp/.gitignore"
+  done < <(runtime_ignore_fixtures)
+}
 
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  local hp="$PROJECTS/healthy"
-  # .omp/AGENTS.md → the project's own CLAUDE.md (absolute machine-local link)
-  [ -L "$hp/.omp/AGENTS.md" ]
-  [ "$(readlink "$hp/.omp/AGENTS.md")" = "$hp/CLAUDE.md" ]
-  # Four whole-directory links → canonical core-rules
-  [ -L "$hp/.omp/skills" ]
-  [ "$(readlink "$hp/.omp/skills")" = "$CANON/core-rules/skills" ]
-  [ -L "$hp/.omp/commands" ]
-  [ "$(readlink "$hp/.omp/commands")" = "$CANON/core-rules/commands" ]
-  [ -L "$hp/.omp/agents" ]
-  [ "$(readlink "$hp/.omp/agents")" = "$CANON/core-rules/agents" ]
-  [ -L "$hp/.omp/hooks" ]
-  [ "$(readlink "$hp/.omp/hooks")" = "$CANON/core-rules/omp/hooks" ]
-
-  # Every link resolves (directory links resolve to dirs; AGENTS.md resolves
-  # through the project overlay).
-  [ -e "$hp/.omp/AGENTS.md" ]
-  [ -d "$hp/.omp/skills" ]
-  [ -d "$hp/.omp/commands" ]
-  [ -d "$hp/.omp/agents" ]
-  [ -d "$hp/.omp/hooks" ]
-
-  # User-owned OMP config files are never generated (operator-owned).
-  [ ! -e "$hp/.omp/config.yml" ]
-  [ ! -e "$hp/.omp/mcp.json" ]
-
-  # No individual custom agents are seeded anywhere (legacy agents were
-  # removed; the agents surface is the whole-directory link only).
-  [ ! -e "$hp/.claude/agents" ]
-
-  # Output shows the links being created.
-  [[ "$output" == *"linked: .omp/AGENTS.md"* ]]
-  [[ "$output" == *"linked: .omp/skills"* ]]
-  [[ "$output" == *"linked: .omp/hooks"* ]]
+assert_local_runtime_ignores() {
+  local hp="$1" pattern fixture
+  while IFS='|' read -r pattern fixture; do
+    mkdir -p "$(dirname "$hp/$fixture")"
+    : > "$hp/$fixture"
+    [ "$(grep -Fxc -- "$pattern" "$hp/.gitignore")" = "1" ] ||
+      { echo "missing or duplicate local-runtime pattern: $pattern"; false; }
+    run git -C "$hp" check-ignore --no-index -q -- "$fixture"
+    [ "$status" -eq 0 ] ||
+      { echo "local-runtime fixture is visible: $fixture"; false; }
+  done < <(runtime_ignore_fixtures)
 }
 
 # ===========================================================================
-# 2. Managed ignore: the five OMP links plus root-only runtime state.
+# 1. Cutover (v1.0.0-rc.25): the legacy direct-link writer is REMOVED.
+#
+#    Sections 1–9 of this file used to prove what `--legacy` seeded: the five
+#    OMP links, the managed ignore block, idempotence, never-clobber, broken-
+#    link replacement, live directory links, harness gating, the control-plane
+#    special case, and obsolete-agent cleanup. None of that code exists any
+#    more, so none of those cases can pass or fail meaningfully. The equivalent
+#    guarantees for the layout that replaced it are proven against the
+#    attachment transaction in attach-project.bats, detach-project.bats,
+#    surface-plan.bats, and non-trellis-inert.bats.
+#
+#    What is left to pin here is the removal itself: every spelling that used to
+#    select the writer refuses with the usage class, names the migration, and —
+#    the assertion that matters — writes nothing into the project.
 # ===========================================================================
 
-@test "managed ignore protects runtime state without hiding tracked surfaces" {
+run_removed_mode() {
+  run env HOME="$SANDBOX" TRELLIS_HOME="$LOCAL_HOME" TRELLIS_CONFIG="$CFG" \
+    TRELLIS_SKIP_INFRA=1 TRELLIS_SKIP_SECURITY_BASELINE=1 \
+    bash "$ONBOARD" "$@"
+}
+
+assert_project_untouched() {
+  local hp="$1"
+  [ ! -e "$hp/.claude/rules/trellis.md" ]
+  [ ! -L "$hp/.claude/rules/trellis.md" ]
+  [ ! -e "$hp/.claude/skills/process-gate" ]
+  [ ! -e "$hp/.omp/AGENTS.md" ]
+  [ ! -L "$hp/.omp/AGENTS.md" ]
+  [ ! -e "$hp/.trellis.json" ]
+  [ ! -e "$hp/gotchas.md" ]
+  if [ -f "$hp/.gitignore" ]; then
+    ! grep -Fq 'Trellis inheritance symlinks' "$hp/.gitignore"
+  fi
+}
+
+@test "--legacy refuses with exit 2 and writes nothing into the project" {
   build_canonical_tree
   build_healthy_project
   write_config
-  local hp="$PROJECTS/healthy"
-  seed_standalone_runtime_policy "$hp"
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  assert_runtime_ignore_contract "$hp"
-  grep -Fxq -- "project-owned.log" "$hp/.gitignore" ||
-    { echo "project-authored ignore line was removed"; false; }
 
-  mkdir -p "$hp/nested"
-  : > "$hp/nested/context-log.md"
-  run git -C "$hp" check-ignore --no-index -q -- "nested/context-log.md"
-  [ "$status" -eq 1 ] || { echo "nested context-log.md is unexpectedly ignored"; false; }
+  run_removed_mode --legacy "$PROJECTS/healthy"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis migrate --prepare"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"trellis attach --fleet NAME"* ]] || { echo "$output"; false; }
 
-  # Tracked onboarding surfaces remain visible.
-  local rel
-  for rel in ".claude/settings.json" ".claude/primers/INDEX.md"; do
-    [ -f "$hp/$rel" ] || { echo "missing tracked onboarding surface: $rel"; false; }
-    run git -C "$hp" check-ignore --no-index -q -- "$rel"
-    [ "$status" -eq 1 ] || { echo "tracked onboarding surface is ignored: $rel"; false; }
+  assert_project_untouched "$PROJECTS/healthy"
+}
+
+@test "--compatibility, --legacy-relative, and --infra-entry all refuse identically" {
+  build_canonical_tree
+  build_healthy_project
+  write_config
+
+  local mode
+  for mode in --compatibility --legacy-relative --infra-entry; do
+    run_removed_mode "$mode" "$PROJECTS/healthy"
+    [ "$status" -eq 2 ] || { echo "$mode: $output"; false; }
+    [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$mode: $output"; false; }
+    assert_project_untouched "$PROJECTS/healthy"
   done
 
-  # The managed .gitignore block lists all five exact machine-local links.
-  for rel in ".omp/AGENTS.md" ".omp/skills" ".omp/commands" ".omp/agents" ".omp/hooks"; do
-    grep -q "^$rel\$" "$hp/.gitignore" || { echo "missing from .gitignore: $rel"; false; }
-    git -C "$hp" check-ignore -q "$rel" || { echo "not ignored: $rel"; false; }
-  done
-  # They never appear in git status (untracked + ignored).
-  run git -C "$hp" status --porcelain
-  [[ "$output" != *".omp"* ]]
+  # The `=`-joined spelling must refuse before it consumes its value, so a
+  # scripted `--infra-entry=<file>` cannot fall through to portable onboarding
+  # and be read as a project path.
+  run_removed_mode --infra-entry="$SANDBOX/entry.yml" "$PROJECTS/healthy"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$output"; false; }
+  assert_project_untouched "$PROJECTS/healthy"
+}
+
+@test "the refusal is a usage error, not a portable onboarding attempt" {
+  build_canonical_tree
+  build_healthy_project
+  write_config
+
+  # Exit 2 is the usage class. A conflict (3) or state (4) class would mean the
+  # portable path ran and formed an opinion about the project, which is exactly
+  # what the dispatcher must prevent for a removed mode.
+  run_removed_mode --legacy --fleet personal "$PROJECTS/healthy"
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"created tracked manifest"* ]] || { echo "$output"; false; }
+  assert_project_untouched "$PROJECTS/healthy"
 }
 
 # ===========================================================================
-# 3. Idempotence: second run skips the OMP links, .gitignore stays stable.
+# 10. Portable default: one inert manifest, then local attachment delegation.
 # ===========================================================================
 
-@test "idempotent: second run skips correct OMP links and leaves .gitignore stable" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
-  local hp="$PROJECTS/healthy"
-  seed_standalone_runtime_policy "$hp"
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  assert_runtime_ignore_contract "$hp"
+build_portable_onboard_fixture() {
+  PORTABLE_BIN="$SANDBOX/portable-bin"
+  PORTABLE_ONBOARD="$PORTABLE_BIN/onboard-project.sh"
+  ATTACH_LOG="$SANDBOX/attach.argv"
+  PORTABLE_PROJECT="$SANDBOX/project with spaces"
+  mkdir -p "$PORTABLE_BIN/lib" "$PORTABLE_PROJECT"
+  cp "$ONBOARD" "$PORTABLE_ONBOARD"
+  cp "$REPO_ROOT/scripts/lib/trellis-home.sh" "$PORTABLE_BIN/lib/trellis-home.sh"
+  cp "$REPO_ROOT/scripts/lib/local-registry.sh" "$PORTABLE_BIN/lib/local-registry.sh"
+  cat > "$PORTABLE_BIN/attach-project.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$ATTACH_LOG"
+EOF
+  chmod +x "$PORTABLE_ONBOARD" "$PORTABLE_BIN/attach-project.sh"
+  (
+    cd "$PORTABLE_PROJECT"
+    git init -q -b main
+    git config user.email test@example.com
+    git config user.name test
+    printf 'seed\n' > README.md
+    git add README.md
+    git commit -qm init
+  )
+}
 
+run_portable_onboard() {
+  run env ATTACH_LOG="$ATTACH_LOG" TRELLIS_CONFIG="$SANDBOX/missing-legacy-config.json" \
+    bash "$PORTABLE_ONBOARD" "$@"
+}
+
+@test "portable onboarding writes only the inert manifest and forwards local selectors" {
+  build_portable_onboard_fixture
+
+  run_portable_onboard --fleet personal --home "$SANDBOX/home" --release 1.2.3 \
+    --harness claude --harness omp --project-id portable-project "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"created tracked manifest:"* ]] || { echo "$output"; false; }
+  jq -e '
+    keys == ["$schema", "project_id", "schema_version"]
+    and ."$schema" == "https://trellis.local/schemas/trellis.project.schema.json"
+    and .schema_version == 1
+    and .project_id == "portable-project"
+  ' "$PORTABLE_PROJECT/.trellis.json"
+  [ "$(grep -cF "$SANDBOX" "$PORTABLE_PROJECT/.trellis.json")" -eq 0 ] || { cat "$PORTABLE_PROJECT/.trellis.json"; false; }
+  [ "$(git -C "$PORTABLE_PROJECT" status --short)" = "?? .trellis.json" ]
+  [ "$(sed -n '1p' "$ATTACH_LOG")" = attach ]
+  [ "$(sed -n '2p' "$ATTACH_LOG")" = --home ]
+  [ "$(sed -n '3p' "$ATTACH_LOG")" = "$SANDBOX/home" ]
+  [ "$(sed -n '4p' "$ATTACH_LOG")" = --fleet ]
+  [ "$(sed -n '5p' "$ATTACH_LOG")" = personal ]
+  [ "$(sed -n '6p' "$ATTACH_LOG")" = --release ]
+  [ "$(sed -n '7p' "$ATTACH_LOG")" = 1.2.3 ]
+  [ "$(sed -n '8p' "$ATTACH_LOG")" = --harness ]
+  [ "$(sed -n '9p' "$ATTACH_LOG")" = claude ]
+  [ "$(sed -n '10p' "$ATTACH_LOG")" = --harness ]
+  [ "$(sed -n '11p' "$ATTACH_LOG")" = omp ]
+  [ "$(sed -n '12p' "$ATTACH_LOG")" = "$PORTABLE_PROJECT" ]
+}
+
+@test "portable onboarding is idempotent for an existing valid manifest" {
+  build_portable_onboard_fixture
+  run_portable_onboard --fleet personal --project-id portable-project "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ]
   local before
-  before="$(sha_of "$hp/.gitignore")"
+  before="$(sha_of "$PORTABLE_PROJECT/.trellis.json")"
 
-  run_onboard "$PROJECTS/healthy"
+  run_portable_onboard --fleet personal "$PORTABLE_PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  [[ "$output" == *"skip (correct symlink): .omp/AGENTS.md"* ]]
-  [[ "$output" == *"skip (correct symlink): .omp/skills"* ]]
-  [[ "$output" == *"skip (correct symlink): .omp/hooks"* ]]
-  [[ "$output" != *"linked: .omp/"* ]]
-  [ "$(readlink "$hp/.omp/AGENTS.md")" = "$hp/CLAUDE.md" ]
-  [ "$(readlink "$hp/.omp/hooks")" = "$CANON/core-rules/omp/hooks" ]
-  assert_runtime_ignore_contract "$hp"
-  [ "$(sha_of "$hp/.gitignore")" = "$before" ]
+  [[ "$output" != *"created tracked manifest:"* ]] || { echo "$output"; false; }
+  [ "$(sha_of "$PORTABLE_PROJECT/.trellis.json")" = "$before" ]
+  [ "$(sed -n '1p' "$ATTACH_LOG")" = attach ]
 }
 
-# ===========================================================================
-# 4. Never-clobber: user-owned OMP paths are refused, WARNed, left intact.
-# ===========================================================================
+@test "portable onboarding rejects a legacy preset beside an existing manifest" {
+  build_portable_onboard_fixture
+  cat > "$PORTABLE_PROJECT/.trellis.json" <<'JSON'
+{"$schema":"https://trellis.local/schemas/trellis.project.schema.json","project_id":"portable-project","schema_version":1}
+JSON
+  mkdir -p "$PORTABLE_PROJECT/.claude/rules"
+  ln -s "$SANDBOX/legacy-preset.md" "$PORTABLE_PROJECT/.claude/rules/preset-legacy.md"
 
-@test "user-owned OMP paths are never clobbered" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
+  run_portable_onboard --fleet personal "$PORTABLE_PROJECT"
 
-  local hp="$PROJECTS/healthy"
-  mkdir -p "$hp/.omp"
-  # User-owned regular file where .omp/AGENTS.md belongs.
-  printf 'user overlay\n' > "$hp/.omp/AGENTS.md"
-  # User-owned real directory where .omp/skills belongs.
-  mkdir -p "$hp/.omp/skills"
-  printf 'user content\n' > "$hp/.omp/skills/local.md"
-  # User-owned symlink elsewhere where .omp/commands belongs.
-  ln -s "$SANDBOX/user-commands" "$hp/.omp/commands"
-  # User-owned OMP config.
-  printf 'model: user\n' > "$hp/.omp/config.yml"
-
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  # The user file is untouched (WARN, not clobbered).
-  [ -f "$hp/.omp/AGENTS.md" ] && [ ! -L "$hp/.omp/AGENTS.md" ]
-  [ "$(cat "$hp/.omp/AGENTS.md")" = "user overlay" ]
-  [[ "$output" == *"exists and is not a symlink"* ]]
-  # The user directory is untouched.
-  [ -d "$hp/.omp/skills" ] && [ ! -L "$hp/.omp/skills" ]
-  [ "$(cat "$hp/.omp/skills/local.md")" = "user content" ]
-  # The user symlink is untouched (wrong-target WARN).
-  [ -L "$hp/.omp/commands" ]
-  [ "$(readlink "$hp/.omp/commands")" = "$SANDBOX/user-commands" ]
-  [[ "$output" == *"leaving as-is"* ]]
-  # User config is untouched.
-  [ -f "$hp/.omp/config.yml" ]
-  [ "$(cat "$hp/.omp/config.yml")" = "model: user" ]
+  [ "$status" -eq 3 ]
+  [ -L "$PORTABLE_PROJECT/.claude/rules/preset-legacy.md" ]
+  [ ! -e "$ATTACH_LOG" ]
 }
 
-# ===========================================================================
-# 5. Broken-link replacement where existing policy permits: onboard alone
-#    never clobbers a broken link; after the link is rm'd (doctor --fix's
-#    rm-then-reseed policy), onboard re-creates the exact OMP link.
-# ===========================================================================
+@test "portable onboarding never overwrites an invalid project manifest" {
+  build_portable_onboard_fixture
+  printf 'project owned\n' > "$PORTABLE_PROJECT/.trellis.json"
+  local before
+  before="$(sha_of "$PORTABLE_PROJECT/.trellis.json")"
 
-@test "broken OMP link: never-clobbered by onboard alone, re-seeded after rm" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  local hp="$PROJECTS/healthy"
-  # Simulate a broken link — dangling, pointing at an old machine path.
-  rm -f "$hp/.omp/skills"
-  ln -s "/opt/old-machine/trellis/core-rules/skills" "$hp/.omp/skills"
-
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # onboard alone never clobbers: the broken link is left, with a WARN.
-  [ "$(readlink "$hp/.omp/skills")" = "/opt/old-machine/trellis/core-rules/skills" ]
-  [[ "$output" == *"leaving as-is"* ]]
-
-  # Existing repair policy (doctor --fix): rm the broken link, then onboard
-  # re-seeds the exact OMP link.
-  rm -f "$hp/.omp/skills"
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$hp/.omp/skills" ]
-  [ "$(readlink "$hp/.omp/skills")" = "$CANON/core-rules/skills" ]
-  [ -d "$hp/.omp/skills" ]
+  run_portable_onboard --fleet personal "$PORTABLE_PROJECT"
+  [ "$status" -eq 3 ]
+  [ "$(sha_of "$PORTABLE_PROJECT/.trellis.json")" = "$before" ]
+  [ ! -e "$ATTACH_LOG" ]
 }
 
-# ===========================================================================
-# 6. Whole-directory links are live: new canonical entries appear through them
-#    without re-running onboarding.
-# ===========================================================================
+@test "portable onboarding requires an explicit valid fleet" {
+  build_portable_onboard_fixture
+  run_portable_onboard "$PORTABLE_PROJECT"
+  [ "$status" -eq 2 ]
+  [ ! -e "$PORTABLE_PROJECT/.trellis.json" ]
 
-@test "new canonical entries appear through the OMP directory links without re-onboarding" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  local hp="$PROJECTS/healthy"
-  # Add a new canonical skill, command, agent, and adapter AFTER onboarding.
-  mkdir -p "$CANON/core-rules/skills/new-skill"
-  printf 'name: new-skill\ndescription: fixture\n' \
-    > "$CANON/core-rules/skills/new-skill/SKILL.md"
-  printf 'x\n' > "$CANON/core-rules/commands/new-command.md"
-  printf -- '---\nname: new-agent\ndescription: fixture\n---\n' \
-    > "$CANON/core-rules/agents/new-agent.md"
-  mkdir -p "$CANON/core-rules/omp/hooks/pre"
-  printf 'export default {};\n' > "$CANON/core-rules/omp/hooks/pre/trellis.ts"
-
-  # Visible through the directory links — no re-onboarding, no new symlinks.
-  [ -f "$hp/.omp/skills/new-skill/SKILL.md" ]
-  [ -f "$hp/.omp/commands/new-command.md" ]
-  [ -f "$hp/.omp/agents/new-agent.md" ]
-  [ -f "$hp/.omp/hooks/pre/trellis.ts" ]
-
-  # The .omp surface is still exactly five symlinks (nothing re-seeded).
-  [ "$(find "$hp/.omp" -maxdepth 1 -type l | wc -l | tr -d ' ')" = "5" ]
+  run_portable_onboard --fleet '../personal' "$PORTABLE_PROJECT"
+  [ "$status" -eq 2 ]
+  [ ! -e "$PORTABLE_PROJECT/.trellis.json" ]
 }
 
-# ===========================================================================
-# 7. OMP is Trellis's third harness: enabled explicitly, isolated otherwise.
-# ===========================================================================
+@test "portable onboarding rejects a legacy layout before creating a manifest" {
+  build_portable_onboard_fixture
+  printf '{"presets":["legacy"]}\n' > "$PORTABLE_PROJECT/.trellis.config.json"
+  local before
+  before="$(sha_of "$PORTABLE_PROJECT/.trellis.config.json")"
 
-@test "OMP surface is gated by the omp harness without changing Claude or Codex" {
-  build_canonical_tree
-  build_healthy_project
-  rm -rf "$CANON/core-rules/agents" "$CANON/core-rules/omp"
-  write_config '"claude","codex"'
+  run_portable_onboard --fleet personal "$PORTABLE_PROJECT"
 
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  local hp="$PROJECTS/healthy"
-  [ ! -e "$hp/.omp" ]
-
-  # Both established harnesses retain their normal inheritance surfaces even
-  # when the OMP-only canonical directories do not exist.
-  [ -L "$hp/.claude/rules/trellis.md" ]
-  [ -L "$hp/.claude/skills/process-gate" ]
-  [ -f "$hp/.claude/settings.json" ]
-  [ -L "$hp/AGENTS.md" ]
-  [ -L "$hp/.agents/rules/trellis.md" ]
-  [ -d "$hp/.codex/hooks" ]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"trellis migrate --prepare"* ]] || { echo "$output"; false; }
+  # The refusal must not offer the removed writer as an escape hatch.
+  [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$output"; false; }
+  [ "$(sha_of "$PORTABLE_PROJECT/.trellis.config.json")" = "$before" ]
+  [ ! -e "$PORTABLE_PROJECT/.trellis.json" ]
+  [ ! -L "$PORTABLE_PROJECT/.trellis.json" ]
+  [ ! -e "$ATTACH_LOG" ]
 }
 
-@test "OMP-enabled onboarding seeds its five native harness links" {
-  build_canonical_tree
-  build_healthy_project
-  write_config '"omp"'
+@test "portable onboarding rejects mixed legacy surfaces without changing bytes" {
+  build_portable_onboard_fixture
+  cat > "$PORTABLE_PROJECT/.trellis.json" <<'JSON'
+{"$schema":"https://trellis.local/schemas/trellis.project.schema.json","project_id":"portable-project","schema_version":1}
+JSON
+  cat > "$PORTABLE_PROJECT/.gitignore" <<'EOF'
+project-owned.log
+# --- Trellis inheritance symlinks (per-machine; regenerated by onboard-project.sh) ---
+EOF
+  local manifest_before ignore_before
+  manifest_before="$(sha_of "$PORTABLE_PROJECT/.trellis.json")"
+  ignore_before="$(sha_of "$PORTABLE_PROJECT/.gitignore")"
 
-  run_onboard "$PROJECTS/healthy"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run_portable_onboard --fleet personal "$PORTABLE_PROJECT"
 
-  local hp="$PROJECTS/healthy"
-  [ -L "$hp/.omp/AGENTS.md" ]
-  [ "$(readlink "$hp/.omp/AGENTS.md")" = "$hp/CLAUDE.md" ]
-  [ -L "$hp/.omp/skills" ]
-  [ -L "$hp/.omp/commands" ]
-  [ -L "$hp/.omp/agents" ]
-  [ -L "$hp/.omp/hooks" ]
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"trellis migrate --prepare"* ]] || { echo "$output"; false; }
+  [ "$(sha_of "$PORTABLE_PROJECT/.trellis.json")" = "$manifest_before" ]
+  [ "$(sha_of "$PORTABLE_PROJECT/.gitignore")" = "$ignore_before" ]
+  [ ! -e "$ATTACH_LOG" ]
 }
 
-# ===========================================================================
-# 8. Control plane: when PROJECT IS the canonical clone and the root CLAUDE.md
-#    is absent, .omp/AGENTS.md targets core-rules/CLAUDE.md. A project that
-#    carries its own root CLAUDE.md (the public-mirror shape: onboarded from
-#    the private clone) keeps <project>/CLAUDE.md while the other four links
-#    still point at the canonical core-rules — covered by test 1.
-# ===========================================================================
+@test "portable onboarding leaves a precreated hostile manifest temp untouched" {
+  build_portable_onboard_fixture
+  local victim hostile_tmp fake_bin real_mktemp
+  victim="$SANDBOX/attacker-owned.txt"
+  hostile_tmp="$PORTABLE_PROJECT/.trellis.json.tmp.precreated"
+  fake_bin="$SANDBOX/fake-bin"
+  real_mktemp="$(command -v mktemp)"
+  printf 'attacker bytes\n' > "$victim"
+  ln -s "$victim" "$hostile_tmp"
+  mkdir "$fake_bin"
+  cat > "$fake_bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  */.trellis.json.tmp.XXXXXX) printf '%s\n' "$HOSTILE_TMP" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+EOF
+  chmod +x "$fake_bin/mktemp"
+  export HOSTILE_TMP="$hostile_tmp"
+  export REAL_MKTEMP="$real_mktemp"
+  export PATH="$fake_bin:$PATH"
 
-@test "control-plane: canonical clone without root CLAUDE.md targets core-rules/CLAUDE.md" {
-  build_canonical_tree
-  git_init_canonical_main
-  write_config
+  run_portable_onboard --fleet personal --project-id portable-project "$PORTABLE_PROJECT"
 
-  # Precondition: the canonical clone has no root CLAUDE.md (rules live in
-  # core-rules/CLAUDE.md).
-  [ ! -f "$CANON/CLAUDE.md" ]
-
-  run_onboard "$CANON"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  [ -L "$CANON/.omp/AGENTS.md" ]
-  [ "$(readlink "$CANON/.omp/AGENTS.md")" = "$CANON/core-rules/CLAUDE.md" ]
-  [ -e "$CANON/.omp/AGENTS.md" ]
-  # The other four links still target canonical core-rules.
-  [ "$(readlink "$CANON/.omp/skills")" = "$CANON/core-rules/skills" ]
-  [ "$(readlink "$CANON/.omp/commands")" = "$CANON/core-rules/commands" ]
-  [ "$(readlink "$CANON/.omp/agents")" = "$CANON/core-rules/agents" ]
-  [ "$(readlink "$CANON/.omp/hooks")" = "$CANON/core-rules/omp/hooks" ]
-}
-
-# ===========================================================================
-# 9. Obsolete custom-agent cleanup: symlinks (incl. dangling) and byte-
-#    identical legacy copies are removed; divergent regular files are left
-#    with a WARN. Nothing is re-seeded.
-# ===========================================================================
-
-@test "obsolete agent artifacts: symlinks + byte-identical copies removed, divergent user files left with WARN" {
-  build_canonical_tree
-  build_healthy_project
-  write_config
-
-  local hp="$PROJECTS/healthy"
-  mkdir -p "$hp/.claude/agents" "$hp/.omp/agents"
-
-  # (a) Trellis-owned legacy symlinks — dangling old-machine targets included.
-  ln -s "/opt/old-machine/trellis/core-rules/agents/codex-worker.md" \
-    "$hp/.claude/agents/codex-worker.md"
-  ln -s "/opt/old-machine/trellis/core-rules/agents/lane-worker.md" \
-    "$hp/.omp/agents/lane-worker.md"
-  # (b) byte-identical legacy copy — the pre-purge canonical file still exists
-  # in the fixture canonical, so the cmp-based removal branch is exercised.
-  mkdir -p "$CANON/core-rules/agents"
-  printf '# legacy trellis agent\n' > "$CANON/core-rules/agents/fable-advisor.md"
-  cp "$CANON/core-rules/agents/fable-advisor.md" "$hp/.claude/agents/fable-advisor.md"
-  # (c) divergent regular file — user content, must be left with a WARN.
-  printf '# user-owned divergent agent\n' > "$hp/.claude/agents/opus-advisor.md"
-
-  run_onboard "$hp"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  # Symlinks removed (from both surfaces).
-  [ ! -e "$hp/.claude/agents/codex-worker.md" ]
-  [ ! -L "$hp/.claude/agents/codex-worker.md" ]
-  [ ! -e "$hp/.omp/agents/lane-worker.md" ]
-  # Byte-identical copy removed; the canonical source is untouched.
-  [ ! -e "$hp/.claude/agents/fable-advisor.md" ]
-  [ -f "$CANON/core-rules/agents/fable-advisor.md" ]
-  # Divergent user file left byte-identical, with a WARN.
-  [ -f "$hp/.claude/agents/opus-advisor.md" ]
-  [ "$(cat "$hp/.claude/agents/opus-advisor.md")" = "# user-owned divergent agent" ]
-  [[ "$output" == *"removed (obsolete agent"* ]]
-  [[ "$output" == *"leaving as-is"* ]]
-  # Nothing was re-seeded: only the explicitly preserved divergent user file
-  # remains under .claude/agents; .omp/agents has no regular files.
-  [ "$(find "$hp/.claude/agents" -type f 2>/dev/null | wc -l | tr -d ' ')" = "1" ]
-  [ -f "$hp/.claude/agents/opus-advisor.md" ]
-  [ "$(find "$hp/.omp/agents" -type f 2>/dev/null | wc -l | tr -d ' ')" = "0" ]
+  [ "$status" -eq 3 ]
+  [ "$(cat "$victim")" = "attacker bytes" ]
+  [ -L "$hostile_tmp" ]
+  [ "$(readlink "$hostile_tmp")" = "$victim" ]
+  [ ! -e "$PORTABLE_PROJECT/.trellis.json" ]
+  [ ! -L "$PORTABLE_PROJECT/.trellis.json" ]
+  [ ! -e "$ATTACH_LOG" ]
 }

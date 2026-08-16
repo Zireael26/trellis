@@ -8,6 +8,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Added
 
+- **Forward-only high-autonomy decision receipts (GOV-01).** Substantive L4/L5 Stop events now require a canonical `## Decisions made (L<n>)` block whose current-turn entries match the effective autonomy level and exist verbatim in canonical-root `decisions-log.md`; architectural entries must carry `SURFACED INLINE`. Claude Code, Codex, and OMP share one validator core, while L1-L3, clean read-only turns, and all legacy decision-log bytes remain unchanged.
 - **Shared local-development infrastructure contract (spec 023).** Trellis now supports an optional configured shared-infra root. When present, it requires registry/manifest parity for every active project (including explicit `services: {}` declarations), coordinates review-gated infrastructure registration through `./scripts/onboard-project.sh --infra-entry`, seeds fixed-port startup preflight, and extends the read-only `./scripts/doctor.sh` surface with shared path, allocation, registry-parity, and port checks.
 - Operator documentation for the shared-infrastructure ownership boundary, the external repository contract, onboarding, verification, and recovery.
 - **Canonical-clone hygiene policy.** The canonical clone is a published surface, not a workspace: every registered project resolves rules, skills, and hooks through absolute paths into it, so its branch and dirty state are inherited live by all of them. Codifies clean-`main`-only, work-in-worktrees, and makes an off-main or dirty canonical clone a **stop-and-fix condition agents act on unprompted**, with a verified recovery procedure (WIP commit over `git stash`, park in a worktree, `git reset HEAD~1` to restore exact prior state). `trellis-doctor` Tier 0 already checked all three conditions; this makes the response to a Tier 0 failure explicit and blocking rather than advisory. Full procedure in `core-rules/inheritance.md`; one-line pointer in `core-rules/CLAUDE.md`.
@@ -17,6 +18,8 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 ### Removed
 
 - **GPTX-era custom agents.** `codex-worker`, `lane-worker`, `fable-advisor`, and `opus-advisor` are removed from canonical inheritance and active routing. OMP uses only its bundled agents; historical release notes remain below.
+- **Retired Codex worker integration.** The unaccepted `codex-worker`, fan-out/recipe preflight, handoff, and probe surfaces are removed; direct CLI, explicitly selected plugin commands, and plugin hook PATH health remain supported.
+- **Completed one-off workflow executors.** Five audit and Redis migration runners are removed after their plans retain the completed evidence.
 
 ### Deferred
 
@@ -25,11 +28,85 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Changed
 
+- **OSV severity normalization is per vulnerability again.** The security-gate adapter now reads OSV-Scanner 2.x package groups, matches each authoritative group score to its vulnerability IDs, and falls back to ecosystem-provided CRITICAL/HIGH/MODERATE/LOW labels when no valid group score exists. CVSS 3 and CVSS 4 scores therefore reach the baseline summary at their real severity without one group's score leaking into another finding; records with no usable severity retain the conservative medium fallback.
 - Local applications remain native on macOS; Docker owns shared or project-specific infrastructure only. Project shutdown may stop only project-owned infrastructure and native process helpers, never the shared Compose project.
 - Shared-service provisioning is declarative and idempotent on every start rather than first-volume-only. Static onboarding discovery produces evidence and a reviewable proposal but cannot execute project code, read secret values, choose credentials/allocations silently, or mutate the manifest before explicit review.
-- Shared local-infrastructure integration now validates optional external manifests, reviewed empty declarations, and fixed-port uniqueness without publishing an operator fleet inventory or allocation map.
+- The current eleven-project manifest includes `provakil-competitor` with `services: {}` and `ports: {}`. Five Vite preview listeners are registered while default `4173` remains deliberately unallocated; VeriCite's evaluation endpoint is `18003`, Neev's native worker health endpoint is `23080`, and Duta's project-owned migration MariaDB is registered on `3307`.
 - Infrastructure publication now requires dependency-ordered repository receipts: scoped commit, local gates, PR, merge SHA, and synchronized local `main`.
-- **Local-state ignore policy.** Added the 24 explicit root-scoped runtime paths to the repository ignore policy; onboarding now emits the same block exactly once and idempotently.
+- **Local-state ignore policy.** Replaced blanket tracked `.claude/` hiding with explicit runtime paths while retaining the canonical clone's intentional machine-local `.claude/` exclusion. The onboarding contract now states that its managed block contains machine-specific symlinks plus the fixed 24-path runtime inventory; other project state remains tracked.
+
+### Fixed
+
+- **Disk janitor external worktree reaping.** Recoverable linked worktrees registered outside `projects_root` now reap through Git's worktree registry, while the manual `rm -rf` fallback remains restricted to project and temporary roots. Apply summaries now count only successful removals instead of repeating planned bytes after a refusal.
+- **OMP/Cmux rollout options.** Removed the advertised `--yes` flag because the rollout has no interactive prompt; the no-op parser state also caused the repository-wide ShellCheck job to fail with SC2034.
+- **Mirror lint no longer fails open on a glob-metacharacter mirror path.** `lint_mirror` interpolated the mirror's absolute path directly into every `find -path` pattern, where `*`, `?`, `[`, `]` and `\` are glob syntax rather than literals. A linted directory whose own path contained one of those characters therefore matched no reject term at all: the entire structural private-state scan, the `.git` traversal prunes, and the symlink validation silently passed over a dirty mirror. The root is now escaped once per call and the escaped form used in every pattern, with a fixture linting a bracketed directory name.
+- **`trellis show-config` now refuses direct source execution on the same attestation basis as `release`, `upgrade`, and `mirror`.** Its gate was identity-based — it refused only when a consulted machine config named that copy as its `source_root`, and allowed whenever no config answered. That question is undecidable for a copy of the source tree, a git worktree of it, an unpacked tarball, or a clone at a path no config names, so each of those rendered validated local machine state from an unverified copy. The gate now requires the stable launcher's verified payload attestation and refuses otherwise, with no config consulted at all. The gate also runs before argument parsing, as its three siblings do: `show-config.sh -h` previously reached the parser first and exited 0 with usage text out of a copy the launcher had never attested. Only the launcher route changes behaviour for operators; `trellis show-config` through the installed launcher is unaffected.
+- **Release-snapshot payload binding no longer accepts a foreign release's execution snapshot.** `sync-to-template.sh` matched the sealed snapshot name with a prefix glob plus a greedy `##*.exec.` strip, so `.tmp.1.2.3.exec.9.exec.SUFFIX` — the snapshot of a release legitimately named `1.2.3.exec.9` — was accepted under a `1.2.3` attestation. The predicate now strips the version delimiters literally at all six sites — the five direct-source gates (`show-config.sh`, the `upgrade.sh` body, both the bootstrap and body of `sync-to-template.sh`, and the launcher body) plus `scripts/lib/release-store.sh`, which carries its own copy because its stated contract is to depend on nothing above `semver.sh` — against one normative definition in `scripts/lib/trellis-home.sh` that `scripts/tests/release-snapshot-predicate.bats` pins all six to. Two name gates took only a name and carried the same greedy strip: `launcher_snapshot_name_is_safe` guarded snapshot creation, copy, bundle emission, and cleanup, and `release_store_snapshot_name_is_safe` guarded snapshot creation, cleanup, and verified attachment-bundle emission — so each accepted a foreign release's snapshot name everywhere it was consulted. Both now take the release store and version and delegate the parse to their pinned copy of the predicate, and `release_store_remove_snapshot` and `release_store_emit_verified_attachment_bundle` take the release version as a required argument so the caller cannot leave the binding unstated.
+
+## [v1.0.0-rc.25] — 2026-08-16
+
+Portable multi-fleet **cutover release** (spec 036, T32). It completes the two-release
+rollout begun in `v1.0.0-rc.24`: the compatibility layer that let the tracked control
+plane and the machine-local one coexist is withdrawn. Roll back by explicitly adopting
+`1.0.0-rc.24` per fleet and restoring the snapshotted local state — see
+[`docs/UPGRADING.md`](docs/UPGRADING.md) and [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md).
+
+### Changed
+
+- **The machine-local registry is the only fleet inventory.** `trellis registry list` /
+  `doctor` / `show-config` are the roster; `trellis registry rebuild --fleet NAME ROOT...`
+  reconstructs it from tracked `.trellis.json` manifests under operator-selected roots.
+  Documentation, evals, skills, recipes, and the architecture diagram that still named the
+  tracked files were repointed at the local registry.
+- **Scheduled-task inputs are materialized, not tracked.** `trellis task materialize`
+  renders `registry.md`, `blacklist.md`, and `aeo-targets.md` into
+  `$TRELLIS_HOME/tasks/<fleet>/<task>/` from one strict local-registry snapshot. Those
+  filenames now denote materialized private inputs only; the `aeo-gate` skill's fleet
+  command documents the materialized paths.
+- **`doctor` diagnoses legacy checkouts instead of repairing them.** Both the portable
+  layout classifier (`compatibility-legacy`, `mixed/conflict`) and the explicit
+  `TRELLIS_CONFIG` legacy mode still recognize a pre-cutover checkout and name
+  `trellis migrate --prepare` as its path. `--fix` no longer seeds direct links,
+  re-onboards, or mirrors worktree symlinks; every such row is reported `[manual]`.
+
+### Deprecated
+
+- **Project-local `.trellis.config.json`.** `.trellis.json` is the canonical portable
+  project manifest. The old filename remains a read-only fallback in the autonomy,
+  package-manager, spec-gate, and process-gate resolvers, retained past cutover solely
+  for checkouts explicitly held on the legacy layout; `doctor` reports every such
+  checkout and `trellis migrate --prepare` replaces the file. It is removed once no held
+  row remains.
+
+### Removed
+
+- **Tracked `registry.md` and `blacklist.md`.** There is no tracked fleet inventory,
+  audit roster, or exclusion list. `trellis registry import --registry FILE
+  [--blacklist FILE]` still reads a Markdown roster, but only one the operator supplies
+  — recover it with `git show <pre-cutover-sha>:registry.md` — and it is no longer a
+  repository path. `conformance-check.sh` drops both from its scanned spec-doc and
+  single-file sets, and `trellis.config.json` drops them from `template.redact_paths`.
+- **Legacy direct-link onboarding.** `onboard-project.sh --legacy` / `--compatibility`
+  (and with it `--legacy-relative` and `--infra-entry`) now refuses with exit 2 and names
+  `trellis migrate --prepare` followed by `trellis attach`. Nothing in Trellis creates an
+  absolute direct link into a mutable source checkout any more. The shared-infrastructure
+  `--infra-entry` registration lived only inside that writer and is withdrawn with it;
+  re-hosting it on the portable path is the separate reviewed shared-infra PR the plan
+  sequences (`plan.md` §4.4 row 73).
+- **Legacy worktree mirroring.** `seed-inheritance-symlinks.sh --legacy-mirror` and its
+  `--root` spelling refuse with exit 2. The unflagged command reconciles a linked
+  worktree from its clone's registration and recorded immutable release, and an
+  unregistered clone stays inert.
+- **`TRELLIS_ROOT` as a compatibility input.** `config-load.sh` no longer exports the
+  source root under that name; callers read `TRELLIS_SOURCE_ROOT`. `TRELLIS_ROOT` keeps
+  exactly one meaning: the per-project `.trellis/runtime` anchor that attachment-owned
+  hooks receive.
+
+## [v1.0.0-rc.24] — 2026-08-13
+
+### Changed
+
+- **Portable multi-fleet compatibility release.** Immutable annotated releases now install independently of a mutable policy checkout; explicit local-registry project, fleet, or all adoption updates verified attachment-owned runtime anchors only after preflight. Stable launcher, launchd, and mirror publication paths use canonical private machine state, clean reviewed payloads, and never publish operator paths or release, attachment, registry, or task state.
 
 ## [v1.0.0-rc.14] — 2026-07-28
 
@@ -666,7 +743,7 @@ updates and usage without per-turn LLM cost.
 ### Note on landing path
 
 This v0.3.1 entry was written on 2026-05-19 and synced to the public mirror
-(`__GITHUB_USER__/trellis@v0.3.1`) but the corresponding private commits were lost
+(`Zireael26/trellis@v0.3.1`) but the corresponding private commits were lost
 when `chore/v0.3.1-primer-freshness-loop` was reset to `origin/main` instead
 of merged. Backfilled into the private trellis-instance repo on 2026-05-20
 alongside the v0.4.0 release; the public mirror tag was already correct.
@@ -686,7 +763,7 @@ The 20-task plan was executed via the superpowers:subagent-driven-development sk
 Anthropic large-codebase best-practices bundle plus the late-2026-05 follow-ups
 (frontend-quality references, Codex `[features].hooks` rename, brand-sweep
 cleanup, Obsidian dep retire). Tagged on the public mirror at
-`__GITHUB_USER__/trellis@v0.3.0`.
+`Zireael26/trellis@v0.3.0`.
 
 ### Added
 
@@ -700,7 +777,7 @@ cleanup, Obsidian dep retire). Tagged on the public mirror at
 
 - **Codex feature-flag rename: `[features].codex_hooks` → `[features].hooks`.** Codex CLI 0.129+ emits a deprecation warning when it sees `[features].codex_hooks` in `$CODEX_HOME/config.toml`; the canonical key is now `[features].hooks`. The legacy key still works as an alias but should not be used in new installs. Doc references updated across `README.md`, `AGENT_ONBOARD_PROJECT.md`, `engineering-process.md` (§5a hook-tier section and §10.3 onboarding checklist), `core-rules/inheritance.md`, and the `scripts/onboard-project.sh` post-onboarding echo. Each touch points new operators at `hooks = true` while noting the alias for users who still have the legacy key in their config. The bash function name `seed_codex_hooks()` (script-internal — copies `.codex/hooks/*.sh`) is unaffected — it describes a category of hooks, not the deprecated TOML key.
 - **Retired Obsidian dependency from the `monthly-documentation-audit` description.** The Neev-scoped monthly doc audit in `scheduled-tasks/README.md` no longer claims to check "Obsidian sync" — the audit covers EPM currency and ADR coverage; doc-write target is the project filesystem (already mounted), so the MCP path is unnecessary overhead.
-- **Brand sweep follow-ups.** `security-gate-plan.md` had three stale "SE Core" / `se-core` mentions left over from the 2026-05-12 rebrand (§1 purpose paragraph, §3 infrastructure reuse line, §11 per-project flow); all three now read "Trellis" / "Trellis instance". Historical references in `CHANGELOG.md` (rebrand entry), audit filenames under `audits/`, ADR PR URLs at `__GITHUB_USER__/se-core`, and `scripts/rollout-rebrand.sh` (whose purpose is the migration itself) are intentionally preserved.
+- **Brand sweep follow-ups.** `security-gate-plan.md` had three stale "SE Core" / `se-core` mentions left over from the 2026-05-12 rebrand (§1 purpose paragraph, §3 infrastructure reuse line, §11 per-project flow); all three now read "Trellis" / "Trellis instance". Historical references in `CHANGELOG.md` (rebrand entry), audit filenames under `audits/`, ADR PR URLs at `Zireael26/se-core`, and `scripts/rollout-rebrand.sh` (whose purpose is the migration itself) are intentionally preserved.
 
 
 ### Added

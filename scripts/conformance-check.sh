@@ -16,14 +16,13 @@
 #   - cross-doc URL refs
 #
 # Usage:
-#   scripts/conformance-check.sh [--quiet]
-#
+#   trellis conformance [--quiet]
 # Designed to be cheap (~1s) so it can run on every PR.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 
 QUIET=false
 [ "${1:-}" = "--quiet" ] && QUIET=true
@@ -44,11 +43,20 @@ SPEC_DOCS=(
   "$ROOT/core-rules/skills/process-gate/SKILL.md"
   "$ROOT/engineering-process.md"
   "$ROOT/recon.md"
-  "$ROOT/registry.md"
   "$ROOT/docs/UPGRADING.md"
   "$ROOT/core-rules/commands/trellis-doctor.md"
+  "$ROOT/AGENT_SETUP.md"
+  "$ROOT/AGENT_ONBOARD_PROJECT.md"
+  "$ROOT/README.md"
+  "$ROOT/docs/MIGRATING-LOCAL-FLEETS.md"
 )
 
+# The compatibility boundary that kept `registry.md`/`blacklist.md` in this
+# scan closed at v1.0.0-rc.25: the tracked inventory was removed, so neither is
+# a live path contract and neither is a repo-root file this linter can resolve.
+# Both are gone from SPEC_DOCS and from SINGLE_FILES below. A doc that still
+# cites them as repository paths is therefore a MISS, which is the point.
+# CHANGELOG entries are historical records, not live path contracts.
 # Operator clones may carry a private prompt tree. Public-template clones do
 # not, so only include these documents when the subtree is actually present.
 if [ -d "$ROOT/scheduled-tasks" ]; then
@@ -79,8 +87,6 @@ PREFIXES=(
 SINGLE_FILES=(
   "recon.md"
   "engineering-process.md"
-  "registry.md"
-  "blacklist.md"
   "CHANGELOG.md"
   "trellis.config.json"
   "security-gate-plan.md"
@@ -147,8 +153,9 @@ for doc in "${SPEC_DOCS[@]}"; do
       }
     ' > "$spans_tmp"
     while IFS= read -r span; do
-      # Strip leading `__TRELLIS_PATH__/` if present
-      span="${span#__TRELLIS_PATH__/}"
+      # All references are repo-relative. Hard-coded operator checkout prefixes
+      # are invalid published documentation, not a portability compatibility
+      # feature, and must therefore remain visible to the checker.
       span="${span#./}"
       # Skip if not ours
       is_ours "$span" || continue
@@ -170,7 +177,6 @@ for doc in "${SPEC_DOCS[@]}"; do
       # cites a path that exists only inside a registered project.
       case "$rel_doc:$cleaned" in
         "core-rules/skills/process-gate/references/docs.md:docs/EPM.md") continue ;;
-        "registry.md:docs/specs/2026-06-04-gwtf-site-design.md") continue ;;
         # spec 023: onboarding seeds this wrapper INTO each registered project.
         # Trellis owns only the template it is generated from,
         # core-rules/templates/shared-infra-preflight.sh, so the seeded path

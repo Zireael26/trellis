@@ -1,11 +1,7 @@
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
-  "comment": "Example Trellis configuration. Copy to repo root as trellis.config.json, then fill in absolute paths and identity. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude', 'codex', and 'omp'.",
-
-  "trellis_root": "/ABSOLUTE/PATH/TO/trellis-instance",
-  "projects_root": "/ABSOLUTE/PATH/TO/projects",
-  "comment_shared_infra_root": "Optional. Add \"shared_infra_root\": \"/ABSOLUTE/PATH/TO/shared-infra\" for the repository that owns the shared local-service Make targets. Omit the key entirely when unconfigured; a present-but-nonexistent path aborts config-load.sh.",
-  "user_home": "/ABSOLUTE/PATH/TO/home",
+  "schema_version": 2,
+  "comment": "Example portable Trellis policy. Run `trellis configure` for machine-local setup; do not add machine paths here. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude', 'codex', and 'omp'.",
 
   "maintainer_name": "Your Name",
   "github_user": "your-github-handle",
@@ -13,7 +9,7 @@
   "harnesses": ["claude", "codex", "omp"],
 
   "autonomy_default": 3,
-  "comment_autonomy_default": "Optional. Fleet autonomy level 1–5; default 3 (current Trellis behavior). 1=pedagogical, 2=cautious, 3=standard, 4=initiative, 5=autonomous. Per-project override via <project>/.trellis.config.json autonomy field. Presets may clamp via autonomy_ceiling.",
+  "comment_autonomy_default": "Optional. Fleet autonomy level 1–5; default 3 (current Trellis behavior). 1=pedagogical, 2=cautious, 3=standard, 4=initiative, 5=autonomous. Per-project override via <project>/.trellis.json autonomy field. Presets may clamp via autonomy_ceiling.",
 
   "trellis_version": "0.1.0",
 
@@ -45,5 +41,15 @@
     "enabled": false,
     "spec_required_diff_lines": 80,
     "surgical_max_diff_lines": 400
+  },
+
+  "comment_aeo_gate": "Optional (spec 033). Warn-only AEO diff adapter for mapped public websites. Default OFF. When enabled, all five string fields are required; baseline is repository-relative. The adapter writes evidence below .git/trellis-aeo and never blocks during initial rollout.",
+  "aeo_gate": {
+    "enabled": false,
+    "project": "registry-name",
+    "url": "https://example.com",
+    "marker_file": "path/to/source-file",
+    "marker": "stable deployed marker",
+    "baseline": "audits/aeo-baseline/accepted/baseline.json"
   }
 }

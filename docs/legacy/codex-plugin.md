@@ -1,9 +1,9 @@
-# Optional legacy: OpenAI Codex plugin for Claude Code
+# Optional compatibility: OpenAI Codex plugin for Claude Code
 
-This page preserves compatibility guidance for operators who already use the OpenAI
-Codex plugin or prefer its slash-command and background-job workflow. The plugin is
-optional legacy compatibility — it is not required by Trellis and never becomes an
-implicit fallback from an explicit selection.
+This page provides compatibility guidance for operators who intentionally use the
+OpenAI Codex plugin. The plugin owns its slash-command and background-job workflow;
+it is optional to Trellis and never becomes an implicit fallback from an explicit
+selection.
 
 ## Three separate Codex/GPT surfaces
 
@@ -12,7 +12,7 @@ Do not collapse these into one dependency:
 | Surface | Purpose | Dependency? |
 |---|---|---|
 | Codex CLI harness | Run Codex directly with `AGENTS.md`, `.agents/`, `.codex/` hooks, or deliberate `codex exec` commands | Independent, fully supported |
-| OpenAI Codex plugin for Claude Code | Add `/codex:*` review, rescue, transfer, and job-management commands inside Claude Code | Optional legacy compatibility |
+| OpenAI Codex plugin for Claude Code | Run explicitly selected `/codex:*` review, rescue, transfer, and job-management commands inside Claude Code | Optional plugin-owned direct commands |
 
 Removing plugin dependency does not remove generic Codex CLI support.
 
@@ -40,33 +40,30 @@ through the direct CLI (deliberate `codex exec` dispatch) so units stay on norma
 Agent/Workflow receipts instead of being converted into plugin jobs. The measured
 difference is topology, not a claim that one model is better.
 
-## Retained Trellis compatibility
+## Retired Trellis-owned integration
 
-Trellis may retain these artifacts for existing installations:
+Commit `2ad1808` retired the Trellis-owned `codex-worker`, worker preflight and
+rollout, and `codex-executor`/`codex-fanout` Workflow recipes. Those surfaces are
+absent: do not invoke, reinstall, or treat them as an available plugin integration.
 
-- `core-rules/agents/codex-worker.md`;
-- `scripts/codex-worker-preflight.sh`;
-- plugin-specific companion references and Workflow recipes;
-- provider classifications needed to recognize legacy Agent types.
-
-They are not required inheritance. Missing plugin state must not fail generic Codex
-hooks or direct-CLI dispatch.
-
-Plugin-specific preflight runs only after the operator explicitly selects that route. It
-is a runtime check, not a Claude/Codex hook and not a default release gate.
+Direct `codex exec` is independent of plugin state. A plugin user follows the
+plugin's own setup and support instructions only after explicitly choosing a
+plugin-owned command. Trellis has no worker preflight, rollout, or recipe preflight
+for either direct CLI or the plugin.
 
 ## Fail-closed compatibility rule
 
-A plugin-backed unit never becomes an automatic fallback from a direct-CLI unit, and a
-direct-CLI unit never becomes an automatic fallback from a plugin-backed unit.
+An explicitly selected plugin-owned command never becomes an automatic fallback from
+a direct-CLI command, and a direct-CLI command never becomes an automatic fallback
+from a plugin-owned command.
 
-If explicit legacy plugin dispatch fails because setup, authentication, quota, companion,
-or app-server state is unavailable:
+If an explicitly selected plugin-owned command fails because setup, authentication,
+quota, companion, or app-server state is unavailable:
 
-1. record failure against selected legacy lane;
-2. return failed receipt;
-3. do not re-dispatch same unit to Claude or direct Codex CLI;
-4. require caller/operator to select a new lane explicitly.
+1. record failure against the selected plugin lane;
+2. report that failure to the caller;
+3. do not re-dispatch the same unit to Claude or direct Codex CLI;
+4. require the caller/operator to select a new lane explicitly.
 
 ## Existing plugin users
 
@@ -76,9 +73,10 @@ Existing users may keep plugin installed. Recommended separation:
 - use direct Codex CLI only when deliberately choosing CLI thread/sandbox controls;
 - never let availability failure on one surface silently select another.
 
-No migration requires deleting plugin files. Removing plugin from default navigation,
-inheritance, setup, and validation is enough. Historical ADRs and changelog entries remain
-unchanged.
+No migration requires deleting locally installed plugin files. Trellis no longer owns
+plugin navigation, inheritance, dispatch setup, worker, preflight, or rollout paths.
+Doctor retains only hook PATH/node-shim validation and repair for installed plugins.
+Historical ADRs and changelog entries remain unchanged.
 
 ## Further reading
 

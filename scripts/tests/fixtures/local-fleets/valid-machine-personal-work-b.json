@@ -1,0 +1,18 @@
+{
+  "$schema": "../../../lib/trellis.machine.schema.json",
+  "schema_version": 1,
+  "source_root": "/home/alex/src/trellis-instance",
+  "release_remote": "git@github.com:Zireael26/trellis.git",
+  "active_cli_release": "1.0.0-rc.24",
+  "default_fleet": "work",
+  "fleets": {
+    "personal": {
+      "discovery_roots": ["/home/alex/code/personal"],
+      "shared_infra_root": "/home/alex/code/personal/shared-infra"
+    },
+    "work": {
+      "discovery_roots": ["/mnt/work/client repos"],
+      "shared_infra_root": "/mnt/work/shared-infra"
+    }
+  }
+}

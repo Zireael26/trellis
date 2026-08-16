@@ -39,7 +39,7 @@ _sh_prompt() {
   run _md_prompt
   [ "$status" -eq 0 ]
   [ -n "$output" ]
-  [[ "$output" == "You are a code reviewer for a single turn's diff."* ]]
+  [[ "$output" == "You are a code reviewer for a single turn's diff."* ]] || { echo "$output"; false; }
 }
 
 @test "the .md prompt block and the .sh heredoc are byte-identical" {

@@ -196,8 +196,8 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
-  [[ "$output" == *'secret'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'secret'* ]] || { echo "$output"; false; }
   # A blocked turn must NOT advise; it blocks.
   [[ "$output" != *'additionalContext'* ]]
 }
@@ -214,10 +214,10 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"additionalContext"'* ]]
-  [[ "$output" == *'<review>'* ]]
-  [[ "$output" == *'[minor]'* ]]
-  [[ "$output" == *'prefer a constant'* ]]
+  [[ "$output" == *'"additionalContext"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'<review>'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'[minor]'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'prefer a constant'* ]] || { echo "$output"; false; }
   [[ "$output" != *'"decision":"block"'* ]]
 }
 
@@ -229,9 +229,9 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"additionalContext"'* ]]
-  [[ "$output" == *'[important]'* ]]
-  [[ "$output" == *'missing error handling'* ]]
+  [[ "$output" == *'"additionalContext"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'[important]'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'missing error handling'* ]] || { echo "$output"; false; }
   [[ "$output" != *'"decision":"block"'* ]]
 }
 
@@ -262,7 +262,7 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" != *'additionalContext'* ]]
 }
 
@@ -357,7 +357,7 @@ EOF
   [ "$(reviewer_call_count "$CLAUDE_COUNT")" -ge 1 ]
   # And its critical finding propagated to a block.
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'eval injection'* ]]
 }
 
@@ -376,7 +376,7 @@ EOF
 
   run_hook
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'planted'* ]]
 }
 
@@ -397,7 +397,7 @@ EOF
   [ -f "$CAP" ]
   # The envelope's .diff must carry the NEW file's path AND its actual content.
   run jq -r '.diff' "$CAP"
-  [[ "$output" == *'gamma.py'* ]]
+  [[ "$output" == *'gamma.py'* ]] || { echo "$output"; false; }
   [[ "$output" == *'untracked-content-xyz'* ]]
 }
 
@@ -414,10 +414,10 @@ EOF
 
   # The files stay UNTRACKED (??) before and after — never staged as an
   # addition (A ). A `git add -N` would flip them to 'A ' / 'AM'.
-  [[ "$before" == *'?? alpha.py'* ]]
-  [[ "$after"  == *'?? alpha.py'* ]]
-  [[ "$after"  == *'?? gamma.py'* ]]
-  [[ "$after" != *'A  alpha.py'* ]]
+  [[ "$before" == *'?? alpha.py'* ]] || { echo "$before"; false; }
+  [[ "$after"  == *'?? alpha.py'* ]] || { echo "$after"; false; }
+  [[ "$after"  == *'?? gamma.py'* ]] || { echo "$after"; false; }
+  [[ "$after" != *'A  alpha.py'* ]] || { echo "$after"; false; }
   [[ "$after" != *'A  gamma.py'* ]]
 }
 
@@ -430,12 +430,13 @@ EOF
   setup_triggering_repo
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  # Presets and runtime policy resolve through $TRELLIS_ROOT only; a
+  # `trellis_root` key inside the project manifest is not read by lib/autonomy.sh.
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
   printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
     > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
-  jq -n --arg root "$TRELLIS_FIXTURE" \
-    '{trellis_root: $root, presets: ["experimental"]}' \
-    > "$PROJECT_DIR/.trellis.config.json"
+  jq -n '{presets: ["experimental"]}' > "$PROJECT_DIR/.trellis.config.json"
   printf '%s\n' '- 2026-07-15T00:00:00Z [L4] [pattern] chose shared resolver.' \
     > "$PROJECT_DIR/decisions-log.md"
 
@@ -454,12 +455,13 @@ EOF
   setup_triggering_repo
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  # Presets and runtime policy resolve through $TRELLIS_ROOT only; a
+  # `trellis_root` key inside the project manifest is not read by lib/autonomy.sh.
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   printf '%s\n' '{"autonomy_default":2}' > "$TRELLIS_FIXTURE/trellis.config.json"
   printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
     > "$TRELLIS_FIXTURE/core-rules/presets/experimental.md"
-  jq -n --arg root "$TRELLIS_FIXTURE" \
-    '{trellis_root: $root, presets: ["experimental"], autonomy: 3}' \
-    > "$PROJECT_DIR/.trellis.config.json"
+  jq -n '{presets: ["experimental"], autonomy: 3}' > "$PROJECT_DIR/.trellis.config.json"
   printf '%s\n' '- 2026-07-15T00:00:00Z [L3] [pattern] must stay out.' \
     > "$PROJECT_DIR/decisions-log.md"
 
@@ -478,14 +480,13 @@ EOF
   setup_triggering_repo
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets" "$PROJECT_DIR/.claude"
+  export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   printf '%s\n' '{"autonomy_default":3}' > "$TRELLIS_FIXTURE/trellis.config.json"
   printf '%s\n' '---' 'autonomy_ceiling: 5' 'autonomy_default: 4' '---' \
     > "$TRELLIS_FIXTURE/core-rules/presets/loose.md"
   printf '%s\n' '---' 'autonomy_ceiling: 2' '---' \
     > "$TRELLIS_FIXTURE/core-rules/presets/strict.md"
-  jq -n --arg root "$TRELLIS_FIXTURE" \
-    '{trellis_root: $root, presets: ["loose", "strict"], autonomy: 1}' \
-    > "$PROJECT_DIR/.trellis.config.json"
+  jq -n '{presets: ["loose", "strict"], autonomy: 1}' > "$PROJECT_DIR/.trellis.config.json"
   printf '5\n' > "$PROJECT_DIR/.claude/session-autonomy"
   printf '%s\n' '- 2026-07-15T00:00:00Z [L5] [pattern] must be suppressed after clamp.' \
     > "$PROJECT_DIR/decisions-log.md"

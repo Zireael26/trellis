@@ -8,9 +8,9 @@ Companion to `2026-07-16-worktree-lifecycle-reap.md` (the 3-layer fix, PR #160).
 That PR made the janitor *able* to reclaim orphaned fan-out worktrees and warn
 early — but it is **not hands-off**: the launchd agent only `--report`s, so the
 disk still fills between manual `--apply` runs. The operator asked to close
-"don't do this every week" fully. The chosen close-out is *both* a scheduled
-safe-set `--apply` (this ADR) and orchestrator-side reap at the primary source
-(follow-up #1, a separate spec).
+"don't do this every week" fully for the merged-clean class. The chosen close-out
+is this scheduled safe-set `--apply`; PR #162 separately accepted an
+orchestrator-side reap doctrine that commit `2ad1808` later retired.
 
 The naïve version — schedule `--apply --scopes worktrees --yes` on the full
 delete-set — is **unsafe unattended**. The default predicate reaps any
@@ -45,10 +45,11 @@ morning.** Fails safe — merge detection is a read-only `gh pr list … --state
 merged`; no gh / no network at 3:30am → "unverified → never reaped" → the nightly
 no-ops instead of guessing.
 
-**Deliberately left to other owners** (not the nightly): `pushed`-unmerged and
-`/private/tmp`-ephemeral trees are in-flight; Layer 1 (fan-out teardown) and
-follow-up #1 (orchestrator reap) own them. The pieces compose rather than
-overlap.
+**Deliberately left outside the nightly:** `pushed`-unmerged and
+`/private/tmp`-ephemeral trees can be in-flight. Current owners are the
+`fanout-verify` teardown for trees it provisions and the generic attended
+disk-janitor path; the retired caller-provisioned `codex-fanout` follow-up owns
+nothing.
 
 **Delivery.** New template `core-rules/templates/org.trellis.disk-janitor-apply.plist`
 (RunAtLoad false; 04:00, after the 03:30 report; own log). The installer gains
@@ -63,10 +64,15 @@ agent is explicit opt-in and prints what it will and won't reap.
   is on the host: flip it on only after PR #160 is merged and the host has pulled
   (`install-disk-janitor-launchd.sh --with-apply`). Building the code now is
   fine; enabling it before the predicate ships would just error harmlessly.
+- **Rollback ordering is destructive-path safety.** Run
+  `scripts/install-disk-janitor-launchd.sh --uninstall` first; only then change
+  or revert the predicate, re-sync the public mirror, and reinstall the
+  report-only agent without `--with-apply`.
 - **Still not the whole job.** `pushed`-unmerged and abandoned (never-merged)
-  trees are untouched by the nightly by design — those are follow-up #1's remit.
-  Between the two, "every week" is closed; alone, the nightly closes only the
-  merged-clean class.
+  trees are untouched by the nightly by design. Current `fanout-verify` teardown
+  and attended generic janitor runs cover their supported cases; the retired
+  caller-provisioned follow-up is not part of the close-out. The nightly itself
+  closes only the merged-clean class.
 - Verified: 78/78 disk-janitor bats (incl. the discriminating pair — a
   pushed-unmerged tree is reaped WITHOUT the flag and survives WITH it),
   shellcheck `--severity=warning` clean, plist `plutil -lint` OK with exactly the

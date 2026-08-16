@@ -28,6 +28,7 @@ reference files. Projects copy the canonical set into their own
 | Script | Event | Origin |
 |---|---|---|
 | `spec-gate.sh` | Stop | new |
+| `decision-receipt.sh` | Stop (L4/L5 substantive turns) | new |
 | `stop-verify.sh` | Stop | upstream, extended |
 | `code-review-subagent.sh` | Stop (edit-heavy) | new |
 | `propose-rules.sh` | Stop (default-on, opt-out) | new |

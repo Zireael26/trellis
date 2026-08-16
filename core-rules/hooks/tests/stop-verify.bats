@@ -137,7 +137,71 @@ EOF
     [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 1 ]
     [ "$(cut -f1 "$call_log")" = "$module_dir" ]
     [ "$(cut -f2- "$call_log")" = "vet ./pkg/..." ]
-    ! grep -F './/' "$call_log" >/dev/null
-    ! grep -F "$PROJECT_DIR" < <(cut -f2- "$call_log") >/dev/null
+    # Counted, not `! grep`: a leading `!` never trips `set -e`, so the bare
+    # form could not have failed on a leaked `.//` or absolute path.
+    [ "$(grep -cF './/' "$call_log")" -eq 0 ] || { cat "$call_log"; false; }
+    [ "$(cut -f2- "$call_log" | grep -cF "$PROJECT_DIR")" -eq 0 ] || { cat "$call_log"; false; }
+  done
+}
+
+@test "Python checks prefer the project venv in both stop-hook twins" {
+  local fake_bin="$BATS_TEST_TMPDIR/bin"
+  local local_log="$BATS_TEST_TMPDIR/local-tools.log"
+  local global_log="$BATS_TEST_TMPDIR/global-tools.log"
+  local candidate tool
+
+  seed_todos completed
+  mkdir -p "$PROJECT_DIR/.venv/bin" "$fake_bin"
+  printf '[tool.mypy]\n' > "$PROJECT_DIR/pyproject.toml"
+  printf 'value: int = 1\n' > "$PROJECT_DIR/scratch.py"
+
+  for tool in mypy pytest; do
+    cat > "$PROJECT_DIR/.venv/bin/$tool" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$LOCAL_TOOL_LOG"
+EOF
+    cat > "$fake_bin/$tool" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$GLOBAL_TOOL_LOG"
+exit 99
+EOF
+    chmod +x "$PROJECT_DIR/.venv/bin/$tool" "$fake_bin/$tool"
+  done
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    : > "$local_log"
+    : > "$global_log"
+    run env PROCESS_GATE_NO_RECEIPTS=1 LOCAL_TOOL_LOG="$local_log" \
+      GLOBAL_TOOL_LOG="$global_log" PATH="$fake_bin:/usr/bin:/bin" \
+      bash "$candidate" <<<'{}'
+    [ "$status" -eq 0 ]
+    [ "$(cat "$local_log")" = $'mypy .\npytest --tb=short -q' ]
+    [ ! -s "$global_log" ]
+  done
+}
+
+
+@test "mixed Python and Rust manifests fall through when pytest is unavailable" {
+  local fake_bin="$BATS_TEST_TMPDIR/bin"
+  local cargo_log="$BATS_TEST_TMPDIR/cargo.log"
+  local candidate
+
+  seed_todos completed
+  mkdir -p "$fake_bin"
+  printf '[build-system]\nrequires = []\n' > "$PROJECT_DIR/pyproject.toml"
+  printf '[package]\nname = "mixed"\nversion = "0.1.0"\n' > "$PROJECT_DIR/Cargo.toml"
+  cat > "$fake_bin/cargo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CARGO_LOG"
+EOF
+  chmod +x "$fake_bin/cargo"
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    : > "$cargo_log"
+    run env PROCESS_GATE_NO_RECEIPTS=1 CARGO_LOG="$cargo_log" \
+      PATH="$fake_bin:/usr/bin:/bin" bash "$candidate" <<<'{}'
+    [ "$status" -eq 0 ]
+    grep -Fx 'check' "$cargo_log"
+    grep -Fx 'test --quiet' "$cargo_log"
   done
 }

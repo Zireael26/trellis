@@ -8,7 +8,7 @@ Authoritative source: `engineering-process.md` §9 (Documentation standards).
 |---|---|
 | `CHANGELOG.md` updated when code under tracked dirs changed | **fail** if missing, **warn** if `### Unreleased` exists but no entry added |
 | `gotchas.md` updated when commits matched the gotcha-pattern (corrections, surprising discoveries, bug-fix postmortems > 2h) | **warn** — gate suggests; doesn't block |
-| ADR added when commits touch architectural-trigger paths (declared in local.config.sh) | **fail** if trigger path changed without an ADR delta or referenced ADR |
+| ADR added when commits touch architectural-trigger paths (declared in local.config.sh) | **fail** if an architectural trigger changed without an ADR delta or referenced ADR; same-major dependency-version-only `package.json` maintenance is exempt |
 | Project `CLAUDE.md` updated if rules changed (new commands, new conventions) | **warn** |
 | `README.md` `## Quick start` runs as written if any quick-start commands changed | **warn** (manually verify) |
 
@@ -51,6 +51,16 @@ A change to any ADR-trigger path without:
 - A reference in the commit message body to an existing ADR number (`Refs: ADR-0042`)
 
 …is a **fail**.
+
+`package.json` has one narrow maintenance carve-out: version-value changes under
+`dependencies`, `devDependencies`, `optionalDependencies`, or
+`peerDependencies` do not require an ADR when dependency names are unchanged,
+the manifest is otherwise semantically identical, and every changed semver
+specifier admits the same set of majors. New, removed, renamed, or type-changed
+manifests; new or removed dependencies; major-range changes;
+scripts/engines/config changes; range-shape or protocol changes; malformed JSON;
+non-semver sources; syntactically invalid, empty, or unsatisfiable semver
+ranges; invalid Git ranges; and parser uncertainty remain ADR-triggering.
 
 ## gotchas.md
 

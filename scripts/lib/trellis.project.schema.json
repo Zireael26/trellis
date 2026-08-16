@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/trellis.project.schema.json",
+  "title": "Trellis portable project manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "presets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+        "minLength": 2,
+        "maxLength": 64
+      },
+      "uniqueItems": true
+    },
+    "autonomy": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "package_manager": {
+      "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
+    },
+    "loop_safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_iterations": { "type": "integer", "minimum": 1 },
+        "no_progress_iterations": { "type": "integer", "minimum": 1 },
+        "budget_ceiling_usd": { "type": "number", "minimum": 0 },
+        "usd_per_mtok": { "type": "number", "exclusiveMinimum": 0 },
+        "codex_usd_per_mtok": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "mandatory_pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "spec_required_diff_lines": { "type": "integer", "minimum": 1 },
+        "surgical_max_diff_lines": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "gate_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  }
+}

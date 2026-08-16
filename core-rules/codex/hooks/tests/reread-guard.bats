@@ -116,22 +116,22 @@ warn_rows() {
   run_guard "$f"
   [ "$status" -eq 0 ]
   [ -z "$output" ]               # NEVER an immediate block
-  [[ "$stderr" == *"warn 1/2"* ]]
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 1 ]
 
   # Call 2 — WARN, still not a block.
   run_guard "$f"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 2/2"* ]]
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 2 ]
 
   # Call 3 — budget exhausted → BLOCK: exit 2, decision JSON, no further warn row.
   run_guard "$f"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
-  [[ "$output" == *"$f"* ]]
-  [[ "$output" == *"TRELLIS_REREAD_OVERRIDE=1"* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$f"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"TRELLIS_REREAD_OVERRIDE=1"* ]] || { echo "$output"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 2 ]   # block did not append a warn
 }
 
@@ -148,7 +148,7 @@ warn_rows() {
   run_guard "$f"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 1/1"* ]]
+  [[ "$stderr" == *"warn 1/1"* ]] || { echo "$stderr"; false; }
   [ "$(warn_rows "$f" 1000)" -eq 1 ]
 
   # Call 2 — block.
@@ -238,7 +238,7 @@ warn_rows() {
   run_guard "$a"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 1/"* ]]
+  [[ "$stderr" == *"warn 1/"* ]] || { echo "$stderr"; false; }
 
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$a" \
     '{transcript_path: $tp, tool_name: "Edit", tool_input: {file_path: $t}, tool_response: {filePath: $t, success: true}}')"
@@ -260,7 +260,7 @@ warn_rows() {
 
   run_guard "$f"
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 1/2"* ]]
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
 
   # The Edit FAILED (old_string mismatch). track-read must NOT record it.
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
@@ -270,7 +270,7 @@ warn_rows() {
 
   run_guard "$f"
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 2/2"* ]]
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
 
   run_guard "$f"
   [ "$status" -eq 2 ]
@@ -293,7 +293,7 @@ warn_rows() {
     run grep -F -- "OVERRIDE:$f" "$STATE_DIR/$KEY.warns.tsv"
     [ "$status" -eq 0 ]
   else
-    [[ "$stderr" == *"TRELLIS_REREAD_OVERRIDE=1"* ]]
+    [[ "$stderr" == *"TRELLIS_REREAD_OVERRIDE=1"* ]] || { echo "$stderr"; false; }
   fi
 }
 
@@ -430,7 +430,7 @@ warn_rows() {
   # ...then a real BLOCK (exit 2 + decision JSON naming the RESOLVED absolute path).
   run_guard "$rel"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *"$PROJECT_DIR/$rel"* ]]
 }
 

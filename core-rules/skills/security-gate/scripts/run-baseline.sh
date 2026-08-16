@@ -39,7 +39,18 @@ if [ ! -d "$PROJECT_DIR" ]; then
 fi
 
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+# The project key names the REPOSITORY, not the directory the run happened in.
+# `basename $PROJECT_DIR` is the worktree name inside a linked worktree, so a
+# worktree could never match its own repo's baseline and every diff scan there
+# was skipped as "no baseline found". Derive from the common git dir instead,
+# which is shared by every worktree of one repository.
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
+if _sg_common="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+   && [ -n "$_sg_common" ]; then
+  _sg_repo="$(cd "$_sg_common/.." 2>/dev/null && pwd)" || _sg_repo=""
+  [ -n "$_sg_repo" ] && PROJECT_NAME="$(basename "$_sg_repo")"
+fi
+PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
 
 # --- load project-local config --------------------------------------------
 CFG_LOADED=0

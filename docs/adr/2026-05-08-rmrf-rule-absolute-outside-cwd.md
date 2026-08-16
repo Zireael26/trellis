@@ -68,5 +68,5 @@ Bats coverage in `core-rules/hooks/tests/block-destructive.bats` (P3.1).
 - `core-rules/hooks/block-destructive.sh:42`
 - `core-rules/codex/hooks/block-destructive.sh:43`
 - `core-rules/hooks.md:21`
-- Plan decision D3, plan task P1.1, PR [#23](https://github.com/__GITHUB_USER__/se-core/pull/23)
+- Plan decision D3, plan task P1.1, PR [#23](https://github.com/Zireael26/se-core/pull/23)
 - Audit §3.3 first bullet

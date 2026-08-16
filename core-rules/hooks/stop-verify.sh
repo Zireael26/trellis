@@ -212,8 +212,19 @@ if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
   fi
 fi
 
-# Python (mypy)
-if command -v mypy >/dev/null 2>&1; then
+# Python (mypy). Prefer the project's pinned environment: global shims run
+# outside it and can report phantom import/type errors for installed packages.
+MYPY_CMD=""
+if [ -x ".venv/bin/mypy" ]; then
+  MYPY_CMD=".venv/bin/mypy"
+elif command -v poetry >/dev/null 2>&1 && [ -f "poetry.lock" ]; then
+  MYPY_CMD="poetry run mypy"
+elif command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
+  MYPY_CMD="uv run python -m mypy"
+elif command -v mypy >/dev/null 2>&1; then
+  MYPY_CMD="mypy"
+fi
+if [ -n "$MYPY_CMD" ]; then
   HAS_MYPY_CFG=0
   [ -f "mypy.ini" ] && HAS_MYPY_CFG=1
   if [ -f "pyproject.toml" ] && grep -q '\[tool.mypy\]' pyproject.toml 2>/dev/null; then
@@ -221,7 +232,7 @@ if command -v mypy >/dev/null 2>&1; then
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$(mypy . 2>&1)
+    OUT=$($MYPY_CMD . 2>&1)
     if [ $? -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "typecheck (mypy)" "$SLICED"
@@ -294,6 +305,19 @@ if [ -f "go.mod" ] && command -v golangci-lint >/dev/null 2>&1; then
   fi
 fi
 
+# Resolve Python's test runner before selecting a manifest branch so mixed
+# Python/Rust/Go repositories still fall through when pytest is unavailable.
+PYTEST_CMD=""
+if [ -x ".venv/bin/pytest" ]; then
+  PYTEST_CMD=".venv/bin/pytest --tb=short -q"
+elif command -v poetry >/dev/null 2>&1 && [ -f "poetry.lock" ]; then
+  PYTEST_CMD="poetry run pytest --tb=short -q"
+elif command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
+  PYTEST_CMD="uv run python -m pytest --tb=short -q"
+elif command -v pytest >/dev/null 2>&1; then
+  PYTEST_CMD="pytest --tb=short -q"
+fi
+
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
 TEST_CMD=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
@@ -309,8 +333,9 @@ if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
       TEST_CMD="$_PM run test"
     fi
   fi
-elif { [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; } && command -v pytest >/dev/null 2>&1; then
-  TEST_CMD="pytest --tb=short -q"
+elif { [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; } &&
+  [ -n "$PYTEST_CMD" ]; then
+  TEST_CMD="$PYTEST_CMD"
 elif [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   TEST_CMD="cargo test --quiet"
 elif [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then

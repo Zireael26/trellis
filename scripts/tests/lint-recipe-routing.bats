@@ -19,7 +19,7 @@ JS
 
   run bash "$LINT" "$FIXTURES/typed.wf.js"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 agent() call sites: 1 typed, 0 marked"* ]]
+  [[ "$output" == *"1 agent() call sites: 1 typed, 0 marked"* ]] || { echo "$output"; false; }
 }
 
 @test "marked inherited agent site passes" {
@@ -32,7 +32,7 @@ JS
 
   run bash "$LINT" "$FIXTURES/marked.wf.js"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 agent() call sites: 0 typed, 1 marked"* ]]
+  [[ "$output" == *"1 agent() call sites: 0 typed, 1 marked"* ]] || { echo "$output"; false; }
 }
 
 @test "unclassified agent site fails with file and line" {
@@ -44,8 +44,8 @@ JS
 
   run bash "$LINT" "$FIXTURES/unclassified.wf.js"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"$FIXTURES/unclassified.wf.js:3"* ]]
-  [[ "$output" == *"1 unclassified site(s)"* ]]
+  [[ "$output" == *"$FIXTURES/unclassified.wf.js:3"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"1 unclassified site(s)"* ]] || { echo "$output"; false; }
 }
 
 @test "commented-out example does not trigger" {
@@ -58,7 +58,7 @@ JS
 
   run bash "$LINT" "$FIXTURES/commented.wf.js"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"0 agent() call sites: 0 typed, 0 marked"* ]]
+  [[ "$output" == *"0 agent() call sites: 0 typed, 0 marked"* ]] || { echo "$output"; false; }
 }
 
 @test "regexes and string examples do not hide an opts-line marker" {
@@ -72,7 +72,7 @@ JS
 
   run bash "$LINT" "$FIXTURES/lexical.wf.js"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"1 agent() call sites: 0 typed, 1 marked"* ]]
+  [[ "$output" == *"1 agent() call sites: 0 typed, 1 marked"* ]] || { echo "$output"; false; }
 }
 
 @test "canonical recipes keep the complete routing inventory explicit" {
@@ -88,5 +88,5 @@ JS
 
   [ "$total" -gt 0 ]
   [ "$(( typed + marked ))" -eq "$total" ]
-  [[ "$output" == *"$total agent() call sites: $typed typed, $marked marked"* ]]
+  [[ "$output" == *"$total agent() call sites: $typed typed, $marked marked"* ]] || { echo "$output"; false; }
 }

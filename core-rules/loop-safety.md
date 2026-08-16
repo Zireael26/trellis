@@ -58,7 +58,7 @@ On any ceiling trip:
 Modeled on the autonomy resolution (`core-rules/CLAUDE.md` § Autonomy, `core-rules/autonomy.md`). Each ceiling resolves independently, most specific wins:
 
 1. **Per-loop `safety` override** — a recipe's `safety` block or an operator-run loop declaration explicitly sets a value.
-2. **Project-local `.trellis.config.json.loop_safety`** — optional, for a project that needs different ceilings.
+2. **Project-local `.trellis.json.loop_safety`** — optional, for a project that needs different ceilings. The pre-cutover `.trellis.config.json` spelling is a deprecated read-only fallback.
 3. **Central `trellis.config.json.loop_safety`** — the instance baseline.
 4. **Built-in fallback constants** (below) — so a loop in a broken / misconfigured / non-Trellis context still halts.
 

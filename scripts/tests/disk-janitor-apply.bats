@@ -2,11 +2,9 @@
 # THE SAFETY SUITE for scripts/disk-janitor.sh --apply.
 #
 # These tests verify the bright-line guardrails that keep --apply from ever
-# destroying data it shouldn't. They are the load-bearing correctness proof for
-# the whole feature. Every test is HERMETIC and CANNOT reach ~/projects:
+# destroying data it shouldn't. Every test is hermetic:
 #   * a fresh `mktemp -d` sandbox per test,
-#   * a fixture trellis.config.json whose projects_root IS the sandbox,
-#   * $TRELLIS_CONFIG exported so config-load resolves the FIXTURE config,
+#   * a portable policy plus private TRELLIS_HOME/local registry,
 #   * merge/build network checks use injectable overrides; liveness cases use a
 #     real background process whose cwd/open handle stays inside the sandbox.
 #
@@ -18,7 +16,8 @@
 #
 # We always pass `</dev/null` to apply runs so a stray tty can never feed the
 # y/N prompt, and `--yes` only where we WANT the destructive path to run.
-# `--scopes` is pinned per test so the host-global `stores` scope never runs.
+# `--scopes` is pinned per test so the host-global `stores` scope never runs;
+# the Docker test shadows the Docker CLI with a hermetic fixture.
 #
 # Paths resolve relative to this file (../.. = worktree root) — no hardcoded
 # absolute paths (those leak into the public mirror).
@@ -38,9 +37,12 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
-  CFG="$SANDBOX/trellis.config.json"
-  mkdir -p "$CANON" "$PROJECTS"
-  export TRELLIS_CONFIG="$CFG"
+  TRELLIS_HOME="$SANDBOX/.trellis"
+  CFG="$CANON/trellis.config.json"
+  EXTERNAL_WT_ROOT="$SANDBOX/external worktrees"
+  mkdir -p "$CANON" "$PROJECTS" "$TRELLIS_HOME"
+  chmod 700 "$TRELLIS_HOME"
+  export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
   build_canonical_min
   write_config
 }
@@ -50,12 +52,12 @@ teardown() {
     kill "$LIVE_PID" 2>/dev/null || true
     wait "$LIVE_PID" 2>/dev/null || true
   fi
+  if [ -n "${EXTERNAL_WT_ROOT:-}" ] && [ -d "$EXTERNAL_WT_ROOT" ]; then
+    rm -rf "$EXTERNAL_WT_ROOT"
+  fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
-  # The /private/tmp ephemerality tests MUST create fixtures under the real
-  # /private/tmp (the only way to exercise that code path), outside the sandbox —
-  # remove them here so nothing leaks.
   if [ -n "${TMP_WT_ROOT:-}" ] && [ -d "$TMP_WT_ROOT" ]; then
     rm -rf "$TMP_WT_ROOT"
   fi
@@ -65,48 +67,41 @@ teardown() {
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# Registry listing exactly one active project "alpha", empty blacklist.
 build_canonical_min() {
-  cat > "$CANON/registry.md" <<EOF
-# Project registry
-
-## Active projects
-
-| Project | Path | Class | Notes |
-|---|---|---|---|
-| alpha | \`/personal/alpha\` | app | fixture |
-
----
-EOF
-  cat > "$CANON/blacklist.md" <<EOF
-# Blacklist
-
-## 1. Temporarily excluded (registered projects)
-
-| Project | Reason | Added | Review after |
-|---|---|---|---|
-| — | — | — | — |
-
-## 2. Permanently excluded from management
-
-| Path | Reason |
-|---|---|
-
-## Semantics
-EOF
+  mkdir -p "$CANON/audits"
 }
 
 write_config() {
   cat > "$CFG" <<EOF
 {
-  "trellis_root": "$CANON",
-  "projects_root": "$PROJECTS",
-  "user_home": "$SANDBOX",
+  "schema_version": 2,
   "maintainer_name": "Test Maintainer",
   "github_user": "tester",
   "harnesses": ["claude"]
 }
 EOF
+  cat > "$TRELLIS_HOME/config.json" <<EOF
+{
+  "schema_version": 1,
+  "source_root": "$CANON",
+  "release_remote": "https://example.invalid/trellis.git",
+  "active_cli_release": "1.2.3",
+  "default_fleet": "personal",
+  "fleets": {"personal": {"discovery_roots": ["$PROJECTS"]}}
+}
+EOF
+  chmod 600 "$TRELLIS_HOME/config.json"
+  printf '%s\n' '{"schema_version":1,"projects":{},"discovery_ignores":{}}' > "$TRELLIS_HOME/registry.json"
+  chmod 600 "$TRELLIS_HOME/registry.json"
+}
+
+register_fixture_root() {
+  local root="$1" project_id="${2:-alpha}"
+  bash -c '
+    . "$1/scripts/lib/trellis-home.sh"
+    . "$1/scripts/lib/local-registry.sh"
+    local_registry_register_worktree "$2" personal "$3" "$4" 1.2.3 "[\"claude\"]" ""
+  ' _ "$REPO_ROOT" "$TRELLIS_HOME" "$project_id" "$root" >/dev/null
 }
 
 # Optional: drop a disk_janitor block with a custom cache_ttl_days so we can
@@ -115,9 +110,7 @@ write_config_with_ttl() {
   local ttl="$1"
   cat > "$CFG" <<EOF
 {
-  "trellis_root": "$CANON",
-  "projects_root": "$PROJECTS",
-  "user_home": "$SANDBOX",
+  "schema_version": 2,
   "maintainer_name": "Test Maintainer",
   "github_user": "tester",
   "harnesses": ["claude"],
@@ -140,11 +133,11 @@ git_init_at() {
     git add -A
     GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" git commit -q -m "init"
   )
+  case "$dir/" in "$PROJECTS/"*) register_fixture_root "$dir" ;; esac
 }
 
 # make_cache <project_dir> <relpath> <touch-stamp> — a non-empty cache dir whose
-# DIR mtime is set explicitly (cache staleness keys on the directory mtime, so
-# we touch the dir AFTER writing content, never before).
+# DIR mtime is set explicitly (cache staleness keys on the directory mtime).
 make_cache() {
   local proj="$1" rel="$2" stamp="$3" dir="$1/$2"
   mkdir -p "$dir"
@@ -152,39 +145,33 @@ make_cache() {
   touch -t "$stamp" "$dir"
 }
 
-# add_worktree <repo> <wt_path> <branch> — a linked worktree on its own branch.
-# The base commit is already backdated (git_init_at), so the worktree HEAD
-# commit time is old -> dj_worktree_mtime reads as stale. Linked worktrees are
-# placed UNDER projects_root (the .claude/worktrees house convention) so
-# dj_reap_worktree's PROJECTS_ROOT-prefix guard permits removal.
+# add_worktree <repo> <wt> <branch> — a linked worktree with a registry record.
 add_worktree() {
   local repo="$1" wt="$2" branch="$3"
+  mkdir -p "$(dirname "$wt")"
   ( cd "$repo" && git worktree add -q -b "$branch" "$wt" >/dev/null 2>&1 )
+  register_fixture_root "$wt"
 }
 
-# add_worktree_ignoring <repo> <wt> <branch> <gitignore-line...> — a linked
-# worktree that commits a .gitignore then materializes the ignored entries. The
-# tree stays porcelain-clean (ignored files never show in `git status`), which is
-# exactly the Layer-2 shape: clean working tree + build artifacts / secrets in
-# gitignored paths.
+# add_worktree_ignoring <repo> <wt> <branch> <gitignore-line...>
 add_worktree_ignoring() {
   local repo="$1" wt="$2" branch="$3"; shift 3
+  mkdir -p "$(dirname "$wt")"
   ( cd "$repo" && git worktree add -q -b "$branch" "$wt" >/dev/null 2>&1 )
   printf '%s\n' "$@" > "$wt/.gitignore"
   ( cd "$wt" && git add .gitignore \
       && GIT_AUTHOR_DATE="$OLD_COMMIT_DATE" GIT_COMMITTER_DATE="$OLD_COMMIT_DATE" \
          git commit -q -m "gitignore" )
+  register_fixture_root "$wt"
 }
 
-# write_config_dj <disk_janitor-json> — fixture config carrying a custom
+# write_config_dj <disk_janitor-json> — portable policy carrying a custom
 # disk_janitor object (e.g. '{ "reap_pushed_worktrees": false }').
 write_config_dj() {
   local dj="$1"
   cat > "$CFG" <<EOF
 {
-  "trellis_root": "$CANON",
-  "projects_root": "$PROJECTS",
-  "user_home": "$SANDBOX",
+  "schema_version": 2,
   "maintainer_name": "Test Maintainer",
   "github_user": "tester",
   "harnesses": ["claude"],
@@ -209,7 +196,7 @@ run_dj() { run bash "$DJ" "$@"; }
   # Positive control: the plan must mark stale as delete and fresh as skip.
   run_dj --report --scopes caches
   [ "$status" -eq 0 ]
-  [[ "$output" == *"delete"*"$PROJECTS/alpha/.next/cache"* || "$output" == *"$PROJECTS/alpha/.next/cache"*"stale"* ]]
+  [[ "$output" == *"delete"*"$PROJECTS/alpha/.next/cache"* || "$output" == *"$PROJECTS/alpha/.next/cache"*"stale"* ]] || { echo "$output"; false; }
 
   # Apply, auto-confirm. </dev/null guards the prompt path even with --yes.
   run_dj --apply --yes --scopes caches </dev/null
@@ -249,8 +236,8 @@ run_dj() { run bash "$DJ" "$@"; }
   make_cache "$PROJECTS/alpha" ".next/cache" "$STALE_TOUCH"
   DJ_BUILD_ACTIVE_OVERRIDE=1 run_dj --report --scopes caches
   [ "$status" -eq 0 ]
-  [[ "$output" == *"build running"* ]]
-  [[ "$output" != *"[delete]"* ]]
+  [[ "$output" == *"build running"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -266,7 +253,7 @@ run_dj() { run bash "$DJ" "$@"; }
   # Positive control: report must place this worktree in the delete plan.
   DJ_MERGED_OVERRIDE=merged run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[delete]"*"$wt"* || "$output" == *"$wt"*"merged"* ]]
+  [[ "$output" == *"[delete]"*"$wt"* || "$output" == *"$wt"*"merged"* ]] || { echo "$output"; false; }
 
   [ -d "$wt" ]
   DJ_MERGED_OVERRIDE=merged run_dj --apply --yes --scopes worktrees </dev/null
@@ -294,8 +281,8 @@ run_dj() { run bash "$DJ" "$@"; }
   # Report classifies it as a candidate (unverified merge), excluded from apply.
   DJ_MERGED_OVERRIDE=unverified run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"candidate"* ]]
-  [[ "$output" == *"unverified"* ]]
+  [[ "$output" == *"candidate"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"unverified"* ]] || { echo "$output"; false; }
 
   DJ_MERGED_OVERRIDE=unverified run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -340,7 +327,7 @@ run_dj() { run bash "$DJ" "$@"; }
   add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
   DJ_MERGED_OVERRIDE=merged run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"main checkout — never reaped"* ]]
+  [[ "$output" == *"main checkout — never reaped"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -354,7 +341,7 @@ run_dj() { run bash "$DJ" "$@"; }
   # No --yes, stdin is EOF (/dev/null) -> confirm_category declines -> no delete.
   run_dj --apply --scopes caches </dev/null
   [ "$status" -eq 0 ]
-  [[ "$output" == *"declined"* ]]
+  [[ "$output" == *"declined"* ]] || { echo "$output"; false; }
   # The stale cache survives because the operator never confirmed.
   [ -d "$PROJECTS/alpha/.next/cache" ]
 }
@@ -394,14 +381,51 @@ run_dj() { run bash "$DJ" "$@"; }
   # Positive control: the report puts this pushed tree in the delete plan.
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[delete]"*"$wt"* ]]
-  [[ "$output" == *"pushed"* ]]
-  [[ "$output" == *"recoverable"* ]]
+  [[ "$output" == *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"pushed"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"recoverable"* ]] || { echo "$output"; false; }
 
   [ -d "$wt" ]
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
   [ ! -d "$wt" ]
+}
+
+@test "registered recoverable worktree outside a discovery root is reaped" {
+  git_init_at "$PROJECTS/alpha"
+  local wt="$EXTERNAL_WT_ROOT/alpha/feat-x"
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/external"
+  [ -d "$wt" ]
+  DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reaped: $wt"* ]] || { echo "$output"; false; }
+  [ ! -d "$wt" ]
+}
+
+@test "worktree summary counts only successful removals" {
+  git_init_at "$PROJECTS/alpha"
+  local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
+  local real_git fake_bin
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+  real_git="$(command -v git)"
+  fake_bin="$SANDBOX/bin"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<EOF
+#!/bin/sh
+case " \$* " in
+  *" worktree remove "*) exit 1 ;;
+esac
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_bin/git"
+
+  PATH="$fake_bin:$PATH" DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged \
+    run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 1 ]
+  [ -d "$wt" ]
+  [[ "$output" == *"REFUSED/failed: $wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"worktrees: 0 B reaped"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"reaped (planned)"* ]] || { echo "$output"; false; }
 }
 
 @test "recoverable via MERGED override -> REAPED (merged arm of merged-OR-pushed)" {
@@ -422,7 +446,7 @@ run_dj() { run bash "$DJ" "$@"; }
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"candidate (not recoverable)"* ]]
+  [[ "$output" == *"candidate (not recoverable)"* ]] || { echo "$output"; false; }
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -431,7 +455,7 @@ run_dj() { run bash "$DJ" "$@"; }
 }
 
 # ===========================================================================
-# LAYER 2 — cleanliness gate is plain porcelain (allowlist no longer blocks)
+# LAYER 2 — no-local-content safety gate
 # ===========================================================================
 
 @test "porcelain-dirty (untracked source) -> skip, regardless of recoverable" {
@@ -443,8 +467,8 @@ run_dj() { run bash "$DJ" "$@"; }
 
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=merged run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[skip]"*"$wt"* ]]
-  [[ "$output" == *"dirty (uncommitted work)"* ]]
+  [[ "$output" == *"[skip]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"dirty (uncommitted work)"* ]] || { echo "$output"; false; }
 
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=merged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -453,7 +477,7 @@ run_dj() { run bash "$DJ" "$@"; }
   [ -f "$wt/NEWFEATURE.ts" ]
 }
 
-@test "porcelain-clean + only build artifacts ignored (node_modules/.next) -> REAPED" {
+@test "porcelain-clean + ignored build artifacts -> candidate, NOT reaped" {
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   add_worktree_ignoring "$PROJECTS/alpha" "$wt" "feat/x" "node_modules/" ".next/"
@@ -461,25 +485,34 @@ run_dj() { run bash "$DJ" "$@"; }
   printf 'x\n' > "$wt/node_modules/pkg/i.js"
   printf 'x\n' > "$wt/.next/cache/x"
 
-  [ -d "$wt" ]
+  DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ignored local content"* ]] || { echo "$output"; false; }
+
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
-  [ ! -d "$wt" ]
+  [ -d "$wt" ]
+  [ -f "$wt/node_modules/pkg/i.js" ]
+  [ -f "$wt/.next/cache/x" ]
 }
 
-@test "porcelain-clean + an UNLISTED non-secret ignored file (.vercel) -> REAPED (old allowlist would have blocked)" {
+@test "porcelain-clean + unknown gitignored data (.vercel) -> candidate, NOT reaped" {
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
-  # .vercel is NOT on the old dj_worktree_clean allowlist and is NOT a secret.
-  # Under the old predicate it over-refused (left the tree); Layer 2 reaps it.
   add_worktree_ignoring "$PROJECTS/alpha" "$wt" "feat/x" ".vercel/"
   mkdir -p "$wt/.vercel"
   printf '{}\n' > "$wt/.vercel/project.json"
 
-  [ -d "$wt" ]
+  DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ignored local content"* ]] || { echo "$output"; false; }
+
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
-  [ ! -d "$wt" ]
+  [ -d "$wt" ]
+  [ -f "$wt/.vercel/project.json" ]
 }
 
 @test "porcelain-clean + a gitignored .env secret -> candidate (manual), NOT reaped" {
@@ -489,15 +522,15 @@ run_dj() { run bash "$DJ" "$@"; }
   printf 'API_KEY=shhh\n' > "$wt/.env"
   mkdir -p "$wt/node_modules"; printf 'x\n' > "$wt/node_modules/x"
 
-  # Recoverable + porcelain-clean, BUT the gitignored secret downgrades it.
+  # Recoverable + porcelain-clean, but any ignored local content downgrades it.
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"candidate"* ]]
-  [[ "$output" == *"secret ignored file present"* ]]
+  [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ignored local content"* ]] || { echo "$output"; false; }
 
   DJ_PUSHED_OVERRIDE=pushed DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
-  # Secret denylist -> manual candidate, EXCLUDED from apply -> the .env survives.
+  # Ignored local content is a manual candidate, excluded from apply.
   [ -d "$wt" ]
   [ -f "$wt/.env" ]
 }
@@ -507,9 +540,8 @@ run_dj() { run bash "$DJ" "$@"; }
 #
 # These MUST create fixtures under the real /private/tmp (the only way to hit
 # that branch); guarded by [ -d /private/tmp ] and cleaned in teardown via
-# TMP_WT_ROOT. The dj_reap_worktree root guard permits the ephemeral tmp root
-# (in addition to PROJECTS_ROOT), so a /private/tmp delete verdict is actually
-# reaped by --apply — asserted at both the REPORT and APPLY levels below.
+# TMP_WT_ROOT. A registered /private/tmp worktree remains eligible because
+# explicit registry identity, not discovery-root placement, is the boundary.
 # ===========================================================================
 
 @test "/private/tmp clean tree, stale + no upstream + not-detached -> delete verdict" {
@@ -519,47 +551,50 @@ run_dj() { run bash "$DJ" "$@"; }
   local wt="$TMP_WT_ROOT/wt"
   # Backdated init commit -> HEAD is far past -> stale at the 2d ephemeral TTL.
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
+  register_fixture_root "$wt"
 
   # Not recoverable (unmerged + unpushed), clean, /private/tmp, stale, branch set.
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[delete]"*"$wt"* ]]
-  [[ "$output" == *"ephemeral-tmp"* ]]
+  [[ "$output" == *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ephemeral-tmp"* ]] || { echo "$output"; false; }
 }
 
-@test "/private/tmp clean stale tree is actually REAPED by --apply (root guard permits tmp)" {
+@test "/private/tmp clean stale registered tree is actually REAPED by --apply" {
   [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
   TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
+  register_fixture_root "$wt"
 
   [ -d "$wt" ]
-  # Widened dj_reap_worktree root guard must let --apply remove a tmp worktree
-  # (exit 0), NOT the old "outside PROJECTS_ROOT" refusal that set EXIT_STATUS=1.
+  # Exact registry ownership, rather than a root-prefix exception, permits this
+  # registered ephemeral worktree to be removed.
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
   [ ! -d "$wt" ]
 }
 
-@test "/private/tmp stale tree with a gitignored SECRET -> candidate, NOT reaped (ephemeral path honors secret denylist)" {
+@test "/private/tmp stale tree with gitignored local content -> candidate, NOT reaped" {
   [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
   TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
+  register_fixture_root "$wt"
   # Gitignore .env (tree stays porcelain-clean), backdated commit so HEAD is stale.
   printf '.env\n' > "$wt/.gitignore"
   ( cd "$wt" && git add .gitignore \
       && GIT_AUTHOR_DATE="$OLD_COMMIT_DATE" GIT_COMMITTER_DATE="$OLD_COMMIT_DATE" git commit -q -m "gitignore" )
   printf 'SECRET=1\n' > "$wt/.env"
 
-  # Not recoverable + clean + /private/tmp + stale would be an ephemeral delete,
-  # but the gitignored secret must force candidate (never auto-reaped).
+  # Not recoverable + porcelain-clean + /private/tmp + stale would otherwise be
+  # an ephemeral delete, but ignored local state must force a manual candidate.
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" != *"[delete]"*"$wt"* ]]
-  [[ "$output" == *"$wt"*"secret ignored file present"* ]]
+  [[ "$output" != *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$wt"*"ignored local content"* ]] || { echo "$output"; false; }
 }
 
 @test "/private/tmp clean tree that is YOUNGER than the TTL -> candidate, NOT delete" {
@@ -568,13 +603,14 @@ run_dj() { run bash "$DJ" "$@"; }
   TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
+  register_fixture_root "$wt"
   # Fresh commit (current date) -> HEAD is recent -> NOT stale at the 2d TTL.
   ( cd "$wt" && git commit --allow-empty -q -m "fresh" )
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" != *"[delete]"*"$wt"* ]]
-  [[ "$output" == *"candidate (not recoverable)"*"$wt"* || "$output" == *"$wt"*"candidate (not recoverable)"* ]]
+  [[ "$output" != *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"candidate (not recoverable)"*"$wt"* || "$output" == *"$wt"*"candidate (not recoverable)"* ]] || { echo "$output"; false; }
 }
 
 @test "/private/tmp clean tree that is DETACHED -> candidate, NOT delete (no branch ref)" {
@@ -584,11 +620,12 @@ run_dj() { run bash "$DJ" "$@"; }
   local wt="$TMP_WT_ROOT/wt"
   # Detached HEAD at the backdated init commit -> stale but branchless.
   ( cd "$PROJECTS/alpha" && git worktree add -q --detach "$wt" HEAD >/dev/null 2>&1 )
+  register_fixture_root "$wt"
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" != *"[delete]"*"$wt"* ]]
-  [[ "$output" == *"candidate"* ]]
+  [[ "$output" != *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"candidate"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -629,7 +666,7 @@ run_dj() { run bash "$DJ" "$@"; }
 
   DJ_MERGED_OVERRIDE=unverified run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"candidate (unverified merge)"* ]]
+  [[ "$output" == *"candidate (unverified merge)"* ]] || { echo "$output"; false; }
 
   DJ_MERGED_OVERRIDE=unverified run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -651,7 +688,7 @@ run_dj() { run bash "$DJ" "$@"; }
 
   run_dj --apply --yes --scopes caches </dev/null
   [ "$status" -eq 2 ]
-  [[ "$output" == *"enabled is false"* ]]
+  [[ "$output" == *"enabled is false"* ]] || { echo "$output"; false; }
   # The stale cache is untouched — apply never ran.
   [ -d "$PROJECTS/alpha/.next/cache" ]
 }
@@ -663,7 +700,7 @@ run_dj() { run bash "$DJ" "$@"; }
 
   run_dj --report --scopes caches
   [ "$status" -eq 0 ]
-  [[ "$output" == *"enabled=false"* ]]
+  [[ "$output" == *"enabled=false"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================
@@ -711,8 +748,8 @@ run_dj() { run bash "$DJ" "$@"; }
   DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=unpushed \
     run_dj --report --safe-only --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[candidate]"*"$wt"* ]]
-  [[ "$output" == *"candidate (worktree in use)"* ]]
+  [[ "$output" == *"[candidate]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"candidate (worktree in use)"* ]] || { echo "$output"; false; }
 
   [ -d "$wt" ]
   DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=unpushed \
@@ -756,9 +793,9 @@ run_dj() { run bash "$DJ" "$@"; }
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=pushed \
     run_dj --report --safe-only --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"safe-only: not merged"* ]]
+  [[ "$output" == *"safe-only: not merged"* ]] || { echo "$output"; false; }
   # And the banner advertises the restriction.
-  [[ "$output" == *"safe-only: merged-clean worktrees only"* ]]
+  [[ "$output" == *"safe-only: merged-clean worktrees only"* ]] || { echo "$output"; false; }
 }
 
 @test "lsof failure fails closed: merged worktree is manual-only in default and safe-only apply" {
@@ -780,9 +817,9 @@ EOF
   PATH="$shim_dir:$PATH" DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
     run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
-  [[ "$output" == *"[candidate]"*"$wt"* ]]
-  [[ "$output" == *"worktree in use"* ]]
-  [[ "$output" == *"lsof failed (exit 73)"* ]]
+  [[ "$output" == *"[candidate]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"worktree in use"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"lsof failed (exit 73)"* ]] || { echo "$output"; false; }
 
   PATH="$shim_dir:$PATH" DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=pushed \
     run_dj --apply --yes --safe-only --scopes worktrees </dev/null
@@ -802,4 +839,204 @@ EOF
   # Dirty -> skip regardless of merged/safe-only. Work preserved.
   [ -d "$wt" ]
   [ -f "$wt/uncommitted.txt" ]
+}
+
+@test "apply skips a cache when its exact registry owner changes after planning" {
+  local fake_bin="$SANDBOX/race-bin" real_python
+  git_init_at "$PROJECTS/alpha"
+  make_cache "$PROJECTS/alpha" ".next/cache" "$STALE_TOUCH"
+  real_python="$(command -v python3)"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/python3" <<'EOF'
+#!/bin/sh
+"$DJ_REAL_PYTHON" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "${1:-}" = "-" ] &&
+   [ "${2:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/raced" ]; then
+  : > "$DJ_RACE_HOME/raced"
+  rm -f "$DJ_RACE_HOME/registry.json"
+fi
+exit "$rc"
+EOF
+  chmod +x "$fake_bin/python3"
+
+  PATH="$fake_bin:$PATH" DJ_REAL_PYTHON="$real_python" \
+    DJ_RACE_ROOT="$PROJECTS/alpha" DJ_RACE_HOME="$TRELLIS_HOME" \
+    run_dj --apply --yes --scopes caches </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped (plan changed)"* ]] || { echo "$output"; false; }
+  [ -d "$PROJECTS/alpha/.next/cache" ]
+}
+
+@test "apply skips a cache when its registry status becomes detached after planning" {
+  local fake_bin="$SANDBOX/status-race-bin" real_python
+  git_init_at "$PROJECTS/alpha"
+  make_cache "$PROJECTS/alpha" ".next/cache" "$STALE_TOUCH"
+  real_python="$(command -v python3)"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/python3" <<'EOF'
+#!/bin/sh
+"$DJ_REAL_PYTHON" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "${1:-}" = "-" ] &&
+   [ "${2:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/status-raced" ]; then
+  : > "$DJ_RACE_HOME/status-raced"
+  proposal="$DJ_RACE_HOME/registry.detached"
+  jq --arg key "$DJ_RACE_KEY" '.projects[$key].status = "detached"' \
+    "$DJ_RACE_HOME/registry.json" > "$proposal" || exit 74
+  chmod 600 "$proposal"
+  mv "$proposal" "$DJ_RACE_HOME/registry.json"
+fi
+exit "$rc"
+EOF
+  chmod +x "$fake_bin/python3"
+
+  PATH="$fake_bin:$PATH" DJ_REAL_PYTHON="$real_python" \
+    DJ_RACE_ROOT="$PROJECTS/alpha" DJ_RACE_HOME="$TRELLIS_HOME" \
+    DJ_RACE_KEY="personal/alpha" \
+    run_dj --apply --yes --scopes caches </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped (plan changed)"* ]] || { echo "$output"; false; }
+  [ -d "$PROJECTS/alpha/.next/cache" ]
+}
+
+@test "apply skips a worktree made dirty after its delete plan" {
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
+  local fake_bin="$SANDBOX/worktree-race-bin" real_git
+  git_init_at "$PROJECTS/alpha"
+  add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+  real_git="$(command -v git)"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<EOF
+#!/bin/sh
+if [ "\${1-}" = "-C" ] && [ "\${2-}" = "\$DJ_RACE_WT" ] &&
+   [ "\${3-}" = "worktree" ] && [ "\${4-}" = "list" ] &&
+   [ "\${5-}" = "--porcelain" ] && [ "\${6-}" != "-z" ]; then
+  "$real_git" "\$@"
+  rc=\$?
+  if [ -e "\$DJ_RACE_STATE" ]; then
+    printf 'late write\n' > "\$DJ_RACE_WT/late-uncommitted.txt"
+  else
+    : > "\$DJ_RACE_STATE"
+  fi
+  exit "\$rc"
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_bin/git"
+
+  PATH="$fake_bin:$PATH" DJ_RACE_WT="$wt" DJ_RACE_STATE="$SANDBOX/worktree-race" \
+    DJ_MERGED_OVERRIDE=merged run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped (plan changed): $wt"* ]] || { echo "$output"; false; }
+  [ -f "$wt/late-uncommitted.txt" ]
+  [ -d "$wt" ]
+}
+
+@test "Docker apply deletes only its exact planned anonymous volume IDs" {
+  local fake_bin="$SANDBOX/docker-bin" log="$SANDBOX/docker.log"
+  local volume_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/docker" <<'EOF'
+#!/bin/sh
+case "${1:-}:${2:-}" in
+  info:) exit 0 ;;
+  version:--format) printf '23.0.0\n' ;;
+  system:df)
+    if [ "${3:-}" = "-v" ]; then
+      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
+    else
+      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
+    fi
+    ;;
+  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
+  buildx:prune) printf 'buildx:%s\n' "$*" >> "$DJ_DOCKER_LOG" ;;
+  volume:inspect) printf '%s\n' "${5:-}" ;;
+  ps:-a) : ;;
+  volume:rm) printf 'rm:%s\n' "${3:-}" >> "$DJ_DOCKER_LOG" ;;
+  volume:prune) printf 'broad-prune\n' >> "$DJ_DOCKER_LOG" ;;
+  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
+esac
+EOF
+  chmod +x "$fake_bin/docker"
+
+  PATH="$fake_bin:$PATH" DJ_DOCKER_LOG="$log" DJ_DOCKER_ID_ONE="$volume_id" \
+    run_dj --apply --yes --scopes docker </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"docker volume rm $volume_id"* ]] || { echo "$output"; false; }
+
+  run cat "$log"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rm:$volume_id"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"buildx:buildx prune"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"broad-prune"* ]] || { echo "$output"; false; }
+}
+
+@test "Docker apply exits nonzero when an exact planned volume refusal is not an attachment race" {
+  local fake_bin="$SANDBOX/docker-bin"
+  local volume_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/docker" <<'EOF'
+#!/bin/sh
+case "${1:-}:${2:-}" in
+  info:) exit 0 ;;
+  version:--format) printf '23.0.0\n' ;;
+  system:df)
+    if [ "${3:-}" = "-v" ]; then
+      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
+    else
+      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
+    fi
+    ;;
+  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
+  buildx:prune) : ;;
+  volume:inspect) printf '%s\n' "${5:-}" ;;
+  ps:-a) : ;;
+  volume:rm) exit 1 ;;
+  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
+esac
+EOF
+  chmod +x "$fake_bin/docker"
+
+  PATH="$fake_bin:$PATH" DJ_DOCKER_ID_ONE="$volume_id" \
+    run_dj --apply --yes --scopes docker </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"REFUSED/failed planned Docker volume removal: $volume_id"* ]] || { echo "$output"; false; }
+}
+
+@test "Docker apply treats only a proven post-plan attachment as a benign remove race" {
+  local fake_bin="$SANDBOX/docker-bin" race="$SANDBOX/volume-attached"
+  local volume_id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/docker" <<'EOF'
+#!/bin/sh
+case "${1:-}:${2:-}" in
+  info:) exit 0 ;;
+  version:--format) printf '23.0.0\n' ;;
+  system:df)
+    if [ "${3:-}" = "-v" ]; then
+      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
+    else
+      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
+    fi
+    ;;
+  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
+  buildx:prune) : ;;
+  volume:inspect) printf '%s\n' "${5:-}" ;;
+  ps:-a)
+    if [ -f "$DJ_DOCKER_RACE" ]; then
+      printf '%s\n' 'container-now-attached'
+    fi
+    ;;
+  volume:rm) : > "$DJ_DOCKER_RACE"; exit 1 ;;
+  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
+esac
+EOF
+  chmod +x "$fake_bin/docker"
+
+  PATH="$fake_bin:$PATH" DJ_DOCKER_ID_ONE="$volume_id" DJ_DOCKER_RACE="$race" \
+    run_dj --apply --yes --scopes docker </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped planned Docker volume (benign attachment race): $volume_id"* ]] || { echo "$output"; false; }
 }

@@ -9,7 +9,7 @@ Cross-cutting rules for every active personal project. Project-specific `CLAUDE.
 - When asked to plan, output only the plan. No code until explicit approval.
 - When given a plan, follow it exactly. If you see a real problem, say so in a sentence — then wait or proceed-and-log per the active autonomy level.
 - For non-trivial features (3+ steps or architectural decisions), interview the user about implementation, UX, and tradeoffs before writing code.
-- **Mandatory feature pipeline (opt-in, default off).** When `mandatory_pipeline` is enabled in `trellis.config.json`, a branch whose net gated diff exceeds the size floor cannot be pushed without a spec triad, a size-capped `/surgical` declaration, or a logged `/surgical --emergency`; sub-floor work stays surgical-default. Deterministic and harness-identical, but not a bright-line guardrail — *who answers* the intake interview follows the autonomy slider. `engineering-process.md` §14.7, `core-rules/hooks.md`.
+- **Mandatory feature pipeline (opt-in, default off).** When effective portable policy enables `mandatory_pipeline` (the tracked project declaration is `.trellis.json`), a branch whose net gated diff exceeds the size floor cannot be pushed without a spec triad, a size-capped `/surgical` declaration, or a logged `/surgical --emergency`; sub-floor work stays surgical-default. Deterministic and harness-identical, but not a bright-line guardrail — *who answers* the intake interview follows the autonomy slider. `engineering-process.md` §14.7, `core-rules/hooks.md`.
 - Never attempt multi-file refactors in one response. Break into phases sized by a **soft, autonomy-scoped ceiling** — ~7 files at L1–L3, widening at L4/L5. `code-review-subagent` fires at ≥3 files / ≥200 lines, so review coverage scales with phase size. Complete, verify (hooks enforce), get approval per the active autonomy level, continue.
 - Don't hide confusion. When two readings of the request would lead to materially different work, surface the choice instead of picking silently; resolve routine ambiguity yourself, per the active autonomy level.
 - Frame each task as a verifiable goal before writing code: bug → reproducing test that fails then passes; refactor → tests green before and after; new behavior → explicit acceptance check per step. Weak goals ("make it work") force back-and-forth; strong goals let you loop independently.
@@ -83,9 +83,9 @@ A token shared by several projects has ONE canonical source, exported from your 
 
 ## Autonomy
 
-Trellis ships a **responsibility slider** (L1–L5, default L3) controlling *who answers* interactive gates — user or agent. All gates and quality controls fire at every level; the level changes only the consultation surface. Bright-line guardrails (hard hooks, destructive ops, external messages, secrets, DoD receipts, code-review subagent, untrusted-content boundary) stay mandatory at every level, and architectural decisions surface inline mid-turn even at L5. At L4/L5, decisions taken on the user's behalf go to `<canonical-root>/decisions-log.md` (never touched by `save-context-log`) and render as `## Decisions made (L<n>)`.
+Trellis ships a **responsibility slider** (L1–L5, default L3) controlling *who answers* interactive gates — user or agent. All gates and quality controls fire at every level; the level changes only the consultation surface. Bright-line guardrails (hard hooks, destructive ops, external messages, secrets, DoD receipts, code-review subagent, untrusted-content boundary) stay mandatory at every level, and architectural decisions surface inline mid-turn even at L5. At L4/L5, decisions taken on the user's behalf go to `<project-root>/decisions-log.md` (never touched by `save-context-log`) and render as `## Decisions made (L<n>)`.
 
-Level resolution (pick → clamp): `trellis.config.json.autonomy_default` → project-local `.trellis.config.json.autonomy` → preset `autonomy_default` (when no project-local) → session override (`/autonomy N`); then clamp to the lowest preset `autonomy_ceiling`. Full matrix, guardrails, resolution algorithm, decision-log format: `core-rules/autonomy.md`.
+Level resolution reads portable project policy from `.trellis.json`, then the active immutable release and declared presets, then the session override; it clamps to the lowest preset `autonomy_ceiling`. Full matrix, guardrails, precedence, and decision-log format: `core-rules/autonomy.md`.
 
 ## Loops
 
@@ -101,27 +101,28 @@ Two tiers — **fast-local** (every turn) and **heavy-gated** (wrap-up) — plus
 
 ## Skills
 
-Canonical skills live under `core-rules/skills/<name>/`, inherited by every project via symlink (Claude Code: `.claude/skills/`; Codex: `.agents/skills/`). Each skill's `SKILL.md` is its spec.
+When a project is explicitly attached, release-owned skills are expanded as manifest-owned local leaves in the native Claude Code, Codex, and OMP surfaces. Each skill's `SKILL.md` is its spec.
 
 **Path-scoping (project-local skills only).** If a non-canonical skill carries a `scope.json` beside its `SKILL.md`, read it before auto-mentioning the skill: auto-invoke only when the session cwd or this turn's changed files match a glob in `paths[]`. Explicit `/skill <name>` always works. Schema + rationale: `core-rules/inheritance.md` § "Skill path-scoping".
 
 ## Commands
 
-Canonical slash commands live under `core-rules/commands/<name>.md`, inherited via symlink (`.claude/commands/`, `.agents/commands/`). Commands are explicit user invocations (`/<name> <args>`); skills are what the agent dispatches from context. The set: `core-rules/commands/`. Reach for `/explore` before touching an unfamiliar subsystem — it maps one to a transient note in a read-only subagent, cheaper than inline.
+When a project is explicitly attached, release-owned slash commands are manifest-owned local leaves in the native Claude Code, Codex, and OMP surfaces. Commands are explicit user invocations (`/<name> <args>`); skills are what the agent dispatches from context. The release-owned set is under `core-rules/commands/`. Reach for `/explore` before touching an unfamiliar subsystem — it maps one to a transient note in a read-only subagent, cheaper than inline.
 
 <!-- BEGIN PRIMER SECTION -->
 
 ## Feature primers
 
-Where `<canonical-root>/.claude/primers/INDEX.md` exists, primers are live and the `inject-primer-index` hook injects INDEX at session start. **When the task names a feature, directory, or subsystem listed in INDEX, read that primer before exploring code** — loading is not optional. On any drift flag other than FRESH or WARM, say so before relying on it and offer `/primer-refresh`. Authoring, staleness, storage, commands: `core-rules/primers.md`.
+Where an attached project renders `<project-root>/.claude/primers/INDEX.md`, primers are live and the `inject-primer-index` hook injects INDEX at session start. **When the task names a feature, directory, or subsystem listed in INDEX, read that primer before exploring code** — loading is not optional. On any drift flag other than FRESH or WARM, say so before relying on it and offer `/primer-refresh`. Authoring, staleness, storage, commands: `core-rules/primers.md`.
 
 <!-- END PRIMER SECTION -->
 
-## Project-local files every project maintains
+## Project-local policy and records
 
-- `CLAUDE.md` — project-specific rules only. No duplication of this file. Target <5 KB.
+- `.trellis.json` — the sole Trellis-controlled tracked project state; portable identity and policy only. Local attachment state is never added to it.
+- `CLAUDE.md` — project-specific rules only. No duplication of the parent layer. Target <5 KB.
 - `gotchas.md` — lessons logged as they happen.
-- `context-log.md` — written by the `save-context-log` hook at the canonical project root, auto-injected at session start and after compaction. Never edit by hand (mechanism: `core-rules/hooks.md`).
+- `context-log.md` — written by the `save-context-log` hook at the project root, auto-injected at session start and after compaction. Never edit by hand (mechanism: `core-rules/hooks.md`).
 
 ## Documentation
 
@@ -129,10 +130,8 @@ Where `<canonical-root>/.claude/primers/INDEX.md` exists, primers are live and t
 
 ## Control plane
 
-Active projects opt in via `registry.md`; temporary exemptions in `blacklist.md`. Audits, registry, and project onboarding live in `__TRELLIS_PATH__/`, whose `engineering-process.md` is the narrative manual (why/how, onboarding playbook, incident patterns, glossary) — read it when you need more than these terse rules. Target for this file: **≤19,000 bytes and ≤200 lines** (`wc -c`, `wc -l`; the line budget is what `trellis-doctor` reports on, warn-class). The byte figure is a high-water mark — where the file could actually be trimmed to — so it is re-set when a rule genuinely earns its place, never quietly exceeded. Anything situational belongs in a sibling reference — a target nobody can check is a target nobody keeps.
+Explicit attachment stores machine configuration, fleet inventory, immutable releases, ownership records, and recovery journals under private `TRELLIS_HOME` (default `~/.trellis`). Resolve a project's fleet and runtime from that local state through the installed `trellis` launcher — `registry list`, `doctor`, `show-config`, scoped with `--fleet`/`--project`. There is no tracked fleet inventory: the machine-local registry is the only membership authority, rebuildable from `.trellis.json` manifests plus operator-selected discovery roots. A row is `available`, `unavailable` (class 0 or 5) or `identity_error` (class 4); a failed row is reported, never deleted, repaired, or replaced by a guessed path, and a command exits on the highest class any row produced. The source checkout is a management/publication checkout, never attached-runtime authority. Read `engineering-process.md` for the operator process, `docs/MIGRATING-LOCAL-FLEETS.md` for migration, and `docs/UPGRADING.md` for release transitions.
 
 ## Inheritance
 
-Inheritance mechanism (symlink + @-import, skills inheritance, multi-harness layout, silent-drop invariants, registered-project checklist): `core-rules/inheritance.md`. The scheduled `cross-project-process-audit` fails a project missing required inheritance.
-
-Canonical clone (`trellis_root`) is a published surface, not a workspace: clean `main` only, work in worktrees. Off-main or dirty is stop-and-fix, unprompted, before the task in hand — recovery in `core-rules/inheritance.md`.
+Portable attachment, manifest-owned leaves, silent-drop handling, three-harness layout, local settings ownership, Git common-directory state, worktree diagnosis, and recovery are defined in `core-rules/inheritance.md`. A raw contributor clone remains inert; attached projects resolve only through their verified immutable runtime anchor.

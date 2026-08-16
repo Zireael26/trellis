@@ -34,10 +34,17 @@ fi
 # present-but-non-executable run-diff.sh (cp without -p / archive extraction /
 # core.fileMode=false) is NOT silently downgraded to a non-blocking warn-skip,
 # which at merge would let a real Critical/High security finding through.
+#
+# The in-tree `core-rules/` copy is the last candidate, for the Trellis clone
+# itself: there the skill IS the repository, but a linked worktree has no seeded
+# `.claude/skills` and no `.agents` at all, so a hard gate silently downgraded to
+# a non-blocking warn on the one checkout that authors the gate. Last, not first,
+# so a project's own installed copy still wins wherever one exists.
 RUNDIFF=""
 for cand in \
   "$PROJECT_DIR/.claude/skills/security-gate/scripts/run-diff.sh" \
-  "$PROJECT_DIR/.agents/skills/security-gate/scripts/run-diff.sh"; do
+  "$PROJECT_DIR/.agents/skills/security-gate/scripts/run-diff.sh" \
+  "$PROJECT_DIR/core-rules/skills/security-gate/scripts/run-diff.sh"; do
   if [ -f "$cand" ]; then RUNDIFF="$cand"; break; fi
 done
 if [ -z "$RUNDIFF" ]; then

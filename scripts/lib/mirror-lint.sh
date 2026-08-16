@@ -1,280 +1,211 @@
 #!/usr/bin/env bash
-# mirror-lint.sh — pure, sourceable denylist lint for the public Trellis mirror.
+# Pure, sourceable lint for the public Trellis mirror.
 #
-# Purpose: the sync (sync-to-template.sh) is a positive allowlist — it only
-# inspects files it copies. Public-only files that live in the mirror but are
-# NOT in SYNC_PATHS (README.md, SETUP.md, AGENT_SETUP.md, docs/architecture.svg,
-# LICENSE, .github/) are never scrubbed and drift silently. That is exactly how
-# stale AntiGravity content survived the RC.4 release in README/SETUP/AGENT_SETUP.
-# This helper greps the ENTIRE mirror tree (not just synced paths) for forbidden
-# content and fails closed, so the sync can abort before commit/push.
-#
-# Two token classes, because a naive denylist cries wolf (verified 2026-07-05):
-#   HARD  — absolute filesystem-path leaks (trellis_root / source_root /
-#           projects_root / user_home). These are NEVER legitimate anywhere in
-#           the public mirror. Fail on any occurrence.
-#   SCOPED — "antigravity" (case-insensitive). LEGITIMATE in the historical
-#           record (docs/adr/ ADRs are immutable history, docs/specs/ historical
-#           design docs, CHANGELOG.md "Removed: AntiGravity"). FORBIDDEN in
-#           current operator-facing surface (README, SETUP, steering, live
-#           skills/hooks). Fail only OUTSIDE the historical-record allowlist.
-#
-# NOT denylisted: maintainer_name ("__MAINTAINER_NAME__") and github_user
-# ("__GITHUB_USER__") appear LEGITIMATELY in the public mirror — attribution in
-# README.md, clone URLs in SETUP.md. Banning them would false-positive on
-# correct public content. The staged-tree leak check in sync-to-template.sh
-# (its SUB_FROM grep) already guards the SYNCED files against those; that check
-# is unchanged. This lint is the complementary guard for the UNSYNCED files.
-#
-# Read/write contract:
-#   READS  — the filesystem under <mirror_dir> plus optional private denylist
-#            data under <source_root>/local/ (file contents via grep/read).
-#   WRITES — nothing. Prints "path: reason" per offender to stdout only. Sets no
-#            globals, mutates no shell state, touches no files.
-#   No `set -euo pipefail`: sourcing must not alter the caller's shell. The
-#   function is self-contained and `set -e`-safe (every grep runs in an `if`).
+# The mirror must contain portable policy and tools only. It must never contain
+# private TRELLIS_HOME state or an operator's absolute home path. All traversal
+# is lexical or `find -P` over regular files, so neither validation nor content
+# scans dereference a hostile mirror link. Unknown operator paths fail closed
+# on their own bytes.
 
-# lint_mirror <mirror_dir> <trellis_root> <source_root> <projects_root> <user_home>
-#   Prints each offender as "<relative-path>: <reason>" to stdout, one per line.
-#   Returns 0 if the mirror is clean, 1 if any offender was found.
-#
-# The `.git/` directory is always excluded. grep -I skips binary files, so
-# docs/architecture.svg (text) is scanned but true binaries are not.
-lint_mirror() {
-  local mirror_dir="$1" trellis_root="$2" source_root="$3" projects_root="$4" user_home="$5"
-  local rc=0
+# lint_mirror MIRROR_DIR
+#   Prints "relative-path: reason" per offender to stdout.
+#   Returns 0 when clean, 1 for policy violations, 2 for bad arguments.
 
-  [ -d "$mirror_dir" ] || { echo "mirror-lint: not a directory: $mirror_dir" >&2; return 2; }
+# mirror_find_path_escape LITERAL_PATH
+#   Escapes a literal path for use inside a `find -path` pattern. `-path`
+#   matches with shell-glob semantics, so an unescaped `*`, `?`, `[`, `]` or
+#   `\` anywhere in the mirror's own absolute path is read as pattern syntax
+#   instead of as itself. That fails open, not closed: the whole structural
+#   scan silently matches nothing and a dirty mirror lints clean. Escape the
+#   root once and interpolate the escaped form into every `-path` term.
+mirror_find_path_escape() {
+  local out="${1:-}"
+  out="${out//\\/\\\\}"
+  out="${out//\*/\\*}"
+  out="${out//\?/\\?}"
+  out="${out//\[/\\[}"
+  out="${out//\]/\\]}"
+  printf '%s' "$out"
+}
 
-  # --- HARD tokens: absolute-path leaks, forbidden anywhere ---------------
-  # Dedup: source_root and trellis_root are often the same clone path; report
-  # each distinct token once.
-  local -a hard_tokens=()
-  local seen="" t
-  for t in "$trellis_root" "$source_root" "$projects_root" "$user_home"; do
-    [ -n "$t" ] || continue
-    case "$seen" in *"|$t|"*) continue ;; esac
-    seen="${seen}|$t|"
-    hard_tokens+=("$t")
+# mirror_link_target_is_contained RELATIVE_LINK_PATH TARGET
+#   Validates a relative symlink target by lexical resolution. It never follows
+#   the link, so a hostile mirror cannot turn validation into filesystem access.
+mirror_link_target_is_contained() {
+  local rel="${1:-}" target="${2:-}" parent rest component resolved=""
+  [ "$#" -eq 2 ] || return 1
+  case "$rel" in
+    ''|/*|*'//'|*'/./'*|*'/../'*|*/.|*/..|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  case "$target" in
+    ''|/*|*'//'|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  case "$rel" in
+    */*) parent="${rel%/*}" ;;
+    *) parent="" ;;
+  esac
+  if [ -n "$parent" ]; then rest="$parent/$target"; else rest="$target"; fi
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) component="${rest%%/*}"; rest="${rest#*/}" ;;
+      *) component="$rest"; rest="" ;;
+    esac
+    case "$component" in
+      ''|.) ;;
+      ..)
+        [ -n "$resolved" ] || return 1
+        case "$resolved" in */*) resolved="${resolved%/*}" ;; *) resolved="" ;; esac
+        ;;
+      *)
+        case "$component" in *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;; esac
+        if [ -n "$resolved" ]; then resolved="$resolved/$component"; else resolved="$component"; fi
+        ;;
+    esac
   done
-  local tok f rel
-  for tok in "${hard_tokens[@]}"; do
-    [ -n "$tok" ] || continue
-    # -F fixed-string (paths contain no regex intent), -I skip binary,
-    # -l list files, -r recurse. Exclude the git dir.
-    while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      rel="${f#"$mirror_dir"/}"
-      echo "$rel: absolute-path leak ('$tok')"
-      rc=1
-    done < <(grep -rIlF --exclude-dir='.git' -- "$tok" "$mirror_dir" 2>/dev/null)
-  done
+  [ -n "$resolved" ]
+}
 
-  # Symlink TARGETS can leak a hard token even when no file content does — an
-  # inheritance symlink accidentally shipped in the mirror could point at an
-  # instance path. grep reads link targets as the (short) link file, not the
-  # destination, so scan targets explicitly (cross-model review finding).
-  local link target
+# mirror_validate_symlinks MIRROR_DIR
+#   Rejects absolute or relative links that escape the mirror. Safe relative
+#   links may remain as leaf artifacts, but callers must never use a link as a
+#   destination parent for a mutation.
+mirror_validate_symlinks() {
+  local mirror_dir="${1:-}" mirror_pat link rel target rc=0
+  [ "$#" -eq 1 ] || return 2
+  [ -d "$mirror_dir" ] && [ ! -L "$mirror_dir" ] || return 2
+  mirror_pat="$(mirror_find_path_escape "$mirror_dir")"
   while IFS= read -r link; do
     [ -n "$link" ] || continue
+    rel="${link#"$mirror_dir"/}"
     target="$(readlink "$link" 2>/dev/null || true)"
-    [ -n "$target" ] || continue
-    for tok in "${hard_tokens[@]}"; do
-      case "$target" in
-        *"$tok"*) rel="${link#"$mirror_dir"/}"; echo "$rel: symlink target leaks absolute path ('$tok' -> $target)"; rc=1 ;;
-      esac
-    done
-  done < <(find "$mirror_dir" -type l -not -path '*/.git/*' 2>/dev/null)
+    case "$target" in
+      /*)
+        printf '%s: symlink target leaks absolute path\n' "$rel"
+        rc=1
+        ;;
+      *)
+        if ! mirror_link_target_is_contained "$rel" "$target"; then
+          printf '%s: symlink target escapes mirror\n' "$rel"
+          rc=1
+        fi
+        ;;
+    esac
+  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type l -print 2>/dev/null)
+  return "$rc"
+}
 
-  # Catch hardcoded home paths that are not one of the configured tokens. This
-  # closes the cross-machine case where content copied from another operator
-  # contains an unknown macOS/Linux username. A few deliberately generic
-  # documentation and regression-fixture users are safe public examples.
-  local hit line_body home_path unknown_home
+lint_mirror() {
+  local mirror_dir="${1:-}" mirror_pat rc=0 f rel hit path username
+  [ "$#" -eq 1 ] || { printf 'mirror-lint: usage: lint_mirror MIRROR_DIR\n' >&2; return 2; }
+  [ -d "$mirror_dir" ] && [ ! -L "$mirror_dir" ] || {
+    printf 'mirror-lint: not an ordinary directory: %s\n' "$mirror_dir" >&2
+    return 2
+  }
+  mirror_pat="$(mirror_find_path_escape "$mirror_dir")"
+
+  # Local machine state is never a public template payload. Keep the list
+  # structural rather than content-based: it catches a future sync allowlist
+  # mistake before a path-redaction scheme has a chance to hide it.
+  #
+  # Every term is a top-level TRELLIS_HOME child, anchored at exactly one depth
+  # (`$mirror_pat/NAME` plus `$mirror_pat/NAME/*`) so the group stays readable
+  # as an inventory of private roots. A deeper or unanchored `-name` term would
+  # be redundant with its own root and, being a glob rather than a path, could
+  # not be paired with a `delist_prune` entry in `sync-to-template.sh`. That
+  # pairing is a hard invariant: a path this lint rejects but the sync cannot
+  # prune is a mirror that can never be published clean again.
+  #
+  # `tasks` and `locks` are distinct roots, not sub-cases of the ones above
+  # them. `tasks` holds materialized task state — a local-registry snapshot and
+  # private backlog — and is *not* covered by `scheduled-tasks`, which is the
+  # repository's own source directory. `locks` is the TRELLIS_HOME lock root
+  # and is not covered by `state`, which has its own separate `state/locks`.
+  #
+  # KNOWN GAP, deliberately not covered: TRELLIS_HOME also holds transient
+  # atomic-write temporaries as *siblings* of the artifacts above —
+  # `.config.json.tmp.XXXXXX` (scripts/lib/trellis-home.sh) and
+  # `.registry.json.tmp.XXXXXX` (scripts/lib/local-registry.sh). Their names
+  # end in an `mktemp` suffix, so no exact relative path can ever name them,
+  # and `delist_prune` in `sync-to-template.sh` deletes exact literal paths
+  # only — `mirror_remove_pruned_paths` builds `$root/$path` and never expands
+  # a glob. Adding a reject term for them without first teaching the prune side
+  # to match a prefix would therefore manufacture the exact permanently
+  # unpublishable mirror the pairing invariant exists to prevent, so the term
+  # is withheld rather than unpairable. Residual exposure is bounded: any
+  # directory-granularity allowlist mistake that copies a temp also copies its
+  # committed sibling, and the anchored `config.json` / `registry.json` terms
+  # below reject that and block the publish. What stays uncovered is only an
+  # allowlist naming a dot-prefixed temp pattern with no committed sibling
+  # present. Closing it is a `delist_prune` prefix-matching change, tracked as
+  # such, not a lint-only edit.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$mirror_dir"/}"
+    printf '%s: private Trellis machine state must not publish\n' "$rel"
+    rc=1
+  done < <(find -P "$mirror_dir" \
+    \( -path "$mirror_pat/.trellis" -o -path "$mirror_pat/.trellis/*" \
+       -o -path "$mirror_pat/config.json" \
+       -o -path "$mirror_pat/registry.json" \
+       -o -path "$mirror_pat/releases" -o -path "$mirror_pat/releases/*" \
+       -o -path "$mirror_pat/state" -o -path "$mirror_pat/state/*" \
+       -o -path "$mirror_pat/tasks" -o -path "$mirror_pat/tasks/*" \
+       -o -path "$mirror_pat/locks" -o -path "$mirror_pat/locks/*" \
+       -o -path "$mirror_pat/scheduled-tasks" -o -path "$mirror_pat/scheduled-tasks/*" \
+       -o -path "$mirror_pat/local" -o -path "$mirror_pat/local/*" \) \
+    -not -path '*/.git/*' -print 2>/dev/null)
+
+  # A public symlink may be relative only when lexical resolution remains
+  # inside the mirror. This rejects both absolute targets and ../ escapes
+  # without dereferencing a potentially hostile target.
+  if ! mirror_validate_symlinks "$mirror_dir"; then
+    return 1
+  fi
+  # Any non-generic home path is an operator path, including one copied from
+  # a different machine.
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    line_body="${hit#*:}"
-    unknown_home=0
-    while IFS= read -r home_path; do
-      [ -n "$home_path" ] || continue
-      case "$home_path" in
-        /Users/me/|/Users/jane/|/Users/helios/|/Users/.../|/home/jane|/home/jane/) continue ;;
-      esac
-      unknown_home=1
-      break
-    done < <(printf '%s\n' "$line_body" | grep -oE -- '/Users/[[:alnum:]_.-]+/|/home/[[:alnum:]_.-]+(/|$)' 2>/dev/null)
-    [ "$unknown_home" -eq 1 ] || continue
     rel="${hit%%:*}"
     rel="${rel#"$mirror_dir"/}"
-    echo "$rel: unrecognized absolute home path"
-    rc=1
-  done < <(grep -rInE --exclude-dir='.git' -- '/Users/[[:alnum:]_.-]+/|/home/[[:alnum:]_.-]+(/|$)' "$mirror_dir" 2>/dev/null)
+    path="${hit#*:}"
+    while IFS= read -r username; do
+      [ -n "$username" ] || continue
+      username="${username#/Users/}"
+      username="${username#/home/}"
+      username="${username%%/*}"
+      case "$username" in
+        me|example|user|you|test|jane|helios|alex|'...') ;;
+        *)
+          printf '%s: absolute-path leak\n' "$rel"
+          rc=1
+          break
+          ;;
+      esac
+    done < <(printf '%s\n' "$path" | grep -oE '/(Users|home)/[[:alnum:]_.-]+/' 2>/dev/null)
+  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
+    -exec grep -HnE -- '/(Users|home)/[[:alnum:]_.-]+/' {} + 2>/dev/null)
 
-  # --- SCOPED token: antigravity, forbidden outside the historical record --
-  # Allowlist (paths RELATIVE to mirror_dir where the token is legitimate):
-  #   docs/adr/, docs/specs/  — immutable historical design record
-  #   CHANGELOG.md            — "Removed: AntiGravity" is history, must persist
-  #   the three removal-tooling files that necessarily NAME the token (this
-  #   linter, sync-to-template's DELIST_PRUNE, and this linter's own test) —
-  #   they sync to the mirror, so exempt them or the lint flags its own
-  #   machinery. NOT a blanket scripts/ exemption: a stale antigravity in a
-  #   synced OPERATOR script (onboard-project.sh, a rollout script) must still
-  #   fail (cross-model review finding, 2026-07-05). The path-leak check above
-  #   scans every file regardless.
-  # Everything else IS scanned: README, SETUP, AGENT_SETUP, engineering-process,
-  # docs steering, live core-rules skill/hook docs, and every other script — the
-  # operator-facing surface where the RC.4 regression actually landed.
-  local allow_re='^(docs/adr/|docs/specs/|CHANGELOG\.md$|scripts/lib/mirror-lint\.sh$|scripts/sync-to-template\.sh$|scripts/tests/mirror-lint\.bats$)'
+  # Preserve the historical-record boundary for retired private integrations.
+  # The lint implementation itself is allowed to name the tokens it detects.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
-    if ! printf '%s\n' "$rel" | grep -qE "$allow_re"; then
-      echo "$rel: stale 'antigravity' in current operator surface (historical record only: docs/adr/, docs/specs/, CHANGELOG.md)"
-      rc=1
-    fi
-  done < <(grep -rIliF --exclude-dir='.git' -- 'antigravity' "$mirror_dir" 2>/dev/null)
-
-  # --- UNOFFICIAL PROXY TOKENS ----------------------------------------------
-  # `claudex` remains instance-private everywhere. `cliproxy`/`cli-proxy-api`
-  # name the operator's local gateway, which is not part of the public template.
-  # The tokens are legal only in the sync/lint machinery itself and in the
-  # historical record (docs/adr/, docs/specs/, CHANGELOG.md), mirroring the
-  # `antigravity` allowance above.
-  local proxy_allow_re='^(docs/adr/|docs/specs/|CHANGELOG\.md$|scripts/lib/mirror-lint\.sh$|scripts/tests/mirror-lint\.bats$)'
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    rel="${f#"$mirror_dir"/}"
-    if ! printf '%s\n' "$rel" | grep -qE "$proxy_allow_re"; then
-      echo "$rel: instance-private token 'cliproxy' must never reach the public mirror"
-      rc=1
-    fi
-  done < <(grep -rIliE --exclude-dir='.git' -- 'cliproxy|cli-proxy-api' "$mirror_dir" 2>/dev/null)
+    case "$rel" in
+      docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats|scripts/sync-to-template.sh) ;;
+      *) printf "%s: stale 'antigravity' in current operator surface\n" "$rel"; rc=1 ;;
+    esac
+  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
+    -exec grep -IliF -- 'antigravity' {} + 2>/dev/null)
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
     case "$rel" in
-      scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
-      *) echo "$rel: instance-private token 'claudex' must never reach the public mirror"; rc=1 ;;
+      docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
+      *) printf "%s: instance-private proxy token must not publish\n" "$rel"; rc=1 ;;
     esac
-  done < <(grep -rIliF --exclude-dir='.git' -- 'claudex' "$mirror_dir" 2>/dev/null)
+  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
+    -exec grep -IliE -- 'claudex|cliproxy|cli-proxy-api' {} + 2>/dev/null)
 
-  # --- OPERATOR-ACCOUNT identifiers: instance-local, never public ------------
-  # Names of the operator's cloud accounts, credential stores, and env vars.
-  # These are not secrets — they are the shape of the operator's infrastructure,
-  # which is exactly what a public template must not carry. A rule like "one
-  # canonical source per shared token" is publishable; the team slug and the
-  # Keychain service name that instantiate it are not.
-  #
-  # The tokens live in an instance-local denylist file rather than in this
-  # script, because this script itself syncs to the public mirror — hardcoding
-  # them here would publish the very strings it exists to withhold. The file
-  # lives under local/, which the private-namespace check below already forbids
-  # from publishing. Absent the file, this check is a no-op: a fresh clone of
-  # the public template has no operator identifiers to protect, and inventing a
-  # default denylist would be guessing at someone else's account names.
-  #
-  # Format: one token per line; blank lines and lines starting with # ignored.
-  # Matching is fixed-string and case-insensitive.
-  local denylist_file="$source_root/local/mirror-denylist.txt"
-  if [ -f "$denylist_file" ]; then
-    local dtok
-    while IFS= read -r dtok || [ -n "$dtok" ]; do
-      case "$dtok" in ''|'#'*) continue ;; esac
-      while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        rel="${f#"$mirror_dir"/}"
-        echo "$rel: operator-account identifier must not publish (see local/mirror-denylist.txt)"
-        rc=1
-      done < <(grep -rIliF --exclude-dir='.git' -- "$dtok" "$mirror_dir" 2>/dev/null)
-    done < "$denylist_file"
-  fi
-
-  # The private source for this one guide contains a complete fleet inventory.
-  # Its separate denylist is deliberately scoped to the generated public guide:
-  # project names are legitimate in historical public docs, so applying these
-  # tokens to the whole mirror would create false positives. Public clones lack
-  # local/, so the absent private file makes this check a no-op there. Tokens
-  # carry their Markdown backticks for exact-name/port matching. Never echo the
-  # matching token; the lint result identifies only the public file and private
-  # data file.
-  local shared_infra_doc="$mirror_dir/docs/local-development-infrastructure.md"
-  local shared_infra_denylist="$source_root/local/shared-infra-public-denylist.txt"
-  if [ -f "$shared_infra_doc" ] && [ -f "$shared_infra_denylist" ]; then
-    local shared_dtok
-    while IFS= read -r shared_dtok || [ -n "$shared_dtok" ]; do
-      case "$shared_dtok" in ''|'#'*) continue ;; esac
-      if grep -qiF -- "$shared_dtok" "$shared_infra_doc" 2>/dev/null; then
-        echo "docs/local-development-infrastructure.md: private shared-infrastructure identifier must not publish (see local/shared-infra-public-denylist.txt)"
-        rc=1
-        break
-      fi
-    done < "$shared_infra_denylist"
-  fi
-
-  # The current private changelog also carries one fleet-specific publication
-  # receipt. Its public staging replacement is generic, and this separate scoped
-  # denylist prevents the project/port details from reappearing. Keep it separate
-  # from the guide denylist because an older historical changelog entry names a
-  # project legitimately. As above, never disclose the matching token.
-  local shared_infra_changelog="$mirror_dir/CHANGELOG.md"
-  local shared_infra_changelog_denylist="$source_root/local/shared-infra-public-changelog-denylist.txt"
-  if [ -f "$shared_infra_changelog" ] && [ -f "$shared_infra_changelog_denylist" ]; then
-    local shared_changelog_token
-    while IFS= read -r shared_changelog_token || [ -n "$shared_changelog_token" ]; do
-      case "$shared_changelog_token" in ''|'#'*) continue ;; esac
-      if grep -qiF -- "$shared_changelog_token" "$shared_infra_changelog" 2>/dev/null; then
-        echo "CHANGELOG.md: private shared-infrastructure receipt must not publish (see local/shared-infra-public-changelog-denylist.txt)"
-        rc=1
-        break
-      fi
-    done < "$shared_infra_changelog_denylist"
-  fi
-
-  # --- Root private namespaces: whole subtrees that must never publish (audit
-  # 2026-07-13 H1/L17). A bare .gitkeep placeholder and the one deterministic,
-  # empty public ledger bootstrap are allowed; any other real content under
-  # these roots fails the lint. Catches the leak structurally, so a future
-  # SYNC_PATHS slip re-publishing a report or populated ledger aborts before
-  # commit. The bootstrap's contents are also asserted by sync tests.
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    rel="${f#"$mirror_dir"/}"
-    case "$rel" in
-      .gitkeep|*/.gitkeep|audits/fleet-remediation-ledger.json) continue ;;
-    esac
-    echo "$rel: private namespace must not publish (audits/ research/ conductor/ local/ scheduled-tasks/)"
-    rc=1
-  done < <(find "$mirror_dir" \
-      \( -path "$mirror_dir/audits/*" -o -path "$mirror_dir/research/*" \
-         -o -path "$mirror_dir/conductor/*" -o -path "$mirror_dir/local/*" \
-         -o -path "$mirror_dir/scheduled-tasks/*" \) \
-      -type f -not -path '*/.git/*' 2>/dev/null)
-
-  # Current operator-facing docs include both synced and public-only files.
-  # Once the scheduled-task subtree is de-listed, none may claim that the
-  # private path, MCP, or numbered fleet ships in the public template. General
-  # guidance about configuring operator-side audits remains valid.
-  local operator_doc
-  for operator_doc in \
-    README.md SETUP.md AGENT_SETUP.md AGENT_ONBOARD_PROJECT.md \
-    registry.md blacklist.md docs/architecture.svg docs/PROVENANCE.md \
-    examples/README.md engineering-process.md \
-    core-rules/CLAUDE.md core-rules/hooks.md \
-    core-rules/inheritance.md core-rules/autonomy.md core-rules/loop-safety.md \
-    core-rules/hooks/README.md core-rules/references/loops.md \
-    core-rules/references/programmatic-tool-calling.md \
-    core-rules/presets/README.md core-rules/templates/trellis.config.json.example \
-    core-rules/skills/orchestrate/SKILL.md \
-    core-rules/skills/security-gate/SKILL.md core-rules/commands/constitution.md \
-    core-rules/commands/trellis-doctor.md core-rules/commands/disk-janitor.md \
-    scripts/lib/trellis.config.schema.json; do
-    [ -f "$mirror_dir/$operator_doc" ] || continue
-    if grep -qiE -- 'scheduled-tasks(/|[[:space:]]|$)|mcp__scheduled-tasks__|scheduled[[:space:]]+audit[[:space:]]+fleet|([0-9]+|sixteen)[[:space:]]+scheduled[[:space:]]+(tasks|audits)|([0-9]+|sixteen)[[:space:]]+audits[[:space:]]+(are[[:space:]]+)?(registered|running)|audited[[:space:]]+(weekly|continuously)' "$mirror_dir/$operator_doc" 2>/dev/null; then
-      echo "$operator_doc: claims de-listed scheduled-task content"
-      rc=1
-    fi
-  done
-
-  return $rc
+  return "$rc"
 }

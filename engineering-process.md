@@ -1,30 +1,39 @@
 # Trellis — engineering process manual
 
-**Owner:** __MAINTAINER_NAME__ (solo maintainer)
-**Status:** Authoritative. Updates only via PR against `~/projects/trellis-instance/`.
-**Last revised:** 2026-07-14
+**Owner:** Trellis maintainers
+**Status:** Authoritative process and operating-model guide
+**Last revised:** 2026-08-13
 
-This is the single human-readable source of truth for how engineering is done under the Trellis regime. Everything elaborated here is grounded in the operator clone — specs in `core-rules/`, canonical hooks in `core-rules/hooks/`, and the project list in `registry.md`. Optional audit schedules, prompts, targets, and fleet inventory belong to the operator and are intentionally excluded from the public template. This manual narrates and connects the public contract; when a section points at a sibling file, that file is the deep dive.
+Trellis is a shared engineering-process regime for opt-in projects. Its portable
+policy is versioned in this repository; its machine inventory and runtime state
+are deliberately not. A project that has not been explicitly attached remains
+an ordinary repository, even when it tracks a portable `.trellis.json` manifest.
+
+This document explains the human operating model. The executable local-setup
+and onboarding recipes live in [AGENT_SETUP.md](AGENT_SETUP.md) and
+[AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md). The release and migration
+procedures are [docs/UPGRADING.md](docs/UPGRADING.md) and
+[docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md).
 
 ---
 
 ## Table of contents
 
 1. [Introduction](#1-introduction)
-2. [Philosophy](#2-philosophy)
-3. [The control plane](#3-the-control-plane)
+2. [Principles](#2-principles)
+3. [Portable policy and local machine state](#3-portable-policy-and-local-machine-state)
 4. [Project regime](#4-project-regime)
-5. [Hook enforcement](#5-hook-enforcement)
-6. [Git workflow](#6-git-workflow)
-7. [Definition of done](#7-definition-of-done)
-8. [Code quality standards](#8-code-quality-standards)
-9. [Documentation standards](#9-documentation-standards)
-10. [Onboarding a new project](#10-onboarding-a-new-project-full-playbook)
-11. [Operator audits & the feedback loop](#11-operator-audits--the-feedback-loop)
-12. [Incident response & rollback](#12-incident-response--rollback)
-13. [Secrets & dependency management](#13-secrets--dependency-management)
+5. [Attachment and the three harnesses](#5-attachment-and-the-three-harnesses)
+6. [Source development and immutable releases](#6-source-development-and-immutable-releases)
+7. [Git workflow and publication roles](#7-git-workflow-and-publication-roles)
+8. [Definition of done](#8-definition-of-done)
+9. [Code and documentation standards](#9-code-and-documentation-standards)
+10. [Onboarding, worktrees, and local recovery](#10-onboarding-worktrees-and-local-recovery)
+11. [Audits and fleet operations](#11-audits-and-fleet-operations)
+12. [Incident response and rollback](#12-incident-response-and-rollback)
+13. [Secrets, dependencies, and local tooling](#13-secrets-dependencies-and-local-tooling)
 14. [Evolving Trellis](#14-evolving-trellis)
-15. [Glossary & quick reference](#15-glossary--quick-reference)
+15. [Glossary and quick reference](#15-glossary-and-quick-reference)
 
 ---
 
@@ -32,1030 +41,715 @@ This is the single human-readable source of truth for how engineering is done un
 
 ### What Trellis is
 
-Trellis is a shared engineering-process regime that a set of opt-in personal projects inherit from. It lives in `~/projects/trellis-instance/` and manifests in each registered project as:
+Trellis supplies a compact parent policy, process skills, deterministic hooks,
+and release tooling to projects that explicitly opt in on a particular machine.
+It supports Claude Code, Codex, and OMP as first-class native harnesses.
 
-- Harness-native parent-rule links for Claude Code (`.claude/rules/trellis.md`), Codex (`AGENTS.md` / `.agents/rules/trellis.md`), and OMP (`.omp/AGENTS.md`), all resolving to the canonical parent through the project overlay.
-- Canonical hook enforcement under `.claude/hooks/` for Claude Code, `.codex/` for Codex, and the live `.omp/hooks` adapter for OMP.
-- Native OMP skills, commands, agents, context, and lifecycle enforcement through five live `.omp/` links.
-- Weekly and monthly audits that scan every registered project for drift and write reports to `~/projects/trellis-instance/audits/`.
+The old model made a source checkout's current files and machine inventory part
+of every project's runtime. That model was path-bound, mutable, and unsafe across
+machines. The current model has four separate concerns:
 
-The goal: shared high standards across projects without hand-enforcing them per session.
+- **Tracked policy:** this repository's portable rules, manifests, release
+  payload, and documentation.
+- **Machine state:** private configuration, fleet membership, registry rows,
+  installed releases, journals, and ownership records under `~/.trellis` by
+  default.
+- **Project identity:** one optional, inert tracked `.trellis.json` manifest
+  with a stable project ID and portable project policy.
+- **Runtime attachment:** explicit, local harness leaves rooted at one verified
+  immutable installed release.
 
-### Why this manual exists
-
-The specs (`core-rules/CLAUDE.md`, `hooks.md`, `inheritance.md`) are terse and LLM-optimized. They tell Claude *what* to enforce. They don't explain *why*, don't narrate the workflow end-to-end, and don't give a human reader (you, your future self, or a collaborator) a single place to ramp on the whole regime. This manual fills that gap.
+A project is not managed because it is inside a particular directory, appears in
+a tracked roster, or happens to have an old link. It is managed only when the
+local registry and a committed attachment ownership record agree for its actual
+Git checkout.
 
 ### Audience
 
-- **You (Abhishek)** — when you need to remember what the policy is, when you need to decide whether a pattern should be lifted into the parent, or when you're about to change something about the process.
-- **Your LLM collaborators** — Claude Code, Codex, and headless audit runners — already load the parent rules via the inheritance mechanism. This manual is a companion for human-readable context that can be referenced on demand.
-- **Future contributors** — if Trellis ever has other humans working inside it, this is the doc that onboards them.
+- **Machine operators** configure their local Trellis home, named fleets, and
+  installed releases.
+- **Project owners and agents** review portable project changes, attach a
+  checkout locally, and use the normal engineering process.
+- **Non-Trellis contributors** need do nothing: a fresh clone must stay inert,
+  clean, and free of Trellis discovery warnings or hook behavior.
+- **Trellis maintainers** develop policy in a source checkout and publish
+  immutable releases without exposing private fleet state.
 
 ### Scope
 
-Trellis covers engineering process for *personal* projects under `~/projects/personal/`. Work projects, client engagements, and throwaway experiments are out of scope — this regime is opinionated, prescriptive, and designed around solo-dev-with-high-standards dynamics. If a project opts into Trellis it commits to the whole stack; partial adoption is not supported.
+Trellis governs engineering process for projects that choose to attach. It does
+not configure harness credentials, model/provider choices, trust stores, MCPs,
+or project-owned continuous integration and branch protection. It also does not
+synchronize a machine's `~/.trellis` state to another machine: import, rebuild,
+and explicit attachment are the recovery mechanisms.
 
 ---
 
-## 2. Philosophy
+## 2. Principles
 
-Five principles the manual comes back to:
-
-**1. Parent/child layered rules, Rule of Three for promotion.** Cross-cutting rules live in the parent (`core-rules/CLAUDE.md` + `hooks.md`). Project-specific rules live in each project's own `CLAUDE.md`. A rule earns parent status only when three independent projects adopt it; n=2 is the danger zone where you lock in the wrong abstraction. Candidates waiting for their third witness live in `core-rules/deferred.md`. See [§14](#14-evolving-trellis).
-
-**2. Process is code.** Every rule that can be mechanically enforced becomes a hook. Hooks fail closed (block the agent or fail the build). Written rules that depend on good intentions erode in under a month; written rules backed by a hook persist until the hook is deleted. See [§5](#5-hook-enforcement).
-
-**3. Receipts over self-reporting.** "Done" means you attach the verification command, the exit code, and the diff lines that prove the change. "It works" without receipts is not done. The `stop-verify` hook enforces the underlying checks; the presentation discipline is on the agent. See [§7](#7-definition-of-done).
-
-**4. Small surface, deep discipline.** The always-loaded parent rules stay compact; deeper procedures live in canonical hooks, skills, and references, while operator-specific automation stays private. Anything project-specific belongs in a project-local file. This keeps the inherited contract legible and the drift surface narrow. See [§3](#3-the-control-plane).
-
-**5. Harness-safe by default.** Every mechanism in the regime should work in Claude Code and Codex, with hook envelopes separated where the tools differ. Claude's primary inheritance path is `.claude/rules/`; Codex's is root `AGENTS.md` plus `.agents/`. See [§4.2](#42-inheritance-symlink--import) and `core-rules/inheritance.md`.
+1. **Portable tracked bytes; private machine facts.** Source paths, user homes,
+   fleet membership, discovery roots, installed versions, release anchors, and
+   local hook state are machine facts. They stay under `~/.trellis`, never in a
+   tracked project file or public policy payload.
+2. **Inert until explicit opt-in.** `.trellis.json` identifies a project and
+   carries only portable policy. It never activates Trellis by itself. No
+   direct absolute `@` import, source-checkout symlink, copied hook, copied
+   settings file, or tracked ignore block may substitute for attachment.
+3. **Immutable runtime over mutable source.** Attached projects resolve policy
+   through a verified, read-only release payload. A dirty source checkout,
+   branch switch, source relocation, or publication worktree cannot change an
+   attached project's effective rules.
+4. **Manifest-driven native surfaces.** One release-owned inheritance manifest
+   describes all Claude Code, Codex, and OMP leaves. Attach, detach, doctor,
+   and worktree repair expand the same plan rather than maintaining separate
+   hand-written surface lists.
+5. **Ownership before mutation.** Attachment preflights every destination,
+   records every owned byte, uses a journal, and rolls back its own work on
+   failure. Detach refuses to remove a modified, repointed, or project-owned
+   artifact.
+6. **Receipts over self-reporting.** A completed change includes the command,
+   exit code, and diff evidence that establish its observable result.
+7. **Small always-loaded policy; detailed procedures on demand.** Parent rules
+   stay terse. Skills, release guides, migration guides, and local state carry
+   deeper operational detail.
 
 ---
 
-## 3. The control plane
+## 3. Portable policy and local machine state
 
-Everything that defines and evolves Trellis lives in `~/projects/trellis-instance/`:
+### 3.1 Tracked source policy
 
-```
-trellis-instance/
-├── engineering-process.md          ← you are here
-├── trellis.config.json             ← deployment-local configuration (paths, harnesses, GitHub user)
-├── registry.md                     ← active projects opt-in list
-├── blacklist.md                    ← temporary exemptions
-├── recon.md                        ← LIFT/LEAVE/DEFER thesis doc (history)
-├── core-rules/
-│   ├── CLAUDE.md                   ← parent rules (LLM-facing, inherited)
-│   ├── AGENTS.md                   ← symlink → CLAUDE.md (Codex parity)
-│   ├── hooks.md                    ← three-tier hook spec
-│   ├── inheritance.md              ← symlink + @-import + multi-harness + OMP spec
-│   ├── deferred.md                 ← n=1 candidates awaiting third witness
-│   ├── hooks/                      ← canonical Claude Code hook implementations
-│   ├── codex/                      ← canonical Codex hooks.json + hook scripts
-│   ├── husky/                      ← canonical Tier-3 git hooks
-│   ├── skills/                     ← canonical agent-invoked skills and gates
-│   └── templates/                  ← context-log.md, gotchas.md seeds
-├── scripts/                        ← bootstrap + onboard + sync utilities
-│   ├── lib/                        ← config-load.sh, sed-portable.sh
-│   ├── onboard-project.sh          ← register + seed a project
-│   ├── sync-hooks.sh               ← canonical Claude hooks → projects rsync
-│   ├── sync-codex-hooks.sh         ← canonical Codex hooks → projects rsync
-│   └── sync-to-template.sh         ← live → public template export (with redaction)
-└── audits/                         ← dated operator-generated audit reports
-```
+`trellis.config.json` remains a tracked compatibility/policy file, but it is
+portable. It can express shared policy such as enabled supported harnesses,
+loop-safety defaults, the mandatory-pipeline policy, and publication metadata.
+It must not contain a machine path, `PROJECTS_ROOT`, a local fleet, a registry
+row, a user home, a local release location, or a symlink style.
 
-Private operator clones may add their own audit-schedule and prompt tree beside these public files. That automation is not part of the published template.
+The release payload contains the exact policy snapshot used at runtime. The
+source checkout is not a runtime dependency for attached projects.
 
-### 3.1 `trellis.config.json`
+### 3.2 Trellis home
 
-Single file capturing the customizations of THIS clone of Trellis. Bootstrapped from the template; consumed by every script that needs absolute paths or harness mode.
+A normal machine uses `TRELLIS_HOME`, defaulting to `~/.trellis`. The home is
+private (`0700`); its JSON configuration and registry are private (`0600`). Its
+important state is:
 
-```jsonc
-{
-  "trellis_root":      "/abs/path/to/trellis-instance",
-  "projects_root":     "/abs/path/to/projects/personal",
-  "shared_infra_root": "/abs/path/to/operator-managed-shared-infra", // optional; omit to disable
-  "user_home":         "/Users/<you>",
-  "maintainer_name":"<your name>",
-  "github_user":    "<github-username>",
-  "harnesses":      ["claude"],         // any subset of ["claude", "codex", "omp"]
-  "template": {
-    "remote": "git@github.com:<you>/trellis.git",
-    "branch": "main",
-    "redact_paths": ["audits/", "blacklist.md", "registry.md"]
-  },
-  "sed_flavor": "auto",                 // auto | gnu | bsd
-
-  // Optional. Allowlist of MCP servers sanctioned across this clone. Today
-  // documentation-only — nothing breaks if a project connects something else.
-  // The reserved mcp-drift audit (parked) will warn on unapproved servers.
-  "approved_mcps": [
-    { "name": "operator-scheduler", "purpose": "Private recurring operator jobs", "scope": "fleet" },
-    { "name": "computer-use",     "purpose": "Native-app screenshots + UI control", "scope": "fleet" },
-    { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
-  ],
-
-  // Optional. The fleet baseline for the loop-safety contract (§5c). Every
-  // Trellis loop honors three halt ceilings; these are their values. Absent
-  // = the documented built-in fallback constants (same numbers) so a loop in
-  // a misconfigured context still halts.
-  "loop_safety": {
-    "max_iterations": 100,           // hard cap on loop iterations / dispatch rounds
-    "no_progress_iterations": 3,     // halt after N consecutive no-progress iterations
-    "budget_ceiling_usd": 1000,      // spend ceiling per loop run, in US dollars
-    "usd_per_mtok": 25.00            // $/MTok output rate for the dollar→token conversion
-  },
-
-  // Optional. The mandatory feature-pipeline gate (spec 006, §14.7). Default OFF.
-  // A present-but-malformed block fails CLOSED — an opted-in project must not be
-  // silently disabled by a typo.
-  "mandatory_pipeline": {
-    "enabled": false,
-    "spec_required_diff_lines": 80,  // size floor: at or below this, no spec needed
-    "surgical_max_diff_lines": 400   // ceiling a /surgical declaration is honored to
-  }
-}
+```text
+~/.trellis/
+├── config.json                 machine source/publication metadata, default fleet,
+│                               discovery roots, release remote, active CLI release
+├── registry.json               machine-local fleet/project/checkout/worktree index
+├── releases/<version>/         verified, read-only immutable release records/payloads
+├── state/attachments/          committed attachment ownership records
+├── state/migrations/           local migration rollback snapshots
+├── state/git-hooks/            local dispatchers for opted-in Git common directories
+└── state/...                   transaction journals and other recoverable local state
 ```
 
-Scripts source `scripts/lib/config-load.sh` to populate `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$HARNESSES[@]`, etc. The config is **deployment-local** — not synced to the public template (the template ships placeholders). The `loop_safety` *values* stay deployment-local too; the *policy* (`core-rules/loop-safety.md`) and the schema are public.
+`config.json.source_root` is a development and publication location only. It
+may move without changing the runtime of an attached project. The stable
+launcher normally installed at `~/.local/bin/trellis` validates the configured
+immutable management release before dispatching any command; it never depends
+on a mutable source checkout after installation. Its execution contract is
+§6.5.
 
-`harnesses` accepts any non-empty combination of `"claude"`, `"codex"`, and `"omp"`. Each value enables only its native surface; enabling OMP is additive and does not rewrite Claude Code or Codex files, routing, settings, or hook wiring.
+Resolution is deliberate and fail-closed:
 
-**`loop_safety` resolution order (most specific wins).** Modeled on the autonomy resolution (§14.9). The contract is policy; the ceiling values resolve through four layers, so any instance can relax or tighten them without touching code or prose:
+```text
+explicit CLI flag
+  > TRELLIS_HOME / TRELLIS_FLEET / TRELLIS_RELEASE / TRELLIS_SOURCE_ROOT
+  > ~/.trellis/config.json
+  > portable defaults
+```
 
-1. **Per-loop override** — a recipe's `safety` block or a scheduled-task's "Loop safety" stanza explicitly sets a value.
-2. **Project-local** — `<project>/.trellis.config.json.loop_safety`, for a project that needs different ceilings.
-3. **Central** — this file's `loop_safety` block, the instance baseline.
-4. **Built-in fallback constants** — documented in `core-rules/loop-safety.md` (identical to the baselines above), so a loop in a broken / misconfigured / non-Trellis context still halts. Safe-by-default: a loop authored with no thought still stops.
+An existing attachment's recorded fleet and release win over a contradictory
+environment value. `TRELLIS_ROOT` is **not** in that list and is not accepted as
+an operator-supplied source root: the one-release compatibility bridge that
+published it was removed at `v1.0.0-rc.25`. The name now carries exactly one
+meaning anywhere in Trellis — a project's `.trellis/runtime` anchor, exported to
+attachment-owned hooks so canonical hook libraries resolve the immutable policy
+payload. Read `TRELLIS_SOURCE_ROOT` for the management/publication checkout.
 
-The block is mirrored in `scripts/lib/trellis.config.schema.json` (types, defaults, descriptions). The dollar ceiling is human-meaningful; the Workflow engine's `budget.total` is output-token-native, so the conversion uses the `usd_per_mtok` rate — itself a `loop_safety` config key, set to the current frontier output price, whose default value and derivation `core-rules/loop-safety.md` documents — to map dollars onto the engine budget. The number lives in `trellis.config.json` and the schema, not in this prose; re-derive it when pricing moves.
+### 3.3 Fleets, arbitrary paths, and unavailable rows
 
-Cross-machine portability is achieved by:
+A fleet is a named local grouping such as `personal` or `work`. It has selected
+discovery roots and optional local infrastructure metadata, but a project need
+not live under any particular root. Direct operations receive the actual
+absolute Git worktree path. Discovery roots only bound an explicit registry
+rebuild; they are never a formula for constructing a checkout path.
 
-1. **The template repo** (`trellis-template`) — placeholders + `AGENT_SETUP.md` walking an LLM through bootstrap.
-2. **`sync-to-template.sh`** — exports current canonical content from this live repo back to the template, redacting user-specific values to placeholders. The friend pulls template updates and re-applies to their own clone.
-3. **Audit prompts retain absolute paths** — bootstrap-time sed-substitution, not runtime resolution. Headless-safe by construction; each customer's clone has their own absolute paths after bootstrap.
+`registry.json` keys a project by `<fleet>/<project_id>`, allowing the same
+portable project ID in distinct fleets. It records clones by Git-common-dir
+identity and worktrees by worktree identity. This makes multiple clones and
+linked worktrees distinguishable without relying on directory names.
 
-### 3.2 Scripts
+An imported or previously attached root that is unavailable remains a visible
+`unavailable` row. Fleet tools report it; they do not delete it, create a
+replacement from an ID, or infer a sibling path. When the real checkout is
+known again, register that exact path through a reviewed rebuild or explicit
+attachment. Collisions fail rather than selecting one guessed checkout.
 
-| Script | Purpose |
-|---|---|
-| `scripts/onboard-project.sh <project-path>` | Seed the native inheritance surfaces for every enabled `harnesses` value, plus gotchas/context-log templates and husky hooks (or skip for native-githooks projects). OMP contributes exactly five links: `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, and `.omp/hooks`. |
-| `scripts/sync-hooks.sh [--dry-run\|--yes]` | Canonical Tier 1+2 hook scripts → all registered projects' `.claude/hooks/`. Skill symlinks update automatically (no rsync needed). |
-| `scripts/sync-codex-hooks.sh [--dry-run\|--yes]` | Canonical Codex hook manifest + scripts → all registered projects' `.codex/` trees when Codex is enabled. |
-| `scripts/sync-to-template.sh [--apply] [--push]` | Live → template export. Redacts `$TRELLIS_ROOT`, `$PROJECTS_ROOT`, `$USER_HOME`, `$MAINTAINER_NAME`, `$GITHUB_USER` back to placeholders. Default mode is dry-run; `--apply` writes to template working tree; `--push` also commits + pushes (with confirmation). Excludes `audits/`, `registry.md`, `blacklist.md` (private). |
+### 3.4 Legacy tracked inventory (removed)
 
-**Read-repeatedly files** (the contract):
-- `engineering-process.md` (this doc)
-- `core-rules/CLAUDE.md`, `core-rules/hooks.md`, `core-rules/inheritance.md`
-- `registry.md`, `blacklist.md`
+The tracked `registry.md`/`blacklist.md` roster was removed at `v1.0.0-rc.25`
+after local parity and project-migration evidence existed. There is no tracked
+control plane, audit roster, or runtime authority: the machine-local registry is
+it, and `trellis registry rebuild --fleet NAME ROOT...` reconstructs it from
+`.trellis.json` manifests under operator-selected roots.
 
-**Write-infrequently files** (the evolution loop):
-- `core-rules/deferred.md` — modified when a new candidate rule appears or a third witness promotes one.
-- `audits/YYYY-MM-DD-*.md` — write-only operator reports; remediation tracked elsewhere.
-
-**Read-once-for-history files**:
-- `recon.md` — the thesis doc that drove the original lift/leave/defer classification. Don't rewrite it; its value is the historical record of *why* the parent layer looks the way it does.
+`trellis registry import --fleet NAME --registry FILE [--blacklist FILE]` is
+retained for a machine that has not imported yet. It reads a Markdown roster the
+operator supplies — from Git history (`git show <pre-cutover-sha>:registry.md`)
+or a backup — and never from a tracked path. See
+`docs/MIGRATING-LOCAL-FLEETS.md`.
 
 ---
 
 ## 4. Project regime
 
-### 4.1 What "active under Trellis" means
+### 4.1 The inert portable manifest
 
-A project is active under Trellis if and only if it appears in `registry.md` and not in `blacklist.md`. Active projects are:
+A Trellis-capable project tracks at most one `.trellis.json` manifest. Its
+required purpose is stable identity; it may additionally hold portable policy,
+for example presets, autonomy, package-manager preference, loop safety,
+mandatory-pipeline options, or gate profiles. It may not hold a source path,
+fleet, user home, installed release, harness selection, local registry state,
+runtime anchor, local hook setting, or any machine-specific value.
 
-- Required to carry the canonical hooks, symlink, and `CLAUDE.md` files (see [§10](#10-onboarding-a-new-project-full-playbook) for the checklist).
-- Automatically included in every scheduled audit run (see [§11](#11-scheduled-audits--the-feedback-loop)).
-- Subject to the commit / PR / merge rules in [§6](#6-git-workflow).
+A contributor who clones only the tracked repository sees ordinary project
+files. The manifest does not create rules links, settings, hooks, exclusions,
+or an OMP surface. If Trellis is absent, all three harnesses must continue with
+no Trellis warning, injection, or discovery failure.
 
-`registry.md` is the authoritative list of active projects. Resolve against the registry — do not rely on any count or roster hardcoded elsewhere (including in this manual). When a project is added or removed, `registry.md` changes; nothing else needs to.
+### 4.2 Local attachment is the only activation path
 
-### 4.2 Inheritance (symlink + @-import)
+`trellis attach` validates a manifest and a selected installed release, plans
+all requested native leaves, preflights project-owned collisions, journals the
+transaction, and registers the actual checkout locally. It creates:
 
-Claude Code does **not** cascade `CLAUDE.md` up the directory tree. Inheritance is explicit, via two mechanisms with different trust profiles:
+- `.trellis/runtime`, a local absolute anchor to one installed release payload;
+- release-relative managed leaves for selected harnesses;
+- one exact local block in the Git common directory's `info/exclude` file;
+- an attachment ownership record and, where needed, a local hook dispatcher.
 
-**Primary — `.claude/rules/trellis.md` symlink.** Files under `.claude/rules/` load unconditionally at session start, in interactive *and* headless modes. This is the only inheritance path that's load-bearing. Required for every registered project.
+Those artifacts are intentionally untracked. The managed exclusion is not a
+project `.gitignore` policy and must never be copied into a project commit.
 
-**Tracking policy: gitignored, regenerated locally.** The symlink target is an absolute path under `$TRELLIS_ROOT` (e.g., `__TRELLIS_PATH__/...`), which differs on every developer's machine. Tracking it in git produces a path that resolves only on the developer who created it; every other developer's clone has a dangling symlink, and any cross-machine merge produces a textual conflict on the symlink target. The canonical symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, `.omp/hooks`) are therefore **gitignored** in every registered project. Each developer recreates them post-clone by running `~/projects/trellis-instance/scripts/onboard-project.sh <project-path>`. Relative symlinks (e.g., root `AGENTS.md → CLAUDE.md`) are stable across machines and remain tracked.
+Re-running the same attachment is idempotent after ownership verification. A
+different release is not an attach option for an already attached checkout:
+verify and use explicit `trellis release adopt` instead.
 
-**Secondary — `@`-import in project `CLAUDE.md`.** `@__TRELLIS_PATH__/core-rules/CLAUDE.md` on line 2 of each project's `CLAUDE.md`. Belt-and-braces redundancy in interactive mode. Trust-prompt-gated and silently drops in headless mode, so it must never be treated as primary.
+### 4.3 Project-owned content stays project-owned
 
-If either mechanism breaks, Claude Code drops the instruction silently — no error, no warning. The `parent-hook-drift` audit catches drift; the `cross-project-process-audit` catches missing symlinks. See `core-rules/inheritance.md` for silent-drop invariants and the registered-project checklist.
+Trellis owns only manifest-expanded leaves and its exact local state. It does
+not take ownership of a harness directory, an arbitrary `AGENTS.md`, a project
+`CLAUDE.md`, a project settings file, a project hook manager, or a project
+`.gitignore`.
 
-#### OMP (third native harness)
+The previous doctrine of absolute source links and `@/absolute/path/...` parent
+imports is retired. So are copied canonical hook trees and copied settings
+payloads. A project needs neither a source-copy synchronization commit nor a
+regenerated tracked ignore fragment to receive current Trellis behavior.
 
-OMP is the third supported harness alongside Claude Code and Codex. Add `"omp"` to the top-level `harnesses` array to enable its surface. Each harness remains isolated at the filesystem/configuration boundary, while all three resolve the same canonical Trellis policy. An OMP-enabled project receives exactly these five machine-local, absolute, gitignored symlinks:
+If a planned destination is project-owned, attach fails closed or requires the
+explicit merge/adoption flow documented by the release's manifest; it never
+silently overwrites a project file.
 
-| OMP path | Live target |
+---
+
+## 5. Attachment and the three harnesses
+
+### 5.1 One manifest, three native surfaces
+
+`core-rules/inheritance-manifest.json` inside the selected immutable payload is
+the sole source of truth for attachment, detachment, doctor, and worktree
+reconciliation. It describes managed leaf sources and destinations for:
+
+| Harness | Local attachment role |
 |---|---|
-| `.omp/AGENTS.md` | `<project-root>/CLAUDE.md` |
-| `.omp/skills` | `<trellis_root>/core-rules/skills` |
-| `.omp/commands` | `<trellis_root>/core-rules/commands` |
-| `.omp/agents` | `<trellis_root>/core-rules/agents` (reserved; `.gitkeep` only) |
-| `.omp/hooks` | `<trellis_root>/core-rules/omp/hooks` |
+| **Claude Code** | Parent-rule, skill, command, and lifecycle leaves plus explicit local settings integration where declared by the manifest. |
+| **Codex** | Native agent/rule, skill, command/workflow, and lifecycle leaves described by the same release manifest. |
+| **OMP** | Native adapter, context, skills, commands, and reserved-agent leaves without replacing project-owned OMP configuration. |
 
-The directory links are live and are mirrored by the worktree seeder. OMP's nearest non-empty ancestor `.omp` directory stops discovery even when required entries are absent, so a missing, dangling, wrong-target, regular-file, or non-symlink Trellis-owned path is a doctor error, not a fallback. OMP snapshots discovery and filesystem reads in a running process: a fresh session sees current canonical/project files, while an already-open process requires an explicit discovery reset or restart. This is not full in-process hot reload.
+The selected release—not the source checkout—is the source for every managed
+leaf. Leaves point relatively through `.trellis/runtime`, so adoption swaps one
+verified anchor atomically instead of rewriting each harness surface.
 
-All GPTX-era custom agents are retired. The linked agent root stays present for future harness-neutral definitions, but OMP currently uses only its bundled agents. The canonical private Trellis checkout is the sole context-link exception: it has no root `CLAUDE.md`, so its `.omp/AGENTS.md` points directly to `core-rules/CLAUDE.md`.
+### 5.2 Hooks and settings
 
-OMP task children do not inherit `AGENTS.md`, and OMP does not natively load Trellis's `.claude/rules/preset-*.md` links. The runtime adapter at `core-rules/omp/hooks/pre/trellis.ts` injects a missing live project `CLAUDE.md` plus enabled canonical presets on the first `before_agent_start` event. It resolves `trellis_root` and the project at runtime and invokes live canonical hook scripts; unsupported payloads and adapter/script failures fail loudly with the exact path, while canonical denials retain their reasons.
+Trellis no longer copies canonical hooks or settings into projects. The manifest
+installs local, release-relative lifecycle surfaces. Where a project already
+uses a hook manager, attachment records the existing configuration and installs
+an absolute local dispatcher under `~/.trellis/state/git-hooks/<checkout-id>/`.
+The dispatcher chains the prior manager with unchanged arguments and standard
+input; it does not replace it.
 
-Trellis does not create `.omp/RULES.md`, `.omp/config.yml`, or `.omp/mcp.json`, and does not overwrite other OMP files. OMP memory is not the Trellis context-log authority, and `approved_mcps` remains documentation rather than an enforceable MCP allowlist. The detailed path, child-session, doctor, rollout, and [primary OMP references](core-rules/inheritance.md#omp-project-surface) live in `core-rules/inheritance.md`.
+Settings integration is an explicit, manifest-declared merge. A conflicting or
+project-owned settings file is a preflight conflict, not permission to overwrite
+it. Harness credentials, trust stores, providers, and MCP configuration remain
+outside Trellis attachment.
 
-### 4.3 Registering / blacklisting
+The rendered session surfaces are the clearest example of why a leaf is data
+rather than an executable. Attachment renders each `SessionStart` entry as a
+call to the fixed launcher — `trellis hook NAME HARNESS PROJECT_ROOT` — crossing
+its own `env -i` boundary with only `HOME`, `TRELLIS_HOME`, and a fixed `PATH`.
+The launcher verifies the active release, then the payload's dispatcher resolves
+`NAME`/`HARNESS` against a closed route table and executes the hook from the
+verified payload in a deliberately small environment: no `BASH_ENV`, no `ENV`,
+no exported functions, no inherited Git loader or config variables, and Git
+configured only by two command-scoped entries. Claude Code receives
+`session-context`, `post-compact-context`, `inject-primer-index`, and
+`skill-size-preflight`; Codex receives the first three. An unsupported route is
+a usage error, not a fallback. The project's `.trellis/runtime` anchor is
+therefore something diagnosis reads, never a hook source anything executes.
 
-To add a project: follow [§10](#10-onboarding-a-new-project-full-playbook).
+### 5.3 Clones, worktrees, and reference counting
 
-To temporarily exempt a project: move its row to `blacklist.md` with a reason and a revisit date. The `bypass-tripwire` and `cross-project-process-audit` skip blacklisted projects. Don't delete the row from `registry.md` — preserve the history of "this project was active once."
+Git local excludes and hook configuration live in the Git common directory,
+while harness leaves live in each worktree. Trellis records both layers:
 
-To permanently deregister: delete the row from `registry.md` and note the reason in the commit message. Rare — blacklisting is almost always the right move instead.
+- a **clone/checkout owner** keyed by the common Git directory;
+- a **worktree owner** keyed by the actual worktree root.
 
-### 4.4 Local development infrastructure ownership
+The common-dir local exclude block and dispatcher remain while any attached
+worktree for that checkout remains. They are restored only when the last
+committed worktree owner detaches. A detach therefore cannot accidentally make
+a sibling worktree's local artifacts visible or disable its dispatcher.
 
-Local applications run natively on the host. Docker is the local infrastructure boundary, not the normal application runtime. Deployment images, CI services, testcontainers, UAT stacks, and remote managed services remain independent.
+Use `trellis worktree add` for an opted-in clone so attachment is reconciled
+before harness discovery. The local dispatcher can eagerly reconcile a new
+worktree only after the clone opted in. A raw clone and an unregistered worktree
+remain inert; diagnosis may request a restart when a harness has already
+snapshotted discovery.
 
-An operator may separately configure a shared-infrastructure repository by setting the optional `trellis.config.json.shared_infra_root` key. When configured, that external repository owns its runtime and manifest; Trellis delegates proposal, registration, reconciliation, preflight, and read-only checks through the repository's Make contract. Every registered project then has a machine-readable `services` + `ports` entry, including explicit `services: {}` when it consumes no shared service. When the key is absent, integration is disabled, no external manifest declaration is required, and ordinary onboarding plus doctor behavior remain intact. The public capability and ownership boundaries are documented in [`docs/local-development-infrastructure.md`](docs/local-development-infrastructure.md).
+### 5.4 Local lifecycle commands
 
-Ownership is asymmetric:
+The canonical commands are intentionally narrow:
 
-- Shared-infra owns shared service lifecycle, global reconciliation, shared logs, shared `down`, and disposable-volume reset.
-- A project may preflight its declared ports, ensure and reconcile its own shared allocation, run its own migrations, and start infrastructure unique to that project.
-- A project shutdown stops only its native processes and project-owned infrastructure. It must never stop the shared Compose project, delete shared volumes, or reset another project's allocation.
-- Every concurrently runnable fixed host listener receives one central allocation before it is wired into startup. Dynamic ephemeral and isolated test-only ports are excluded.
+```sh
+trellis attach [--fleet NAME] [--release VERSION] \
+  [--harness claude|codex|omp]... PATH
+trellis relink [--fleet NAME] PATH
+trellis recover PATH
+trellis detach [--harness claude|codex|omp]... [--all-worktrees] PATH
+```
 
-When the optional integration is enabled, onboarding and later service adoption use the same conservative proposal flow. Static discovery may present evidence from recognized configuration but may not execute project code, read secret values, choose credentials or allocations silently, or mutate the external manifest before an operator reviews a `services` + `ports` fragment. The exact operational contract lives in the configured external Makefile; Trellis invokes only repo-local `./scripts/onboard-project.sh` and `./scripts/doctor.sh` surfaces. Without `shared_infra_root`, these shared-infrastructure steps are skipped.
+`relink` repairs an existing owned immutable anchor and local dispatcher; it
+does not discover a moved checkout or choose a new release. `recover` resolves
+an interrupted transaction for the exact worktree named by doctor. `detach`
+verifies ownership before removing only Trellis-owned leaves and restores
+shared common-dir state only after its reference count reaches zero. Full
+operator recipes are in [AGENT_SETUP.md](AGENT_SETUP.md).
 
 ---
 
-## 5. Hook enforcement
+## 6. Source development and immutable releases
 
-Full spec: `core-rules/hooks.md`. Summary follows.
+### 6.1 Source checkout role
 
-### 5.1 Three-tier architecture
+The source checkout is for changing policy, authoring releases, reviewing the
+public mirror, and publishing. It is not an attached project's runtime. A
+maintainer may use feature branches, worktrees, and uncommitted source changes
+without changing any project's installed payload.
 
-| Tier | When it runs | Budget | Purpose |
-|---|---|---|---|
-| **Tier 1 — fast-local** | Every relevant tool call | ≤ 3s | Sub-second feedback loops; PreToolUse / PostToolUse hooks. |
-| **Tier 2 — heavy-gated** | On turn wrap-up (`Stop` event) | ≤ 90s | Catch "claimed done but isn't" before the turn ends. |
-| **Tier 3 — git-boundary** | On commit / push (husky) | Project-local | Last-line defense if tier 1/2 misfired. |
+Do not use source-checkout cleanliness or `main` as a runtime health signal.
+Release verification, recorded adoption, and `trellis doctor` are the runtime
+health signals. Source hygiene still matters for the ordinary reason: changes
+to policy and releases go through review before publication.
 
-Tier 1 and 2 are harness hook events. Claude Code and Codex use separate JSON envelopes, so Trellis keeps separate canonical script trees while preserving the same policy intent. Tier 3 is husky + lint-staged + commitlint, standard git machinery.
+### 6.2 Installed immutable releases
 
-### 5.2 The canonical hooks
+A release is installed from an annotated `vVERSION` tag. Installation requires
+`core-rules/VERSION` to equal `VERSION`, records the release metadata and Git
+blob manifest, verifies each payload entry, makes the payload read-only, and
+atomically installs it under `~/.trellis/releases/VERSION/`. An existing release
+version is never overwritten.
 
-Canonical inventory (names + tiers + origin) is `core-rules/hooks/README.md`; canonical event/matcher wiring is `core-rules/templates/claude-settings.json` (the `hooks` block each project must register). The table below is narrative — the "Responsibility" column captures what each hook does in plain English; do not treat this table as the authoritative manifest. Add or remove hooks in README.md + the settings.json template first, then update this row if the responsibility changes.
-
-| Script | Tier | Event | Responsibility |
-|---|---|---|---|
-| `block-destructive.sh` | 1 | PreToolUse (Bash) | Deny `rm -rf /`, force-push, hard-reset, DB DROP, `.env` reads. |
-| `reread-guard.sh` | 1 | PreToolUse (Edit/Write/MultiEdit) | Require a fresh read before editing a stale copy. |
-| `post-edit-verify.sh` | 1 | PostToolUse (Write/Edit/MultiEdit) | Per-file lint (eslint/ruff/clippy/golangci-lint). Block on fail. |
-| `truncation-check.sh` | 1 | PostToolUse (Grep/Bash/Read) | Warn when tool output ≥100K chars or truncation marker present. |
-| `track-read.sh` | 1 | PostToolUse (Read/Write/Edit/MultiEdit) | Record file reads for stale-copy protection. |
-| `session-context.sh` | 1 | SessionStart (startup/resume) | Inject branch, last commits, dirty-file count, pending gotchas. |
-| `save-context-log.sh` | 1 | PreCompact | Persist session state to `context-log.md`. |
-| `post-compact-context.sh` | 1 | SessionStart (compact) | Restore `context-log.md` into context after auto-compact. |
-| `inject-primer-index.sh` | 1 | SessionStart | Inject the project primer index when configured. |
-| `spec-gate.sh` | 2 | Stop | Enforce the mandatory feature/spec pipeline when enabled. |
-| `stop-verify.sh` | 2 | Stop | Block if todos open, run typecheck + lint + fast tests. |
-| `code-review-subagent.sh` | 2 | Stop (edit-heavy) | Dispatch a code-review subagent on the diff; findings must resolve or defer. |
-| `propose-rules.sh` | 2 | Stop | Surface Rule-of-Three candidates; configurable and default-on. |
-| `ui-verify.sh` | 2 | Stop (UI diff) | Spin up dev server, take screenshot, attach. |
-| `stamp-turn.sh` | 2 | Stop | Stamp completed turn activity for hook coordination. |
-
-`code-review-subagent` is the *filter*, not the finder: `severity == "critical"` blocks, everything else is advisory. When wiring a project-local reviewer, prompt it for **coverage, not filtering** — report every issue with a confidence and severity, and let the hook rank. Current models follow "be conservative" and "only report high-severity" literally and will silently drop low-severity findings: precision rises, recall falls. Ask for everything and filter in a separate pass. Detail + snippet: the hook's header contract. Per-model specifics: `core-rules/references/model-prompting-deltas.md`.
-
-Claude implementations are version-controlled at `core-rules/hooks/`. Projects deploy by copying into `.claude/hooks/` and wiring into `.claude/settings.json` using `$CLAUDE_PROJECT_DIR` paths.
-
-Codex implementations are version-controlled at `core-rules/codex/`. Projects deploy by copying `hooks.json` and `hooks/*.sh` into `.codex/`; scripts resolve the project via `$CODEX_PROJECT_DIR` with `$CLAUDE_PROJECT_DIR` as a fallback. Codex hooks require `[features] hooks = true` in `$CODEX_HOME/config.toml` (the older `codex_hooks` key still works as a deprecated alias on Codex CLI 0.129+).
-
-### 5b. Skills layer
-
-Canonical skills live under `core-rules/skills/<name>/` and are inherited by every project via the same symlink mechanism as parent rules. Skills are *agent-invoked* — not run automatically — and supply structured procedures plus harness-agnostic validator scripts.
-
-**Current canonical set.** Trellis ships the five-stage spec pipeline (`clarify`, `spec`, `plan`, `tasks`, `analyze`) plus `brainstorming`, `execute`, `process-gate`, `security-gate`, `orchestrate`, `debrief`, and `writing`. `process-gate` runs eight deterministic categories and returns one verdict block (`MERGEABLE` / `NEEDS CHANGES` / `BLOCKED`). The exact inventory is the set of directories under `core-rules/skills/`; each skill's `SKILL.md` is authoritative for its contract.
-
-**Project deployment.** Each registered project carries:
-
-```
-<project-root>/.claude/skills/<name>/  →  $TRELLIS_ROOT/core-rules/skills/<name>/
+```sh
+trellis release install VERSION --remote URL
+trellis release verify VERSION
 ```
 
-The directory itself is symlinked, so canonical updates appear automatically. Project-local configuration goes beside the symlink in `<project-root>/.claude/skills/process-gate-local/local.config.sh` (NOT covered by the canonical symlink — project owns it).
+`release verify` checks version/tag metadata, payload membership, Git blob IDs,
+modes, symlink safety, and immutability. It is required before attachment or
+adoption. Installing a release does **not** adopt it for any project.
 
-**Codex-enabled projects** additionally carry `.agents/skills/<name>/` pointing at the same canonical targets and `.agents/skills/process-gate-local/local.config.sh` for Codex-local overrides. **OMP-enabled projects** expose the canonical tree through `.omp/skills`. All three resolve byte-identical skill content; `process-gate-local/` remains the project-owned Claude/Codex extension point.
+### 6.3 Explicit adoption
 
-**Stack profiles.** The canonical eight gates apply to every project. Stack-specific validators (design tokens, a11y, module boundaries, asset checks) attach via `PROCESS_GATE_STACK_PROFILE` and `PROCESS_GATE_STACK_VALIDATORS` in `local.config.sh`. See `core-rules/skills/process-gate/references/stack-profiles.md`. Profiles waiting for a third witness queue in `core-rules/deferred.md`.
+A project remains on its recorded release until an operator explicitly adopts a
+verified version. The normal selector forms are:
 
-**Lume carve-out.** Lume (Unity, n=1 native-stack project) declares `PROCESS_GATE_STACK_PROFILE="unity"` with project-local validators only. The canonical eight gates still apply. The carve-out is documented in `registry.md` and the extended `parent-hook-drift` audit treats it as expected, not drift.
-
-**Project-local verification skills.** Between "a rule written in `CLAUDE.md` and hoped for" and "a canonical hook rolled out to the fleet" there is a middle rung: a small project-local skill that performs one check and fixes what it finds. It is the right shape when the check is deterministic, specific to this project, and something you have found yourself correcting by hand after the fact.
-
-```markdown
----
-name: verify-log-hygiene
-description: Check error logs include request IDs, never expose request bodies
-allowed-tools: [Read, Edit, Grep]
----
-Read error-handling paths in diffs.
-For each log call, confirm request ID inclusion and payload stripping.
-Report violations with file:line, then fix each issue.
+```sh
+trellis release adopt VERSION --project ID [--fleet NAME]
+trellis release adopt VERSION --fleet NAME
+trellis release adopt VERSION --all
 ```
 
-Three things qualify for encoding this way: corrections you keep making manually after implementation; deterministic rules a generic linter won't catch ("reject a migration that drops a column without a backfill"); and the patterns you'd otherwise explain to every new contributor. Deploy it standalone at first — invoke it deliberately. **If you find yourself running it after every change, that is the signal to promote it**: append it to the producing skill, chain it behind an existing one, or — at the third project that wants it ([§14.1](#141-rule-of-three)) — lift it into a canonical hook.
+A project selector without `--fleet` resolves only if its ID is unique in the
+selected Trellis home; duplicate fleet IDs fail closed. Bulk selection prints a
+per-project outcome, keeps unavailable paths explicit, and does not infer a
+replacement checkout. Adoption changes the owned `.trellis/runtime` anchor only
+after the target release and selected ownership records pass preflight.
 
-Chained verification costs tokens on every run. Measure before deploying one broadly.
+### 6.4 Compatibility then cutover
 
-### 5c. Loop-safety contract
+The portable architecture ships through two releases:
 
-Trellis is a loop system: operator-owned recurring audits are agentic cron loops, the `orchestrate` skill drives fan-out workflows, and `/loop` / `/goal` run agent loops on infra time. The dominant production failure mode of this generation of agent loops is the loop that does not stop — infinite iteration, no-progress thrash, runaway spend. The **loop-safety contract** is the named guarantee that every Trellis loop halts.
+1. **Compatibility release:** local home, registry, immutable releases,
+   attachment, import, migration preparation, and dual-layout doctor are
+   available. Legacy direct-link onboarding and diagnosis remain operable for
+   this one release only and warn; no project is forced to migrate.
+2. **Fleet migration:** import historical inventory into local state; make and
+   review one project PR at a time; preserve project-owned bytes; prove an inert
+   fresh clone; then attach and verify the local checkout.
+3. **Cutover release:** only after parity and migration evidence, remove tracked
+   central registry/blacklist authority and legacy direct-link writers, publish
+   the next immutable release, and explicitly adopt it.
 
-It is **doctrine plus declared fields, not a mechanical kill-switch** — there is no hook that intercepts a running loop at tool-use time (deferred; see `core-rules/loop-safety.md`). The contract is carried by the canonical policy spec, the `loop_safety` config (§3.1), the parent-rules `## Loops` entry that makes it discoverable at runtime, and a drift audit that flags any loop missing its declaration.
+This is a compatibility window, not a permanent mixed layout. The full sequence
+and rollback branches are in [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md)
+and [docs/UPGRADING.md](docs/UPGRADING.md).
 
-**The three ceilings.** Every loop declares and honors three, and **halts on any one**:
+### 6.5 Launcher-only command execution
 
-- **`max_iterations`** — hard cap on loop iterations / agent-dispatch rounds. Baseline **100**. Complements (does not replace) the Workflow engine's existing 1000-agent lifetime backstop.
-- **`no_progress_iterations`** — halt after N consecutive iterations that make no measurable progress. Baseline **3**. "Progress" is a per-loop **progress signal** drawn from a catalog — commit/PR (fleet-mutation loops), file delta (edit loops), new finding (audit loops), work-list drain (queue/pipeline loops), or a declared state-hash change (catch-all if none is declared). A one-shot fan-out with no rounds is exempt and declares `no_progress_iterations: null`.
-- **`budget_ceiling_usd`** — spend ceiling per loop run, in US dollars (the human-meaningful unit). Baseline **1000**. The Workflow tool's `budget.total` is output-token-native, so `loop-safety.md` documents the dollar→token conversion and maps the ceiling onto the engine budget where exposed; `/loop` and operator recurring jobs track or estimate spend against the declared dollar figure, and surface that running spend as a `spent_usd / budget_ceiling_usd` line in **every** run report — not only on a ceiling trip — so the ceiling reads as a live gauge, not just a tripwire.
+"Attached projects run from a verified immutable release" is enforced at the
+point of execution, not merely asserted. Every normal command runs through the
+fixed launcher installed at `$HOME/.local/bin/trellis`
+(`scripts/trellis-launcher.sh` is the template it is copied from).
 
-**Halt behavior.** On any ceiling trip the loop **hard-stops** — never auto-continues past a tripped ceiling — and emits a **structured halt report**: which ceiling tripped, the last progress marker, the running `spent_usd / budget_ceiling_usd` cost line, and the work done so far. Unattended runs (overnight / cron / `--run-in-background`) surface the halt in their run report (and notification where wired) rather than dying silently.
+**Execution snapshot.** The launcher resolves its own home, validates the
+private machine config, reads `active_cli_release`, and then freezes an
+independently verified *execution snapshot* of that installed release inside the
+release store. Children are handed the snapshot, never the installed release
+directory, and the snapshot is pinned by the SHA-256 of the release record so a
+concurrent mutation of the store cannot be executed. The snapshot is removed
+when the command finishes.
 
-**Where it's declared.** The policy lives in `core-rules/loop-safety.md`; the ceiling values resolve through the four-layer order in §3.1. Loops carry their declaration where they live:
+**Digest-bound command bundles.** The `release` and `upgrade` routes are not
+executed by pathname at all. The launcher emits their bodies as an in-memory
+command bundle bound to that same record digest and pipes it into a clean Bash.
+`upgrade` therefore never reopens a release-script pathname: it receives the
+release body as a preloaded command surface in its own shell. Reaching
+`trellis upgrade` through the payload's dispatcher instead exits `2` and prints
+the launcher invocation to use.
 
-- **`orchestrate` recipes** — a `safety` block in the recipe scaffold (`recipes/template.wf.js`); authoring a recipe without one is non-compliant. `recipes/fanout-verify.wf.js` declares its block as a worked example of an override.
-- **Operator audit loops** — a uniform "Loop safety" stanza in each private prompt. Most inherit the baselines; task-specific runtime caps become explicit overrides.
+**Attestation-based, default-refuse source gates.** `release.sh`, `upgrade.sh`,
+`show-config.sh`, and `sync-to-template.sh` each refuse to run unless the
+launcher's attestation is present and resolves to a payload inside the
+launcher's own home. The gate runs before any library is sourced and before any
+argument is parsed — including `--help`, which otherwise gave an ungated copy an
+exit-0 path. The gate binds to the attestation and to nothing else. An earlier
+identity-based shape asked whether a machine config named the running copy as
+its `source_root`, and allowed when no config answered; a copy of the source
+tree, a worktree of it, an unpacked tarball, and a clone at an unnamed path all
+answered "cannot tell", so all of them ran. A gate whose undecidable case allows
+is not a gate. Undecidable means refuse.
 
-This is the foundational sub-project in a sequence: the nesting-depth budget in `orchestrate` extends it (depth is a halting dimension) and the "Mayor" loops-supervising-loops recipe must honor it. Loops are also an autonomy surface (§14.9) — the loop-safety contract is the halting guarantee that lets higher autonomy levels run loops unattended. Full policy, the progress-signal catalog, and the fallback constants: `core-rules/loop-safety.md`. Design spec: `docs/specs/2026-06-09-loop-safety-contract-design.md`.
+**One pre-active route.** Before the configured active release exists locally,
+the launcher permits exactly one command, implemented inside the launcher
+itself: `trellis release install <active_cli_release> [--remote URL]`. It
+accepts no other version and no other flag, so bootstrapping never needs a
+mutable source dispatcher.
 
-### 5.3 Project overrides
-
-Projects can override:
-- Per-file linter command (`post-edit-verify`)
-- Typecheck/lint/test commands (`stop-verify`, `pre-push`)
-- Edit-heavy threshold (`code-review-subagent`)
-- UI file glob + dev-server port/regex (`ui-verify`)
-- Commit scope allowlist (`commit-msg`)
-
-Overrides live in each project's `.claude/hooks/config.sh` and/or `.codex/hooks/config.sh`. The canonical `.sh` files themselves are never edited per-project — drift from canonical is what `parent-hook-drift` catches.
-
-### 5.4 Guarantees
-
-- **Rename-proof.** Claude/Codex hooks use `$CLAUDE_PROJECT_DIR` or `$CODEX_PROJECT_DIR`; the OMP adapter resolves the active project from OMP context at runtime. No project path is baked into canonical hook code.
-- **Headless-safe.** Claude hooks work identically in interactive and headless runs; Codex parity is project-local and feature-gated; OMP uses the same adapter in interactive, headless, and child sessions.
-- **Fail closed.** A failed hook blocks; it never logs-and-continues.
-
-### 5.5 Harness coverage matrix
-
-Claude Code is the baseline harness, Codex a parallel harness, and OMP the third. Different native surfaces converge on the same policy:
-
-| Layer | Claude Code | Codex | OMP | Notes |
-|---|---|---|---|---|
-| Parent rules doc | `.claude/rules/trellis.md` → `CLAUDE.md` | `AGENTS.md` or `.agents/rules/trellis.md` → `CLAUDE.md` | `.omp/AGENTS.md` → project `CLAUDE.md`; adapter re-injects for children | One canonical source in `core-rules/CLAUDE.md`, preserving project overlays. |
-| Preset rules | `.claude/rules/preset-*.md` | `.agents/rules/preset-*.md` | Adapter injects canonical preset links on first agent start | Same canonical preset content; no copied OMP policy. |
-| Skills (`process-gate`, etc.) | `.claude/skills/<name>/` links | `.agents/skills/<name>/` links | `.omp/skills` directory link | Same live canonical skill tree. |
-| Slash commands (`/primer`, `/explore`) | `.claude/commands/<name>.md` | `.agents/commands/<name>.md` and workflows | `.omp/commands` directory link | Same live canonical commands. |
-| Tier 1 + 2 hooks | `.claude/settings.json` + scripts | `.codex/hooks.json` + scripts | `.omp/hooks` lifecycle adapter | Native event envelopes translate to canonical hook decisions. |
-| Tier 3 git hooks (husky / native) | runs | runs | runs | Harness-agnostic merge-boundary enforcement. |
-| Operator audits (optional) | scheduler or cron | scheduler or cron | scheduler or cron | Scheduling remains operator-owned and honors `blacklist.md`. |
-
-The public template defaults to `["claude"]`; add `"codex"` and/or `"omp"` to opt into those native surfaces. This private control plane enables all three. OMP onboarding is an additive branch: it never writes `.claude` or `.codex`, and disabling OMP imposes no `.omp` prerequisite. All enabled harnesses retain Tier 1/2/3 enforcement appropriate to their native event model.
-
-#### OMP adapter enforcement
-
-The OMP adapter is the native enforcement path for the third harness, not a replacement for Claude or Codex. Its expected events map to canonical Trellis hook scripts at runtime; a blocked canonical decision becomes `{block: true, reason}`. When OMP is enabled, doctor treats missing, stale, wrong-target, dangling, or non-symlink OMP paths and adapter-load failures as blocking inheritance errors. Scheduled-task policy is unchanged.
-
-#### Codex executor routing
-
-Codex work is dispatchable through the direct CLI (deliberate `codex exec`) with
-explicit per-unit effort, and through the optional legacy OpenAI Codex plugin
-companion when the operator explicitly installs and selects it. Neither is required
-inheritance, and neither is ever an implicit fallback from an explicit selection.
-Generic Codex CLI use remains a separate operator-selected surface; the effort band
-and fail-closed contract live in [`docs/codex-routing.md`](docs/codex-routing.md).
-
-### 5.6 Token-noise filter (`permissions.deny`)
-
-The canonical settings template ships a `permissions.deny` block that blocks the agent from reading generated files, build artifacts, vendored dependencies, and lockfiles. Same payload across every project: `node_modules/`, `.next/`, `dist/`, `build/`, `out/`, `target/`, `vendor/`, `.venv/`, `__pycache__/`, every cache dir, every lockfile. New projects pick it up automatically through `onboard-project.sh`. Existing projects converge via `scripts/rollout-settings.sh` — idempotent jq merge that preserves project-local additions and only ever adds entries, never deletes.
-
-Why it matters: every read of `node_modules/` is wasted context, and the agent has no business reading lockfiles unless explicitly asked. The deny block is the cheapest single change that reduces token spend per session.
-
-Project-local additions go in the same `.permissions.deny` array; the rollout script unions canonical + local and dedupes. To deny something only in one project (e.g. `Read(./data/embeddings/**)` for a project with on-disk vectors), add it to `<project>/.claude/settings.json` and run the rollout — your entry survives.
+**No publication side effects.** No release, adoption, or upgrade command tags,
+pushes, or mirrors. Tagging and public-mirror publication are the separate,
+separately gated operations of §7.2.
 
 ---
 
-## 6. Git workflow
+## 7. Git workflow and publication roles
 
-### 6.1 Branching model
+### 7.1 Project Git workflow
 
-**Trunk-based with short-lived feature branches.** `main` is the only long-lived branch. Work happens on feature branches named `<type>/<short-slug>` (e.g., `feat/avatar-rig`, `fix/cloth-sim-crash`, `chore/upgrade-next-15`). Feature branches live ≤ 5 working days; older branches either merge or get abandoned.
+Projects use short-lived feature branches and PRs for `main`. Conventional
+Commits remain the default. `main` is never force-pushed; revert a merged change
+through a PR instead of resetting shared history. Project branch protection,
+CI, and project-owned hook managers remain project responsibilities.
 
-No `develop`. No `release/*`. No `hotfix/*`. If you need a pre-production branch for a specific reason (integration testing, staged release), create it, merge what you need, delete it when done.
+Trellis's local attachment does not make otherwise-untracked policy files part
+of a project commit. Before committing a migration, review the project diff and
+stage only deliberate tracked changes such as `.trellis.json` and removal of
+legacy Trellis-generated tracked behavior.
 
-### 6.2 Commit conventions
+### 7.2 Private source and public publication are different roles
 
-**[Conventional Commits](https://www.conventionalcommits.org/)** enforced by `commit-msg` hook (`@commitlint/config-conventional`).
+The private source checkout and public publication mirror have different remote
+roles:
 
-Allowed types: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `test`, `perf`, `build`, `ci`, `revert`.
+- the private source's `origin.pushurl` may point only to the private Trellis
+  repository after the release gate passes;
+- the public `upstream` remains fetch-only in that checkout;
+- public publication occurs from the reviewed mirror/publishing checkout, never
+  by pushing private machine state from the source checkout.
 
-**Scopes are optional and opt-in per project.** Projects that define a scope allowlist (e.g., Neev's 16 package names) enforce that allowlist. Projects that don't, accept unscoped commits. Never invent a scope ad-hoc.
+Before restoring a private push URL or publishing a compatibility/cutover
+release, inspect the push URLs and the intended public diff. The gate requires:
 
-Examples:
-```
-feat: add avatar rotation gesture
-fix(wardrobe): reset zoom after outfit swap
-chore: bump pnpm lockfile to v2
-```
+1. a reviewed implementation branch and release package;
+2. release tag, `VERSION`, and release metadata agreement;
+3. immutable-release verification and three-harness smoke evidence;
+4. an inspected private/public mirror diff with no `~/.trellis` paths, fleet
+   inventory, registry data, source paths, credentials, or operator-only state;
+5. normal process/security gates and documented release receipts.
 
-Commit bodies are optional. When present, use them for *why*, not for *what* (the diff is the *what*). Footers for `BREAKING CHANGE:`, `Refs: #123`, `Co-authored-by:`.
+A failed gate leaves push access disabled or unchanged. Never compensate by
+pointing a public remote at private state or by copying local registry data into
+a tracked file.
 
-### 6.3 PR flow
+### 7.3 Infrastructure publication
 
-**Every change to `main` goes through a PR.** No exceptions under normal conditions. Direct push to `main` is blocked at three layers:
-
-1. Local `pre-push` hook (husky) — refuses direct push to `main`/`master`. Override: `TRELLIS_ALLOW_MAIN_PUSH=1 git push` (use almost never, document every use in the project's `gotchas.md` or commit trailer).
-2. GitHub branch protection — require PR, require passing status checks, **squash-merge disabled in repo settings** so merge commits are the only path that lands on `main` (preserves full PR history). Do not enable "Require linear history" — it forbids merge commits.
-3. Convention — you know better.
-
-Review model for sole-maintainer projects: **self-review discipline + CI gates**. GitHub blocks self-approval so "reviewed by = merged by" is structurally prevented, but the review happens:
-- When you open the PR, write the description as if explaining to a stranger. If it's hard to write, the change is too big or too unclear — split it.
-- Wait at least one session (≥ 30 minutes; overnight is better) before merging. Re-read the diff with fresh eyes. The `code-review-subagent` hook already fires on edit-heavy diffs (≥ 3 files or ≥ 200 lines); you do not need to launch a review pass by hand on top of it.
-- CI must be green. Status checks required at the branch protection level.
-- Merge style: **merge commit** by default — preserve the full per-commit history of every PR (including agent attribution and intermediate review state). Squash-merge is forbidden; rebase-merge only when the branch's commit history is intentionally clean and linear and explicitly approved for that PR. (See `core-rules/skills/process-gate/references/pr-hygiene.md` and `core-rules/hooks.md` for the canonical statements; the `bypass-tripwire` audit treats the `(#NN)` squash marker as a direct-push detection signal, which assumes merge commits are the norm.)
-
-### 6.4 Branch protection
-
-Every Trellis project must have branch protection on `main`:
-- Require pull requests before merging.
-- Require status checks to pass (CI: install → lint → typecheck → unit tests → build).
-- Disable squash-merge in repo settings; allow merge-commit (default) and rebase-merge only. Do **not** enable the "Require linear history" branch-protection toggle — it forbids merge commits, conflicting with the canonical merge-commit policy. Effective linearity is achieved by rebasing feature branches onto current `main` before merge so the merge commit is fast-forwardable.
-- Do not allow force pushes to `main`.
-- Do not allow deletions.
-
-Review-count rules are N/A for sole-maintainer orgs (GitHub's self-approval block means any required-review setting = undeployable). The local `pre-push` guard + CI + the PR window are the functional gate.
-
-**The cross-harness merge gate.** The local `pre-push` git hook (`process-gate/scripts/run-all.sh --mode=merge`, see `core-rules/hooks.md` Tier 3) is the merge boundary that fires under **Claude Code, Codex, and OMP** because git hooks are harness-agnostic. It covers the **deterministic gate set only**: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. It is **fail-closed at push** — a hard failure blocks the push — but **not un-bypassable**: the only escape is an explicit `--no-verify` / direct-push. Operators can add a recurring tripwire audit as an after-the-fact backstop. It does **not** cover `code-review` / `ui-verify` / receipts — those are turn-level-enforced through each enabled harness's native hook path (§5.5) and carry no separate GitHub branch-protection control.
-
-### 6.5 History hygiene
-
-- **Merge-commit by default** — one merge commit per PR on `main`, preserving the branch's per-commit history. Squash-merge is forbidden (drops agent attribution, intermediate review state, and bisect resolution). Rebase-merge is allowed only for branches whose commit history is intentionally clean and linear, with explicit approval per PR.
-- **Linear history on `main`** (by convention, not by GitHub toggle) — rebase feature branches onto current `main` before merge so the merge commit is fast-forwardable. The "Require linear history" branch-protection setting is **disabled** because it forbids merge commits; the discipline is enforced at PR time by the gate, not by GitHub.
-- **Don't amend published commits** without force-with-lease on the feature branch. Never force-push `main` under any condition (blocked anyway).
-- **`git revert` over `git reset`** for rolling back merged work. Preserves history.
-
-### 6.6 Cross-repository infrastructure publication receipts
-
-A local-infrastructure change is not complete when files merely agree in working trees. Publish in dependency order: shared runtime first, Trellis registry/validation second, then consuming projects. A downstream PR may be prepared early but must not merge before the contract it consumes is available on the upstream target branch.
-
-For every changed repository, retain these receipts:
-
-1. scoped branch name and commit SHA;
-2. exact local gate commands, exit status, and any explicit skip or external-CI limitation;
-3. ready PR URL and reviewed final diff;
-4. merge SHA;
-5. fetch/fast-forward receipt showing the canonical local `main` matches its remote;
-6. for runtime changes, the relevant schema, preflight, reconcile/doctor, native startup, and lifecycle-isolation evidence.
-
-Local gates remain the authority where remote jobs cannot start for account reasons; record that condition without describing the remote checks as green. Configuration rollback uses a revert PR in dependency-reverse order. Do not preserve an undocumented alternate infrastructure path as a hidden fallback.
+Optional shared infrastructure is configured per local fleet, not through a
+tracked global root. A project may preflight its declared local allocation and
+operate project-owned infrastructure, but it must not stop shared services or
+change another project's allocation. Publish cross-repository changes in
+contract order, retain the relevant schema/preflight/doctor/lifecycle receipts,
+and revert in dependency-reverse order when rollback is necessary.
 
 ---
 
-## 7. Definition of done
+## 8. Definition of done
 
-A change is done when all of the following are true:
+A change is done only when its applicable observable contract is complete:
 
-1. **Receipts attached.** The response that claims done includes: the verification command(s) run, their exit codes, and the diff lines (or a summary pointing at the PR) that prove the change. "It works" without receipts is not done. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`.)*
-2. **Todos closed.** If `TodoWrite` has `in_progress` or `pending` items, the turn is not done. Complete them, defer with reason, or abandon with reason. *(Turn-level-enforced on Claude Code + Codex by `stop-verify`.)*
-3. **Typecheck + lint + fast tests green.** Enforced by `stop-verify` at turn end and by `pre-push` at git boundary (the latter on every harness — tests are in the deterministic merge gate set, §6.4).
-4. **Code review resolved.** On edit-heavy turns (≥ 3 files or ≥ 200 lines), the `code-review-subagent` runs. Findings either get fixed or explicitly acknowledged and deferred. *(Turn-level-enforced on Claude Code + Codex.)*
-5. **Visual verification for UI.** For any diff touching UI files, `ui-verify` has run and attached a screenshot. Logically verified is not visually verified. *(Turn-level-enforced on Claude Code + Codex.)*
+1. **Receipts attached:** state the command, exit code, and diff evidence.
+2. **In-flight work closed:** complete, defer with reason, or abandon every
+   active task before claiming completion.
+3. **Appropriate verification:** run the relevant smoke, focused contract test,
+   UI confirmation, or deterministic gate—not a weaker substitute.
+4. **Review resolved:** address findings from applicable review/gates or record
+   a deliberate, bounded deferral.
+5. **Portable state respected:** a permanent Trellis change does not leak local
+   inventory, source paths, release anchors, or attachment artifacts into
+   tracked project or publication bytes.
 
-**Enforcement.** Items 1, 2, 4, and 5 are turn-level-enforced on both **Claude Code and Codex** (a hook blocks the turn when any is missing) — receipts and todos-closed by `stop-verify`, code-review and ui-verify by their Stop subagents. Item 3 (tests) is additionally carried by the deterministic `pre-push` merge gate (§6.4), which fires on every harness.
-
-Done is a property of the *turn* that claimed done, not of the project. Turn-level done compounds into project-level correctness; don't skip the turn-level gate on the theory that a later turn will catch it.
-
-**Receipts are the evidence; they are not the whole message.** When the operator watched the work happen, receipts alone are the right answer — they saw the context, they want the proof. When they did not — an overnight run, a long autonomous stretch, anything at L4/L5 ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)), or simply many tool calls since they last spoke — your final message is the first and possibly only thing they will read about any of it. Write it as a re-grounding rather than a continuation of your working thread.
-
-In practice: open with the outcome in a plain sentence, before any command output. Write in complete sentences. Spell out the names of things instead of the shorthand you developed mid-run — no arrow chains, no stacked-hyphen compounds, no labels you invented three hours ago and never defined. Say what changed, what it means for them, and what still needs their hand. Then attach the receipts and the decision log underneath, where they serve as evidence for the claims above rather than as the claims themselves. If you have to choose between short and clear, choose clear — brevity between tool calls is good discipline; brevity in the one message they actually read is a cost they pay.
-
-None of this relaxes item 1. The receipts still ship, in full, every time. What changes is where they sit: beneath a plain-language account of what happened, not in place of one.
-
----
-
-## 8. Code quality standards
-
-Full expression in `core-rules/CLAUDE.md`. Summary:
-
-### 8.1 Planning discipline
-
-- When asked to plan, output only the plan. No code until explicit approval.
-- When given a plan, follow it exactly. Flag real problems and wait.
-- For non-trivial features (3+ steps or architectural decisions), interview the user first: implementation, UX, trade-offs.
-- Never attempt multi-file refactors in one response. Phase them: a soft, autonomy-scoped ceiling (~7 files at L1–L3, widening at L4/L5), verify, get approval per the active level, continue. The ceiling is a safety rail — the `code-review-subagent` fires at ≥3 files / ≥200 lines, so review coverage scales with phase size — not a hard cap.
-
-### 8.2 Edit safety
-
-- Re-read every file before editing it — the `reread-guard` hook enforces this. A routine re-read *after* the edit is not needed: the Edit tool errors loudly on a stale `old_string` and the harness tracks file state.
-- On any rename or signature change, search separately for: direct calls, type refs, string literals, dynamic imports, `require()` calls, re-exports, barrel files, test mocks. Assume grep missed something.
-- Never delete a file without verifying nothing references it.
-
-### 8.3 Context management
-
-- Batch independent tool calls — reads, greps, bash — into a single message rather than firing them serially. Fan out reads before you need them; a serial chain of five greps costs five round-trips for no benefit.
-- Delegate to a subagent when the work is genuinely independent, parallelizable, and larger than you would finish in a handful of tool calls — a wide multi-file investigation, an audit spanning several subsystems, a search whose breadth you cannot predict. Do not delegate work you could finish inline, and if one subagent can do it use one rather than several. Whether to spawn a subagent to check your own work depends on run length, not preference: on a short attended run don't, and on a long or multi-window run verify at a declared interval with a fresh-context subagent against the spec. Deterministic gates are exempt either way — they are mechanism, not self-checking. Dispatch and keep working rather than blocking; intervene if a subagent goes off track or is missing context you have, and reuse one that already has the context for a follow-on subtask rather than spawning a fresh one. The payoff is fresh context and wall-clock parallelism — delegation for its own sake costs both. *(Canonical wording: `core-rules/CLAUDE.md` § Context management. Quote it here rather than paraphrasing, or the two layers drift.)*
-- **Why the axis is run length and not attendedness.** Over hours of work a fresh-context verifier outperforms self-critique, because the context that produced the error is the context reviewing it. Whether anyone is watching does not change that; a long *attended* run across several context windows needs the fresh verifier exactly as much as an overnight one. Attendedness governs the consultation surface and the reporting register, not whether verification is worth its cost. This carve-out does not reach the `code-review-subagent` hook, which is threshold-triggered infrastructure reviewing an artifact — the diff — and is not discretionary delegation at all.
-- Re-read a file immediately before editing it. Your memory of a file you read earlier in the session can be stale — the file may have changed, or a compaction may have dropped the detail. The `reread-guard` hook enforces this mechanically; treat a re-read as free.
-- You have ample context. Do not stop, summarize, or suggest a new session on account of context limits, and do not manage your work against a remaining-token budget.
-- If you notice context degradation (referencing nonexistent variables, forgetting file structure), prefer a **fresh session** over `/compact`. State lives on disk, and rediscovering it is cheap and more reliable than a lossy summary. Land your work first — commit or stash, let `save-context-log` capture `context-log.md` — then start clean. A fresh window should open by orienting: `pwd`, read `context-log.md`, read the last few commits, run the fast test suite. Use `/compact` when you must preserve an unlanded in-flight thread that would be expensive to reconstruct.
-- Reads are capped at 2000 lines. For files >1500 LOC, use offset/limit chunks.
-- Tool results over 100K chars truncate to a 2KB preview. Re-run narrower or read the source directly.
-- Before touching an unfamiliar subsystem, run `/explore <subsystem>` to dispatch a read-only subagent that writes a compact map to `.claude/primers/_explore/`. Editing without that map on a sufficiently-large unfamiliar subsystem produces wrong-shaped changes. Promote to a durable `/primer` post-edit if the subsystem is stable enough to warrant it.
-
-#### Language server integration (polyglot projects)
-
-For projects spanning two or more languages (typical: Go + TypeScript + Python in one monorepo), install a Claude Code language-server plugin so symbol-level navigation beats string-grep at locating identifiers, finding call sites, and following types across files. Recommended order:
-
-1. Install the per-language LSP binary on `PATH` — `gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, etc.
-2. Install a Claude Code LSP plugin that wraps these binaries and exposes symbol-lookup / find-references tools to the agent.
-3. Verify with one targeted prompt — e.g., "find every call site of `loadConfig` and tell me their types" — and confirm the agent uses LSP rather than ripgrep.
-
-LSP is a recommendation, not a Trellis requirement: single-language repos derive less value, and the cost is one binary per language plus one plugin install. The win shows up most clearly on polyglot monorepos where the same identifier ("config", "handler", "Process") exists in three different languages — string-grep returns 40 false positives; symbol lookup returns the right one. Trellis does not enforce installation; it just calls out the gap.
-
-### 8.4 Style
-
-- Hold a senior-perfectionist bar on the code you are asked to touch: no duplicated state, no inconsistent patterns, no shape a careful reviewer would reject. Deliver what was asked, at the scope intended. If the surrounding architecture is flawed and a structural fix would be the right call, say so in a sentence and continue with the task as asked — don't quietly widen it into a refactor. Make routine judgment calls yourself; check in only when different readings of the request would lead to materially different work.
-- Write code that reads like the code around it — match the surrounding comment density, naming, and idiom. Where the *why* is non-obvious, say it; where the code speaks for itself, let it.
-- Don't build for imaginary scenarios. Simple and correct beats elaborate and speculative.
-
-### 8.5 Debugging
-
-- Work from raw error data. Don't guess. If a bug report has no output, ask for it.
-- For long-running processes (dev server, test watcher, build, log tail), use the `monitor` tool — never `tail -f`, polling loops, or repeated Bash calls.
-- If a fix doesn't work after two attempts, stop. Read the entire relevant section top-down. State where your mental model was wrong before trying again.
-
-### 8.6 Testing bar
-
-Minimum per project (enforced by CI and `stop-verify`):
-- **Unit tests** — fast suite, runs on every turn. Target coverage: useful-is-enough; don't chase %.
-- **Type-check** — `tsc --noEmit`, `mypy`, `cargo check`, or `go vet` — whichever fits the stack.
-- **Lint** — project's configured linter runs repo-wide on Stop, per-file on edit.
-- **Integration / E2E** — where the project warrants it; run in CI, not on every turn. Don't mock boundaries that production crosses (DB, queue, auth).
-- **General solutions, not test-gaming** — implement logic that works for all valid inputs, not just the test cases. Don't hard-code values or build workarounds that only pass the specific tests in front of you; tests verify correctness, they don't define the solution. If a test is wrong or a task infeasible, say so rather than working around it.
-
-Playwright is the default E2E framework for web projects. Non-web stacks (games, CLIs, native apps, embedded) bring their own testing and tooling conventions — document those in the project's own `CLAUDE.md` and let the Rule of Three ([§14.1](#141-rule-of-three)) decide whether any of it rises into this manual. The parent layer stays small on purpose.
+For an unattended or long run, begin the completion message with a plain
+language outcome and any decision that still needs an operator. Put the receipt
+below that explanation as evidence, not as a replacement for it.
 
 ---
 
-## 9. Documentation standards
+## 9. Code and documentation standards
 
-### 9.1 Project `CLAUDE.md`
+### 9.1 Planning, scope, and safety
 
-Each registered project has a `CLAUDE.md` at its root. Structure:
+- Use the established feature pipeline for cross-cutting or load-bearing work;
+  follow the accepted plan and record a real fork rather than silently widening
+  scope.
+- Read the relevant caller, public surface, and existing convention before
+  changing unfamiliar code. Make surgical changes unless structural rot blocks
+  the requested behavior.
+- Re-read an existing file before editing it. On a rename or signature change,
+  separately search direct calls, types, strings, imports, re-exports, and
+  mocks.
+- Prefer a general fix over special-casing one input. Do not add speculative
+  fallback behavior or an abstraction that has one caller.
+- Verify behavior with the smallest command or scenario that can falsify the
+  changed contract.
 
-```markdown
-# <project-name>
+### 9.2 Parent and project documentation
 
-@__TRELLIS_PATH__/core-rules/CLAUDE.md
+`core-rules/CLAUDE.md` is a terse parent policy contained in each immutable
+release. A project `CLAUDE.md` remains project-owned context: its purpose,
+current gotchas, architecture notes, and local commands. It must not contain an
+absolute parent `@` import or a machine path to Trellis. Attachment supplies the
+parent policy locally when the operator opts in.
 
-> Engineering process manual: `~/projects/trellis-instance/engineering-process.md`
+Keep project documentation portable. `gotchas.md` records genuine corrections;
+`context-log.md` is hook-managed local state and is not hand-authored; ADRs use
+the repository's existing convention. Do not put a machine's fleet membership,
+release state, source-root path, or attachment instructions in a project README
+or project configuration.
 
-<1–3 sentences: what is this project, who uses it, what's its current phase>
+### 9.3 Hook and skill discipline
 
-## Gotchas
-<This is the highest-value section in the file and the reason it exists.
-Everything else here, the agent could work out on its own; this is what it
-cannot. Surface the 3–5 live ones inline — the ones that will bite this week —
-and link `gotchas.md` for the full log. A gotcha earns a line here when getting
-it wrong costs more than one round-trip to discover.>
-
-## Stack
-<One line. Name only what the manifest doesn't make obvious — the deployment
-target, the runtime version if it's pinned for a non-obvious reason, a framework
-used in a non-default mode.>
-
-## Architecture
-<high-level shape: monorepo packages, services, main modules>
-
-## Codebase map *(optional)*
-<Include only where the directory layout would mislead — a name that doesn't
-mean what it looks like, a directory that is dead, two directories whose split
-is historical rather than logical. If `ls` plus the directory names already
-tells the story, omit this section; the agent will find it faster than you can
-describe it.>
-
-## Project-specific rules
-<anything that doesn't belong in the parent — e.g., "never import @neev/orders from @neev/inventory">
-
-## Running locally
-<Only the commands that are NOT the obvious ones. If `pnpm dev` works, don't
-write it down. Write down the ones with a precondition: the service that must be
-running first, the env var with no default, the seed step, the port that
-collides.>
-```
-
-Target size: **< 5 KB**. Bloat pushes signal out of context. Long reference material goes in sibling files and gets linked.
-
-The same discipline binds `core-rules/CLAUDE.md` itself — it is injected into every session of every registered project, so every kilobyte there is multiplied by the fleet. That file states its own target; when it exceeds it, the answer is progressive disclosure (a `references/` sibling loaded on demand), not a bigger budget.
-
-**Context budget.** Treat injected scaffolding (`CLAUDE.md` + primers +
-`context-log.md` + system reminders) as a metered per-turn tax. Measure its
-footprint periodically, keep the leanest set that still works, and scale it
-down as models improve; Anthropic already ships leaner system prompts for
-stronger models. Evidence: 2026-07-12 CC-vs-OpenCode token-overhead teardown,
-~33K vs ~7K baseline tokens before the user prompt.
-
-**Codebase map convention.** A plain listing of top-level directories is something the agent derives from one `ls` — spending injected tokens on it every turn buys nothing. That trade used to run the other way: when exploration was expensive and context was tight, paying per-turn tokens to save a round-trip was correct. It no longer is. What *is* worth writing down is where the layout misleads: a directory whose name understates or misstates its role, a vestigial tree nobody has deleted, a split that only makes sense historically. Write those lines and skip the rest.
-
-Keep the format bare: one line per directory, role only. If a directory needs more than a one-liner to introduce, write a sibling `docs/<dir>.md` and link to it from the map line.
-
-**What changed and what did not.** The rule for *what the section contains* changed. The rule for *whether it exists* did not. At ≥ 5 top-level directories the heading stays, carrying either the misleading-directory lines or a single line stating the layout is self-describing. Below that threshold, omit it when there is nothing to say.
-
-Splitting it this way is deliberate. The `cross-project-process-audit` check that reports any registered project with ≥ 5 top-level directories whose `CLAUDE.md` lacks the heading **still runs**, and whether to retire it is an operator decision that has not been made. Had the content change also removed the heading, every correctly-onboarded project would have become a standing false positive in an advisory report while that decision sat pending — and this repo's own doctrine is that noisy advisory findings decay compliance. Keeping the heading costs one line and keeps the audit honest. Projects that already carry a full inventory stay compliant; trim them to the new content rule when you next touch them, don't sweep.
-
-### 9.2 README.md
-
-Project-level README is for *humans landing on the repo for the first time*. Orthogonal to `CLAUDE.md`.
-
-```markdown
-# <project-name>
-
-<one-line tagline>
-
-<one-paragraph what/why>
-
-## Requirements
-<host toolchain plus infrastructure prerequisites; keep application runtimes native and distinguish shared from project-owned infrastructure>
-
-## Quick start
-<the 3-5 commands that preflight fixed ports, ensure declared shared services when needed, start unique infrastructure, and run the application natively>
-
-## Documentation
-<links to deeper docs if any>
-
-## License
-<license name + year>
-```
-
-### 9.3 gotchas.md
-
-Every project maintains a `gotchas.md` at the root. Purpose: log every *correction* the user gives you, every surprising discovery, every "turns out this library does X." Format per entry:
-
-```markdown
-## <YYYY-MM-DD> — <short title>
-**Context:** <where this bit us>
-**Gotcha:** <what actually happens>
-**Rule:** <what to do about it>
-```
-
-Read at session start (`session-context` hook surfaces pending items). Reviewed monthly by the `gotchas-rollup` audit, which clusters entries and applies the Rule of Three — n≥3 similar entries promotes to `CLAUDE.md`, n=2 queues in `deferred.md`.
-
-### 9.4 context-log.md
-
-Hook-managed (`save-context-log` writes on `PreCompact`, `post-compact-context` re-injects on resume). Don't edit by hand. Don't commit to `main` — it's a local working file. Gitignored in every project.
-
-### 9.5 ADRs (parked)
-
-Architecture Decision Records are currently in `deferred.md` awaiting a third project to adopt. TGSC uses `docs/adr/NNNN-<slug>.md` with context / decision / consequences / status. Neev uses tech-spec docs. Neither is the parent rule yet.
-
-**Interim guidance:** if you write an ADR, use TGSC's shape. When a third project picks the same shape, promote it.
-
-### 9.6 Frontend-quality references
-
-Projects with a public web surface (portfolio, marketing page, SaaS console, app landing) inherit four reference docs via the process-gate skill: `core-rules/skills/process-gate/references/web-perf.md`, `core-rules/skills/process-gate/references/web-a11y.md`, `core-rules/skills/process-gate/references/web-seo.md`, and `core-rules/skills/process-gate/references/web-agent-readiness.md`. These synthesize Lighthouse (Performance, Accessibility, Best Practices, SEO, Agentic Browsing), web.dev a11y, Google's AI optimization guide, and Cloudflare's `isitagentready.com` scorecard into a single Trellis-stamped checklist. Advisory today; automation deferred per `core-rules/deferred.md` until Rule of Three. Consult before any non-trivial public-page PR.
+Rules that need mechanical enforcement belong in release-owned hooks or skills,
+not in copied project files. A project can own local validation configuration
+where the manifest explicitly permits it, but it does not edit a released
+canonical artifact in place. A recurring cross-project rule earns promotion only
+with evidence; project-specific rules stay project-specific.
 
 ---
 
-## 10. Onboarding a new project — full playbook
+## 10. Onboarding, worktrees, and local recovery
 
-This is the canonical sequence. Run it manually, or use the existing `./scripts/onboard-project.sh` flow. Resolve `shared_infra_root` with `jq -r '.shared_infra_root // empty'`: when non-empty, new projects require an explicitly reviewed external manifest fragment before registration; when absent, use ordinary one-argument onboarding with no `--infra-entry`. One-argument reruns remain idempotent in both modes.
+### 10.1 New portable projects
 
-**Agent-driven shortcut.** `AGENT_ONBOARD_PROJECT.md` at the repo root wraps every step below into a paste-into-agent interview — detect mode (new / fresh-clone / repair), run `scripts/onboard-project.sh`, wire the project's `CLAUDE.md` `@`-import, collect and write the project's gotchas, update `registry.md`, and commit in both repos. Use it unless you specifically want the manual walkthrough.
+For a project that opts in, establish a stable portable project ID, create or
+review `.trellis.json`, commit it as a project change, and only then attach the
+actual checkout locally. Use [AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md)
+for the executable configure/onboard/attach sequence. Do not hand-create legacy
+links, direct imports, copied hook trees, or ignored tracked artifacts.
 
-### 10.1 Pre-flight questions (answer before anything)
+### 10.2 Existing and legacy projects
 
-- **Name?** Final, committed. Directory name matches.
-- **GitHub host?** User, new org, existing org?
-- **Stack?** Informs `CLAUDE.md` seed and `.gitignore`.
-- **Class?** Monorepo SaaS, single Next.js app, portfolio site, game, CLI — informs registry.
-- **License?** MIT default; choose something else only with reason.
-- **Local infrastructure?** First resolve `SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"`. If empty, shared-infrastructure integration is disabled and this question is skipped. If non-empty, generate a static proposal through the external repository, review every detected shared service and fixed host port, and resolve ambiguous credentials or allocations. A no-service project still records `services: {}`. Discovery supplies evidence only: it never runs project code, reads secret values, invents an allocation or credential, or mutates the external manifest before review. See [`docs/local-development-infrastructure.md`](docs/local-development-infrastructure.md).
-- **What will bite an agent working here?** The only question on this list whose answer isn't sitting in the filesystem, and the reason the project `CLAUDE.md` exists at all. Ask what has bitten the owner, what looks like it does one thing and does another, what they explain to every new person, and what is dead or half-migrated despite its name. Skim the README, the last 20 commit subjects, and the `TODO`/`HACK`/`FIXME` comments first so you can ask something specific. Write the answers into `gotchas.md` in the §9.3 entry format and surface the two or three most live ones under `## Gotchas` in the project `CLAUDE.md`. If there are none, record none — don't invent them.
+During the compatibility release, use `trellis migrate --prepare` to classify
+legacy artifacts, create a local rollback snapshot, and make a reviewable
+tracked cleanup. Inspect the resulting project diff before staging it. Preserve
+project-owned harness content; ambiguous ownership is a conflict to resolve,
+not a reason to delete it. The migration guide gives the import, snapshot,
+rollback, and five-project rollout requirements.
 
-### 10.2 Scaffold steps
+### 10.3 Worktrees
 
-**Preferred repo-local flow.** From the Trellis canonical repository, resolve the optional integration first:
+Attach the main worktree or an explicitly selected worktree, then use
+`trellis worktree add` for new worktrees in an opted-in clone. It reconciles the
+manifest-defined local leaves early enough for harness discovery. Do not copy
+local attachment artifacts from one worktree to another and do not remove a
+common-dir exclude block by hand: clone/worktree ownership reference counting
+is what makes detach safe.
 
-```bash
-PROJECT=/absolute/path/to/project
-PROJECT_NAME="$(basename "$PROJECT")"
-SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
-```
+### 10.4 Moves, repair, recovery, and opt-out
 
-When `SHARED_INFRA_ROOT` is non-empty, generate a reviewable proposal through the external repository and stop for operator review before registration:
+Moving the **source checkout** changes only local configuration. Reconfigure
+its source location; attached runtimes continue to use their installed release.
+Use `trellis relink` only to repair an existing attachment's recorded release
+anchor or dispatcher.
 
-```bash
-make -C "$SHARED_INFRA_ROOT" propose \
-  PROJECT="$PROJECT_NAME" SOURCE="$PROJECT" \
-  OUTPUT=/absolute/path/to/reviewed-infra-entry.yaml
-```
-
-The proposal contains only `services` and `ports`. Review and complete it; preserve an explicit `services: {}` when no shared service is needed. Then run the enabled path. If the key is absent, run ordinary onboarding without `--infra-entry` and skip every shared-infrastructure-specific check:
-
-```bash
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  ./scripts/onboard-project.sh "$PROJECT" \
-    --infra-entry /absolute/path/to/reviewed-infra-entry.yaml
-else
-  ./scripts/onboard-project.sh "$PROJECT"
-fi
-
-./scripts/doctor.sh --project "$PROJECT_NAME"
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  make -C "$SHARED_INFRA_ROOT" doctor \
-    PROJECT="$PROJECT_NAME" REGISTRY_FILE="$PWD/registry.md"
-fi
-```
-
-With integration enabled, onboarding atomically delegates registration of the reviewed fragment, reconciles only that allocation, and seeds `scripts/local-infra-preflight.sh`. Wire that wrapper into the project's native start path before any application or project-owned infrastructure binds a fixed port. Projects with `services: {}` run preflight but do not start the shared runtime. Project shutdown must never delegate shared `down`. With integration disabled, no external manifest, preflight wrapper, or shared-runtime verification is required.
-
-The manual scaffold below remains useful for understanding or repairing the inheritance assets. When integration is enabled it does not replace the proposal/review/registration step; when disabled, the scaffold and one-argument onboarding remain the complete legacy path.
-
-When `"omp"` is enabled, `onboard-project.sh` creates the exact five OMP links listed in §4.2. Keep them machine-local and ignored; never replace them with copied policy or hand-maintained `.omp` files. The OMP adapter and all canonical OMP discovery surfaces resolve live from `trellis_root`. Without `"omp"`, onboarding and doctor leave `.omp` absent and untouched.
-
-```bash
-# 1. Create project directory
-cd ~/projects/personal
-mkdir <name>
-cd <name>
-
-# 2. git init
-git init -b main
-
-# 3. Create the Claude Code inheritance structure
-mkdir -p .claude/rules .claude/hooks
-
-# 4. Symlink parent rules (PRIMARY inheritance — required)
-ln -s __TRELLIS_PATH__/core-rules/CLAUDE.md \
-      .claude/rules/trellis.md
-
-# 5. Copy canonical hooks
-cp __TRELLIS_PATH__/core-rules/hooks/*.sh .claude/hooks/
-chmod +x .claude/hooks/*.sh
-
-# 5b. Symlink canonical skills (process-gate)
-mkdir -p .claude/skills
-ln -s __TRELLIS_PATH__/core-rules/skills/process-gate \
-      .claude/skills/process-gate
-
-# 5c. (Codex-enabled projects only) seed .agents and .codex trees
-# If `harnesses` in trellis.config.json includes "codex":
-#   mkdir -p .agents/rules .agents/skills .codex/hooks
-#   ln -s __TRELLIS_PATH__/core-rules/CLAUDE.md \
-#         .agents/rules/trellis.md
-#   ln -s __TRELLIS_PATH__/core-rules/skills/process-gate \
-#         .agents/skills/process-gate
-#   cp __TRELLIS_PATH__/core-rules/codex/hooks.json .codex/hooks.json
-#   cp __TRELLIS_PATH__/core-rules/codex/hooks/*.sh .codex/hooks/
-#   chmod +x .codex/hooks/*.sh
-#   # AGENTS.md at project root: either content + @-import OR symlink → CLAUDE.md
-#   ln -s CLAUDE.md AGENTS.md   # if no Codex-specific divergence is needed
-
-# 6. Write .claude/settings.json
-# (copy from any active project — structure is identical, uses $CLAUDE_PROJECT_DIR)
-
-# 7. Write project CLAUDE.md (template in §9.1)
-cat > CLAUDE.md <<'EOF'
-# <name>
-
-@__TRELLIS_PATH__/core-rules/CLAUDE.md
-
-<1-3 sentence project overview>
-
-## Gotchas
-<the 3-5 live ones, from the pre-flight interview; full log in gotchas.md>
-
-## Stack
-...
-EOF
-
-# 8. Write gotchas.md (template in core-rules/templates/gotchas.md), then fill it
-#    in from the pre-flight interview (§10.1) using the §9.3 entry format.
-#    The template ships empty on purpose — an unfilled gotchas.md is an
-#    onboarding that skipped its only non-derivable question.
-cp __TRELLIS_PATH__/core-rules/templates/gotchas.md .
-
-# 9. .gitignore — onboard-project.sh generates the Trellis-managed block (the
-#    machine-absolute inheritance symlinks) automatically; you only add the
-#    project-local entries.
-cat >> .gitignore <<'EOF'
-context-log.md
-.claude/settings.local.json
-EOF
-# The generated block gitignores exactly the canonical absolute-path symlinks
-# onboard creates (rules/skills/commands under .claude/ and .agents/). It is
-# rewritten in full on every run, so each developer regenerates both the symlinks
-# and their ignore lines post-clone via scripts/onboard-project.sh.
-
-# 10. README.md (template in §9.2)
-
-# 11. Initial commit
-git add -A
-git commit -m "chore: initial scaffold with Trellis inheritance"
-
-# 12. Add to registry.md
-# Edit ~/projects/trellis-instance/registry.md, add a new row under "Active projects"
-# Commit that change in trellis-instance with "chore: register <name>"
-
-# 13. Create GitHub repo (via gh CLI or UI), add remote
-gh repo create <owner>/<name> --private --source=. --remote=origin
-git push -u origin main
-
-# 14. Enable branch protection on main (see §6.4)
-# Can be done via gh api or the GitHub UI. Must do before first PR.
-```
-
-### 10.3 First-commit checklist (verify before you push)
-
-- [ ] Read `~/projects/trellis-instance/engineering-process.md` end-to-end. Everything below this line assumes you have.
-- [ ] `ls -la .claude/rules/trellis.md` — symlink exists, points at canonical path.
-- [ ] `readlink .claude/rules/trellis.md` — target is `__TRELLIS_PATH__/core-rules/CLAUDE.md`.
-- [ ] `ls .claude/hooks/` — every script named in `core-rules/hooks/README.md` is present and executable.
-- [ ] `ls -la .claude/skills/process-gate` — symlink exists, points at canonical `core-rules/skills/process-gate`.
-- [ ] `readlink .claude/skills/process-gate` — target is `__TRELLIS_PATH__/core-rules/skills/process-gate`.
-- [ ] `grep -q '$CLAUDE_PROJECT_DIR' .claude/settings.json` — no hardcoded project paths.
-- [ ] `CLAUDE.md` starts with `@__TRELLIS_PATH__/core-rules/CLAUDE.md` on line 2.
-- [ ] `gotchas.md` exists at project root.
-- [ ] `.gitignore` includes the Trellis symlink fragment (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`) plus `context-log.md` and `.claude/settings.local.json`.
-- [ ] `git ls-files .claude/rules/trellis.md .claude/skills/process-gate` returns nothing — the absolute-path symlinks are NOT staged for the initial commit.
-- [ ] If Codex-enabled (shared surface): `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, and `.agents/primers/INDEX.md` are present.
-- [ ] If Codex-enabled (Codex-only): `.codex/hooks.json`, `.codex/hooks/*.sh`, and `.agents/commands/{primer,primer-refresh,primer-check,explore}.md` plus `.agents/workflows/{primer,primer-refresh,primer-check,explore}.md` are present (Codex reads `.agents/`, including `.agents/workflows/`).
-- [ ] If Codex-enabled: `$CODEX_HOME/config.toml` has `[features] hooks = true` (or the legacy `codex_hooks = true` alias; deprecated as of Codex CLI 0.129+).
-- [ ] OMP has exactly `.omp/AGENTS.md`, `.omp/skills`, `.omp/commands`, `.omp/agents`, and `.omp/hooks` as absolute symlinks with exact targets; no Trellis-generated `.omp/RULES.md`, `.omp/config.yml`, or `.omp/mcp.json` is present.
-- [ ] `registry.md` has a row for the new project.
-- [ ] If `shared_infra_root` is non-empty, the external `projects.yaml` has the same project key with explicit `services` and `ports`; empty declarations use `services: {}` / `ports: {}` rather than omission. If the key is absent, this check is skipped.
-- [ ] If integration is enabled, `scripts/local-infra-preflight.sh` exists, is executable, and is called before the native startup path binds fixed ports. If disabled, no wrapper is required.
-- [ ] If integration is enabled, the project shutdown path cannot call the external repository's shared-runtime stop target.
-- [ ] Branch protection enabled on `main`.
-
-### 10.4 Post-onboarding verification
-
-Always run `./scripts/doctor.sh --project <registry-name>`. Resolve `SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"`; only when it is non-empty, also run the external `make doctor PROJECT=<registry-name> REGISTRY_FILE=<absolute-registry-path>`, the seeded startup preflight, and manifest/allocation/fixed-port verification. When the key is absent, skip those shared-infrastructure-specific checks and run the ordinary native smoke path. If private operator audits are configured, trigger the hook-drift and registry-health checks as supplemental evidence.
-
-OMP doctor checks the exact targets, realpaths, target kinds, canonical-root containment, project `CLAUDE.md` import, OMP manifests/collisions, adapter loading, parent/project markers in a fresh headless session, and policy parity in a task child. Any broken or stale OMP path exits nonzero; warnings do not count as parity. If canonical or project files change, verify them in a fresh OMP session or after an explicit discovery reset/process restart rather than claiming in-process hot reload.
-
-**Tell the project's future sessions how the file grows.** The seeded `CLAUDE.md` is deliberately thin, and thin is the target. It grows from `gotchas.md`, not from documentation written up front: log corrections as they happen, and the `gotchas-rollup` audit promotes anything that recurs three times ([§14.1](#141-rule-of-three)). Resist the urge to describe the codebase in it; describe what the codebase will get wrong.
-
-### 10.5 Bootstrapping a fresh clone (every developer, every machine)
-
-The canonical absolute-path symlinks (`.claude/rules/trellis.md`, `.claude/skills/process-gate`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, and the five `.omp` links) are gitignored — they encode a per-machine `$TRELLIS_ROOT` and cannot be shared across developers (see §4.2 tracking policy). After cloning a registered project, run:
-
-```bash
-git clone <repo-url>
-cd <project>
-~/projects/trellis-instance/scripts/onboard-project.sh "$PWD"
-```
-
-`onboard-project.sh` is idempotent: it creates each missing symlink, leaves existing correct ones alone, warns on mismatches, and never overwrites tracked files. Re-running after every `git pull` is harmless.
-
-If you skip this step, Claude Code and Codex sessions in the project will silently run **without** the Trellis parent rules and skills — no error, no warning, just a session quietly missing the load-bearing inheritance file. Add the bootstrap to your project README's "Setup" section so teammates can't miss it.
-
-### 10.6 Adopting a shared service later
-
-Later shared-service or fixed-port adoption exists only when an operator has supplied a separate repository and `jq -r '.shared_infra_root // empty' trellis.config.json` returns a non-empty path. If the key is absent, there is no external manifest to mutate; keep using ordinary onboarding until the operator explicitly enables the integration.
-
-When enabled, use the same path as initial onboarding:
-
-1. Run the external repository's `make propose PROJECT=<registry-name> SOURCE=<absolute-project-path> OUTPUT=<proposal-path>`.
-2. Review the evidence and provide a complete `services` + `ports` fragment. Do not choose credentials, allocations, databases, buckets, or ports by guesswork.
-3. Run `./scripts/onboard-project.sh <absolute-project-path> --infra-entry <reviewed-fragment>`.
-4. Update project environment examples, migrations, startup preflight, native run instructions, and project-owned infrastructure commands.
-5. Reconcile and verify positive project access, negative cross-project access where applicable, `./scripts/doctor.sh --project <registry-name>`, the external doctor, and the lifecycle rule that project shutdown leaves the shared runtime running.
-6. Publish the external repository and project changes through dependency-ordered PRs with the receipts in §6.6.
+Moving a **project checkout** is explicit: detach while its old identity is
+reachable, relocate it using the operator's chosen filesystem procedure, then
+attach the new exact path. Do not edit registry JSON or invent a new path from a
+project ID. If a transaction was interrupted, run `trellis doctor` and then
+`trellis recover` for that exact worktree. To opt out locally, use `trellis
+detach`; it leaves the inert `.trellis.json` untouched.
 
 ---
 
-## 11. Operator audits & the feedback loop
+## 11. Audits and fleet operations
 
-### 11.1 Optional audit patterns
+Fleet-wide commands enumerate the machine-local registry, including unavailable
+rows. They never reconstruct paths from a fixed root. `trellis registry list`
+and `trellis doctor` are the starting points for local inventory and health.
+Scope a command with `--fleet` and, where supported, `--project` whenever the
+intent is not genuinely fleet-wide. `trellis show-config` renders portable
+policy plus validated local machine context through the same launcher and
+verified payload; `trellis task materialize --fleet NAME TASK` materializes a
+private scheduled-task input under `$TRELLIS_HOME/tasks/` from the verified
+active release and one strict registry snapshot, and never writes a project
+root.
 
-The public template does not ship an operator's schedules, prompts, targets, or fleet inventory. An operator clone can use `registry.md` to drive private checks such as:
+### 11.1 One row vocabulary
 
-| Pattern | What it catches |
-|---|---|
-| bypass tripwire | `--no-verify` commits, direct-to-main pushes, husky skips, force-pushes. |
-| process drift | Missing symlinks, missing hooks, staleness, required-file gaps, loop-safety declarations. |
-| registry health | Registry vs. filesystem consistency, orphans, overdue blacklist reviews. |
-| test health | Each project's fast suite, with a last-green investigation on red. |
-| hook drift | Byte-identity of deployed hooks vs. canonical and registration gaps. |
-| gotchas rollup | Clusters project lessons and applies the Rule of Three for promotion. |
-| report rollup | Trend analysis across the operator's other audits. |
+Every consumer of the local registry classifies a row with the same three words,
+and the vocabulary is named for exit classes so a row state and an exit code can
+never disagree (`scripts/lib/local-registry.sh` is the normative definition):
 
-When configured, audits write to `<trellis-root>/audits/YYYY-MM-DD-<name>.md`. They may run through a harness scheduler, cron, or another headless runner; the private prompt source remains version-controlled in the operator clone and out of the public mirror.
+| Row state | Class | Meaning |
+|---|---|---|
+| `available` | `0` | The row is exactly as registered — or, for a rootless `project` row, has no root to classify. |
+| `unavailable` | `0` or `5` | Class 0: the root is unreachable and nothing contradicts the row. Class 5: the environment could not answer — an uncanonicalizable root, an unusable hash command. |
+| `identity_error` | `4` | Live Git identity contradicts the recorded registry state. |
 
-**Loop-safety drift.** Operator process audits should also keep the loop-safety contract (§5c) honest by scanning `orchestrate` recipes and private audit prompts for a present, non-blank declaration. Authoring a loop without the stanza is additionally a `process-gate` / review finding at PR time.
+`not-applicable` is an *identity-state* word in the diagnostic listing, never an
+availability word, so both listings agree on the same three-word enum. Failed
+rows are **report-only**: they stay visible and are neither deleted,
+reconstructed from a project ID, nor replaced by a similarly named checkout.
+Roots and names are printed through the shared terminal-safety helper, so a
+corrupt or hostile path named in a diagnostic cannot rewrite the terminal.
 
-#### OMP inheritance rollout scope
+### 11.2 Row faults continue, environment faults stop
 
-An explicit OMP inheritance rollout walks every row in `registry.md`, including registered-but-held rows, and adds only the ignored five-link surface. This installation scope is intentionally broader than scheduled eligibility: normal fleet scheduling continues to honor `blacklist.md`, so installing OMP links never enrolls a held project in scheduled tasks.
+A **row fault** is scoped to one registry row and the run continues to the other
+selected rows. A strict whole-file read would abort on the first broken row
+*anywhere*, so one unrelated `identity_error` row used to fail every healthy
+target; selections are therefore read diagnostically, per row. An **environment
+fault** is global — a missing hash command, an unreadable store — and is probed
+once, up front, failing the whole command class `5`.
 
-### 11.2 Remediation workflow
+This loosens nothing about a target. Before a write, exactly the checkout and
+worktree rows about to be mutated are re-validated under the registry lock by
+**bound-row identity**, using the same validator the strict reader uses, and the
+resulting document is written under the **whole-file schema**. A target whose
+own row is broken still fails class `4` or `5` and is never adopted onto, and a
+per-row read can never publish a registry the strict reader would reject.
 
-1. **Read the audit report.** Critical findings first; warnings second; info last.
-2. **Classify:** is it drift (the project copy diverged from canonical), gap (missing a required file), or policy violation (bypass/direct push)?
-3. **For drift:** rsync the canonical hook or file to the project, commit with `chore: sync <thing> to canonical`. Run the audit again to verify.
-4. **For gaps:** re-run the relevant part of [§10 onboarding](#10-onboarding-a-new-project-full-playbook) for the missing file.
-5. **For policy violations:** if intentional (emergency override), document in `gotchas.md` and move on. If accidental, understand how it slipped past the three tiers of gates and close that gap.
+Narrowing *within* a listing cannot lower the state class: the class is computed
+from the full listing while actions are computed from the selection, so
+`--project` cannot make a command exit `0` over a listing already shown to be
+corrupt, and rows outside the selection that would otherwise go unreported are
+printed. `--fleet` is **not** that kind of narrowing — it scopes the listing
+itself, so it narrows the state class with it, deliberately: a fleet-scoped
+consumer acts only within its fleet and is not made to fail on a row it cannot
+touch. A clean `--fleet` listing therefore attests to that fleet and to nothing
+else, and a whole-machine verdict needs an unscoped listing. Two checks stay
+registry-wide regardless of the flag, and they are the only ones: the file-level
+structural/schema validation that runs before any row is classified, and the
+re-validation every write performs under the registry lock. A command's exit
+status is the **highest** class any row or preflight produced, and no exit path
+may report below a state class already proven.
 
-### 11.3 Writing new audit tasks
+Operator-owned audit schedules and prompts are private local automation. They
+may examine selected local fleet rows, but their targets, paths, and reports are
+not publication inputs. A useful audit reports facts and proposes a bounded
+remediation; it does not rewrite project-owned files or turn an unavailable row
+into a guessed replacement.
 
-Keep audit prompts in a private operator-owned directory, using one folder per task and a SKILL-style `prompt.md`. Good audit prompts:
-- Name their inputs (which files to read) and outputs (where to write).
-- Are **reporting only** — they never modify project files. That's a hard boundary.
-- Cap output size (50 lines of diff, 30 lines of log).
-- Degrade gracefully if a project is missing (defer to a sibling audit that owns detection).
-- Include sensible-failure-mode handling.
+For drift:
 
-Start from an existing local report under `<trellis-root>/audits/` and the loop-safety contract in `core-rules/loop-safety.md`. Public-template users can instead start from its redacted `examples/audits/`; never publish private targets as examples.
+1. identify whether the condition is an immutable-release problem, attachment
+   ownership conflict, unavailable checkout, project migration gap, or a
+   project-owned configuration issue;
+2. verify the installed release and exact registry row before mutation;
+3. use attach/relink/recover/detach only for Trellis-owned state;
+4. use a reviewed project PR for tracked project changes;
+5. rerun the narrow doctor/registry check that establishes the repair.
 
 ---
 
-## 12. Incident response & rollback
+## 12. Incident response and rollback
 
-Solo-dev scope — this is not PagerDuty territory. The patterns:
+### 12.1 Triage
 
-### 12.1 Triage tree
+1. **Production is broken:** revert the suspect project change through a PR,
+   then diagnose. Do not reset or force-push `main`.
+2. **Local project behavior is broken:** determine whether the project is
+   attached, which immutable release it records, and whether doctor identifies
+   corruption, an unavailable root, or an interrupted transaction.
+3. **Trellis attachment is broken:** verify the installed release first. Use
+   `recover` only for its recorded transaction; use `relink` only for a verified
+   owned anchor; detach if local opt-out is the safest recovery.
+4. **Source checkout is broken or moved:** repair or reconfigure it as a
+   development/publication checkout. It cannot silently alter already attached
+   project runtime.
 
-1. **Is the production deployment broken?** Roll back first, diagnose second. `gh pr list --state merged --limit 5` to find the suspect; revert via `git revert <sha>` (never `git reset --hard` on shared branches); push through a revert PR.
-2. **Is local dev broken but prod is fine?** Diagnose without urgency. Check the last clean sha (`test-health` weekly report gives last-green automatically).
-3. **Is Trellis itself broken?** (Hooks failing, audits erroring, inheritance drift.) Fix at the parent layer; rsync fix to every project; commit in the Trellis canonical repo with `fix:` prefix.
+### 12.2 Rollback layers
 
-### 12.2 Rollback options, ranked
+- **Release rollback:** verify the prior installed immutable release, then
+  explicitly adopt it for the affected project, fleet, or reviewed all-fleet
+  scope. Installation alone never rolls anything back.
+- **Project migration rollback:** use the exact snapshot path printed by
+  `trellis migrate --prepare` with `trellis migrate --rollback SNAPSHOT` before
+  further project changes. The rollback rejects a changed checkout or changed
+  post-prepare file rather than overwriting it.
+- **Attachment transaction rollback:** attach and detach journal their own
+  work. If interrupted, preserve the journal and invoke `trellis recover`; do
+  not remove local leaves or `info/exclude` blocks manually.
+- **Tracked project change rollback:** revert the reviewed project PR normally.
+- **Source policy rollback:** publish and explicitly adopt a prior verified
+  release; do not make a live source checkout the fallback runtime.
 
-1. **`git revert <sha>`** — preserves history, reversible, works after merge. Default choice.
-2. **Forward-fix** — if the bug is small and the fix is obvious, ship a fix rather than a revert. Only when you're sure of the scope.
-3. **`git reset --hard HEAD~N`** — forbidden on `main`. Allowed on a feature branch only if it's not yet pushed.
-4. **Force-push `main`** — forbidden unconditionally. Branch protection blocks this; the `pre-push` hook blocks this; don't try.
+### 12.3 Compatibility rollback
 
-### 12.3 Postmortem pattern (blameless, lightweight)
-
-For anything that took > 2 hours to resolve, write a short note in `gotchas.md`:
-
-```markdown
-## <YYYY-MM-DD> — <short title of what broke>
-**What happened:** <one paragraph>
-**Why it happened:** <root cause, not symptom>
-**Detection:** <how it surfaced — hook blocked us / user reported / audit caught it>
-**Fix:** <what the fix was>
-**Prevention:** <is there a hook, a test, a lint rule, an invariant check that would catch this category next time? If yes, open an issue or add it now.>
-```
-
-If a prevention is possible and cross-cutting, add it to `deferred.md` with this project as the first witness. When two more projects hit the same category, promote to parent.
+The compatibility release retains legacy direct-link support for exactly one
+release so a machine can restore a local migration snapshot and use the retained
+compatibility behavior while its project PR is corrected. This escape does not
+extend the cutover deadline or justify new direct-link onboarding.
 
 ---
 
-## 13. Secrets & dependency management
+## 13. Secrets, dependencies, and local tooling
 
-### 13.1 Secrets
-
-- **Never commit secrets.** `.env*`, `secrets/**`, `*.pem`, `*.key` are blocked from reads by `block-destructive` and should be `.gitignore`d at project root.
-- **Local dev** uses `.env.local` (gitignored). Share a `.env.example` with the keys and no values.
-- **CI/CD** secrets live in the platform's secret store (GitHub Actions secrets, Vercel environment variables, Cloudflare secret bindings). Rotate on any suspected leak.
-- **Production** uses the same platform secret stores. Per-environment values.
-- **Never pipe secrets through hooks or subagents.** Hooks run with the user's env and can see them; they must not echo them into tool output.
-
-### 13.2 Dependency management
-
-Baseline across all projects:
-
-- **Dependabot** (or Renovate) enabled on every repo — weekly schedule for minor/patch, manual for major.
-- **Auto-merge patch updates** when CI passes. Manual review for minor. Major upgrades are their own PR with testing notes.
-- **Pin versions** in lockfiles (`pnpm-lock.yaml`, `Cargo.lock`, etc.). Never commit with an out-of-sync lockfile.
-- **`npm audit` / `pnpm audit` / `cargo audit` / equivalent** runs in CI. High-severity vulnerabilities block the merge; medium/low get a fix window and a tracking issue.
-
-Upgrade cadence:
-- **Weekly:** accept Dependabot patch PRs.
-- **Monthly:** process minor upgrades with a morning of focused work.
-- **Quarterly:** evaluate major upgrades. Don't let any dep stay >2 majors behind without a written reason.
-
-#### Node engine declaration
-
-Every active project declares `engines.node` matching the watchlist Node target (currently `>=22.0.0`) at the root `package.json`, plus a root `.nvmrc` (or `.node-version`) carrying the matching major for local-dev parity. Workspace-level `engines.node` overrides are allowed only when a workspace genuinely needs a different floor; otherwise inherit from root. Reasoning: Node-tier tooling (turbo, lint-staged, husky, codegen) silently picks up whatever Node is on PATH when no engine is declared, which produces drift the dep-major-upgrade-watch audit can only detect after the fact.
-
-#### Python engine declaration
-
-Every active Python project declares `requires-python` in `pyproject.toml` matching the watchlist Python target (currently `>=3.12`), plus a root `.python-version` carrying the matching version for local-dev parity (read by `pyenv`, `uv`, `pdm`, and most editor integrations). Workspace-level overrides are allowed only when a sub-package genuinely needs a different floor. Reasoning is identical to Node: Python-tier tooling (mypy, ruff, pytest, codegen) silently picks up whatever `python3` is on PATH when no engine is declared, which produces interpreter-version drift the dep-major-upgrade-watch audit can only detect after the fact.
-
-### 13.3 CVE monitoring
-
-GitHub's Dependabot alerts are the default channel. High-severity alerts get same-week attention. For runtime-critical projects (e.g., anything public-facing handling user data), subscribe to the relevant advisory feeds (Node security, Rust advisory DB, GHSA).
-
-### 13.4 Local toolchain baseline (Node / package manager)
-
-Trellis hooks (`pre-push`, `stop-verify`, the process-gate) shell out to `node` and a package manager. They run as **git hooks and harness hooks — non-login, non-interactive shells.** A login-only PATH (the common `.zprofile` / nvm-in-`.zshrc` setup) leaves those shells with a *different* Node and no pnpm, which silently breaks enforcement. This bit us twice (see `gotchas.md` 2026-05-31). The machine-level baseline that prevents it is **not repo-tracked**, so a fresh machine or new agent must re-establish it:
-
-- **Node 24 LTS via nvm**, single version installed; `nvm alias default 24`. Don't leave multiple 24.x point releases around — long-running dev servers pin a since-deleted version path in memory and confuse audits.
-- **Stable symlink** `~/.nvm/default-node` → the active `~/.nvm/versions/node/vXX`. nvm's own dir name changes per upgrade; the symlink gives a stable target.
-- **`~/.zshenv` prepends `$HOME/.nvm/default-node/bin` to PATH** — `.zshenv` is sourced by *every* zsh (login, non-login, non-interactive), so git hooks inherit Node 24 + pnpm. This is the load-bearing fix; `.zprofile`/`.zshrc` are not enough because hooks don't source them.
-- **Standalone pnpm** pinned to each repo's `packageManager` field (corepack disabled). Not corepack-shimmed — corepack adds a Node-version-sensitive layer that broke under the wrong Node.
-- **Homebrew Node (currently 26) is a *kept transitive dependency*** of the `summarize` formula (`brew uses --installed node` → `summarize`). Do **not** uninstall it — that breaks `summarize`. It must simply stay *shadowed* on PATH behind the nvm Node via the `.zshenv` prepend. nvm remains the only Node *manager*; brew Node is just a hidden library dep.
-
-**Per-repo:** `.nvmrc` pins the dev-shell Node major (`24`). `engines.node` stays the *loose floor* (`>=22.0.0`) — do not bump it to `24.x`. Repos with `engine-strict=true` (e.g. an `.npmrc`) hard-fail installs on a mismatched Node, so a pinned `24.x` engine would break installs on a Node-26 box. `.nvmrc` is the hint; `engines` is the floor. This split is intentional, not an inconsistency.
-
-**Package-manager agnosticism.** Hooks never hardcode a manager. They resolve it via `trellis.config.json.package_manager` (fleet) → `<project>/.trellis.config.json.package_manager` (project-local) → `"auto"` = lockfile detection (`pnpm-lock.yaml`→pnpm, `bun.lock(b)`→bun, `yarn.lock`→yarn, `package-lock.json`→npm). A configured-but-absent manager makes the step *skip*, never hard-fail. Resolver lives in `core-rules/hooks/lib/pm.sh` (`trellis_resolve_pm`), mirrored in process-gate `common.sh` (`pg_resolve_pm`) and inlined in `husky/pre-push`. Schema: `scripts/lib/trellis.config.schema.json`.
-
-**Doctor check.** `scripts/doctor.sh` has a `== Tooling baseline ==` section: it flags any tool present interactively but missing in a non-login shell (the regression signature above), and any registered project whose `.nvmrc` major diverges from the running Node. Both are WARN-only (dev-env hygiene, never gates inheritance). Run `scripts/doctor.sh` after touching node/nvm/PATH.
-
-### 13.5 Disk maintenance
-
-Build caches, stale `git worktree` checkouts, and package stores accumulate silently across the fleet. The triggering incident: a single unscoped `turbo.json` `outputs` glob (a `.next` entry without the `cache`/`dev` negations) made turbo re-archive the whole `.next` tree on every run, reaching 148 GB on one machine over two days before the disk filled. Disk reclamation is a **host** operation — the scheduled-task sandbox cannot see the real host footprint, so this lives in a CLI, not an audit.
-
-`trellis disk-janitor` (`scripts/disk-janitor.sh`) scans the active fleet across three scopes — build caches, stale worktrees, package stores — and is **report-first, never auto-delete**. The flow is `--report` → `--dry-run` → `--apply`:
-
-- **`--report`** (default) prints a fleet disk summary and writes `audits/YYYY-MM-DD-disk-janitor.md`, including a tripwire (free space vs floor, largest cache vs ceiling) and a recurrence pre-pass flagging any unscoped-`turbo.json` landmine.
-- **`--dry-run`** prints the exact deletion plan — per row the human-readable bytes and why it is safe to delete; worktrees show their four-gate verdict — and mutates nothing.
-- **`--apply`** prints the plan, then confirms **per category** (a mandatory `y/N` unless `--yes`) before deleting. A worktree is reaped only when all four gates hold: non-main, older than the stale threshold, working tree clean, and verified-merged (merge detection avoids `git branch --merged`, which is blind to squash-merge history). An unverified merge is reported as a candidate and never reaped.
-
-A **daily launchd report agent** (`core-rules/templates/org.trellis.disk-janitor.plist`, installed by `scripts/install-disk-janitor-launchd.sh`) runs `trellis disk-janitor --report` off-peak — **report-only; it never runs `--apply`** — so the next runaway cache surfaces as a daily `audits/` line, not a full disk. The recurrence tripwire is also wired into `trellis doctor` as the report-only `hc_turbo_outputs` check in `scripts/lib/health-checks.sh` (it warns and prints the fix; it does not auto-edit the user-owned `turbo.json`). Config lives under the optional `disk_janitor` object in `trellis.config.json` (TTLs, stale-days, the free-space floor and cache ceiling, `skip_projects`); a clone with no block runs on defaults. Rationale and rejected alternatives: `docs/adr/2026-06-02-disk-janitor.md`.
+- Never commit secrets. Keep local values in ignored project environment files
+  and platform secret stores; never place them in a release payload, registry,
+  migration snapshot description, or audit report.
+- Read tokens from the process environment only when needed. Do not print,
+  persist, or copy them into a command line, URL, documentation example, or
+  project configuration.
+- Projects own their package-manager and runtime declarations. Trellis can
+  carry portable defaults, but no fixed machine path or user-local package store
+  becomes project policy.
+- Local hooks and agents run in non-login environments. Ensure the necessary
+  toolchain is available there, but diagnose a missing tool rather than adding a
+  path to tracked policy.
 
 ---
 
@@ -1063,332 +757,302 @@ A **daily launchd report agent** (`core-rules/templates/org.trellis.disk-janitor
 
 ### 14.1 Rule of Three
 
-The parent layer grows slowly and deliberately. A rule earns parent status only when *three* independent projects adopt it. The mechanics:
+Cross-project policy earns parent status when three independent projects need
+it. Keep a first occurrence project-local, record the second as a candidate,
+and promote the third only with the evidence and a release-level verification
+plan. Demote a parent rule when it no longer applies broadly or causes real
+harm.
 
-- **n = 1:** a rule appears in exactly one project's `CLAUDE.md` or hook set. Leave it project-local.
-- **n = 2:** a rule appears in two. Enter it in `core-rules/deferred.md` with source, what/why, and the condition for lift (usually "when a third project adopts a close variant").
-- **n = 3:** a third project adopts a close variant of the rule. Promote: edit `core-rules/CLAUDE.md` or `core-rules/hooks.md` as appropriate, cite the three sources, delete the `deferred.md` entry, run `parent-hook-drift` to sync.
+### 14.2 Release discipline
 
-This is the discipline that prevents `core-rules/CLAUDE.md` from bloating into a 30 KB kitchen sink (as Neev's did before Trellis extracted it).
+A source change becomes runtime behavior only after review, an immutable
+annotated release, installation, verification, and explicit adoption. Update
+release metadata, migration compatibility notes, public mirror material, and
+all three harness surfaces together. Never repair drift by source-copy syncing
+files into projects.
 
-**The missing rung between n=1 and n=3.** A check that is *written down* at n=1 is not a check — it is prose the agent may or may not honor, and it sits unenforced until a third project happens to want it. The project-local verification skill ([§5b](#5b-skills-layer)) is the form that is actually *enforced* while it earns its promotion: deterministic, invocable, scoped to one project, and cheap to delete if it turns out not to matter. Prefer it over a `deferred.md` entry when the rule is mechanical enough to run. `deferred.md` remains the right home for rules that are judgment calls rather than checks.
+### 14.3 Compatibility discipline
 
-### 14.2 Demotion
+A compatibility path needs a named release boundary, a diagnostic signal, a
+migration/rollback procedure, and a removal condition. It must not become an
+undocumented alternate runtime. The current legacy direct-link path ends after
+the portable-fleet compatibility release; cutover requires local registry parity
+and migrated-project evidence before its writers and tracked inventory are
+removed.
 
-If a parent rule stops applying to one of the registered projects, consider demoting it. Demotion criteria:
-- At least three projects no longer use the rule actively, OR
-- The rule has been shown to cause harm (locked in wrong defaults, blocked legitimate work).
+### 14.4 Choosing the track
 
-Demotion mechanics: move the rule body into an `archived/` file with date + reason, remove from parent, run `parent-hook-drift` to sync.
-
-### 14.3 Who edits `core-rules/`
-
-Edits to `core-rules/` affect every registered project immediately (via the symlink). Consequence: every edit to `core-rules/CLAUDE.md`, `hooks.md`, or `inheritance.md` is a PR in the Trellis canonical repo with:
-- The rationale (why this edit).
-- The Rule-of-Three evidence if it's a lift.
-- A re-run of `parent-hook-drift` after merge to confirm every project's deployed copies are still identical.
-
-**Write rules as principles, not prohibitions.** Current models follow instructions literally and do not silently generalize scope from one item to another. When you add or edit a rule: state scope explicitly ("apply to every section, not just the first"), prefer a positive statement of the desired behavior over a list of "don't"s, and reserve `CRITICAL:`/`MUST` for genuine bright-lines — aggressive language over-triggers, so normal "Use this when…" phrasing usually steers better. A rule that describes the shape of good work generalizes; a rule that forbids one specific mistake usually just moves the mistake. Anything genuinely model-divergent belongs in `core-rules/references/model-prompting-deltas.md`, never inline in a rule file.
-
-### 14.4 Rollout hygiene
-
-When a canonical hook changes:
-1. Edit `core-rules/hooks/<name>.sh` in the Trellis canonical repo.
-2. Commit in the Trellis canonical repo with `fix:` or `feat:` prefix.
-3. Rsync to every active project: `for p in $(registry-list); do cp core-rules/hooks/<name>.sh ~/projects/personal/$p/.claude/hooks/; done`.
-4. Commit in each project with `chore: sync <hook> to canonical`.
-5. Next `parent-hook-drift` run confirms all byte-identical.
-
-Step 3 will be automated by `scripts/sync-hooks.sh` once it exists (currently manual).
+Size every change before building it. Direct surgical work for a tiny obvious
+change; a short design pass and a project-local plan for a self-contained
+change; the full pipeline of §14.7 for cross-cutting or load-bearing work. When
+two tracks are plausible, take the heavier one — a little extra design is cheap
+and a wrong "surgical" change is not. The autonomy level of §14.9 determines who
+answers the interactive gates, not whether safety, receipts, review, and
+immutable release boundaries apply.
 
 ### 14.5 Versioning & the upgrade flow
 
-Spec-kit adoption (Phase A, 2026-05-12) introduced a semver pin on the canonical core-rules so downstream consumers can decide when to pull canonical changes instead of getting silently dragged along.
+`core-rules/VERSION` is a single-line semver and the authoritative identity of a
+release source revision. It is bumped deliberately when a meaningful rule, hook,
+or skill change lands, and a release publishes an annotated `vVERSION` tag whose
+`core-rules/VERSION` equals `VERSION` exactly — installation refuses the tag
+otherwise.
 
-- `core-rules/VERSION` — single-line semver. Authoritative. Bumped intentionally when a meaningful rule, hook, or skill change lands. A verified release tags both the source control plane and the published mirror at their corresponding release tips.
-- `trellis.config.json` — optional `trellis_version` field. Downstream forks (and the parent itself, on the canonical clone) pin to a specific version. Absent = "not pinned yet" (the expected pre-rollout state for existing projects).
-- `scripts/upgrade.sh` — consumer-side check. Fetches tags from `origin` (or `template.remote` fallback), compares pinned version to highest `v*.*.*` tag, prints a stat diff of `core-rules/`. Read-only by default; `--opt-in` rewrites the pin and revalidates the config against the schema. `--check` exits non-zero on drift for CI.
-- An optional operator version-drift audit can walk the registry and classify each project as current / no-pin / patch-drift / minor-drift / major-drift / ahead / malformed. Only major drift is critical; everything else is informational while a rollout reaches each project.
+Consumers do not track a branch and do not resolve "latest". They install a
+named annotated tag from an explicit `--remote` or the machine-local
+`TRELLIS_HOME/config.json` `release_remote`, verify the installed payload, and
+then explicitly adopt it for a selected project, fleet, or reviewed all-fleet
+scope. Installing a version already present in the local store is refused as an
+ownership conflict rather than overwritten, which is what makes an installed
+release a stable forensic artifact.
 
-Severity contract is shared between `upgrade.sh` and `version-drift`. If you change tiers, change both in the same commit.
-
-Read `core-rules/VERSION` and the latest `v*.*.*` tag for the current release; this manual intentionally does not duplicate a version number that will drift. Legacy `SE_CORE_*` env vars or `.claude/rules/se-core.md` symlinks can be re-linked by `scripts/rollout-rebrand.sh` (one-shot, idempotent), after which operator version checks can convert `no-pin` rows to real pins project by project.
+An optional operator `version-drift` audit walks the local registry and
+classifies each row against the current release. Only major drift is critical;
+everything else is informational while a rollout reaches each attachment. This
+manual deliberately does not restate a version number that will drift — read
+`core-rules/VERSION` and the release store.
 
 ### 14.6 Updating Trellis
 
-§14.5 describes the version-pin *machinery*; this is the *sequence* an agent runs to apply an update. Trellis is agent-operated, so the canonical step order below is load-bearing — getting it wrong silently poisons every project's inheritance. The full agent runbook is `docs/UPGRADING.md`; this section is the summary.
+§14.5 is the versioning *machinery*; this is the *sequence*. The full runbook is
+[docs/UPGRADING.md](docs/UPGRADING.md); this is the summary, and the step order
+is load-bearing.
 
-**The canonical upgrade sequence:**
+1. **Install** the exact annotated release into the local immutable store:
+   `trellis release install VERSION --remote URL`.
+2. **Verify** the installed payload: `trellis release verify VERSION`. Required
+   before any attachment or adoption, and success says only that the payload is
+   valid — not that any project uses it.
+3. **Inspect the intended scope** with `trellis registry list --fleet NAME`.
+   Unavailable and `identity_error` rows (§11.1) are evidence, not permission to
+   guess a replacement.
+4. **Adopt explicitly** with exactly one selector: `--project ID [--fleet NAME]`,
+   `--fleet NAME`, or a reviewed `--all`.
+5. **Verify the adopted runtime** with the same narrow `trellis doctor` scope.
 
-1. **Pull latest canonical.** Fetch and pull the canonical clone (`$TRELLIS_ROOT`).
-2. **Ensure the canonical checkout is on `main` and clean.** Every project symlinks to the canonical working tree at a fixed path, so a feature or dirty canonical silently feeds *every* project stale rules. This is a Tier-0 precondition — verify it before trusting any inheritance, never assume it. (`docs/UPGRADING.md` makes this its leading Step 0 and re-asserts it as Step 2 *after* the pull, since the pull itself can leave the tree dirty; check it both before and after.)
-3. **`scripts/upgrade.sh --opt-in`** to adopt the version pin (rewrites `trellis_version`, revalidates the config — see §14.5).
-4. **`scripts/doctor.sh`** runs read-only — `upgrade.sh` auto-invokes it. On drift it prints the exact `doctor --fix` command to run.
-5. **Preview, then repair.** `scripts/doctor.sh --fix --dry-run` shows exactly what would change per project; `scripts/doctor.sh --fix` applies it. Hook re-sync is gated behind `--fix-hooks` because it changes enforcement behavior.
-6. **Re-run `scripts/doctor.sh`** to confirm green.
+`trellis upgrade VERSION [--remote URL] <selector>` performs steps 1, 2 and 4 as
+one launcher-only operation with no intermediate review point. Because it begins
+with an install, it is forward-only: rolling back to an already installed
+version uses `release verify` plus `release adopt` instead.
 
-**`doctor` is the verification gate after every update** — it is the deterministic check that adopted rules actually reached the projects, which the version pin alone does not verify. Two lessons this sequence encodes (from the 2026-05-30 drift incidents): a canonical checkout left on a feature branch silently unparents every project, so confirm canonical-is-on-`main` *before* trusting inheritance; and resolve symlink targets rather than assuming a name implies its target, since a stale or cross-machine target drops the rule with no error. See `docs/UPGRADING.md` for the step-by-step runbook and `docs/adr/2026-05-30-trellis-doctor.md` for the rationale.
+**`doctor` is the verification gate after every update.** A recorded release is
+not evidence that the attachment's leaves are intact; the scoped doctor result
+is. The older doctrine this replaces — pull the canonical clone, confirm it is
+on clean `main`, then trust every project's live symlinks — is retired with the
+checkout that made it necessary. Source-checkout cleanliness is no longer a
+runtime health signal, because no attached project resolves through it.
 
-### 14.7 The clarify → spec → plan → tasks → analyze pipeline (opt-in by default; enforceable via `mandatory_pipeline`)
+### 14.7 The clarify → spec → plan → tasks → analyze pipeline (opt-in)
 
-Spec-kit Phases B + C (2026-05-12) added five opt-in skills that take a vague request through structured questioning, formal specification, technical planning, work breakdown, and a final coherence check. They live as canonical skills under `core-rules/skills/{clarify,spec,plan,tasks,analyze}/` and are seeded into every registered project's `.claude/skills/` (and `.agents/skills/` under Codex) by `onboard-project.sh` / `scripts/rollout-feature-skills.sh`.
+Five skills take a vague request through structured questioning, formal
+specification, technical design, work breakdown, and a coherence check. They are
+release-owned under `core-rules/skills/`, and an attached project receives them
+as manifest-owned leaves in its native Claude Code, Codex, and OMP surfaces.
 
-**This pipeline is the heavyweight track of a three-track router.** The `brainstorming` front-door (the canonical skill ships under `core-rules/skills/brainstorming/`) sizes every change to one of three tracks before any building begins. The same boundaries are stated in `core-rules/inheritance.md` and the `brainstorming` skill itself:
+- `clarify` — front-step question pass. Use before `spec` when the request is
+  vague, contradictory, or leaves any of the five canonical intent dimensions
+  unresolved. The five questions are a floor: add the ones whose answers would
+  change the architecture, and ask those first.
+- `spec` — problem, users, success criteria, non-goals, constraints, risks.
+  *What* and *why* only, no implementation detail.
+- `plan` — file-by-file technical design, sequencing, test strategy, risks. When
+  a working implementation of the semantics already exists, point the plan at
+  that code rather than describing it.
+- `tasks` — checkbox breakdown, ≤4h per task, each mapped to a spec criterion.
+  `tasks.md` is the document of record; `TodoWrite` mirrors the active slice, and
+  if they disagree `tasks.md` wins.
+- `analyze` — advisory drift check across the artifacts. Verdict only; the
+  operator owns whether to act or override.
 
-- **Surgical** — a tiny, obvious change with one clear correct shape (one-line fix, copy tweak, config flip). Skip ideation and skip the pipeline; make the change directly with a receipt, or hand it to `execute` if a checkbox already exists.
-- **Lightweight** — a self-contained change you can design in a short dialogue (one subsystem, a handful of files, no cross-cutting risk). Run a short design pass, author a project-local design plan, then build it with `execute`. *(When `mandatory_pipeline` is enabled, the plan-only route satisfies the gate only **below the size floor**. Above the floor a lightweight **feature** escalates to the full triad; genuinely lightweight **mechanical** work over the floor takes the `/surgical` route instead — decision D10, spec 006.)*
-- **Heavyweight** — cross-cutting / load-bearing / multi-subsystem work, vague or contradictory intent, or three-plus acceptance criteria. **This is the pipeline below:** `clarify` → `spec` → `plan` → `tasks` → `analyze`, then build with `execute`.
+All three tracks of §14.4 converge on the single builder, `execute`, which runs
+*after* these artifacts exist.
 
-All three tracks converge on the single canonical builder, **`execute`** (`core-rules/skills/execute/`, shipped Phase 4) — it is the implement/build stage that turns a plan's or `tasks.md`'s checkboxes into shipped, receipted work. The pipeline below produces the design artifacts; `execute` is what runs *after* them. When unsure between two tracks, choose the heavier one — a little extra design is cheap; a wrong "surgical" change is not.
+**Decision rule.** Invoke the pipeline when any of: three or more acceptance
+criteria; net-new behavior across more than two files; cross-cutting or
+load-bearing work; or the operator asks for a write-up. Otherwise skip it — bug
+fixes with clear reproductions, behavior-preserving refactors, single-file
+additions, and operational tasks stay on the surgical default.
 
-**Exploration is a different loop from building.** The three tracks size work by *risk*, and all three converge on shipping. For work whose *shape* is undecided — a new surface, a flow with no obvious structure, anything where you'd recognize the right answer but can't specify it — don't take any of the three tracks yet. Explore first, in a separate session, at deliberately low fidelity:
+**When `mandatory_pipeline` is enabled** in effective portable policy (the
+tracked project declaration is `.trellis.json`; default off), that decision rule
+stops being a judgment call above the floor. A branch whose net gated diff
+exceeds `spec_required_diff_lines` cannot be pushed without one of: a spec triad
+added on this branch, a size-capped `/surgical` declaration, or a logged
+`/surgical --emergency`. Sub-floor work stays surgical-default at every setting.
+The gate is a pure function of git and filesystem state, so it enforces
+identically across harnesses. What flexes with autonomy is only *who answers*
+the intake interview (§14.9): the block itself fires the same at every level.
+Mechanism: `core-rules/hooks.md`.
 
-- **Set direction before generating.** Fonts, colors, references, mood, the two products you want it to feel like. Given no direction, the model produces competent defaults, and competent defaults are the thing you'll spend the next three turns trying to escape.
-- **Keep fidelity low while the structure is in question.** Wireframes move faster and keep the conversation on structure instead of on the shade of the button. Mock with fake data; test the layout before wiring anything real to it.
-- **Generate several, then remix.** Ask for a handful of distinct options rather than one polished one. Pick the two that are working and ask for them combined.
-- **Make it interactive when you need buy-in.** A clickable simulation settles arguments that a static mockup extends.
-- **Take the last 5% by hand.** Nudging a margin yourself is faster and cheaper than describing the nudge.
+**Exploration is a different loop from building.** For work whose *shape* is
+undecided, explore first in its own session at deliberately low fidelity: set
+direction before generating, keep fidelity low while structure is in question,
+generate several options and remix, and take the last 5% by hand. Treat the
+output as disposable — what carries forward is the chosen direction, not the
+exploration code.
 
-Do this in its own session and treat the output as disposable. What carries forward into the pipeline is the chosen direction and the mockup, not the exploration code — a prototype that gets promoted straight to production is how exploration debt ships.
+**Implementation notes.** While building, keep an untracked
+`implementation-notes.md` at the repo root of the active checkout: one line per
+place the code had to depart from the plan, and the choice made at that fork.
+Repo root and untracked are both load-bearing — `process-gate` looks for it at
+the repo root, and keeping it out of the index stops it shifting a task's diff
+stat. Delete it before a worktree is reaped, and after harvesting its entries
+into the PR description and `gotchas.md`.
 
-**Decision rule — when to invoke the pipeline (the heavyweight track):**
+**Stopping points.** Each artifact is meant to be reviewed before the next is
+generated. When the operator is present, stop after each skill returns. When
+running unattended, chain the mechanical transitions rather than parking the
+work overnight, and pause only where the work genuinely requires the operator: a
+destructive or irreversible action, a real scope change, or an answer only they
+can give. The `spec`→`plan` transition is not mechanical — a plan that settles
+an architectural question surfaces inline even at L5.
 
-Trellis's default is surgical scope. The pipeline is for changes that DON'T fit that mould. Invoke when any of:
-
-- The request lists **three or more acceptance criteria**.
-- The change introduces **net-new behaviour across more than two files**.
-- The change is **cross-cutting** (auth, billing, infra, shared UI primitives) or otherwise load-bearing.
-- The operator explicitly says "spec this out first" or asks for a write-up.
-
-If none apply, skip the pipeline. Bug fixes with clear reproductions, refactors with no behaviour change, single-file additions, and operational tasks all stay on the surgical-default path: failing test → fix → PR.
-
-**When `mandatory_pipeline` is enabled, the decision rule above stops being a judgment call above the floor (spec 006).** The canonical statement, one wording across this section and every skill doc:
-
-> By default the pipeline is **opt-in** and the decision rule above is advisory — sub-floor and clearly-surgical work skips it, exactly as before. When the operator sets `mandatory_pipeline.enabled` in `trellis.config.json` (default **off**; the public template ships off), a branch whose **net gated diff exceeds `spec_required_diff_lines`** cannot be pushed without ONE of: a **spec triad** added on this branch (+ the interview artifact), a size-capped **`/surgical`** declaration (≤ `surgical_max_diff_lines`), or a logged **`/surgical --emergency`** override. **Sub-floor work stays surgical-default at every setting.** The gate is deterministic (a pure function of git/filesystem state), so it enforces equally on Claude Code and Codex; with the knob off, behavior is identical to prior Trellis. Full mechanism: `core-rules/hooks.md` (spec-gate) + `specs/006-process-parity-and-mandatory-pipeline/`.
-
-This is **not** a bright-line guardrail and not new `MUST` prose — it is a config-gated, default-off deterministic trigger in front of the already-mandatory-in-prose pipeline (the sanctioned "more automatic" path per ADR 2026-07-05). What flexes with autonomy is only *who answers* the intake interview (§14.9): at L1–L3 `clarify` genuinely interviews the user and writes `clarify.md`; at L4/L5 the agent self-answers and logs to `decisions-log.md`. The gate's block fires the same at every level; the level only changes how you satisfy it.
-
-**The blind-spot pass (before `clarify`).** `clarify` asks the questions we already know to ask. When the work touches a domain you don't know well — a protocol, a regulatory surface, a runtime you've not shipped on — the more valuable pass comes first: ask the agent what you don't know that you don't know.
-
-> "I'm working on [task] but know nothing about [domain]. Can you do a blind spot pass to help me figure out my relevant unknown unknowns?"
-
-Disclose your actual expertise level when you ask — "I've shipped a lot of Postgres but never touched replication" gets a usefully different answer than a blank request. The output is not an artifact and does not need a file; it exists to change what `clarify` asks about. Skip it when you know the territory. It costs one turn and it is the cheapest place in the pipeline to find out that the plan was going to be wrong.
-
-**Where each skill fits:**
-
-- `clarify` — front-step question pass. Use BEFORE `spec` when the operator's request is vague, contradictory, or leaves any of the five canonical intent dimensions unresolved. Optional but recommended for non-trivial requests.
-- `spec` — formal specification: problem, users, success criteria, non-goals, constraints, open questions, risks, out-of-scope.
-- `plan` — file-by-file technical design.
-- `tasks` — checkbox work breakdown, ≤4h per task, dependencies tracked, every task maps back to a spec criterion.
-- `analyze` — tail-step drift check across spec ↔ plan ↔ tasks (and clarify if present). Advisory, not gating; runs BEFORE implementation begins, OR mid-implementation when something feels off.
-
-**Pipeline mechanics:**
-
-The scaffolding step is shared across the pipeline: `core-rules/skills/spec/scripts/new-feature.sh <slug>` validates the kebab-case slug, checks for a dirty tree, picks the next NNN, creates branch `feature/<slug>` from main/master, and lays down a *template* `spec.md`. After scaffolding, the skills compose:
-
-1. **`clarify` skill** *(optional, recommended for vague requests)* — captures the operator's voice verbatim across five canonical questions (intent, users affected, success metric, edge cases, rollback plan). Writes `specs/<NNN>-<slug>/clarify.md` alongside the template spec.md. Refuses to declare done until every question has an answer or an explicit `Deferred: <reason>` block. The schema lives at `core-rules/skills/clarify/references/question-schema.md`.
-
-   The five canonical questions are the floor, not the ceiling. Before asking them, look at what the change actually touches and add the questions **whose answers would change the architecture** — the data model, the type interfaces, the UX flow, the boundary between two subsystems. Ask those first; they are the ones where a wrong assumption is expensive to unwind later. Where a canonical question is obviously settled by the request itself, record the answer and move on rather than performing the interview.
-2. **`spec` skill** — reads `clarify.md` if it exists, then replaces the template `spec.md` placeholders with real content. Authoring rules forbid implementation detail; the spec answers *what* + *why* only.
-3. **`plan` skill** — reads the reviewed spec, writes `specs/<NNN>-<slug>/plan.md`: technical approach, schema, API surface, file-by-file change list, sequencing + dependencies, test strategy mapping each spec criterion to a test, rollout plan, risks + mitigations, decisions log. Refuses to overwrite.
-
-   When a working implementation of the semantics you want already exists — another repo, a library, a sibling service, an older version of this same system — point the plan at the **code** rather than describing it. "Read `<path>`; reimplement those semantics in our stack, with these three differences" is shorter than a specification and leaves far less room to guess. The same holds for UI: a rough HTML mockup carries more design intent than a paragraph describing the layout.
-4. **`tasks` skill** — reads the reviewed plan, writes `specs/<NNN>-<slug>/tasks.md`: checkbox table of atomic tasks (≤4h each), dependencies, coverage map. `tasks.md` is the source of truth for the feature's work breakdown; `TodoWrite` mirrors the active 3–5-item slice during implementation.
-5. **`analyze` skill** — reads `spec.md` + `plan.md` + `tasks.md` (+ `clarify.md` if present), writes `specs/<NNN>-<slug>/analyze.md`: drift findings across 8 categories (coverage, origin, scope, constraint compliance, intent fidelity, rollback consistency, test strategy completeness, sequencing sanity). Ends with a verdict — PASS / NEEDS-REVISION / BLOCKED. Advisory only; operator owns the call to act or override.
-
-**After the build — package it for the human who wasn't watching.** The five pipeline artifacts are written for the agent doing the work. When the work is done — and especially when it ran unattended ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project) L4/L5) — write one document *for the operator*: lead with what it does (a demo, a screenshot, a worked example, the actual output), then the decisions you made on their behalf, then what you'd want a reviewer to look at hardest. Not a recap of the artifacts; they can read those. An HTML page is a good format here — it renders, it can embed the real thing, and it costs no more to produce than markdown.
-
-Where understanding matters more than approval — a subsystem the operator will maintain, a pattern they'll be asked to extend — run `/debrief` instead of writing the pitch. It asks them to explain the change back and stops when they can't.
-
-**The TodoWrite-vs-tasks.md contract.** `tasks.md` is committed, reviewed, archived alongside the rest of the pipeline — the document of record. `TodoWrite` is the ephemeral in-flight surface: pull the next 3–5 unchecked tasks into TodoWrite as you sit down to work; tick the box in `tasks.md` AND mark TodoWrite items complete in lockstep. If they disagree, `tasks.md` wins.
-
-**Implementation notes.** While building, keep an **untracked `implementation-notes.md` at the repo root of the active checkout** — a running log of every place the code had to depart from the plan, and the choice you made at that fork. Repo root and untracked are both load-bearing and not stylistic: `process-gate` looks for it at the repo root, and it must stay out of the index so it cannot shift a task's `+N/-M` diff stat or the `git diff HEAD` hash that the end-of-turn review rendezvous is keyed on. It must also be **deleted before a worktree is reaped**, because every reap predicate refuses on untracked content by design. One line each: what the plan assumed, what was actually true, what you did, and whether you took the conservative option. This is not a status file and not a summary; it is the record of where the map and the territory disagreed. It is the first thing to read when reviewing the work, and the raw material for `gotchas.md` entries afterward. Delete it when the feature ships, after harvesting the gotchas. It is distinct from `decisions-log.md` ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)), which records decisions taken on the operator's behalf at L4/L5 only; implementation notes apply at every level, because the plan↔build gap exists whether or not anyone was watching.
-
-**Stopping points between skills.** The pipeline is deliberately five skills (not one): each artifact is meant to be reviewed before the next is generated. When the operator is present (L1–L3), stop after each skill returns and let them read it.
-
-When running unattended (L4/L5), stopping between skills just parks the work until morning — nobody is going to read the artifact tonight. Chain through the **mechanical** transitions (`clarify`→`spec`, `tasks`→build) rather than ending the turn on a returned artifact. Pause only where the work genuinely requires the operator: a destructive or irreversible action, a real scope change, or an answer only they can give. If you do pause, say what you need and end the turn — don't end on a promise to continue. Record the decisions you made on their behalf in `decisions-log.md` ([§14.9](#149-autonomy-the-responsibility-slider-opt-in-per-project)) so the review that was skipped can happen after the fact instead of blocking.
-
-**The `spec`→`plan` transition is not mechanical.** A plan that settles an architectural question — a new dependency, a new module, an auth flow, a data store, a public API — hits the §14.9 reversibility carve-out, which surfaces inline *even at L5*. Chaining does not override that cliff: the rule against ending a turn on an unfinished promise is not a licence to push past an irreversible decision. Surface the decision, then continue.
-
-The skills are writers (and one analyst), not builders — building is the `execute` skill's job and begins after `tasks` completes (and ideally after `analyze` returns PASS or NEEDS-REVISION with operator-accepted findings), not before. `execute` reads the resulting `tasks.md` checkbox-by-checkbox; the lightweight track points it at a `docs/plans/<topic>.md` instead.
-
-**Onboarding + rollout.** New projects pick up the symlinks via `onboard-project.sh`. Existing registered projects get the symlinks via `scripts/rollout-feature-skills.sh` (idempotent). The project `.gitignore`'s Trellis-managed block is **generated** by `onboard-project.sh` (`write_gitignore_block`): it lists exactly the machine-absolute symlinks onboard creates this run — nothing else — and is rewritten in full on every run. The block is version-agnostic (no skill-count sentinel) and self-healing: each run strips all prior Trellis-managed blocks (any historical sentinel, plus the legacy `end SE Core fragment` variant) and any orphaned canonical-symlink lines, so re-onboarding an older project collapses stacked/stale blocks into one clean block. Project-authored `.gitignore` content is preserved.
-
-**Artifact layout per feature:**
-
-```
-<project-root>/specs/<NNN>-<slug>/
-├── clarify.md          # clarify skill (optional front-step)
-├── spec.md             # spec skill
-├── plan.md             # plan skill
-├── tasks.md            # tasks skill (work-breakdown source of truth)
-└── analyze.md          # analyze skill (advisory verdict before implementation)
-```
-
-`implementation-notes.md` is deliberately **not** in that tree. It lives untracked
-at the repo root while the build runs and is deleted once its entries are folded
-into the PR description and harvested for `gotchas.md`. Putting it inside the spec
-directory would commit it, which breaks two mechanisms at once: the diff stat and
-`git diff HEAD` hash that the review rendezvous keys on, and the reap predicates
-that refuse to destroy untracked work.
-
-After a feature ships, the directory stays in git as historical record.
+Artifacts live at `<project-root>/specs/<NNN>-<slug>/` and stay in git as
+historical record after the feature ships.
 
 ### 14.8 Presets — layering opt-in rule variants on top of parent
 
-Spec-kit Phase D (2026-05-12) added an opt-in mechanism for projects whose discipline needs genuinely diverge from the parent default. The Rule of Three protects the parent layer from bloat (§14.1); presets let two projects compose differently without forcing every project to inherit either side of the divergence.
+The Rule of Three (§14.1) protects the parent layer from bloat. Presets let two
+projects diverge without forcing every project to inherit either side of the
+divergence.
 
-**Mechanism.** Each preset is a single markdown file at `core-rules/presets/<name>.md`. Projects opt in by listing the name(s) in a project-local `<project>/.trellis.config.json` (preferred, hidden) or `<project>/trellis.config.json`:
+Each preset is one Markdown file under `core-rules/presets/`. A project opts in
+by listing names in its portable `.trellis.json`:
 
 ```json
-{
-  "presets": ["compliance-strict"]
-}
+{ "presets": ["compliance-strict"] }
 ```
 
-`scripts/rollout-presets.sh` (and `onboard-project.sh`'s preset-seeding pass) read this array, install symlinks at `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` (under Codex), and prune symlinks no longer declared. Claude Code and Codex load those links natively; the OMP adapter injects the same canonical preset content on first agent start.
+Attachment expands the declared presets as manifest-owned leaves in the native
+Claude Code and Codex rule surfaces; the OMP adapter injects the same released
+content. Rules are **additive, not last-wins**: all three harnesses add the
+enabled preset content to the prompt, and there is no engine-level override.
+"Priority" means which layer's voice an agent defers to when prose conflicts —
+parent rules, then presets, then the project's own `CLAUDE.md` — not which file
+silently overwrites another. In practice a preset extends the parent or states
+an explicit written carve-out; it never contradicts silently.
 
-**Priority order (conceptual — rules are additive, not last-wins):**
+Shipped presets, catalogued in `core-rules/presets/README.md`:
 
-All three harnesses add the enabled canonical preset content to the agent prompt. There is no engine-level override; "priority" here means *which layer's voice an agent should defer to when prose conflicts*, not which file silently overwrites another.
+- `compliance-strict` — additions for regulated or audit-bound work: mandatory
+  ADR per architectural change, two-human PR sign-off, no `--no-verify` ever,
+  mandatory CHANGELOG per PR, hard-fail secrets scan, deploy artifacts encode
+  the merge SHA.
+- `experimental-loose` — carve-outs only, for throwaway prototypes: direct
+  commits to main, skip the pipeline, optional CHANGELOG, PR-size ceiling
+  demoted to warn. Time-bound, and the security gate still runs.
 
-1. Parent rules (`core-rules/CLAUDE.md`) — always loaded. The baseline.
-2. Presets (`core-rules/presets/<name>.md`) — opt-in; the array order in the project config is also conceptual (later entries are more specific). All declared presets are loaded.
-3. Project-local (`<project>/CLAUDE.md`) — most specific; the agent should give it the most weight when it contradicts a higher-up layer.
+Authoring a new preset is governed by `core-rules/presets/README.md`:
+single-purpose, ≤50 lines, additions-plus-carve-outs structure, a stated reason,
+and a two-project minimum before it ships. An optional operator `preset-drift`
+audit compares each local row's declared array against the leaves actually
+attached.
 
-In practice, presets stay additive — they extend the parent with new rules or explicit carve-outs ("§X of the parent rules is relaxed here because…"). They never directly contradict without a written carve-out. The drift audit and code-review pass catch contradictions that slipped in silently.
+### 14.9 Autonomy — the responsibility slider
 
-**Available presets** (catalogue lives at `core-rules/presets/README.md`):
+Trellis ships an L1–L5 responsibility slider that determines *who* answers the
+harness's interactive gates: user at the lower levels, agent at the higher ones.
+Every gate and quality control remains at every level; the level changes only
+the consultation surface. L3 is the default and the historical behavior.
 
-- `compliance-strict` — additions on top of parent: mandatory ADR per architectural change, two-human PR sign-off, no `--no-verify` ever, mandatory CHANGELOG per PR, hard-fail secrets scan, deploy artifacts encode merge SHA. For regulated-data / audit-bound projects.
-- `experimental-loose` — carve-outs only: direct commits to main allowed, skip the spec-kit pipeline (TodoWrite only), optional CHANGELOG, PR-size ceiling demoted to warn, test coverage not required. Time-bound (three-week revisit); security-gate still runs. For throwaway prototypes / hackathon projects.
+- **L1 Pedagogical** — ask, and explain why you recommend what you recommend.
+- **L2 Cautious** — ask, with an embedded recommendation.
+- **L3 Standard** — the default.
+- **L4 Initiative** — single plan approval, batched questions; architectural
+  decisions still surface inline.
+- **L5 Autonomous** — silent decision-making plus a decision log; architectural
+  decisions still surface inline.
 
-**Authoring new presets** is governed by `core-rules/presets/README.md` — single-purpose, ≤50 lines, additions+carve-outs structure, cite a reason. Two-project minimum before a new preset ships (a scaled-down Rule of Three because presets are opt-in).
-
-**Drift audit.** An optional operator preset-drift check can compare each registered project's declared `presets` array against the symlinks actually present and report unknown presets, missing symlinks, harness divergence, and stale links.
-
-**Rollout flow:**
-
-```
-# 1. Pick a preset (or write a new one). Catalogue: core-rules/presets/README.md
-# 2. Add to the project's local config:
-$EDITOR <project>/.trellis.config.json   # add to .presets array
-# 3. Apply (idempotent — also prunes anything no longer declared):
-scripts/rollout-presets.sh <project>
-# 4. Re-onboard the project if its .gitignore predates Phase D (the
-#    preset-*.md gitignore globs are in the (7-skill set + presets)
-#    fragment, sentinel-bumped from prior versions).
-scripts/onboard-project.sh /abs/path/to/<project>
-```
-
-Onboarding new projects with presets pre-declared is fully automatic: write `<project>/.trellis.config.json` before running `onboard-project.sh`, and the seeding pass installs the preset symlinks alongside the canonical skill + rule symlinks.
+Level resolution reads portable project policy from `.trellis.json`, then the
+active immutable release and its declared presets, then a session override, and
+finally clamps to the lowest preset `autonomy_ceiling`. Bright-line guardrails —
+hard hooks, destructive operations, external messages, secrets, DoD receipts,
+the code-review subagent, the untrusted-content boundary — stay mandatory at
+every level. At L4/L5, decisions taken on the operator's behalf are recorded in
+the project's `decisions-log.md`. Full matrix and precedence:
+`core-rules/autonomy.md`.
 
 ---
 
-### 14.9 Autonomy — the responsibility slider (opt-in per project)
+## 15. Glossary and quick reference
 
-Trellis ships an L1–L5 **responsibility slider** that determines who answers the harness's interactive gates: user (lower) or agent (higher). All gates and quality controls remain at every level; the level only changes *who decides*. Default L3 = legacy Trellis behavior; existing projects see no change.
+**Attachment** — machine-local, ownership-recorded activation of one Git
+worktree against a verified immutable release.
 
-**Why this exists.** New users routinely report Trellis's interactive surface as the primary friction barrier — plan-approval, ambiguity flagging, pre-implementation interview, per-phase approval, brainstorming, spec-kit phase gates, destructive-action confirmation, PR-creation confirmation. Each gate exists to catch a real failure mode. But experienced operators on chore-grade work pay the same input cost as a novice on a high-stakes refactor. The slider lets them dial it.
+**Attestation** — the payload identity the stable launcher exports across its
+`env -i` boundary. It is the only thing a gated command binds to when deciding
+whether it may run; its absence is a refusal, never a permission.
 
-**Levels.**
-- L1 Pedagogical — ask, and say why you're recommending what you're recommending.
-- L2 Cautious — ask with embedded recommendation.
-- L3 Standard — current behavior.
-- L4 Initiative — single plan-approval, batched questions, architectural decisions still inline.
-- L5 Autonomous — silent decision-making + decision log; architectural decisions still inline.
+**Bound-row identity** — under-lock re-validation of exactly the checkout and
+worktree rows a write is about to mutate, using the strict reader's validator.
 
-**Configuration layers** (later overrides earlier; preset ceiling clamps at the end):
-1. Hard default = L3.
-2. Fleet: `trellis.config.json.autonomy_default`.
-3. Preset `autonomy_default` (if no project override).
-4. Project: `<project>/.trellis.config.json.autonomy`.
-5. Session: `<canonical-root>/.claude/session-autonomy` (written by `/autonomy N` slash command).
-6. Clamp by lowest active preset `autonomy_ceiling`.
+**Environment fault** — a global failure such as a missing hash command or an
+unreadable store. Probed once, up front, and fails the whole command class `5`.
 
-**Bright-line guardrails** (always-on, every level): hard hooks, destructive ops, external messages to others (Slack/email/PR-comments), secrets, DoD receipts, code-review subagent, untrusted-content boundary. PR *creation* flexes with level.
+**Execution snapshot** — the independently verified, digest-pinned copy of the
+active installed release that the launcher freezes and runs from, so a store
+mutation cannot be executed mid-command.
 
-**Reversibility carve-out:** architectural decisions (new dep, new module, auth flow, data store, public API) surface inline mid-turn even at L5. The reversibility cliff is honored.
+**`identity_error`** — the single class-4 row state: live Git identity
+contradicts the recorded registry row. Reported, never repaired or removed.
 
-**Decision log.** At L4/L5, agent appends each decision-on-user's-behalf to `<canonical-root>/decisions-log.md` (separate file, NOT touched by `save-context-log.sh`). End-of-turn message renders a `## Decisions made (L<n>)` block; PR description (when created) includes the same. Code-review subagent at L4/L5 verifies decision-log completeness vs diff — incomplete logs are findings.
+**Compatibility release** — the single release that supports both legacy
+direct-link diagnosis/onboarding and the new portable local-fleet path while
+projects migrate.
 
-The `## Decisions made (L<n>)` block is a record, not a report. It goes *below* the plain-language summary of what happened ([§7](#7-definition-of-done)), never in place of it. At L4/L5 the operator did not watch any of the work, so the final message is their entire view of it — write the re-grounding first, then attach the decision log and the receipts as evidence beneath it.
+**Fleet** — a named machine-local grouping of registry entries and selected
+discovery roots. It is not a tracked project property.
 
-**Audit.** An optional operator autonomy-drift check can flag silent L4/L5 (decisions missing), chronic override (config probably under-set), ceiling friction (repeated clamp), and schema issues.
+**Immutable release** — a verified, read-only installed payload under
+`~/.trellis/releases/<version>/payload` that supplies runtime policy.
 
-Full matrix + resolution algorithm: `core-rules/autonomy.md`. ADR: `docs/adr/2026-05-20-autonomy-slider.md`. Spec: `docs/specs/2026-05-20-trellis-autonomy-design.md`.
+**Inert manifest** — the tracked `.trellis.json` identity/policy file that does
+not produce Trellis behavior by itself.
 
----
+**Local registry** — private `~/.trellis/registry.json`, the operational index
+of fleet/project identities, checkouts, worktrees, statuses, and attachments.
+It is rebuildable; it is not a tracked source of project identity.
 
-## 15. Glossary & quick reference
+**Release adoption** — the explicit verified operation that swaps an attached
+project's `.trellis/runtime` anchor to another installed version.
 
-**Active project** — appears in `registry.md`, not in `blacklist.md`.
+**Row fault** — a failure scoped to one registry row. The run continues to the
+other selected rows; the faulting row is reported and left intact.
 
-**Aspirational-rules test** — every `CLAUDE.md` line must trace to a real observed failure; if you cannot point to the mistake, delete the line.
+**Source checkout** — a development and publication checkout of Trellis. It is
+not an attached project's runtime and may safely be moved or worked on.
 
-**Canonical hook** — the nine `.sh` files under `~/projects/trellis-instance/core-rules/hooks/`. Projects deploy copies; drift is flagged by `parent-hook-drift`.
+**Unavailable row** — a retained local registry record for a missing or
+unmounted checkout. It is reported, never silently removed or guessed.
 
-**Control plane** — the contents of `~/projects/trellis-instance/`. The place where the regime is defined, evolved, and audited.
+**Verified command bundle** — the `release` and `upgrade` bodies emitted in
+memory, bound to the execution snapshot's record digest, so those routes never
+reopen a script pathname.
 
-**Drift** — a project's deployed hook or required file has diverged from canonical. Critical: flagged, must be remediated.
+**Worktree owner** — the per-worktree attachment record nested under a
+clone/common-dir owner; common Git state persists until its final owner detaches.
 
-**`$CLAUDE_PROJECT_DIR`** — environment variable injected by Claude Code pointing at the project root. Used in `settings.json` to keep hook paths rename-proof.
+### Quick reference
 
-**Headless-safe** — works identically in `claude -p` mode and interactive mode. All primary mechanisms must be headless-safe.
-
-**Inheritance** — the mechanism by which each project picks up parent rules. Primary: `.claude/rules/trellis.md` symlink. Secondary: `@`-import in project `CLAUDE.md`.
-
-**Parent layer** — the rules and hooks in `~/projects/trellis-instance/core-rules/` that every registered project inherits.
-
-**Ratchet** — `gotchas.md` self-correction: every agent mistake permanently tightens the harness with a rule or sensor, never a one-off fix; Trellis practiced this before the industry's July 2026 "harness engineering" label (O'Reilly Radar; Addy Osmani).
-
-**Receipts** — the verification command + exit code + diff lines required to claim "done."
-
-**Registered** — synonymous with active.
-
-**Rule of Three** — promotion criterion: three independent project adoptions before a rule enters the parent layer.
-
-**Trellis** — this regime. The name, the directory, the process.
-
-**Silent drop** — Claude Code's behavior when inheritance breaks: no error, no warning, instruction simply doesn't load. Detection is via the `InstructionsLoaded` hook and periodic audits.
-
-**Sensors vs guides** — hooks and DoD receipts are sensors that verify the agent did it; rules and docs are guides that tell it what to do. Invest in sensors first.
-
-**Tier (hook)** — three tiers: fast-local (every turn), heavy-gated (Stop event), git-boundary (husky).
-
-### Cheat sheet
-
-| I want to... | Do this |
+| I want to… | Do this |
 |---|---|
-| Add a project to Trellis | [§10](#10-onboarding-a-new-project-full-playbook) |
-| Temporarily exempt a project | Move row to `blacklist.md` with reason + revisit date |
-| Change a parent rule | PR in the Trellis canonical repo, cite Rule-of-Three evidence, rsync hooks, re-run `parent-hook-drift` |
-| Understand why a hook blocked me | Read `core-rules/hooks.md` for the spec; error output identifies the rule |
-| Roll back a bad merge | `git revert <sha>` → PR → merge. Never `reset --hard` on main. |
-| Commit while `.env` is in my diff | Stop. Remove the file. Rotate the secret. Recommit. |
-| Skip a broken hook | You don't. Fix the hook or document an override. `--no-verify` is tripwired. |
-| Find the last-green commit | `test-health` weekly report has it per project. |
-| Promote a rule from deferred.md | Rule of Three satisfied → edit parent rules → delete deferred entry → rsync |
-
----
+| Configure a machine or create fleets | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
+| Install and verify a release | Follow [docs/UPGRADING.md](docs/UPGRADING.md). |
+| Install, verify, and adopt in one step | `trellis upgrade VERSION [--remote URL]` with exactly one selector; launcher-only, forward-only (§14.6). |
+| Import or rebuild local inventory | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
+| Attach, move, recover, or detach a checkout | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
+| Migrate a legacy project | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
+| Roll back an adopted release | Verify the prior release, then explicitly adopt it; see [docs/UPGRADING.md](docs/UPGRADING.md). |
+| Change parent policy | Make a reviewed source change, publish an immutable release, then explicitly adopt it. |
+| Publish Trellis safely | Keep private-source push and public-mirror publication roles separate; pass the release gate first. |
 
 ## References
 
-- `core-rules/CLAUDE.md` — parent rules (LLM-facing).
-- `core-rules/hooks.md` — three-tier hook spec.
-- `core-rules/inheritance.md` — symlink + @-import mechanism.
-- `core-rules/references/model-prompting-deltas.md` — per-model prompting deltas vs Trellis. The one place model-specific claims are allowed to live; the terse table you read when you need the delta and nothing else.
-- `docs/claude-steering.md` — the long-form Claude steering reference and snippet library, generation-neutral with per-model sections. Canonical for effort posture: settings-accepted levels, override precedence, degrade behavior, and the sweep method. Carried the Opus 4.8 name until spec 019 renamed it generation-neutral; the sibling for the other harness is `docs/gpt-5.x-steering.md`, with routing in `docs/codex-routing.md`.
-- `docs/research/2026-07-25-claude-5-prompting-corpus.md` — the primary-source corpus behind the current doctrine.
-- `core-rules/deferred.md` — n=1 candidates awaiting third witness.
-- `core-rules/hooks/README.md` — canonical hook script index + attribution.
-- `core-rules/hooks/*.sh` — canonical hook implementations; inventory in `core-rules/hooks/README.md`.
-- `registry.md` — active project opt-in list.
-- `blacklist.md` — temporary exemptions.
-- `recon.md` — LIFT/LEAVE/DEFER thesis that seeded the regime.
-- operator-private audit automation — schedules, prompts, targets, and fleet inventory are intentionally not published.
-- `audits/` — dated audit output archive.
-
-## Upstream attribution
-
-Core hook patterns (`block-destructive`, `post-edit-verify`, `stop-verify`, `truncation-check`) derive from [iamfakeguru/claude-md](https://github.com/iamfakeguru/claude-md) (MIT). Extensions are documented in each script's header. The three-tier architecture, TodoWrite-completion guard, `code-review-subagent`, `ui-verify`, session-context / save-context-log / post-compact-context hooks, and the git-boundary tier are Trellis additions.
+- [core-rules/CLAUDE.md](core-rules/CLAUDE.md) — compact parent policy carried by every immutable release.
+- [core-rules/inheritance.md](core-rules/inheritance.md) — manifest-driven local attachment and harness contract.
+- [core-rules/hooks.md](core-rules/hooks.md) — deterministic hook and gate policy.
+- [AGENT_SETUP.md](AGENT_SETUP.md) — executable local machine setup and lifecycle recipes.
+- [AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md) — portable project onboarding recipe.
+- [docs/UPGRADING.md](docs/UPGRADING.md) — install, verify, adoption, compatibility, and rollback procedure.
+- [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md) — local registry import/rebuild and legacy project migration procedure.
+- [docs/adr/2026-08-12-local-fleets-immutable-releases.md](docs/adr/2026-08-12-local-fleets-immutable-releases.md) — architectural decision and supersession record.

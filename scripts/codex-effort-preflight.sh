@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # codex-effort-preflight.sh — the spec 011 D6 surface preflight (SC6).
 #
-# Probes the INSTALLED Codex surface and reports what it actually accepts —
-# never assumes. Three probes, all fail-closed:
+# Reports the installed Codex surface without assuming capability. It is a
+# preflight for an explicitly selected direct `codex exec --json ...` route or
+# plugin command. Three probes, all fail-closed:
 #
 #   (a) model pin  — parse `model = "…"` from the Codex config and compare to
 #       the expected pin ($1, default gpt-5.6-sol). Missing file / missing key
 #       / wrong value → pin_ok: false.
-#   (b) effort enum — extract the accepted --effort values from the installed
-#       companion plugin's validator SOURCE (the search pattern is hardcoded;
+#   (b) selected plugin enum — extract the accepted --effort values from the
+#       selected plugin's validator SOURCE (the search pattern is hardcoded;
 #       the resulting tier set never is — verified-surface rule, spec 011 §4).
 #       Missing plugin / no validator match → supported_efforts: [] (fail-closed).
 #   (c) CLI version — `codex --version`; cli_ok = semver >= 0.144 (the floor
-#       for per-dispatch --model pinning, 013 handoff). Missing binary /
-#       unparsable output → cli_ok: false.
+#       for per-dispatch --model pinning). Missing binary / unparsable output
+#       → cli_ok: false.
 #
 # THE SCRIPT ONLY REPORTS; CALLERS DECIDE. It always exits 0 with a JSON
 # report on stdout — a Claude-only host (no plugin, no CLI) gets a fully
-# fail-closed report, never an error exit. The main loop threads
-# `supported_efforts` into recipes as `args.supportedEfforts` and refuses
-# exception-tier dispatch when pin_ok/cli_ok gate it, logging the refusal.
+# fail-closed report, never an error exit. A caller may inspect it before its
+# selected direct CLI or plugin dispatch; this script does not select a provider,
+# route work, or authorize an effort tier.
 #
 # Output JSON shape (exactly these five fields):
 #   { "model_pin": "<value|absent>", "pin_ok": bool,
@@ -41,7 +42,7 @@ CONFIG_PATH="${CODEX_CONFIG:-$HOME/.codex/config.toml}"
 PLUGIN_ROOT="${CODEX_PLUGIN:-$HOME/.claude/plugins/cache/openai-codex/codex}"
 CODEX_BIN="${CODEX_BIN:-codex}"
 
-# The CLI-version floor for per-dispatch --model pinning (013 handoff item 5).
+# The CLI-version floor for per-dispatch --model pinning.
 CLI_FLOOR_MAJOR=0
 CLI_FLOOR_MINOR=144
 

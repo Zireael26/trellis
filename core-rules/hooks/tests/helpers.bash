@@ -4,6 +4,7 @@
 
 # Resolve the canonical hooks directory regardless of where bats is invoked.
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034  # Read by the .bats files that `load helpers`.
 CODEX_HOOKS_DIR="$(cd "$HOOKS_DIR/../codex/hooks" && pwd)"
 
 # Build a temp dir that simulates a project root (with a git init so
@@ -43,7 +44,10 @@ run_with_stderr() {
   local stderr_file
   stderr_file="$(mktemp)"
   set +e
+  # shellcheck disable=SC2034  # `output`, `status` and `stderr` are the bats
+  # result convention: the calling test reads them after this helper returns.
   output="$(printf '%s' "$input" | bash "$script" 2>"$stderr_file")"
+  # shellcheck disable=SC2034
   status=$?
   set -e
   stderr="$(cat "$stderr_file")"

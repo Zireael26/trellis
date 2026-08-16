@@ -126,8 +126,8 @@ run_check() {
 
   run_check
   [ "$status" -eq 1 ]                                  # the gate's own rc, passed through
-  [[ "$output" == *"STUB-RUN-DIFF"* ]]                 # the 644 script was actually invoked
-  [[ "$output" != *"not installed"* ]]                 # NOT downgraded to a warn-skip
+  [[ "$output" == *"STUB-RUN-DIFF"* ]] || { echo "$output"; false; }  # the 644 script was actually invoked
+  [[ "$output" != *"not installed"* ]] || { echo "$output"; false; }  # NOT downgraded to a warn-skip
   [[ "$output" != *"skipped"* ]]
 }
 
@@ -137,7 +137,7 @@ run_check() {
   stub_run_diff 1   # would fail if invoked
   run bash -c "cd '$PROJECT_DIR' && SECURITY_GATE_SKIP=1 '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"skipped"* ]]
+  [[ "$output" == *"skipped"* ]] || { echo "$output"; false; }
   [[ "$output" != *"STUB-RUN-DIFF"* ]]
 }
 
@@ -148,6 +148,39 @@ run_check() {
   run_check
   [ "$status" -eq 0 ]
   [[ "$output" == *"STUB-RUN-DIFF"* ]]
+}
+
+# --- in-tree core-rules/ fallback (the Trellis clone itself) ---
+#
+# In the repository that authors the gate, the skill IS the tree: a linked
+# worktree has no seeded .claude/skills and no .agents, so this hard gate used to
+# downgrade itself to a non-blocking warn on exactly the checkout where the gate
+# is being changed. Last in the resolution order, so an installed copy still wins.
+
+@test "fallback: run-diff under core-rules/ is found when neither harness dir exists" {
+  stub_run_diff 0 "core-rules-marker"
+  rm -rf "$PROJECT_DIR/core-rules-marker"
+  local d="$PROJECT_DIR/core-rules/skills/security-gate/scripts"
+  mkdir -p "$d"
+  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\nexit 0\n' > "$d/run-diff.sh"
+  chmod 755 "$d/run-diff.sh"
+  run_check
+  [ "$status" -eq 0 ]
+  grep -Fq 'STUB-CORE-RULES' <<<"$output"
+}
+
+@test "precedence: an installed .claude copy still wins over the in-tree one" {
+  stub_run_diff 0 ".claude"
+  local d="$PROJECT_DIR/core-rules/skills/security-gate/scripts"
+  mkdir -p "$d"
+  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\nexit 1\n' > "$d/run-diff.sh"
+  chmod 755 "$d/run-diff.sh"
+  run_check
+  [ "$status" -eq 0 ]
+  grep -Fq 'STUB-RUN-DIFF' <<<"$output"
+  if grep -Fq 'STUB-CORE-RULES' <<<"$output"; then
+    echo "in-tree copy shadowed the installed one"; echo "$output"; false
+  fi
 }
 
 # --- --no-llm keyed on PG_MODE ---
@@ -204,7 +237,7 @@ run_check() {
   # Use -F (fixed string): without it the leading `-f`-as-flag is dodged by `--`
   # but `$` is a regex end-anchor, so a plain `grep -c` would report 0 even when
   # the predicate is PRESENT — a tautological guard. -F makes this a real check.
-  [[ "$(grep -cF -- '-f "$cand"' "$GATE")" -eq 0 ]]  # the -f predicate is gone
+  [[ "$(grep -cF -- '-f "$cand"' "$GATE")" -eq 0 ]] || { grep -nF -- '-f "$cand"' "$GATE"; false; }  # the -f predicate is gone
 
   # 3) Point the harness at the copy. PG_TEST_SCRIPT makes the comment-promised
   #    plumbing real for any child; SCRIPT is the lever run_check actually reads
@@ -226,9 +259,9 @@ run_check() {
 
   # 5) Assert RED against the pre-fix copy — the exact inverse of the green case:
   [ "$status" -eq 2 ]                                  # warn-skip rc (NOT the gate's own rc 1)
-  [[ "$output" == *"not installed"* ]]                 # downgraded to a warn-skip ...
-  [[ "$output" == *"skipped"* ]]                       # ... fail-OPEN
-  [[ "$output" != *"STUB-RUN-DIFF"* ]]                 # the 644 script was NEVER invoked
+  [[ "$output" == *"not installed"* ]] || { echo "$output"; false; }  # downgraded to a warn-skip ...
+  [[ "$output" == *"skipped"* ]] || { echo "$output"; false; }  # ... fail-OPEN
+  [[ "$output" != *"STUB-RUN-DIFF"* ]] || { echo "$output"; false; }  # the 644 script was NEVER invoked
 
   # Glob-free cleanup on a verified-nonempty full path (mirrors teardown; never a
   # glob on a possibly-empty var, which would trip the rm safety prompt).

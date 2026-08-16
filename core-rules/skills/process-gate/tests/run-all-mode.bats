@@ -74,14 +74,14 @@ run_all() {
 @test "render: all 8 gate labels emitted (verdict loop), all-pass -> MERGEABLE 0" {
   run_all merge
   [ "$status" -eq 0 ]
-  [[ "$output" == *"PR hygiene"* ]]
-  [[ "$output" == *"Secrets"* ]]
-  [[ "$output" == *"Bypass markers"* ]]
-  [[ "$output" == *"Tests & coverage"* ]]
-  [[ "$output" == *"Docs discipline"* ]]
-  [[ "$output" == *"Stack profile"* ]]
-  [[ "$output" == *"Security (diff)"* ]]
-  [[ "$output" == *"Analyze"* ]]
+  [[ "$output" == *"PR hygiene"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Secrets"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Bypass markers"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Tests & coverage"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Docs discipline"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Stack profile"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Security (diff)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Analyze"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: MERGEABLE"* ]]
 }
 
@@ -90,8 +90,8 @@ run_all() {
   # so its label shows in findings too.
   STUB_RC_6=1 STUB_RC_7=2 run bash -c "cd '$PROJECT_DIR' && STUB_RC_6=1 STUB_RC_7=2 '$STUB/scripts/run-all.sh' --mode=merge"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"## Findings"* ]]
-  [[ "$output" == *"### Security (diff)"* ]]
+  [[ "$output" == *"## Findings"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"### Security (diff)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"### Analyze"* ]]
 }
 
@@ -101,14 +101,14 @@ run_all() {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh'"
   # idx 0 (PR hygiene) fails; merge default => no downgrade => BLOCKED.
   [ "$status" -eq 1 ]
-  [[ "$output" == *"mode=merge"* ]]
+  [[ "$output" == *"mode=merge"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
 
 @test "mode: garbage --mode value resolves to merge (fail-closed, never lenient)" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=bogus"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"mode=merge"* ]]
+  [[ "$output" == *"mode=merge"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
 
@@ -117,7 +117,7 @@ run_all() {
 @test "push: PR hygiene (idx 0) FAIL downgrades to WARN -> NEEDS CHANGES 2" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
   [[ "$output" == *"downgraded to WARN"* ]]
 }
 

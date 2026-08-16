@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Shared autonomy resolution for Codex hooks.
+# Shared autonomy resolution for hook runtimes.
 #
 # Contract (core-rules/autonomy.md):
-#   hard L3 -> fleet autonomy_default -> first active preset default when no
-#   project override -> project autonomy -> session override -> lowest active
-#   preset ceiling.
+#   built-in L3 -> runtime fleet autonomy_default -> first active preset
+#   default (only without a project override) -> canonical project autonomy
+#   or legacy fallback -> session override -> lowest active preset ceiling.
+
 #
 # Call `_se_resolve_autonomy <canonical-repo-root>`. It sets:
 #   AUTONOMY_LEVEL, AUTONOMY_NAME, AUTONOMY_REQUESTED_LEVEL,
@@ -47,9 +48,13 @@ _se_autonomy_frontmatter_value() {
 
 _se_resolve_autonomy() {
   local repo_root="$1"
-  local project_cfg="" trellis_root="" fleet_cfg=""
-  local fleet_level="" project_level="" preset_default="" session_level=""
-  local project_cfg_candidate="" preset="" preset_file="" value="" session_file=""
+  local canonical_cfg="$repo_root/.trellis.json"
+  # DEPRECATED read-only fallback. Retained past v1.0.0-rc.25 only for checkouts
+  # still held on the legacy layout; `trellis migrate --prepare` replaces it.
+  local legacy_cfg="$repo_root/.trellis.config.json"
+  local runtime_cfg="" project_level="" preset_default="" session_level=""
+  local project_override_present=0
+  local project_cfg_candidate="" preset_cfg="" preset="" preset_file="" value="" session_file=""
 
   AUTONOMY_LEVEL=3
   AUTONOMY_NAME="Standard"
@@ -58,51 +63,61 @@ _se_resolve_autonomy() {
   AUTONOMY_CLAMPED=0
   AUTONOMY_LIMITING_PRESET=""
 
-  # Project-local config selects active presets and may carry the project
-  # override. `.trellis.config.json` wins over the compatibility filename.
-  for project_cfg_candidate in \
-    "$repo_root/.trellis.config.json" \
-    "$repo_root/trellis.config.json"; do
-    if [ -f "$project_cfg_candidate" ]; then
-      project_cfg="$project_cfg_candidate"
+  # The installed payload is the only fleet policy source. Do not resolve a
+  # source checkout or consult machine-local configuration here.
+  if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+    runtime_cfg="$TRELLIS_ROOT/trellis.config.json"
+  fi
+
+  if [ -n "$runtime_cfg" ]; then
+    value=$(jq -r '.autonomy_default // empty' "$runtime_cfg" 2>/dev/null || true)
+    if _se_valid_autonomy_level "$value"; then
+      AUTONOMY_LEVEL="$value"
+    fi
+  fi
+
+  # Resolve autonomy per field: canonical project policy wins, the legacy
+  # compatibility file fills only an absent canonical value. A present but
+  # malformed higher-precedence value suppresses lower-precedence overrides.
+  for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
+    [ -f "$project_cfg_candidate" ] || continue
+    if ! jq -e 'type == "object"' "$project_cfg_candidate" >/dev/null 2>&1; then
+      project_override_present=1
+      break
+    fi
+    if jq -e 'has("autonomy")' "$project_cfg_candidate" >/dev/null 2>&1; then
+      project_override_present=1
+      value=$(jq -r '.autonomy' "$project_cfg_candidate" 2>/dev/null || true)
+      if _se_valid_autonomy_level "$value"; then
+        project_level="$value"
+      fi
       break
     fi
   done
 
-  # TRELLIS_ROOT is authoritative when supplied by the deployed environment.
-  # Otherwise, resolve it from project config; a canonical clone can fall back
-  # to its own root when it carries trellis.config.json directly.
-  if [ -n "${TRELLIS_ROOT:-}" ]; then
-    trellis_root="$TRELLIS_ROOT"
-  elif [ -n "$project_cfg" ]; then
-    trellis_root=$(jq -r '(.trellis_root // empty) | strings' "$project_cfg" 2>/dev/null || true)
-  fi
-  if [ -z "$trellis_root" ] && [ -f "$repo_root/trellis.config.json" ]; then
-    trellis_root="$repo_root"
-  fi
-  if [ -n "$trellis_root" ] && [ -f "$trellis_root/trellis.config.json" ]; then
-    fleet_cfg="$trellis_root/trellis.config.json"
-  fi
-
-  if [ -n "$fleet_cfg" ]; then
-    value=$(jq -r '.autonomy_default // empty' "$fleet_cfg" 2>/dev/null || true)
-    if _se_valid_autonomy_level "$value"; then
-      fleet_level="$value"
-      AUTONOMY_LEVEL="$fleet_level"
+  # Active preset names use the same canonical-then-legacy field precedence,
+  # while every preset definition is loaded solely from the immutable runtime.
+  for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
+    [ -f "$project_cfg_candidate" ] || continue
+    if ! jq -e 'type == "object"' "$project_cfg_candidate" >/dev/null 2>&1; then
+      break
     fi
-  fi
-
-  if [ -n "$project_cfg" ]; then
-    value=$(jq -r '.autonomy // empty' "$project_cfg" 2>/dev/null || true)
-    if _se_valid_autonomy_level "$value"; then
-      project_level="$value"
+    if jq -e 'has("presets")' "$project_cfg_candidate" >/dev/null 2>&1; then
+      if jq -e '.presets | type == "array"' "$project_cfg_candidate" >/dev/null 2>&1; then
+        preset_cfg="$project_cfg_candidate"
+      fi
+      break
     fi
+  done
 
+  if [ -n "$preset_cfg" ] && [ -n "${TRELLIS_ROOT:-}" ]; then
     # Preset order is the declared config order. The first valid preset default
     # wins; ceiling conflicts always resolve to the lowest (most restrictive).
     while IFS= read -r preset; do
-      [ -n "$preset" ] || continue
-      preset_file="$trellis_root/core-rules/presets/$preset.md"
+      case "$preset" in
+        ''|*[!A-Za-z0-9._-]*) continue ;;
+      esac
+      preset_file="$TRELLIS_ROOT/core-rules/presets/$preset.md"
       [ -f "$preset_file" ] || continue
 
       value=$(_se_autonomy_frontmatter_value "$preset_file" autonomy_default)
@@ -115,12 +130,10 @@ _se_resolve_autonomy() {
         AUTONOMY_CEILING="$value"
         AUTONOMY_LIMITING_PRESET="$preset"
       fi
-    done < <(jq -r '(.presets // [])[]? | strings' "$project_cfg" 2>/dev/null || true)
+    done < <(jq -r '.presets[]? | strings' "$preset_cfg" 2>/dev/null || true)
   fi
 
-  # Canonical pick precedence. A preset default applies only when there is no
-  # valid project-local override, and it comes after the fleet default.
-  if [ -n "$preset_default" ] && [ -z "$project_level" ]; then
+  if [ -n "$preset_default" ] && [ "$project_override_present" -eq 0 ]; then
     AUTONOMY_LEVEL="$preset_default"
   fi
   if [ -n "$project_level" ]; then

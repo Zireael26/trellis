@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/trellis.machine.schema.json",
+  "title": "Trellis machine configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "source_root": { "$ref": "#/$defs/absoluteSafePath" },
+    "release_remote": { "type": "string", "minLength": 1 },
+    "active_cli_release": { "$ref": "#/$defs/version" },
+    "default_fleet": { "$ref": "#/$defs/fleetName" },
+    "fleets": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/fleetName" },
+      "additionalProperties": { "$ref": "#/$defs/fleet" }
+    }
+  },
+  "$defs": {
+    "absoluteSafePath": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^/[^/]",
+      "not": { "pattern": "(^|/)(\\.|\\.\\.)(/|$)|[\\u0000-\\u001F\\u007F-\\u009F]" }
+    },
+    "fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discovery_roots"],
+      "properties": {
+        "discovery_roots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/absoluteSafePath" },
+          "uniqueItems": true
+        },
+        "shared_infra_root": { "$ref": "#/$defs/absoluteSafePath" }
+      }
+    },
+    "fleetName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    }
+  }
+}

@@ -20,6 +20,18 @@ function fail(message, code = 2) {
   process.exit(code)
 }
 
+// A registry row that failed identity validation is reported by the listing as
+// this availability. It outranks ordinary findings: 4 is the corrupt-state
+// class, 1 is "this run found drift to fix". Highest class wins.
+const REGISTRY_STATE_AVAILABILITY = 'identity_error'
+const REGISTRY_STATE_EXIT = 4
+
+const VALUE_OPTIONS = new Set([
+  'baseline', 'ledger', 'ref', 'project', 'output', 'vulnerability-report',
+  'today', 'home', 'fleet',
+])
+const RETIRED_OPTIONS = new Set(['registry', 'blacklist', 'projects-root'])
+
 function parseArgs(argv) {
   const args = { command: argv[2] ?? 'check', json: false, ref: 'origin/main' }
   for (let i = 3; i < argv.length; i += 1) {
@@ -27,10 +39,12 @@ function parseArgs(argv) {
     if (value === '--json') args.json = true
     else if (value === '--fetch') args.fetch = true
     else if (value.startsWith('--')) {
-      const key = value.slice(2).replaceAll('-', '_')
+      const option = value.slice(2)
+      if (RETIRED_OPTIONS.has(option)) fail(`${value} is no longer supported; select local state with --home and --fleet`)
+      if (!VALUE_OPTIONS.has(option)) fail(`unknown option: ${value}`)
       const next = argv[i + 1]
       if (!next || next.startsWith('--')) fail(`missing value for ${value}`)
-      args[key] = next
+      args[option.replaceAll('-', '_')] = next
       i += 1
     } else fail(`unexpected argument: ${value}`)
   }
@@ -45,40 +59,156 @@ function readJson(file) {
   }
 }
 
-function stripHtmlComments(text) {
-  return text.replace(/<!--[\s\S]*?-->/g, '')
+function resolveRegistrySelection(args) {
+  const resolver = [
+    'set -eu',
+    '. "$1"',
+    'home="$(trellis_home_resolve "$2")"',
+    'config="$(trellis_home_config_path "$home")"',
+    'fleet="$(trellis_home_resolve_fleet "$3" "$config")"',
+    "if [ -e \"$config\" ] || [ -L \"$config\" ]; then",
+    "  jq -e --arg fleet \"$fleet\" '.fleets[$fleet] != null' \"$config\" >/dev/null || { printf 'trellis: selected fleet is not configured locally: %s\\n' \"$fleet\" >&2; exit \"$TRELLIS_EX_USAGE\"; }",
+    'fi',
+    'printf "%s\\t%s\\n" "$home" "$fleet"',
+  ].join('\n')
+  let output
+  try {
+    output = execFileSync('bash', [
+      '-c', resolver, 'fleet-dependencies',
+      path.join(ROOT, 'scripts/lib/trellis-home.sh'),
+      args.home ?? '',
+      args.fleet ?? '',
+    ], { encoding: 'utf8' })
+  } catch (error) {
+    const detail = String(error.stderr ?? '').trim()
+    fail(`cannot resolve local fleet selection: ${detail || error.message}`, error.status ?? 2)
+  }
+  const fields = output.endsWith('\n') ? output.slice(0, -1).split('\t') : output.split('\t')
+  if (fields.length !== 2 || !fields[0] || !fields[1]) fail('cannot resolve local fleet selection')
+  return { home: fields[0], fleet: fields[1] }
 }
 
-function parseRegistry(text, projectsRoot) {
-  const projects = []
-  let active = false
-  for (const line of stripHtmlComments(text).split(/\r?\n/)) {
-    if (line.startsWith('## Active projects')) {
-      active = true
-      continue
+function listLocalRegistry(selection) {
+  let output
+  let acceptedPartial = false
+  try {
+    output = execFileSync('bash', [
+      path.join(ROOT, 'scripts/registry.sh'),
+      'list',
+      '--home', selection.home,
+      '--fleet', selection.fleet,
+      '--json',
+    ], { encoding: 'utf8' })
+  } catch (error) {
+    // registry.sh emits the complete listing before reporting registry state
+    // errors with exit class 4; those rows must be evaluated, not abort the run.
+    const partial = typeof error.stdout === 'string' ? error.stdout : ''
+    if (error.status === REGISTRY_STATE_EXIT && partial.trim()) {
+      output = partial
+      acceptedPartial = true
+    } else {
+      const detail = String(error.stderr ?? '').trim()
+      fail(`cannot list local registry for fleet ${selection.fleet}: ${detail || error.message}`, error.status ?? 1)
     }
-    if (active && (line === '---' || line.startsWith('## '))) break
-    if (!active || !line.startsWith('|')) continue
-    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim().replaceAll('`', ''))
-    if (cells.length < 2 || cells[0] === 'Project' || /^-+$/.test(cells[0])) continue
-    const registeredPath = cells[1]
-    if (!registeredPath || cells[0] === '_(none yet)_' || cells[0] === '—') continue
-    const relative = registeredPath.startsWith('/personal/')
-      ? registeredPath.slice('/personal/'.length)
-      : registeredPath
-    projects.push({ name: cells[0], root: path.resolve(projectsRoot, relative) })
   }
-  return projects
+  let snapshot
+  try {
+    snapshot = JSON.parse(output)
+  } catch (error) {
+    fail(`local registry returned invalid JSON: ${error.message}`)
+  }
+  if (snapshot?.schema_version !== 1 || !Array.isArray(snapshot.entries)) {
+    fail('local registry returned an unsupported snapshot')
+  }
+  // A class-4 exit is accepted as a PARTIAL listing only when the listing itself
+  // names the rows that caused it. Exit 4 with no identity_error row is a state
+  // class this process cannot attribute to anything it can report or skip, so
+  // continuing would evaluate a registry whose failure is invisible in the data.
+  // This mirrors the guard `run-evals.sh` applies to the same contract.
+  if (acceptedPartial && !snapshot.entries.some((row) => row?.availability === REGISTRY_STATE_AVAILABILITY)) {
+    fail(`local registry reported a state error with no identity-drift row for fleet ${selection.fleet}`, REGISTRY_STATE_EXIT)
+  }
+  return snapshot
 }
 
-function parseBlacklist(text) {
-  const names = new Set()
-  for (const line of stripHtmlComments(text).split(/\r?\n/)) {
-    if (!line.startsWith('|')) continue
-    const first = line.split('|')[1]?.trim().replaceAll('`', '')
-    if (first && first !== 'Project' && first !== '_(none yet)_' && first !== '—' && !/^-+$/.test(first)) names.add(first)
+function unavailableRegistryRow(row) {
+  return {
+    fleet: row.fleet ?? null,
+    project: row.project_id ?? null,
+    kind: row.kind ?? null,
+    root: typeof row.root === 'string' ? row.root : null,
+    status: row.status ?? null,
+    availability: row.availability ?? null,
+    excluded: Boolean(row.excluded),
   }
-  return names
+}
+
+function isEligibleRegistryWorktree(row) {
+  return row.kind === 'worktree'
+    && row.availability === 'available'
+    && row.status === 'active'
+    && !row.excluded
+    && typeof row.root === 'string'
+}
+
+function registryIneligibility(row) {
+  const reasons = []
+  if (row.kind !== 'worktree') reasons.push(`kind ${row.kind ?? 'unknown'}`)
+  if (row.availability !== 'available') reasons.push(`availability ${row.availability ?? 'unknown'}`)
+  if (row.status !== 'active') reasons.push(`status ${row.status ?? 'unknown'}`)
+  if (row.excluded) reasons.push('excluded')
+  if (typeof row.root !== 'string') reasons.push('no recorded worktree root')
+  return reasons.length > 0 ? reasons.join(', ') : 'unknown local registry state'
+}
+
+function localRegistryProjects(snapshot, selection, requestedProject) {
+  const fleetRows = snapshot.entries.filter((row) => row.fleet === selection.fleet)
+  // A registry state error is a property of the REGISTRY, not of the selection.
+  // Computing it from the filtered rows let a `--project P` run whose own row is
+  // healthy exit 0 while the registry was corrupt, so it is computed here from
+  // the full fleet listing and reported and aggregated regardless of P.
+  const stateErrors = fleetRows
+    .filter((row) => row.availability === REGISTRY_STATE_AVAILABILITY)
+    .map(unavailableRegistryRow)
+  let rows = fleetRows
+  if (requestedProject) {
+    rows = rows.filter((row) => row.project_id === requestedProject)
+    if (rows.length === 0) {
+      // A plain typo over a clean registry stays a usage error. When the
+      // registry ALSO carries identity-validation failures, exiting 2 here would
+      // discard every state error computed above — the corrupt registry would go
+      // unreported because the caller mistyped a project name. Report the rows
+      // and take the higher class.
+      const message = `project is not registered in local fleet ${selection.fleet}: ${requestedProject}`
+      if (stateErrors.length === 0) fail(message)
+      reportUnavailable(stateErrors)
+      fail(message, REGISTRY_STATE_EXIT)
+    }
+  }
+  const unavailable = rows
+    .filter((row) => row.kind !== 'worktree' || row.availability !== 'available')
+    .map(unavailableRegistryRow)
+  const projects = rows
+    .filter(isEligibleRegistryWorktree)
+    .map((row) => ({
+      name: row.project_id,
+      fleet: row.fleet,
+      root: row.root,
+      checkout_id: row.checkout_id ?? null,
+      worktree_id: row.worktree_id ?? null,
+    }))
+  if (requestedProject && projects.length === 0) {
+    const details = [...new Set(rows.map(registryIneligibility))].join('; ')
+    // The selected project having no eligible row BECAUSE its own row failed
+    // registry identity validation is a registry state error (class 4), not the
+    // ordinary "nothing to evaluate here" finding class.
+    const selectionStateError = rows.some((row) => row.availability === REGISTRY_STATE_AVAILABILITY)
+    fail(
+      `project is not eligible for dependency evaluation in local fleet ${selection.fleet}: ${requestedProject} (${details})`,
+      selectionStateError ? REGISTRY_STATE_EXIT : 1,
+    )
+  }
+  return { projects, unavailable, stateErrors }
 }
 
 function cleanVersion(value) {
@@ -539,13 +669,42 @@ function validateLedger(ledger, today) {
   return errors
 }
 
-function renderFindings(result, projects, json) {
-  const payload = { projects: projects.map((project) => ({ name: project.name, root: project.root, warnings: project.warnings })), ...result }
+function reportUnavailable(unavailable) {
+  for (const row of unavailable) {
+    const root = row.root ?? '(no recorded worktree root)'
+    // An identity_error row is a registry state error, not a merely absent root.
+    const label = row.availability === REGISTRY_STATE_AVAILABILITY ? 'STATE-ERROR' : 'UNAVAILABLE'
+    console.error(`${label} ${row.fleet}/${row.project}: ${root} (${row.kind ?? 'unknown'})`)
+  }
+}
+
+// MACHINE-OUTPUT PARITY. A JSON run suppresses the stderr row reports, so a
+// `--project P --json` run over a healthy P whose sibling row is drifted used to
+// exit 4 while emitting a payload that named nothing wrong — the exit class said
+// "corrupt registry" and the only machine-readable artifact said "clean". The
+// `state_errors` field carries exactly the rows that raised the class, whether
+// or not the selector included them, so a consumer reading the JSON alone can
+// attribute the exit. `unavailable` keeps its meaning: rows inside the selection
+// that were not eligible.
+function renderFindings(result, projects, unavailable, stateErrors, json) {
+  const payload = {
+    projects: projects.map((project) => ({
+      name: project.name,
+      fleet: project.fleet,
+      root: project.root,
+      checkout_id: project.checkout_id,
+      worktree_id: project.worktree_id,
+      warnings: project.warnings,
+    })),
+    unavailable,
+    state_errors: stateErrors,
+    ...result,
+  }
   if (json) console.log(JSON.stringify(payload, null, 2))
   else {
     for (const error of result.errors) console.error(`ERROR schema: ${error}`)
     for (const finding of result.findings) console.error(`ERROR ${finding.type}: ${JSON.stringify(finding)}`)
-    console.log(`fleet dependency check: ${result.findings.length} finding(s), ${result.errors.length} schema error(s), ${projects.length} project(s)`)
+    console.log(`fleet dependency check: ${result.findings.length} finding(s), ${result.errors.length} schema error(s), ${projects.length} available worktree(s)`)
   }
 }
 
@@ -558,12 +717,12 @@ function usage() {
   ledger-check Validate terminal evidence and expiry in the remediation ledger
   ledger-sync  Add current baseline drift and audit appendix rows to the ledger
 
-Public clones ship empty, schema-valid baseline and ledger shells. After adding
-projects to registry.md, use snapshot --ref worktree --output <path> to seed
-your own shared-package baseline; private fleet rows are never mirror inputs.
+Public clones ship empty, schema-valid baseline and ledger shells. Register local
+worktrees, then use snapshot --ref worktree --output <path> to seed your own
+shared-package baseline. Tracked registry and blacklist Markdown are not inputs.
 
-Options: --baseline PATH --ledger PATH --registry PATH --blacklist PATH
-         --projects-root PATH --ref REF|worktree --project NAME --output PATH --json --fetch
+Options: --baseline PATH --ledger PATH --home PATH --fleet NAME
+         --ref REF|worktree --project ID --output PATH --json --fetch
          --vulnerability-report PATH`)
 }
 
@@ -629,9 +788,6 @@ if (args.command === 'help') {
 }
 const baselinePath = path.resolve(args.baseline ?? path.join(ROOT, 'dependency-baseline.json'))
 const ledgerPath = path.resolve(args.ledger ?? path.join(ROOT, 'audits/fleet-remediation-ledger.json'))
-const registryPath = path.resolve(args.registry ?? path.join(ROOT, 'registry.md'))
-const blacklistPath = path.resolve(args.blacklist ?? path.join(ROOT, 'blacklist.md'))
-const projectsRoot = path.resolve(args.projects_root ?? path.join(ROOT, '..', 'personal'))
 const today = args.today ?? new Date().toISOString().slice(0, 10)
 
 if (args.command === 'ledger-check') {
@@ -646,13 +802,42 @@ if (!['check', 'snapshot', 'apply', 'ledger-sync'].includes(args.command)) {
   fail(`unknown command: ${args.command}`)
 }
 
-const blacklist = parseBlacklist(fs.readFileSync(blacklistPath, 'utf8'))
-let registry = parseRegistry(fs.readFileSync(registryPath, 'utf8'), projectsRoot).filter((project) => !blacklist.has(project.name))
-if (args.project) registry = registry.filter((project) => project.name === args.project)
-if (args.project && registry.length === 0) fail(`project not active in registry: ${args.project}`)
+const selection = resolveRegistrySelection(args)
+const registrySnapshot = listLocalRegistry(selection)
+const { projects: registryProjects, unavailable, stateErrors } = localRegistryProjects(registrySnapshot, selection, args.project)
+if (unavailable.length > 0 && !args.json) reportUnavailable(unavailable)
+// Rows that failed registry identity validation are reported and skipped, but
+// they still raise the final exit class; every other row is evaluated normally.
+// `stateErrors` spans the WHOLE fleet listing, so a `--project P` run over a
+// healthy P still reports and aggregates a sibling's corrupt row instead of
+// exiting 0 over a registry it knows is broken. Rows already printed as part of
+// the selection are not printed twice.
+const unreportedStateErrors = stateErrors.filter(
+  (row) => !unavailable.some((seen) => seen.project === row.project && seen.root === row.root),
+)
+if (unreportedStateErrors.length > 0 && !args.json) reportUnavailable(unreportedStateErrors)
+const registryStateErrors = stateErrors.length
+const findingsExit = (found) => (registryStateErrors > 0 ? REGISTRY_STATE_EXIT : (found ? 1 : 0))
+// The artifact-writing commands used to end in a hard `process.exit(0)`, which
+// bypassed `findingsExit` and made a class-4 registry state error vanish at
+// exactly the point where it gets PERSISTED: a baseline or ledger derived from a
+// registry whose rows failed identity validation freezes that corruption into
+// the file every later run compares against. Refuse to produce the artifact at
+// all — to a file or to stdout — and exit 4, the same class the non-writing
+// commands already carry.
+function refuseOnRegistryState(artifact) {
+  if (registryStateErrors === 0) return
+  // Non-JSON runs already printed these rows; JSON runs suppressed them, and a
+  // refusal that names no row is unactionable.
+  if (args.json) reportUnavailable(stateErrors)
+  fail(
+    `refusing to write ${artifact} from a local registry with ${registryStateErrors} identity-validation failure(s); resolve the STATE-ERROR rows and re-run`,
+    REGISTRY_STATE_EXIT,
+  )
+}
 if (args.fetch) {
   if (args.ref === 'worktree') fail('--fetch cannot be combined with --ref worktree')
-  for (const project of registry) {
+  for (const project of registryProjects) {
     try {
       execFileSync('git', ['-C', project.root, 'fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'], { stdio: 'ignore', timeout: 30_000 })
     } catch {
@@ -660,10 +845,11 @@ if (args.fetch) {
     }
   }
 }
-const projects = registry.map((project) => collectProject(project, args.ref))
+const projects = registryProjects.map((project) => collectProject(project, args.ref))
 const baseline = readJson(baselinePath)
 
 if (args.command === 'snapshot') {
+  refuseOnRegistryState('a dependency baseline')
   const snapshot = snapshotBaseline(baseline, projects)
   const output = `${JSON.stringify(snapshot, null, 2)}\n`
   if (args.output) fs.writeFileSync(path.resolve(args.output), output)
@@ -673,6 +859,7 @@ if (args.command === 'snapshot') {
 
 const result = checkBaseline(baseline, projects, today)
 if (args.command === 'ledger-sync') {
+  refuseOnRegistryState('a remediation ledger')
   const ledger = syncLedger(readJson(ledgerPath), result, args.vulnerability_report ? path.resolve(args.vulnerability_report) : null)
   const output = `${JSON.stringify(ledger, null, 2)}\n`
   if (args.output) fs.writeFileSync(path.resolve(args.output), output)
@@ -681,13 +868,13 @@ if (args.command === 'ledger-sync') {
 }
 if (args.command === 'apply') {
   const drifts = result.findings.filter((finding) => ['version-drift', 'missing-toolchain-pin', 'toolchain-drift'].includes(finding.type))
-  if (args.json) console.log(JSON.stringify({ project: args.project ?? null, changes: drifts }, null, 2))
+  if (args.json) console.log(JSON.stringify({ project: args.project ?? null, unavailable, state_errors: stateErrors, changes: drifts }, null, 2))
   else {
     console.log('Read-only apply plan; update manifests, regenerate the authoritative lock, then run `trellis deps check`.')
     for (const drift of drifts) console.log(`${drift.project} ${drift.workspace ?? '.'}: ${drift.package ?? drift.toolchain} ${drift.resolved ?? drift.current ?? '(missing)'} -> ${drift.expected} [${drift.lane}]`)
   }
-  process.exit(drifts.length ? 1 : 0)
+  process.exit(findingsExit(drifts.length > 0))
 }
 
-renderFindings(result, projects, args.json)
-process.exit(result.errors.length || result.findings.length ? 1 : 0)
+renderFindings(result, projects, unavailable, stateErrors, args.json)
+process.exit(findingsExit(result.errors.length > 0 || result.findings.length > 0))

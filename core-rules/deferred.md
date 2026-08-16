@@ -64,7 +64,7 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Source:** Cowork audit 2026-05-08, n=0 in registry.
 **What:** `Dockerfile` lint at PR time — pinned base image (no `:latest`), non-root runtime user, `HEALTHCHECK` declared, no secrets baked into layers, multi-stage build for any compiled language. Tooling: hadolint or equivalent.
 **Why defer:** two service-shaped projects now exist (clusterbid-console, vericite — the latter ships a k3s deployment), so the "no Docker-shipping projects" premise is weakening, but there's no firsthand Dockerfile-lint adoption evidence yet. Promoting a Docker rule now would still lock in defaults from a hypothetical. Move from hypothetical to watch; re-evaluate next cycle.
-**Lift when:** three projects in `registry.md` ship production container images and each runs a Dockerfile linter at PR time.
+**Lift when:** three projects in the local registry (`trellis registry list`) ship production container images and each runs a Dockerfile linter at PR time.
 
 ### service-verify hook
 **Source:** Cowork audit 2026-05-08, n=0 in registry.

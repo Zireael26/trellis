@@ -147,7 +147,7 @@ Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
 Lume (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical eight gates still apply.
 
-Lume's row in `registry.md` documents the carve-out. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
+Lume's local registry row documents the carve-out in its `metadata`. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
 
 ## Public web surface — cross-profile note
 

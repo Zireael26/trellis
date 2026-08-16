@@ -55,14 +55,18 @@ commit_body_and_check() {
   git -C "$PROJECT_DIR" config core.hooksPath /dev/null
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core.hooksPath"* ]]
-  [[ "$output" == *"actively set to disable hooks"* ]]
+  [[ "$output" == *"core.hooksPath"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"actively set to disable hooks"* ]] || { echo "$output"; false; }
   [[ "$output" == *"/dev/null"* ]]
 }
 
 @test "§3a: core.hooksPath unset -> no finding from this check (exit 0)" {
-  # Sanity: ensure key is not set in the fixture.
-  ! git -C "$PROJECT_DIR" config --get core.hooksPath >/dev/null 2>&1
+  # Sanity: ensure key is not set in the fixture. `if`, not a leading `!`: a
+  # negated command never trips `set -e`, so the bare form was inert and a
+  # fixture that DID carry the key would have sailed past it.
+  if git -C "$PROJECT_DIR" config --get core.hooksPath; then
+    echo "fixture precondition violated: core.hooksPath is set"; false
+  fi
   run_check
   [ "$status" -eq 0 ]
   [[ "$output" != *"actively set to disable hooks"* ]]
@@ -81,7 +85,7 @@ commit_body_and_check() {
   git -C "$PROJECT_DIR" config commit.gpgsign false
   run_check
   [ "$status" -eq 2 ]
-  [[ "$output" == *"commit.gpgsign"* ]]
+  [[ "$output" == *"commit.gpgsign"* ]] || { echo "$output"; false; }
   [[ "$output" == *"actively disabled via persistent config"* ]]
 }
 
@@ -93,7 +97,9 @@ commit_body_and_check() {
 }
 
 @test "§3b: commit.gpgsign unset -> no finding (exit 0)" {
-  ! git -C "$PROJECT_DIR" config --get commit.gpgsign >/dev/null 2>&1
+  if git -C "$PROJECT_DIR" config --get commit.gpgsign; then
+    echo "fixture precondition violated: commit.gpgsign is set"; false
+  fi
   run_check
   [ "$status" -eq 0 ]
   [[ "$output" != *"actively disabled via persistent config"* ]]
@@ -104,7 +110,7 @@ commit_body_and_check() {
 @test "§1a: PROCESS_GATE_SKIP=1 trailer in range -> warn (exit 2) with finding" {
   commit_body_and_check "PROCESS_GATE_SKIP=1"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"PROCESS_GATE_SKIP=1"* ]]
+  [[ "$output" == *"PROCESS_GATE_SKIP=1"* ]] || { echo "$output"; false; }
   [[ "$output" == *"must be justified"* ]]
 }
 

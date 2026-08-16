@@ -61,6 +61,13 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "reread-guard"
 
+# Source the shared autonomy resolver. It owns canonical project, legacy
+# project, immutable runtime, and built-in precedence.
+__se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__se_autonomy_lib" ] || { echo "reread-guard: missing sibling autonomy lib at $__se_autonomy_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__se_autonomy_lib"
+
 # --- target file ---
 T=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -n "$T" ] || exit 0   # empty target → permit (fail-open)
@@ -162,29 +169,9 @@ fi
 
 # --- T exists, NOT in the known-set: resolve autonomy, apply warn budget ---
 
-# Autonomy resolution mirrors code-review-subagent.sh (verbatim algorithm).
-REPO_ROOT="$ROOT"
-AUTONOMY_LEVEL=3
-TRELLIS_CFG=""
-if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
-  TRELLIS_CFG="$TRELLIS_ROOT/trellis.config.json"
-fi
-if [ -n "$TRELLIS_CFG" ] && command -v jq >/dev/null 2>&1; then
-  FLEET=$(jq -r '.autonomy_default // empty' "$TRELLIS_CFG" 2>/dev/null)
-  [ -n "$FLEET" ] && AUTONOMY_LEVEL="$FLEET"
-fi
-for cand in "$REPO_ROOT/.trellis.config.json" "$REPO_ROOT/trellis.config.json"; do
-  if [ -f "$cand" ] && command -v jq >/dev/null 2>&1; then
-    PL=$(jq -r '.autonomy // empty' "$cand" 2>/dev/null)
-    [ -n "$PL" ] && AUTONOMY_LEVEL="$PL"
-    break
-  fi
-done
-SESSION_FILE="$REPO_ROOT/.claude/session-autonomy"
-if [ -f "$SESSION_FILE" ]; then
-  SESS=$(head -1 "$SESSION_FILE" | tr -d '[:space:]')
-  case "$SESS" in 1|2|3|4|5) AUTONOMY_LEVEL="$SESS" ;; esac
-fi
+# The shared resolver owns canonical-project, legacy-project, immutable-runtime,
+# and built-in precedence. Reread state handling remains local and fail-open.
+_se_resolve_autonomy "$ROOT"
 
 # warn-budget(level): L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
 case "$AUTONOMY_LEVEL" in

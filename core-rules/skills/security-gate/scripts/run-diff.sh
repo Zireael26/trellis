@@ -47,7 +47,18 @@ if [ -z "$PROJECT_DIR" ]; then
   fi
 fi
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+# The project key names the REPOSITORY, not the directory the run happened in.
+# `basename $PROJECT_DIR` is the worktree name inside a linked worktree, so a
+# worktree could never match its own repo's baseline and every diff scan there
+# was skipped as "no baseline found". Derive from the common git dir instead,
+# which is shared by every worktree of one repository.
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
+if _sg_common="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+   && [ -n "$_sg_common" ]; then
+  _sg_repo="$(cd "$_sg_common/.." 2>/dev/null && pwd)" || _sg_repo=""
+  [ -n "$_sg_repo" ] && PROJECT_NAME="$(basename "$_sg_repo")"
+fi
+PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
 
 # --- load project-local config --------------------------------------------
 for cfg in \
@@ -128,23 +139,44 @@ GITLEAKS_OUT="$WORK/gitleaks.jsonl"
 # Semgrep — scoped to changed files (filter to existing files; skip deletions).
 :>"$SEMGREP_OUT"
 SCOPE_FILES=()
+SHELL_SCOPE_FILES=()
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   case "$f" in
     *.js|*.jsx|*.ts|*.tsx|*.mjs|*.cjs|*.py|*.go|*.rs|*.java|*.kt|*.rb|*.php) ;;
+    # Shell is a first-class language here. Excluding it meant a shell-heavy
+    # repository had ~2% of its diff inspected while the row still read `pass`.
+    #
+    # `.bats` is deliberately NOT in this list. Semgrep's default ignore set skips
+    # test directories on a directory scan but not on explicit targets, so a
+    # baseline can never hold a finding this mode would then raise out of a test
+    # fixture — every run would report the same fixture credentials as new. Test
+    # files are covered by the baseline's whole-tree scan instead.
+    *.sh|*.bash|*.zsh) ;;
     *) continue ;;
   esac
-  [ -f "$PROJECT_DIR/$f" ] && SCOPE_FILES+=("$PROJECT_DIR/$f")
+  [ -f "$PROJECT_DIR/$f" ] || continue
+  SCOPE_FILES+=("$PROJECT_DIR/$f")
+  # ShellCheck refuses anything that is not sh/bash/dash/ksh and reports the
+  # refusal as a high-severity finding, so it gets its own narrower list.
+  case "$f" in
+    *.sh|*.bash) SHELL_SCOPE_FILES+=("$PROJECT_DIR/$f") ;;
+  esac
 done < "$CHANGED_LIST"
 
 if [ "${#SCOPE_FILES[@]}" -gt 0 ] && command -v semgrep >/dev/null 2>&1; then
   case "$PROFILE" in
-    web-next)   CONFIGS=(--config=p/owasp-top-ten --config=p/javascript --config=p/typescript --config=p/nextjs --config=p/react) ;;
-    web-static) CONFIGS=(--config=p/owasp-top-ten --config=p/javascript --config=p/typescript) ;;
-    *)          CONFIGS=(--config=p/owasp-top-ten) ;;
+    web-next)      CONFIGS=(--config=p/owasp-top-ten --config=p/javascript --config=p/typescript --config=p/nextjs --config=p/react) ;;
+    web-static)    CONFIGS=(--config=p/owasp-top-ten --config=p/javascript --config=p/typescript) ;;
+    shell-tooling) CONFIGS=(--config=p/owasp-top-ten --config=p/command-injection --config=p/secrets) ;;
+    *)             CONFIGS=(--config=p/owasp-top-ten) ;;
   esac
+  # Same exclusions the baseline engine applies (scripts/lib/semgrep.sh), so a
+  # diff finding is comparable to a baseline finding rather than an artefact of
+  # the two modes disagreeing about scope.
+  EXCLUDES=(--exclude=node_modules --exclude=.next --exclude=dist --exclude=build --exclude=.turbo --exclude=test-results --exclude=coverage --exclude=audits --exclude=playwright-report)
   RAW="$WORK/semgrep.raw.json"
-  semgrep scan --json --metrics=off --quiet "${CONFIGS[@]}" "${SCOPE_FILES[@]}" >"$RAW" 2>/dev/null || true
+  semgrep scan --json --metrics=off --quiet "${CONFIGS[@]}" "${EXCLUDES[@]}" "${SCOPE_FILES[@]}" >"$RAW" 2>/dev/null || true
   python3 - "$RAW" "$PROJECT_DIR" >"$SEMGREP_OUT" <<'PY'
 import json, sys, os
 raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
@@ -167,6 +199,37 @@ for i, r in enumerate(data.get("results", []), 1):
         "message": (r.get("extra", {}).get("message") or "").splitlines()[0][:280],
     }, ensure_ascii=False))
 PY
+fi
+
+# ShellCheck — the actual SAST for shell. Semgrep's registry has no bash ruleset
+# (`p/bash` 404s) and a canary proves it detects neither `eval "$x"` nor a
+# hardcoded AWS secret in a .sh file, so scoping shell in without this engine
+# would put shell files in `paths.scanned` and still see nothing. Findings join
+# the semgrep stream because they populate the same SAST row.
+if [ "$PROFILE" = "shell-tooling" ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
+  SC_RAW="$WORK/shellcheck.raw.json"
+  shellcheck --severity=warning --format=json "${SHELL_SCOPE_FILES[@]}" >"$SC_RAW" 2>/dev/null || true
+  python3 - "$SC_RAW" "$PROJECT_DIR" >>"$SEMGREP_OUT" <<'SCPY'
+import json, sys, os
+raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
+sev_map = {"error": "high", "warning": "medium", "info": "low", "style": "low"}
+try:
+    with open(raw) as fh: data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for i, r in enumerate(data, 1):
+    path = r.get("file") or ""
+    if path.startswith(root + os.sep): path = path[len(root) + 1:]
+    print(json.dumps({
+        "id": f"shellcheck-diff-{i:04d}",
+        "tool": "shellcheck",
+        "rule": f"SC{r.get('code', 0)}",
+        "severity": sev_map.get((r.get("level") or "").lower(), "low"),
+        "file": path,
+        "line": r.get("line", 0),
+        "message": (r.get("message") or "")[:280],
+    }, ensure_ascii=False))
+SCPY
 fi
 
 # OSV — only if a manifest changed (deps changed).

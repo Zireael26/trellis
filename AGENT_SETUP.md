@@ -1,199 +1,251 @@
-# AGENT_SETUP.md — paste-into-agent prompt
+# AGENT_SETUP.md — local Trellis setup for agents
 
-> **For the human:** clone this repo, then paste **everything below the `--- BEGIN PROMPT ---` line** into an agent conversation that has filesystem and shell tools (Claude Code, Codex, Cowork, or any agent that can read, edit, and run shell commands). The agent will interview you, replace placeholders across the repo, install the inheritance symlinks in your projects, seed hooks/skills for the configured harnesses, and update the registry.
->
-> Make sure the agent session has the cloned repo available — open the agent from inside it, or connect the cloned folder in the app you are using.
+This runbook sets up **one machine's local Trellis state**. It is deliberately safe to rehearse in a temporary home, supports personal and work fleets from one policy source clone, and accepts project Git worktrees at arbitrary absolute paths.
 
----
+It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and migration rationale, link to—not duplicate—the T23 documents: [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
-## --- BEGIN PROMPT ---
+## 1. Establish explicit inputs and a safe local home
 
-You are bootstrapping **Trellis** — a multi-project engineering-process control plane — on this machine. The repo we're in is a redacted template; your job is to customize it for the user, then optionally onboard their first project. Work carefully and verify each step.
-
-### Context you should establish first
-
-Before touching anything, read these files in order so you understand the system:
-
-1. `README.md` — high-level overview and the placeholder list.
-2. `core-rules/CLAUDE.md` and `core-rules/AGENTS.md` — the parent rules every project will inherit (~5 KB, shared by both harnesses).
-3. `core-rules/inheritance.md` — the load-bearing inheritance mechanism (this is critical; it's how rules reach Claude Code and Codex sessions).
-4. `core-rules/hooks.md` — the three-tier hook architecture and harness-specific hook envelopes.
-5. `engineering-process.md` §§1-5 only at this stage — the narrative manual; sections 1-5 cover philosophy, control plane, and project regime. Skip the rest until later.
-
-After reading, confirm to the user in one short paragraph what Trellis is and what you're about to do, then continue.
-
-### Step 1 — Interview the user for placeholder values
-
-Use whatever clarification mechanism your tooling provides (multi-choice question tool if available, or just ask in chat). You need five values and one harness choice:
-
-- `__TRELLIS_PATH__` — absolute path to this cloned repo. **Auto-detect** from your current working directory using `pwd` (run it with `bash`); confirm with the user before using it.
-- `__PROJECTS_ROOT__` — absolute path to the parent dir holding the user's projects. Examples: `/path/to/workspace/projects`, `/home/<user>/code`. Default the suggestion to a sibling of `__TRELLIS_PATH__` named `projects`. Confirm with the user.
-- `__MAINTAINER_NAME__` — the user's display name (used in `engineering-process.md`).
-- `__GITHUB_USER__` — the user's GitHub username (referenced in audit examples and registry comments).
-- `__USER_HOME__` — the user's home directory. Auto-detect via `echo $HOME`; confirm.
-- Harness support — ask whether the user wants **Claude + Codex** (default), **Claude-only**, or **Codex-only**. The default keeps Claude + Codex. Removing Claude is rare — confirm explicitly if proposed.
-
-Echo the five values plus harness choice back to the user in a clear table and ask "Should I proceed with these?" Wait for explicit yes.
-
-### Step 2 — Replace placeholders across the repo
-
-Run this from the repo root. The exclusion list keeps four files untouched: `LICENSE`, `README.md`, `SETUP.md`, and `AGENT_SETUP.md` itself — they reference placeholders by literal name as documentation.
+Start in the policy source clone only to perform the two one-time bootstrap calls below: direct `configure.sh configure` and `configure.sh fleet add`. Never invoke the mutable `scripts/trellis` dispatcher. Select an exact **published** release and the remote that contains its annotated `vVERSION` tag; do not derive either from a branch, working tree, or “latest” lookup.
 
 ```bash
-TRELLIS_PATH="<from-step-1>"
-PROJECTS_ROOT="<from-step-1>"
-MAINTAINER_NAME="<from-step-1>"
-GITHUB_USER="<from-step-1>"
-USER_HOME="<from-step-1>"
+SOURCE_ROOT="$(pwd -P)"
+BOOTSTRAP_CONFIGURE="$SOURCE_ROOT/scripts/configure.sh"
+test -x "$BOOTSTRAP_CONFIGURE"
+test -x "$SOURCE_ROOT/scripts/trellis-launcher.sh"
 
-# Detect sed flavor (BSD on macOS vs GNU on Linux).
-if sed --version >/dev/null 2>&1; then
-  SED_INPLACE=(-i)        # GNU
-else
-  SED_INPLACE=(-i '')     # BSD/macOS
-fi
+: "${RELEASE_VERSION:?Set the exact published immutable release, without a v prefix}"
+: "${RELEASE_REMOTE:?Set a remote containing annotated tag v$RELEASE_VERSION}"
+: "${PERSONAL_DISCOVERY_ROOT:?Set an explicit personal scan root}"
+: "${WORK_DISCOVERY_ROOT:?Set an explicit work scan root}"
 
-find . -type f \
-  ! -path './.git/*' \
-  ! -name LICENSE ! -name README.md ! -name SETUP.md ! -name AGENT_SETUP.md \
-  -exec sed "${SED_INPLACE[@]}" \
-    -e "s|__TRELLIS_PATH__|$TRELLIS_PATH|g" \
-    -e "s|__PROJECTS_ROOT__|$PROJECTS_ROOT|g" \
-    -e "s|__MAINTAINER_NAME__|$MAINTAINER_NAME|g" \
-    -e "s|__GITHUB_USER__|$GITHUB_USER|g" \
-    -e "s|__USER_HOME__|$USER_HOME|g" \
-    {} +
+# New private state and an isolated user home for this rehearsal. This shell
+# never reads or mutates the operator's ~/.trellis or ~/.local/bin/trellis.
+export TRELLIS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/trellis-home.XXXXXX")"
+export HOME="$(mktemp -d "${TMPDIR:-/tmp}/trellis-user-home.XXXXXX")"
 ```
 
-**Verification:** grep for any leftover placeholder. Output should be empty.
+Use a deliberately chosen persistent `TRELLIS_HOME` only after this flow is understood; then run the configure command with the operator's real `HOME` so the fixed launcher installs at `$HOME/.local/bin/trellis`. `TRELLIS_HOME` is local state, not a repository setting. A discovery root bounds an opt-in registry rebuild or scan; it is not a required parent directory for a project you explicitly attach.
+
+## 2. Configure personal and work fleets
+
+Only this block executes a script from the source clone. It writes private machine configuration and both fleet definitions, then atomically installs the fixed launcher at `$HOME/.local/bin/trellis`; it never invokes `scripts/trellis`. The temporary `HOME` makes that fixed destination safe for rehearsal. Once `TRELLIS` is set below, every command—including the first release installation—uses the installed launcher.
 
 ```bash
-grep -rn "__TRELLIS_PATH__\|__PROJECTS_ROOT__\|__MAINTAINER_NAME__\|__GITHUB_USER__\|__USER_HOME__" . \
-  --exclude-dir=.git --exclude=LICENSE --exclude=README.md --exclude=SETUP.md --exclude=AGENT_SETUP.md
+FLEET=personal
+"$BOOTSTRAP_CONFIGURE" configure \
+  --source "$SOURCE_ROOT" \
+  --home "$TRELLIS_HOME" \
+  --default-fleet "$FLEET" \
+  --discovery-root "$PERSONAL_DISCOVERY_ROOT" \
+  --release "$RELEASE_VERSION" \
+  --release-remote "$RELEASE_REMOTE" \
+  --launcher-template "$SOURCE_ROOT/scripts/trellis-launcher.sh"
+"$BOOTSTRAP_CONFIGURE" fleet add work \
+  --home "$TRELLIS_HOME" \
+  --discovery-root "$WORK_DISCOVERY_ROOT"
+
+TRELLIS="$HOME/.local/bin/trellis"
+test -x "$TRELLIS"
 ```
 
-If anything matches, fix it before continuing. Report findings to the user.
+`$TRELLIS_HOME/config.json` holds this machine's source location, selected release, default fleet, and fleet discovery roots. `$TRELLIS_HOME/registry.json` later records actual attached checkout locations and their availability. Both stay private to this machine.
 
-### Step 2b — Apply harness choice
+## 3. Install and verify the immutable release
 
-The `harnesses` array in `trellis.config.json` accepts any combination of `"claude"` and `"codex"`. Apply the user's choice. Common combinations:
-
-```json
-"harnesses": ["claude", "codex"]
-```
-
-```json
-"harnesses": ["claude"]
-```
-
-```json
-"harnesses": ["codex"]
-```
-
-For Codex parity, also tell the user that Codex hooks require this user-level config:
-
-```toml
-[features]
-hooks = true
-```
-
-(The older `codex_hooks` key still works as a deprecated alias but emits a warning on Codex CLI 0.129+.)
-
-If you are running in Codex and the user explicitly wants you to update `$CODEX_HOME/config.toml`, add only `hooks = true` under `[features]`; do not rewrite other settings.
-
-### Step 3 — Smoke-test the canonical files
-
-Sanity checks the user can trust:
+The configured `active_cli_release` must equal `$RELEASE_VERSION`. Before that release exists locally, the fixed launcher permits exactly its bootstrap-safe installation route: `release install VERSION [--remote URL]`. Use that route; do not fall back to a mutable source dispatcher. Installation fetches the annotated tag, verifies its version and tree, then makes the installed payload immutable. After installation, even verification runs through the stable launcher.
 
 ```bash
-# Hooks are executable
-ls -la core-rules/hooks/*.sh core-rules/codex/hooks/*.sh core-rules/husky/* scripts/onboard-project.sh scripts/sync-codex-hooks.sh
-
-# Symlink target exists (used in step 4)
-test -f "$TRELLIS_PATH/core-rules/CLAUDE.md" && echo OK
+"$TRELLIS" release install "$RELEASE_VERSION" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$RELEASE_VERSION"
 ```
 
-If any are not executable:
+The source clone is a bootstrap and later local-configuration input only. A successful project attachment resolves its runtime from the verified release payload recorded under `TRELLIS_HOME`, never from `SOURCE_ROOT`; after the initial bootstrap, normal operations use `"$TRELLIS"` only.
+
+## 4. Understand the inert project boundary
+
+A project may track one optional `.trellis.json` manifest. It contains a stable `project_id` and portable policy such as presets or autonomy; it contains no source path, fleet membership, local release path, local registry row, hook state, or runtime link.
+
+Everything behavior-producing is local attachment state: the immutable runtime anchor, native Claude Code/Codex/OMP surfaces, managed local exclusions, attachment ownership, and recovery journals. A contributor who clones only the tracked project—including `.trellis.json`—has an inert ordinary clone: no Trellis installation is required and no Trellis harness behavior is activated.
+
+Do not create absolute `@` imports, direct live source links, copied hooks/settings, or a tracked central registry as a substitute for attachment. Each harness's credentials and trust decisions remain the user's responsibility.
+
+## 5. Onboard or attach a project at any path
+
+Resolve the operator-supplied Git worktree; never construct it from a discovery root or project ID. The normal command explicitly attaches all three supported harnesses.
 
 ```bash
-chmod +x core-rules/hooks/*.sh core-rules/codex/hooks/*.sh core-rules/husky/* scripts/onboard-project.sh scripts/sync-codex-hooks.sh
+: "${PROJECT_INPUT:?Set the existing project Git worktree path explicitly}"
+: "${PROJECT_ID:?Set a stable portable project ID explicitly}"
+PROJECT_ROOT="$(git -C "$PROJECT_INPUT" rev-parse --show-toplevel)"
+
+git -C "$PROJECT_ROOT" status --short
+"$TRELLIS" onboard \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --release "$RELEASE_VERSION" \
+  --project-id "$PROJECT_ID" \
+  --harness claude \
+  --harness codex \
+  --harness omp \
+  "$PROJECT_ROOT"
 ```
 
-### Step 4 — Commit the customization
+`onboard` creates the portable manifest when it is absent and records the actual checkout only locally. Have the project owner review and commit `.trellis.json` as its own project change. Do not stage the local attachment artifacts.
+
+For a clean clone that already has a valid manifest, attach directly with the same explicit release, fleet, and three-harness selection:
 
 ```bash
-git add -A
-git status
-git commit -m "chore: bootstrap Trellis for $USER"
+"$TRELLIS" attach \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --release "$RELEASE_VERSION" \
+  --harness claude \
+  --harness codex \
+  --harness omp \
+  "$PROJECT_ROOT"
 ```
 
-Show the user the commit. Don't push yet — wait until after step 5 in case the user wants to change the remote.
+## 6. Migrate a legacy project before attachment
 
-### Step 5 — (Optional) Repoint git remote
-
-The cloned remote currently points at the template repo on GitHub. If the user wants their own copy, ask whether they want to:
-
-- (a) **Fork on GitHub then re-point.** Best if they want a public fork with provenance back to the template.
-- (b) **Create a new private repo and re-point.** Best for a personal control plane.
-- (c) **Leave the remote alone.** Useful if they're just trying Trellis out and may delete it.
-
-For (b), instruct the user to create the repo themselves on GitHub (creating accounts/repos requires their input — don't do it for them). Once they've created it:
+If `onboard` reports a legacy or mixed direct-link layout, do not delete artifacts by hand and do not use the compatibility route as the normal setup path. Prepare a reversible migration, review its project diff, and preserve the emitted snapshot path.
 
 ```bash
-git remote set-url origin git@github.com:<USER>/trellis-instance.git
-git push -u origin main
+"$TRELLIS" migrate --prepare \
+  --home "$TRELLIS_HOME" \
+  --project-id "$PROJECT_ID" \
+  "$PROJECT_ROOT"
 ```
 
-For (a), ask the user to fork via GitHub UI, then guide them through `git remote set-url`.
+The command prints `snapshot: ...` and its exact rollback invocation. After reviewing the result, attach the migrated project through the normal all-three-harness command in the prior section. If migration itself must be reversed before further project changes, use only that recorded snapshot:
 
-### Step 6 — (Optional) Onboard their first project
+```bash
+"$TRELLIS" migrate --rollback "$SNAPSHOT"
+```
 
-Ask the user: "Do you have an existing project you'd like to register under Trellis right now? (Y/N)"
+### Import a historical tracked registry
 
-If yes:
+The tracked `registry.md`/`blacklist.md` were removed at `v1.0.0-rc.25`, so `LEGACY_REGISTRY` now names a file the operator supplies — extract it from history with `git show <pre-cutover-sha>:registry.md > /tmp/legacy-registry.md`, or use a backup. A machine coming from the legacy tracked inventory imports it once, into a fleet that already exists in this machine's config — `registry import` refuses a fleet `configure.sh fleet add` has never created, because fleet-scoped rows no `doctor --fleet NAME` can inspect are worse than no rows. Import reads the legacy Markdown read-only and writes only private `registry.json`.
 
-1. Ask for the absolute path. Verify it's a directory and a git repo.
+A historical registry usually records a portable shorthand path such as `/personal/<name>`, since a tracked file must carry no machine paths. `--projects-root PATH` is the explicit, operator-supplied statement of where that shorthand lives here: each row path that is not an existing absolute path is resolved as `PATH` + the recorded row path, the resolved path becomes the row root, and the recorded shorthand is retained as `legacy.legacy_path` metadata. A resolved path that does not exist still imports as a visible unavailable row at the resolved path. Without the flag every recorded path is used exactly as written.
 
-2. Run the onboarding script (it auto-detects Trellis's location):
+```bash
+: "${LEGACY_REGISTRY:?Set the exact historical registry.md path}"
+: "${PROJECTS_ROOT:?Set the absolute root the recorded shorthand hangs from}"
+"$TRELLIS" registry import \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --registry "$LEGACY_REGISTRY" \
+  --projects-root "$PROJECTS_ROOT"
+"$TRELLIS" registry list --home "$TRELLIS_HOME" --fleet "$FLEET"
+```
 
-   ```bash
-   ./scripts/onboard-project.sh /absolute/path/to/their/project
-   ```
+The complete import, parity-review, and cutover procedure — including the blacklist pair, the seven-cell row contract, and how a literal `|` is written `\|` in a cell — is [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md) §2.
 
-3. Follow the script's "Next steps" output. Specifically:
-   - Add the `@`-import line at the top of `<project>/CLAUDE.md`. Read the file first; if the user has no `CLAUDE.md`, create a minimal one with just the import line and a one-line "project-specific rules go below" header. Don't invent project-specific rules — that's for them.
-   - In the project dir, run `git status` and present the new files (`.claude/rules/trellis.md`, `gotchas.md`, `context-log.md`, and the `.husky/*` files if Node) for the user's review.
-   - If Codex parity is enabled, also present `AGENTS.md`, `.agents/rules/trellis.md`, `.agents/skills/process-gate`, `.agents/skills/process-gate-local/local.config.sh`, `.codex/hooks.json`, and `.codex/hooks/*.sh`.
-   - Suggest the commit message: `chore: onboard to Trellis`.
-   - Remind the user to run `pnpm install` (or `bun install` / `npm install`) so husky activates `core.hooksPath`.
+## 7. Verify local state and the attached project
 
-4. Back in the Trellis repo, append a row to `registry.md`:
+Verify the installed payload, inspect only the selected fleet, and make `doctor` resolve the project by its recorded identity. Inspection runs through the same fixed launcher as every other command: `trellis show-config [--home PATH] [--fleet NAME]` executes `scripts/show-config.sh` from the verified immutable payload, never from the mutable source clone.
 
-   ```markdown
-   | <project-name> | `<absolute-path>` | <class — see existing rows for examples> | Onboarded YYYY-MM-DD. |
-   ```
+Two preconditions come with that route, because the launcher crosses an `env -i` boundary before the payload runs:
 
-   Commit: `chore: register <project-name>`.
+- The launcher resolves a home of its own — `TRELLIS_HOME`, else `$HOME/.trellis` — and refuses before dispatch if that home has no verified active release. `--home PATH` then selects which machine state to render; it is not a way to reach an unconfigured launcher.
+- `TRELLIS_FLEET` does not survive the boundary. Select the fleet with `--fleet NAME`; with neither, the rendered home's `default_fleet` applies.
 
-If the user has no project to onboard yet, that's fine — Trellis sits idle until they do. Tell them where the onboarding script is for later.
+Sections 1 and 2 already export `TRELLIS_HOME` and set `FLEET`, and section 3 installed and verified the active release into that home, so the block below satisfies both preconditions as written.
 
-### Step 7 — Final report
+```bash
+"$TRELLIS" release verify "$RELEASE_VERSION"
+"$TRELLIS" registry list --home "$TRELLIS_HOME" --fleet "$FLEET"
+"$TRELLIS" doctor \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --project "$PROJECT_ID"
 
-Tell the user, in this order:
+(
+  cd "$PROJECT_ROOT"
+  "$TRELLIS" show-config --home "$TRELLIS_HOME" --fleet "$FLEET"
+  git status --short
+)
+```
 
-1. **What you did.** A short paragraph: which placeholders were swapped, which harnesses are enabled, whether you committed, whether the remote was repointed, whether a project was onboarded.
-2. **What's still on them.** Three concrete things: (a) push the customization commit if they want it on a remote, (b) read `engineering-process.md` cover-to-cover for the manual, (c) if they registered a project, run `pnpm install` (or equivalent) inside it so husky activates. If Codex parity is enabled, also confirm `$CODEX_HOME/config.toml` has `[features] hooks = true` (the older `codex_hooks` key is deprecated as of Codex CLI 0.129+).
-3. **Where to look next.** Point them at `core-rules/CLAUDE.md` (the rules), `engineering-process.md` (the manual), and `examples/audits/` (sample report shapes for optional operator-side audits).
+Before the project owner commits a newly created manifest, `git status` may show that intentional tracked file. After it is committed, attachment state must not dirty the project. An unavailable local-registry row remains explicit; do not guess an alternative path or recreate `$PROJECTS_ROOT/<name>`.
 
-Don't write a tutorial — they have one in `engineering-process.md`. Just hand off cleanly.
+## 8. Move, relink, recover, and detach safely
 
-### Discipline you should follow throughout
+### Move the policy source clone
 
-- **Read before editing.** Before any `sed` / `Edit` / `Write`, read the target file. The `core-rules/CLAUDE.md` rules you're installing apply to you too.
-- **Verify after editing.** After the `sed` pass in step 2, grep for leftovers. After the symlink creation in step 6, `ls -la <project>/.claude/rules/trellis.md` and confirm it resolves.
-- **Don't push without explicit permission.** Step 4 is a local commit; step 5 asks before pushing.
-- **Don't create accounts or repos for the user.** If a step needs a new GitHub repo, ask the user to create it and paste the URL.
-- **Don't invent project-specific rules.** When seeding a new project's `CLAUDE.md`, keep it minimal — just the `@`-import. The user will fill in their own.
-- **One thing at a time.** Wait for "yes" before each major step. The user is in the loop.
+A moved policy source clone changes only local machine configuration. The existing project runtime stays on its immutable installed payload. Reconfigure the source location, then relink the recorded project only if its owned runtime anchor needs repair:
 
-## --- END PROMPT ---
+```bash
+: "${NEW_SOURCE_ROOT:?Set the moved policy source clone path explicitly}"
+NEW_SOURCE_ROOT="$(cd "$NEW_SOURCE_ROOT" && pwd -P)"
+"$TRELLIS" configure --source "$NEW_SOURCE_ROOT" --home "$TRELLIS_HOME" --no-install-launcher
+"$TRELLIS" relink --home "$TRELLIS_HOME" --fleet "$FLEET" "$PROJECT_ROOT"
+```
+
+### Move a project checkout
+
+`relink` repairs an immutable runtime anchor; it does not guess or rewrite a moved checkout location. Detach before relocating a checkout, then attach the new explicit path.
+
+```bash
+: "${NEW_PROJECT_ROOT:?Set the destination checkout path explicitly}"
+"$TRELLIS" detach --home "$TRELLIS_HOME" --all-worktrees "$PROJECT_ROOT"
+# Move the checkout with the operator's chosen filesystem operation.
+"$TRELLIS" attach \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --release "$RELEASE_VERSION" \
+  --harness claude \
+  --harness codex \
+  --harness omp \
+  "$NEW_PROJECT_ROOT"
+```
+
+### Recover interruption or opt out locally
+
+Run recovery only after `doctor` identifies an interrupted transaction for this exact worktree. Detachment removes only attachment-owned local artifacts and leaves `.trellis.json` intact and inert.
+
+```bash
+"$TRELLIS" recover --home "$TRELLIS_HOME" "$PROJECT_ROOT"
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
+
+"$TRELLIS" detach --home "$TRELLIS_HOME" --all-worktrees "$PROJECT_ROOT"
+```
+
+## 9. Adopt or roll back a release explicitly
+
+Never edit a project runtime anchor by hand. Managed adoption first verifies the target immutable release, then changes only strict local-registry rows whose attachment ownership matches. Unavailable rows remain explicit and no path is inferred.
+
+The safe default is one recorded project in one fleet:
+
+```bash
+: "${TARGET_RELEASE:?Set the exact immutable release to adopt}"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" release adopt "$TARGET_RELEASE" --project "$PROJECT_ID" --fleet "$FLEET"
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+`--project "$PROJECT_ID"` without `--fleet` is allowed only when the local registry resolves that ID uniquely; ambiguity fails closed. A reviewed fleet-wide adoption uses `"$TRELLIS" release adopt "$TARGET_RELEASE" --fleet "$FLEET"`; a reviewed all-fleet adoption uses `"$TRELLIS" release adopt "$TARGET_RELEASE" --all`. Choose exactly one scope—do not turn a project repair into a fleet or all-fleet change.
+
+Rollback is the same explicit operation with a previously installed and verified version, never a source-checkout link:
+
+```bash
+: "${ROLLBACK_RELEASE:?Set the previously verified immutable release to restore}"
+"$TRELLIS" release verify "$ROLLBACK_RELEASE"
+"$TRELLIS" release adopt "$ROLLBACK_RELEASE" --project "$PROJECT_ID" --fleet "$FLEET"
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+`release adopt VERSION --runtime-anchor PATH` is compatibility-only. Normal local-fleet setup must use the registry-targeted commands above.
+
+## 10. Failure handling and completion
+
+Treat exit class `2` as bad arguments, `3` as an ownership/identity conflict, `4` as invalid or corrupt local state, and `5` as an unavailable path, remote, or required capability. Read the reported condition; do not delete local state, alter a project-owned file, or guess a missing checkout to force progress.
+
+A complete local setup has all of the following observed facts:
+
+1. A chosen `TRELLIS_HOME` has separate `personal` and `work` fleet configuration.
+2. The exact release was installed and verified before any attachment.
+3. Each attached project has a reviewed portable `.trellis.json`, a strict local registry row, and all three harnesses explicitly attached from the immutable payload.
+4. `trellis doctor` and `trellis show-config` resolve the selected fleet/project through the launcher, without using a common projects root.
+5. A raw contributor clone stays inert, while the operator has the migration snapshot, recovery path, detach path, and verified-release rollback procedure needed to undo local changes.

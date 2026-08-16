@@ -1,0 +1,21 @@
+{
+  "$schema": "../../../lib/trellis.attachment.schema.json",
+  "schema_version": 1,
+  "status": "committed",
+  "fleet": "personal",
+  "project_id": "neev",
+  "checkout_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "worktree_root": "/Users/alex/projects/neev",
+  "release": "1.0.0-rc.24",
+  "artifacts": [
+    {
+      "path": ".omp/hooks/pre/trellis.ts",
+      "kind": "symlink"
+    }
+  ],
+  "exclude_block_hash": "short",
+  "git_hooks": {
+    "previous_hooks_path": null,
+    "managed_hooks_path": "/Users/alex/.trellis/state/git-hooks/1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}

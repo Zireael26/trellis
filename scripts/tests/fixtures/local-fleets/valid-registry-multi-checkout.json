@@ -1,0 +1,67 @@
+{
+  "$schema": "../../../lib/trellis.registry.schema.json",
+  "schema_version": 1,
+  "projects": {
+    "personal/neev": {
+      "fleet": "personal",
+      "project_id": "neev",
+      "status": "active",
+      "metadata": {
+        "source": "fixture"
+      },
+      "checkouts": {
+        "1111111111111111111111111111111111111111111111111111111111111111": {
+          "root": "/Users/alex/projects/neev",
+          "git_common_dir": "/Users/alex/projects/neev/.git",
+          "release": "1.0.0-rc.24",
+          "harnesses": ["claude", "codex", "omp"],
+          "worktrees": {
+            "2222222222222222222222222222222222222222222222222222222222222222": {
+              "root": "/Users/alex/projects/neev",
+              "attachment_id": "11111111-2222-4333-8444-555555555555"
+            },
+            "3333333333333333333333333333333333333333333333333333333333333333": {
+              "root": "/Users/alex/projects/neev feature-x",
+              "attachment_id": "22222222-3333-4444-8555-666666666666"
+            }
+          }
+        },
+        "4444444444444444444444444444444444444444444444444444444444444444": {
+          "root": "/Volumes/Archive/checkouts/neev",
+          "git_common_dir": "/Volumes/Archive/checkouts/neev/.git",
+          "release": "1.0.0-rc.24",
+          "harnesses": ["claude", "codex"],
+          "worktrees": {
+            "5555555555555555555555555555555555555555555555555555555555555555": {
+              "root": "/Volumes/Archive/checkouts/neev",
+              "attachment_id": "33333333-4444-4555-8666-777777777777"
+            }
+          }
+        }
+      }
+    },
+    "work/neev": {
+      "fleet": "work",
+      "project_id": "neev",
+      "status": "unavailable",
+      "metadata": {
+        "source": "fixture",
+        "reason": "external volume detached"
+      },
+      "checkouts": {
+        "6666666666666666666666666666666666666666666666666666666666666666": {
+          "root": "/Volumes/Work Drive/checkouts/neev",
+          "git_common_dir": "/Volumes/Work Drive/checkouts/neev/.git",
+          "release": "1.0.0-rc.24",
+          "harnesses": ["claude", "codex", "omp"],
+          "worktrees": {
+            "7777777777777777777777777777777777777777777777777777777777777777": {
+              "root": "/Volumes/Work Drive/checkouts/neev",
+              "attachment_id": "44444444-5555-4666-8777-888888888888"
+            }
+          }
+        }
+      }
+    }
+  }
+}

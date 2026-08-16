@@ -106,7 +106,7 @@ make_failing_npx_dir() {
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
   [ "$status" -eq 2 ]
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
   [ "$status" -eq 2 ]
@@ -134,7 +134,7 @@ EOF
   # Block 1: one payload.
   run bash "$HOOK" <<<"$(make_envelope "All done — the change is complete." "$tx1")"
   [ "$status" -eq 2 ]
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   # Block 2: DIFFERENT last_assistant_message + DIFFERENT transcript, SAME files.
   run bash "$HOOK" <<<"$(make_envelope "Wrapped up, all good here." "$tx2")"
@@ -154,7 +154,7 @@ EOF
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
   [ "$status" -eq 2 ]
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   # Change the file SET (add a second non-doc file).
   echo "function sub(a,b){return a-b}" > "$PROJECT_DIR/other.js"
@@ -205,12 +205,12 @@ EOF
   run bash "$HOOK" <<<"$(make_envelope)"
   [ "$status" -eq 2 ]
   printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):")' >/dev/null
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   run bash "$HOOK" <<<"$(make_envelope)"
   [ "$status" -eq 2 ]
   printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):")' >/dev/null
-  [[ "$output" == *"$ESCALATION"* ]]
+  [[ "$output" == *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   export PATH="$PATH_BACKUP"; rm -rf "$npxdir"
 }

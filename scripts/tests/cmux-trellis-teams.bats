@@ -51,7 +51,7 @@ json_field() {
 
   run "$LAUNCHER" --dry-run --model sol
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unsupported model"* ]]
+  [[ "$output" == *"unsupported model"* ]] || { echo "$output"; false; }
 
   run "$LAUNCHER" --dry-run --model terra
   [ "$status" -ne 0 ]
@@ -74,14 +74,14 @@ json_field() {
 
   run "$LAUNCHER" --dry-run --advisor sol
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unsupported advisor"* ]]
+  [[ "$output" == *"unsupported advisor"* ]] || { echo "$output"; false; }
 }
 
 @test "delegates defaults to auto and accepts claude and none" {
   run "$LAUNCHER" --dry-run
   [ "$status" -eq 0 ]
   [ "$(json_field '.delegates')" = auto ]
-  [[ "$(json_field '.command | join(" ")')" == *"--delegates auto governs"* ]]
+  [[ "$(json_field '.command | join(" ")')" == *"--delegates auto governs"* ]] || { echo "$output"; false; }
 
   run "$LAUNCHER" --dry-run --delegates claude
   [ "$status" -eq 0 ]
@@ -93,14 +93,14 @@ json_field() {
 
   run "$LAUNCHER" --dry-run --delegates gpt
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unsupported delegates"* ]]
+  [[ "$output" == *"unsupported delegates"* ]] || { echo "$output"; false; }
 }
 
 @test "removed routed topologies are rejected" {
   for mode in codex hybrid deepseek muse-contributor; do
     run "$LAUNCHER" --dry-run --mode "$mode"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"unsupported mode"* ]]
+    [[ "$output" == *"unsupported mode"* ]] || { echo "$output"; false; }
   done
   run "$LAUNCHER" --dry-run --mode nope
   [ "$status" -ne 0 ]
@@ -131,6 +131,6 @@ json_field() {
 @test "Agent lifecycle guidance is injected into the session prompt" {
   run "$LAUNCHER" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$(json_field '.command | join(" ")')" == *"the root orchestrator may pass name"* ]]
-  [[ "$(json_field '.command | join(" ")')" == *"TaskStop"* ]]
+  [[ "$(json_field '.command | join(" ")')" == *"the root orchestrator may pass name"* ]] || { echo "$output"; false; }
+  [[ "$(json_field '.command | join(" ")')" == *"TaskStop"* ]] || { echo "$output"; false; }
 }

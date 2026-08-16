@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# Recreate ("mirror") the gitignored Trellis inheritance symlinks from a
-# project's MAIN git working tree into a linked worktree.
+# Reconcile a linked worktree from its clone's local Trellis registration and
+# recorded immutable release.
 #
-# git worktree add does not recreate gitignored files, so worktrees lose all
-# .claude/, .agents/, and .omp/ inheritance symlinks. This script restores
-# them, including whole-directory symlinks (.omp/skills, .omp/commands, ...).
+# `git worktree add` does not recreate machine-local Trellis surfaces, so a new
+# worktree starts without them. This script re-attaches it through the same
+# transaction `trellis attach` uses, from the release its clone already records.
+# An unregistered clone remains completely inert.
 #
-# Usage: seed-inheritance-symlinks.sh [--target <dir>] [--root <dir>]
-#                                     [--quiet] [--verify-only] [--help]
+# The legacy mirror mode — copying direct links out of the primary checkout,
+# spelled `--legacy-mirror` or `--root <dir>` — shipped for exactly one
+# compatibility release and was REMOVED at v1.0.0-rc.25. Both spellings now
+# refuse with exit 2. Migrate the clone instead:
+#
+#   trellis migrate --prepare <clone-path>
+#   trellis attach --fleet NAME <clone-path>
+#
+# Usage: seed-inheritance-symlinks.sh [--target <dir>] [--quiet] [--verify-only]
+#                                     [--help]
 #
 # Options:
-#   --target <dir>   The worktree to seed. Default: $PWD.
-#   --root   <dir>   Explicit TRELLIS_ROOT override (skips resolution).
-#   --quiet          Suppress per-symlink "linked"/"skip" lines; still print
-#                    WARN/ERROR.
-#   --verify-only    Create nothing; report missing/wrong-target symlinks;
-#                    exit 1 if any are missing, else 0.
+#   --target <dir>   The worktree to reconcile. Default: $PWD.
+#   --quiet          Suppress successful reconciliation output.
+#   --verify-only    Check attachment state only; exit 1 when an opted-in
+#                    worktree is missing its attachment.
 #   --help           Print usage to stdout and exit 0.
 
 set -euo pipefail
@@ -25,25 +32,35 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--target <dir>] [--root <dir>] [--quiet] [--verify-only] [--help]
+Usage: $(basename "$0") [--target <dir>] [--quiet] [--verify-only] [--help]
 
-Recreate gitignored Trellis inheritance symlinks from a project's MAIN git
-working tree into a linked worktree.
+Reconcile a linked worktree from its clone's local Trellis registration and
+recorded immutable release. Unregistered clones remain inert.
 
 Options:
-  --target <dir>   Worktree to seed. Default: \$PWD.
-  --root   <dir>   Explicit TRELLIS_ROOT override (skips auto-resolution).
-  --quiet          Suppress per-symlink linked/skip lines; WARNs still printed.
-  --verify-only    Check only; exit 1 if any symlinks are missing/wrong-target.
+  --target <dir>   Worktree to reconcile. Default: \$PWD.
+  --quiet          Suppress successful reconciliation output.
+  --verify-only    Check attachment state only; exit 1 when an opted-in
+                   worktree is missing its attachment.
   --help           Show this message and exit 0.
+
+Removed in v1.0.0-rc.25: --legacy-mirror and --root (legacy direct-link
+mirroring). Run \`trellis migrate --prepare\` then \`trellis attach\` instead.
 EOF
+}
+
+legacy_mirror_removed() {
+  printf 'error: legacy direct-link worktree mirroring was removed in v1.0.0-rc.25 (%s)\n' "$1" >&2
+  printf 'error: migrate the clone, then attach it:\n' >&2
+  printf 'error:   trellis migrate --prepare <clone-path>\n' >&2
+  printf 'error:   trellis attach --fleet NAME <clone-path>\n' >&2
+  exit 2
 }
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 TARGET=""
-ROOT_OVERRIDE=""
 QUIET=0
 VERIFY_ONLY=0
 
@@ -52,9 +69,8 @@ while [ $# -gt 0 ]; do
     --target)
       [ $# -ge 2 ] || { echo "error: --target requires an argument" >&2; usage >&2; exit 2; }
       TARGET="$2"; shift 2 ;;
-    --root)
-      [ $# -ge 2 ] || { echo "error: --root requires an argument" >&2; usage >&2; exit 2; }
-      ROOT_OVERRIDE="$2"; shift 2 ;;
+    --root|--root=*|--legacy-mirror)
+      legacy_mirror_removed "${1%%=*}" ;;
     --quiet)
       QUIET=1; shift ;;
     --verify-only)
@@ -89,237 +105,225 @@ if ! git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: Find the MAIN working tree
+# The only mode: reconcile from local attachment state. The direct-link
+# mirroring path that used to sit below this point was removed at v1.0.0-rc.25;
+# both flags that selected it now refuse above.
 # ---------------------------------------------------------------------------
-# Parse the first 'worktree <path>' line from the porcelain output.
-# We parse in pure bash to avoid SIGPIPE under pipefail (head -1 closes early).
-wt_porcelain="$(git -C "$TARGET" worktree list --porcelain)"
-# Extract path from the first 'worktree <path>' line
-main_line=""
-while IFS= read -r line; do
-  case "$line" in
-    "worktree "*)
-      main_line="$line"
-      break ;;
-  esac
-done <<< "$wt_porcelain"
+attachment_reconcile() {
+  local script_dir home registry state identity checkout worktree common registration
+  local fleet project_id release payload owner rc harness attachment_id harnesses_json
+  local donor_worktree donor_root donor_attachment donor_owner donor_identity donor_ok
+  local donor_checkout donor_worktree_actual donor_root_actual donor_common
+  local -a attach_args=() expected_args=() donor_args=()
 
-if [ -z "$main_line" ]; then
-  echo "error: could not determine main worktree path" >&2
-  exit 1
-fi
+  script_dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
+  # Do not create local state merely to inspect a clone: unregistered clones
+  # must remain completely inert.
+  # shellcheck source=lib/trellis-home.sh
+  . "$script_dir/lib/trellis-home.sh"
+  # shellcheck source=lib/local-registry.sh
+  . "$script_dir/lib/local-registry.sh"
+  # shellcheck source=lib/release-store.sh
+  . "$script_dir/lib/release-store.sh"
+  # shellcheck source=lib/attachment.sh
+  . "$script_dir/lib/attachment.sh"
 
-MAIN="${main_line#worktree }"
+  home="$(trellis_home_resolve "")" || return "$?"
+  registry="$(local_registry_path "$home")" || return "$?"
+  [ -e "$registry" ] || [ -L "$registry" ] || return 0
 
-# Canonicalize MAIN real path (macOS /var -> /private/var)
-if [ ! -d "$MAIN" ]; then
-  echo "error: main worktree directory does not exist: $MAIN" >&2
-  exit 1
-fi
-MAIN="$(cd "$MAIN" && pwd -P)"
+  state="$(mktemp "${TMPDIR:-/tmp}/trellis.worktree.registry.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  # Keep the registry reader's status intact. In particular, a corrupt or
+  # unavailable local registry must not look like an unregistered clone. The
+  # whole-file identity validator additionally aborted on the FIRST broken row
+  # anywhere in the registry, which made one unrelated project's drift block
+  # `git worktree add` seeding for every project on the machine. This call binds
+  # exactly one row, so it validates exactly that row below — schema, private
+  # state and permissions are still whole-file checks.
+  local_registry_read_diagnostic_state "$home" > "$state" || {
+    rc=$?
+    rm -f "$state"
+    return "$rc"
+  }
+  identity="$(local_registry_identity_for_root "$TARGET")" || {
+    rc=$?
+    rm -f "$state"
+    return "$rc"
+  }
+  checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || {
+    rm -f "$state"
+    return "$TRELLIS_EX_STATE"
+  }
+  worktree="$(printf '%s\n' "$identity" | jq -r '.worktree_id')" || {
+    rm -f "$state"
+    return "$TRELLIS_EX_STATE"
+  }
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')" || {
+    rm -f "$state"
+    return "$TRELLIS_EX_STATE"
+  }
+  # The row this call is about to bind gets the SAME strict identity validation
+  # `local_registry_validate_available_identities` would have applied to it, so
+  # a broken row here is still a hard class-4 refusal to seed. An unregistered
+  # clone has no such row and validates vacuously, staying inert below.
+  local_registry_validate_bound_row_identity "$(jq -c . "$state")" "$checkout" "$worktree" || {
+    rc=$?
+    rm -f "$state"
+    return "$rc"
+  }
+  registration="$(jq -c --arg checkout "$checkout" --arg worktree "$worktree" \
+    --arg common "$common" --arg root "$TARGET" '
+    [ .projects | to_entries[]
+      | . as $project
+      | select($project.value.status == "active")
+      | select(($project.value.metadata.legacy.blacklisted // false) == false)
+      | $project.value.checkouts[$checkout]? as $record
+      | select($record != null and $record.git_common_dir == $common)
+      | select(([ $record.worktrees[]? | select(.attachment_id? != null) ] | length) > 0)
+      | {fleet:$project.value.fleet, project_id:$project.value.project_id,
+         unavailable_roots:($project.value.unavailable_roots // []),
+         release:$record.release, harnesses:$record.harnesses, checkout:$record,
+         worktree:($record.worktrees[$worktree] // {root:$root})} ]
+    | if length == 0 then null
+      elif length == 1 then .[0]
+      else error("checkout is registered by multiple Trellis projects")
+      end
+  ' "$state")" || {
+    rm -f "$state"
+    return "$TRELLIS_EX_STATE"
+  }
+  rm -f "$state"
 
-# If TARGET is the main checkout, nothing to mirror
-if [ "$MAIN" = "$TARGET" ]; then
-  if [ "$QUIET" -eq 0 ]; then
-    echo "info: target is the main checkout — nothing to mirror"
-  fi
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Step 3: Resolve ROOT (TRELLIS_ROOT)
-# ---------------------------------------------------------------------------
-ROOT=""
-
-if [ -n "$ROOT_OVERRIDE" ]; then
-  # Normalize: strip trailing slash
-  ROOT="${ROOT_OVERRIDE%/}"
-  if [ ! -d "$ROOT" ]; then
-    echo "error: --root is not a directory: $ROOT" >&2
-    exit 1
-  fi
-fi
-
-if [ -z "$ROOT" ]; then
-  # 3b: readlink of .claude/rules/trellis.md in MAIN
-  trellis_link="$MAIN/.claude/rules/trellis.md"
-  if [ -L "$trellis_link" ]; then
-    link_target="$(readlink "$trellis_link")"
-    # Strip trailing /core-rules/CLAUDE.md to get ROOT
-    candidate="${link_target%/core-rules/CLAUDE.md}"
-    if [ "$candidate" != "$link_target" ] && [ -d "$candidate" ]; then
-      ROOT="${candidate%/}"
-    fi
-  fi
-fi
-
-if [ -z "$ROOT" ]; then
-  # 3c: $TRELLIS_ROOT env var
-  if [ -n "${TRELLIS_ROOT:-}" ] && [ -d "$TRELLIS_ROOT" ]; then
-    ROOT="${TRELLIS_ROOT%/}"
-  fi
-fi
-
-if [ -z "$ROOT" ]; then
-  # 3d: $TRELLIS_CONFIG or trellis.config.json walk-up
-  cfg_file=""
-  if [ -n "${TRELLIS_CONFIG:-}" ] && [ -f "$TRELLIS_CONFIG" ]; then
-    cfg_file="$TRELLIS_CONFIG"
+  # A registry can exist for another project/fleet without opting this clone
+  # in. It must not cause project mutation or an emitted warning.
+  [ "$registration" != null ] || return 0
+  fleet="$(printf '%s\n' "$registration" | jq -r '.fleet')" || return "$TRELLIS_EX_STATE"
+  project_id="$(printf '%s\n' "$registration" | jq -r '.project_id')" || return "$TRELLIS_EX_STATE"
+  release="$(printf '%s\n' "$registration" | jq -r '.release // empty')" || return "$TRELLIS_EX_STATE"
+  [ -n "$release" ] || return "$TRELLIS_EX_STATE"
+  if printf '%s\n' "$registration" | jq -e --arg root "$TARGET" '
+    (.unavailable_roots | index($root)) == null
+  ' >/dev/null 2>&1; then
+    :
   else
-    # Walk up from TARGET
-    walk="$TARGET"
-    while [ "$walk" != "/" ]; do
-      if [ -f "$walk/trellis.config.json" ]; then
-        cfg_file="$walk/trellis.config.json"
-        break
+    return "$TRELLIS_EX_STATE"
+  fi
+  printf '%s\n' "$registration" | jq -e --arg root "$TARGET" '
+    .worktree.root == $root
+  ' >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
+  harnesses_json="$(local_registry_normalize_harnesses "$(printf '%s\n' "$registration" | jq -c '.harnesses')")" || return "$?"
+  [ "$harnesses_json" != '[]' ] || return "$TRELLIS_EX_STATE"
+  payload="$(TRELLIS_HOME="$home" release_store_locate "$release")" || return "$?"
+  payload="$payload/payload"
+  [ -d "$payload" ] && [ ! -L "$payload" ] || return "$TRELLIS_EX_STATE"
+  [ -x "$payload/scripts/attach-project.sh" ] || return "$TRELLIS_EX_STATE"
+  owner="$home/state/attachments/$checkout/$worktree.json"
+  attachment_id="$(printf '%s\n' "$registration" | jq -r '.worktree.attachment_id // empty')" || return "$TRELLIS_EX_STATE"
+  expected_args=(
+    "--expected-fleet" "$fleet"
+    "--expected-project-id" "$project_id"
+    "--expected-root" "$TARGET"
+    "--expected-checkout-id" "$checkout"
+    "--expected-worktree-id" "$worktree"
+    "--expected-attachment-id" "$attachment_id"
+    "--expected-release" "$release"
+    "--expected-harnesses-json" "$harnesses_json"
+  )
+  if [ "$VERIFY_ONLY" -eq 1 ]; then
+    # attachment_verify checks every owned artifact (including rendered files).
+    # Bind that complete result to this exact registry worktree row and to the
+    # immutable release anchor; scalar owner metadata alone is not enough.
+    if [ -n "$attachment_id" ] &&
+       [ -f "$owner" ] && [ ! -L "$owner" ] &&
+       attachment_verify "$home" "$owner" >/dev/null 2>&1 &&
+       jq -e --arg fleet "$fleet" --arg project_id "$project_id" --arg checkout "$checkout" \
+         --arg worktree "$worktree" --arg attachment "$attachment_id" --arg release "$release" \
+         --arg root "$TARGET" --arg payload "$payload" '
+           .status == "committed"
+           and .fleet == $fleet and .project_id == $project_id
+           and .checkout_id == $checkout and .worktree_id == $worktree
+           and .attachment_id == $attachment
+           and .project_root == $root and .worktree_root == $root
+           and .release == $release
+           and ([.artifacts[]
+                 | select(.path == ".trellis/runtime"
+                          and .kind == "symlink"
+                          and .target == $payload)] | length) == 1
+         ' "$owner" >/dev/null 2>&1; then
+      if [ "$QUIET" -eq 0 ]; then
+        printf 'verify: attached worktree is current: %s\n' "$TARGET"
       fi
-      walk="$(dirname "$walk")"
-    done
-  fi
-  if [ -n "$cfg_file" ] && command -v jq >/dev/null 2>&1; then
-    candidate="$(jq -r '.trellis_root // empty' "$cfg_file" 2>/dev/null || true)"
-    if [ -n "$candidate" ] && [ -d "$candidate" ]; then
-      ROOT="${candidate%/}"
+      return 0
     fi
+    printf 'verify: opted-in worktree is missing its local Trellis attachment: %s\n' "$TARGET" >&2
+    return 1
   fi
-fi
-
-if [ -z "$ROOT" ]; then
-  echo "error: could not resolve TRELLIS_ROOT — run: <root>/scripts/onboard-project.sh $TARGET" >&2
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4: Enumerate source symlinks from MAIN
-# ---------------------------------------------------------------------------
-# Collect (relpath, link_target) pairs where link_target starts with $ROOT/
-RELPATHS=()
-TARGETS=()
-
-collect_symlinks() {
-  local dir="$1"
-  if [ ! -d "$dir" ]; then
-    return 0
+  # A target row with an attachment ID is an explicit repair request. A new
+  # worktree may inherit this checkout's attachment only from a fully verified
+  # sibling, never from scalar registry metadata alone.
+  if [ -z "$attachment_id" ]; then
+    donor_ok=0
+    while IFS=$'\t' read -r donor_worktree donor_root donor_attachment; do
+      [ -n "$donor_worktree" ] && [ -n "$donor_root" ] && [ -n "$donor_attachment" ] || continue
+      donor_owner="$home/state/attachments/$checkout/$donor_worktree.json"
+      [ -f "$donor_owner" ] && [ ! -L "$donor_owner" ] || continue
+      [ "$(_attachment_mode "$donor_owner")" = 600 ] || continue
+      donor_identity="$(local_registry_identity_for_root "$donor_root" 2>/dev/null)" || continue
+      donor_checkout="$(printf '%s\n' "$donor_identity" | jq -r '.checkout_id')" || continue
+      donor_worktree_actual="$(printf '%s\n' "$donor_identity" | jq -r '.worktree_id')" || continue
+      donor_root_actual="$(printf '%s\n' "$donor_identity" | jq -r '.root')" || continue
+      donor_common="$(printf '%s\n' "$donor_identity" | jq -r '.git_common_dir')" || continue
+      [ "$donor_checkout" = "$checkout" ] &&
+        [ "$donor_common" = "$common" ] &&
+        [ "$donor_worktree_actual" = "$donor_worktree" ] &&
+        [ "$donor_root_actual" = "$donor_root" ] || continue
+      attachment_verify "$home" "$donor_owner" >/dev/null 2>&1 || continue
+      jq -e --arg fleet "$fleet" --arg project_id "$project_id" --arg checkout "$checkout" \
+        --arg worktree "$donor_worktree" --arg attachment "$donor_attachment" \
+        --arg root "$donor_root" --arg release "$release" --arg payload "$payload" '
+          .status == "committed"
+          and .fleet == $fleet and .project_id == $project_id
+          and .checkout_id == $checkout and .worktree_id == $worktree
+          and .attachment_id == $attachment
+          and .project_root == $root and .worktree_root == $root
+          and .release == $release
+          and ([.artifacts[]
+                | select(.path == ".trellis/runtime"
+                         and .kind == "symlink"
+                         and .target == $payload)] | length) == 1
+        ' "$donor_owner" >/dev/null 2>&1 || continue
+      donor_ok=1
+      donor_args=(
+        "--expected-donor-root" "$donor_root"
+        "--expected-donor-checkout-id" "$checkout"
+        "--expected-donor-worktree-id" "$donor_worktree"
+        "--expected-donor-attachment-id" "$donor_attachment"
+        "--expected-donor-release" "$release"
+        "--expected-donor-harnesses-json" "$harnesses_json"
+      )
+      break
+    done < <(printf '%s\n' "$registration" | jq -r --arg worktree "$worktree" '
+      .checkout.worktrees
+      | to_entries[]
+      | select(.key != $worktree and (.value.attachment_id? | type == "string"))
+      | [.key, .value.root, .value.attachment_id] | @tsv
+    ')
+    [ "$donor_ok" -eq 1 ] || return "$TRELLIS_EX_STATE"
   fi
-  while IFS= read -r link; do
-    local link_target
-    link_target="$(readlink "$link")"
-    # Keep only symlinks whose target begins with $ROOT/
-    case "$link_target" in
-      "$ROOT"/*)
-        local relpath="${link#"$MAIN"/}"
-        RELPATHS+=("$relpath")
-        TARGETS+=("$link_target")
-        ;;
-    esac
-    # -maxdepth 2: every Trellis inheritance symlink lives at exactly
-    # .claude/<subdir>/<entry> or .agents/<subdir>/<entry> (depth 2) or
-    # .omp/<entry> (depth 1). Bounding the search here also prunes nested git
-    # worktrees (e.g. Claude session worktrees under .claude/worktrees/<x>/
-    # .claude/...) whose own seeded symlinks must NOT be re-mirrored into this
-    # target. Whole-directory symlinks (.omp/skills → $ROOT/core-rules/skills)
-    # match at depth 1; find does not descend through symlinks, so no recursion.
-  done < <(find "$dir" -maxdepth 2 -type l)
+  while IFS= read -r harness; do
+    [ -n "$harness" ] || continue
+    attach_args+=("--harness" "$harness")
+  done < <(printf '%s\n' "$harnesses_json" | jq -r '.[]')
+  if [ "$QUIET" -eq 1 ]; then
+    TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
+      --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
+      "${attach_args[@]}" "$TARGET" >/dev/null
+  else
+    TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
+      --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
+      "${attach_args[@]}" "$TARGET"
+  fi
 }
 
-collect_symlinks "$MAIN/.claude"
-collect_symlinks "$MAIN/.agents"
-collect_symlinks "$MAIN/.omp"
-
-# .omp/AGENTS.md targets the project's OWN CLAUDE.md (not a canonical path), so
-# the $ROOT-prefix filter above skips it. Mirror it with the target rewritten to
-# the TARGET checkout's CLAUDE.md — each checkout's OMP session must read that
-# checkout's project overlay (CLAUDE.md is tracked, so every worktree has its
-# own copy), never the main checkout's. A non-conforming .omp/AGENTS.md is left
-# out of the mirror, matching the generic filter's silent skip.
-omp_agents_link="$MAIN/.omp/AGENTS.md"
-if [ -L "$omp_agents_link" ] && [ "$(readlink "$omp_agents_link")" = "$MAIN/CLAUDE.md" ]; then
-  RELPATHS+=(".omp/AGENTS.md")
-  TARGETS+=("$TARGET/CLAUDE.md")
-fi
-
-if [ ${#RELPATHS[@]} -eq 0 ]; then
-  echo "info: main checkout has no Trellis inheritance symlinks to mirror"
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Step 5 & 6: Seed or verify
-# ---------------------------------------------------------------------------
-seeded_count=0
-already_correct_count=0
-problem_count=0
-total_count=${#RELPATHS[@]}
-
-# In verify-only mode, collect problem paths for reporting
-problem_paths=()
-
-i=0
-while [ "$i" -lt "$total_count" ]; do
-  relpath="${RELPATHS[$i]}"
-  link_target="${TARGETS[$i]}"
-  dest="$TARGET/$relpath"
-
-  if [ "$VERIFY_ONLY" -eq 1 ]; then
-    # Verify mode: check existence and target correctness
-    if [ -L "$dest" ]; then
-      cur="$(readlink "$dest")"
-      if [ "$cur" = "$link_target" ]; then
-        already_correct_count=$((already_correct_count + 1))
-      else
-        problem_count=$((problem_count + 1))
-        problem_paths+=("$relpath (wrong target: '$cur', expected '$link_target')")
-      fi
-    elif [ -e "$dest" ]; then
-      problem_count=$((problem_count + 1))
-      problem_paths+=("$relpath (exists but is not a symlink)")
-    else
-      problem_count=$((problem_count + 1))
-      problem_paths+=("$relpath (missing)")
-    fi
-  else
-    # Normal seed mode — mirror seed_symlink semantics exactly
-    mkdir -p "$(dirname "$dest")"
-    if [ -L "$dest" ]; then
-      cur="$(readlink "$dest")"
-      if [ "$cur" = "$link_target" ]; then
-        already_correct_count=$((already_correct_count + 1))
-        if [ "$QUIET" -eq 0 ]; then
-          echo "skip (correct symlink): $relpath"
-        fi
-      else
-        echo "WARN: $relpath symlinks to '$cur', expected '$link_target' — leaving as-is" >&2
-      fi
-    elif [ -e "$dest" ]; then
-      echo "WARN: $relpath exists and is not a symlink — leaving as-is" >&2
-    else
-      ln -s "$link_target" "$dest"
-      seeded_count=$((seeded_count + 1))
-      if [ "$QUIET" -eq 0 ]; then
-        echo "linked: $relpath → $link_target"
-      fi
-    fi
-  fi
-
-  i=$((i + 1))
-done
-
-# Summary
-if [ "$VERIFY_ONLY" -eq 1 ]; then
-  if [ $problem_count -gt 0 ]; then
-    echo "verify: $problem_count missing/wrong of $total_count inheritance symlinks"
-    for p in "${problem_paths[@]}"; do
-      echo "  - $p"
-    done
-    exit 1
-  else
-    if [ "$QUIET" -eq 0 ]; then
-      echo "verify: all $total_count inheritance symlink(s) correct"
-    fi
-    exit 0
-  fi
-else
-  if [ "$QUIET" -eq 0 ]; then
-    echo "seeded $seeded_count symlink(s) into $TARGET ($already_correct_count already correct)"
-  fi
-fi
+attachment_reconcile
+exit $?

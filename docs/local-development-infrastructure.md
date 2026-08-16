@@ -1,104 +1,191 @@
-# Optional shared local infrastructure
+# Local development infrastructure
 
-Trellis projects run their applications natively. An operator may separately provide a shared local-infrastructure repository for data services and other reusable development dependencies, but that repository remains outside the Trellis template and outside each application's normal runtime.
+Trellis coordinates local infrastructure **selection**; the external
+shared-infrastructure repository owns its runtime, manifest, allocations, and
+Make targets. This boundary keeps machine paths out of tracked policy and keeps
+one fleet from accidentally operating another fleet's services.
 
-The supported shared-service families are PostgreSQL with pgvector, Redis, MinIO, and Mailpit. The external repository decides which of them to provide and how to allocate them; Trellis does not assign public default ports, credentials, databases, indexes, buckets, or message tags.
+## Local source of truth
 
-The public Trellis template does **not** ship or own that external runtime repository, its manifest, credentials, service allocations, or fixed-port map. Trellis only integrates with an operator-supplied repository when the operator opts in.
+A shared-infrastructure root is optional, machine-local state at:
 
-## Enable or leave disabled
-
-The integration is enabled by the optional `trellis.config.json.shared_infra_root` key:
-
-```bash
-SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  test -d "$SHARED_INFRA_ROOT"
-  test -f "$SHARED_INFRA_ROOT/Makefile"
-fi
+```text
+<TRELLIS_HOME>/config.json
+  .fleets[<selected-fleet>].shared_infra_root
 ```
 
-When the key is absent, shared-infrastructure integration is disabled. Project onboarding continues through the ordinary one-argument flow, Trellis doctor skips shared-infrastructure checks, no manifest entry is required, and legacy onboarding and doctor behavior remain intact.
+It is not a field in `trellis.config.json`, a project manifest, a README, or a
+conventional sibling directory. Normal consumers must obtain
+`SHARED_INFRA_ROOT` through Trellis's validated local configuration loading for
+the selected fleet. They must not accept a guessed path, fall back to
+`$HOME/projects/shared-infra`, or derive it from the current checkout.
 
-When the key is present, it must resolve to the separately managed repository. Adding the key does not make Trellis the owner or provisioner of that repository.
+Selection follows the normal local-state precedence:
 
-Project-side checks accept a `SHARED_INFRA_ROOT` environment override and otherwise compare against the conventional `$HOME/projects/shared-infra` location. If the configured repository lives elsewhere, export `SHARED_INFRA_ROOT` to the configured path when running project-side startup or doctor checks; the seeded preflight wrapper also carries the configured path.
+1. an explicit `--home` or `--fleet` argument;
+2. `TRELLIS_HOME` or `TRELLIS_FLEET`;
+3. the validated machine configuration's default fleet.
 
-## External repository contract
+Configure or update the selected fleet from the Trellis source checkout. These
+commands write only local machine state:
 
-An opted-in repository is expected to expose these Make targets. Its own documentation and schema remain authoritative.
+```bash
+TRELLIS_HOME="/absolute/path/to/trellis-home"
+FLEET="personal"
+SHARED_INFRA_ROOT="/absolute/path/to/shared-infra"
 
-| Target | Expected boundary |
+./scripts/trellis fleet update "$FLEET" \
+  --home "$TRELLIS_HOME" \
+  --shared-infra-root "$SHARED_INFRA_ROOT"
+```
+
+For an initial setup, use `./scripts/trellis configure` with an explicit
+`--default-fleet`, one or more `--discovery-root` values, and optionally
+`--shared-infra-root`; see `./scripts/trellis configure --help` for the exact
+arguments. A configured root is not usable until the local configuration loader
+has validated the selected fleet and the root is available as a real directory.
+If no `shared_infra_root` is configured, the fleet has no shared-infrastructure
+delegation to perform.
+
+## Project identity and worktree boundary
+
+Every infrastructure handoff needs two separate values:
+
+- `PROJECT_ID`: the exact `project_id` registered in the selected local fleet;
+- `PROJECT_ROOT`: one exact available `kind: "worktree"` registry `root` for
+  that project.
+
+List the selected fleet's local registry before choosing either value:
+
+```bash
+./scripts/trellis registry list \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --json
+```
+
+Set `PROJECT_ID` and `PROJECT_ROOT` from that output, then verify the exact
+pair rather than reconstructing a path from the ID:
+
+```bash
+PROJECT_ID="example-project"
+PROJECT_ROOT="/absolute/path/copied/from-the-local-registry"
+
+./scripts/trellis registry list \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --json \
+| jq -e --arg project "$PROJECT_ID" --arg root "$PROJECT_ROOT" '
+    any(.entries[];
+      .project_id == $project
+      and .kind == "worktree"
+      and .availability == "available"
+      and .status == "active"
+      and ((.excluded // false) | not)
+      and .root == $root)
+  '
+```
+
+A project can have multiple clones or linked worktrees. The caller chooses one
+recorded available root deliberately; it must never synthesize
+`$PROJECTS_ROOT/$PROJECT_ID`, use a tracked registry row, or substitute a
+similarly named directory. A row whose root is unavailable, missing, detached,
+or excluded is diagnostic state, not a Make input. Report it and stop or choose
+a different available row.
+
+## External shared-infrastructure contract
+
+The external `shared-infra` repository is a separate dependency. It owns:
+
+- the shared runtime and lifecycle;
+- the service/allocation manifest and any secrets it references;
+- validation, reconciliation, reset, and health semantics;
+- atomic allocation changes and rollback behavior.
+
+This repository does **not** implement or attest to the external Make contract.
+The following interface is the required delegation shape for a reviewed external
+shared-infra release; do not infer that a target is available merely because it
+is named here:
+
+| Operation | Required delegated form |
 |---|---|
-| `propose` | Inspect a project conservatively and write a reviewable proposal without changing the external manifest. |
-| `register` | Atomically add or replace one operator-reviewed project fragment, then validate the candidate manifest. |
-| `validate` | Check manifest shape, references, allocations, and fixed-port uniqueness. |
-| `preflight` | Reject conflicting declarations or occupied declared ports before project startup. |
-| `reconcile` | Converge only the requested declaration and remain safe to repeat. |
-| `up` | Start only the externally declared shared-service subset, then reconcile it. |
-| `doctor` | Perform read-only manifest, runtime, registry-parity, and port checks. |
+| Validate one identity/root pair | `make -C "$SHARED_INFRA_ROOT" validate PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"` |
+| Preflight a project | `make -C "$SHARED_INFRA_ROOT" preflight PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"` |
+| Start or reconcile a project | `make -C "$SHARED_INFRA_ROOT" up PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"` |
+| Reconcile without native app startup | `make -C "$SHARED_INFRA_ROOT" reconcile PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"` |
+| Diagnose a project | `make -C "$SHARED_INFRA_ROOT" doctor PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"` |
+| Produce a review-only proposal | `make -C "$SHARED_INFRA_ROOT" propose PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT" OUTPUT="$PROPOSAL"` |
+| Apply a reviewed allocation | `make -C "$SHARED_INFRA_ROOT" register PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT" ENTRY="$ENTRY"` |
 
-Trellis delegates to this interface; it does not define the external repository's Compose topology, credentials, allocation policy, or destructive recovery commands.
+The external prerequisite is a separately reviewed shared-infra change that
+accepts this fleet-local identity/root handoff and preserves its atomic
+allocation behavior. Until that change is available and verified in the
+external repository, do not represent these commands as implemented end-to-end
+or add a second local manifest in Trellis.
 
-## Reviewed declaration
+## Safe delegation procedure
 
-A proposal is evidence, not approval. Review every service and fixed listener before registration. The reviewed file contains only the external repository's `services` and `ports` fragment. A project that consumes no shared service still uses an explicit empty declaration when the integration is enabled:
-
-```yaml
-services: {}
-ports: {}
-```
-
-Non-empty declarations follow the external repository's schema. Use placeholders while reviewing; do not copy credentials or operator allocations into Trellis documentation.
-
-## Onboarding flow
-
-Resolve the optional key first and keep the disabled path ordinary:
+After the selected configuration and exact registry row have both been
+validated, an operator may prepare the external call inputs:
 
 ```bash
-PROJECT_ROOT="${PROJECT_ROOT:?set the absolute project path}"
-PROJECT_NAME="${PROJECT_NAME:?set the reviewed registry name}"
-SHARED_INFRA_ROOT="$(jq -r '.shared_infra_root // empty' trellis.config.json)"
+: "${SHARED_INFRA_ROOT:?resolve this from validated selected-fleet state}"
+: "${PROJECT_ID:?set the selected local registry project_id}"
+: "${PROJECT_ROOT:?set the exact selected available registry root}"
 
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  PROPOSAL_FILE="${PROPOSAL_FILE:?set a proposal output path}"
-  REVIEWED_ENTRY="${REVIEWED_ENTRY:?set the reviewed fragment path}"
-
-  make -C "$SHARED_INFRA_ROOT" propose \
-    PROJECT="$PROJECT_NAME" SOURCE="$PROJECT_ROOT" OUTPUT="$PROPOSAL_FILE"
-  # Stop here for operator review. After approval:
-  ./scripts/onboard-project.sh "$PROJECT_ROOT" --infra-entry "$REVIEWED_ENTRY"
-else
-  ./scripts/onboard-project.sh "$PROJECT_ROOT"
-fi
+test -d "$SHARED_INFRA_ROOT"
+test -f "$SHARED_INFRA_ROOT/Makefile"
 ```
 
-With integration enabled, onboarding delegates registration and project-scoped reconciliation to the external repository and seeds `scripts/local-infra-preflight.sh`. Wire that wrapper into the native startup path before the application or project-owned infrastructure binds a fixed listener.
-
-The wrapper performs project-scoped preflight. An explicit `services: {}` project does not start shared services. A project with declared shared services may delegate project-scoped `up`; migrations and the native application still run from the project repository.
-
-Project shutdown stops only native processes and project-owned infrastructure. It must never stop the shared runtime, invoke a shared `down`, delete shared volumes, or reset another project.
-
-## Verification
-
-Always run the ordinary Trellis checks. Run shared-infrastructure checks only when the optional key is non-empty:
+When the external contract prerequisite is present, proposal and registration
+remain separate actions:
 
 ```bash
-./scripts/doctor.sh --project "$PROJECT_NAME"
+PROPOSAL="/absolute/path/outside-the-project/proposal.yaml"
+ENTRY="/absolute/path/to/reviewed-entry.yaml"
 
-if [ -n "$SHARED_INFRA_ROOT" ]; then
-  make -C "$SHARED_INFRA_ROOT" validate PROJECT="$PROJECT_NAME"
-  make -C "$SHARED_INFRA_ROOT" doctor \
-    PROJECT="$PROJECT_NAME" REGISTRY_FILE="$PWD/registry.md"
-  test -x "$PROJECT_ROOT/scripts/local-infra-preflight.sh"
-  "$PROJECT_ROOT/scripts/local-infra-preflight.sh"
-fi
+make -C "$SHARED_INFRA_ROOT" propose \
+  PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT" OUTPUT="$PROPOSAL"
+# Review the proposal and allocation deliberately before continuing.
+make -C "$SHARED_INFRA_ROOT" register \
+  PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT" ENTRY="$ENTRY"
+make -C "$SHARED_INFRA_ROOT" reconcile \
+  PROJECT="$PROJECT_ID" SOURCE="$PROJECT_ROOT"
 ```
 
-For a live project proof, run preflight before startup, start only the declared shared-service subset and project-owned infrastructure, run migrations, then start the application natively. Record the shared runtime identity before project shutdown and confirm shutdown leaves it unchanged.
+A project-owned startup wrapper may call project-scoped `preflight` and `up`
+only after it has resolved the same validated fleet-local root and exact
+registry identity/root pair. It must not call a fleet-wide stop, reset shared
+volumes, delete another project's allocation, or treat an unavailable row as a
+fallback path.
 
-## Recovery boundary
+## Verification and recovery
 
-Prefer non-destructive, project-scoped recovery. Rerun `make -C "$SHARED_INFRA_ROOT" reconcile PROJECT="$PROJECT_NAME"`, then rerun migrations, the external doctor, Trellis doctor, and the native smoke path. Use any reset or shared-runtime stop operation only through the external repository's operator-approved procedure.
+Use the local registry to verify selection before each delegated operation:
 
-A failed project migration or startup does not justify stopping the shared runtime for other projects. Trellis configuration rollback uses normal version-control reverts; it does not create or preserve a hidden second infrastructure path.
+```bash
+./scripts/trellis registry list \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --json
+```
+
+Then use the external repository's reviewed `validate`, `doctor`, and
+project-scoped recovery targets with the same `PROJECT_ID` and `PROJECT_ROOT`.
+Trellis's own doctor remains a separate local attachment and registry health
+check; it does not prove the external runtime's allocation semantics.
+
+If a worktree becomes unavailable, retain the local registry row and report the
+recorded path. Do not remove it as a convenience, do not reconstruct it under a
+discovery root, and do not run external Make against it. Recover the volume or
+register a different available worktree explicitly. If the configured
+`shared_infra_root` is unavailable or no longer validates for the selected
+fleet, stop delegation and repair that fleet's local configuration; do not
+borrow another fleet's root.
+
+## Non-goals
+
+This guide does not define service names, ports, credentials, containers,
+project allocations, reset behavior, or the external repository's implementation
+status. Those are owned and documented by the external shared-infrastructure
+repository once its fleet-local handoff contract has been reviewed and merged.

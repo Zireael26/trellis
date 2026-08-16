@@ -1,5 +1,10 @@
 # 2026-06-02 — Worktree inheritance seeding
 
+> **Status:** Superseded (2026-08-12).
+>
+> Replaced by [2026-08-12 — Local fleets and immutable releases](2026-08-12-local-fleets-immutable-releases.md). The SessionStart timing and Husky-dispatch findings below remain historical. Main-checkout mirror seeding and direct inherited-link runtime are replaced by locally registered clone/worktree attachments to the recorded immutable release before harness discovery.
+
+
 ## Context
 
 Trellis child projects inherit parent rules, skills, commands, and presets via

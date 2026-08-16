@@ -21,7 +21,10 @@ if [ "$branch" = "HEAD" ] || [ -z "$branch" ]; then
 elif [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
   pg_log info "on $branch; branch-name check is N/A"
 else
-  if ! printf "%s" "$branch" | grep -qE '^(codex|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*$'; then
+  # `feature` is in the list because the spec/plan/tasks skills *mandate*
+  # `feature/<slug>` (spec/SKILL.md:37,58,83; plan/SKILL.md:28; tasks/SKILL.md:26).
+  # Without it every branch produced by the canonical pipeline failed this gate.
+  if ! printf "%s" "$branch" | grep -qE '^(codex|feature|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*$'; then
     findings+=("branch:$branch — does not match <type>/<kebab-slug>")
     [ "$worst" = "pass" ] && worst="warn"
   fi
@@ -65,19 +68,26 @@ done < <(pg_diff_files "$RANGE")
 
 countable=$((total - lock_lines))
 
+# The ADR exception requires an ADR *authored by this change* — `references/pr-hygiene.md`
+# says the ADR must "name the oversized change and explain why splitting it would make
+# review or rollback less clear". Only an ADR **added** in the range can do that; an
+# existing ADR the diff merely brushed cannot, and accepting one made the hard cap
+# disarmable by any incidental edit under docs/adr.
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   case "$f" in
     "$adr_dir"/*.md) pr_size_adr_file="$f"; break ;;
   esac
-done < <(pg_diff_files "$RANGE")
+done < <(git diff --name-only --diff-filter=A "$RANGE" 2>/dev/null)
 
-size_context=""
 if [ "$countable" -gt "$size_hard" ]; then
   if [ -n "$pr_size_adr_file" ]; then
-    size_context=", ADR exception: $pr_size_adr_file"
+    # Exempted from `fail`, never from view: an oversized range still has to be
+    # acknowledged by a reviewer, so it stays a warn rather than a silent pass.
+    findings+=("pr-size: $countable lines > hard cap $size_hard — ADR exception: $pr_size_adr_file; record reviewer ack of the size in the PR description")
+    [ "$worst" = "pass" ] && worst="warn"
   else
-    findings+=("pr-size: $countable lines > hard cap $size_hard — split or attach ADR")
+    findings+=("pr-size: $countable lines > hard cap $size_hard — split, or add an ADR under $adr_dir explaining why splitting harms clarity")
     worst="fail"
   fi
 elif [ "$countable" -gt "$size_limit" ]; then
@@ -87,7 +97,7 @@ fi
 
 # --- Output ----------------------------------------------------------------
 case "$worst" in
-  pass) pg_log pass "PR hygiene (range=$RANGE, $countable lines${size_context})" ;;
+  pass) pg_log pass "PR hygiene (range=$RANGE, $countable lines)" ;;
   warn) pg_log warn "PR hygiene (range=$RANGE)";  for f in "${findings[@]}"; do pg_finding "$f"; done ;;
   fail) pg_log fail "PR hygiene (range=$RANGE)";  for f in "${findings[@]}"; do pg_finding "$f"; done ;;
 esac

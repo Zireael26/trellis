@@ -86,6 +86,8 @@ const cases = [
     path: conductor,
     args: {
       today: '2026-08-03',
+      backlogPath: '/private/tasks/personal/conductor/backlog.json',
+      registryPath: '/private/tasks/personal/conductor/snapshot.json',
       __agentOutputByLabel: {
         rank: { generated_for: '2026-08-03', ranked: [{ id: 's1', project: 'repo', title: 'probe', score: 1, reasons: 'top', eligible_auto_spec: true, auto_spec: null, delivered_on_main: false, existing_spec_path: '', auto_spec_exclusions: [] }] },
       },
@@ -299,7 +301,7 @@ NODE
   run_recipe "$DIGEST" '{"maxParallel":8,"digestPath":"digest.md","approved":[{"id":"P1","route":"validation-only"}],"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"already present","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"already present","route":"validation-only","rationale":"no mutation","skeptic_upheld":true}}}'
   json_assert '!r.error && r.result.verdicts.length===0'
 
-  run_recipe "$CONDUCTOR" '{"maxParallel":8,"today":"2026-07-28","__agentOutputByLabel":{"refresh-refs":{"complete":true,"refs":[],"notes":"none"},"rank":{"generated_for":"2026-07-28","ranked":[]}}}'
+  run_recipe "$CONDUCTOR" '{"maxParallel":8,"today":"2026-07-28","backlogPath":"/private/tasks/personal/conductor/backlog.json","registryPath":"/private/tasks/personal/conductor/snapshot.json","__agentOutputByLabel":{"refresh-refs":{"complete":true,"refs":[],"notes":"none"},"rank":{"generated_for":"2026-07-28","ranked":[]}}}'
   json_assert '!r.error && r.result.specs.length===0'
 }
 

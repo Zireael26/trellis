@@ -1,0 +1,141 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/block-destructive.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking command safety..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/reread-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "Re-read guard..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/post-edit-verify.sh\"",
+            "timeout": 120,
+            "statusMessage": "Verifying edit..."
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/truncation-check.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking for truncation..."
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/track-read.sh\"",
+            "timeout": 5,
+            "statusMessage": "Recording reads..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context codex \"$CODEX_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "Loading session context..."
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context codex \"$CODEX_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "Restoring context after compact..."
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index codex \"$CODEX_PROJECT_DIR\"",
+            "timeout": 5,
+            "statusMessage": "Loading primer index..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/spec-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking spec-gate..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/save-context-log.sh\"",
+            "timeout": 10,
+            "statusMessage": "Saving session context..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/decision-receipt.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking decision receipts..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/stop-verify.sh\"",
+            "timeout": 300,
+            "statusMessage": "Running final verification..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/code-review-subagent.sh\"",
+            "timeout": 120,
+            "statusMessage": "Code review on diff..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/propose-rules.sh\"",
+            "timeout": 60,
+            "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/ui-verify.sh\"",
+            "timeout": 120,
+            "statusMessage": "UI verification..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/stamp-turn.sh\"",
+            "timeout": 5,
+            "statusMessage": "Stamping turn..."
+          }
+        ]
+      }
+    ]
+  }
+}
