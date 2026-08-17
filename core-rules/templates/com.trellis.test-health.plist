@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Trellis test-health host LaunchAgent template.
+
+  scripts/install-test-health-launchd.sh replaces the placeholder values and
+  installs this plist plus an executable snapshot of the runner under the
+  current user's ~/Library/LaunchAgents/. The snapshot keeps a bootstrapped
+  agent independent of the implementation worktree that installed it; the
+  runner itself changes to __TRELLIS_ROOT__ before dispatching Claude, so the
+  canonical project rules and canonical prompt remain authoritative.
+
+  This task is deliberately host-only. The runner rejects every uname value
+  other than Darwin arm64 before it reads the prompt or any project path. It
+  runs on Monday at 11:00 local time, never at install/load time. launchd owns
+  the scheduled process and the runner's shlock guard rejects any overlap.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trellis.test-health</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__USER_HOME__/Library/LaunchAgents/com.trellis.test-health.runner.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__TRELLIS_ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <key>TRELLIS_ROOT</key>
+        <string>__TRELLIS_ROOT__</string>
+        <key>CLAUDE_BIN</key>
+        <string>__CLAUDE_BIN__</string>
+        <key>TEST_HEALTH_LOCK_FILE</key>
+        <string>__USER_HOME__/Library/Caches/com.trellis.test-health.lock</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__TRELLIS_ROOT__/logs/test-health.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__TRELLIS_ROOT__/logs/test-health.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+</dict>
+</plist>

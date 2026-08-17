@@ -419,13 +419,13 @@ run_managed_pre_push() {
       startswith("/usr/bin/env -i HOME=")
       and contains("TRELLIS_HOME=") and contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
       and contains("/bin/bash --noprofile --norc")
-      and contains("$CODEX_PROJECT_DIR")
+      and contains("${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}")
       and (contains("__TRELLIS_") | not)
       and (contains(".trellis/runtime") | not)
       and (contains("$HOME") | not)
       and (contains("$TRELLIS_HOME") | not)
       and (contains("$PATH") | not))
-  ' "$codex_settings" >/dev/null
+  ' "$codex_settings" >/dev/null || { jq -c '[.hooks.SessionStart[].hooks[].command]' "$codex_settings"; false; }
   owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
   [ -f "$owner" ]
   jq -e --arg home "$TRELLIS_HOME" --arg user_home "$CONTEXT_OS_HOME" --arg launcher "$CONTEXT_LAUNCHER" '

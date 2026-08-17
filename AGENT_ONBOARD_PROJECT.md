@@ -38,7 +38,7 @@ PROJECT_ROOT="$(git -C "$PROJECT_INPUT" rev-parse --show-toplevel)"
 git -C "$PROJECT_ROOT" status --short
 ```
 
-`TRELLIS_HOME` holds machine state: local machine configuration, local registry rows, immutable release payloads, attachment ownership, and recovery journals. It is not committed. The only normal tracked Trellis footprint in the project is `.trellis.json`, which contains portable project identity and policy only. It must not contain a home path, a fleet, a release payload path, or live harness artifacts.
+`TRELLIS_HOME` holds machine state: local machine configuration, local registry rows, immutable release payloads, attachment ownership, and recovery journals. It is not committed. The only normal tracked Trellis footprint in the project is `.trellis.json`, which contains portable project identity and policy only. It must not contain a home path, a fleet, a release payload path, or live harness artifacts. `core-rules/templates/project.trellis.json.example` in the release payload shows the minimum shape — `$schema`, `schema_version`, `project_id` — which is exactly what onboarding writes when the manifest is absent.
 
 Trellis does not configure credentials, model/provider choices, or harness trust stores. Do not omit a supported surface merely because its host application is not open; this runbook explicitly attaches `claude`, `codex`, and `omp`.
 
@@ -85,7 +85,7 @@ For a project with no legacy Trellis artifacts and no manifest, run portable onb
   "$PROJECT_ROOT"
 ```
 
-If this command reports a legacy or mixed Trellis layout, stop. Do not retry with ad hoc deletes or a direct-link workaround; use the migration path below. `onboard --legacy` is a compatibility-only route and is not the normal portable onboarding path.
+If this command reports a legacy or mixed Trellis layout, stop. Do not retry with ad hoc deletes or a direct-link workaround; use the migration path below. There is no `--legacy` escape: `onboard` refuses `--legacy`, `--compatibility`, `--legacy-relative`, and `--infra-entry` with exit 2 since `v1.0.0-rc.25` removed direct-link onboarding. Migration is the only route.
 
 #### Existing portable manifest
 

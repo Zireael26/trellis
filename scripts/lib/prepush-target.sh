@@ -4,7 +4,7 @@
 # Purpose: decide WHERE a project's pre-push hook lives and WHICH canonical
 # source feeds it, accounting for the three install shapes Trellis projects use
 # (husky/Node, native core.hooksPath in-repo dir, and per-clone .git/hooks) plus
-# the clusterbid misconfig (hooksPath pointing at .git/hooks while a tracked
+# the observed misconfig (hooksPath pointing at .git/hooks while a tracked
 # .githooks/ also exists). Extracting the branchy decision as a pure function is
 # the only sane way to unit-test the misconfig path without git-push machinery
 # (mirrors sync-coverage.sh / sync-coverage.bats).
@@ -54,7 +54,7 @@ resolve_prepush_target() {
       *)  abs_hooks="${toplevel:-$proj}/$hooks_path" ;;
     esac
 
-    # Misconfig A (the clusterbid case): hooksPath resolves to the per-clone
+    # Misconfig A (the observed case): hooksPath resolves to the per-clone
     # .git/hooks (inside the worktree, so the outside-check below won't catch
     # it) WHILE a tracked .githooks/ ALSO exists. The intent is ambiguous — the
     # operator pinned hooksPath at the untracked per-clone dir but ships a

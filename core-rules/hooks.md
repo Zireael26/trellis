@@ -317,4 +317,4 @@ Overrides live in the project's `.claude/hooks/config.sh` and/or `.codex/hooks/c
 
 ## Lineage
 
-Core patterns (block-destructive, post-edit-verify, stop-verify, truncation-check) trace back to [iamfakeguru/claude-md](https://github.com/iamfakeguru/claude-md) (MIT). That template was the seed for Neev and TGSC's hook stacks. This file extends the template with: the three-tier architecture, `stop-verify`'s TodoWrite guard, `code-review-subagent`, `ui-verify`, the `session-context` / `save-context-log` / `post-compact-context` hooks, and the git-boundary tier.
+Core patterns (block-destructive, post-edit-verify, stop-verify, truncation-check) trace back to [iamfakeguru/claude-md](https://github.com/iamfakeguru/claude-md) (MIT). That template was the seed for this fleet's earliest hook stacks. This file extends the template with: the three-tier architecture, `stop-verify`'s TodoWrite guard, `code-review-subagent`, `ui-verify`, the `session-context` / `save-context-log` / `post-compact-context` hooks, and the git-boundary tier.

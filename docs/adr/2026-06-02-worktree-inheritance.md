@@ -39,7 +39,7 @@ Two empirical findings (verified 2026-06-02) shaped the solution:
    dead in worktrees on husky projects.** Husky v9 sets `core.hooksPath=.husky/_`
    and `.husky/_/.gitignore` is `*` (husky-generated). In a worktree `.husky/_`
    never materializes (same bug class as the inheritance symlinks), so git finds
-   no dispatch directory — the hook never fires. Verified live on neev: `.husky/_`
+   no dispatch directory — the hook never fires. Verified live on the monorepo project: `.husky/_`
    absent in the worktree, `core.hooksPath` still `.husky/_`, no post-checkout fires.
    A `post-checkout` in the tracked `.husky/` wrapper layer is also unreachable
    because the dispatch dir is what git invokes first.
@@ -59,7 +59,7 @@ boundary:
 1. **`core-rules/githooks/post-checkout`** (eager, native-hooks projects only) —
    fires on `git worktree add`, detects linked worktree, seeds immediately,
    always `exit 0`. Installed by `onboard-project.sh` only when `core.hooksPath`
-   points at a tracked directory (native-`.githooks`: lume, clusterbid-console;
+   points at a tracked directory (native-`.githooks`: the Unity project, the polyglot monorepo;
    plain-git: `.git/hooks`). Not installed on husky projects — dead there by
    finding #2 above.
 
@@ -101,8 +101,8 @@ point at *their* `$TRELLIS_ROOT`, never the original author's.
 
 | Project type | Eager hook | `trellis worktree add` | Raw `git worktree add` → first session |
 |---|---|---|---|
-| native-`.githooks` (lume, clusterbid-console) | ✓ correct | ✓ correct | **first-session-correct** (hook fires) |
-| husky (neev, tgsc, akaushik.org, curat.money, vericite) | ✗ dead | ✓ correct | unparented → SessionStart seeds-for-next + **loud warn** → restart |
+| native-`.githooks` (the Unity project, the polyglot monorepo) | ✓ correct | ✓ correct | **first-session-correct** (hook fires) |
+| husky (the monorepo project, the single-app project, the portfolio site, the multi-frontend app, the RAG service) | ✗ dead | ✓ correct | unparented → SessionStart seeds-for-next + **loud warn** → restart |
 
 No project ever fails silently. "First-session-correct on raw `git worktree add`"
 holds for native-hooks projects. Husky projects are first-session-warned +

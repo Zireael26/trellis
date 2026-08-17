@@ -16,6 +16,21 @@ teardown() {
   [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"
 }
 
+# BSD and GNU stat are probed in SEPARATE captures: GNU `stat -f` is
+# --file-system and prints a filesystem block before failing, which a chained
+# substitution would concatenate onto the mode.
+file_mode() {
+  local candidate
+  candidate="$(stat -f '%Lp' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 make_repo() {
   local path="$1" project_id="$2"
   mkdir -p "$path"
@@ -72,15 +87,15 @@ rewrite_registry_json() {
 @test "same project ID remains fleet-scoped and paths with spaces survive JSON listing" {
   personal="$SANDBOX/personal clone"
   work="$SANDBOX/work clone"
-  make_repo "$personal" neev
-  make_repo "$work" neev
-  register_repo personal neev "$personal"
-  register_repo work neev "$work"
+  make_repo "$personal" alpha
+  make_repo "$work" alpha
+  register_repo personal alpha "$personal"
+  register_repo work alpha "$work"
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" list --json
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | jq '[.entries[] | select(.project_key == "personal/neev")] | length')" -eq 1 ]
-  [ "$(printf '%s\n' "$output" | jq '[.entries[] | select(.project_key == "work/neev")] | length')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | jq '[.entries[] | select(.project_key == "personal/alpha")] | length')" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | jq '[.entries[] | select(.project_key == "work/alpha")] | length')" -eq 1 ]
   [[ "$output" == *"personal clone"* ]] || { echo "$output"; false; }
 }
 
@@ -88,12 +103,12 @@ rewrite_registry_json() {
   clone_a="$SANDBOX/clone a"
   clone_b="$SANDBOX/clone b"
   linked="$SANDBOX/linked worktree"
-  make_repo "$clone_a" neev
+  make_repo "$clone_a" alpha
   git clone -q "$clone_a" "$clone_b"
   git -C "$clone_a" worktree add -q -b topic "$linked"
-  register_repo personal neev "$clone_a"
-  register_repo personal neev "$clone_b"
-  register_repo personal neev "$linked"
+  register_repo personal alpha "$clone_a"
+  register_repo personal alpha "$clone_b"
+  register_repo personal alpha "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" list --json --fleet personal
   [ "$status" -eq 0 ]
@@ -116,14 +131,14 @@ rewrite_registry_json() {
   rm -f "$TRELLIS_HOME_FIX/registry.json"
   first="$SANDBOX/first"
   second="$SANDBOX/second"
-  make_repo "$first" neev
+  make_repo "$first" alpha
   make_repo "$second" other
-  register_repo personal neev "$first"
+  register_repo personal alpha "$first"
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c '. "$1"; local_registry_record_unavailable_root "$TRELLIS_HOME" work other "$2" "{}"' _ "$REGISTRY_LIB" "$first"
   [ "$status" -eq 3 ]
 
   registry_file="$TRELLIS_HOME_FIX/registry.json"
-  jq '.projects["personal/neev"].checkouts |= (to_entries | .[0].key = ("0" * 64) | from_entries)' \
+  jq '.projects["personal/alpha"].checkouts |= (to_entries | .[0].key = ("0" * 64) | from_entries)' \
     "$registry_file" > "$registry_file.next"
   mv "$registry_file.next" "$registry_file"
   chmod 600 "$registry_file"
@@ -771,8 +786,8 @@ Projects that should be **temporarily** excluded from centralized process checks
 
 | Project | Reason | Added | Review after |
 |---|---|---|---|
-| duta | Active Astro rewrite awaiting production cutover. `PROCESS_GATE_STACK_PROFILE="n-a"` remains deliberate until the migration pipeline defines project-local validators. | 2026-07-30 | 2026-09-30 |
-| provakil-competitor | Phase-0 scaffold. Proof-of-architecture work is still on `feat/proof-of-architecture`. Same reasoning as `duta`. | 2026-07-30 | 2026-08-31 |
+| lambda | Active Astro rewrite awaiting production cutover. `PROCESS_GATE_STACK_PROFILE="n-a"` remains deliberate until the migration pipeline defines project-local validators. | 2026-07-30 | 2026-09-30 |
+| mu | Phase-0 scaffold. Proof-of-architecture work is still on `feat/proof-of-architecture`. Same reasoning as `lambda`. | 2026-07-30 | 2026-08-31 |
 
 ## 2. Permanently excluded from management
 
@@ -911,8 +926,8 @@ LEGACY
 
 @test "a missing SHA-256 command fails the whole listing rather than every row" {
   repo="$SANDBOX/hashless clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
 
   bin="$(hashless_path)"
   run env -i PATH="$bin" HOME="$SANDBOX" TMPDIR="$SANDBOX" \
@@ -926,8 +941,8 @@ LEGACY
 
 @test "a present but broken SHA-256 command fails the whole listing rather than every row" {
   repo="$SANDBOX/broken hash clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
 
   # `hashless_path` gives a tool set with NO SHA-256 command; adding a `shasum`
   # that runs, exits 0, and prints something that is not a digest reproduces the
@@ -953,10 +968,10 @@ STUB
 @test "checkout-level drift on a POPULATED checkout is reported by the listing" {
   clone="$SANDBOX/populated clone"
   linked="$SANDBOX/populated worktree"
-  make_repo "$clone" neev
+  make_repo "$clone" alpha
   git -C "$clone" worktree add -q -b topic "$linked"
-  register_repo personal neev "$clone"
-  register_repo personal neev "$linked"
+  register_repo personal alpha "$clone"
+  register_repo personal alpha "$linked"
 
   # The discriminating shape: every registered WORKTREE root is unreachable, and
   # the checkout root is reachable but drifted. Each worktree row verifies its
@@ -968,7 +983,7 @@ STUB
   make_repo "$decoy" decoy
   rm -rf "$linked" "$clone"
   rewrite_registry_json '
-    .projects["personal/neev"].checkouts |= with_entries(.value.root = $decoy)
+    .projects["personal/alpha"].checkouts |= with_entries(.value.root = $decoy)
   ' --arg decoy "$decoy"
 
   # The whole-file validator is the parity oracle: it enumerates a checkout row
@@ -990,8 +1005,8 @@ STUB
 
 @test "a second worktree row for one root in one checkout is refused structurally" {
   repo="$SANDBOX/duplicate root clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
 
   # Re-key the existing row so the root no longer hashes to its worktree ID.
   # Registering the same root again now computes a DIFFERENT key, which without
@@ -999,17 +1014,17 @@ STUB
   # whole-file identity validation that used to catch this by accident no longer
   # runs for a bound-row registration.
   rewrite_registry_json '
-    .projects["personal/neev"].checkouts |= with_entries(
+    .projects["personal/alpha"].checkouts |= with_entries(
       .value.worktrees |= (to_entries | {($drifted): .[0].value})
     )
   ' --arg drifted "$(printf '0%.0s' $(seq 64))"
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
-    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal neev "$2" "" "[]" "" "{}"' \
+    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal alpha "$2" "" "[]" "" "{}"' \
     _ "$REGISTRY_LIB" "$repo"
   [ "$status" -eq 3 ]
   [[ "$output" == *"identity or path collision"* ]] || { echo "$output"; false; }
-  [ "$(jq '[.projects["personal/neev"].checkouts[].worktrees[]] | length' "$TRELLIS_HOME_FIX/registry.json")" -eq 1 ]
+  [ "$(jq '[.projects["personal/alpha"].checkouts[].worktrees[]] | length' "$TRELLIS_HOME_FIX/registry.json")" -eq 1 ]
 }
 
 @test "detach clears one attachment while an unrelated registry row is broken" {
@@ -1044,8 +1059,8 @@ STUB
 
 @test "a bound-row write with nothing bound is a usage refusal" {
   repo="$SANDBOX/bound floor clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
   before="$(jq -S . "$TRELLIS_HOME_FIX/registry.json")"
 
   # The last two carry whitespace: the binding list is consumed by a two-field
@@ -1071,10 +1086,10 @@ STUB
 
 @test "a bound-row write refuses a whitespace-bearing worktree ID" {
   repo="$SANDBOX/bound worktree floor clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
   before="$(jq -S . "$TRELLIS_HOME_FIX/registry.json")"
-  checkout_id="$(jq -r '.projects["personal/neev"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
+  checkout_id="$(jq -r '.projects["personal/alpha"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
 
   # The checkout ID is legal here, so the entry passes the existing floor. The
   # WORKTREE ID is where `read -r checkout worktree` hides the split: the whole
@@ -1102,13 +1117,13 @@ STUB
 @test "a broken SHA-256 command fails a bound-row WRITE as an environment fault" {
   repo="$SANDBOX/write probe clone"
   attachment=11111111-2222-3333-4444-555555555555
-  make_repo "$repo" neev
+  make_repo "$repo" alpha
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
-    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal neev "$2" "" "[]" "$3" "{}"' \
+    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal alpha "$2" "" "[]" "$3" "{}"' \
     _ "$REGISTRY_LIB" "$repo" "$attachment"
   [ "$status" -eq 0 ]
-  checkout_id="$(jq -r '.projects["personal/neev"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
-  worktree_id="$(jq -r '.projects["personal/neev"].checkouts[].worktrees | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
+  checkout_id="$(jq -r '.projects["personal/alpha"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
+  worktree_id="$(jq -r '.projects["personal/alpha"].checkouts[].worktrees | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
 
   # A hasher that returns a WELL-FORMED but wrong digest is the discriminating
   # stub: `local_registry_sha256`'s own format check passes it, so without an
@@ -1128,7 +1143,7 @@ STUB
 
   run env -i PATH="$bin" HOME="$SANDBOX" TMPDIR="$SANDBOX" \
     TRELLIS_HOME="$TRELLIS_HOME_FIX" /bin/bash -c \
-    '. "$1"; local_registry_clear_attachment "$TRELLIS_HOME" personal neev "$2" "$3" "$4"' \
+    '. "$1"; local_registry_clear_attachment "$TRELLIS_HOME" personal alpha "$2" "$3" "$4"' \
     _ "$REGISTRY_LIB" "$checkout_id" "$worktree_id" "$attachment"
   # ENVIRONMENT (5), never STATE (4). A bare `[[ ]]` is a bats keyword and does
   # not trip the ERR trap mid-test, so message assertions are counted instead.
@@ -1141,24 +1156,24 @@ STUB
   [ "$(printf '%s\n' "$output" | grep -cF 'does not match recorded Git common directory')" -eq 0 ] ||
     { echo "$output"; false; }
   # Report-only: the write never happened, so the attachment is intact.
-  [ "$(jq -r '.projects["personal/neev"].checkouts[].worktrees[].attachment_id' "$TRELLIS_HOME_FIX/registry.json")" = "$attachment" ]
+  [ "$(jq -r '.projects["personal/alpha"].checkouts[].worktrees[].attachment_id' "$TRELLIS_HOME_FIX/registry.json")" = "$attachment" ]
 }
 
 @test "a worktree row's own cause survives the checkout-level dedupe" {
   clone="$SANDBOX/dedupe clone"
   linked="$SANDBOX/dedupe worktree"
   decoy="$SANDBOX/dedupe decoy"
-  make_repo "$clone" neev
+  make_repo "$clone" alpha
   git -C "$clone" worktree add -q -b topic "$linked"
-  register_repo personal neev "$clone"
-  register_repo personal neev "$linked"
+  register_repo personal alpha "$clone"
+  register_repo personal alpha "$linked"
   make_repo "$decoy" decoy
 
   # Two INDEPENDENT faults under one checkout: the checkout root is repointed at
   # an unrelated repository (checkout-level drift), and one worktree row is
   # re-keyed so its stored ID no longer hashes its own recorded root.
   rewrite_registry_json '
-    .projects["personal/neev"].checkouts |= with_entries(
+    .projects["personal/alpha"].checkouts |= with_entries(
       .value.root = $decoy
       | .value.worktrees |= (to_entries
           | map(if .value.root == $decoy then . else {key: $drifted, value: .value} end)
@@ -1180,8 +1195,8 @@ STUB
 @test "a row the strict validator calls class 4 is identity_error in BOTH listings" {
   clone="$SANDBOX/agreement clone"
   gone="$SANDBOX/agreement gone"
-  make_repo "$clone" neev
-  register_repo personal neev "$clone"
+  make_repo "$clone" alpha
+  register_repo personal alpha "$clone"
 
   # THE discriminating fixture for the two-classifier defect: a worktree row
   # whose root is UNREACHABLE and whose stored ID is also wrong, filed under a
@@ -1194,7 +1209,7 @@ STUB
   # The checkout must stay healthy or the checkout-row FOLD would supply
   # `identity_error` on its own and the case would stop discriminating.
   rewrite_registry_json '
-    .projects["personal/neev"].checkouts |= with_entries(
+    .projects["personal/alpha"].checkouts |= with_entries(
       .value.worktrees[$zero] = {root: $gone}
     )
   ' --arg zero "$(printf '0%.0s' $(seq 64))" --arg gone "$gone"
@@ -1228,16 +1243,16 @@ STUB
 @test "a fleet-scoped listing never prints another fleet's checkout cause" {
   personal="$SANDBOX/scoped personal"
   work="$SANDBOX/scoped work"
-  make_repo "$personal" neev
-  make_repo "$work" neev
-  register_repo personal neev "$personal"
-  register_repo work neev "$work"
+  make_repo "$personal" alpha
+  make_repo "$work" alpha
+  register_repo personal alpha "$personal"
+  register_repo work alpha "$work"
 
   # Break ONLY the work fleet's checkout row: its stored checkout ID no longer
   # hashes from the recorded Git common directory. That is a checkout-scoped
   # class-4 fault, which the checkout pre-pass reports on stderr.
   rewrite_registry_json '
-    .projects["work/neev"].checkouts |= with_entries(.value.git_common_dir = $moved)
+    .projects["work/alpha"].checkouts |= with_entries(.value.git_common_dir = $moved)
   ' --arg moved "$SANDBOX/moved common dir"
 
   # Fleet scoping is a documented contract: a personal-fleet consumer cannot act
@@ -1271,9 +1286,9 @@ STUB
 @test "a worktree's own class-5 cause is printed under a failed checkout row" {
   clone="$SANDBOX/class5 clone"
   linked="$SANDBOX/class5 linked"
-  make_repo "$clone" neev
+  make_repo "$clone" alpha
   git -C "$clone" worktree add -q -b topic "$linked"
-  register_repo personal neev "$linked"
+  register_repo personal alpha "$linked"
 
   # Both roots stay REACHABLE — `-d` succeeds — but neither can be canonicalized,
   # which is the class-5 environment answer rather than the class-4 state one.
@@ -1303,7 +1318,7 @@ STUB
   # but a fleet-scoped caller must not be handed another fleet's project key,
   # exactly as the per-checkout identity causes are withheld from it.
   local table
-  table="$(printf 'work/neev\t8fbc\t9\n')"
+  table="$(printf 'work/alpha\t8fbc\t9\n')"
 
   run env bash -c '. "$1"; local_registry_require_checkout_class_vocabulary "$2" "$3"' \
     _ "$REGISTRY_LIB" "$table" personal
@@ -1317,20 +1332,20 @@ STUB
   run env bash -c '. "$1"; local_registry_require_checkout_class_vocabulary "$2" "$3"' \
     _ "$REGISTRY_LIB" "$table" work
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [ "$output" = 'trellis registry: could not classify registry checkout row (exit 9): work/neev 8fbc' ] ||
+  [ "$output" = 'trellis registry: could not classify registry checkout row (exit 9): work/alpha 8fbc' ] ||
     { echo "$output"; false; }
 
   # So is it for a whole-machine consumer, which passes no fleet at all.
   run env bash -c '. "$1"; local_registry_require_checkout_class_vocabulary "$2"' \
     _ "$REGISTRY_LIB" "$table"
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [ "$output" = 'trellis registry: could not classify registry checkout row (exit 9): work/neev 8fbc' ] ||
+  [ "$output" = 'trellis registry: could not classify registry checkout row (exit 9): work/alpha 8fbc' ] ||
     { echo "$output"; false; }
 
   # A table holding only reportable classes passes silently, which is what keeps
   # the three assertions above from being satisfied by an always-failing guard.
   run env bash -c '. "$1"; local_registry_require_checkout_class_vocabulary "$2" "$3"' \
-    _ "$REGISTRY_LIB" "$(printf 'work/neev\t8fbc\t4\npersonal/neev\t2ab1\t5\n')" personal
+    _ "$REGISTRY_LIB" "$(printf 'work/alpha\t8fbc\t4\npersonal/alpha\t2ab1\t5\n')" personal
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = '' ] || { echo "$output"; false; }
 }
@@ -1522,36 +1537,36 @@ EOF
 @test "annotate merges machine-local metadata onto a registered row without dropping legacy keys" {
   configure_fleet personal
   repo="$SANDBOX/annotated clone"
-  make_repo "$repo" neev
+  make_repo "$repo" alpha
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
-    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal neev "$2" "" "[]" "" "$3"' \
+    '. "$1"; local_registry_register_worktree "$TRELLIS_HOME" personal alpha "$2" "" "[]" "" "$3"' \
     _ "$REGISTRY_LIB" "$repo" '{"legacy":{"notes":"imported"}}'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project neev \
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project alpha \
     --metadata-json '{"gptx":{"enabled":true,"lane":"codex"}}'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(printf '%s\n' "$output" | jq -r '.metadata.gptx.lane')" = codex ]
-  [ "$(jq -r '.projects["personal/neev"].metadata.gptx.enabled' "$TRELLIS_HOME_FIX/registry.json")" = true ]
+  [ "$(jq -r '.projects["personal/alpha"].metadata.gptx.enabled' "$TRELLIS_HOME_FIX/registry.json")" = true ]
   # The import's own metadata is retained, not replaced wholesale.
-  [ "$(jq -r '.projects["personal/neev"].metadata.legacy.notes' "$TRELLIS_HOME_FIX/registry.json")" = imported ]
-  [ "$(stat -f '%Lp' "$TRELLIS_HOME_FIX/registry.json" 2>/dev/null || stat -c '%a' "$TRELLIS_HOME_FIX/registry.json")" = 600 ]
+  [ "$(jq -r '.projects["personal/alpha"].metadata.legacy.notes' "$TRELLIS_HOME_FIX/registry.json")" = imported ]
+  [ "$(file_mode "$TRELLIS_HOME_FIX/registry.json")" = 600 ]
 
   # The merge is SHALLOW by contract: a supplied top-level key replaces its
   # counterpart outright rather than being deep-merged into it, so a re-stated
   # routing block is the whole routing block.
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project neev \
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project alpha \
     --metadata-json '{"gptx":{"enabled":false}}'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(jq -cS '.projects["personal/neev"].metadata.gptx' "$TRELLIS_HOME_FIX/registry.json")" = '{"enabled":false}' ]
-  [ "$(jq -r '.projects["personal/neev"].metadata.legacy.notes' "$TRELLIS_HOME_FIX/registry.json")" = imported ]
+  [ "$(jq -cS '.projects["personal/alpha"].metadata.gptx' "$TRELLIS_HOME_FIX/registry.json")" = '{"enabled":false}' ]
+  [ "$(jq -r '.projects["personal/alpha"].metadata.legacy.notes' "$TRELLIS_HOME_FIX/registry.json")" = imported ]
 }
 
 @test "annotate refuses unregistered rows and non-object metadata, and writes nothing" {
   configure_fleet personal
   repo="$SANDBOX/annotate refusal clone"
-  make_repo "$repo" neev
-  register_repo personal neev "$repo"
+  make_repo "$repo" alpha
+  register_repo personal alpha "$repo"
   before="$(jq -S . "$TRELLIS_HOME_FIX/registry.json")"
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project absent \
@@ -1560,18 +1575,18 @@ EOF
   [[ "$output" == *"project is not registered: personal/absent"* ]] || { echo "$output"; false; }
 
   for payload in '[]' '"routing"' 'null' 'not json'; do
-    run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project neev \
+    run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project alpha \
       --metadata-json "$payload"
     [ "$status" -eq 2 ] || { echo "payload=$payload: $output"; false; }
     [[ "$output" == *"--metadata-json must be a JSON object"* ]] || { echo "$output"; false; }
   done
 
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project neev
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project alpha
   [ "$status" -eq 2 ] || { echo "$output"; false; }
 
   # An unconfigured fleet is the same refusal `import` makes: annotate writes
   # fleet-scoped state, so a typo must not leave rows doctor cannot inspect.
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet typo --project neev \
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet typo --project alpha \
     --metadata-json '{"gptx":{"enabled":true}}'
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"fleet is not configured on this machine: typo"* ]] || { echo "$output"; false; }
@@ -1583,19 +1598,19 @@ EOF
   configure_fleet personal
   annotated="$SANDBOX/annotated project"
   sibling="$SANDBOX/broken sibling"
-  make_repo "$annotated" neev
+  make_repo "$annotated" alpha
   make_repo "$sibling" sibling
-  register_repo personal neev "$annotated"
+  register_repo personal alpha "$annotated"
   register_repo personal sibling "$sibling"
 
   # Present root that no longer resolves as a canonical Git worktree: a
   # whole-file writer would refuse every annotation on the machine over it.
   rm -rf "$sibling/.git"
 
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project neev \
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project alpha \
     --metadata-json '{"gptx":{"enabled":true}}'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(jq -r '.projects["personal/neev"].metadata.gptx.enabled' "$TRELLIS_HOME_FIX/registry.json")" = true ]
+  [ "$(jq -r '.projects["personal/alpha"].metadata.gptx.enabled' "$TRELLIS_HOME_FIX/registry.json")" = true ]
   # The broken sibling row is untouched, not repaired and not removed.
   [ "$(jq --arg root "$sibling" '[.projects["personal/sibling"].checkouts[].worktrees[] | select(.root == $root)] | length' "$TRELLIS_HOME_FIX/registry.json")" -eq 1 ]
 

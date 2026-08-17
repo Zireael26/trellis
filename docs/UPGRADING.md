@@ -8,7 +8,10 @@ under `TRELLIS_HOME` (default `~/.trellis`).
 For first-machine configuration, launcher installation, fleet creation, and
 attachment recipes, use [AGENT_SETUP.md](../AGENT_SETUP.md). For importing
 legacy inventory and preparing project migrations, use
-[MIGRATING-LOCAL-FLEETS.md](MIGRATING-LOCAL-FLEETS.md).
+[MIGRATING-LOCAL-FLEETS.md](MIGRATING-LOCAL-FLEETS.md). For an agent executing an
+upgrade end to end — any harness, with per-step verification, stop conditions,
+and a rollback path — use [AGENT_UPGRADE.md](../AGENT_UPGRADE.md); this document
+is the reference it cites.
 
 ## What an upgrade changes
 
@@ -419,6 +422,198 @@ do not reintroduce live source-checkout inheritance.
   means only the per-project `.trellis/runtime` anchor.
 - Project-local `.trellis.config.json` stays readable but deprecated, for held
   legacy checkouts only.
+
+## `1.0.0-rc.25` → `1.0.0-rc.26`
+
+rc.26 is an ordinary immutable release with no migration and no compatibility
+window: install, verify, adopt through the routes above. Two of its fixes are
+not delivered by adoption alone, so read this section before running Step 4.
+
+### What changed operationally
+
+- **Scheduled-task materialization excludes an unusable row instead of failing
+  the whole task.** `trellis task materialize` previously turned every
+  unreachable checkout into a planned error: the manifest went
+  `status: "planned-error"` and the command returned class `5`, so one
+  unavailable registry row halted 19 of 22 tasks. Unavailable rows are now
+  dropped from the run and recorded in `requirements.excluded_rows` as
+  `{project_id, reason}`; the manifest stays `ready` and the command exits `0`.
+  One line per excluded row goes to stderr, `trellis task: excluded row: <id>:
+  checkout unavailable in local registry snapshot`, while stdout still carries
+  only the task root. `planned-error` and class `5` are now reserved for three
+  whole-task faults: no registered rows at all, no eligible target among the
+  rows that remain, or a registry that failed identity validation. A task
+  prompt must report excluded rows and proceed; it must stop only on
+  `planned-error`. **Existing materialized inputs are pinned to the release that
+  produced them and do not change under adoption — re-materialize.**
+- **The Codex `SessionStart` hook template resolves its project directory
+  through the documented fallback.** Three entries in
+  `core-rules/templates/codex-hooks.local.json` passed a bare
+  `"$CODEX_PROJECT_DIR"`, which Codex does not reliably set;
+  they now pass `"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"`, the chain
+  every other Codex surface in the payload already used. The expected-command
+  pin in `scripts/lib/attachment.sh` was updated on the same three strings in
+  the same change: the pin and the template are the two sides that must agree,
+  and rendering fails closed with class `4` if they diverge. The Claude arm was
+  not touched. **This is render-time output, not payload content — see
+  [What adoption delivers](#what-adoption-delivers-and-what-it-does-not).**
+- **`spec-gate.sh` ships executable in both harness trees.**
+  `core-rules/hooks/spec-gate.sh` and `core-rules/codex/hooks/spec-gate.sh` were
+  mode `100644` in the index from 2026-07-07. Both harness templates invoke the
+  hook by bare path with no `bash` prefix, so it returned `126` in every
+  attached project and the harness reported a hook failure rather than a gate
+  verdict: the mandatory-pipeline Stop hook was inert everywhere it was
+  installed. Both are `100755` now. There is no "spec-gate mode" setting — mode
+  here means the file permission bits in the release payload.
+- **`trellis hook` resolves its project directory up to the nearest
+  `.trellis/runtime` anchor.** The route previously used the directory the
+  harness handed it, which for Codex is routinely a subdirectory of the
+  checkout; `context-log.md` and `.claude/primers/INDEX.md` live at the root, so
+  session-context, post-compact-context, and primer-index injection silently
+  found nothing. The route now walks up to the first directory holding a
+  runtime anchor. A directory under no attachment resolves to itself, so
+  unattached clones are unchanged, and no exit code on the route changed.
+- **Security-gate ShellCheck findings reach the verdict, and extensionless shell
+  scripts are in scope.** ShellCheck findings fell through the tool-dispatch
+  `case` in the gate's diff mode: they updated no severity counter, so a new
+  high-severity shell defect still returned `MERGEABLE` and exit `0` on a
+  repository that is mostly Bash. ShellCheck now shares the SAST row with
+  Semgrep, printing provenance as `shellcheck/SC####`. Scope was also
+  suffix-only (`*.sh`, `*.bash`), which left every extensionless script — the
+  pre-push hooks that invoke the gate, both `commit-msg` hooks, the `trellis`
+  CLI entrypoint — outside both engines; scope is now suffix **plus** any
+  changed file whose shebang names `sh`, `bash`, `dash`, or `ksh`. Expect
+  previously-silent shell findings on the first rc.26 gate run.
+- **`run-tests.sh` and CI enumerate every suite.** Both hand-listed their
+  suites and had drifted to 20 of 57, with one omitted suite red at the
+  committed tip while the gate reported a pass. `scripts/tests/*.bats` is
+  globbed now, `TEST_SUITE_EXCLUSIONS` is the one hand-kept list (each entry
+  carrying a scope and a reason), and `scripts/tests/suite-coverage.bats` fails
+  on any suite that is neither globbed nor excluded. `run-tests.sh` takes
+  `--quick`, `--scope=local|ci`, `--shard=I/N`, and `--list`; CI runs four
+  shards. This changes no runtime behavior — it changes what a green gate means.
+
+### What adoption delivers, and what it does not
+
+`release adopt` performs exactly three mutations: it repoints the project's
+`.trellis/runtime` anchor at the new payload, rewrites the ownership record's
+release and payload fields, and regenerates the managed git-hook dispatchers
+under `$TRELLIS_HOME/state/git-hooks/`. It never re-runs the surface plan and
+never rewrites a rendered harness file.
+
+| rc.26 fix | Delivered by | Why |
+|---|---|---|
+| materializer per-row exclusion | adopt **plus** re-materialization | the code is payload-resident, but an already materialized task's manifest is pinned to the release that wrote it |
+| `spec-gate.sh` `100755` | adopt alone | the templates reach the hook *through* `.trellis/runtime`, so moving the anchor picks up the payload's modes |
+| `trellis hook` anchor walk | adopt alone | payload-resident, in the payload's own dispatcher |
+| security-gate ShellCheck | adopt alone | payload-resident skill content |
+| suite enumeration | adopt alone | payload-resident; affects the source tree's own gates |
+| Codex `SessionStart` fallback | **re-render required** | `.codex/hooks.json` is attach-time output; its bytes are written once, by `attach` |
+
+Nothing reports the stale render for you. `doctor` does not repair a rendered
+surface in any mode, and its Codex hook-freshness check is gated on a legacy
+`.codex/hooks` **directory**, which a portable attachment does not have — so an
+attachment still holding rc.25 render bytes reports clean. Treat the re-render
+below as a required step, not a conditional one.
+
+### Upgrade the machine
+
+Use the stepwise route. `trellis upgrade` performs the same install, verify and
+adopt against one selector and is valid here — rc.26 is not yet installed, so
+the forward-only constraint does not bite — but it offers no review point
+between operations, and this release needs one.
+
+```sh
+TARGET_RELEASE=1.0.0-rc.26
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+: "${TRELLIS:=trellis}"
+
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" registry list --fleet "$FLEET"
+"$TRELLIS" release adopt "$TARGET_RELEASE" --fleet "$FLEET"
+"$TRELLIS" doctor --fleet "$FLEET"
+```
+
+Keep `1.0.0-rc.25` installed. Installed releases are immutable and are not a
+cleanup candidate; rollback adopts one that is already on disk.
+
+### Re-render an attached project's Codex surface
+
+An attached project renders its harness templates from the release payload once,
+at attach time. The documented route back to a fresh render is the detach/attach
+pair — the same pair
+[AGENT_SETUP.md](../AGENT_SETUP.md) §8 uses for a checkout move. There is no
+repair, refresh, or force flag: `attach` against an already-attached row prints
+`already attached: <root>` and returns `0` without rendering, `relink` repairs
+the anchor and git hooks and verifies owned artifacts byte-exact against the
+ownership record, and `doctor --fix` is read-only.
+
+```sh
+"$TRELLIS" detach --home "$TRELLIS_HOME" --all-worktrees "$PROJECT_ROOT"
+"$TRELLIS" attach \
+  --home "$TRELLIS_HOME" \
+  --fleet "$FLEET" \
+  --release "$TARGET_RELEASE" \
+  --harness claude \
+  --harness codex \
+  --harness omp \
+  "$PROJECT_ROOT"
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+What changes on disk: `detach` removes only attachment-owned artifacts — the
+runtime anchor, the rendered harness surfaces, the managed local exclude block,
+the ownership record, the local hook dispatchers — and leaves the tracked
+`.trellis.json` intact and inert. `attach` writes them back from the rc.26
+payload, so `.codex/hooks.json` is rewritten with the three fallback-form
+`SessionStart` commands and `.claude/settings.local.json` is re-rendered
+unchanged. The project's own tracked files are not touched, and the project must
+be Git-clean afterward. Attach the same three harnesses that were detached: a
+harness set that differs from the recorded attachment is refused, and detaching
+is what makes the set re-selectable.
+
+Re-render only projects with `codex` attached. A Claude-only or OMP-only
+attachment picks up every rc.26 fix from adoption alone.
+
+### Re-materialize scheduled tasks
+
+Materialized task inputs carry the release identity that wrote them and do not
+follow an adoption. Re-materialize each task the machine schedules, per fleet:
+
+```sh
+for TASK in daily-project-digest conductor dep-currency; do
+  "$TRELLIS" task materialize --home "$TRELLIS_HOME" --fleet "$FLEET" "$TASK"
+done
+```
+
+Substitute the tasks this machine actually schedules; the catalogue is
+[`scheduled-tasks/README.md`](../scheduled-tasks/README.md). Each call reads one
+strict registry snapshot and rewrites `$TRELLIS_HOME/tasks/<fleet>/<task>/`
+atomically. A run that prints `excluded row:` lines and exits `0` succeeded —
+that is the new behavior, not a partial failure. A `planned-error` manifest or a
+class `5` exit is a real stop.
+
+Every launcher invocation re-verifies the release payload before dispatch:
+4.55–39 s warm, 40–125 s under load. A loop
+over a full task catalogue therefore runs for many minutes. That is the
+verification cost, not a hang.
+
+### Roll back
+
+```sh
+ROLLBACK_RELEASE=1.0.0-rc.25
+"$TRELLIS" release verify "$ROLLBACK_RELEASE"
+"$TRELLIS" release adopt "$ROLLBACK_RELEASE" --fleet "$FLEET"
+"$TRELLIS" doctor --fleet "$FLEET"
+```
+
+A rolled-back project keeps whatever render it last received. If it was
+re-rendered under rc.26, repeat the detach/attach pair with
+`--release "$ROLLBACK_RELEASE"` to restore the rc.25 render; leaving the rc.26
+render in place under an rc.25 anchor is not a supported state, because the
+expected-command pin lives in the payload. Re-materialize scheduled tasks after
+a rollback for the same reason they are re-materialized after an upgrade.
 
 ## Source checkout and publication boundary
 

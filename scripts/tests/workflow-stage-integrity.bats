@@ -156,8 +156,16 @@ EOF
   json_assert '!r.error && r.result.results[0]===null && r.result.results[1].id==="b" && r.result.results[1].step===2 && r.result.results[1].index===1 && r.logs.filter((line)=>JSON.parse(line).stage===2).length===1 && JSON.parse(r.logs.find((line)=>JSON.parse(line).stage===2)).original==="b"'
 }
 
-@test "valid negative verdict remains a successful receipt" {
-  run_recipe "$FANOUT" '{"targets":[{"name":"alpha","path":"/tmp/alpha"}],"__agentOutputByLabel":{"fanout:alpha":{"target":"alpha","branch":"","pushed":false,"green":false,"pr_url":"","worktree_path":"","notes":"held for review"}}}'
+@test "CODEX_UNAVAILABLE receipts fail the selected lane without provider fallback" {
+  run_recipe "$TEMPLATE" '{"__agentOutputByLabel":{"work":"CODEX_UNAVAILABLE"}}'
+  json_assert 'r.error && /Work/.test(r.error.message) && r.prompts.length===1 && r.prompts[0].opts.label==="work" && (() => { const gate=r.logs.map((line)=>{try{return JSON.parse(line)}catch{return null}}).find((row)=>row?.stage==="Work"); return gate && gate.success_count===0 && gate.failure_ids.join(",")==="work" && gate.ok===false; })()'
+
+  run_recipe "$TEMPLATE" '{"__agentOutputByLabel":{"work":{"error":{"code":"CODEX_UNAVAILABLE"}}}}'
+  json_assert 'r.error && /Work/.test(r.error.message) && r.prompts.length===1 && r.prompts[0].opts.label==="work" && (() => { const gate=r.logs.map((line)=>{try{return JSON.parse(line)}catch{return null}}).find((row)=>row?.stage==="Work"); return gate && gate.success_count===0 && gate.failure_ids.join(",")==="work" && gate.ok===false; })()'
+}
+
+@test "valid business HOLD remains a successful receipt" {
+  run_recipe "$FANOUT" '{"targets":[{"name":"alpha","path":"/tmp/alpha"}],"__agentOutputByLabel":{"fanout:alpha":{"target":"alpha","branch":"","pushed":false,"green":false,"pr_url":"","worktree_path":"","notes":"HOLD: awaiting review"}}}'
   json_assert '!r.error && r.result.verdicts.length===1 && r.result.verdicts[0].target==="alpha" && r.result.verdicts[0].green===false && (() => { const gate=r.logs.map((line)=>{try{return JSON.parse(line)}catch{return null}}).find((row)=>row?.stage==="Fan-out"); return gate && gate.success_ids.join(",")==="alpha" && gate.failure_count===0; })()'
 }
 

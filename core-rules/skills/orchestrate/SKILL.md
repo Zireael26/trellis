@@ -94,8 +94,9 @@ receipts, never from the length of `results.filter(Boolean)`.
 Every recipe carries the engine-compatible inline helper pair shown in
 `recipes/template.wf.js`:
 
-- `settle(id, run)` returns exactly one `{id, ok, value, error}` receipt. A throw or
-  null value is `ok:false`; the declared id and result-array cardinality survive.
+- `settle(id, run)` returns exactly one `{id, ok, value, error}` receipt. A throw,
+  null value, or `CODEX_UNAVAILABLE` (literal or an object's `code`, `status`, or
+  `error` marker) is `ok:false`; the declared id and result-array cardinality survive.
 - `requireStage(stage, expectedIds, receipts, minSuccess)` requires one unique receipt
   for every expected id, emits one JSON `workflow_stage_gate` log with expected,
   successful, failed, missing, and unexpected ids plus counts, and throws when identity

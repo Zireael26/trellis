@@ -17,8 +17,8 @@ new recurring cost is **orphaned git worktrees from Codex audit-remediation
 fan-out**.
 
 Incident forensics (2026-07-16, 3.3 GiB free / 100% full): 224 linked worktrees
-fleet-wide (126 on `neev` alone); `/private/tmp` 148 GB, `neev-worktrees`
-137 GB, `vericite-worktrees` 28 GB; each tree 1–3 GB. The janitor reported
+fleet-wide (126 on `the monorepo project` alone); `/private/tmp` 148 GB, `the monorepo project-worktrees`
+137 GB, `the RAG service-worktrees` 28 GB; each tree 1–3 GB. The janitor reported
 **`0 B reclaimable` while the disk was full.** Classifying by real
 `git status --porcelain`: 157 porcelain-empty (safe — branch ref survives reap),
 66 with genuine uncommitted work, 1 live process. Emergency resolved by hand

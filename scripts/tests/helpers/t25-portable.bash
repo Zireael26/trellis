@@ -22,8 +22,20 @@ t25_sha256_text() {
   fi
 }
 
+# GNU `stat -f` is --file-system, so it prints a whole filesystem block on
+# stdout before failing on the format operand. Chained in one substitution that
+# block concatenates with the GNU mode and every mode assertion reads garbage.
+# Probe BSD first, shape-check the answer, and fall back in a SEPARATE capture.
 t25_mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+  local candidate
+  candidate="$(stat -f %Lp "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c %a "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 t25_git() {
@@ -157,6 +169,8 @@ t25_inert_env() (
   "$@"
 )
 
+# shellcheck disable=SC2120  # the version argument is optional by design; every
+# caller so far takes the default.
 t25_make_immutable_release() {
   local version="${1:-$T25_RELEASE}" repo="$T25_SANDBOX/release source"
 
@@ -450,6 +464,85 @@ t25_run_session_start() (
   cd "$project" || return 1
   printf '%s\n' '{"hook_event_name":"SessionStart","source":"startup"}' | \
     t25_inert_env bash "$hook"
+)
+
+# Drive the real OMP extension factory over a project directory, the way
+# `t25_run_session_start` drives the real Claude/Codex SessionStart hooks. The
+# factory is the loader's entry point, so this is the same surface OMP itself
+# reaches. Every registered lifecycle handler is dispatched with the project as
+# `ctx.cwd`; on a raw clone each must resolve no runtime, return `undefined`,
+# log nothing, and never set the extension label. Prints `inert` and exits 0 in
+# that case, or the offending lines and exit 1 otherwise.
+#
+# The driver runs with the project as its working directory: Node resolves
+# package configuration upward from the CWD, so running it from the Trellis
+# checkout would make an unrelated repository's `package.json` decide whether
+# the module loads at all.
+# The OMP adapter is TypeScript with erasable syntax only, so plain Node runs it
+# through type stripping — but only from 22.18/23 onward without a flag. Probing
+# the capability beats comparing version numbers: the runtime either imports a
+# `.ts` module or it does not.
+t25_node_can_strip_types() {
+  local probe="$T25_SANDBOX/strip-types-probe"
+  mkdir -p "$probe" || return 1
+  printf 'export const ok: number = 1;\n' > "$probe/m.ts" || return 1
+  printf 'import { ok } from "./m.ts";\nif (ok !== 1) process.exit(1);\n' > "$probe/m.mjs" || return 1
+  (cd "$probe" && node ./m.mjs) >/dev/null 2>&1
+}
+
+# t25_run_omp_extension <module> <project> <expected-handler-csv>
+#
+# The expected handler list is required, not decorative. Without it the probe
+# was vacuous: `mod.default(pi)` registering nothing left `handlers` empty, the
+# `for` loop never ran, `problems` stayed empty and the driver printed `inert`.
+# An adapter refactor that stopped registering handlers — the single failure
+# mode most likely to kill the whole extension — would have turned this probe
+# GREEN. The set is compared exactly, so a dropped or renamed lifecycle event is
+# a red rather than a silent narrowing.
+t25_run_omp_extension() (
+  local module="$1" project="$2" expected="$3" driver="$T25_SANDBOX/omp-extension-probe.mjs"
+
+  cat > "$driver" <<'JS'
+const [modulePath, projectDir, expectedCsv] = process.argv.slice(2);
+const mod = await import(modulePath);
+const problems = [];
+const handlers = new Map();
+const pi = {
+  logger: {
+    warn: (...a) => problems.push("logger.warn: " + a.join(" ")),
+    error: (...a) => problems.push("logger.error: " + a.join(" ")),
+  },
+  setLabel: (label) => problems.push("setLabel: " + label),
+  sendMessage: (message) => problems.push("sendMessage: " + JSON.stringify(message)),
+  on: (name, fn) => handlers.set(name, fn),
+};
+mod.default(pi);
+const expected = expectedCsv.split(",").filter(Boolean).sort();
+const registered = [...handlers.keys()].sort();
+if (registered.join(",") !== expected.join(",")) {
+  problems.push(
+    "handlers registered [" + registered.join(",") + "] != expected [" + expected.join(",") + "]",
+  );
+}
+const ctx = { cwd: projectDir };
+for (const [name, fn] of handlers) {
+  let result;
+  try {
+    result = await fn({}, ctx);
+  } catch (err) {
+    problems.push(name + " threw: " + (err && err.message));
+    continue;
+  }
+  if (result !== undefined) problems.push(name + " returned " + JSON.stringify(result));
+}
+if (problems.length) {
+  console.log(problems.join("\n"));
+  process.exit(1);
+}
+console.log("inert");
+JS
+  cd "$project" || return 1
+  t25_inert_env node "$driver" "$module" "$project" "$expected"
 )
 
 t25_no_attachment_warning() {

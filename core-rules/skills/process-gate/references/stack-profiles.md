@@ -15,17 +15,17 @@ Typical validators contributors add at the project level:
 - `check-input-font-size.sh` — iOS-zoom guard (input fields ≥ 16px to prevent zoom on focus).
 - `check-phrases.sh` — forbidden-phrase list (brand voice).
 
-These are project-specific implementations; the canonical layer doesn't ship them. TGSC's `.claude/skills/process-gate/scripts/` is a worked example.
+These are project-specific implementations; the canonical layer doesn't ship them. the single-app project's `.claude/skills/process-gate/scripts/` is a worked example.
 
 ### `monorepo-pnpm` — pnpm-workspace monorepos
 
 Common validators:
 
-- `check-module-boundary.sh` — package import-boundary enforcement (e.g., `@neev/orders` may not import from `@neev/inventory`).
+- `check-module-boundary.sh` — package import-boundary enforcement (e.g., `@the monorepo project/orders` may not import from `@the monorepo project/inventory`).
 - `check-package-graph.sh` — circular-dep detection.
 - `check-scope-allowlist.sh` — Conventional-Commit scope must match a workspace package name.
 
-Neev is the worked example.
+the monorepo project is the worked example.
 
 ### `service-node` — Node.js HTTP services / APIs
 
@@ -92,7 +92,7 @@ Common validators:
 - `check-asset-bundle.sh` — `.unity` and `.prefab` files don't have merge-conflict markers.
 - `check-no-binary-bloat.sh` — diff size sanity for binary assets.
 
-Lume is the only current adopter; canonical Unity profile defers to Rule of Three (n=1 today).
+the Unity project is the only current adopter; canonical Unity profile defers to Rule of Three (n=1 today).
 
 ### `native-other` — Rust / Go / Python / etc.
 
@@ -143,11 +143,11 @@ When three independent projects adopt a close variant of the same validator, pro
 
 Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
-## Lume carve-out
+## the Unity project carve-out
 
-Lume (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical eight gates still apply.
+the Unity project (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical eight gates still apply.
 
-Lume's local registry row documents the carve-out in its `metadata`. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
+the Unity project's local registry row documents the carve-out in its `metadata`. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
 
 ## Public web surface — cross-profile note
 

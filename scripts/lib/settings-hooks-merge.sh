@@ -7,7 +7,7 @@
 # *files* are copied by sync-hooks.sh; this reconciles the *wiring* (which event
 # arrays reference which commands) so a project that gained a new canonical hook
 # (e.g. reread-guard, track-read, propose-rules, stamp-turn) actually gets it
-# wired, while a bespoke hook a project added (e.g. neev's
+# wired, while a bespoke hook a project added (e.g. a monorepo project's
 # check-module-boundary.sh on PreToolUse Edit|Write, or a custom hook appended
 # into the single canonical Stop block) survives verbatim.
 #

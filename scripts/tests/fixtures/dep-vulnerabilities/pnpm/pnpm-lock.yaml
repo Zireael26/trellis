@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+importers:
+  apps/web:
+    dependencies:
+      '@scope/shared':
+        version: 1.0.0
+      web-only:
+        version: 2.0.0
+    devDependencies:
+      '@scope/web-dev':
+        version: 3.0.0
+  apps/admin:
+    dependencies:
+      admin-only:
+        version: 4.0.0
+
+packages:
+  '@scope/shared@1.0.0': {}
+  '@scope/web-dev@3.0.0': {}
+  admin-only@4.0.0: {}
+  nested-child@5.0.0: {}
+  web-only@2.0.0: {}

@@ -2,9 +2,9 @@
   "$schema": "../../../lib/trellis.registry.schema.json",
   "schema_version": 1,
   "projects": {
-    "neev": {
+    "alpha": {
       "fleet": "personal",
-      "project_id": "neev",
+      "project_id": "alpha",
       "status": "active",
       "metadata": {},
       "checkouts": {}

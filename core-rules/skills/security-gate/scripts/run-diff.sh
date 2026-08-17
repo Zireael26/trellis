@@ -136,12 +136,60 @@ SEMGREP_OUT="$WORK/semgrep.jsonl"
 OSV_OUT="$WORK/osv.jsonl"
 GITLEAKS_OUT="$WORK/gitleaks.jsonl"
 
+# A shell script does not have to carry a suffix. `pre-push`, `commit-msg`,
+# `pre-commit` and a CLI entrypoint conventionally carry none, so a suffix-only
+# filter drops the highest-value scripts in a repository out of *every* arm at
+# once — not in the semgrep scope, not in the ShellCheck scope. Classification
+# falls back to the shebang, which is what ShellCheck itself dispatches on.
+# `env` is resolved through to the real interpreter, and only the four dialects
+# ShellCheck accepts count; a `#!/usr/bin/env bats` or `#!/usr/bin/env python3`
+# file is not shell and returns non-zero here.
+shebang_is_shell() {
+  # Bounded read: only the shebang line can matter, and a changed file may be a
+  # large binary.
+  head -c 256 "$1" 2>/dev/null | awk 'BEGIN { rc = 1 }
+       NR == 1 {
+         if ($0 ~ /^#!/) {
+           sub(/^#![ \t]*/, "")
+           interp = $1
+           if (interp ~ /(^|\/)env$/) {
+             for (i = 2; i <= NF; i++) { if ($i !~ /^-/) { interp = $i; break } }
+           }
+           sub(/.*\//, "", interp)
+           if (interp ~ /^(sh|bash|dash|ksh)$/) rc = 0
+         }
+         exit rc
+       }
+       END { exit rc }' 2>/dev/null
+}
+
+# Paths carved out of the ShellCheck stage, as whitespace-separated globs
+# matched against the repo-relative path. Empty by default: a project sets this
+# in its `security-gate-local/local.config.sh` to mirror whatever its own lint
+# gate carves out, so the two agree. It is deliberately not hardcoded — this
+# skill is inherited by every registered project and must not name one project's
+# directory layout.
+SHELLCHECK_EXCLUDE_GLOBS=()
+if [ -n "${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS:-}" ]; then
+  # Split on whitespace but never pathname-expand. These are patterns to match a
+  # repo-relative path against, not paths to resolve against the current
+  # directory — and `core-rules/evals/*` resolves against a real directory when
+  # the gate runs from the repository root, which silently turned the pattern
+  # into a list of literal paths that matched nothing.
+  set -f
+  # shellcheck disable=SC2206  # word splitting is the point; globbing is off
+  SHELLCHECK_EXCLUDE_GLOBS=(${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS})
+  set +f
+fi
+
 # Semgrep — scoped to changed files (filter to existing files; skip deletions).
 :>"$SEMGREP_OUT"
 SCOPE_FILES=()
 SHELL_SCOPE_FILES=()
 while IFS= read -r f; do
   [ -z "$f" ] && continue
+  [ -f "$PROJECT_DIR/$f" ] || continue
+  is_shell=false
   case "$f" in
     *.js|*.jsx|*.ts|*.tsx|*.mjs|*.cjs|*.py|*.go|*.rs|*.java|*.kt|*.rb|*.php) ;;
     # Shell is a first-class language here. Excluding it meant a shell-heavy
@@ -152,16 +200,32 @@ while IFS= read -r f; do
     # baseline can never hold a finding this mode would then raise out of a test
     # fixture — every run would report the same fixture credentials as new. Test
     # files are covered by the baseline's whole-tree scan instead.
-    *.sh|*.bash|*.zsh) ;;
-    *) continue ;;
+    *.sh|*.bash) is_shell=true ;;
+    # `.zsh` gets semgrep only, and that is a real gap rather than coverage:
+    # semgrep's registry has no shell ruleset, so only the generic secret and
+    # command-injection patterns can fire, and ShellCheck has no zsh dialect to
+    # fall back on. A zsh file is listed as scanned and is, in practice, only
+    # grepped for secrets.
+    *.zsh) ;;
+    *) shebang_is_shell "$PROJECT_DIR/$f" || continue; is_shell=true ;;
   esac
-  [ -f "$PROJECT_DIR/$f" ] || continue
   SCOPE_FILES+=("$PROJECT_DIR/$f")
   # ShellCheck refuses anything that is not sh/bash/dash/ksh and reports the
   # refusal as a high-severity finding, so it gets its own narrower list.
-  case "$f" in
-    *.sh|*.bash) SHELL_SCOPE_FILES+=("$PROJECT_DIR/$f") ;;
-  esac
+  #
+  # The carve-out is load-bearing rather than cosmetic: the baseline engine
+  # never runs ShellCheck (scripts/lib/semgrep.sh), so a shell finding has no
+  # baseline entry to be deduped against and every one is permanently "new". A
+  # project therefore scopes this stage to exactly the tree its own lint gate
+  # owns; a file the lint gate is not allowed to clean must not be able to block
+  # a push here.
+  [ "$is_shell" = true ] || continue
+  shell_excluded=false
+  for glob in ${SHELLCHECK_EXCLUDE_GLOBS[@]+"${SHELLCHECK_EXCLUDE_GLOBS[@]}"}; do
+    # shellcheck disable=SC2254  # the config value is a glob pattern by design
+    case "$f" in $glob) shell_excluded=true; break ;; esac
+  done
+  [ "$shell_excluded" = true ] || SHELL_SCOPE_FILES+=("$PROJECT_DIR/$f")
 done < "$CHANGED_LIST"
 
 if [ "${#SCOPE_FILES[@]}" -gt 0 ] && command -v semgrep >/dev/null 2>&1; then
@@ -206,7 +270,23 @@ fi
 # hardcoded AWS secret in a .sh file, so scoping shell in without this engine
 # would put shell files in `paths.scanned` and still see nothing. Findings join
 # the semgrep stream because they populate the same SAST row.
-if [ "$PROFILE" = "shell-tooling" ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
+#
+# The stage is opt-in per project rather than fleet-wide, and the default tracks
+# the profile only as a convenience. It cannot simply be on everywhere: the
+# baseline engine does not run ShellCheck, so on a tree whose shell has never
+# been linted every finding is permanently new and unbaselineable, and turning
+# this on would block every push over pre-existing debt. `SECURITY_GATE_SHELLCHECK=1`
+# in a project's `security-gate-local/local.config.sh` is the opt-in; `=0` is the
+# opt-out for a `shell-tooling` project that is not ready yet.
+case "${SECURITY_GATE_SHELLCHECK:-}" in
+  1|true|on|yes)  SHELLCHECK_ENABLED=true ;;
+  0|false|off|no) SHELLCHECK_ENABLED=false ;;
+  "")             if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
+  *)              echo "warn: unrecognized SECURITY_GATE_SHELLCHECK value — treating as unset" >&2
+                  if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
+esac
+
+if [ "$SHELLCHECK_ENABLED" = true ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
   SC_RAW="$WORK/shellcheck.raw.json"
   shellcheck --severity=warning --format=json "${SHELL_SCOPE_FILES[@]}" >"$SC_RAW" 2>/dev/null || true
   python3 - "$SC_RAW" "$PROJECT_DIR" >>"$SEMGREP_OUT" <<'SCPY'
@@ -336,7 +416,13 @@ while IFS= read -r line; do
     *)             WORST="warn" ;;
   esac
   case "$tool" in
-    semgrep)  SAST_NEW=$((SAST_NEW+1));    [ "$WORST" = "fail" ] && SAST_WORST="fail";    [ "$WORST" = "warn" ] && [ "$SAST_WORST" = "pass" ] && SAST_WORST="warn" ;;
+    # ShellCheck rides the same SAST row as semgrep — it is the SAST engine for
+    # shell, and semgrep is blind to it. Without this arm every ShellCheck
+    # finding fell through the case, updated no *_WORST, and a new high-severity
+    # shell defect returned MERGEABLE/0 on a repository that is mostly Bash.
+    # Kept as its own arm rather than relabelling the tool so the printed
+    # provenance (`shellcheck/SC1072`) stays truthful.
+    semgrep|shellcheck) SAST_NEW=$((SAST_NEW+1)); [ "$WORST" = "fail" ] && SAST_WORST="fail";    [ "$WORST" = "warn" ] && [ "$SAST_WORST" = "pass" ] && SAST_WORST="warn" ;;
     osv)      DEPS_NEW=$((DEPS_NEW+1));    [ "$WORST" = "fail" ] && DEPS_WORST="fail";    [ "$WORST" = "warn" ] && [ "$DEPS_WORST" = "pass" ] && DEPS_WORST="warn" ;;
     gitleaks) SECRETS_NEW=$((SECRETS_NEW+1)); SECRETS_WORST="fail" ;;
   esac

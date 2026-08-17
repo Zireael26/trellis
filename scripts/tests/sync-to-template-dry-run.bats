@@ -12,6 +12,7 @@ setup() {
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
   VICTIM=""
+  SOCKET_FIXTURE=""
   SOURCE_EXECUTED="$SANDBOX/source-script-ran"
   export HOME="$SANDBOX/home"
   export TRELLIS_HOME="$SANDBOX/trellis-home"
@@ -78,6 +79,7 @@ teardown() {
     rm -rf "$SANDBOX"
   fi
   [ -z "${VICTIM:-}" ] || rm -rf "$VICTIM"
+  [ -z "${SOCKET_FIXTURE:-}" ] || rm -rf "$SOCKET_FIXTURE"
 }
 
 write_machine_config() {
@@ -96,6 +98,20 @@ write_machine_config() {
 }
 EOF
   chmod 600 "$TRELLIS_HOME/config.json"
+
+  # A real TRELLIS_HOME always carries a registry; the mirror lint's fleet
+  # identity guard reads it and fails closed without one. Model it here with
+  # synthetic ids so the fixture matches the shape the publish path actually
+  # runs against, rather than leaving the guard permanently unsatisfiable.
+  cat > "$TRELLIS_HOME/registry.json" <<'EOF'
+{
+  "schema_version": 1,
+  "projects": {
+    "personal/fixtureproj": { "project_id": "fixtureproj" }
+  }
+}
+EOF
+  chmod 600 "$TRELLIS_HOME/registry.json"
 }
 
 write_release_record() {
@@ -142,6 +158,64 @@ seed_mirror_agents_link() {
   ln -s "$1" "$MIRROR/core-rules/AGENTS.md"
   git -C "$MIRROR" add -A
   git -C "$MIRROR" commit -qm seed
+}
+
+make_agent_socket_fixture() {
+  # A real AF_UNIX socket: the check requires -S, so no plain file can stand
+  # in.
+  # The physical spelling of /tmp: short enough for the 104-byte sun_path limit
+  # and free of symlinks, so the fixture's own path adds none of its own. It is
+  # resolved rather than written as /private/tmp, which exists only on Darwin —
+  # the hardcoded spelling made this case fail outright on Linux, which is where
+  # CI runs it.
+  local tmp_root
+  tmp_root="$(CDPATH='' cd /tmp && pwd -P)"
+  SOCKET_FIXTURE="$(mktemp -d "$tmp_root/trellis-agent-socket.XXXXXX")"
+  mkdir -p "$SOCKET_FIXTURE/real"
+  /usr/bin/perl -MSocket -e '
+    socket(my $sock, PF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    bind($sock, sockaddr_un($ARGV[0])) or die "bind: $!";
+  ' "$SOCKET_FIXTURE/real/agent.sock"
+  # The stock macOS spelling reaches the launchd socket through /var, a symlink
+  # to /private/var, so an alias directory reproduces the real-world path.
+  ln -s "$SOCKET_FIXTURE/real" "$SOCKET_FIXTURE/alias"
+}
+
+require_verified_ssh_socket() {
+  local check
+  check="$(awk '/^mirror_require_verified_ssh_socket\(\) \{/,/^\}/' "$REPO_ROOT/scripts/sync-to-template.sh")"
+  TRELLIS_VERIFIED_SSH_AUTH_SOCK="$1" /bin/bash --noprofile --norc -c "set -euo pipefail
+$check
+mirror_require_verified_ssh_socket"
+}
+
+@test "push accepts a socket reached through a symlinked directory and refuses a symlinked socket" {
+  local canonical
+  make_agent_socket_fixture
+  canonical="$SOCKET_FIXTURE/real/agent.sock"
+
+  run require_verified_ssh_socket "$SOCKET_FIXTURE/alias/agent.sock"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$canonical" ] || { echo "$output"; false; }
+
+  run require_verified_ssh_socket "$canonical"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$canonical" ] || { echo "$output"; false; }
+
+  ln -s "$canonical" "$SOCKET_FIXTURE/real/link.sock"
+  run require_verified_ssh_socket "$SOCKET_FIXTURE/real/link.sock"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [[ "$output" == *'requires a verified SSH agent socket'* ]] || { echo "$output"; false; }
+
+  : > "$SOCKET_FIXTURE/real/plain"
+  run require_verified_ssh_socket "$SOCKET_FIXTURE/real/plain"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+
+  run require_verified_ssh_socket "$SOCKET_FIXTURE/real/../real/agent.sock"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+
+  run require_verified_ssh_socket ""
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
 }
 
 @test "template directory is explicit through the verified launcher" {

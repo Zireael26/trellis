@@ -460,6 +460,14 @@ create_release_missing_attachment() {
   chmod 600 "$registry"
 }
 
+# POST-SYNC VERIFICATION lives in rollout-hooks.sh --check, not here.
+# sync-hooks.sh carried a --verify flag under the registry.md model; the
+# portable-fleet model removed it, because verification now compares a
+# project against its attached immutable release rather than against the
+# mutable checkout that launched the command. The seven tests that exercised
+# the old flag were dropped with it; scripts/tests/rollout-hooks.bats owns the
+# sweep contract now.
+
 @test "Claude and Codex sync use only the active immutable-release reconciler" {
   prepare_fixture
   rm "$PROJECT/.trellis/runtime"

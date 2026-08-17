@@ -172,6 +172,43 @@ EOF
   [[ "$output" != *"<placeholder>"* ]]
 }
 
+@test "v031: skips example rows inside a multi-line HTML comment" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  ( cd "$PROJECT_DIR" && git commit -q --allow-empty -m "seed" )
+
+  # Mirrors the bootstrap INDEX.md template shipped to fresh projects.
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<'EOF'
+# Primers Index
+
+<!-- Primers start below. Example:
+
+- [marketing-chatbot-core](./marketing-chatbot-core.md) — Core persona/dispatch pipeline
+- [persona-system](./persona-system.md) — Persona definition and selection logic
+
+Delete the comment and example lines above when you add your first real primer.
+-->
+
+- [real](./real.md) — actual entry
+EOF
+
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/real.md" <<EOF
+---
+slug: real
+pinned_to: $SHA
+---
+## Purpose
+real
+EOF
+
+  run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"real"* ]]
+  [[ "$output" != *"MISSING_FILE"* ]]
+  [[ "$output" != *"marketing-chatbot-core"* ]]
+  [[ "$output" != *"persona-system"* ]]
+}
+
 @test "v031: handles entry-point paths containing spaces" {
   mkdir -p "$PROJECT_DIR/.claude/primers"
   mkdir -p "$PROJECT_DIR/has space"

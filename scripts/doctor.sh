@@ -181,6 +181,10 @@ if [ "$DO_DRY_RUN" -eq 1 ] && [ "$DO_FIX" -eq 0 ]; then
   exit 2
 fi
 
+# Legacy mode only: legacy_config_read exports TRELLIS_ROOT (and the
+# registry/blacklist paths below live beside it). This is deliberately NOT
+# config-load's TRELLIS_SOURCE_ROOT — that names the portable policy
+# checkout, which is a different thing from the legacy canonical root.
 CANON="$TRELLIS_ROOT"
 REGISTRY="$CANON/registry.md"
 BLACKLIST="$CANON/blacklist.md"
@@ -850,6 +854,11 @@ EOF
   if emit "  " hc_prepush_wired_runall "$proj" "$CANON"; then :; else
     add_hint "$name: pre-push hook is not wired to process-gate's run-all.sh — the local merge gate is bypassed; re-seed the canonical pre-push hook"
   fi
+
+  # --- Gate interpreter diagnostics (always advisory / no execution) ---
+  # This mirrors stop-verify resolution so operators can see the concrete Node
+  # and Python launchers before an enforcement hook runs.
+  emit "  " hc_gate_interpreters "$proj"
 
   return 0
 }

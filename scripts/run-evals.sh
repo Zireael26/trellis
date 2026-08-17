@@ -20,7 +20,7 @@
 #   (default)             Run fixtures end-to-end and emit results.
 #
 # Filtering:
-#   --filter <pattern>    Glob against <project>/<id>; e.g. 'neev/*' or '*/regression-*'.
+#   --filter <pattern>    Glob against <project>/<id>; e.g. 'myproject/*' or '*/regression-*'.
 #   --changed-only        Only fixtures whose dir is touched in `git diff main..HEAD`.
 #
 # Output:

@@ -1,0 +1,7 @@
+{
+  "name": "web",
+  "dependencies": {
+    "@scope/web-direct": "5.0.0",
+    "sibling": "7.0.0"
+  }
+}

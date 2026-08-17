@@ -46,6 +46,41 @@ make_clean() {
   rm -f "$PROJECT_DIR/scratch.txt"
 }
 
+make_python_command() {
+  local path="$1"
+  local label="$2"
+  cat > "$path" <<EOF
+#!/usr/bin/env bash
+printf '%s %s\n' '$label' "\$*" >> "\$PYTHON_TOOL_LOG"
+EOF
+  chmod +x "$path"
+}
+
+prepare_python_tool_project() {
+  local fake_bin="$1"
+
+  mkdir -p "$fake_bin"
+  ln -s "$(command -v jq)" "$fake_bin/jq"
+  printf '[mypy]\n' > "$PROJECT_DIR/mypy.ini"
+  printf '[pytest]\n' > "$PROJECT_DIR/pytest.ini"
+  make_dirty
+}
+
+assert_python_hook_calls() {
+  local fake_bin="$1"
+  local call_log="$2"
+  local expected="$3"
+  local candidate
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    : > "$call_log"
+    run env PROCESS_GATE_NO_RECEIPTS=1 PYTHON_TOOL_LOG="$call_log" \
+      PATH="$fake_bin:/usr/bin:/bin" bash "$candidate" <<<'{}'
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_log")" = "$expected" ]
+  done
+}
+
 @test "P1.3: clean tree + open todo blocks (rc=2)" {
   seed_todos open
   make_clean
@@ -204,4 +239,64 @@ EOF
     grep -Fx 'check' "$cargo_log"
     grep -Fx 'test --quiet' "$cargo_log"
   done
+}
+
+@test "T8: .venv mypy and pytest beat global tools in both stop verifiers" {
+  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
+  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
+
+  prepare_python_tool_project "$fake_bin"
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  make_python_command "$PROJECT_DIR/.venv/bin/mypy" venv-mypy
+  make_python_command "$PROJECT_DIR/.venv/bin/pytest" venv-pytest
+  make_python_command "$fake_bin/mypy" global-mypy
+  make_python_command "$fake_bin/pytest" global-pytest
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
+    'venv-mypy .' \
+    'venv-pytest --tb=short -q')"
+}
+
+@test "T8: Poetry lock selects Poetry before uv and global tools in both stop verifiers" {
+  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
+  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
+
+  prepare_python_tool_project "$fake_bin"
+  touch "$PROJECT_DIR/poetry.lock" "$PROJECT_DIR/uv.lock"
+  make_python_command "$fake_bin/poetry" poetry
+  make_python_command "$fake_bin/uv" uv
+  make_python_command "$fake_bin/mypy" global-mypy
+  make_python_command "$fake_bin/pytest" global-pytest
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
+    'poetry run mypy .' \
+    'poetry run pytest --tb=short -q')"
+}
+
+@test "T8: uv lock selects uv before global tools in both stop verifiers" {
+  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
+  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
+
+  prepare_python_tool_project "$fake_bin"
+  touch "$PROJECT_DIR/uv.lock"
+  make_python_command "$fake_bin/uv" uv
+  make_python_command "$fake_bin/mypy" global-mypy
+  make_python_command "$fake_bin/pytest" global-pytest
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
+    'uv run mypy .' \
+    'uv run pytest --tb=short -q')"
+}
+
+@test "T8: global Python tools remain the final fallback in both stop verifiers" {
+  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
+  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
+
+  prepare_python_tool_project "$fake_bin"
+  make_python_command "$fake_bin/mypy" global-mypy
+  make_python_command "$fake_bin/pytest" global-pytest
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
+    'global-mypy .' \
+    'global-pytest --tb=short -q')"
 }

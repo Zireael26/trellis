@@ -217,7 +217,7 @@ Scripts:
 - **`pre-push`** — Trellis PR-flow guard first (block direct push to `main`/`master`; allow `TRELLIS_ALLOW_MAIN_PUSH=1` override per `engineering-process.md` §6), then `make vet && make lint`. The Makefile owns per-language fan-out; the hook stays language-agnostic.
 - **`pre-commit`** — deferred. Polyglot-specific pre-commit validators (proto-staleness, generated-code drift, service.yaml lint) are still in design. Add them only once they hit Rule of Three across at least three polyglot projects.
 
-Pattern reference: Lume's `.githooks/` directory shows the layout, exit-code conventions, and the `TRELLIS_ALLOW_MAIN_PUSH` escape hatch.
+Pattern reference: a native-hooks project's `.githooks/` directory shows the layout, exit-code conventions, and the `TRELLIS_ALLOW_MAIN_PUSH` escape hatch.
 
 ## 8. PR size budget
 

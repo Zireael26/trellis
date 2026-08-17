@@ -10,6 +10,7 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/home"
   export TRELLIS_HOME="$SANDBOX/trellis-home"
+  SOCKET_FIXTURE=""
   SOURCE_POISON="$SANDBOX/source-poison"
   SOURCE_POISON_MARKER="$SANDBOX/source-poison-ran"
   ARGV_LOG="$HOME/trellis-launcher-argv.log"
@@ -30,6 +31,9 @@ EOF
 }
 
 teardown() {
+  if [ -n "${SOCKET_FIXTURE:-}" ] && [ -d "$SOCKET_FIXTURE" ]; then
+    rm -rf "$SOCKET_FIXTURE"
+  fi
   [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ] || return 0
   find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
   rm -rf "$SANDBOX"
@@ -242,6 +246,32 @@ run_session_context() {
     _ "$LAUNCHER" "$harness" "$project_root"
 }
 
+# The Codex SessionStart command exactly as it is written into a project's
+# settings, with the render placeholders resolved. Reading it back out of the
+# template is the point: a test that retypes the fallback chain proves only that
+# two copies of a string agree, which is all the string assertions elsewhere in
+# this file can prove.
+render_codex_session_start_command() {
+  jq -r '.hooks.SessionStart[0].hooks[].command | select(contains("hook session-context codex "))' \
+    "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" |
+    sed -e "s#__TRELLIS_USER_HOME__#$HOME#g" \
+      -e "s#__TRELLIS_HOME__#$TRELLIS_HOME#g" \
+      -e "s#__TRELLIS_LAUNCHER__#$LAUNCHER#g"
+}
+
+# Run that command for real from directory $1, with the environment variables
+# named in $2.. removed. Everything after the first argument is unset.
+run_rendered_codex_session_start() {
+  local cwd="$1" command
+  shift
+  command="$(render_codex_session_start_command)"
+  run env -i "HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "${@}" \
+    /bin/bash --noprofile --norc -c \
+    "cd \"\$1\" || exit 1; printf '%s\n' '{\"source\":\"startup\"}' | $command" \
+    _ "$cwd"
+}
+
 make_dispatch_stub() {
   local name="$1"
   cat > "$DISPATCH_ROOT/$name" <<'EOF'
@@ -261,6 +291,74 @@ prepare_dispatcher_fixture() {
     make_dispatch_stub "$script"
   done
 }
+make_agent_socket_fixture() {
+  # A real AF_UNIX socket: the resolver requires -S, so no plain file can stand
+  # in.
+  # The physical spelling of /tmp: short enough for the 104-byte sun_path limit
+  # and free of symlinks, so the fixture's own path adds none of its own. It is
+  # resolved rather than written as /private/tmp, which exists only on Darwin —
+  # the hardcoded spelling made this case fail outright on Linux, which is where
+  # CI runs it.
+  local tmp_root
+  tmp_root="$(CDPATH='' cd /tmp && pwd -P)"
+  SOCKET_FIXTURE="$(mktemp -d "$tmp_root/trellis-agent-socket.XXXXXX")"
+  mkdir -p "$SOCKET_FIXTURE/real"
+  /usr/bin/perl -MSocket -e '
+    socket(my $sock, PF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
+    bind($sock, sockaddr_un($ARGV[0])) or die "bind: $!";
+  ' "$SOCKET_FIXTURE/real/agent.sock"
+  # The stock macOS spelling reaches the launchd socket through /var, a symlink
+  # to /private/var, so an alias directory reproduces the real-world path.
+  ln -s "$SOCKET_FIXTURE/real" "$SOCKET_FIXTURE/alias"
+}
+
+resolve_ssh_auth_sock() {
+  local resolver
+  resolver="$(
+    awk '/^launcher_absolute_path_is_clean\(\) \{/,/^\}/' "$LAUNCHER_TEMPLATE"
+    awk '/^launcher_verified_ssh_auth_sock\(\) \{/,/^\}/' "$LAUNCHER_TEMPLATE"
+  )"
+  SSH_AUTH_SOCK="$1" /bin/bash --noprofile --norc -c "set -u
+$resolver
+launcher_verified_ssh_auth_sock"
+}
+
+@test "verified SSH_AUTH_SOCK resolves a socket reached through a symlinked directory" {
+  local canonical
+  make_agent_socket_fixture
+  canonical="$SOCKET_FIXTURE/real/agent.sock"
+
+  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/alias/agent.sock"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$canonical" ] || { echo "$output"; false; }
+
+  run resolve_ssh_auth_sock "$canonical"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$canonical" ] || { echo "$output"; false; }
+}
+
+@test "verified SSH_AUTH_SOCK refuses a symlinked socket, a non-socket, and an unclean path" {
+  make_agent_socket_fixture
+  ln -s "$SOCKET_FIXTURE/real/agent.sock" "$SOCKET_FIXTURE/real/link.sock"
+  : > "$SOCKET_FIXTURE/real/plain"
+
+  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/link.sock"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+
+  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/plain"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+
+  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/../real/agent.sock"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+
+  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/missing.sock"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
 @test "copied launcher runs only active immutable payload with exact argv and status" {
   local expected
   make_release 1.2.3
@@ -317,6 +415,66 @@ EOF
 }
 
 
+# Every other assertion about the fallback chain is a string match on the
+# template or the rendered JSON, so all of them would still pass if the chain
+# resolved nothing at runtime. These execute it. The fixture project's path
+# contains a space, which is where an unquoted expansion would come apart.
+@test "the Codex SessionStart fallback chain resolves a project dir at runtime" {
+  make_release 1.2.3 session-context
+  make_poisoned_project_runtime
+
+  # 1. CODEX_PROJECT_DIR wins when Codex sets it.
+  rm -f "$PROJECT_RUNTIME_MARKER"
+  run_rendered_codex_session_start "$SANDBOX" \
+    "CODEX_PROJECT_DIR=$PROJECT" "CLAUDE_PROJECT_DIR=$SANDBOX/projects/wrong"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"verified payload project context"* ]] || { echo "$output"; false; }
+
+  # 2. CLAUDE_PROJECT_DIR is the next leg when Codex does not set its own.
+  rm -f "$PROJECT_RUNTIME_MARKER"
+  run_rendered_codex_session_start "$SANDBOX" "CLAUDE_PROJECT_DIR=$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"verified payload project context"* ]] || { echo "$output"; false; }
+
+  # 3. With neither set, `$PWD` is the last resort. Before the chain landed this
+  #    passed an empty string and the hook exited 2 on a non-absolute path.
+  rm -f "$PROJECT_RUNTIME_MARKER"
+  run_rendered_codex_session_start "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"verified payload project context"* ]] || { echo "$output"; false; }
+
+  # The project's own runtime is never the thing that ran, in any of the three.
+  [ ! -e "$PROJECT_RUNTIME_MARKER" ]
+}
+
+# `$PWD` is where the session started, which for a Codex session is routinely a
+# subdirectory rather than the project root — and `context-log.md` and
+# `.claude/primers/INDEX.md` both live at the root, so the hooks would find
+# nothing and inject nothing without ever saying so.
+@test "a SessionStart project dir inside a project resolves to the attachment root" {
+  make_release 1.2.3 session-context
+  make_poisoned_project_runtime
+  mkdir -p "$PROJECT/src/deep"
+
+  rm -f "$PROJECT_RUNTIME_MARKER"
+  run_rendered_codex_session_start "$PROJECT/src/deep"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"verified payload project context"* ]] || { echo "$output"; false; }
+  [ ! -e "$PROJECT_RUNTIME_MARKER" ]
+}
+
+# ...and a directory under no attachment at all still resolves to itself, so an
+# unattached clone behaves exactly as it did before the walk existed.
+@test "a SessionStart project dir under no attachment resolves to itself" {
+  make_release 1.2.3 session-context
+  make_poisoned_project_runtime
+  mkdir -p "$SANDBOX/projects/unattached"
+
+  run_session_context codex "$SANDBOX/projects/unattached"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"verified payload project context"* ]] || { echo "$output"; false; }
+}
+
 @test "SessionStart routes reject malformed paths and report missing absolute projects as unavailable" {
   make_release 1.2.3 session-context
   mkdir -p "$SANDBOX/projects/valid"
@@ -372,12 +530,20 @@ EOF
     [ "$output" = "$expected" ]
   done
 
+  # The Claude and Codex project-dir arguments differ on purpose, so this loop
+  # cannot reuse the bare-variable form asserted above. Claude Code always sets
+  # CLAUDE_PROJECT_DIR, but Codex does not reliably set CODEX_PROJECT_DIR, so
+  # every Codex surface in this repo — core-rules/codex/hooks.json and each
+  # script under core-rules/codex/hooks/ — resolves it through the documented
+  # ${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}} chain. The template follows
+  # that convention; this expectation had mirrored the Claude form since the
+  # template and the assertion landed together in 0d37cf1, so it never matched.
   for name in session-context post-compact-context inject-primer-index; do
     run jq -r --arg name "$name" '.hooks.SessionStart[0].hooks[].command | select(contains("hook " + $name + " codex "))' \
       "$REPO_ROOT/core-rules/templates/codex-hooks.local.json"
     [ "$status" -eq 0 ] || { echo "$output"; false; }
-    expected="/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook $name codex \"\$CODEX_PROJECT_DIR\""
-    [ "$output" = "$expected" ]
+    expected="/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook $name codex \"\${CODEX_PROJECT_DIR:-\${CLAUDE_PROJECT_DIR:-\$PWD}}\""
+    [ "$output" = "$expected" ] || { echo "actual:   $output"; echo "expected: $expected"; false; }
   done
 }
 

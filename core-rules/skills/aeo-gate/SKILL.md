@@ -16,7 +16,7 @@ The accepted contract is `specs/033-aeo-gate/spec.md`. That spec wins if this fi
 | Baseline | `scripts/run-baseline.sh` | shipped |
 | Diff | `scripts/run-diff.sh` | shipped, warn only |
 | Deep citability review | `scripts/run-deep.sh` | shipped, optional |
-| Fleet baseline | `scripts/run-fleet.sh` | shipped; scheduler wrapper pending |
+| Fleet baseline | `scripts/run-fleet.sh` | shipped, registration pending |
 
 ## Invariants
 
@@ -126,7 +126,9 @@ bash core-rules/skills/aeo-gate/scripts/run-fleet.sh \
 
 `--registry`/`--blacklist` name materialized local inputs, not tracked fleet inventory:
 the tracked `registry.md`/`blacklist.md` were removed at `v1.0.0-rc.25`. The target set
-accounts for `registry minus blacklist` through active and explicit-skip tables. The fleet command invokes Mode 1 with no LLM, isolates domain failures, validates every target manifest, and writes a dated fleet rollup plus a fleet manifest. Scheduler registration remains a separate operational step; do not describe the cadence as active until the wrapper exists.
+accounts for `registry minus blacklist` through active and explicit-skip tables. The fleet command invokes Mode 1 with no LLM, isolates domain failures, validates every target manifest, and writes a dated fleet rollup plus a fleet manifest.
+
+The wrapper text and its cron are checked in at `scheduled-tasks/README.md` under "`aeo-baseline` — wrapper ready, awaiting registration". Creating the MCP registration is a separate operator step that cannot be performed from this repo; until it exists the task counts zero expected runs, so do not describe the cadence as active.
 
 ## Multi-harness surface
 

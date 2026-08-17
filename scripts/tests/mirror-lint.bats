@@ -83,11 +83,27 @@ assert_all_findings_under() {
 setup() {
   MIRROR="$(mktemp -d "${TMPDIR:-/tmp}/trellis-mirror-lint.XXXXXX")"
   VICTIM=""
+  # The identity guard reads the machine-local registry by default. Point it at
+  # a synthetic fixture so the suite keeps its promise never to inspect an
+  # operator's real machine configuration, and so a machine with no registry
+  # does not turn every case into a fail-closed error.
+  IDENTITY_SOURCE="$MIRROR.registry.json"
+  cat > "$IDENTITY_SOURCE" <<'JSON'
+{
+  "projects": {
+    "personal/fixtureproj": { "project_id": "fixtureproj" },
+    "work/otherfixture": { "project_id": "otherfixture" }
+  }
+}
+JSON
+  export TRELLIS_MIRROR_IDENTITY_SOURCE="$IDENTITY_SOURCE"
   . "$LINT_LIB"
 }
 
 teardown() {
   rm -rf "$MIRROR"
+  rm -f "${IDENTITY_SOURCE:-}"
+  unset TRELLIS_MIRROR_IDENTITY_SOURCE
   [ -z "$VICTIM" ] || rm -rf "$VICTIM"
 }
 
@@ -297,4 +313,156 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *'escape: symlink target escapes mirror'* ]] || { echo "$output"; false; }
   [ "$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)" = "$before" ]
+}
+
+# --- fleet identity + infrastructure leak guards --------------------------
+# These exist because a payload that every earlier check called clean still
+# carried 80 project-name references and 13 routable IP literals into the
+# public mirror. Narrative files were the carrier, so the identity guard
+# deliberately grants no historical-record exemption.
+
+@test "a fleet project identifier is rejected in ordinary policy prose" {
+  printf 'The fixtureproj rollout landed.\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'README.md: local fleet project identifier must not publish' <<<"$output"
+}
+
+@test "a fleet project identifier is rejected in an ADR and the changelog too" {
+  mkdir -p "$MIRROR/docs/adr"
+  printf 'Verified live on otherfixture.\n' > "$MIRROR/docs/adr/0001-example.md"
+  printf 'Backfilled onto fixtureproj.\n' > "$MIRROR/CHANGELOG.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'docs/adr/0001-example.md: local fleet project identifier must not publish' <<<"$output"
+  grep -qF 'CHANGELOG.md: local fleet project identifier must not publish' <<<"$output"
+}
+
+@test "identifier matching is word-anchored, not substring" {
+  printf 'The fixtureprojection module is unrelated.\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# A registry row written by the real `local-registry.sh` writer, in the exact
+# `jq -S` two-space shape the public-identity parser reads by indentation. The
+# `legacy` note carries literal braces inside a JSON string on purpose: that is
+# the real-world content which makes a brace-depth parser miscount, and the
+# reason this one keys on indentation instead.
+write_annotated_registry() {
+  local public_flag="$1"
+  cat > "$IDENTITY_SOURCE" <<JSON
+{
+  "projects": {
+    "personal/fixtureproj.org": {
+      "fleet": "personal",
+      "metadata": {
+        "legacy": {
+          "shared_services": "\`services: {}\`"
+        },
+        "public_identity": $public_flag
+      },
+      "project_id": "fixtureproj.org",
+      "status": "active"
+    },
+    "work/otherfixture": {
+      "fleet": "work",
+      "metadata": {},
+      "project_id": "otherfixture",
+      "status": "active"
+    }
+  }
+}
+JSON
+}
+
+@test "a project annotated public_identity may publish its own identifier" {
+  write_annotated_registry true
+  printf 'Built and maintained by [Someone](https://fixtureproj.org).\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "a public_identity annotation frees only the row it is set on" {
+  write_annotated_registry true
+  printf 'See https://fixtureproj.org and the otherfixture rollout.\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'README.md: local fleet project identifier must not publish' <<<"$output"
+}
+
+@test "public identity defaults closed when the row does not claim it" {
+  write_annotated_registry false
+  printf 'Built and maintained by [Someone](https://fixtureproj.org).\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'README.md: local fleet project identifier must not publish' <<<"$output"
+}
+
+# `sync-to-template.sh` — the only real caller — runs under `set -o pipefail`,
+# and bats does not. A stage that exits non-zero on the ordinary no-annotations
+# path is therefore invisible to every other case in this file and fails only
+# in production, which is exactly how it first shipped. Assert the contract in
+# the caller's shell options, not this suite's.
+@test "identity tokens survive pipefail when no row claims public identity" {
+  set -o pipefail
+  run lint_mirror "$MIRROR"
+  set +o pipefail
+
+  [ "$status" -eq 0 ]
+  ! grep -qF 'refusing to certify' <<<"$output"
+}
+
+@test "an unreadable identity source refuses to certify instead of passing" {
+  export TRELLIS_MIRROR_IDENTITY_SOURCE="$MIRROR/absent-registry.json"
+  printf '# Public policy\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'refusing to certify' <<<"$output"
+}
+
+@test "a routable IP literal is rejected" {
+  printf 'Origin is 139.99.130.129 in Sydney.\n' > "$MIRROR/docs.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'docs.md: routable IP literal must not publish' <<<"$output"
+}
+
+@test "private, loopback and documentation ranges stay publishable" {
+  printf 'Try 127.0.0.1, 10.1.2.3, 192.168.0.1, 172.16.0.1 or 203.0.113.7.\n' \
+    > "$MIRROR/examples.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "content checks still run when a symlink is unresolvable" {
+  ln -s /etc/passwd "$MIRROR/escape.md"
+  printf 'The fixtureproj rollout landed.\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  grep -qF 'escape.md: symlink target leaks absolute path' <<<"$output"
+  grep -qF 'README.md: local fleet project identifier must not publish' <<<"$output"
 }

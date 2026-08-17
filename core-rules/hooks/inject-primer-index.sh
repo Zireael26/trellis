@@ -56,6 +56,7 @@ OUT="## Primers (auto-injected)"$'\n'
 #   - [slug](./slug.md) — description
 # We parse out the slug (between `[` and `]`) and locate <slug>.md.
 in_fence=0
+in_comment=0
 while IFS= read -r line; do
   # toggle fence state on ``` lines; skip content inside fences
   case "$line" in
@@ -63,9 +64,24 @@ while IFS= read -r line; do
   esac
   [ "$in_fence" -eq 0 ] || continue
 
-  # skip blanks + headings + comments + bold/em markers
+  # skip HTML comment blocks, including multi-line ones. The bootstrap INDEX
+  # template ships its example rows inside a `<!-- ... -->` block; without
+  # this the examples parse as real primers and every fresh project reports
+  # three phantom MISSING_FILE entries.
+  if [ "$in_comment" -eq 1 ]; then
+    case "$line" in
+      *'-->'*) in_comment=0 ;;
+    esac
+    continue
+  fi
   case "$line" in
-    ''|\#*|'<!--'*) continue ;;
+    *'<!--'*'-->'*) continue ;;
+    *'<!--'*) in_comment=1; continue ;;
+  esac
+
+  # skip blanks + headings
+  case "$line" in
+    ''|\#*) continue ;;
   esac
   # extract slug from `- [slug](./slug.md) — desc`
   slug=$(printf '%s' "$line" | sed -n 's/^[[:space:]]*-[[:space:]]*\[\([^]]*\)\].*/\1/p')

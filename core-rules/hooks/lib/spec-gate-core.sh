@@ -194,8 +194,12 @@ sg_merge_base() {
 # A path excluded from the "gated" (feature-code) diff. Deterministic + shared
 # so Claude and Codex classify identically (spec §0.6 C-5b/c, PD3).
 sg_is_excluded_path() {
+  local base="${1##*/}"
+  # Test-file patterns apply only to the basename; test-like directories may hold production code.
+  case "$base" in
+    *_test.*|*.test.*|*.spec.*|*.bats|*Tests.swift|test_*.py|*Test.kt) return 0 ;;
+  esac
   case "$1" in
-    *_test.*|*.test.*|*.spec.*|*.bats) return 0 ;;
     docs/*|*/docs/*|specs/*|*/specs/*|audits/*|*/audits/*) return 0 ;;
     # Inherited Trellis infrastructure: copied from the canonical clone by
     # sync-hooks.sh / sync-codex-hooks.sh / onboard-project.sh, never authored in

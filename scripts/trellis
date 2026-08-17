@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 
 usage() {
   cat <<'EOF'
@@ -73,11 +73,37 @@ session_project_root() {
     printf 'trellis: SessionStart PROJECT_ROOT is unavailable: %s\n' "$project_root" >&2
     return 5
   }
-  canonical="$(CDPATH= cd "$project_root" && pwd -P)" || {
+  canonical="$(CDPATH='' cd "$project_root" && pwd -P)" || {
     printf 'trellis: SessionStart PROJECT_ROOT is unavailable: %s\n' "$project_root" >&2
     return 5
   }
-  printf '%s\n' "$canonical"
+  printf '%s\n' "$(session_attachment_root "$canonical")"
+}
+
+# Nearest ancestor of $1 that carries a runtime anchor, or $1 unchanged when
+# none does.
+#
+# The harness variables are not always the project root. The Codex SessionStart
+# command falls back to `$PWD` when neither CODEX_PROJECT_DIR nor
+# CLAUDE_PROJECT_DIR is set, and a session started from a subdirectory would
+# then hand the hooks a directory that is inside the project but is not its
+# root — `context-log.md` and `.claude/primers/INDEX.md` both live at the root,
+# so the hooks would silently find nothing and inject nothing.
+#
+# A directory that is under no attached project resolves to itself, exactly as
+# before: unattached fixtures and raw clones keep their current behaviour, and
+# this walk can only ever move the answer to a real attachment.
+session_attachment_root() {
+  local dir="$1"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.trellis/runtime" ] || [ -L "$dir/.trellis/runtime" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="${dir%/*}"
+    [ -n "$dir" ] || break
+  done
+  printf '%s\n' "$1"
 }
 
 run_session_hook() {
@@ -91,7 +117,7 @@ run_session_hook() {
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"
 
-  payload_root="$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)" || {
+  payload_root="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)" || {
     printf 'trellis: could not resolve verified release payload\n' >&2
     exit 5
   }

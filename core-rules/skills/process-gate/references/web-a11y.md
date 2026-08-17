@@ -52,7 +52,7 @@ accessibility tools. Reasoning:
 - First-class React/Next.js integration via `@axe-core/react`.
 - Lighthouse's Accessibility category uses axe-core internally — a passing
   axe-core run aligns with Lighthouse a11y scoring.
-- Matches TGSC's existing project-local `check-a11y.sh`
+- Matches the single-app project's existing project-local `check-a11y.sh`
   (`stack-profiles.md:14`).
 
 **pa11y** is documented as the alternative for projects where axe-core is a
@@ -85,7 +85,7 @@ Run before any non-trivial public-page PR:
 Project-local `check-a11y.sh` running axe-core against the preview is the
 established pattern. **Promotion to a canonical Trellis check is deferred
 per `core-rules/deferred.md:57`** until a second project independently
-adopts it. TGSC is currently the sole witness.
+adopts it. the single-app project is currently the sole witness.
 
 When promoting, the validator should target the `web-next` stack profile in
 `stack-profiles.md` and fail on new violations relative to `main`.

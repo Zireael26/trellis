@@ -8,8 +8,19 @@ sha256_file() {
   shasum -a 256 "$1" | cut -d ' ' -f 1
 }
 
+# BSD and GNU stat are probed in SEPARATE captures: GNU `stat -f` is
+# --file-system and prints a filesystem block before failing, which a chained
+# substitution would concatenate onto the mode.
 file_mode() {
-  stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"
+  local candidate
+  candidate="$(stat -f %Lp "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c %a "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 canonical_dir() {
@@ -28,14 +39,35 @@ checkout_lock_path() {
   printf '%s/state/locks/attachment-checkout-%s.lock\n' "$TRELLIS_HOME" "$checkout"
 }
 
+# The budget is a CONTENTION allowance, not a timing expectation: on an idle
+# machine the lock appears in well under a second, so the happy path never
+# spends it. The original 2 s was the whole reason the signal cases read as
+# flaky — under a parallel full-battery run the detach process could not reach
+# its lock write inside the window, the signaler exited 1, and the failure
+# looked like a signal-handling defect rather than a starved test. Measured at
+# this tip: 3/3 green quiescently (one full-suite run plus two targeted reruns),
+# 2/2 red under load with the old budget.
+#
+# The budget is WALL CLOCK, and it has to be: the invariant it must satisfy is
+# "expire before the holder lets go", and the holder's grip
+# (`ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK`) is measured in seconds. Expressed as an
+# iteration count it was not checkable — 1500 iterations of `sleep 0.01` is
+# 15 s of sleeping plus 1500 process spawns, which measured 23.9 s under a load
+# average of 6.45 against a 30 s hold, and a 2-core runner executing four shards
+# is strictly worse. The margin that comment called comfortable was ~6 s and
+# shrank with contention, in the direction the budget was widened to tolerate.
+#
+# Seconds, so the comparison against the hold is arithmetic a reader can do.
+CHECKOUT_LOCK_HOLD_SECONDS=30
+WAIT_FOR_CHECKOUT_LOCK_SECONDS=20
+
 wait_for_checkout_lock() {
-  local path attempt
+  local path deadline
   path="$(checkout_lock_path)"
-  attempt=0
-  while [ "$attempt" -lt 200 ]; do
+  deadline=$((SECONDS + WAIT_FOR_CHECKOUT_LOCK_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     [ -L "$path" ] && return 0
     sleep 0.01
-    attempt=$((attempt + 1))
   done
   return 1
 }
@@ -198,7 +230,7 @@ run_detach() {
   exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")"
   registry_hash="$(sha256_file "$TRELLIS_HOME/registry.json")"
 
-  ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK=10 "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT" >"$SANDBOX/held-detach.log" 2>&1 &
+  ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT" >"$SANDBOX/held-detach.log" 2>&1 &
   background_pid=$!
   wait_for_checkout_lock
   holder_pid="$(checkout_lock_pid)"
@@ -234,7 +266,7 @@ run_detach() {
       kill -"$signal" "$(checkout_lock_pid)" || exit 1
     ) &
     signaler_pid=$!
-    run env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK=10 "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
+    run env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
     [ "$status" -eq 5 ]
     signaler_status=0
     wait "$signaler_pid" || signaler_status=$?
@@ -276,7 +308,7 @@ run_detach() {
     "$PROJECT/.claude/settings.local.json"
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
   jq -e '[.hooks.SessionStart[].hooks[].command] | length == 3
-    and all(.[]; contains("$CODEX_PROJECT_DIR") and (contains("__TRELLIS_") | not))' \
+    and all(.[]; contains("${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}") and (contains("__TRELLIS_") | not))' \
     "$PROJECT/.codex/hooks.json"
   [ -L "$PROJECT/.omp/AGENTS.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]

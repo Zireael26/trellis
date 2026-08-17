@@ -2,15 +2,15 @@
   "$schema": "../../../lib/trellis.registry.schema.json",
   "schema_version": 1,
   "projects": {
-    "personal/neev": {
+    "personal/alpha": {
       "fleet": "personal",
-      "project_id": "neev",
+      "project_id": "alpha",
       "status": "active",
       "metadata": {},
       "checkouts": {
         "1111111111111111111111111111111111111111111111111111111111111111": {
-          "root": "relative/projects/neev",
-          "git_common_dir": "/Users/alex/projects/neev/.git",
+          "root": "relative/projects/alpha",
+          "git_common_dir": "/Users/alex/projects/alpha/.git",
           "release": "1.0.0-rc.24",
           "harnesses": ["claude", "codex", "omp"],
           "worktrees": {}

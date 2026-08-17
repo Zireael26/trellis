@@ -3,15 +3,26 @@
 # that catches a Codex runtime whose hooks are OFF, which would silently no-op the
 # entire cross-harness enforcement mechanism (spec-gate included).
 #
-# Isolation: we source the check lib, stub HARNESSES + pg_has_harness, and point
-# CODEX_HOME at a throwaway config.toml. No live registry, no real ~/.codex.
+# Isolation: we source the check lib, stub HARNESSES + pg_has_harness, put a stub
+# `codex` on PATH, and point CODEX_HOME at a throwaway config.toml. No live
+# registry, no real ~/.codex.
+#
+# The PATH stub is load-bearing, not decorative. `hc_codex_hooks_enabled` returns
+# WARN before reading any config when the codex CLI is absent, so on a machine
+# without codex installed — every GitHub runner — the three config-parsing cases
+# below asserted against the wrong branch and failed. Measured in ubuntu:24.04:
+# 3 of 6 red without the stub, 6 of 6 green with it. The CLI-absent branch has
+# its own case, which unsets the stub rather than relying on the host.
 
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 
 setup() {
   SANDBOX="$(mktemp -d)"
   export CODEX_HOME="$SANDBOX/codex"
-  mkdir -p "$CODEX_HOME"
+  mkdir -p "$CODEX_HOME" "$SANDBOX/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/bin/codex"
+  chmod 755 "$SANDBOX/bin/codex"
+  export PATH="$SANDBOX/bin:$PATH"
   # HC_ constants live in health-checks.sh; source it for the function + codes.
   # shellcheck disable=SC1090
   . "$REPO/scripts/lib/health-checks.sh"
@@ -62,4 +73,16 @@ _write_cfg() { printf '%s\n' "$@" > "$CODEX_HOME/config.toml"; }
   _write_cfg '[hooks.state]' 'hooks = true' '' '[features]' 'other = 1'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
+}
+
+# The branch the stub hides on a developer machine: codex enabled, no CLI.
+@test "codex enabled but the CLI is absent -> WARN naming the missing CLI" {
+  _write_cfg '[features]' 'hooks = true'
+  # Narrow PATH to the sandbox plus the base system directories and drop the
+  # stub, so the case tests the absent-CLI branch even where codex is installed.
+  rm -f "$SANDBOX/bin/codex"
+  PATH="$SANDBOX/bin:/usr/bin:/bin"
+  run hc_codex_hooks_enabled
+  [ "$status" -eq "$HC_WARN" ] || { echo "$output"; false; }
+  [[ "$output" == *"codex CLI is not installed"* ]] || { echo "$output"; false; }
 }

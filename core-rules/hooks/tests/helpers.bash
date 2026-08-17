@@ -50,6 +50,7 @@ run_with_stderr() {
   # shellcheck disable=SC2034
   status=$?
   set -e
+  # shellcheck disable=SC2034  # same bats result convention as `output`/`status`
   stderr="$(cat "$stderr_file")"
   rm -f "$stderr_file"
 }

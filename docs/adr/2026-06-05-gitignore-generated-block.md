@@ -20,9 +20,9 @@ embedded in the block header (`(7-skill set + presets …)`, `(10-skill set …)
 `(11-skill set …)`). When the canonical skill set changed, the sentinel changed,
 and the next re-onboard **appended a new block alongside the old ones** rather
 than replacing them. Over a year this produced 1–4 **stacked, stale** Trellis
-blocks per project (clusterbid-console had project-authored ignore rules
-*interleaved between* two Trellis blocks; neev had orphaned `se-core.md` /
-`security-gate` lines that had escaped block boundaries; tgsc/lume had a stray
+blocks per project (the polyglot monorepo had project-authored ignore rules
+*interleaved between* two Trellis blocks; the monorepo project had orphaned `se-core.md` /
+`security-gate` lines that had escaped block boundaries; the single-app project/the Unity project had a stray
 `# Trellis builder-skill symlinks` comment with loose paths). The stale blocks
 omitted the current symlinks, so `execute`, `brainstorming`, `orchestrate`, and
 `debrief` showed up as untracked across all 8 registered projects — at risk of an
@@ -59,7 +59,7 @@ generate-and-replace mechanism.
   stray builder-skill comment) left stranded between old stacked blocks.
 - **Per-block, not span-based.** Stripping removes each `begin → end` region
   individually, so project-authored content interleaved between stacked blocks
-  (clusterbid-console) is preserved. The orphan sweep matches only exact strings
+  (the polyglot monorepo) is preserved. The orphan sweep matches only exact strings
   no project would ever author, so it cannot touch project content.
 - **`.claude/session-autonomy` stays ignored.** It is per-developer, per-session
   runtime state — not a symlink and not a shippable file — so it remains in the
@@ -81,7 +81,7 @@ The static template `core-rules/templates/project.gitignore.fragment` is deleted
 - **Dual-maintenance is gone.** There is no longer a template to bump in lockstep
   with the `seed_symlink` call list; the ignore list is derived from the calls.
 - **Minor cosmetic churn**: consolidating to one block at the end can relocate
-  project lines that previously sat *after* a Trellis block (clusterbid-console's
+  project lines that previously sat *after* a Trellis block (the polyglot monorepo's
   `.claude/screenshots/` et al.). `.gitignore` is order-independent, so this is
   functionally inert.
 - **Ordering change**: the block is written *after* symlink creation (it must read
@@ -92,5 +92,5 @@ The static template `core-rules/templates/project.gitignore.fragment` is deleted
 ## Status
 
 Accepted — 2026-06-05. Mechanism shipped on `chore/gitignore-managed-block`;
-rolled out to all 8 registered projects (neev, tgsc, akaushik.org, curat.money,
-vericite, lume, clusterbid-console, gwtf-in), one PR each.
+rolled out to all 8 registered projects (the monorepo project, the single-app project, the portfolio site, the multi-frontend app,
+the RAG service, the Unity project, the polyglot monorepo, the static marketing site), one PR each.

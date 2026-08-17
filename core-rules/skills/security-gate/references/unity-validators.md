@@ -80,4 +80,4 @@ The validator output is appended to the per-project audit narrative manually unt
 
 ## Status (Phase 5)
 
-Phase 5 ships the **rulesets** and this **specification** for project-local validators. The actual `check-*.sh` scripts are project-specific (bundle layout, save-file format, IAP plugin choice all vary per project) and live under `<project>/security-gate-local/scripts/`. Lume's validators land separately when the project author writes them — the spec in this doc is the contract.
+Phase 5 ships the **rulesets** and this **specification** for project-local validators. The actual `check-*.sh` scripts are project-specific (bundle layout, save-file format, IAP plugin choice all vary per project) and live under `<project>/security-gate-local/scripts/`. the Unity project's validators land separately when the project author writes them — the spec in this doc is the contract.

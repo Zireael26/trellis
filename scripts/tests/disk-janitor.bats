@@ -156,11 +156,27 @@ EOF
 
 # Snapshot a deterministic fingerprint of a tree: each file's path + size +
 # mtime-epoch. Used to assert read-only modes mutate NOTHING.
+# BSD and GNU stat are probed in SEPARATE captures: GNU `stat -f` is
+# --file-system and prints a filesystem block before failing, which a chained
+# substitution would concatenate onto the mtime and make every fingerprint
+# differ from itself.
+file_mtime() {
+  local candidate
+  candidate="$(stat -f %m "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-9]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c %Y "$1" 2>/dev/null)" || candidate=0
+  fi
+  printf '%s\n' "$candidate"
+}
+
 fingerprint() {
   local root="$1"
   find "$root" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
     printf '%s\t%s\t%s\n' "$f" "$(wc -c < "$f" | tr -d ' ')" \
-      "$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+      "$(file_mtime "$f")"
   done
 }
 

@@ -122,12 +122,14 @@ register_fixture_root() {
 # reproduces the exact observable shape (stdout block + non-zero exit) that the
 # inspection identified, and the assertions below run against it for real.
 #
-# This suite has NOT been run on Linux. T27's ubuntu:24.04 container run covered
-# the doctor/attach contracts lane (scripts/tests/doctor.bats — see the note on
-# the "Run doctor suite" step in .github/workflows/bats.yml), which is where the
-# same chained-`stat` defect was confirmed against the real GNU binary. That
-# confirmation is what this shim models; it is not a container run of
-# disk-janitor-lib.bats, and this suite is on no CI job.
+# T27's ubuntu:24.04 container run covered the doctor/attach contracts lane,
+# which is where the same chained-`stat` defect was confirmed against the real
+# GNU binary. That confirmation is what this shim models.
+#
+# The shim delegates its `-c` branch to the real BSD `/usr/bin/stat -f`, so the
+# case below is a Darwin-host simulation by construction and cannot run on Linux
+# — it is skipped there rather than excluding the whole suite from CI, which
+# since T34 runs every suite under scripts/tests/.
 install_gnu_stat_shim() {
   GNU_BIN="$SANDBOX/gnu-bin"
   mkdir -p "$GNU_BIN"
@@ -156,6 +158,7 @@ SH
 }
 
 @test "stat-dialect helpers stay single-valued under the GNU dialect (-f is --file-system)" {
+  [ "$(uname -s)" = Darwin ] || skip "the GNU shim delegates to BSD /usr/bin/stat -f"
   install_gnu_stat_shim
   printf 'x\n' > "$SANDBOX/f"
   mkdir -p "$SANDBOX/dir"

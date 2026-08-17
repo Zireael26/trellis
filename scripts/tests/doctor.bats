@@ -887,7 +887,7 @@ make_no_playwright_path() {
   git_init_canonical_main
   build_healthy_project
   write_config
-  # Present-but-DEAD @-import (incident #1's literal shape: curat.money's import
+  # Present-but-DEAD @-import (incident #1's literal shape: the observed import
   # pointed at /Users/helios/...). The rules symlink is left healthy so the only
   # ERROR source is the import branch — this isolates hc_import_resolves's
   # HC_ERROR path from the rules-symlink ERROR path (test 8).
@@ -1120,7 +1120,7 @@ make_no_playwright_path() {
   git_init_canonical_main
   build_healthy_project
   write_config
-  # Native-git-hooks project (lume / clusterbid-console shape): no husky, the
+  # Native-git-hooks project (Unity / polyglot-monorepo shape): no husky, the
   # active hook lives at .githooks/pre-push via core.hooksPath. Reading
   # core.hooksPath needs a real repo, so git-init the project and pin the config.
   local hp="$PROJECTS/healthy"
@@ -2393,4 +2393,74 @@ EOF
   [[ "$output" == *"policy source:         verified immutable attachment payload $PORTABLE_RELEASE_PAYLOAD"* ]] || { echo "$output"; false; }
   [[ "$output" == *"strict: default=L4 ceiling=L2"* ]] || { echo "$output"; false; }
   [[ "$output" != *"MUTABLE_RESOLVER_WAS_USED"* ]] || { echo "$output"; false; }
+}
+
+# ===========================================================================
+# Gate interpreter diagnostics — static resolution mirrors stop-verify.
+# ===========================================================================
+
+@test "gate-interpreters: project .venv tools win over global shims" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+
+  local hp="$PROJECTS/healthy" fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+  mkdir -p "$fake_bin" "$hp/.venv/bin"
+  local tool
+  for tool in node python mypy pytest; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/$tool"
+    chmod +x "$fake_bin/$tool"
+  done
+  for tool in python mypy pytest; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$hp/.venv/bin/$tool"
+    chmod +x "$hp/.venv/bin/$tool"
+  done
+
+  run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"✓ gate-interpreters: node=$fake_bin/node; python=$hp/.venv/bin/python; mypy=$hp/.venv/bin/mypy; pytest=$hp/.venv/bin/pytest"* ]]
+}
+
+@test "gate-interpreters: lock-pinned Poetry and uv launchers beat global shims" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+
+  local hp="$PROJECTS/healthy" fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+  mkdir -p "$fake_bin"
+  local tool
+  for tool in node python mypy pytest poetry uv; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/$tool"
+    chmod +x "$fake_bin/$tool"
+  done
+
+  touch "$hp/poetry.lock"
+  run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"python=$fake_bin/poetry run python; mypy=$fake_bin/poetry run mypy; pytest=$fake_bin/poetry run pytest"* ]]
+
+  rm "$hp/poetry.lock"
+  touch "$hp/uv.lock"
+  run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
+}
+
+@test "gate-interpreters: absent tools are explicit without failing unrelated checks" {
+  build_canonical_tree
+  git_init_canonical_main
+  build_healthy_project
+  write_config
+
+  local farm
+  farm="$(make_no_playwright_path)"
+  rm -f "$farm/node" "$farm/python" "$farm/mypy" "$farm/pytest" \
+    "$farm/poetry" "$farm/uv"
+
+  run env -u SHARED_INFRA_ROOT PATH="$farm" bash "$DOCTOR"
+  [ "$status" -eq 0 ] \
+    && [[ "$output" == *"✓ gate-interpreters: node=unavailable; python=unavailable; mypy=unavailable; pytest=unavailable"* ]] \
+    && [[ "$output" != *"✗ inheritance is broken"* ]]
 }

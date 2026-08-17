@@ -11,7 +11,7 @@ Trellis governs its active projects through an **inheritance mechanism** — a s
 
 Two drift incidents in one working session motivated this ADR:
 
-1. **`curat.money` was running with zero parent rules.** It had no `.claude/rules/trellis.md` symlink at all, its `@`-import pointed at a dead cross-machine path (`/Users/helios/claude/se-core-template/...` — an old name on a different machine), and it was missing the full canonical skill + command set. None of this surfaced until checked by hand.
+1. **`the multi-frontend app` was running with zero parent rules.** It had no `.claude/rules/trellis.md` symlink at all, its `@`-import pointed at a dead cross-machine path (`/Users/helios/claude/se-core-template/...` — an old name on a different machine), and it was missing the full canonical skill + command set. None of this surfaced until checked by hand.
 2. **The canonical checkout was left on a feature branch.** Because every project symlinks to the canonical working tree at a fixed path, a canonical checkout on a feature (or dirty) branch silently feeds *every* project stale rules. No existing tool checks this.
 
 The machinery to detect and repair drift already exists, but it is **fragmented**:
@@ -80,7 +80,7 @@ Each Tier-1 line already has logic inside an existing audit; the work is consoli
 
 ## Consequences
 
-- Drift becomes a one-command, deterministic, seconds-fast check instead of a weekly LLM audit — the `curat.money`-class silent-unparenting bug is caught immediately.
+- Drift becomes a one-command, deterministic, seconds-fast check instead of a weekly LLM audit — the `the multi-frontend app`-class silent-unparenting bug is caught immediately.
 - The Tier-0 canonical-on-main precondition closes the inheritance-poisoning gap incident #2 exposed.
 - One source of truth for "healthy" reduces the 8-audit + N-fix-script sprawl.
 - Reversible and additive: new scripts only; no change to the inheritance mechanism or to any rule.
@@ -91,4 +91,4 @@ Each Tier-1 line already has logic inside an existing audit; the work is consoli
 - Check engines to unify: `scheduled-tasks/{cross-project-process-audit,parent-hook-drift,version-drift,preset-drift,primer-drift,autonomy-drift,registry-blacklist-health,test-health}`.
 - Update flow: `scripts/upgrade.sh`.
 - Invariants doctor enforces: `core-rules/inheritance.md`.
-- Motivating incident: `curat.money` unparented (no rules symlink, dead `@`-import) + canonical checkout left on a feature branch, 2026-05-30.
+- Motivating incident: `the multi-frontend app` unparented (no rules symlink, dead `@`-import) + canonical checkout left on a feature branch, 2026-05-30.

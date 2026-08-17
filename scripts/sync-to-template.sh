@@ -17,6 +17,8 @@ mirror_bootstrap_trellis_home=${TRELLIS_HOME-}
 mirror_bootstrap_payload=${TRELLIS_VERIFIED_PAYLOAD-}
 mirror_bootstrap_release_version=${TRELLIS_VERIFIED_RELEASE_VERSION-}
 mirror_bootstrap_ssh_auth_sock=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}
+# shellcheck disable=SC2093  # nothing after this exec runs in the outer shell:
+# the trusted body below the marker is read as DATA by the re-exec'd bootstrap.
 exec /usr/bin/env -i \
   "HOME=$mirror_bootstrap_home" "TRELLIS_HOME=$mirror_bootstrap_trellis_home" \
   "TRELLIS_VERIFIED_PAYLOAD=$mirror_bootstrap_payload" \
@@ -250,11 +252,23 @@ mirror_git() {
     /usr/bin/git "$@"
 }
 
+# Twin of launcher_verified_ssh_auth_sock (scripts/trellis-launcher.sh): the
+# launcher mints the marker, this re-derives it rather than trusting it. Only
+# the spelling of the path may differ — a symlinked directory above the socket
+# is fine (stock macOS spells it /var/run/..., and /var is a symlink), but the
+# socket itself must be a real socket, must not be a symlink, and the resolved
+# path must name the same file. The canonical spelling is what gets pushed with.
 mirror_require_verified_ssh_socket() {
   local socket="${TRELLIS_VERIFIED_SSH_AUTH_SOCK:-}" parent base canonical
   case "$socket" in
     /*) ;;
     *)
+      printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
+      return 5
+      ;;
+  esac
+  case "$socket" in
+    *[[:cntrl:]]*|*//*|*/./*|*/../*|*/.|*/..|*/)
       printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
       return 5
       ;;
@@ -265,12 +279,17 @@ mirror_require_verified_ssh_socket() {
   }
   parent="${socket%/*}"
   base="${socket##*/}"
-  canonical="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || return 5
-  [ "$canonical/$base" = "$socket" ] || {
+  [ -n "$parent" ] && [ -n "$base" ] || {
     printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
     return 5
   }
-  printf '%s\n' "$socket"
+  canonical="$(CDPATH='' cd -P -- "$parent" && pwd -P)/$base" || return 5
+  [ -S "$canonical" ] && [ ! -L "$canonical" ] &&
+    [ "$canonical" -ef "$socket" ] || {
+    printf 'trellis mirror: --push requires a verified SSH agent socket\n' >&2
+    return 5
+  }
+  printf '%s\n' "$canonical"
 }
 
 mirror_git_push() {
@@ -436,12 +455,21 @@ sync_paths=(
   'docs/research/2026-07-25-claude-5-prompting-corpus.md'
   'scripts/'
   'trellis.config.json'
-  'recon.md'
 )
 
 # Every core-rules subtree is either published above or consciously private.
 core_rules_no_sync=(
   'evals'
+)
+
+# Exact payload paths that a wholesale directory entry above would otherwise
+# publish. A directory is allowlisted for its policy value while a single file
+# inside it carries operator-specific detail, so the exclusion has to name the
+# file rather than drop the whole subtree. Every entry here must also appear in
+# `delist_prune` so an existing mirror loses the file instead of keeping a stale
+# published copy forever.
+payload_no_publish=(
+  'docs/adr/2026-08-07-fleet-hosting-substrate-policy.md'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -466,6 +494,10 @@ delist_prune=(
   'locks'
   'releases'
   'registry.json'
+  'registry.md'
+  'blacklist.md'
+  'recon.md'
+  'docs/adr/2026-08-07-fleet-hosting-substrate-policy.md'
   'AGENT_ONBOARD_GPTX.md'
   'docs/gptx.md'
   'docs/gptx-security.md'
@@ -907,6 +939,15 @@ stage_verified_payload() {
     [ -d "$stage/${path%/}" ] && [ ! -L "$stage/${path%/}" ] || continue
     rm -rf "$stage/${path%/}/workflows" || return 5
     rm -f "$stage/${path%/}/full-audit-sweep-ledger.mjs" || return 5
+  done
+  # Drop the named-file exclusions a wholesale directory entry pulled in. These
+  # are exact relative paths, never globs, so nothing outside the list can be
+  # removed by a surprising expansion.
+  for path in "${payload_no_publish[@]}"; do
+    case "$path" in
+      /*|*..*) printf 'trellis mirror: unsafe no-publish path: %s\n' "$path" >&2; return 4 ;;
+    esac
+    rm -f "$stage/$path" || return 5
   done
 }
 

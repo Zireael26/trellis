@@ -52,8 +52,27 @@ assert_rolled_back_to_baseline() {
   fi
 }
 
-@test "three-harness late Codex and OMP collisions preflight before every project or local write" {
+# A project-owned symlink destination is NOT a collision — `attach_deferred_leaves`
+# yields the leaf to the project and drops it from the surface set, so attach
+# succeeds and the project's bytes are never claimed. Only `replace` renders and
+# the runtime anchor are hard collisions; the next test covers those.
+#
+# This test asserted exit 3 until the project-authored-file deferral landed, and
+# the assertion was never updated because this suite ran in neither
+# .github/workflows/bats.yml nor scripts/run-tests.sh. The deferral is the
+# deliberate, separately-tested contract — see the "attach defers a project-authored
+# AGENTS.md regular file" test in attach-project.bats and the show-config deferral
+# tests in doctor.bats. What this test adds over those is the three-harness
+# integration view: two deferrals at once, across Codex and OMP, proving the
+# deferral is a partial YIELD and not a partial attach — every leaf the plan
+# still owns lands, and the exclude block covers those and only those.
+@test "three-harness late Codex and OMP destinations defer to the project without claiming a byte" {
+  local codex_before omp_before codex_after omp_after owner git_before
+
   mkdir -p "$T25_PROJECT/.agents/rules"
+  # Both bodies are non-empty and match no canonical source, which is what makes
+  # them authored content rather than a dropping — the narrow condition
+  # `_attachment_symlink_destination_authored` requires before deferring.
   printf 'project-owned Codex destination\n' > "$T25_PROJECT/.agents/rules/trellis.md"
   printf 'project-owned OMP destination\n' > "$T25_PROJECT/.omp/AGENTS.md"
   chmod 640 "$T25_PROJECT/.agents/rules/trellis.md"
@@ -61,26 +80,64 @@ assert_rolled_back_to_baseline() {
   printf '# collision sentinel\n*.must-remain\n' > "$T25_EXCLUDE"
   chmod 640 "$T25_EXCLUDE"
 
-  project_before="$T25_SANDBOX/collision-project.before"
-  home_before="$T25_SANDBOX/collision-home.before"
-  project_after="$T25_SANDBOX/collision-project.after"
-  home_after="$T25_SANDBOX/collision-home.after"
+  codex_before="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
+  omp_before="$(t25_sha256_file "$T25_PROJECT/.omp/AGENTS.md")"
   git_before="$(t25_git_status "$T25_PROJECT")"
-  t25_snapshot_tree "$T25_PROJECT" "$project_before"
-  t25_snapshot_tree "$T25_TRELLIS_HOME" "$home_before"
 
   run t25_attach
 
-  [ "$status" -eq 3 ]
-  t25_snapshot_tree "$T25_PROJECT" "$project_after"
-  t25_snapshot_tree "$T25_TRELLIS_HOME" "$home_after"
-  cmp -s "$project_before" "$project_after"
-  cmp -s "$home_before" "$home_after"
-  t25_attachment_state_absent "$T25_PROJECT"
-  t25_path_absent "$T25_TRELLIS_HOME/registry.json"
-  t25_path_absent "$T25_PROJECT/.trellis/runtime"
-  t25_path_absent "$T25_PROJECT/.claude/rules/trellis.md"
-  [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # The rest of the three-harness surface still attached. Without this the whole
+  # test would pass over an attach that yielded everything.
+  owner="$(t25_owner_path "$T25_PROJECT")"
+  [ -L "$T25_PROJECT/.trellis/runtime" ] || { echo "$output"; false; }
+  [ -L "$T25_PROJECT/.claude/rules/trellis.md" ] || { echo "$output"; false; }
+  [ -f "$T25_PROJECT/.omp/PREAMBLE.md" ] || { echo "$output"; false; }
+  jq -e '.status == "committed"' "$owner" >/dev/null || { jq -cS '.status' "$owner"; false; }
+
+  # Both destinations stay project-owned regular files: same bytes, same mode,
+  # never replaced by a Trellis symlink.
+  [ -f "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'codex leaf is not a regular file'; false; }
+  [ ! -L "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'codex leaf became a symlink'; false; }
+  [ -f "$T25_PROJECT/.omp/AGENTS.md" ] || { echo 'omp leaf is not a regular file'; false; }
+  [ ! -L "$T25_PROJECT/.omp/AGENTS.md" ] || { echo 'omp leaf became a symlink'; false; }
+  codex_after="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
+  omp_after="$(t25_sha256_file "$T25_PROJECT/.omp/AGENTS.md")"
+  [ "$codex_after" = "$codex_before" ] || { echo 'codex destination bytes changed'; false; }
+  [ "$omp_after" = "$omp_before" ] || { echo 'omp destination bytes changed'; false; }
+  [ "$(t25_mode "$T25_PROJECT/.agents/rules/trellis.md")" = 640 ] ||
+    { echo "codex destination mode is $(t25_mode "$T25_PROJECT/.agents/rules/trellis.md")"; false; }
+  [ "$(t25_mode "$T25_PROJECT/.omp/AGENTS.md")" = 600 ] ||
+    { echo "omp destination mode is $(t25_mode "$T25_PROJECT/.omp/AGENTS.md")"; false; }
+
+  # The owner record names both deferrals and claims neither as an artifact.
+  jq -e '
+    ([.pre_existing[] | select(.path == ".agents/rules/trellis.md" or .path == ".omp/AGENTS.md")
+      | {path, kind, reason}] | sort_by(.path)
+      == [{path:".agents/rules/trellis.md",kind:"symlink",reason:"project-authored-file"},
+          {path:".omp/AGENTS.md",kind:"symlink",reason:"project-authored-file"}])
+    and ([.artifacts[].path
+          | select(. == ".agents/rules/trellis.md" or . == ".omp/AGENTS.md")] | length) == 0
+  ' "$owner" >/dev/null || { jq -cS '{pre_existing,artifacts:[.artifacts[].path]}' "$owner"; false; }
+
+  # A deferred leaf gets no managed exclude line at all. The claude leaf is the
+  # positive control: it proves the block was written, so the two absence checks
+  # below cannot pass because the block is simply missing.
+  run grep -Fx '/.claude/rules/trellis.md' "$T25_EXCLUDE"
+  [ "$status" -eq 0 ] || { cat "$T25_EXCLUDE"; false; }
+  run grep -Fx '/.agents/rules/trellis.md' "$T25_EXCLUDE"
+  [ "$status" -ne 0 ] || { cat "$T25_EXCLUDE"; false; }
+  run grep -Fx '/.omp/AGENTS.md' "$T25_EXCLUDE"
+  [ "$status" -ne 0 ] || { cat "$T25_EXCLUDE"; false; }
+  # The operator's own pre-existing sentinel lines survive verbatim.
+  run grep -Fx '*.must-remain' "$T25_EXCLUDE"
+  [ "$status" -eq 0 ] || { cat "$T25_EXCLUDE"; false; }
+
+  # Neither deferred file was dirtied, and neither was hidden by an exclude that
+  # would have made a tracked file look untracked.
+  [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ] ||
+    { echo "git status drifted: $(t25_git_status "$T25_PROJECT")"; false; }
 }
 
 @test "project-owned replace render and runtime anchor collisions refuse before any write" {

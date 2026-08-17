@@ -326,9 +326,9 @@ JSON
     core-rules/templates/codex-hooks.local.json)
       cat <<'JSON'
 [
-  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context codex \"$CODEX_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",1,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context codex \"$CODEX_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index codex \"$CODEX_PROJECT_DIR\""}
+  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""},
+  {"path":["hooks","SessionStart",0,"hooks",1,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""},
+  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""}
 ]
 JSON
       ;;

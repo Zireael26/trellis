@@ -14,6 +14,8 @@
 # the POSIX prologue too. `scripts/tests/posix-bootstrap-prologue.bats` re-checks
 # each prologue as `sh` to keep that guarantee, since this line removes it here.
 launcher_ssh_auth_sock=${SSH_AUTH_SOCK-}
+# shellcheck disable=SC2093  # nothing after this exec runs in the outer shell:
+# the trusted body below the marker is read as DATA by the re-exec'd bootstrap.
 exec /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
   "SSH_AUTH_SOCK=$launcher_ssh_auth_sock" \
@@ -89,8 +91,17 @@ launcher_absolute_path_is_clean() {
   return 0
 }
 
+# Resolve SSH_AUTH_SOCK to the physical path of the agent socket, or to the
+# empty string when there is no socket we are willing to forward.
+#
+# Only the *spelling* of the path may differ from what the caller handed us: a
+# symlinked directory anywhere above the socket is fine (stock macOS spells the
+# launchd agent socket /var/run/..., and /var is a symlink to /private/var), but
+# the socket itself must still be a real socket, must not be a symlink, and the
+# resolved path must name the same file. What leaves here is the canonical
+# spelling, so nothing downstream re-traverses a symlink that could be swapped.
 launcher_verified_ssh_auth_sock() {
-  local socket="${SSH_AUTH_SOCK:-}" parent base canonical_parent
+  local socket="${SSH_AUTH_SOCK:-}" parent base canonical_parent canonical
   [ -n "$socket" ] || {
     printf '\n'
     return 0
@@ -104,19 +115,23 @@ launcher_verified_ssh_auth_sock() {
   parent="${socket%/*}"
   base="${socket##*/}"
   [ -n "$parent" ] && [ -n "$base" ] &&
-    [ -d "$parent" ] && [ ! -L "$parent" ] || {
+    [ -d "$parent" ] || {
     printf '\n'
     return 0
   }
-  canonical_parent="$(CDPATH='' cd "$parent" && pwd -P)" || {
+  canonical_parent="$(CDPATH='' cd -P -- "$parent" && pwd -P)" || {
     printf '\n'
     return 0
   }
-  [ "$canonical_parent/$base" = "$socket" ] || {
+  canonical="$canonical_parent/$base"
+  launcher_absolute_path_is_clean "$canonical" &&
+    [ -S "$canonical" ] &&
+    [ ! -L "$canonical" ] &&
+    [ "$canonical" -ef "$socket" ] || {
     printf '\n'
     return 0
   }
-  printf '%s\n' "$socket"
+  printf '%s\n' "$canonical"
 }
 
 launcher_safe_relative_path() {

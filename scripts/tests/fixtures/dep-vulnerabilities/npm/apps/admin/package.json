@@ -1,0 +1,6 @@
+{
+  "name": "admin",
+  "dependencies": {
+    "@scope/admin-direct": "8.0.0"
+  }
+}

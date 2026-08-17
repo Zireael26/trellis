@@ -15,7 +15,7 @@ Over 2026-04 the design walked back across multiple iterations:
 
 1. Initial spec: dep-sandbox per project. Failed because real test
    suites need real native toolchains (Xcode CLT for iOS, Unity Editor
-   for the lume project, system-level pnpm/bun versions tied to host
+   for the the Unity project project, system-level pnpm/bun versions tied to host
    `.tool-versions`, etc.).
 2. Mid-April: dep-sandbox for Node-only projects, host for native.
    Failed because the per-project sandbox classification turned into

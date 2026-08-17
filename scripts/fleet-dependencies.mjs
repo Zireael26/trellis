@@ -668,6 +668,81 @@ function validateLedger(ledger, today) {
   }
   return errors
 }
+function parseCurrencyAuditRows(reportPath) {
+  const rows = []
+  let section = null
+  for (const line of fs.readFileSync(reportPath, 'utf8').split(/\r?\n/)) {
+    if (line.startsWith('### Full runtime-direct drift list')) {
+      section = 'runtime'
+      continue
+    }
+    if (line.startsWith('### Dev-direct major-behind detail')) {
+      section = 'dev'
+      continue
+    }
+    if (line.startsWith('#')) section = null
+    if (!section || !line.startsWith('|')) continue
+    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim())
+    if (cells[0] === 'Project' || cells.every((cell) => /^-+$/.test(cell))) continue
+    if (section === 'runtime') {
+      if (cells.length === 7 && /(?:major|minor)-behind/.test(cells[5])) rows.push(['runtime', ...cells.slice(0, 6)])
+    } else if (cells.length === 5) {
+      rows.push(['dev', cells[0], '.', cells[1], cells[2], cells[3], 'major-behind'])
+    }
+  }
+  return rows
+}
+
+function validateCurrencyLedgerCoverage(ledger, reportPath) {
+  const errors = []
+  const source = `audits/${path.basename(reportPath)}`
+  const expected = new Set(parseCurrencyAuditRows(reportPath).map((row) => JSON.stringify(row)))
+  const covered = new Map()
+  let entries = 0
+  for (const finding of ledger.findings ?? []) {
+    if (finding.source !== source || finding.category !== 'dependency-currency') continue
+    entries += 1
+    let summary
+    try {
+      summary = JSON.parse(finding.summary)
+    } catch {
+      errors.push(`${finding.id}: dependency-currency summary must be JSON`)
+      continue
+    }
+    if (!Array.isArray(summary.audit_rows)) {
+      errors.push(`${finding.id}: dependency-currency summary requires audit_rows`)
+      continue
+    }
+    if (!['fixed', 'accepted-risk', 'compatibility-exception'].includes(finding.disposition)) {
+      errors.push(`${finding.id}: dependency-currency disposition must be fixed, accepted-risk, or compatibility-exception`)
+    }
+    if (finding.disposition === 'fixed' && !finding.evidence?.some((evidence) => evidence.kind === 'commit')) {
+      errors.push(`${finding.id}: fixed dependency-currency disposition requires commit evidence`)
+    }
+    if (finding.disposition !== 'fixed') {
+      for (const field of ['owner', 'expires_on', 'replacement_condition']) {
+        if (!finding[field]) errors.push(`${finding.id}: non-fixed dependency-currency disposition requires ${field}`)
+      }
+    }
+    for (const row of summary.audit_rows) {
+      if (!Array.isArray(row) || !row.every((cell) => typeof cell === 'string')) {
+        errors.push(`${finding.id}: invalid dependency-currency audit row`)
+        continue
+      }
+      const key = JSON.stringify(row)
+      if (!expected.has(key)) {
+        errors.push(`${finding.id}: audit row is not in ${path.basename(reportPath)}`)
+      } else if (covered.has(key)) {
+        errors.push(`${finding.id}: duplicate coverage for ${key} (also ${covered.get(key)})`)
+      } else {
+        covered.set(key, finding.id)
+      }
+    }
+  }
+  if (entries === 0) errors.push(`dependency-currency ledger has no entries for ${source}`)
+  return errors
+}
+
 
 function reportUnavailable(unavailable) {
   for (const row of unavailable) {
@@ -791,7 +866,9 @@ const ledgerPath = path.resolve(args.ledger ?? path.join(ROOT, 'audits/fleet-rem
 const today = args.today ?? new Date().toISOString().slice(0, 10)
 
 if (args.command === 'ledger-check') {
-  const errors = validateLedger(readJson(ledgerPath), today)
+  const ledger = readJson(ledgerPath)
+  const errors = validateLedger(ledger, today)
+  if (args.currency_report) errors.push(...validateCurrencyLedgerCoverage(ledger, path.resolve(args.currency_report)))
   if (args.json) console.log(JSON.stringify({ errors }, null, 2))
   else console.log(errors.length ? errors.join('\n') : 'fleet remediation ledger: valid')
   process.exit(errors.length ? 1 : 0)

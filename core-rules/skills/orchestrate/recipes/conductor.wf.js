@@ -55,9 +55,20 @@ const SAFETY_BUDGET_CEILING_USD = 60
 // Caller-owned capability inputs arrive in `args`; recipes never read project
 // config. Stages without a declared agentType inherit the calling main loop by
 // construction.
+function isCodexUnavailable(value) {
+  if (value === 'CODEX_UNAVAILABLE') return true
+  if (value == null || typeof value !== 'object') return false
+  return value.code === 'CODEX_UNAVAILABLE'
+    || value.status === 'CODEX_UNAVAILABLE'
+    || value.error === 'CODEX_UNAVAILABLE'
+    || value.error?.code === 'CODEX_UNAVAILABLE'
+    || value.error?.status === 'CODEX_UNAVAILABLE'
+}
+
 async function settle(id, run) {
   try {
     const value = await run()
+    if (isCodexUnavailable(value)) return { id, ok: false, value: null, error: 'CODEX_UNAVAILABLE' }
     if (value == null) return { id, ok: false, value: null, error: 'null result' }
     return { id, ok: true, value, error: null }
   } catch (error) {

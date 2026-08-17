@@ -94,8 +94,96 @@ mirror_validate_symlinks() {
   return "$rc"
 }
 
+# mirror_fleet_identity_tokens
+#   Prints the lowercased project identifiers of the local fleet, one per line.
+#
+# The token set is READ FROM PRIVATE LOCAL STATE, never hardcoded. A hardcoded
+# list would publish, inside this very file, the names it exists to suppress —
+# and would go stale the moment a project is onboarded, which is precisely how
+# a leak returns after being cleaned once. Reading the machine-local registry
+# means the guard covers every project the operator has now and every one they
+# add later, with nothing to remember.
+#
+# Fails (non-zero) when the source is unreadable so the caller can refuse to
+# certify rather than certify blind.
+mirror_fleet_identity_tokens() {
+  local source="${TRELLIS_MIRROR_IDENTITY_SOURCE:-${TRELLIS_HOME:-$HOME/.trellis}/registry.json}"
+  local public_tokens
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  public_tokens="$(mirror_fleet_public_identity_tokens "$source")" || return 1
+  # Deliberately parsed with grep/sed rather than jq. `trellis mirror` re-execs
+  # through `env -i` with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a jq-dependent
+  # guard resolves "unreadable" on every real publish — it would fail closed
+  # forever and be ripped out as broken, which is worse than no guard. The
+  # fields read here are flat string values written by this repo's own
+  # local-registry writer, so a full JSON parser buys nothing.
+  {
+    grep -oE '"project_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$source" 2>/dev/null
+    grep -oE '"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*\{' "$source" 2>/dev/null
+  } |
+    sed -E 's/.*"([^"]*)"[[:space:]]*:?[[:space:]]*\{?$/\1/; s#.*/##' |
+    LC_ALL=C tr '[:upper:]' '[:lower:]' |
+    sed -E 's/\.(com|org|net|money|live|dev|in|ai|site)$//' |
+    grep -vE '^.{0,2}$' |
+    sort -u |
+    { if [ -n "$public_tokens" ]; then grep -vxF -- "$public_tokens"; else cat; fi; }
+}
+
+# mirror_fleet_public_identity_tokens SOURCE
+#   Prints the normalized identifiers of projects the operator has declared
+#   already public, one per line, for subtraction from the guard's token set.
+#
+# Some project identifiers ARE public by construction: a personal site's own
+# domain is the thing it publishes under, and it legitimately appears in this
+# repository's README as a link and a maintainer byline. Without this list the
+# guard reports that byline as a fleet-identity leak and the mirror can never
+# be certified, which ends one of two ways — the byline gets deleted, or the
+# check gets deleted. Neither is the right answer, so the distinction is made
+# explicit and operator-owned instead.
+#
+# The declaration lives in machine-local registry metadata, set with
+# `trellis registry annotate --metadata-json '{"public_identity": true}'`, for
+# the same reason the token set itself is read rather than hardcoded: an
+# allowlist written into this file would publish, in the mirror, a list of the
+# operator's projects. Default is closed — a row says nothing, it is private.
+#
+# Parsed by indentation rather than by brace depth. `metadata.legacy` notes
+# carry literal braces inside JSON strings, so a depth counter that cannot see
+# string boundaries miscounts on real rows; the writer emits `jq -S` output at a
+# fixed two-space indent, which those strings cannot forge. A source whose shape
+# does not match yields no public tokens, so a formatting change fails toward
+# flagging more rather than fewer.
+#
+# The short-token filter is `sed -E '/^.{0,2}$/d'`, not `grep -vE`. Having no
+# annotated rows at all is the ordinary case, and `grep` exits 1 on empty input.
+# `sync-to-template.sh` runs under `set -o pipefail`, so that 1 propagates out
+# of the pipeline, the caller reads it as `return 1`, and the guard announces
+# "fleet identity source unreadable" for a registry it read perfectly well —
+# turning the common case into a hard publication failure. `sed` deletes the
+# same lines and exits 0 whether or not it matched.
+mirror_fleet_public_identity_tokens() {
+  local source="${1:-}"
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  awk '
+    /^    "[^"]+"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/ { inproj = 1; pid = ""; pub = 0; next }
+    inproj && /^        "public_identity"[[:space:]]*:[[:space:]]*true/ { pub = 1; next }
+    inproj && /^      "project_id"[[:space:]]*:[[:space:]]*"/ {
+      pid = $0
+      sub(/^[^:]*:[[:space:]]*"/, "", pid)
+      sub(/".*$/, "", pid)
+      next
+    }
+    inproj && /^    \}/ { if (pub && pid != "") print pid; inproj = 0; pid = ""; pub = 0; next }
+  ' "$source" 2>/dev/null |
+    LC_ALL=C tr '[:upper:]' '[:lower:]' |
+    sed -E 's#.*/##; s/\.(com|org|net|money|live|dev|in|ai|site)$//' |
+    sed -E '/^.{0,2}$/d' |
+    sort -u
+}
+
 lint_mirror() {
   local mirror_dir="${1:-}" mirror_pat rc=0 f rel hit path username
+  local identity_tokens identity_token address
   [ "$#" -eq 1 ] || { printf 'mirror-lint: usage: lint_mirror MIRROR_DIR\n' >&2; return 2; }
   [ -d "$mirror_dir" ] && [ ! -L "$mirror_dir" ] || {
     printf 'mirror-lint: not an ordinary directory: %s\n' "$mirror_dir" >&2
@@ -158,8 +246,13 @@ lint_mirror() {
   # A public symlink may be relative only when lexical resolution remains
   # inside the mirror. This rejects both absolute targets and ../ escapes
   # without dereferencing a potentially hostile target.
+  # Record the failure and keep going. Returning here would let one unresolvable
+  # symlink short-circuit every content check below, so a mirror could carry an
+  # operator path or a fleet identifier and still be reported only as a symlink
+  # problem. The verdict is the same either way; what changes is that the
+  # operator sees the whole picture in one run.
   if ! mirror_validate_symlinks "$mirror_dir"; then
-    return 1
+    rc=1
   fi
   # Any non-generic home path is an operator path, including one copied from
   # a different machine.
@@ -205,7 +298,58 @@ lint_mirror() {
       *) printf "%s: instance-private proxy token must not publish\n" "$rel"; rc=1 ;;
     esac
   done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-    -exec grep -IliE -- 'claudex|cliproxy|cli-proxy-api' {} + 2>/dev/null)
+    -exec grep -IliE -- 'claudex|cli-proxy-api|cliproxy' {} + 2>/dev/null)
+
+  # Fleet project identifiers must never reach a public mirror. Deliberately NO
+  # historical-record exemption: unlike the retired-integration tokens above,
+  # `docs/adr/*`, `docs/specs/*` and `CHANGELOG.md` are exactly where project
+  # names accumulated unnoticed, because narrative prose is written long after
+  # the allowlist decision and nothing re-checked it. A name is as public in a
+  # two-year-old ADR as in today's README, so the boundary does not apply here.
+  if ! identity_tokens="$(mirror_fleet_identity_tokens)" || [ -z "$identity_tokens" ]; then
+    printf 'mirror-lint: fleet identity source unreadable — refusing to certify a mirror it cannot check\n'
+    rc=1
+  else
+    while IFS= read -r identity_token; do
+      [ -n "$identity_token" ] || continue
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rel="${f#"$mirror_dir"/}"
+        case "$rel" in
+          scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
+          *) printf '%s: local fleet project identifier must not publish\n' "$rel"; rc=1 ;;
+        esac
+      done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
+        -exec grep -IliwF -- "$identity_token" {} + 2>/dev/null)
+    done <<IDENTITY_TOKENS
+$identity_tokens
+IDENTITY_TOKENS
+  fi
+
+  # Routable IPv4 literals are operator infrastructure — origin hosts, VPS
+  # addresses, tunnel endpoints. Private, loopback, link-local and the three
+  # RFC 5737 documentation ranges stay allowed so examples and fixtures work.
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    rel="${hit%%:*}"
+    rel="${rel#"$mirror_dir"/}"
+    case "$rel" in
+      scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) continue ;;
+    esac
+    path="${hit#*:}"
+    while IFS= read -r address; do
+      [ -n "$address" ] || continue
+      case "$address" in
+        10.*|127.*|169.254.*|0.0.0.0|255.255.255.255) continue ;;
+        192.168.*|192.0.2.*|198.51.100.*|203.0.113.*) continue ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
+      esac
+      printf '%s: routable IP literal must not publish\n' "$rel"
+      rc=1
+      break
+    done < <(printf '%s\n' "$path" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' 2>/dev/null)
+  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
+    -exec grep -HnE -- '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' {} + 2>/dev/null)
 
   return "$rc"
 }

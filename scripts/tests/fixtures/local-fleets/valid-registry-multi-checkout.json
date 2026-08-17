@@ -2,47 +2,47 @@
   "$schema": "../../../lib/trellis.registry.schema.json",
   "schema_version": 1,
   "projects": {
-    "personal/neev": {
+    "personal/alpha": {
       "fleet": "personal",
-      "project_id": "neev",
+      "project_id": "alpha",
       "status": "active",
       "metadata": {
         "source": "fixture"
       },
       "checkouts": {
         "1111111111111111111111111111111111111111111111111111111111111111": {
-          "root": "/Users/alex/projects/neev",
-          "git_common_dir": "/Users/alex/projects/neev/.git",
+          "root": "/Users/alex/projects/alpha",
+          "git_common_dir": "/Users/alex/projects/alpha/.git",
           "release": "1.0.0-rc.24",
           "harnesses": ["claude", "codex", "omp"],
           "worktrees": {
             "2222222222222222222222222222222222222222222222222222222222222222": {
-              "root": "/Users/alex/projects/neev",
+              "root": "/Users/alex/projects/alpha",
               "attachment_id": "11111111-2222-4333-8444-555555555555"
             },
             "3333333333333333333333333333333333333333333333333333333333333333": {
-              "root": "/Users/alex/projects/neev feature-x",
+              "root": "/Users/alex/projects/alpha feature-x",
               "attachment_id": "22222222-3333-4444-8555-666666666666"
             }
           }
         },
         "4444444444444444444444444444444444444444444444444444444444444444": {
-          "root": "/Volumes/Archive/checkouts/neev",
-          "git_common_dir": "/Volumes/Archive/checkouts/neev/.git",
+          "root": "/Volumes/Archive/checkouts/alpha",
+          "git_common_dir": "/Volumes/Archive/checkouts/alpha/.git",
           "release": "1.0.0-rc.24",
           "harnesses": ["claude", "codex"],
           "worktrees": {
             "5555555555555555555555555555555555555555555555555555555555555555": {
-              "root": "/Volumes/Archive/checkouts/neev",
+              "root": "/Volumes/Archive/checkouts/alpha",
               "attachment_id": "33333333-4444-4555-8666-777777777777"
             }
           }
         }
       }
     },
-    "work/neev": {
+    "work/alpha": {
       "fleet": "work",
-      "project_id": "neev",
+      "project_id": "alpha",
       "status": "unavailable",
       "metadata": {
         "source": "fixture",
@@ -50,13 +50,13 @@
       },
       "checkouts": {
         "6666666666666666666666666666666666666666666666666666666666666666": {
-          "root": "/Volumes/Work Drive/checkouts/neev",
-          "git_common_dir": "/Volumes/Work Drive/checkouts/neev/.git",
+          "root": "/Volumes/Work Drive/checkouts/alpha",
+          "git_common_dir": "/Volumes/Work Drive/checkouts/alpha/.git",
           "release": "1.0.0-rc.24",
           "harnesses": ["claude", "codex", "omp"],
           "worktrees": {
             "7777777777777777777777777777777777777777777777777777777777777777": {
-              "root": "/Volumes/Work Drive/checkouts/neev",
+              "root": "/Volumes/Work Drive/checkouts/alpha",
               "attachment_id": "44444444-5555-4666-8777-888888888888"
             }
           }

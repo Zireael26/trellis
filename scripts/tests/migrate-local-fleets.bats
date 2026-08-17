@@ -8,8 +8,19 @@ sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
+# BSD and GNU stat are probed in SEPARATE captures: GNU `stat -f` is
+# --file-system and prints a filesystem block before failing, which a chained
+# substitution would concatenate onto the mode.
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local candidate
+  candidate="$(stat -f '%Lp' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 # Emit regular-file bytes, link targets, and directories below a project. The

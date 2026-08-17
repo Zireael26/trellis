@@ -145,10 +145,20 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
   fi
 fi
 
+# Two ceilings, because `run_check` drives typecheck, lint AND tests through one
+# code path. A project whose battery legitimately runs for hours has to raise the
+# test ceiling, and while there was only one variable that raise silently removed
+# the guard from typecheck and lint too — the two checks that should never take
+# more than a few minutes and whose runaway is exactly what a timeout is for.
 PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-300}"
+PROCESS_GATE_CHECK_TIMEOUT="${PROCESS_GATE_CHECK_TIMEOUT:-300}"
 
 run_check() {
-  local label="$1" cmd="$2"
+  local label="$1" cmd="$2" limit
+  case "$label" in
+    tests) limit="$PROCESS_GATE_TEST_TIMEOUT" ;;
+    *)     limit="$PROCESS_GATE_CHECK_TIMEOUT" ;;
+  esac
   # Bright line: ABSENT/UNDECLARED check → WARN, never a fail. A check that is
   # declared/detected and FAILS at runtime (rc nonzero, below) stays a hard
   # fail. An empty cmd means the check was never declared or auto-detected, so
@@ -164,7 +174,7 @@ run_check() {
   local out rc
   set +e
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout "$PROCESS_GATE_TEST_TIMEOUT" bash -c "$cmd" 2>&1)"; rc=$?
+    out="$(timeout "$limit" bash -c "$cmd" 2>&1)"; rc=$?
   else
     out="$(bash -c "$cmd" 2>&1)"; rc=$?
   fi

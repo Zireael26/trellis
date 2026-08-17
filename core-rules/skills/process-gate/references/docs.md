@@ -34,7 +34,7 @@ If `CHANGELOG.md` is missing entirely: **fail** with instructions to seed it.
 
 ## ADRs
 
-Architecture Decision Records. Currently parked at parent layer (Rule of Three not met) — TGSC and Neev use different shapes. Project-local until promoted.
+Architecture Decision Records. Currently parked at parent layer (Rule of Three not met) — the single-app project and the monorepo project use different shapes. Project-local until promoted.
 
 If the project declares ADR triggers in `local.config.sh`:
 
@@ -75,7 +75,7 @@ Ignore the warning if the situation truly didn't merit a gotcha. Otherwise add t
 
 Changes to the *parent* `engineering-process.md` happen in the Trellis canonical repo, not in projects. Out of scope for project-level process-gate.
 
-Changes to *project-local* engineering-process docs (e.g., TGSC's `docs/EPM.md`) are project-specific. If declared:
+Changes to *project-local* engineering-process docs (e.g., the single-app project's `docs/EPM.md`) are project-specific. If declared:
 
 ```bash
 PROCESS_GATE_PROJECT_EPM="docs/EPM.md"

@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE="${BASH_SOURCE[0]}"
-while [[ -L "$SOURCE" ]]; do
-  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
-done
-ROOT="$(cd "$(dirname "$SOURCE")/.." && pwd)"
 ANTHROPIC_URL="${ANTHROPIC_DIRECT_BASE_URL:-https://api.anthropic.com}"
 
 usage() {
@@ -70,9 +63,6 @@ mode=claude
 requested_model=
 requested_advisor=
 requested_delegates=
-model_provided=false
-advisor_provided=false
-delegates_provided=false
 dry_run=false
 forwarded=()
 
@@ -90,34 +80,28 @@ while (($#)); do
     --model)
       (($# >= 2)) || die "--model requires a value"
       requested_model=$2
-      model_provided=true
       shift 2
       ;;
     --model=*)
       requested_model=${1#*=}
-      model_provided=true
       shift
       ;;
     --advisor)
       (($# >= 2)) || die "--advisor requires a value"
       requested_advisor=$2
-      advisor_provided=true
       shift 2
       ;;
     --advisor=*)
       requested_advisor=${1#*=}
-      advisor_provided=true
       shift
       ;;
     --delegates)
       (($# >= 2)) || die "--delegates requires a value"
       requested_delegates=$2
-      delegates_provided=true
       shift 2
       ;;
     --delegates=*)
       requested_delegates=${1#*=}
-      delegates_provided=true
       shift
       ;;
     --dry-run)
@@ -146,7 +130,6 @@ command -v jq >/dev/null 2>&1 || die "missing dependency: jq"
 
 # --- resolution (direct Claude topology only) ------------------------------
 claude_model="opus[1m]"
-main_provider=claude
 topology=direct
 base_url=$ANTHROPIC_URL
 case "$requested_model" in

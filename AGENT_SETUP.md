@@ -4,6 +4,8 @@ This runbook sets up **one machine's local Trellis state**. It is deliberately s
 
 It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and migration rationale, link to—not duplicate—the T23 documents: [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
+Once a machine is set up, moving it and its attached projects to a later release is a separate runbook: [AGENT_UPGRADE.md](AGENT_UPGRADE.md), executable end to end by an agent on any harness. Section 9 below is the single-project adoption command it wraps.
+
 ## 1. Establish explicit inputs and a safe local home
 
 Start in the policy source clone only to perform the two one-time bootstrap calls below: direct `configure.sh configure` and `configure.sh fleet add`. Never invoke the mutable `scripts/trellis` dispatcher. Select an exact **published** release and the remote that contains its annotated `vVERSION` tag; do not derive either from a branch, working tree, or “latest” lookup.
@@ -64,7 +66,7 @@ The source clone is a bootstrap and later local-configuration input only. A succ
 
 ## 4. Understand the inert project boundary
 
-A project may track one optional `.trellis.json` manifest. It contains a stable `project_id` and portable policy such as presets or autonomy; it contains no source path, fleet membership, local release path, local registry row, hook state, or runtime link.
+A project may track one optional `.trellis.json` manifest. It contains a stable `project_id` and portable policy such as presets or autonomy; it contains no source path, fleet membership, local release path, local registry row, hook state, or runtime link. `core-rules/templates/project.trellis.json.example` in the release payload is the copyable minimum — the same three keys `trellis onboard` writes — and `scripts/lib/trellis.project.schema.json` is what validates it.
 
 Everything behavior-producing is local attachment state: the immutable runtime anchor, native Claude Code/Codex/OMP surfaces, managed local exclusions, attachment ownership, and recovery journals. A contributor who clones only the tracked project—including `.trellis.json`—has an inert ordinary clone: no Trellis installation is required and no Trellis harness behavior is activated.
 

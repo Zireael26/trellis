@@ -211,8 +211,12 @@ run_check() {
 }
 
 @test "public validator source carries no maintainer-specific absolute path" {
-  run rg -n '/Users/'"abhishek" "$CLI"
-  [ "$status" -eq 1 ]
+  # `grep`, not `rg`: ripgrep is not on a stock ubuntu runner, and an absent
+  # binary exits 127 — which is not 1, so the case failed for the one reason it
+  # was never about. A literal `grep -F` answers exactly the same question with a
+  # tool every host has.
+  run grep -nF '/Users/'"abhishek" "$CLI"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
 }
 
 @test "artifact-writing commands refuse to persist state derived from a drifted registry" {

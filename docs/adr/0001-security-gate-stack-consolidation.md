@@ -10,12 +10,12 @@ The `security-gate` skill landed in six phases per [`security-gate-plan.md`](../
 
 | PR | Phase | Files | LOC | Validated against |
 |---|---|---|---|---|
-| [#10](https://github.com/Zireael26/se-core/pull/10) | 1 — baseline engine + web profile | 7 | 733 | tgsc |
-| [#11](https://github.com/Zireael26/se-core/pull/11) | 2 — diff mode + pre-push wiring | 4 | 374 | tgsc |
+| [#10](https://github.com/Zireael26/se-core/pull/10) | 1 — baseline engine + web profile | 7 | 733 | the single-app project |
+| [#11](https://github.com/Zireael26/se-core/pull/11) | 2 — diff mode + pre-push wiring | 4 | 374 | the single-app project |
 | [#12](https://github.com/Zireael26/se-core/pull/12) | 3 — quarterly scheduler | 3 | 212 | (prompt review) |
-| [#15](https://github.com/Zireael26/se-core/pull/15) | 4 — `web-rag-llm` profile | 6 | 273 | vericite |
-| [#16](https://github.com/Zireael26/se-core/pull/16) | 5 — `unity-game` profile | 3 | 218 | lume |
-| [#17](https://github.com/Zireael26/se-core/pull/17) | 6 — red-team Mode 3 | 4 | 325 | tgsc |
+| [#15](https://github.com/Zireael26/se-core/pull/15) | 4 — `web-rag-llm` profile | 6 | 273 | the RAG service |
+| [#16](https://github.com/Zireael26/se-core/pull/16) | 5 — `unity-game` profile | 3 | 218 | the Unity project |
+| [#17](https://github.com/Zireael26/se-core/pull/17) | 6 — red-team Mode 3 | 4 | 325 | the single-app project |
 
 GitHub's auto-merge stacked PRs in the order they were authored, but the merge target for each (phases 2–6) was the previous phase's branch — not `claude/security-gate-plan` directly. As each PR landed, its content cascaded into intermediate branches but never reached the plan branch. Plan currently holds Phase 1 + Phase 2 only; phases 3–6 are stranded above it on `claude/security-gate-phase-5`.
 

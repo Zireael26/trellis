@@ -135,7 +135,7 @@ rewrite_manifest() {
     | ($commands | length) == 3
     and all($commands[];
       startswith("/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook ")
-      and contains(" codex \"$CODEX_PROJECT_DIR\"")
+      and contains(" codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\"")
       and marker_count("__TRELLIS_USER_HOME__") == 1
       and marker_count("__TRELLIS_HOME__") == 1
       and marker_count("__TRELLIS_LAUNCHER__") == 1

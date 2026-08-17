@@ -266,12 +266,12 @@ function makeSpawn(
 	return { spawn, calls };
 }
 
-const PROJECT_CLAUDE_MD = `# Celeste project policy
+const PROJECT_CLAUDE_MD = `# Example project policy
 First overlay line.
 @/opt/trellis/core-rules/CLAUDE.md
 Second overlay line.`;
 
-const PROJECT_POLICY_MARKER = "# Celeste project policy";
+const PROJECT_POLICY_MARKER = "# Example project policy";
 
 function makeCtx(overrides: Partial<OmpContext> = {}): OmpContext {
 	return {

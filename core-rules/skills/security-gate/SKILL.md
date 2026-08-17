@@ -99,7 +99,7 @@ Static chained-exploit reasoning. Loads retained entries from both `findings` an
 ```json
 {
   "schema": "security-gate.baseline.v2",
-  "project": "tgsc",
+  "project": "example-app",
   "profile": "web-next",
   "generated_at": "2026-05-08T12:34:56Z",
   "tools": {"semgrep": "1.142.0", "osv-scanner": "1.9.2", "gitleaks": "8.21.0"},
@@ -176,9 +176,19 @@ SECURITY_GATE_LLM_TIMEOUT_S=120             # per-call ceiling
 # SECURITY_GATE_GARAK_TARGET="openai:gpt-4o-mini"
 # SECURITY_GATE_GARAK_PROBES="promptinject.HijackHateHumans,latentinjection,leakreplay.LiteratureCloze"
 # SECURITY_GATE_GARAK_TIMEOUT=600
+
+# Shell SAST (diff mode). Defaults on for `shell-tooling`, off elsewhere.
+# SECURITY_GATE_SHELLCHECK="1"
+# SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS="core-rules/evals/*"
 ```
 
 Missing config → skill defaults to `web-next` with a `warn` line and runs `--no-llm` if `llm` is not on PATH.
+
+### Shell coverage
+
+Semgrep's registry has no shell ruleset, so diff mode runs ShellCheck at `severity=warning` as the SAST engine for shell and merges its findings into the same SAST row. Scope is every changed `*.sh` / `*.bash` file **plus every changed file whose shebang names `sh`, `bash`, `dash`, or `ksh`** — extensionless scripts such as `pre-push`, `commit-msg`, and CLI entrypoints are shell and are scanned as shell. `*.zsh` reaches semgrep only; ShellCheck has no zsh dialect, so a zsh file is in practice grepped for secrets and nothing more.
+
+Two limits are deliberate. The stage is **opt-in per project** (`SECURITY_GATE_SHELLCHECK`) because the baseline engine does not run ShellCheck: on a tree whose shell has never been linted, every finding is permanently new and cannot be baselined away, so enabling it fleet-wide would block pushes over pre-existing debt. And a project must point `SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS` at whatever its own lint gate carves out, so the gate cannot block on a file the lint gate is not allowed to clean.
 
 ## Provider neutrality
 

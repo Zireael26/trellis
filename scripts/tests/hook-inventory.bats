@@ -25,3 +25,42 @@ ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
       }
   done < <(find "$ROOT/core-rules/hooks" -maxdepth 1 -type f -name '*.sh' | sort)
 }
+
+# Every script at the top of a hook directory is EXECUTED by path — both harness
+# templates put the bare path in a `command`, with no `bash` prefix — so a hook
+# without the executable bit returns 126 in every attached project and the
+# harness reports a hook failure, not a gate result. `core-rules/hooks/spec-gate.sh`
+# and its Codex twin shipped 100644 from 2026-07-07 until the T34 gate: the
+# mandatory-pipeline Stop hook was dead on arrival everywhere it was installed,
+# and nothing in the tree noticed. Sourced libraries live one level down under
+# `lib/` and are correctly non-executable; this only looks at maxdepth 1.
+#
+# Where the fix lives, since the commit subjects point elsewhere: the two
+# 100644→100755 mode changes are carried by 72f3350 ("unchain the BSD/GNU stat
+# probes in six suites"), which shows them as mode-only entries. The commit
+# whose subject claims the fix, e6f0bd2 ("make spec-gate executable in both
+# harness trees"), adds only the two cases below. Bisect order is safe — 72f3350
+# precedes e6f0bd2 — but `git log -- core-rules/hooks/spec-gate.sh` will send a
+# reader to the wrong diff without this note.
+@test "every shipped hook script is executable in both harness trees" {
+  local dir script offenders=""
+  for dir in "$ROOT/core-rules/hooks" "$ROOT/core-rules/codex/hooks"; do
+    while IFS= read -r script; do
+      [ -n "$script" ] || continue
+      [ -x "$script" ] || offenders="$offenders ${script#"$ROOT/"}"
+    done < <(find "$dir" -maxdepth 1 -type f -name '*.sh' | sort)
+  done
+  [ -z "$offenders" ] || { echo "hook scripts missing the executable bit:$offenders"; false; }
+}
+
+# The working-tree mode is not what ships — `git archive`, a clone and the
+# release payload all carry the INDEX mode. A `chmod +x` that was never staged
+# looks fixed locally and is still broken for every consumer.
+@test "the index agrees that every shipped hook script is mode 100755" {
+  local offenders
+  # A git pathspec `*` crosses `/`, so the lib/ subdirectory has to be filtered
+  # out explicitly — those are sourced, not executed, and are correctly 100644.
+  offenders="$(git -C "$ROOT" ls-files -s -- 'core-rules/hooks/*.sh' 'core-rules/codex/hooks/*.sh' |
+    awk '$4 !~ /\/lib\// && $1 != "100755" { print $4 }' | tr '\n' ' ')"
+  [ -z "$offenders" ] || { echo "hook scripts not 100755 in the index: $offenders"; false; }
+}

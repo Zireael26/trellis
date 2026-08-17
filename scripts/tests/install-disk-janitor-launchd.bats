@@ -30,12 +30,31 @@ teardown() {
   [ -z "${SANDBOX:-}" ] || rm -rf "$SANDBOX"
 }
 
+# BSD and GNU stat are probed in SEPARATE captures: GNU `stat -f` is
+# --file-system and prints a filesystem block before failing, which a chained
+# substitution would concatenate onto the value.
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local candidate
+  candidate="$(stat -f '%Lp' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 file_inode() {
-  stat -f '%i' "$1" 2>/dev/null || stat -c '%i' "$1"
+  local candidate
+  candidate="$(stat -f '%i' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-9]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%i' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 # Execute the script's public main entrypoint while replacing only the

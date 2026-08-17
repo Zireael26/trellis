@@ -3,9 +3,9 @@
   "schema_version": 1,
   "status": "committed",
   "fleet": "personal",
-  "project_id": "neev",
+  "project_id": "alpha",
   "checkout_id": "1111111111111111111111111111111111111111111111111111111111111111",
-  "worktree_root": "/Users/alex/projects/neev",
+  "worktree_root": "/Users/alex/projects/alpha",
   "release": "1.0.0-rc.24",
   "artifacts": [
     {

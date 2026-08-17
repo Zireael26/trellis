@@ -584,7 +584,14 @@ task_requires_checkout() {
   esac
 }
 
-unavailable_required_projects() {
+# Projects with no usable checkout for a checkout-consuming task. These are
+# EXCLUDED from the run, not a fault in it: `plan.md` §3.1 states that bulk
+# commands print a per-project result and do not claim all-or-nothing fleet
+# atomicity, so one offline volume must not take the other twelve projects with
+# it. Before this was a per-row exclusion, a single `unavailable` registry row
+# drove 19 of 22 materialized tasks to `planned-error` and every task prompt
+# halted on it.
+excluded_unavailable_projects() {
   local snapshot="${1:-}"
   jq -cS '
     [ .entries
@@ -1081,7 +1088,7 @@ cmd_materialize() {
   local release_dir="" release_payload="" release_commit="" release_manifest="" release_manifest_sha256="" stage=""
   local tasks_dir="" fleet_dir="" task_root="" output_root="" snapshot_path="" errors_file=""
   local tasks_dir_real="" fleet_dir_real="" fleet_dir_identity="" stage_identity="" task_lock_held=false
-  local canonical_snapshot="" required_unavailable="[]" requires_checkout=false
+  local canonical_snapshot="" excluded_unavailable="[]" excluded_rows="[]" requires_checkout=false
   local entry_count=0 unavailable_count=0 eligible_count=0 nonexcluded_count=0
   local detached_only_count=0 conductor_backlog=false registry_state_errors=0
   local snapshot_sha256="" planned_errors="[]" manifest_status="ready" detail=""
@@ -1244,14 +1251,15 @@ EOF
     elif [ "$nonexcluded_count" -gt 0 ] && [ "$detached_only_count" -ne "$nonexcluded_count" ] && [ "$eligible_count" -eq 0 ]; then
       append_planned_error "$errors_file" "no eligible active checkout targets in local registry snapshot" || return "$TRELLIS_EX_UNAVAILABLE"
     fi
-    required_unavailable="$(unavailable_required_projects "$stage/snapshot.json")" || return "$TRELLIS_EX_STATE"
-    if [ "$(printf '%s\n' "$required_unavailable" | jq 'length')" -gt 0 ]; then
-      while IFS= read -r detail; do
-        append_planned_error "$errors_file" "required checkout unavailable for project: $detail" || return "$TRELLIS_EX_UNAVAILABLE"
-      done <<EOF
-$(printf '%s\n' "$required_unavailable" | jq -r '.[]')
-EOF
-    fi
+    # An unavailable row is dropped from this run and recorded, not planned as an
+    # error: `planned-error` is reserved for faults that invalidate the WHOLE
+    # task — no registered rows at all, no eligible target among rows that are
+    # neither excluded nor detached, or a registry that failed identity
+    # validation. Those three are handled above and still halt.
+    excluded_unavailable="$(excluded_unavailable_projects "$stage/snapshot.json")" || return "$TRELLIS_EX_STATE"
+    excluded_rows="$(printf '%s\n' "$excluded_unavailable" | jq -cS \
+      'map({project_id: ., reason: "checkout unavailable in local registry snapshot"})')" ||
+      return "$TRELLIS_EX_STATE"
   fi
   # Serialize the old private conductor state and the final directory swap.
   # The lock is acquired only after the registry capture has released its own
@@ -1297,7 +1305,8 @@ EOF
     --argjson unavailable_count "$unavailable_count" \
     --argjson identity_error_count "$registry_state_errors" \
     --argjson checkout_required "$requires_checkout" \
-    --argjson unavailable_projects "$required_unavailable" \
+    --argjson unavailable_projects "$excluded_unavailable" \
+    --argjson excluded_rows "$excluded_rows" \
     --argjson planned_errors "$planned_errors" \
     '{
       schema_version: 1,
@@ -1337,6 +1346,7 @@ EOF
       requirements: {
         checkout_required: $checkout_required,
         unavailable_projects: $unavailable_projects,
+        excluded_rows: $excluded_rows,
         planned_errors: $planned_errors
       },
       aeo_compatibility: $aeo_compatibility
@@ -1357,6 +1367,10 @@ EOF
   trap - EXIT HUP INT TERM
 
   printf '%s\n' "$task_root"
+  # Per-project result lines, not a fault: an excluded row is reported and the
+  # run continues over the rows that remain.
+  printf '%s\n' "$excluded_rows" |
+    jq -r '.[] | "trellis task: excluded row: \(.project_id): \(.reason)"' >&2
   if [ "$manifest_status" = "planned-error" ]; then
     printf '%s\n' "$planned_errors" | jq -r '.[] | "trellis task: planned error: \(.)"' >&2
     if [ "$registry_state_errors" -gt 0 ]; then

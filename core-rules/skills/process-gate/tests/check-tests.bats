@@ -533,3 +533,25 @@ JSON
   # GREEN: the fixed script never built the cmd → warn, never blocks.
   [ "$fixed_status" -ne 1 ]
 }
+
+# `run_check` drives typecheck, lint AND tests, and the timeout it applied was
+# read from one variable named for only one of them. A project whose battery
+# legitimately runs for hours raises PROCESS_GATE_TEST_TIMEOUT — and silently
+# removed the ceiling from typecheck and lint at the same time. The ceilings are
+# separate now: PROCESS_GATE_CHECK_TIMEOUT governs typecheck and lint.
+@test "raising the test timeout does not raise the typecheck/lint ceiling" {
+  command -v timeout >/dev/null 2>&1 || skip "no timeout(1) on this host"
+
+  run bash -c "cd '$PROJECT_DIR' && \
+    PROCESS_GATE_TEST_TIMEOUT=30 PROCESS_GATE_CHECK_TIMEOUT=1 \
+    PROCESS_GATE_TYPECHECK_CMD='sleep 5' \
+    PROCESS_GATE_LINT_CMD='true' \
+    PROCESS_GATE_TEST_CMD='sleep 3' \
+    '$SCRIPT'"
+
+  # typecheck is killed at its own 1 s ceiling → 124 → hard fail.
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"typecheck:"*"exited 124"* ]] || { echo "$output"; false; }
+  # ...while the test command, well inside the raised test ceiling, is untouched.
+  [[ "$output" != *"tests:"*"exited"* ]] || { echo "$output"; false; }
+}

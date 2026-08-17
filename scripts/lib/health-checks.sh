@@ -231,6 +231,44 @@ hc_tooling_noninteractive_path() {
   return "$HC_OK"
 }
 
+# hc_resolve_python_tool <project> <tool>
+# Mirrors stop-verify's pinned-project precedence without executing the selected
+# tool. Direct .venv paths prevent a global shim from winning; Poetry and uv
+# are considered only when their corresponding lockfile is present.
+hc_resolve_python_tool() {
+  local proj="$1" tool="$2"
+
+  if [ -x "$proj/.venv/bin/$tool" ]; then
+    printf '%s' "$proj/.venv/bin/$tool"
+  elif [ -f "$proj/poetry.lock" ] && command -v poetry >/dev/null 2>&1; then
+    printf '%s run %s' "$(command -v poetry)" "$tool"
+  elif [ -f "$proj/uv.lock" ] && command -v uv >/dev/null 2>&1; then
+    printf '%s run %s' "$(command -v uv)" "$tool"
+  elif command -v "$tool" >/dev/null 2>&1; then
+    command -v "$tool"
+  fi
+}
+
+# hc_gate_interpreters <project>
+# Read-only interpreter diagnostics for stop-verify's Node/Python gates.
+# Missing tools are explicit but advisory, so unrelated inheritance checks still
+# run and retain their own verdict.
+hc_gate_interpreters() {
+  local proj="$1" node python mypy pytest
+  node="$(command -v node 2>/dev/null || true)"
+  python="$(hc_resolve_python_tool "$proj" python)"
+  mypy="$(hc_resolve_python_tool "$proj" mypy)"
+  pytest="$(hc_resolve_python_tool "$proj" pytest)"
+
+  [ -n "$node" ] || node="unavailable"
+  [ -n "$python" ] || python="unavailable"
+  [ -n "$mypy" ] || mypy="unavailable"
+  [ -n "$pytest" ] || pytest="unavailable"
+
+  echo "gate-interpreters: node=$node; python=$python; mypy=$mypy; pytest=$pytest"
+  return "$HC_OK"
+}
+
 # ===========================================================================
 # TIER 1 — per active project. Each takes the project dir as $1 and the
 # canonical clone path as $2 so the function can compute the expected target
@@ -1150,7 +1188,7 @@ hc_ui_screenshot_path() {
 # WHOLE merge gate incl. tests. Resolves the ACTIVE pre-push the way git itself
 # does, honoring core.hooksPath (mirrors resolve_prepush_target() in
 # lib/prepush-target.sh) so native-git-hooks projects (core.hooksPath=.githooks,
-# e.g. lume / clusterbid-console) are inspected at .githooks/pre-push instead of
+# e.g. Unity and polyglot-monorepo projects) are inspected at .githooks/pre-push instead of
 # being falsely WARNed:
 #   hp = git config --local core.hooksPath
 #   hp empty   -> .git/hooks/pre-push, BUT husky-classic also keeps the real gate

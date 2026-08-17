@@ -1,0 +1,5 @@
+{
+  "$schema": "https://trellis.local/schemas/trellis.project.schema.json",
+  "project_id": "my-project",
+  "schema_version": 1
+}

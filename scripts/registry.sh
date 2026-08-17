@@ -58,6 +58,17 @@ Annotate options:
                         every other key. It never creates a row: an unregistered
                         project is exit class 5.
 
+One metadata key is read by tooling rather than by people:
+
+  public_identity       `true` declares that this project's identifier is
+                        already public, and exempts it from the public-mirror
+                        identity guard. Set it only for a project whose name is
+                        the thing it publishes under — a personal site's own
+                        domain, which appears legitimately in a README link or
+                        maintainer byline. Absent or false means private, so the
+                        guard defaults closed and an unannotated row can never
+                        leak by omission.
+
 A legacy Notes cell may contain a literal pipe written as \|. One ambiguous row
 is rejected on its own, named by line and cell; a missing Active projects
 section or header fails the whole file.

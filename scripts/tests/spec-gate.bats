@@ -268,6 +268,43 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "supported test basenames do not count toward the gated diff" {
+  _config true 80 400
+  _write_lines src/legacy_test.js 100
+  _write_lines src/current.test.ts 100
+  _write_lines src/current.spec.ts 100
+  _write_lines scripts/current.bats 100
+  _write_lines Tests/InventoryTests.swift 100
+  _write_lines tests/test_inventory.py 100
+  _write_lines test/InventoryTest.kt 100
+  git checkout -q -b feat/test-basenames
+  git add -A && git commit -qm "test: supported conventions" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
+@test "test-like directories do not exclude production source files" {
+  _config true 80 400
+  local fixture n=1
+  for fixture in \
+    "legacy_test.js/production.js" \
+    "current.test.ts/production.ts" \
+    "current.spec.ts/production.ts" \
+    "InventoryTests.swift/Inventory.swift" \
+    "test_fixture.py/production.py" \
+    "InventoryTest.kt/Inventory.kt"
+  do
+    git checkout -q -b "feat/near-miss-$n"
+    _write_lines "$fixture" 100
+    git add -A && git commit -qm "feat: production near miss $n" >/dev/null
+    run _gate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"over floor"* ]]
+    git checkout -q main
+    n=$(( n + 1 ))
+  done
+}
+
 @test "over-floor + in-range triad + clarify.md (L3) -> pass" {
   _config true 80 400
   _write_lines src/f.js 200

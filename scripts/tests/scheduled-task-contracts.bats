@@ -211,7 +211,11 @@ materialize_task() {
   [[ "$output" == *"invalid task name"* ]] || { echo "$output"; false; }
 }
 
-@test "materialize retains unavailable rows and returns planned exit class 5" {
+# One offline volume must not take the rest of the fleet with it. `plan.md` §3.1
+# says bulk commands print a per-project result and do not claim all-or-nothing
+# fleet atomicity; before this contract landed, a single `unavailable` row drove
+# 19 of 22 materialized tasks to `planned-error` and every prompt halted on it.
+@test "an unavailable row is excluded per project and leaves the task ready" {
   local personal="$SANDBOX/personal/alpha"
   local root="$TRELLIS_HOME_FIX/tasks/personal/daily-project-digest"
   make_repo "$personal" alpha
@@ -219,11 +223,32 @@ materialize_task() {
   record_unavailable personal offline "$SANDBOX/missing/offline"
 
   materialize_task personal daily-project-digest
-  [ "$status" -eq 5 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -d "$root" ]
+  # The row stays visible in the snapshot — excluded from the run, not erased.
   [ "$(jq '[.entries[] | select(.availability == "unavailable")] | length' "$root/snapshot.json")" -eq 1 ]
-  [ "$(jq -r '.status' "$root/manifest.json")" = planned-error ]
-  [[ "$output" == *"required checkout unavailable for project: offline"* ]] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = ready ] || { cat "$root/manifest.json"; false; }
+  [ "$(jq -c '.requirements.excluded_rows' "$root/manifest.json")" = \
+    '[{"project_id":"offline","reason":"checkout unavailable in local registry snapshot"}]' ] ||
+    { jq -c '.requirements' "$root/manifest.json"; false; }
+  [ "$(jq -c '.requirements.planned_errors' "$root/manifest.json")" = '[]' ] ||
+    { jq -c '.requirements' "$root/manifest.json"; false; }
+  [[ "$output" == *"excluded row: offline: checkout unavailable"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"planned error"* ]] || { echo "$output"; false; }
+  # The available project is still a target, which is the whole point.
+  [ "$(jq '[.entries[] | select(.availability == "available")] | length' "$root/snapshot.json")" -eq 1 ]
+}
+
+# The reserved case: no row the task could act on at all. That invalidates the
+# whole run rather than one project, so it stays a planned error and exit 5.
+@test "a fleet with no usable checkout at all is still a planned error" {
+  local root="$TRELLIS_HOME_FIX/tasks/personal/daily-project-digest"
+  record_unavailable personal offline "$SANDBOX/missing/offline"
+
+  materialize_task personal daily-project-digest
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = planned-error ] || { cat "$root/manifest.json"; false; }
+  [[ "$output" == *"no eligible active checkout targets"* ]] || { echo "$output"; false; }
 }
 
 @test "AEO materialization refuses missing local URL and marker metadata" {
@@ -261,8 +286,9 @@ materialize_task() {
   register_repo personal alpha "$personal"
   record_unavailable personal offline "$SANDBOX/missing/offline"
   materialize_task personal daily-project-digest
-  [ "$status" -eq 5 ]
-  [[ "$output" == *"required checkout unavailable for project: offline"* ]] || { echo "$output"; false; }
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = ready ] || { cat "$root/manifest.json"; false; }
+  [[ "$output" == *"excluded row: offline: checkout unavailable"* ]] || { echo "$output"; false; }
 }
 
 @test "AEO all-blacklisted state is planned and never emits a compatibility triplet" {
@@ -372,9 +398,16 @@ materialize_task() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 @test "tracked scheduled task templates contain no machine-root leakage" {
+  # This guard used to name two real projects as extra leak tokens. That is a
+  # weaker check than it looks — it covers exactly the two names someone
+  # remembered to add — and the literals are themselves published, so the guard
+  # leaked what it existed to catch. Project-identifier leakage is now covered
+  # comprehensively by lint_mirror, which derives the token set from the
+  # machine-local registry and therefore tracks every project automatically.
+  # What stays here is the machine-root half, which is this test's stated scope.
   run bash -c '
     set -e
-    if grep -R -nE "/Users/|/(home)/|__TRELLIS_PATH__|registry\.private\.example|TGSC|Lume(App)?" \
+    if grep -R -nE "/Users/|/(home)/|__TRELLIS_PATH__|registry\.private\.example" \
       "$1/README.md" "$1"/*/prompt.md "$1"/*/targets.md "$1"/*/watchlist.md; then
       echo "unexpected machine-root leakage above" >&2
       exit 1
@@ -384,4 +417,24 @@ materialize_task() {
     [ ! -e "$1/watchlist.md" ]
   ' _ "$REPO/scheduled-tasks"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+# aeo-baseline is Tier 2 with its wrapper text checked in but no MCP
+# registration. audit-report-rollup derives its registered-schedule denominator
+# from README.md, so a row promoted to Tier 1 ahead of the actual registration
+# would make the rollup report missed runs for a task that never ran. Pin both
+# halves: the wrapper must be present, and the task must still read as pending.
+@test "AEO baseline ships a wrapper block and stays unregistered until an operator acts" {
+  local readme="$REPO/scheduled-tasks/README.md"
+  grep -q 'wrapper ready, awaiting registration' "$readme"
+  grep -q '`30 11 1 \* \*`' "$readme"
+  grep -q 'expected run count is 0' "$readme"
+  # Still parked. The single task catalogue replaced the old Tier 1 / Tier 2
+  # split, so the negative is now "the catalogue row still reads `drafted`"
+  # rather than "the row lives in the Tier 2 table". Scope it to the catalogue
+  # row itself: the ready-to-paste cron lives in a fenced example above, and a
+  # whole-file grep for the cadence would match that and never fail.
+  grep -q '^| `aeo-baseline` | drafted |' "$readme"
+  run grep -c '^| `aeo-baseline` | \(daily\|weekly\|weekdays\|monthly\|quarterly\) |' "$readme"
+  [ "$output" -eq 0 ]
 }

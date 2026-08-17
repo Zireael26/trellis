@@ -189,7 +189,14 @@ skill_size__resolve_identity() {
   while IFS="$(printf '\t')" read -r rank root; do
     [ -n "$root" ] || continue
     if [ -n "$found_rank" ] && [ "$rank" -gt "$found_rank" ]; then
-      break
+      # Drain rather than break. Breaking here closes the pipe while
+      # skill_size__discover_ranked_roots is still writing, so its printf takes
+      # EPIPE and bash prints "printf: write error: Broken pipe" to stderr. The
+      # resolved path stays correct, but any caller that merges stderr sees the
+      # noise appended to the answer. The race is scheduling-dependent, so it
+      # never reproduced on macOS and surfaced only on a CI runner. Skipping is
+      # equivalent: these rows rank below the winner and were discarded anyway.
+      continue
     fi
     declared="$(skill_size__declared_name "$root" 2>/dev/null || true)"
     if [ "${root##*/}" != "$name" ] && [ "$declared" != "$name" ]; then

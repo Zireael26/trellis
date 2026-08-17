@@ -8,7 +8,7 @@ negation told turbo to cache the *entire* `.next` tree — including `.next/cach
 which Next.js itself uses as a build cache and rewrites on every dev/build cycle.
 The two layers compounded: turbo archived a fresh copy of `.next` (cache and all)
 into `.turbo/cache` on each task run, and nothing ever evicted the old archives.
-On one project (`vericite`) this reached **148 GB accumulated over two days**
+On one project (`the RAG service`) this reached **148 GB accumulated over two days**
 before the disk pressure surfaced. The misconfiguration was fixed in place, but
 the incident exposed two structural gaps:
 

@@ -221,6 +221,22 @@ fi
 
 CHECKS_RUN=0
 
+# _se_resolve_python_tool <tool> — echo a command with pinned-project
+# precedence. A direct .venv path prevents a global tool shim from winning.
+_se_resolve_python_tool() {
+  local tool="$1"
+
+  if [ -x ".venv/bin/$tool" ]; then
+    printf '%s' ".venv/bin/$tool"
+  elif [ -f "poetry.lock" ] && command -v poetry >/dev/null 2>&1; then
+    printf 'poetry run %s' "$tool"
+  elif [ -f "uv.lock" ] && command -v uv >/dev/null 2>&1; then
+    printf 'uv run %s' "$tool"
+  elif command -v "$tool" >/dev/null 2>&1; then
+    command -v "$tool"
+  fi
+}
+
 # --- Step 2: Typecheck ---
 # TypeScript
 if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
@@ -232,18 +248,8 @@ if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
   fi
 fi
 
-# Python (mypy). Prefer the project's pinned environment: global shims run
-# outside it and can report phantom import/type errors for installed packages.
-MYPY_CMD=""
-if [ -x ".venv/bin/mypy" ]; then
-  MYPY_CMD=".venv/bin/mypy"
-elif command -v poetry >/dev/null 2>&1 && [ -f "poetry.lock" ]; then
-  MYPY_CMD="poetry run mypy"
-elif command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
-  MYPY_CMD="uv run python -m mypy"
-elif command -v mypy >/dev/null 2>&1; then
-  MYPY_CMD="mypy"
-fi
+# Python (mypy)
+MYPY_CMD="$(_se_resolve_python_tool mypy)"
 if [ -n "$MYPY_CMD" ]; then
   HAS_MYPY_CFG=0
   [ -f "mypy.ini" ] && HAS_MYPY_CFG=1
@@ -252,7 +258,7 @@ if [ -n "$MYPY_CMD" ]; then
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$($MYPY_CMD . 2>&1)
+    OUT=$(eval "$MYPY_CMD ." 2>&1)
     if [ $? -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "typecheck (mypy)" "$SLICED"
@@ -328,14 +334,11 @@ fi
 # Resolve Python's test runner before selecting a manifest branch so mixed
 # Python/Rust/Go repositories still fall through when pytest is unavailable.
 PYTEST_CMD=""
-if [ -x ".venv/bin/pytest" ]; then
-  PYTEST_CMD=".venv/bin/pytest --tb=short -q"
-elif command -v poetry >/dev/null 2>&1 && [ -f "poetry.lock" ]; then
-  PYTEST_CMD="poetry run pytest --tb=short -q"
-elif command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
-  PYTEST_CMD="uv run python -m pytest --tb=short -q"
-elif command -v pytest >/dev/null 2>&1; then
-  PYTEST_CMD="pytest --tb=short -q"
+if [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; then
+  PYTEST_CMD="$(_se_resolve_python_tool pytest)"
+  if [ -n "$PYTEST_CMD" ]; then
+    PYTEST_CMD="$PYTEST_CMD --tb=short -q"
+  fi
 fi
 
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
@@ -353,8 +356,7 @@ if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
       TEST_CMD="$_PM run test"
     fi
   fi
-elif { [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; } &&
-  [ -n "$PYTEST_CMD" ]; then
+elif [ -n "$PYTEST_CMD" ]; then
   TEST_CMD="$PYTEST_CMD"
 elif [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   TEST_CMD="cargo test --quiet"
