@@ -30,7 +30,9 @@ Detection: `check-bypass.sh` parses `git log --format=%h%n%P%n%s%n%b` for the ra
 |---|---|---|
 | Modified `.husky/*` to short-circuit (e.g., `exit 0` at top) | Disabled the gate | **fail** |
 | Removed `core.hooksPath` setting (for native-githooks projects) | Disabled the gate | **fail** |
-| `.claude/settings.json` hook entries removed without canonical `parent-hook-drift` clearance | Drift from canonical | **fail** |
+| Hook entries absent from both `.claude/settings.json` and `.claude/settings.local.json` (either file satisfies registration) without canonical `parent-hook-drift` clearance | Drift from canonical | **fail** |
+| An event key kept but its entries stripped (`"hooks": {"PreToolUse": []}`), in every settings file present | Registration in name only | **fail** |
+| Neither settings file present at all, on a project whose `.trellis.json` proves it is attached | Deleted the registration outright | **fail** |
 
 ## Allowed overrides
 

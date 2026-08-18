@@ -15,6 +15,7 @@ reference files. Projects copy the canonical set into their own
 | `skill-slash-guard.sh` | UserPromptExpansion (slash command) | new |
 | `reread-guard.sh` | PreToolUse (Edit/Write/MultiEdit) | new |
 | `post-edit-verify.sh` | PostToolUse (Edit/Write/MultiEdit) | upstream, extended |
+| `slop-tripwire.sh` | PostToolUse (Edit/Write/MultiEdit) | new |
 | `truncation-check.sh` | PostToolUse (Grep/Bash/Read) | upstream |
 | `track-read.sh` | PostToolUse (Read/Write/Edit/MultiEdit) | new |
 | `session-context.sh` | SessionStart (startup/resume) | new |

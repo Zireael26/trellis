@@ -47,6 +47,18 @@ EOF
   _stub check-security-diff.sh
   _stub check-analyze.sh
 
+  # Row 8 (Anti-slop) is not dispatched through run_gate: the aggregator reads its
+  # level off the first printed token so the row can render `n/a`, which no exit
+  # code carries. It also fails closed when the script is absent, so a stub is
+  # required here rather than optional — leaving it out makes every case in this
+  # file BLOCKED on a missing validator instead of on idx 5.
+  cat > "$STUB/scripts/check-slop.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "info Anti-slop: n/a — posture off or undeclared"
+exit 0
+EOF
+  chmod +x "$STUB/scripts/check-slop.sh"
+
   # Fixture git repo so common.sh range/project resolution does not error.
   PROJECT_DIR="$(mktemp -d)"
   (

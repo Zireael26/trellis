@@ -84,10 +84,36 @@ fi
 # scope for this gate — flagging here so future readers don't reinvent
 # an undetectable check.
 
-# 4. .claude/settings.json hooks block: present?
-if [ -f "$PROJECT_DIR/.claude/settings.json" ]; then
-  if ! grep -q '"hooks"' "$PROJECT_DIR/.claude/settings.json" 2>/dev/null; then
-    findings+=(".claude/settings.json: no \"hooks\" key found — Tier 1+2 hooks not registered")
+# 4. Claude hooks block: present in either settings file?
+# Registration counts from the tracked settings.json or the machine-local
+# settings.local.json — portable attachment keeps settings.json free of
+# machine paths and registers the hooks in the local file.
+# Stated assumption: `hooks` is a JSON object of event keys, as the Claude Code
+# schema defines it. An array-, null-, or false-valued `hooks`, and JSONC with
+# comments inside the block, all read as unregistered rather than being parsed.
+settings_seen=""
+hooks_registered=""
+for s in "$PROJECT_DIR/.claude/settings.json" "$PROJECT_DIR/.claude/settings.local.json"; do
+  [ -f "$s" ] || continue
+  settings_seen="yes"
+  # Whitespace-squashed via command substitution (not a pipe — `grep -q` would
+  # SIGPIPE `tr` and trip pipefail on a match). The pattern demands an event key
+  # AND a command entry after it, so neither `"hooks": {}` nor an event key
+  # stripped back to `"PreToolUse": []` counts as registered — stripping the
+  # entries and leaving the keys is the tampering shape this gate exists for.
+  squashed="$(tr -d '[:space:]' < "$s" 2>/dev/null || true)"
+  case "$squashed" in
+    *'"hooks":{"'*'"type":"command"'*) hooks_registered="yes" ;;
+  esac
+done
+if [ -z "$hooks_registered" ]; then
+  if [ -n "$settings_seen" ]; then
+    findings+=(".claude/settings.json / .claude/settings.local.json: no \"hooks\" event with a command entry in either — Tier 1+2 hooks not registered")
+    worst="fail"
+  elif [ -f "$PROJECT_DIR/.trellis.json" ]; then
+    # Deleting the settings pair is otherwise the cheapest bypass, so on a
+    # project the gate knows is attached, absence fails like an emptied block.
+    findings+=(".claude/settings.json / .claude/settings.local.json: neither file exists in a Trellis-attached project — Tier 1+2 hooks not registered")
     worst="fail"
   fi
 fi

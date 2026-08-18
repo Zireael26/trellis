@@ -275,7 +275,11 @@ EOF
   printf '#!/usr/bin/env bash\nexit 0\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/githooks/pre-push"
   chmod 755 "$PORTABLE_RELEASE_PAYLOAD/core-rules/githooks/pre-push"
-  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core spec-gate-core ui-verify-core; do
+  # Every lib the manifest declares as an EXPLICIT codex link source has to exist
+  # here: surface-plan treats a declared source as mandatory and exits 4 on the
+  # first one missing, which fails prepare_portable_attachment for the whole suite.
+  # This builder copies a hand-picked set, so a new manifest entry lands here too.
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core slop-patterns spec-gate-core ui-verify-core; do
     printf '#!/usr/bin/env bash\nexit 0\n' \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"
     chmod 755 "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"

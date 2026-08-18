@@ -37,6 +37,17 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/slop-tripwire.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking evidence doctrine..."
+          }
+        ]
+      },
+      {
         "matcher": "Grep|Bash|Read",
         "hooks": [
           {

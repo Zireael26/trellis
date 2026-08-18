@@ -175,6 +175,15 @@ the artifact list and from the managed exclude block, and detach never removes
 them. Diagnosis re-derives the same decision from the immutable manifest and
 the checkout instead of trusting the record.
 
+Legacy migration holds the same ownership floor with the weaker evidence it
+has, and each project-context leaf keeps the asymmetry of its own link rule. A
+regular-file root `AGENTS.md` is removed only when its bytes match the
+project's own `CLAUDE.md`; `.omp/AGENTS.md` is removed when they match that
+file or an eligible canonical rules source. Any other content is authored:
+migration leaves it in place, does not conflict over it, and names every
+left-alone path, because bytes materialized by a release the run cannot compare
+against are indistinguishable from a project's own document.
+
 A managed `info/exclude` block is powerless where a tracked `.gitignore`
 negation re-includes the same path, because `.gitignore` outranks
 `info/exclude`. Attach therefore refuses, before any mutation, when the winning

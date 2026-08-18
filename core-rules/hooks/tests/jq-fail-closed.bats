@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests P1.5 jq-missing fail-closed across all 20 jq-dependent hooks.
+# Tests P1.5 jq-missing fail-closed across all 22 jq-dependent hooks.
 
 load helpers
 
@@ -11,6 +11,7 @@ HOOKS=(
   "$HOOKS_DIR/post-edit-verify.sh"
   "$HOOKS_DIR/save-context-log.sh"
   "$HOOKS_DIR/session-context.sh"
+  "$HOOKS_DIR/slop-tripwire.sh"
   "$HOOKS_DIR/stop-verify.sh"
   "$HOOKS_DIR/truncation-check.sh"
   "$HOOKS_DIR/ui-verify.sh"
@@ -21,6 +22,7 @@ HOOKS=(
   "$CODEX_HOOKS_DIR/post-edit-verify.sh"
   "$CODEX_HOOKS_DIR/save-context-log.sh"
   "$CODEX_HOOKS_DIR/session-context.sh"
+  "$CODEX_HOOKS_DIR/slop-tripwire.sh"
   "$CODEX_HOOKS_DIR/stop-verify.sh"
   "$CODEX_HOOKS_DIR/truncation-check.sh"
   "$CODEX_HOOKS_DIR/ui-verify.sh"

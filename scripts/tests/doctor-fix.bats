@@ -942,7 +942,9 @@ EOF
   chmod 755 "$repo/core-rules/hooks/fixture.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
   chmod 755 "$repo/core-rules/githooks/pre-push"
-  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core spec-gate-core ui-verify-core; do
+  # Mirrors doctor.bats: every lib the manifest declares as an explicit codex link
+  # source is mandatory in the payload, so a new manifest entry lands here too.
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core slop-patterns spec-gate-core ui-verify-core; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/hooks/lib/$hook.sh"
     chmod 755 "$repo/core-rules/hooks/lib/$hook.sh"
   done

@@ -1,0 +1,32 @@
+# Anti-slop Python profile — ruff fragment: per-line pattern rules.
+#
+# Ownership split (plan 037 D3): ruff owns rules a linter can decide from the line in
+# front of it; mypy owns rules that need type flow. No rule is enabled in both
+# fragments. Read README.md § Ownership before adding to either set.
+#
+# This is a fragment, not a config. Dropping it into a repo root as `ruff.toml` would
+# shadow the project's own settings — merge it instead; README.md § Install has both
+# shapes (`ruff.toml` and `pyproject.toml`).
+
+[lint]
+# ANN401 — `Any` in an annotation: argument, return, `*args` or `**kwargs`. The
+#   escape-hatch type sitting in a contract, which is the pattern this profile exists
+#   for. Only ANN401 is selected, never the whole ANN family: ANN001/ANN2xx report
+#   missing annotations, which is `disallow_untyped_defs`' job in mypy-fragment.ini.
+# PGH004 — blanket `# noqa`. A suppression that names no code also silences every rule
+#   added to the file later. Its `# type: ignore` sibling PGH003 is deliberately
+#   absent: mypy's `ignore-without-code` owns that line, and both fire on the same
+#   column of the same line (measured — README.md § Ownership).
+extend-select = ["ANN401", "PGH004"]
+
+# Generated and vendored trees carry neither authorship nor a cleanup owner, so a
+# finding in them is never actionable. Test code is deliberately absent from this list:
+# both rules are precise enough to stay on there (a test double annotated `Any` is
+# still an untyped seam), and only mypy's `disallow_untyped_defs` needed a test
+# carve-out. The canonical carve-out list for the script lane lives in
+# `hooks/lib/slop-patterns.sh`; this repeats only the globs a linter config can express.
+[lint.per-file-ignores]
+"**/*_pb2.py" = ["ANN401", "PGH004"]
+"**/*.gen.py" = ["ANN401", "PGH004"]
+"**/migrations/**" = ["ANN401", "PGH004"]
+"**/vendor/**" = ["ANN401", "PGH004"]

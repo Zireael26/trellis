@@ -101,6 +101,17 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/slop-tripwire.sh",
+            "timeout": 5,
+            "statusMessage": "Checking evidence doctrine..."
+          }
+        ]
+      },
+      {
         "matcher": "Grep|Bash|Read",
         "hooks": [
           {

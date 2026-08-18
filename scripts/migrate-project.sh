@@ -21,6 +21,10 @@ migrate_err() {
   printf 'trellis migrate: %s\n' "$*" >&2
 }
 
+migrate_warn() {
+  printf 'trellis migrate: warning: %s\n' "$*" >&2
+}
+
 migrate_usage() {
   cat <<'EOF'
 Usage:
@@ -163,15 +167,30 @@ migrate_source_exists() {
 }
 
 migrate_regular_copy_owned() {
-  local rel="$1" path="$2" roots="$3" root source
+  local root="$1" rel="$2" path="$3" roots="$4" candidate source
   case "$rel" in
     .claude/rules/trellis.md|.agents/rules/trellis.md|\
     .claude/rules/se-core.md|.agents/rules/se-core.md) ;;
+    .omp/AGENTS.md)
+      # A materialized copy of the project's own rules is managed output, the
+      # same way the static link case treats a link to project CLAUDE.md.
+      source="$root/CLAUDE.md"
+      [ -f "$source" ] && [ ! -L "$source" ] && cmp -s "$path" "$source" && return 0
+      ;;
+    AGENTS.md)
+      # Root AGENTS.md mirrors its static-link rule exactly: only the project's
+      # own CLAUDE.md proves ownership. Canonical rules are never evidence
+      # here, so a project that authored AGENTS.md by copying the parent rules
+      # keeps it.
+      source="$root/CLAUDE.md"
+      [ -f "$source" ] && [ ! -L "$source" ] && cmp -s "$path" "$source" && return 0
+      return 1
+      ;;
     *) return 1 ;;
   esac
-  while IFS= read -r root; do
-    [ -n "$root" ] || continue
-    source="$root/CLAUDE.md"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    source="$candidate/CLAUDE.md"
     [ -f "$source" ] && [ ! -L "$source" ] && cmp -s "$path" "$source" && return 0
   done < "$roots"
   return 1
@@ -687,7 +706,18 @@ migrate_prepare() (
       }
       printf '%s\n' "$rel" >> "$actions"
     elif [ -f "$path" ]; then
-      migrate_regular_copy_owned "$rel" "$path" "$canonical_roots" || {
+      migrate_regular_copy_owned "$root" "$rel" "$path" "$canonical_roots" || {
+        case "$rel" in
+          # An authored AGENTS.md is project content, not managed output: leave
+          # it untouched instead of refusing the whole migration. Byte-equality
+          # against the compared roots is the only ownership evidence available,
+          # so output materialized by a third release reads as authored too —
+          # name every left-alone path so the residue is visible in the prepare
+          # output rather than discovered later.
+          .omp/AGENTS.md|AGENTS.md)
+            migrate_warn "left in place, ownership not provable: $rel"
+            continue ;;
+        esac
         migrate_err "divergent project-owned legacy candidate: $rel"
         return "$TRELLIS_EX_CONFLICT"
       }

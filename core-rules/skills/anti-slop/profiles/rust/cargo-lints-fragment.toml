@@ -1,0 +1,16 @@
+# Anti-slop Rust profile — a Cargo.toml `[lints]` fragment, not a whole manifest.
+# Merge into the crate's own Cargo.toml. In a workspace, put the table under
+# `[workspace.lints.clippy]` once and give every member `lints.workspace = true`.
+# Requires Rust 1.74+ (older toolchains ignore `[lints]` silently).
+#
+# Spec task: 037-anti-slop T10 (plan §4 file 12). Doctrine: core-rules/references/anti-slop.md
+
+[lints.clippy]
+# Discarded evidence: a panic replaces the error the callee already handed you.
+unwrap_used = "warn"
+# Discarded evidence: a panic message is a note to the reader, not error handling.
+expect_used = "warn"
+# Fabricated evidence: `as` truncates silently; `try_from` reports the failure.
+as_conversions = "warn"
+# Unaccounted escape hatch: every `unsafe` block states the invariant it relies on.
+undocumented_unsafe_blocks = "warn"

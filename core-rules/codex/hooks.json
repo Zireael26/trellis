@@ -37,6 +37,17 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/slop-tripwire.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking evidence doctrine..."
+          }
+        ]
+      },
+      {
         "matcher": "Grep|Bash|Read",
         "hooks": [
           {

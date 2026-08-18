@@ -101,6 +101,17 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/slop-tripwire.sh\"",
+            "timeout": 5,
+            "statusMessage": "Checking evidence doctrine..."
+          }
+        ]
+      },
+      {
         "matcher": "Grep|Bash|Read",
         "hooks": [
           {

@@ -312,6 +312,144 @@ EOF
   assert_git_metadata_unchanged "$head" "$index"
 }
 
+commit_project_fixture() {
+  git -C "$PROJECT" add -A
+  git -C "$PROJECT" -c user.name=fixture -c user.email=fixture@example.invalid \
+    commit -qm "$1"
+}
+
+@test "authored AGENTS.md files survive prepare and never enter the snapshot plan" {
+  local head index snapshot agents_before omp_before
+  prepare_exact_legacy_project
+  cat > "$PROJECT/AGENTS.md" <<'EOF'
+# Project directives
+
+Authored by the project owner; never Trellis output.
+EOF
+  printf '# authored OMP directives\n' > "$PROJECT/.omp/AGENTS.md"
+  agents_before="$(sha256_file "$PROJECT/AGENTS.md")"
+  omp_before="$(sha256_file "$PROJECT/.omp/AGENTS.md")"
+  commit_project_fixture 'authored harness directives'
+  head="$(git -C "$PROJECT" rev-parse HEAD)"
+  index="$(git -C "$PROJECT" write-tree)"
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$PROJECT/AGENTS.md" ] && [ ! -L "$PROJECT/AGENTS.md" ]
+  [ -f "$PROJECT/.omp/AGENTS.md" ] && [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$agents_before" ]
+  [ "$(sha256_file "$PROJECT/.omp/AGENTS.md")" = "$omp_before" ]
+  [[ "$output" == *"left in place, ownership not provable: AGENTS.md"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"left in place, ownership not provable: .omp/AGENTS.md"* ]] || { echo "$output"; false; }
+  snapshot="$(snapshot_from_output "$output")"
+  [ -n "$snapshot" ]
+  ! jq -e '[.entries[].path] | any(. == "AGENTS.md" or . == ".omp/AGENTS.md")' \
+    "$snapshot/manifest.json" >/dev/null
+  assert_exact_legacy_cleanup
+  assert_portable_manifest
+  assert_git_metadata_unchanged "$head" "$index"
+}
+
+# The removal rule is asymmetric by leaf: root AGENTS.md may only ever be a copy
+# of the project's own CLAUDE.md, exactly as its static link rule allows. A copy
+# of the canonical parent rules is an ownership claim migration cannot honour.
+@test "a root AGENTS.md copying the canonical parent rules is preserved and named" {
+  local head index snapshot before
+  prepare_exact_legacy_project
+  cp "$CANONICAL/core-rules/CLAUDE.md" "$PROJECT/AGENTS.md"
+  before="$(sha256_file "$PROJECT/AGENTS.md")"
+  commit_project_fixture 'root AGENTS.md copied from the parent rules'
+  head="$(git -C "$PROJECT" rev-parse HEAD)"
+  index="$(git -C "$PROJECT" write-tree)"
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$PROJECT/AGENTS.md" ] && [ ! -L "$PROJECT/AGENTS.md" ]
+  [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$before" ]
+  [[ "$output" == *"left in place, ownership not provable: AGENTS.md"* ]] || { echo "$output"; false; }
+  snapshot="$(snapshot_from_output "$output")"
+  [ -n "$snapshot" ]
+  ! jq -e '[.entries[].path] | any(. == "AGENTS.md")' "$snapshot/manifest.json" >/dev/null
+  assert_exact_legacy_cleanup
+  assert_git_metadata_unchanged "$head" "$index"
+}
+
+# Byte-equality against the compared roots decays: rules output materialized by
+# some third release matches neither, so it is left in place. The left-alone
+# path must still be named, or stale generated rules become an invisible no-op.
+@test "an .omp/AGENTS.md from an uncompared release is left in place and named" {
+  local head index before
+  prepare_exact_legacy_project
+  printf '# canonical Trellis rules (earlier release vintage)\n' > "$PROJECT/.omp/AGENTS.md"
+  before="$(sha256_file "$PROJECT/.omp/AGENTS.md")"
+  commit_project_fixture 'stale generated OMP context leaf'
+  head="$(git -C "$PROJECT" rev-parse HEAD)"
+  index="$(git -C "$PROJECT" write-tree)"
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$PROJECT/.omp/AGENTS.md" ] && [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  [ "$(sha256_file "$PROJECT/.omp/AGENTS.md")" = "$before" ]
+  [[ "$output" == *"left in place, ownership not provable: .omp/AGENTS.md"* ]] || { echo "$output"; false; }
+  assert_exact_legacy_cleanup
+  assert_git_metadata_unchanged "$head" "$index"
+}
+
+@test "AGENTS.md copies of project and legacy rules are still removed" {
+  local head index
+  prepare_exact_legacy_project
+  cp "$PROJECT/CLAUDE.md" "$PROJECT/AGENTS.md"
+  cp "$CANONICAL/core-rules/CLAUDE.md" "$PROJECT/.omp/AGENTS.md"
+  commit_project_fixture 'materialized rule copies'
+  head="$(git -C "$PROJECT" rev-parse HEAD)"
+  index="$(git -C "$PROJECT" write-tree)"
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$PROJECT/AGENTS.md" ]
+  [ ! -L "$PROJECT/AGENTS.md" ]
+  [ ! -e "$PROJECT/.omp/AGENTS.md" ]
+  [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  assert_exact_legacy_cleanup
+  assert_git_metadata_unchanged "$head" "$index"
+}
+
+@test "an ambiguous AGENTS.md symlink still conflicts without writes" {
+  local before custom
+  prepare_exact_legacy_project
+  custom="$SANDBOX/custom-agents"
+  mkdir -p "$custom"
+  printf '# unrelated rules\n' > "$custom/CLAUDE.md"
+  ln -s "$custom/CLAUDE.md" "$PROJECT/AGENTS.md"
+  before="$(project_tree_state "$PROJECT")"
+
+  run_prepare
+
+  [ "$status" -eq 3 ]
+  [ "$(project_tree_state "$PROJECT")" = "$before" ]
+  [ "$(readlink "$PROJECT/AGENTS.md")" = "$custom/CLAUDE.md" ]
+  [ ! -e "$PROJECT/.trellis.json" ]
+}
+
+@test "owned AGENTS.md symlinks are still removed" {
+  prepare_exact_legacy_project
+  ln -s "$PROJECT/CLAUDE.md" "$PROJECT/AGENTS.md"
+  ln -s "$CANONICAL/core-rules/CLAUDE.md" "$PROJECT/.omp/AGENTS.md"
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$PROJECT/AGENTS.md" ]
+  [ ! -L "$PROJECT/AGENTS.md" ]
+  [ ! -e "$PROJECT/.omp/AGENTS.md" ]
+  [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  assert_exact_legacy_cleanup
+}
+
 @test "prepare uses private snapshot storage under the requested home and is byte-idempotent" {
   local first_state head index snapshot
   prepare_exact_legacy_project

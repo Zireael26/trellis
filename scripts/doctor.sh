@@ -1625,6 +1625,10 @@ while IFS= read -r row; do
   fi
   run_check '  ' hc_portable_layout "$root" "$owner_state" "$project_id" || true
   layout="$HC_PORTABLE_LAYOUT"
+  # Anti-slop presence (spec 037): read-only, OK/INFO only — it reports whether a
+  # language profile config and a gate_profiles.anti_slop.posture exist, and never
+  # errors, so it stays out of $row_diagnostics_ok and out of the repair plan.
+  run_check '  ' hc_anti_slop_profile "$root" || true
   row_diagnostics_ok=false
   [ "$N_ERROR" -eq "$ROW_ERRORS_AT_START" ] && row_diagnostics_ok=true
   plan_safe_repair "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \

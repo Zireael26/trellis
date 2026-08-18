@@ -92,13 +92,15 @@ therefore never be able to wedge the turn — silence is safe.
 The shipped prompt is deliberately minimal (report findings with `severity` +
 `confidence`; narrow `critical`). This is the *reasoning* the reviewer — and a
 human doing PR review — should apply across the diff, folded from the
-`code-review-and-quality` five-axis framing:
+`code-review-and-quality` five-axis framing plus the evidence doctrine
+(`core-rules/references/anti-slop.md`):
 
 1. **Correctness** — does it do what it claims, including edge cases and error paths?
 2. **Readability** — will the next reader understand it without the author present?
 3. **Architecture** — does it fit existing patterns, or fork a second way to do one thing?
 4. **Security** — untrusted input, authz, secrets, injection (the `critical` class).
 5. **Performance** — only where it matters (hot path, N+1, unbounded growth) — not speculative.
+6. **Evidence** — does the diff fabricate, obscure, or discard type/contract evidence (escape-hatch types, unjustified casts, module mocks)?
 
 Two habits sharpen the pass: **review the tests first** (they encode intended
 behavior — a diff whose tests don't change when the requirement is inverted is

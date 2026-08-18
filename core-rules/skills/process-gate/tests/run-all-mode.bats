@@ -42,6 +42,20 @@ EOF
   _stub check-security-diff.sh STUB_RC_6
   _stub check-analyze.sh       STUB_RC_7
 
+  # Row 8 (Anti-slop) is NOT dispatched through run_gate — the aggregator reads
+  # its level off the first printed token so the row can render `n/a`, which no
+  # exit code carries. So its stub prints a level rather than only exiting, and
+  # STUB_LEVEL_8 drives it (default `info ... n/a`, the undeclared-posture row
+  # every project shows until it opts in). Leaving it out entirely made run-all
+  # invoke a nonexistent script in every test here, which is exactly the
+  # missing-validator case the aggregator now fails on.
+  cat > "$STUB/scripts/check-slop.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "${STUB_LEVEL_8:-info Anti-slop: n/a — posture off or undeclared}"
+exit "${STUB_RC_8:-0}"
+EOF
+  chmod +x "$STUB/scripts/check-slop.sh"
+
   # A fixture git repo so common.sh range/project resolution does not error.
   PROJECT_DIR="$(mktemp -d)"
   (
@@ -69,9 +83,9 @@ run_all() {
   run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=$mode"
 }
 
-# --- 8-gate render --------------------------------------------------------
+# --- 9-gate render --------------------------------------------------------
 
-@test "render: all 8 gate labels emitted (verdict loop), all-pass -> MERGEABLE 0" {
+@test "render: all 9 gate labels emitted (verdict loop), all-pass -> MERGEABLE 0" {
   run_all merge
   [ "$status" -eq 0 ]
   [[ "$output" == *"PR hygiene"* ]] || { echo "$output"; false; }
@@ -82,7 +96,35 @@ run_all() {
   [[ "$output" == *"Stack profile"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Security (diff)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Analyze"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Anti-slop"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: MERGEABLE"* ]]
+}
+
+# Row 8's level comes from the printed token, not the exit code — the one gate
+# whose renderer can produce `n/a`. Both halves are asserted, because a renderer
+# that ignored the token would still pass the label check above.
+@test "render: row 8 renders n/a from its printed level while the verdict stays MERGEABLE" {
+  run_all merge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+}
+
+@test "render: row 8 printing warn makes the verdict NEEDS CHANGES at rc 0" {
+  run bash -c "cd '$PROJECT_DIR' && STUB_LEVEL_8='warn Anti-slop (posture=advisory)' '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
+}
+
+# The aggregator's only fail-open hole, now closed: a leaf that predates row 9 has
+# no check-slop.sh, and a shell "no such file" error's first token is neither
+# pass/warn/fail — it used to fall through to `n/a` and read as a clean row.
+@test "render: a MISSING check-slop.sh fails the row, it does not render n/a" {
+  rm -f "$STUB/scripts/check-slop.sh"
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"validator not found"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
 }
 
 @test "render: findings loop also surfaces idx 6/7 labels when not MERGEABLE" {

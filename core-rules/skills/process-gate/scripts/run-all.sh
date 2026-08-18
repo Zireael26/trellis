@@ -29,10 +29,11 @@ PROJECT_DIR="$(pg_project_dir)"
 
 # Bash 3.2 compatibility: parallel arrays instead of associative arrays.
 # idx: 0 PR hygiene, 1 Secrets, 2 Bypass markers, 3 Tests & coverage,
-#      4 Docs discipline, 5 Stack profile, 6 Security (diff), 7 Analyze.
-LABELS=("PR hygiene" "Secrets" "Bypass markers" "Tests & coverage" "Docs discipline" "Stack profile" "Security (diff)" "Analyze")
-RESULTS=("" "" "" "" "" "" "" "")
-FINDINGS=("" "" "" "" "" "" "" "")
+#      4 Docs discipline, 5 Stack profile, 6 Security (diff), 7 Analyze,
+#      8 Anti-slop.
+LABELS=("PR hygiene" "Secrets" "Bypass markers" "Tests & coverage" "Docs discipline" "Stack profile" "Security (diff)" "Analyze" "Anti-slop")
+RESULTS=("" "" "" "" "" "" "" "" "")
+FINDINGS=("" "" "" "" "" "" "" "" "")
 
 set_result() {
   local idx="$1" status="$2" out="$3"
@@ -166,6 +167,33 @@ run_gate 6 "$SKILL_DIR/scripts/check-security-diff.sh"
 # Analyze (idx 7) — PR-shape (downgrades at push). Adapter never exits 1.
 run_gate 7 "$SKILL_DIR/scripts/check-analyze.sh"
 
+# Anti-slop (idx 8) — posture-driven from the project's
+# `gate_profiles.anti_slop.posture`. Set inline rather than via run_gate because
+# the row needs an `n/a` state and no exit code carries one: check-slop.sh's rc
+# says only whether it blocks (1 = posture `enforced` with findings), while its
+# first printed token carries the level. So an `advisory` project's findings
+# surface as ⚠️ warn — NEEDS CHANGES, never BLOCKED — and an undeclared or `off`
+# project renders ➖ n/a. Deliberately absent from the PR-shape downgrade set:
+# the only posture that can fail is one the project opted into.
+#
+# Existence is checked FIRST, and a missing script is a FAIL. Reading the level
+# off the first printed token means a shell "no such file" error falls through the
+# `*)` arm to `n/a` — so a project whose process-gate leaf predates row 9 would
+# report a clean n/a instead of a missing validator, the only gate in this
+# aggregator that fails open. Every run_gate gate lands a missing script in its
+# `*) status="fail"` arm; this one has to say so explicitly.
+if [ ! -f "$SKILL_DIR/scripts/check-slop.sh" ]; then
+  set_result 8 "fail" "fail Anti-slop: validator not found at scripts/check-slop.sh — this process-gate leaf predates gate row 9; re-run the skill rollout"
+else
+  slop_out="$(bash "$SKILL_DIR/scripts/check-slop.sh" --range="$RANGE" 2>&1)"
+  case "$(printf "%s\n" "$slop_out" | head -1 | awk '{print $1}')" in
+    pass) set_result 8 "pass" "$slop_out" ;;
+    warn) set_result 8 "warn" "$slop_out" ;;
+    fail) set_result 8 "fail" "$slop_out" ;;
+    *)    set_result 8 "n/a"  "$slop_out" ;;
+  esac
+fi
+
 # --- Render verdict --------------------------------------------------------
 glyph() {
   case "$1" in
@@ -186,14 +214,14 @@ for r in "${RESULTS[@]}"; do
 done
 
 printf "## process-gate verdict (mode=%s)\n\n" "$PG_MODE"
-for i in 0 1 2 3 4 5 6 7; do
+for i in 0 1 2 3 4 5 6 7 8; do
   printf "%-18s %s\n" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"
 done
 printf "\nOverall: %s\n\n" "$overall"
 
 if [ "$overall" != "MERGEABLE" ]; then
   printf "## Findings\n\n"
-  for i in 0 1 2 3 4 5 6 7; do
+  for i in 0 1 2 3 4 5 6 7 8; do
     case "${RESULTS[$i]}" in
       pass|n/a) ;;
       *) printf "### %s\n%s\n\n" "${LABELS[$i]}" "${FINDINGS[$i]}" ;;

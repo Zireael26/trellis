@@ -2339,3 +2339,109 @@ hc_portable_layout() {
       ;;
   esac
 }
+
+# ===========================================================================
+# ANTI-SLOP PRESENCE (spec 037-anti-slop, plan §4 file 17 — criterion C7).
+# ===========================================================================
+
+# hc_anti_slop_config_marker <project> <marker> <candidate-relpath...>
+# Prints the first root-level candidate that carries the literal marker; status 1
+# when none does. Root-level only, one grep per existing candidate: doctor sweeps
+# every registered row, so this stays O(configs) and never walks a tree.
+hc_anti_slop_config_marker() {
+  local proj="$1" marker="$2" f
+  shift 2
+  for f in "$@"; do
+    [ -f "$proj/$f" ] || continue
+    if grep -qF "$marker" "$proj/$f" 2>/dev/null; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# hc_anti_slop_profile <project>
+# READ-ONLY presence report for the anti-slop tier: is a language profile config
+# installed, and is `gate_profiles.anti_slop.posture` declared in .trellis.json.
+# Reports presence ONLY — it never repairs, never installs, and never returns
+# HC_ERROR/HC_WARN, so it cannot fail a row or move doctor's exit. v1 is the
+# advisory era (spec §4 non-goal: no blocking enforcement), so ABSENCE is HC_INFO,
+# not a warning: most projects have not been rolled out to yet and a warning per
+# row would be exactly the warning-fatigue the spec's failure persona names.
+# Only `present config + valid posture` is HC_OK.
+#
+# Detection keys off each profile's own greppable marker, because the profiles
+# ship as FRAGMENTS merged into a project's existing config (skills/anti-slop/
+# profiles/*/), so there is no Trellis-owned file to look for:
+#   oxlint — the vendored plugin's name in the project's Oxlint config
+#   ruff   — the ANN401 rule the Python profile's ruff fragment selects
+#   mypy   — the ignore-without-code error code its mypy fragment enables
+# A project that hand-rolled the same marker reads as installed; presence is the
+# claim, and this row is advisory, so that is the right side to err on.
+#
+# Marker strings AND candidate lists are the same three the two scripts this row
+# reports on resolve with (SLOP_OXLINT_PLUGIN / SLOP_*_CONFIGS in
+# core-rules/hooks/lib/slop-patterns.sh, consumed by check-slop.sh and
+# audit-slop.sh). Doctor cannot source that lib — it runs from the management
+# checkout against projects whose libs may not be synced yet — so the lists are
+# repeated here and have to be edited together, or this row claims "profile config
+# present" for a config the gate never looks at.
+#
+# Wired into doctor's PORTABLE per-project row loop only. Legacy compatibility
+# mode documents its read-only output as byte-identical to the pre-portable
+# doctor, and a diagnosed pre-cutover layout has no posture to report anyway.
+hc_anti_slop_profile() {
+  local proj="$1" manifest="$1/.trellis.json"
+  local found="" hit posture="" posture_note=""
+
+  if hit="$(hc_anti_slop_config_marker "$proj" 'anti-slop' \
+      oxlint.config.ts oxlint.config.mts oxlint.config.cts \
+      oxlint.config.js oxlint.config.mjs oxlint.config.cjs oxlint.config.json \
+      .oxlintrc.json)"; then
+    found="$found oxlint:$hit"
+  fi
+  if hit="$(hc_anti_slop_config_marker "$proj" 'ANN401' ruff.toml .ruff.toml pyproject.toml)"; then
+    found="$found ruff:$hit"
+  fi
+  if hit="$(hc_anti_slop_config_marker "$proj" 'ignore-without-code' \
+      mypy.ini .mypy.ini setup.cfg pyproject.toml)"; then
+    found="$found mypy:$hit"
+  fi
+  found="${found# }"
+
+  if [ ! -f "$manifest" ]; then
+    posture_note="no portable manifest to declare a posture in"
+  elif ! command -v jq >/dev/null 2>&1; then
+    posture_note="jq is unavailable, so the posture is undetermined"
+  elif ! posture="$(jq -r '.gate_profiles.anti_slop.posture // empty' "$manifest" 2>/dev/null)"; then
+    posture=""
+    posture_note="an unreadable .trellis.json leaves the posture undetermined"
+  fi
+  # The declared value is never echoed: it comes from a project file this reader
+  # does not require to be strict-clean, and the portable terminal-safety helper
+  # lives in a library legacy mode does not source. Naming the enum is enough.
+  case "$posture" in
+    off|advisory|enforced) ;;
+    '') [ -n "$posture_note" ] || posture_note="no gate_profiles.anti_slop.posture declared" ;;
+    *)
+      posture=""
+      posture_note="declared posture is not one of off|advisory|enforced"
+      ;;
+  esac
+
+  if [ -n "$found" ] && [ -n "$posture" ]; then
+    echo "anti-slop: profile config present ($found) + posture=$posture"
+    return "$HC_OK"
+  fi
+  if [ -n "$found" ]; then
+    echo "anti-slop: profile config present ($found) but $posture_note — the gate row stays n/a until a posture is set"
+    return "$HC_INFO"
+  fi
+  if [ -n "$posture" ]; then
+    echo "anti-slop: posture=$posture declared with no profile config installed — detection falls back to the shared pattern set"
+    return "$HC_INFO"
+  fi
+  echo "anti-slop: no profile config installed and $posture_note — not rolled out here (advisory era: absence is informational)"
+  return "$HC_INFO"
+}

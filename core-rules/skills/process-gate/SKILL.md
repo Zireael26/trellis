@@ -1,6 +1,6 @@
 ---
 name: process-gate
-description: Pre-PR enforcement gate for any registered Trellis project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks PR hygiene, secrets, bypass markers, tests and coverage, docs discipline, stack-specific gates, security diff, and analyze. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
+description: Pre-PR enforcement gate for any registered Trellis project. Use before opening a PR, as the first pass when reviewing someone else's PR, and whenever an agent is unsure whether a change is mergeable. Checks PR hygiene, secrets, bypass markers, tests and coverage, docs discipline, stack-specific gates, security diff, analyze, and anti-slop. Returns a single verdict block (pass/warn/fail per category, overall MERGEABLE/NEEDS CHANGES/BLOCKED). Mandatory before merging to `main`.
 ---
 
 # process-gate
@@ -24,7 +24,7 @@ When in doubt, those documents win. If a rule here contradicts either, fix the r
 
 ## Gate categories
 
-Eight canonical gates, all harness-agnostic. Each has a reference file, a validator, and a `pass / warn / fail` posture.
+Nine canonical gates, all harness-agnostic. Each has a reference file, a validator, and a `pass / warn / fail` posture.
 
 | # | Gate | Reference | Validator |
 |---|---|---|---|
@@ -36,6 +36,7 @@ Eight canonical gates, all harness-agnostic. Each has a reference file, a valida
 | 6 | Stack-specific gates (design tokens, a11y, forbidden phrases, etc.) | [`references/stack-profiles.md`](references/stack-profiles.md) | project-local — loaded from `local.config.sh` |
 | 7 | Security (diff) | [`../security-gate/SKILL.md`](../security-gate/SKILL.md) | [`../security-gate/scripts/run-diff.sh`](../security-gate/scripts/run-diff.sh) |
 | 8 | Analyze | [`../analyze/SKILL.md`](../analyze/SKILL.md) | orchestrated by [`scripts/run-all.sh`](scripts/run-all.sh) |
+| 9 | Anti-slop (evidence doctrine in added lines; opt-in per project) | [`references/anti-slop-gate.md`](references/anti-slop-gate.md) | [`scripts/check-slop.sh`](scripts/check-slop.sh) |
 
 ## Where this sits in the verification chain
 
@@ -43,7 +44,7 @@ The gate is the last of four checks on a change, not the only one. In order:
 **(1)** the `code-review-subagent` fires per edit-heavy turn against the diff
 (`core-rules/hooks.md`); **(2)** `execute` runs the same review core in-body per task,
 advisory, before each tick (`../execute/references/verification-step.md`);
-**(3)** this gate runs the eight categories pre-PR and emits the verdict; **(4)**
+**(3)** this gate runs the nine categories pre-PR and emits the verdict; **(4)**
 `pre-push` re-runs the security diff and the 006 spec gate at the git boundary. Each
 layer assumes the ones before it ran — if you are invoking this gate directly on a
 diff no reviewer has seen, say so in the verdict, because Gate 4 and Gate 7 are the
@@ -57,7 +58,7 @@ beside the harness symlink. Claude Code uses
 `<project>/.agents/skills/process-gate-local/local.config.sh`. If both exist,
 the active harness's config wins. This is where each project declares
 stack-specific commands, thresholds, and stack-profile validators that don't fit
-the canonical eight.
+the canonical nine.
 
 Minimal `local.config.sh`:
 
@@ -69,7 +70,7 @@ PROCESS_GATE_LINT_CMD="pnpm lint"             # used by check-tests.sh
 PROCESS_GATE_PR_SIZE_LIMIT=400                # warn threshold (default 400)
 PROCESS_GATE_PR_SIZE_HARD=800                 # fail threshold (default 800)
 
-# Stack-profile validators (run after the canonical eight).
+# Stack-profile validators (run after the canonical nine).
 PROCESS_GATE_STACK_VALIDATORS=(
   "scripts/check-tokens.sh"          # project-local, e.g. design-tokens guard
   "scripts/check-a11y.sh"            # project-local
@@ -85,7 +86,7 @@ If `local.config.sh` is missing the canonical scripts use sensible defaults and 
 
 When invoked, the skill:
 
-1. Reads each of the eight gate references so its advice reflects current rules (not stale training data).
+1. Reads each of the nine gate references so its advice reflects current rules (not stale training data).
 2. Sources `local.config.sh` if present.
 3. Inspects the working tree (or the diff range provided) and runs each validator in order.
 4. Emits a verdict section in this exact shape:
@@ -101,9 +102,14 @@ Docs discipline:   ✅ pass | ⚠️ warn | ❌ fail
 Stack profile:     ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
 Security (diff):   ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
 Analyze:           ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
+Anti-slop:         ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
 
 Overall: MERGEABLE | NEEDS CHANGES | BLOCKED
 ```
+
+`Anti-slop` renders `➖ n/a` in any project that has not declared
+`gate_profiles.anti_slop.posture` in its `.trellis.json` — which is every project
+until it opts in. It can only reach `❌ fail` at `posture: "enforced"`.
 
 5. For every non-pass row, includes a **Finding** block with what failed, where (`file:line` if locatable), and the exact fix.
 6. For every `⚠️ warn`, includes a **Justify or fix** note. Warnings can be accepted by a reviewer but the acceptance must be recorded in the PR description.
@@ -148,7 +154,7 @@ Some projects don't fit the web-default assumptions baked into the canonical scr
 - `PROCESS_GATE_STACK_PROFILE="native-other"` — generic native stack. Project supplies validators.
 - `PROCESS_GATE_STACK_PROFILE="n-a"` — explicitly opt out of stack profile (gate emits `➖ n/a` for the row). Use sparingly; document in project `gotchas.md`.
 
-The canonical eight gates apply regardless of stack profile.
+The canonical nine gates apply regardless of stack profile.
 
 ## Scope boundaries
 

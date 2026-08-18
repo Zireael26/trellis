@@ -42,6 +42,16 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, th
 - **Exit:** 2 on block, 0 otherwise. JSON decision takes precedence when present.
 - **Invariant:** must complete in <3s for a single-file edit. Anything slower belongs in tier 2.
 
+### slop-tripwire
+- **Event:** `PostToolUse` on `Edit`, `Write`, `MultiEdit`
+- **Scope:** the touched file's **added lines only** — `git diff HEAD` at `-U0` for a tracked file, the whole file when it is untracked (every line of a new file is an added line). One file's diff, never the repo. Extension filter `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.go`, `.rs`; other extensions and carved-out paths (test, generated, fixture, migration, vendored, lockfile globs) exit silently. Carve-outs match the **repo-relative** path, so a directory name above the work-tree root cannot silence a whole checkout.
+- **Patterns:** never inlined here — the pattern set and the carve-out globs come from `hooks/lib/slop-patterns.sh`, the single source shared with the anti-slop skill's `audit-slop.sh` and the process-gate `check-slop` row, so a tuned pattern lands in all three at once.
+- **Triggers:** an added line matches an evidence-doctrine pattern for its language (`as any`, `: Any` on a `def`, `interface{}` in a signature, `.unwrap()`, an unjustified `cast(`, a module-level mock) and carries no suppression — a `SAFETY:` comment or the language's own idiom — on that line or the added line before it.
+- **Return:** `{ "additionalContext": "slop-tripwire: <pattern> at <file>:<line> — evidence doctrine: core-rules/references/anti-slop.md" }`, one line per finding, capped at 5 with a `(+N more)` count when it caps.
+- **Exit:** 0 on every detection path — advisory only, never blocks, at any `gate_profiles.anti_slop.posture`; blocking on slop lives in the gate row alone. The shared jq check (`lib/deps.sh`) is the one non-zero exit, as in every other hook. A missing sibling lib is a **silent** exit 0, not the loud exit 1 the blocking hooks use: an unsynced `hooks/lib` would otherwise print a re-run-sync-hooks line on every edit of every file type. Absence surfaces where it is actionable instead — doctor's anti-slop presence row.
+- **Escape:** `SLOP_TRIPWIRE=off` short-circuits before anything else, jq included.
+- **Invariant:** O(diff of one file) — no repo walk, no linter, no network.
+
 ### truncation-check
 - **Event:** `PostToolUse` on `Grep`, `Bash`, `Read`
 - **Triggers:** tool result length ≥ 100,000 chars OR output ends with a `...truncated...` marker

@@ -1,0 +1,35 @@
+# Anti-slop Go profile — a golangci-lint fragment, not a whole config.
+# Merge into the project's own `.golangci.yml`; keep every linter it already enables.
+# Schema is golangci-lint v2 (`linters.settings`, forbidigo `pattern:`). On v1, the
+# settings move to top-level `linters-settings` and forbidigo's key is `p:`.
+#
+# Spec task: 037-anti-slop T10 (plan §4 file 12). Doctrine: core-rules/references/anti-slop.md
+version: "2"
+
+linters:
+  enable:
+    # Discarded evidence: a `.(T)` assertion with no `, ok` panics instead of reporting.
+    - forcetypeassert
+    # Discarded evidence: an unchecked error is a failure the caller never sees.
+    - errcheck
+    # Obscured evidence: runtime shape inspection where a named type belongs.
+    - forbidigo
+  settings:
+    errcheck:
+      # The assertion and blank-assignment forms are the ones agent output reaches for.
+      check-type-assertions: true
+      check-blank: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^reflect\.'
+          msg: "reflect reads the shape at runtime; name the type in the signature instead."
+        # UNVERIFIED (golangci-lint was not available when this fragment was
+        # authored, and there is no fleet Go project to dogfood it against):
+        # forbidigo matches identifiers in *expression*
+        # position, so the `any` in a parameter list may never be reached, and
+        # `interface{}` is an InterfaceType node rather than an ident — almost
+        # certainly not reached. Treat both rows as a hypothesis; README
+        # § Activation makes probing them step 1.
+        - pattern: '^any$'
+          msg: "`any` in a contract discards the evidence the caller already had."
