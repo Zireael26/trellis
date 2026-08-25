@@ -8,7 +8,7 @@
 # is not an edge case here, it is the pre-push gate itself
 # (`core-rules/githooks/pre-push`, `core-rules/husky/pre-push`), the two
 # `commit-msg` twins, `core-rules/husky/pre-commit`, `core-rules/githooks/post-checkout`,
-# the `trellis` CLI entrypoint, and `scripts/cmux-trellis-teams`. The
+# and the `trellis` CLI entrypoint. The
 # security-gate diff scanner then justified its own scope with the claim that
 # "the repository lints its whole shell tree at severity=warning"; the claim was
 # false for exactly the files with the most authority in the repository.
