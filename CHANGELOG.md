@@ -26,6 +26,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 - **GPTX-era custom agents.** `codex-worker`, `lane-worker`, `fable-advisor`, and `opus-advisor` are removed from canonical inheritance and active routing. OMP uses only its bundled agents; historical release notes remain below.
 - **Retired Codex worker integration.** The unaccepted `codex-worker`, fan-out/recipe preflight, handoff, and probe surfaces are removed; direct CLI, explicitly selected plugin commands, and plugin hook PATH health remain supported.
 - **Completed one-off workflow executors.** Five audit and Redis migration runners are removed after their plans retain the completed evidence.
+- **cmux tooling** (504 lines): `scripts/cmux-trellis-teams`, its bats suite, `scripts/rollout-omp-cmux.sh`, and `core-rules/templates/cmux.json.example`. The fleet runs Herdr + Ghostty. Historical references under this changelog are deliberately retained.
 
 ### Deferred
 

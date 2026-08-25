@@ -91,7 +91,7 @@ sandbox_list() {
   expected="core-rules/githooks/pre-push core-rules/githooks/commit-msg
 core-rules/githooks/post-checkout core-rules/husky/pre-push
 core-rules/husky/pre-commit core-rules/husky/commit-msg
-scripts/trellis scripts/cmux-trellis-teams"
+scripts/trellis"
   run bash -c "cd '$REPO_ROOT' && bash scripts/lint-shell-tree.sh --list"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
