@@ -65,6 +65,15 @@ scan() {
   [ "$output" -eq 0 ] || { echo "green.rs produced $output findings"; false; }
 }
 
+@test "java profile (live, pattern layer only): red fixture trips the pattern set, green fixture does not" {
+  run scan java red.java java
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ] || { echo "red.java produced no findings"; false; }
+  run scan java green.java java
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ] || { echo "green.java produced $output findings"; false; }
+}
+
 # A multi-line SAFETY invariant is the shape green.py:38 exposed. Asserting it
 # directly means the fixture can be rewritten without losing the guarantee.
 @test "a SAFETY invariant that wraps over several comment lines still suppresses" {

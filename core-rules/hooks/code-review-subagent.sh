@@ -10,6 +10,11 @@
 #   - Dispatches a code-review subagent against the diff; findings are advisory.
 #   - Blocks only on severity=critical returned by the subagent.
 #   - Budget: 60s soft cap.
+#   - OMP (TRELLIS_OMP=1): the reviewer ladder routes through
+#     lib/omp-reviewer.sh — operator override → TRELLIS_OMP_REVIEW_CMD → live
+#     non-Anthropic `omp -p` role-resolver route. The Claude/Codex `claude -p`
+#     rung 2 is never entered from an OMP stop; when no OMP route resolves, the
+#     lib degrades and the deterministic rung decides the verdict.
 #
 # Dependencies: jq (required), git (required for diff / skipped otherwise).
 #
@@ -224,7 +229,19 @@ REVIEW_PAYLOAD=$(jq -nc \
 # `claude` stderr unsuppressed so a failing reviewer is visible; silencing fd 2
 # on the caller side would re-introduce that documented mistake. stdout (the one
 # findings line) is what we capture. `|| true` so a nonzero ladder never aborts.
-FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$HOOK_DIR/lib/code-reviewer.sh" || true)
+#
+# OMP no-Anthropic guarantee (hooks.md: OMP owns its stop event): under OMP
+# (TRELLIS_OMP=1, exported by core-rules/omp/hooks/pre/trellis.ts) the ladder
+# goes to lib/omp-reviewer.sh instead — operator override →
+# TRELLIS_OMP_REVIEW_CMD → live non-Anthropic `omp -p` role-resolver route — so
+# the Claude/Codex `claude -p` rung 2 is unreachable from an OMP stop. Same
+# stdin contract, same one-findings-line output, same fail-open behavior.
+if [ "${TRELLIS_OMP:-}" = "1" ]; then
+  REVIEWER_LIB="$HOOK_DIR/lib/omp-reviewer.sh"
+else
+  REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
+fi
+FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$REVIEWER_LIB" || true)
 
 if [ -n "$FINDINGS" ]; then
   CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)

@@ -1,0 +1,74 @@
+stage	seconds
+shellcheck (CI scope, severity=warning)	25
+POSIX bootstrap prologues	1
+AEO contract, static, and entrypoint	2
+conformance-check	15
+hooks (claude + codex)	105
+skill gates	59
+recipe routing lint	0
+bats scripts/tests/attach-project.bats	519
+bats scripts/tests/attachment.bats	83
+bats scripts/tests/attachment-contracts-integration.bats	316
+bats scripts/tests/blacklist-parser.bats	5
+bats scripts/tests/code-reviewer-parity.bats	0
+bats scripts/tests/codex-effort-preflight.bats	3
+bats scripts/tests/codex-hooks-enabled.bats	1
+bats scripts/tests/conductor-ref-refresh.bats	1
+bats scripts/tests/conductor-spec-inventory.bats	4
+bats scripts/tests/config-load.bats	8
+bats scripts/tests/configure.bats	5
+bats scripts/tests/dep-vulnerabilities-parser.bats	0
+bats scripts/tests/detach-project.bats	616
+bats scripts/tests/digest-adopt.bats	1
+bats scripts/tests/disk-janitor.bats	107
+bats scripts/tests/disk-janitor-apply.bats	320
+bats scripts/tests/disk-janitor-lib.bats	23
+bats scripts/tests/doctor.bats	1842
+bats scripts/tests/doctor-fix.bats	373
+bats scripts/tests/doctor-turbo-outputs.bats	9
+bats scripts/tests/fleet-dependencies.bats	60
+bats scripts/tests/herdr-task-routing.bats	2
+bats scripts/tests/hook-inventory.bats	1
+bats scripts/tests/hook-parity.bats	1
+bats scripts/tests/install-disk-janitor-launchd.bats	5
+bats scripts/tests/launcher-remote-transport.bats	1
+bats scripts/tests/lint-recipe-routing.bats	0
+bats scripts/tests/local-registry.bats	72
+bats scripts/tests/managed-dispatcher-env.bats	3
+bats scripts/tests/migrate-local-fleets.bats	25
+bats scripts/tests/mirror-lint.bats	3
+bats scripts/tests/missing-leaf.bats	117
+bats scripts/tests/multi-machine-portability.bats	48
+bats scripts/tests/non-trellis-inert.bats	10
+bats scripts/tests/onboard-project.bats	3
+bats scripts/tests/orchestrate-meta-mirror.bats	0
+bats scripts/tests/orchestrate-recipe-followups.bats	1
+bats scripts/tests/portable-home-registry-release.bats	51
+bats scripts/tests/portable-policy.bats	2
+bats scripts/tests/post-checkout-hook.bats	108
+bats scripts/tests/release-snapshot-predicate.bats	0
+bats scripts/tests/release-store.bats	1112
+bats scripts/tests/rollout-hooks.bats	11
+bats scripts/tests/rollout-portable.bats	432
+bats scripts/tests/run-evals-check.bats	14
+bats scripts/tests/run-tests-local.bats	2
+bats scripts/tests/schedule-freshness.bats	0
+bats scripts/tests/scheduled-task-contracts.bats	228
+bats scripts/tests/seed-inheritance-symlinks.bats	177
+bats scripts/tests/setup-runbooks.bats	456
+bats scripts/tests/shared-infra.bats	3
+bats scripts/tests/shell-lint-tree.bats	2
+bats scripts/tests/skill-size.bats	3
+bats scripts/tests/spec-gate.bats	17
+bats scripts/tests/suite-coverage.bats	3
+bats scripts/tests/surface-plan.bats	34
+bats scripts/tests/sync-coverage.bats	0
+bats scripts/tests/sync-hooks-settings.bats	1039
+bats scripts/tests/sync-merge-gate.bats	736
+bats scripts/tests/sync-to-template-dry-run.bats	36
+bats scripts/tests/test-health-launchd.bats	5
+bats scripts/tests/trellis-home.bats	2
+bats scripts/tests/trellis-launcher.bats	27
+bats scripts/tests/upgrade-semver.bats	2
+bats scripts/tests/workflow-stage-integrity.bats	3
+bats scripts/tests/worktree-wrapper.bats	72

@@ -83,6 +83,28 @@ LOOKUP="$(mktemp 2>/dev/null || mktemp -t check-secrets)"
 # shellcheck disable=SC2154  # `rc` is assigned inside the trap, which shellcheck cannot see
 trap 'rc=$?; rm -f "$LOOKUP"; exit "$rc"' EXIT
 
+# A FAILED diff and an empty diff are different facts. Discarding stderr and
+# `|| true` made them identical: an unresolvable range or a misrouted repository
+# produced an empty LOOKUP, the pattern scan below was skipped entirely, and the
+# gate reported `Secrets: pass` having scanned nothing. Note `git -C`/GIT_DIR
+# routing makes misdirection real, not hypothetical. Capture the status first.
+_cs_diff_err="$(mktemp 2>/dev/null || mktemp -t check-secrets-err)"
+# `if !` rather than a bare call: under `set -e` a failing git aborts the script
+# before the diagnostic below can run, which fails closed but says nothing.
+# `|| _cs_diff_rc=$?` rather than `if ! ...; then _cs_diff_rc=$?`: inside the
+# then-branch of `if !`, `$?` is the negation's status (0), not git's.
+_cs_diff_rc=0
+git diff --no-color --unified=0 "$RANGE" 2>"$_cs_diff_err" > /dev/null || _cs_diff_rc=$?
+if [ "$_cs_diff_rc" -ne 0 ]; then
+  printf 'check-secrets: could not resolve the diff for range %s (git exit %s) — refusing to report a verdict\n' \
+    "$RANGE" "$_cs_diff_rc" >&2
+  sed 's/^/check-secrets: git: /' "$_cs_diff_err" >&2
+  rm -f "$_cs_diff_err"
+  pg_log fail "Secrets (range=$RANGE): diff unresolvable; scan did not run"
+  exit 1
+fi
+rm -f "$_cs_diff_err"
+
 git diff --no-color --unified=0 "$RANGE" 2>/dev/null \
   | awk 'BEGIN{file=""; line=0} \
       /^\+\+\+ b\// {file=substr($0,7); next} \

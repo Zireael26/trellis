@@ -1,5 +1,4 @@
 {
-  "effortLevel": "xhigh",
   "permissions": {
     "deny": [
       "Read(./node_modules/**)",
@@ -49,6 +48,12 @@
             "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/block-destructive.sh\"",
             "timeout": 5,
             "statusMessage": "Checking command safety..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/pr-gate-shiftleft.sh\"",
+            "timeout": 120,
+            "statusMessage": "Running PR process-gate pre-flight..."
           }
         ]
       },
@@ -132,6 +137,17 @@
             "statusMessage": "Recording reads..."
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/wiki-skill-suggest.sh\"",
+            "timeout": 5,
+            "statusMessage": "Suggesting wiki maintenance..."
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -208,6 +224,12 @@
             "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/propose-rules.sh\"",
             "timeout": 60,
             "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/primer-capture-nudge.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking primer coverage..."
           },
           {
             "type": "command",

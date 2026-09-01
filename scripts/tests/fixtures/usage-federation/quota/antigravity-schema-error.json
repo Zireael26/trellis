@@ -1,0 +1,40 @@
+{
+  "groups": [
+    {
+      "buckets": [
+        {
+          "bucketId": "gemini-5h",
+          "remainingFraction": {
+            "value": 0.8
+          },
+          "resetTime": "2026-08-23T15:00:00Z"
+        },
+        {
+          "bucketId": "gemini-weekly",
+          "remainingFraction": {
+            "value": 0.74
+          },
+          "resetTime": "2026-08-30T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "buckets": [
+        {
+          "bucketId": "3p-5h",
+          "remainingFraction": {
+            "value": 0.9
+          },
+          "resetTime": "2026-08-23T15:00:00Z"
+        },
+        {
+          "bucketId": "3p-weekly",
+          "remainingFraction": {
+            "value": 0.85
+          },
+          "resetTime": "2026-08-30T12:00:00Z"
+        }
+      ]
+    }
+  ]
+}

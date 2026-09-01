@@ -1,0 +1,532 @@
+{
+  "scenario": "dispatch_reconciliation_matrix",
+  "schema_version": 4,
+  "description": "Synthetic schema-v4 requested tuples, binding resolutions straddling the 600-second reconciliation boundary, and passive outcomes with model_fallback true/false/null. The d004 receipt is requested at 11:49:59Z so 11:59:58Z, 11:59:59Z, and 12:00:00Z are exactly 599s, 600s, and 601s later. All identities are synthetic; timestamps are fixed RFC3339-Z with paired epoch microseconds.",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-26T12:00:00Z",
+      "now_us": 1787745600000000
+    },
+    "receipts": [
+      {
+        "case": "match",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d001",
+        "requested_at": "2026-08-26T11:50:00Z",
+        "requested_at_us": 1787745000000000,
+        "worktree": "/synthetic/worktrees/match",
+        "unit": "U07-match",
+        "agent": "ox-alpha",
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-5.6-luna:max",
+        "effort": "max",
+        "pane_id": "w1:pA",
+        "name": "match-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "fallback_promoted",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d002",
+        "requested_at": "2026-08-26T11:50:01Z",
+        "requested_at_us": 1787745001000000,
+        "worktree": "/synthetic/worktrees/fallback",
+        "unit": null,
+        "agent": "ox-alpha",
+        "provider": "nous-portal",
+        "model": "nous-portal/stealth/ox-alpha",
+        "effort": null,
+        "pane_id": "w1:pB",
+        "name": "fallback-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "mismatch",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d003",
+        "requested_at": "2026-08-26T11:50:02Z",
+        "requested_at_us": 1787745002000000,
+        "worktree": "/synthetic/worktrees/mismatch",
+        "unit": "U07-mismatch",
+        "agent": "luna",
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-5.6-luna:max",
+        "effort": "max",
+        "pane_id": "w1:pC",
+        "name": "mismatch-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "dispatched_unobserved_pending",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d004",
+        "requested_at": "2026-08-26T11:49:59Z",
+        "requested_at_us": 1787744999000000,
+        "worktree": "/synthetic/worktrees/unobserved",
+        "unit": null,
+        "agent": null,
+        "provider": "xai-oauth",
+        "model": "xai-oauth/grok-4.6:xhigh",
+        "effort": "xhigh",
+        "pane_id": "w2:pD",
+        "name": "unobserved-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "stale_unobserved_at_boundary",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d005",
+        "requested_at": "2026-08-26T11:49:59Z",
+        "requested_at_us": 1787744999000000,
+        "worktree": "/synthetic/worktrees/stale-unobserved",
+        "unit": "U07-stale",
+        "agent": null,
+        "provider": null,
+        "model": "opencode-go/deepseek-v4-flash",
+        "effort": null,
+        "pane_id": "w2:pE",
+        "name": "stale-unobserved-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "session_path_bound_never_bound",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d006",
+        "requested_at": "2026-08-26T11:56:00Z",
+        "requested_at_us": 1787745360000000,
+        "worktree": "/synthetic/worktrees/path-bound",
+        "unit": null,
+        "agent": null,
+        "provider": "google-antigravity",
+        "model": "google-antigravity/gemini-3.7-flash:high",
+        "effort": "high",
+        "pane_id": "w2:pF",
+        "name": "path-bound-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      {
+        "case": "stale_joined_observation",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d007",
+        "requested_at": "2026-08-26T11:40:00Z",
+        "requested_at_us": 1787744400000000,
+        "worktree": "/synthetic/worktrees/stale-joined",
+        "unit": null,
+        "agent": null,
+        "provider": "meta",
+        "model": "meta/fixture-model",
+        "effort": null,
+        "pane_id": "w3:pG",
+        "name": "stale-joined-dispatch",
+        "request_source": "foreman-start",
+        "harness": "omp"
+      }
+    ],
+    "bindings": [
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d001",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:50:05Z",
+        "bound_at_us": 1787745005000000,
+        "session_canonical_path": "/synthetic/sessions/match/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e001"
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d002",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:50:06Z",
+        "bound_at_us": 1787745006000000,
+        "session_canonical_path": "/synthetic/sessions/fallback/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e002"
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d003",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:50:07Z",
+        "bound_at_us": 1787745007000000,
+        "session_canonical_path": "/synthetic/sessions/mismatch/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e003"
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d004",
+        "resolution": "pending",
+        "bound_at": null,
+        "bound_at_us": null,
+        "session_canonical_path": null,
+        "session_id": null
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d005",
+        "resolution": "unresolved",
+        "bound_at": "2026-08-26T11:50:09Z",
+        "bound_at_us": 1787745009000000,
+        "session_canonical_path": null,
+        "session_id": null
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d006",
+        "resolution": "session_path_bound",
+        "bound_at": "2026-08-26T11:56:05Z",
+        "bound_at_us": 1787745365000000,
+        "session_canonical_path": "/synthetic/sessions/never-ingested/worker.jsonl",
+        "session_id": null
+      },
+      {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d007",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:40:05Z",
+        "bound_at_us": 1787744405000000,
+        "session_canonical_path": "/synthetic/sessions/stale-joined/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e007"
+      }
+    ],
+    "events": [
+      {
+        "event_id": "00000000-0000-4000-8000-00000000e001:msg-001",
+        "occurred_at": "2026-08-26T11:54:30Z",
+        "occurred_at_us": 1787745270000000,
+        "session_id": "00000000-0000-4000-8000-00000000e001",
+        "message_id": "msg-001",
+        "project_id": "match-project",
+        "project_path": "/synthetic/projects/match-project",
+        "attribution_source": "session.cwd_basename",
+        "provider": "openai-codex",
+        "route": "openai-responses",
+        "model": "openai-codex/gpt-5.6-luna:max",
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "cost_nanos": null,
+        "cost_kind": "unreported",
+        "cost_reason_code": "absent_cost"
+      },
+      {
+        "event_id": "00000000-0000-4000-8000-00000000e002:msg-001",
+        "occurred_at": "2026-08-26T11:54:31Z",
+        "occurred_at_us": 1787745271000000,
+        "session_id": "00000000-0000-4000-8000-00000000e002",
+        "message_id": "msg-001",
+        "project_id": "fallback-project",
+        "project_path": "/synthetic/projects/fallback-project",
+        "attribution_source": "session.cwd_basename",
+        "provider": "nous-portal",
+        "route": "openai-responses",
+        "model": "nous-portal/stealth/ox-alpha-free",
+        "input_tokens": 12,
+        "output_tokens": 6,
+        "cost_nanos": null,
+        "cost_kind": "unreported",
+        "cost_reason_code": "absent_cost"
+      },
+      {
+        "event_id": "00000000-0000-4000-8000-00000000e003:msg-001",
+        "occurred_at": "2026-08-26T11:54:32Z",
+        "occurred_at_us": 1787745272000000,
+        "session_id": "00000000-0000-4000-8000-00000000e003",
+        "message_id": "msg-001",
+        "project_id": "mismatch-project",
+        "project_path": "/synthetic/projects/mismatch-project",
+        "attribution_source": "session.cwd_basename",
+        "provider": "openai-codex",
+        "route": "openai-responses",
+        "model": "openai-codex/gpt-5.6-luna",
+        "input_tokens": 14,
+        "output_tokens": 8,
+        "cost_nanos": null,
+        "cost_kind": "unreported",
+        "cost_reason_code": "absent_cost"
+      },
+      {
+        "event_id": "00000000-0000-4000-8000-00000000f001:orphan-msg",
+        "occurred_at": "2026-08-26T11:54:40Z",
+        "occurred_at_us": 1787745280000000,
+        "session_id": "00000000-0000-4000-8000-00000000f001",
+        "message_id": "orphan-msg",
+        "project_id": "orphan-project",
+        "attribution_source": "session.cwd_basename",
+        "provider": "meta",
+        "route": "meta-api",
+        "model": "meta/fixture-model",
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "cost_nanos": null,
+        "cost_kind": "unreported",
+        "cost_reason_code": "absent_cost"
+      },
+      {
+        "event_id": "00000000-0000-4000-8000-00000000e007:old-msg",
+        "occurred_at": "2026-08-26T11:48:30Z",
+        "occurred_at_us": 1787744910000000,
+        "session_id": "00000000-0000-4000-8000-00000000e007",
+        "message_id": "old-msg",
+        "project_id": "stale-joined-project",
+        "project_path": "/synthetic/projects/stale-joined-project",
+        "attribution_source": "session.cwd_basename",
+        "provider": "meta",
+        "route": "meta-api",
+        "model": "meta/fixture-model",
+        "input_tokens": 16,
+        "output_tokens": 9,
+        "cost_nanos": null,
+        "cost_kind": "unreported",
+        "cost_reason_code": "absent_cost"
+      }
+    ],
+    "outcomes": [
+      {
+        "outcome_id": "00000000-0000-4000-8000-00000000e001:msg-001:serving",
+        "lane_id": "openai-codex",
+        "status": "success",
+        "observed_at": "2026-08-26T11:54:30Z",
+        "observed_at_us": 1787745270000000,
+        "route": "openai-responses",
+        "model": "openai-codex/gpt-5.6-luna:max",
+        "reason_code": null,
+        "http_status": null,
+        "model_fallback": null
+      },
+      {
+        "outcome_id": "00000000-0000-4000-8000-00000000e002:msg-001:serving",
+        "lane_id": "nous-portal",
+        "status": "success",
+        "observed_at": "2026-08-26T11:54:31Z",
+        "observed_at_us": 1787745271000000,
+        "route": "openai-responses",
+        "model": "nous-portal/stealth/ox-alpha-free",
+        "reason_code": null,
+        "http_status": null,
+        "model_fallback": true
+      },
+      {
+        "outcome_id": "00000000-0000-4000-8000-00000000f001:orphan-msg:serving",
+        "lane_id": "meta",
+        "status": "success",
+        "observed_at": "2026-08-26T11:54:40Z",
+        "observed_at_us": 1787745280000000,
+        "route": "meta-api",
+        "model": "meta/fixture-model",
+        "reason_code": null,
+        "http_status": null,
+        "model_fallback": false
+      }
+    ],
+    "boundary_cases": [
+      {
+        "case": "before_boundary_599s",
+        "now": "2026-08-26T11:59:58Z",
+        "now_us": 1787745598000000,
+        "expect_state": "dispatched_unobserved",
+        "subject": "00000000-0000-4000-8000-00000000d004"
+      },
+      {
+        "case": "exact_boundary_600s",
+        "now": "2026-08-26T11:59:59Z",
+        "now_us": 1787745599000000,
+        "expect_state": "stale",
+        "subject": "00000000-0000-4000-8000-00000000d004"
+      },
+      {
+        "case": "beyond_boundary_601s",
+        "now": "2026-08-26T12:00:00Z",
+        "now_us": 1787745600000000,
+        "expect_state": "stale",
+        "subject": "00000000-0000-4000-8000-00000000d004"
+      }
+    ]
+  },
+  "expected": {
+    "freshness_seconds": 600,
+    "cases": [
+      {
+        "case": "full_matrix_as_of_clock_now",
+        "as_of": "2026-08-26T12:00:00Z",
+        "histogram": {
+          "match": 1,
+          "fallback_promoted": 1,
+          "mismatch": 1,
+          "dispatched_unobserved": 1,
+          "unreported_requested": 1,
+          "stale": 3
+        }
+      },
+      {
+        "case": "pre_boundary_as_of",
+        "as_of": "2026-08-26T11:59:58Z",
+        "histogram": {
+          "match": 1,
+          "fallback_promoted": 1,
+          "mismatch": 1,
+          "dispatched_unobserved": 3,
+          "unreported_requested": 1,
+          "stale": 1
+        }
+      }
+    ],
+    "state_subjects": [
+      {"state": "match", "dispatch_id": "00000000-0000-4000-8000-00000000d001"},
+      {"state": "fallback_promoted", "dispatch_id": "00000000-0000-4000-8000-00000000d002"},
+      {"state": "mismatch", "dispatch_id": "00000000-0000-4000-8000-00000000d003"},
+      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d004"},
+      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d005"},
+      {"state": "dispatched_unobserved", "dispatch_id": "00000000-0000-4000-8000-00000000d006"},
+      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d007"},
+      {"state": "unreported_requested", "session_id": "00000000-0000-4000-8000-00000000f001"}
+    ],
+    "tie_break_case": {
+      "note": "Two same-instant events in session e008; max event_id wins and its linked outcome decides the state. Requested model differs only by effort suffix while persisted fallback is explicitly true, so the authoritative pick must classify fallback_promoted, not mismatch.",
+      "receipt": {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d008",
+        "requested_at": "2026-08-26T11:52:00Z",
+        "requested_at_us": 1787745120000000,
+        "worktree": "/synthetic/worktrees/tiebreak",
+        "unit": null,
+        "agent": null,
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-5.6-luna",
+        "effort": null,
+        "pane_id": null,
+        "name": null,
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      "binding": {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d008",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:52:05Z",
+        "bound_at_us": 1787745125000000,
+        "session_canonical_path": "/synthetic/sessions/tiebreak/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e008"
+      },
+      "events": [
+        {
+          "event_id": "00000000-0000-4000-8000-00000000e008:zzz-authoritative",
+          "occurred_at": "2026-08-26T11:53:00Z",
+          "occurred_at_us": 1787745180000000,
+          "session_id": "00000000-0000-4000-8000-00000000e008",
+          "message_id": "zzz-authoritative",
+          "project_id": "tiebreak-project",
+          "project_path": "/synthetic/projects/tiebreak-project",
+          "attribution_source": "session.cwd_basename",
+          "provider": "openai-codex",
+          "route": "openai-responses",
+          "model": "openai-codex/gpt-5.6-luna:max",
+          "input_tokens": 30,
+          "output_tokens": 15,
+          "cost_nanos": null,
+          "cost_kind": "unreported",
+          "cost_reason_code": "absent_cost"
+        },
+        {
+          "event_id": "00000000-0000-4000-8000-00000000e008:aaa-superseded",
+          "occurred_at": "2026-08-26T11:53:00Z",
+          "occurred_at_us": 1787745180000000,
+          "session_id": "00000000-0000-4000-8000-00000000e008",
+          "message_id": "aaa-superseded",
+          "project_id": "tiebreak-project",
+          "project_path": "/synthetic/projects/tiebreak-project",
+          "attribution_source": "session.cwd_basename",
+          "provider": "openai-codex",
+          "route": "openai-responses",
+          "model": "openai-codex/gpt-5.6-luna",
+          "input_tokens": 31,
+          "output_tokens": 16,
+          "cost_nanos": null,
+          "cost_kind": "unreported",
+          "cost_reason_code": "absent_cost"
+        }
+      ],
+      "outcomes": [
+        {
+          "outcome_id": "00000000-0000-4000-8000-00000000e008:zzz-authoritative:serving",
+          "lane_id": "openai-codex",
+          "status": "success",
+          "observed_at": "2026-08-26T11:53:00Z",
+          "observed_at_us": 1787745180000000,
+          "route": "openai-responses",
+          "model": "openai-codex/gpt-5.6-luna:max",
+          "reason_code": null,
+          "http_status": null,
+          "model_fallback": true
+        }
+      ],
+      "expected_state": "fallback_promoted"
+    },
+    "selection_dominance_case": {
+      "note": "The later occurred_at_us event (no outcome row) dominates the earlier event even though the earlier event carries an explicit fallback outcome; absent serving evidence is not fallback evidence, so classification is mismatch.",
+      "receipt": {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d009",
+        "requested_at": "2026-08-26T11:52:30Z",
+        "requested_at_us": 1787745150000000,
+        "worktree": "/synthetic/worktrees/dominance",
+        "unit": null,
+        "agent": null,
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-5.6-luna:max",
+        "effort": "max",
+        "pane_id": null,
+        "name": null,
+        "request_source": "foreman-start",
+        "harness": "omp"
+      },
+      "binding": {
+        "dispatch_id": "00000000-0000-4000-8000-00000000d009",
+        "resolution": "session_bound",
+        "bound_at": "2026-08-26T11:52:35Z",
+        "bound_at_us": 1787745155000000,
+        "session_canonical_path": "/synthetic/sessions/dominance/session.jsonl",
+        "session_id": "00000000-0000-4000-8000-00000000e009"
+      },
+      "events": [
+        {
+          "event_id": "00000000-0000-4000-8000-00000000e009:early-with-fallback",
+          "occurred_at": "2026-08-26T11:53:10Z",
+          "occurred_at_us": 1787745190000000,
+          "session_id": "00000000-0000-4000-8000-00000000e009",
+          "message_id": "early-with-fallback",
+          "project_id": "dominance-project",
+          "project_path": "/synthetic/projects/dominance-project",
+          "attribution_source": "session.cwd_basename",
+          "provider": "opencode-go",
+          "route": "opencode",
+          "model": "opencode-go/ox-alpha-free:base",
+          "input_tokens": 41,
+          "output_tokens": 17,
+          "cost_nanos": null,
+          "cost_kind": "unreported",
+          "cost_reason_code": "absent_cost"
+        },
+        {
+          "event_id": "00000000-0000-4000-8000-00000000e009:late-no-outcome",
+          "occurred_at": "2026-08-26T11:53:50Z",
+          "occurred_at_us": 1787745230000000,
+          "session_id": "00000000-0000-4000-8000-00000000e009",
+          "message_id": "late-no-outcome",
+          "project_id": "dominance-project",
+          "project_path": "/synthetic/projects/dominance-project",
+          "attribution_source": "session.cwd_basename",
+          "provider": "openai-codex",
+          "route": "openai-responses",
+          "model": "openai-codex/gpt-5.6-luna",
+          "input_tokens": 42,
+          "output_tokens": 18,
+          "cost_nanos": null,
+          "cost_kind": "unreported",
+          "cost_reason_code": "absent_cost"
+        }
+      ],
+      "outcomes": [
+        {
+          "outcome_id": "00000000-0000-4000-8000-00000000e009:early-with-fallback:serving",
+          "lane_id": "opencode-go",
+          "status": "success",
+          "observed_at": "2026-08-26T11:53:10Z",
+          "observed_at_us": 1787745190000000,
+          "route": "opencode",
+          "model": "opencode-go/ox-alpha-free:base",
+          "reason_code": null,
+          "http_status": null,
+          "model_fallback": true
+        }
+      ],
+      "expected_state": "mismatch"
+    }
+  }
+}

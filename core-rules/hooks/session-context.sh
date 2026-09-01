@@ -13,7 +13,7 @@
 #            "additionalContext":"..."}}.
 #   - Output trimmed to ≤ 2000 chars. Never blocks. Exit 0 always.
 #
-# Dependencies: jq (required), git (optional — skips git section if absent).
+# Dependencies: jq (required), git (optional — reports degradation and skips Git data).
 #
 # Status: new in this core-rules layer (not in upstream template).
 
@@ -735,7 +735,7 @@ _se_wt_release_verify() (
 _se_wt_diagnose() (
   local active_root git_dir common home registry checkout worktree registration
   local fleet project_id release attachment owner payload
-  command -v git >/dev/null 2>&1 || exit 0
+  type -P git >/dev/null 2>&1 || { printf '%s\n' 'session-context: git not found; degrading to no-op' >&3; exit 0; }
   active_root="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)" || exit 0
   active_root="$(CDPATH='' cd "$active_root" && pwd -P)" || exit 0
   git_dir="$(git -C "$active_root" rev-parse --git-dir 2>/dev/null)" || exit 0
@@ -817,7 +817,7 @@ _se_wt_diagnose() (
   _se_wt_readlink_exact "$active_root/.trellis/runtime" "$payload" || { printf 'WARN\n'; exit 0; }
 )
 
-_se_worktree_warn="$(_se_wt_diagnose 2>/dev/null || printf 'WARN\n')"
+_se_worktree_warn="$(_se_wt_diagnose 3>&2 2>/dev/null || printf 'WARN\n')"
 if [ "${_se_worktree_warn:-}" = "WARN" ]; then
   _se_wt_msg="Trellis attachment is missing in this opted-in worktree. Harness discovery already ran, so no repair was attempted. Reconcile with \`trellis worktree sync\` (or recreate through \`trellis worktree add\`) and restart this session."
   CTX="${_se_wt_msg}

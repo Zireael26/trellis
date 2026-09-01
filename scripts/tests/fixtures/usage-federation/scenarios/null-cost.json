@@ -1,0 +1,60 @@
+{
+  "scenario": "null_cost_completeness",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:15:00Z"
+    },
+    "period": {
+      "start": "2026-08-22T00:00:00Z",
+      "end": "2026-08-23T12:15:00Z",
+      "timezone": "UTC"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-omp-null-cost-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "path": "transcripts/omp-null-cost.jsonl"
+      },
+      {
+        "source_id": "source-claude-absent-cost-001",
+        "format": "claude-jsonl",
+        "harness": "claude",
+        "path": "transcripts/claude-absent-cost.jsonl"
+      }
+    ]
+  },
+  "expected": {
+    "status": "partial",
+    "lanes": [
+      {
+        "lane_id": "openai-codex",
+        "spend": {
+          "notional_nanos": {
+            "status": "unreported",
+            "reason_code": "recorded_cost_null",
+            "observed_at": "2026-08-22T10:00:03Z"
+          },
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "subscription_has_no_real_invoice_spend"
+          }
+        }
+      },
+      {
+        "lane_id": "claude",
+        "spend": {
+          "notional_nanos": {
+            "status": "unreported",
+            "reason_code": "provider_cost_absent_per_q8",
+            "observed_at": "2026-08-22T10:00:02Z"
+          },
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "subscription_has_no_real_invoice_spend"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -90,6 +90,20 @@ can dispatch a subagent can run it; where none exists, the main loop runs the
 same skeptical judgement inline (the tier-3 degrade in `SKILL.md`), never
 collapsing it into the generate step.
 
+### Digest-adopt triage (generator + independent verifier)
+
+The `digest-adopt` recipe implements the persona as two distinct agent
+invocations per candidate: a **generator** (`triage:<id>`, schema
+`TRIAGE_DRAFT` without `skeptic_upheld`) classifies `route`/`rationale` from
+the immutable candidate, and an **independent skeptical verifier**
+(`skeptic:<id>`, schema `SKEPTIC_VERDICT` with only `id` + `skeptic_upheld`)
+receives the immutable candidate plus the generator receipt and alone emits the
+uphold verdict. The workflow merges only matching IDs and fails closed on any
+missing or mismatched verifier receipt; parallelism is across candidates, and
+the human `args.approved` gate is unchanged. No self-check is relabeled as
+independent — the generator schema forbids `skeptic_upheld` so it cannot
+self-uphold.
+
 Evaluator sign-off is necessary, not sufficient. Pair it with the Definition of
 done check that tests must fail when business intent changes (`CLAUDE.md`); do
 not accept a green suite as proof of intent.

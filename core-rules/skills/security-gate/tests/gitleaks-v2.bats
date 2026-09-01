@@ -196,7 +196,7 @@ assert matches[0]["line"] == 12, matches
 JSON
 
   llm_log="$TEST_ROOT/llm-input.json"
-  run env PATH="$BIN:$PATH" LLM_PROVIDER=openai LLM_INPUT_LOG="$llm_log" bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT"
+  run env PATH="$BIN:$PATH" LLM_PROVIDER=openai LLM_MODEL=openai-explicit LLM_INPUT_LOG="$llm_log" bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT"
   [ "$status" -eq 0 ]
 
   run python3 -c '
@@ -226,7 +226,7 @@ assert rows[0]["bucket"] == "findings"
 
 @test "historical severity cannot be downgraded by triage" {
   llm_log="$TEST_ROOT/llm-input.json"
-  run env PATH="$BIN:$PATH" LLM_PROVIDER=openai LLM_INPUT_LOG="$llm_log" bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT"
+  run env PATH="$BIN:$PATH" LLM_PROVIDER=openai LLM_MODEL=openai-explicit LLM_INPUT_LOG="$llm_log" bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT"
   [ "$status" -eq 0 ]
 
   baseline="$PROJECT/audits/$(date +%Y-%m-%d)-baseline-project.json"
@@ -238,6 +238,63 @@ historical = doc["historical_findings"][0]
 assert historical["triage"] == "kept"
 assert historical["severity"] == "high"
 assert doc["summary"]["historical"]["by_severity"]["high"] == 1
+' "$baseline"
+  [ "$status" -eq 0 ]
+}
+
+@test "local.config.sh openai provider with explicit model reaches llm child and audit provenance" {
+  mkdir -p "$PROJECT/.claude/skills/security-gate-local"
+  cat > "$PROJECT/.claude/skills/security-gate-local/local.config.sh" <<'SH'
+LLM_PROVIDER="openai"
+LLM_MODEL="openai-sentinel"
+SH
+  MODEL_LOG="$TEST_ROOT/model.log"
+  INVOCATION_LOG="$TEST_ROOT/invocation.log"
+  export MODEL_LOG INVOCATION_LOG
+  cat > "$BIN/llm" <<'SH'
+#!/usr/bin/env bash
+MODEL=""
+ARGS="$*"
+echo "invoked:$ARGS" >> "$INVOCATION_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m) MODEL="$2"; printf '%s' "$MODEL" > "$MODEL_LOG"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+python3 -c '
+import json, os, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+log = os.environ.get("LLM_INPUT_LOG")
+if log:
+    with open(log, "w") as fh:
+        json.dump(rows, fh)
+for row in rows:
+    print(json.dumps({
+        "id": row["id"],
+        "decision": "kept",
+        "reason": "test decision",
+        "exploit_steps": "test exploit",
+        "suggested_fix": "test fix",
+        "severity_override": "low",
+    }))
+'
+SH
+  chmod +x "$BIN/llm"
+
+  run env PATH="$BIN:$PATH" bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT"
+  [ "$status" -eq 0 ]
+
+  run cat "$MODEL_LOG"
+  [ "$status" -eq 0 ]
+  [ "$output" = "openai-sentinel" ]
+
+  baseline="$PROJECT/audits/$(date +%Y-%m-%d)-baseline-project.json"
+  run python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["llm"]["provider"] == "openai", doc["llm"]
+assert doc["llm"]["model"] == "openai-sentinel", doc["llm"]
 ' "$baseline"
   [ "$status" -eq 0 ]
 }

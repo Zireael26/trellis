@@ -1,0 +1,18 @@
+{
+  "data": {
+    "label": "fixture-openrouter-key",
+    "limit": 100,
+    "limit_remaining": 74,
+    "limit_reset": "weekly",
+    "usage": 26,
+    "usage_daily": 4,
+    "usage_weekly": 26,
+    "usage_monthly": 26,
+    "byok_usage": 0,
+    "byok_usage_daily": 0,
+    "byok_usage_weekly": 0,
+    "byok_usage_monthly": 0,
+    "include_byok_in_limit": false,
+    "is_free_tier": false
+  }
+}

@@ -1,0 +1,2 @@
+- 2026-08-30T12:02:00Z [L2] [scope] Reject the abbreviated alternatives label. Reasoning: The canonical grammar names considered alternatives explicitly. Alternatives: Accept a shorter label.
+- 2026-08-30T12:02:01Z [L2] [scope] Accept the canonical alternatives label. Reasoning: Exact labels keep fleet records comparable. Alternatives considered: Accept a shorter label.

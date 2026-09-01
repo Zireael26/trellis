@@ -1,0 +1,43 @@
+#!/bin/sh
+# Test-only mktemp adapter. Darwin's bare `mktemp -d` ignores TMPDIR and uses
+# the host user-temp directory, which puts Bats fixture repos beside (not below)
+# the per-shard Git fence. Give no-template calls an explicit template inside
+# that fence. Explicit templates keep their caller-selected path; the Git fence
+# still refuses any repository mutation there unless it is independently safe.
+
+set -u
+
+real_mktemp=${TRELLIS_TEST_REAL_MKTEMP:-}
+fence_root=${TRELLIS_TEST_GIT_FENCE_ROOT:-}
+
+if [ -z "$real_mktemp" ] || [ ! -x "$real_mktemp" ]; then
+  echo "test-mktemp-fence: real mktemp is unavailable" >&2
+  exit 97
+fi
+if [ -z "$fence_root" ] || [ ! -d "$fence_root" ]; then
+  echo "test-mktemp-fence: Git fence root is unavailable" >&2
+  exit 97
+fi
+
+has_template=0
+uses_t=0
+for arg do
+  case "$arg" in
+    -t|--tmpdir|--tmpdir=*) uses_t=1 ;;
+    -*) ;;
+    *) has_template=1 ;;
+  esac
+done
+
+# BSD/GNU -t variants both derive their result from TMPDIR. Preserve the exact
+# caller argv and only constrain that base directory.
+if [ "$uses_t" -eq 1 ]; then
+  TMPDIR="$fence_root"; export TMPDIR
+  exec "$real_mktemp" "$@"
+fi
+
+if [ "$has_template" -eq 0 ]; then
+  exec "$real_mktemp" "$@" "$fence_root/tmp.XXXXXXXXXX"
+fi
+
+exec "$real_mktemp" "$@"

@@ -142,6 +142,93 @@ Set `TRELLIS_HOME` before invoking the launcher only when you deliberately use a
 non-default local home. The explicit `--home PATH` flag has higher precedence
 where a command supports it.
 
+## User-global orchestration surface
+
+`trellis attach --user` manages the machine-level user surface from an
+installed, verified release. It is separate from project attachments: it takes
+no project path, fleet, or harness selector. The OMP portion is deliberately
+limited to OMP's default profile (`$HOME/.omp/agent`); named profiles and other
+profile locations remain unmanaged.
+
+The normal first attach uses the active release (or an explicitly selected
+installed release):
+
+```sh
+"$TRELLIS" attach --user --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+If the user surface was hand-placed before Trellis owned it, do not delete or
+overwrite those files to make the command pass. Without an adoption flag,
+`attach --user` treats an existing unowned destination as a conflict and
+leaves the existing user surface untouched. For a release-managed JSON
+destination, plain attach preserves unrelated operator keys, but any overlap
+with a key Trellis renders is a conflict. With `--adopt-identical`, an existing
+JSON object is eligible only when every overlapping managed leaf already has the
+exact release value; an object/type conflict remains a conflict.
+
+For a one-time migration of hand-placed content that is already identical in
+the supported sense, use the explicit `--adopt-identical` opt-in:
+
+```sh
+"$TRELLIS" attach --user --adopt-identical \
+  --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+This flag applies only to `attach --user`; it is not a project-attachment
+option and is not a force/overwrite switch. Adoption is checked per planned
+leaf:
+
+- an existing symlink leaf must point to the exact planned target;
+- an existing regular-file copy may stand in for a planned symlink only when
+  the planned target is a regular file and its bytes match;
+- a planned regular-file leaf must match its planned bytes and mode;
+- an existing explicit-JSON destination must be an object, and every managed
+  leaf already present must equal the release value; unrelated operator keys
+  remain;
+- missing leaves are created normally, and existing directories are reused only
+  as parent directories, not adopted as arbitrary directory trees.
+
+Outside the regular-file-copy case above, a planned regular-file leaf with
+unequal required bytes or mode, a different link target, an unequal managed
+JSON value/type, or an incompatible file/directory shape remains a conflict.
+When a regular-file copy is adopted, its original bytes and mode are retained
+for detach restoration. Use adoption once to establish ownership; later
+changes use `relink --user`.
+
+To remove the user attachment or roll back that migration:
+
+```sh
+"$TRELLIS" detach --user --home "$TRELLIS_HOME"
+```
+
+`detach --user` removes only owned release-backed leaves. It restores files that
+were displaced during adoption and inverse-merges the rendered JSON keys,
+preserving unrelated operator content. If an owned destination was changed,
+detach refuses rather than overwriting the operator's changes. A successful
+detach leaves the user surface in its pre-attach/pre-adoption state. It does
+not select an older release; use `relink --user --release VERSION` for that.
+
+`relink --user` requires an existing owned user attachment, reconciles its
+release-backed leaves and renders to the selected release, and refuses unsafe
+or unowned conflicts. Omitting `--release` uses the active release. When
+`configure --release VERSION` changes the active release and an owned user
+attachment exists, configure performs this relink after adoption as one
+all-or-nothing transition across machine config, the stable launcher, and the
+user surface. If the target user surface is already durably published,
+configure finalizes it and succeeds. Otherwise, if relink cannot complete,
+configure compensates the user surface, restores the prior configuration and
+launcher, and returns the initiating failure; it never reports success with a
+mixed configuration and user surface.
+
+**Criterion 6 notice — project surfaces are separate.** This user-surface
+lifecycle does not refresh project attachments. Project templates and links are
+rendered at project `attach`; release adoption, project `relink`, `configure`,
+and `doctor --fix` do not add newly declared project leaves. If a release adds
+or changes a project leaf, use the documented project `detach`/`attach` cycle
+with the intended harness set and release, then run `doctor`; there is no
+project refresh or force flag. This remains required even when user-global
+relink succeeds.
+
 ## 1. Install the exact release
 
 Install from the release remote. The command requires an annotated tag named
@@ -492,6 +579,10 @@ not delivered by adoption alone, so read this section before running Step 4.
   on any suite that is neither globbed nor excluded. `run-tests.sh` takes
   `--quick`, `--scope=local|ci`, `--shard=I/N`, and `--list`; CI runs four
   shards. This changes no runtime behavior — it changes what a green gate means.
+  The release gate is the local serial run:
+  `bash scripts/run-tests.sh --scope=local`. CI is billing-blocked for this
+  rollout, so its Actions status is not a claim that the code is green and
+  cannot replace the local serial receipt until billing returns.
 
 ### What adoption delivers, and what it does not
 
@@ -543,8 +634,10 @@ cleanup candidate; rollback adopts one that is already on disk.
 An attached project renders its harness templates from the release payload once,
 at attach time. The documented route back to a fresh render is the detach/attach
 pair — the same pair
-[AGENT_SETUP.md](../AGENT_SETUP.md) §8 uses for a checkout move. There is no
-repair, refresh, or force flag: `attach` against an already-attached row prints
+[AGENT_SETUP.md](../AGENT_SETUP.md) §8 uses for a checkout move. This also
+applies to any new project leaf declared by a later release: adoption and
+`relink` do not materialize it. There is no repair, refresh, or force flag:
+`attach` against an already-attached row prints
 `already attached: <root>` and returns `0` without rendering, `relink` repairs
 the anchor and git hooks and verifies owned artifacts byte-exact against the
 ownership record, and `doctor --fix` is read-only.

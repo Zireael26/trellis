@@ -3,7 +3,7 @@
 # Usage: llm-call.sh <prompt-path> <input-path> <out-path>
 # Env:
 #   LLM_PROVIDER  anthropic | openai | gemini | ollama | none   (default: anthropic if `llm` available)
-#   LLM_MODEL     provider-specific model id                    (default per-provider below)
+#   LLM_MODEL     provider-specific model id                    (default: claude-opus-5 for anthropic; required for openai/gemini/ollama)
 #   SECURITY_GATE_LLM_TIMEOUT_S  per-call timeout in seconds    (default: 120)
 #
 # Default backend: simonw/llm CLI. The wrapper just sets the model and pipes
@@ -32,16 +32,20 @@ if ! command -v llm >/dev/null 2>&1; then
   exit 2
 fi
 
-# Provider-default model selection.
+# Provider-default model selection. Only Anthropic has a default; openai/
+# gemini/ollama must provide an explicit LLM_MODEL to avoid silently pinning
+# a stale model id. Callers get the standard no-LLM exit (2) with an
+# actionable warning so they can set the model explicitly.
 if [ -z "$MODEL" ]; then
   case "$PROVIDER" in
     anthropic|"") MODEL="claude-opus-5"; PROVIDER="anthropic" ;;
-    openai)       MODEL="gpt-4o" ;;
-    gemini)       MODEL="gemini-2.0-flash" ;;
-    ollama)       MODEL="llama3.1:8b" ;;
+    openai|gemini|ollama)
+      echo "warn: LLM_PROVIDER=$PROVIDER requires LLM_MODEL to be set — no default (set LLM_MODEL explicitly)" >&2
+      : > "$OUT"
+      exit 2
+      ;;
   esac
 fi
-
 # Compose the call. simonw/llm reads stdin as the user message; -s sets the system prompt.
 SYSTEM_PROMPT="$(cat "$PROMPT")"
 

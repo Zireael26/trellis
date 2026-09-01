@@ -7,6 +7,7 @@ CONDUCTOR_RECIPE="$REPO/core-rules/skills/orchestrate/recipes/conductor.wf.js"
 FLEET_RECIPE="$REPO/scripts/workflows/fleet-audit-remediation.wf.js"
 CONFIG_SCHEMA="$REPO/scripts/lib/trellis.config.schema.json"
 CONFIG_EXAMPLE="$REPO/core-rules/templates/trellis.config.json.example"
+CONFIG="$REPO/trellis.config.json"
 
 _run_recipe() {
   local recipe="$1" args="$2"
@@ -43,6 +44,89 @@ const example = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
 if (Object.prototype.hasOwnProperty.call(schema.properties ?? {}, 'codex_fanout')) process.exit(1)
 if (Object.prototype.hasOwnProperty.call(example, 'codex_fanout')) process.exit(2)
 if (Object.prototype.hasOwnProperty.call(example, 'comment_codex_fanout')) process.exit(3)
+NODE
+  [ "$status" -eq 0 ]
+}
+
+@test "Spec 005 conductor config defaults off and gates reviewed-ready execution to HOLD PR" {
+  local args enabled held
+  args="$(jq -nc '{
+    today: "2026-08-23",
+    backlogPath: "/private/tasks/personal/conductor/backlog.json",
+    registryPath: "/private/tasks/personal/conductor/snapshot.json",
+    autoSpecTopN: 1,
+    __agentOutputByLabel: {
+      "refresh-refs": {
+        complete: true,
+        refs: [{project: "repo", repo_path: "/tmp/repo", main_sha: "1111111111111111111111111111111111111111"}],
+        notes: "ok"
+      },
+      rank: {
+        generated_for: "2026-08-23",
+        ranked: [{
+          id: "alpha",
+          project: "repo",
+          title: "alpha",
+          score: 1,
+          reasons: "top",
+          eligible_auto_spec: true,
+          auto_spec: null,
+          safe: null,
+          surgical: false,
+          status: "todo",
+          delivered_on_main: false,
+          existing_spec_path: "",
+          auto_spec_exclusions: []
+        }]
+      },
+      "spec:alpha": {
+        id: "alpha",
+        branch: "feature/alpha",
+        spec_path: "specs/001-alpha/",
+        ready: true,
+        notes: "ready"
+      }
+    }
+  }')"
+
+  _run_recipe "$CONDUCTOR_RECIPE" "$args"
+  _json_assert "!r.error && r.result.reviews.length === 0 && r.result.executions.length === 0 && !r.prompts.some((entry) => /^review:|^execute:/.test(entry.opts.label || ''))"
+
+  enabled="$(printf '%s\n' "$args" | jq -c '
+    .autoExecuteTopN = 1
+    | .authorAgent = "sol"
+    | .reviewerAgent = "grok"
+    | .__agentOutputByLabel["review:alpha"] = {id:"alpha", reviewed:true, ready:true, notes:"approved"}
+    | .__agentOutputByLabel["execute:alpha"] = {
+        id:"alpha",
+        branch:"feature/alpha",
+        pr_url:"https://github.com/example/repo/pull/7",
+        gate_green:true,
+        notes:"green"
+      }
+  ')"
+  _run_recipe "$CONDUCTOR_RECIPE" "$enabled"
+  _json_assert "!r.error && (() => { const spec = r.prompts.find((entry) => entry.opts.label === 'spec:alpha'); const review = r.prompts.find((entry) => entry.opts.label === 'review:alpha'); const execute = r.prompts.find((entry) => entry.opts.label === 'execute:alpha'); return r.result.reviews.length === 1 && r.result.executions.length === 1 && r.result.executions[0].pr_url.endsWith('/pull/7') && spec.opts.agentType === 'sol' && review.opts.agentType === 'grok' && execute.opts.agentType === 'sol' && review.prompt.includes('independent CONDUCTOR spec reviewer') && execute.prompt.includes('Run the Trellis execute pipeline') && execute.prompt.includes('[HOLD]') && execute.prompt.includes('Never merge') && execute.prompt.includes('normal permission mode') && execute.prompt.includes('Do not request or enable a scheduler-wide permission bypass') && !r.prompts.some((entry) => 'agent' in entry.opts || 'permissionMode' in entry.opts || 'permission_mode' in entry.opts); })()"
+
+  held="$(printf '%s\n' "$enabled" | jq -c '.__agentOutputByLabel.rank.ranked[0].safe = "manual"')"
+  _run_recipe "$CONDUCTOR_RECIPE" "$held"
+  _json_assert "!r.error && r.result.reviews.length === 0 && r.result.executions.length === 0 && !r.prompts.some((entry) => (entry.opts.label || '').startsWith('execute:'))"
+}
+
+@test "shared config materializes Spec 005 and Spec 016 knobs with fleet-only report tuning" {
+  run node - "$CONFIG_SCHEMA" "$CONFIG" "$CONFIG_EXAMPLE" <<'NODE'
+const fs = require('node:fs')
+const schema = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const fleet = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
+const template = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'))
+const conductor = schema.properties?.conductor?.properties?.auto_execute_top_n
+if (conductor?.type !== 'integer' || conductor?.minimum !== 0) process.exit(1)
+if (fleet.conductor?.auto_execute_top_n !== 0 || template.conductor?.auto_execute_top_n !== 0) process.exit(2)
+const lifecycleKeys = ['reap_pushed_worktrees', 'ephemeral_tmp_ttl_days', 'worktree_count_ceiling', 'worktree_total_gb_ceiling']
+if (!lifecycleKeys.every((key) => Object.prototype.hasOwnProperty.call(fleet.disk_janitor ?? {}, key))) process.exit(3)
+if (!lifecycleKeys.every((key) => Object.prototype.hasOwnProperty.call(template.disk_janitor ?? {}, key))) process.exit(4)
+if (fleet.disk_janitor.worktree_count_ceiling !== 50 || fleet.disk_janitor.worktree_total_gb_ceiling !== 100) process.exit(5)
+if (template.disk_janitor.worktree_count_ceiling !== 25 || template.disk_janitor.worktree_total_gb_ceiling !== 80) process.exit(6)
 NODE
   [ "$status" -eq 0 ]
 }

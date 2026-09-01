@@ -9,6 +9,12 @@
             "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/block-destructive.sh\"",
             "timeout": 5,
             "statusMessage": "Checking command safety..."
+          },
+          {
+            "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/pr-gate-shiftleft.sh\"",
+            "timeout": 120,
+            "statusMessage": "Running PR process-gate pre-flight..."
           }
         ]
       },
@@ -132,6 +138,12 @@
             "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/propose-rules.sh\"",
             "timeout": 60,
             "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "/bin/bash \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/primer-capture-nudge.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking primer coverage..."
           },
           {
             "type": "command",

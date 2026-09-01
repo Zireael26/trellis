@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "source": "gotchas.md#managed-dispatcher-drift",
+  "pattern_key": "managed-dispatcher-drift-after-attachment",
+  "occurrences": [
+    {
+      "ref": "context-log.md#session-2026-08-20",
+      "recorded": true
+    },
+    {
+      "ref": "decisions-log.md#2026-08-24",
+      "recorded": true
+    }
+  ],
+  "preconditions": [
+    "The project is attached to Trellis",
+    "The managed hook dispatcher is configured"
+  ],
+  "inputs_needed": true,
+  "inputs": [
+    "project root"
+  ],
+  "steps": [
+    {
+      "order": 1,
+      "action": "Inspect the hook registration and compare it with the managed dispatcher"
+    },
+    {
+      "order": 2,
+      "action": "Run the doctor check against the project root"
+    }
+  ],
+  "result": "The doctor check reports the managed dispatcher as current",
+  "verification": "A second doctor check reports no hook-authority drift",
+  "secret_values_present": false
+}

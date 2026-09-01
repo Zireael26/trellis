@@ -1,14 +1,66 @@
 # delegation — orchestration, executor routing, teammate lifecycle
 
-*Whether* to delegate is decided in `core-rules/CLAUDE.md` § Context management:
+Whether to delegate is decided in `core-rules/CLAUDE.md` § Context management:
 delegate work that is genuinely independent, parallelizable, and larger than you
-would finish in a handful of tool calls — or whose shape fits another model's
-verifiable strength better than yours. *Which model* it goes to is decided in
-`core-rules/references/model-routing.md`. This file carries the mechanism once
-those decisions are made — how multi-stage work is staged, when a bounded unit
-routes to an executor node, and how a named teammate is released. Read it when
-you are orchestrating a multi-stage workflow, considering an executor node, or
-holding a live teammate.
+would finish in a handful of tool calls. This file is the canonical prose
+description of deterministic task-shape routing and carries the mechanism once
+that decision is made: how multi-stage work is staged, when a bounded unit routes
+to an executor node, and how a named teammate is released. Read it when
+orchestrating a multi-stage workflow, selecting a route, considering an executor
+node, or holding a live teammate.
+
+## Deterministic task-shape routing
+
+Classify every dispatchable unit before dispatch as exactly one finite shape. Do
+not choose from overlapping subjective notions of model fit. The classifier's
+preferred primary lanes and effort are:
+
+| task shape | intended primary agent/lane | effort | Sol eligibility |
+|---|---|---|---|
+| `scan` | Flash | `high` | never |
+| `mechanical-coding` | Luna | `max` | never |
+| `bounded-review` | Muse (`cheap`) | `xhigh` | never |
+| `deep-work` | GLM Flash (`glm-flash-go` first, prepaid `glm-flash` fallback) | `max` | never |
+| `hard-work` | Luna / GLM Flash primary; Grok / Sol tail | `max` primary; `xhigh` tail | reserved; Sol only at `xhigh` |
+| `security-review` | Grok / Sol primary; GLM Flash fallback | `xhigh` primary; `max` fallback | eligible; Sol only at `xhigh` |
+| `merge-review` | Sol / Grok | `xhigh` | eligible; Sol only at `xhigh` |
+
+`bounded-review` is a bounded first-pass review against a known scope or oracle.
+It is not a merge or security verdict. `security-review` and `merge-review` are
+verdict roles: their selected reviewer family must differ from the producer
+family, and their compatible chains may use Sol. Sol is never `max` and is never
+a bounded first-pass reviewer. `hard-work` may use a compatible deep/hard chain,
+with Sol reserved for eligible `xhigh` work.
+
+Every dispatch requires one finite task shape, including dispatches with an
+operator-named agent. The operator agent then wins exactly over automatic
+classification and quota selection. Resolve that name exactly or refuse loudly;
+an unavailable, unknown, or incompatible named agent is not permission to choose
+another agent, provider, model, or the session model. A missing or unknown shape
+always refuses with exit 2 rather than guessing.
+
+Automatic quota fallback happens only before dispatch. It may walk the declared
+compatible chain while preserving the shape's required capability; for verdict
+routes it must exclude candidates in the producer family. Exhaustion is an
+unavailable result and fails closed. There is no generic model fallback or
+in-dispatch model substitution, and a failed selected lane is not an automatic
+rerun.
+
+Use the resolver's concise classification/acceptance command before dispatch:
+
+```text
+resolve-roles.py --classify SHAPE [--operator-agent AGENT]
+                 [--producer-agent AGENT] [--actual-model MODEL]
+                 [--usage-file PATH] [--json]
+```
+
+Classification records the requested/chosen agent, task shape, capability,
+provider/model, effort, family, producer-family check, quota source/trail, and
+fallback status. After the unit runs, accept it only against observed runtime
+route metadata: the receipt must expose the selected provider/model, effort,
+family, trail, fallback status, and observed-route acceptance. A worker label or
+requested name is not runtime evidence; a missing or mismatched observed route
+rejects the unit.
 
 ## Orchestrating multi-stage work
 
@@ -16,8 +68,9 @@ holding a live teammate.
   orchestrating through it: **decompose → fan-out → adversarially verify →
   synthesize**. If it does not, run the same stages yourself — the
   decompose / verify / synthesize discipline holds regardless of harness.
-- Keep planning, review, and synthesis on the orchestrator. Those are the stages
-  that need the whole picture.
+- Keep planning and synthesis on the orchestrator. It coordinates review and
+  acceptance; classified review units themselves route according to the table and
+  return for the orchestrator's gate.
 
 ## Which paradigm for parallel work
 
@@ -66,32 +119,32 @@ correctness cost: it changes which agent runs a unit, never what that agent can 
 
 ## Routing to an executor node
 
-- When a dispatchable executor node is available, route **execution-heavy bounded
-  units** to it — large mechanical edits, long-running background execution —
-  while planning, review, and synthesis stay on the orchestrator. When no
-  executor node is available, run every unit on the orchestrator itself.
+- When a dispatchable executor node is available, route classified
+  `mechanical-coding` and eligible `hard-work` units to it. Planning and
+  synthesis stay on the orchestrator; classified review units route according to
+  the table and return for its acceptance gate. When no executor node is
+  available, run every unit on the orchestrator itself.
 - **This is a capability gate, not a model-identity branch.** Inspect the
   dispatch surfaces the session actually exposes; do not infer them from which
   model owns the main loop.
-- Explicit provider or model selections remain authoritative. If the selected
-  lane is rejected, unavailable, or fails, surface that lane result and fail the
-  unit closed; never rewrite the request or silently substitute another provider.
+- Explicit provider or model selections remain authoritative once selected.
+  Automatic quota fallback is allowed only before dispatch and only along the
+  classifier's compatible chain. If the selected lane is rejected, unavailable,
+  or fails, surface that lane result and fail the unit closed; never rewrite the
+  request or silently substitute another provider.
+
+- The gate widens beyond orchestration: a classified bounded **work-order unit**
+  (frozen spec, known repro, mechanical change) routes to an available executor
+  node from any turn. Tiny edits, spec-writing-as-the-work, session-tool needs,
+  and bright-line ops still stay on the orchestrator.
 - Trellis ships no custom executor-agent definitions. Deliberate direct Codex CLI
   dispatch (`codex exec --json ...` from the orchestrator, which holds Bash) is
   the supported executor route; generic Codex CLI harness support is independent
   of any plugin. Inside a Workflow engine (no shell), dispatch a general-purpose
   agent to run the executor mechanics rather than an agent-type alias for a
   removed custom agent.
-- The gate widens beyond orchestration: a bounded **work-order unit** (frozen
-  spec, known repro, mechanical change) **routes** to an available executor node
-  from any turn. The 009 pilot's advisory-first posture — propose, don't
-  auto-route — was retired 2026-07-30 on the pilot's own criteria (11
-  delegations, 90.9% without takeover, zero bright-line incidents; see
-  `specs/009-interactive-codex-delegation/pilot-ledger.md`). It had come to
-  contradict the fit trigger in `core-rules/CLAUDE.md`, which makes a matching
-  unit sufficient on its own. Tiny edits, spec-writing-as-the-work, session-tool
-  needs, and bright-line ops still stay on the orchestrator.
-- Executor output always passes the orchestrator's review gate.
+- Executor output always passes the orchestrator's review gate and observed-route
+  acceptance.
 
 ## Flat Agent lifecycle
 
@@ -122,3 +175,92 @@ workflow agents auto-terminate, named teammates do not.
   orchestrator slot but does not prove the operating-system process exited.
 - Declaring done with teammates still live leaks panes and memory — see
   `core-rules/CLAUDE.md` § Definition of done.
+- The same rule binds **OMP panes**, which are not `TaskStop` teammates: close each
+  with `herdr pane close <pane_id>` at the moment its own output is accepted, in
+  the same turn, rather than batching teardown at the end of the workstream. On a
+  review panel, close the reviewers before starting the judge — the judge reads
+  their report files, not their sessions. See
+  [`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).
+- Treat a lingering pane as a spend leak, not only a housekeeping one: it holds a
+  live session whose whole context is re-sent on every wake. Past **272K input
+  tokens OpenAI bills 2x input and 1.5x output for the entire request**, not just
+  the overage — `gpt-5.6-sol` goes $5/$30 to $10/$45 per 1M. Keep
+  `compaction.methodOrder` remote-first (`remote` is provider-native server
+  compaction, the mechanism that holds a session under the line) and close panes
+  at acceptance so there is no context to re-send.
+
+## Panel layout in a terminal multiplexer
+
+Where agents occupy panes the operator can see, layout is part of the contract:
+an unreadable panel is an unreviewable one, and review is the bottleneck these
+fan-outs exist to feed.
+
+The rules themselves — 2x2 grid per tab, a separate grid tab past three workers,
+visible panes over headless whenever the operator wants to watch, and a finished
+tab being a held resource like a pane — are stated once, in
+[`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).
+Harness-specific commands belong in the harness's own implementation.
+
+## Width needs an oracle; building the oracle is serial
+
+Fan out when units are independent **and each one has an oracle** — something that
+decides pass or fail without a human reading the output. When a unit's oracle does not
+exist yet, the first unit *is* building the oracle, and that one is serial by nature.
+Parallelising ahead of it does not converge; it produces more confident wrong answers
+faster.
+
+Measured on the fleet, 2026-08-23. Generated route art took four rounds. Rounds 2 and 3
+ran a wide fan-out with plenty of legs and both failed. What fixed it was not more legs —
+it was a rasteriser over the recorded call log that caps every 8x8 window at 35% lit:
+
+```
+pre-fix  peaks 47-64 / 64 lit
+post-fix peaks 19-22 / 64 lit
+```
+
+Mutation-checked: restoring the old row count fails with the slug, the phase, the grid
+and the window coordinate named. Once that oracle existed the work converged in one
+round. The same shape held for an arcade section in the same project: the acceptance gate
+was four rendered WAVs and a played browser session, not a bigger panel.
+
+This is the limit on every "widen the fan-out" instruction in this document. Width
+converts quota into finished work only where finished is *decidable*. Where it is not,
+width converts quota into plausible output nobody can check, which is worse than a
+narrow run because it arrives with more agreement behind it.
+
+Practical ordering:
+
+1. Ask what would prove this unit done, mechanically. If the answer is "a person looks
+   at it", the first unit builds the check.
+2. Prove the oracle by inverting the requirement — it must fail, and name what failed.
+   An oracle you cannot make fail is not an oracle.
+3. Then fan out, as wide as the work decomposes.
+
+Corollary already stated under delegation routing: a unit whose only oracle is a running
+deployment cannot be delegated to a subagent that has no deployment. Route it to whoever
+holds the environment, rather than delegating and verifying afterwards.
+
+## A fact in a message decays; a check in a skill does not
+
+When one session learns something another needs — a stale payload, a dead route,
+a config that binds at start — the reflex is to send a message. Messages are the
+weakest durable form available. They are read once, by one session, at one moment,
+and the next session on that project never sees them.
+
+Two sessions independently proved this in a single night. Both had been told, in
+writing, that a routing fix reached only the source checkout and not the release
+payload every other project resolves through. Both then dispatched fan-outs
+without checking which payload they were resolving against. What eventually caught
+it was not the message: it was a rule written into the skill hours later, saying
+to compare each leg's **resolved** model against the requested one. The rule fired
+on a project whose orchestrator already knew the fact and had not used it.
+
+So: when a finding would change how a future session behaves, the deliverable is
+not the message. It is the check — a skill rule, a resolver invariant, a `doctor`
+row, a test. Send the message too, for the session that needs it now. But treat
+the message as the announcement and the check as the fix, never the reverse.
+
+Corollary for routing work: an invariant over **configuration** and a check
+against **reality** are different guarantees. A resolver that validates its own
+table cannot see a stale payload, a session-bound override, or a retry promotion.
+Configuration checks are necessary and never sufficient.

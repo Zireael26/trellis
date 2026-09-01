@@ -1,0 +1,95 @@
+{
+  "scenario": "nous_nvidia_zero_cost_not_supported_spend",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:50:00Z"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-nous-model-list-001",
+        "format": "openai-model-list-json",
+        "provider": "nous",
+        "endpoint": "https://synthetic.invalid/nous/v1/models",
+        "response": {
+          "object": "list",
+          "data": [
+            {
+              "id": "stealth/ox-alpha",
+              "object": "model",
+              "owned_by": "nous"
+            }
+          ]
+        }
+      },
+      {
+        "source_id": "source-nvidia-model-list-002",
+        "format": "openai-model-list-json",
+        "provider": "nvidia",
+        "endpoint": "https://synthetic.invalid/nvidia/v1/models",
+        "response": {
+          "object": "list",
+          "data": [
+            {
+              "id": "nvidia/synthetic-served-model",
+              "object": "model",
+              "owned_by": "nvidia"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "expected": {
+    "status": "complete",
+    "lanes": [
+      {
+        "lane_id": "nous-portal",
+        "billing_mode": "zero_cost",
+        "quota": {
+          "status": "not_supported",
+          "reason_code": "no_quota_api",
+          "observed_at": "2026-08-23T12:50:00Z"
+        },
+        "spend": {
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "zero_cost_lane"
+          },
+          "notional_nanos": {
+            "status": "not_supported",
+            "reason_code": "zero_cost_lane"
+          }
+        },
+        "availability": {
+          "status": "unknown",
+          "observed_at": "2026-08-23T12:50:00Z",
+          "reason_code": "no_serving_observation"
+        }
+      },
+      {
+        "lane_id": "nvidia",
+        "billing_mode": "zero_cost",
+        "quota": {
+          "status": "not_supported",
+          "reason_code": "no_quota_api",
+          "observed_at": "2026-08-23T12:50:00Z"
+        },
+        "spend": {
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "zero_cost_lane"
+          },
+          "notional_nanos": {
+            "status": "not_supported",
+            "reason_code": "zero_cost_lane"
+          }
+        },
+        "availability": {
+          "status": "unknown",
+          "observed_at": "2026-08-23T12:50:00Z",
+          "reason_code": "no_serving_observation"
+        }
+      }
+    ]
+  }
+}

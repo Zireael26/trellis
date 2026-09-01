@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deterministically expand the immutable inheritance payload into owned
-# project-relative leaves. Source this library or execute it with --payload.
+# Deterministically expand the immutable inheritance payload into owned project
+# leaves and HOME-scoped user leaves. Source this library or execute it with --payload.
 #
 # Exit classes: 0 success; 2 usage; 3 destination conflict; 4 invalid payload
 # state; 5 unavailable local capability/path. Bash 3.2 compatible.
@@ -19,6 +19,7 @@ _SURFACE_PLAN_RECORDS=()
 _SURFACE_PLAN_OPTIONAL_MISSING=()
 _SURFACE_PLAN_TEMP_FILES=()
 _SURFACE_PLAN_LAST_TMP=""
+_SURFACE_PLAN_CANONICAL_HOME=""
 
 surface_plan_err() {
   printf 'surface-plan: %s\n' "$*" >&2
@@ -46,7 +47,7 @@ surface_plan_is_safe_destination() {
   local destination="${1:-}"
   surface_plan_is_safe_relative_path "$destination" || return 1
   case "$destination" in
-    .git|.git/*|.trellis|.trellis/*) return 1 ;;
+    .[Gg][Ii][Tt]|.[Gg][Ii][Tt]/*|.[Tt][Rr][Ee][Ll][Ll][Ii][Ss]|.[Tt][Rr][Ee][Ll][Ll][Ii][Ss]/*) return 1 ;;
   esac
   return 0
 }
@@ -75,6 +76,99 @@ surface_plan_realpath() {
   base="$(basename "$candidate")"
   [ -e "$parent/$base" ] || return 1
   printf '%s/%s\n' "$parent" "$base"
+}
+
+surface_plan_prepare_user_home() {
+  local home="${HOME:-}" canonical canonical_check
+
+  if ! trellis_home_require_absolute_safe_path "HOME" "$home" >/dev/null 2>&1; then
+    surface_plan_err "HOME is required as a safe absolute path for user harness planning"
+    return "$TRELLIS_EX_USAGE"
+  fi
+  case "$home" in
+    *//*|*/)
+      surface_plan_err "HOME must be a canonical absolute path for user harness planning"
+      return "$TRELLIS_EX_USAGE"
+      ;;
+  esac
+  if [ ! -d "$home" ] || [ -L "$home" ]; then
+    surface_plan_err "HOME is unavailable or is a symlink for user harness planning"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  canonical="$(CDPATH='' cd "$home" 2>/dev/null && pwd -P)" || {
+    surface_plan_err "HOME cannot be canonicalized for user harness planning"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  canonical_check="$(surface_plan_realpath "$canonical" 2>/dev/null)" || canonical_check=""
+  if ! trellis_home_require_absolute_safe_path "canonical HOME" "$canonical" >/dev/null 2>&1 \
+     || [ ! -d "$canonical" ] || [ -L "$canonical" ] || [ "$canonical_check" != "$canonical" ]; then
+    surface_plan_err "canonical HOME is malformed or unsafe"
+    return "$TRELLIS_EX_STATE"
+  fi
+  _SURFACE_PLAN_CANONICAL_HOME="$canonical"
+  return 0
+}
+
+surface_plan_resolve_home_destination() {
+  local relative="$1" parent base remaining component candidate resolved
+
+  if [ -z "$_SURFACE_PLAN_CANONICAL_HOME" ]; then
+    surface_plan_err "internal error: canonical HOME is unavailable"
+    return "$TRELLIS_EX_STATE"
+  fi
+  if ! surface_plan_is_safe_relative_path "$relative"; then
+    surface_plan_err "unsafe HOME-relative destination: $relative"
+    return "$TRELLIS_EX_STATE"
+  fi
+
+  resolved="$_SURFACE_PLAN_CANONICAL_HOME"
+  case "$relative" in
+    */*)
+      parent="${relative%/*}"
+      base="${relative##*/}"
+      ;;
+    *)
+      parent="."
+      base="$relative"
+      ;;
+  esac
+  if [ "$parent" != "." ]; then
+    remaining="$parent"
+    while [ -n "$remaining" ]; do
+      case "$remaining" in
+        */*)
+          component="${remaining%%/*}"
+          remaining="${remaining#*/}"
+          ;;
+        *)
+          component="$remaining"
+          remaining=""
+          ;;
+      esac
+      candidate="$resolved/$component"
+      if [ -L "$candidate" ]; then
+        surface_plan_err "HOME destination parent symlink escapes the canonical HOME safety boundary: $relative"
+        return "$TRELLIS_EX_STATE"
+      fi
+      if [ -e "$candidate" ]; then
+        if [ ! -d "$candidate" ]; then
+          surface_plan_err "HOME destination parent is not a directory: $relative"
+          return "$TRELLIS_EX_STATE"
+        fi
+      fi
+      resolved="$candidate"
+    done
+  fi
+
+  resolved="$resolved/$base"
+  case "$resolved" in
+    "$_SURFACE_PLAN_CANONICAL_HOME"/*) ;;
+    *)
+      surface_plan_err "HOME destination escapes canonical HOME: $relative"
+      return "$TRELLIS_EX_STATE"
+      ;;
+  esac
+  printf '%s\n' "$resolved"
 }
 
 surface_plan_payload_root() {
@@ -304,11 +398,82 @@ surface_plan_register_destination() {
   return 0
 }
 
+# User destinations are absolute by construction; project destinations remain
+# relative. Normalize every user destination in one Perl process so reserved
+# control-path and duplicate detection cover Unicode canonical equivalence and
+# full case folding rather than jq's ASCII-only folding. Duplicate checks are
+# deliberately conservative on case-sensitive filesystems too, matching
+# attachment's no-alias contract.
+surface_plan_validate_user_destination_aliases() {
+  local destination violation violation_kind violation_path
+  local -a user_destinations=()
+
+  for destination in "${_SURFACE_PLAN_DESTINATIONS[@]+"${_SURFACE_PLAN_DESTINATIONS[@]}"}"; do
+    case "$destination" in
+      /*) user_destinations+=("$destination") ;;
+    esac
+  done
+  [ "${#user_destinations[@]}" -gt 0 ] || return 0
+
+  if ! command -v perl >/dev/null 2>&1; then
+    surface_plan_err "Perl Unicode normalization is required for user harness planning"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  if ! violation="$(perl -MUnicode::Normalize -Mfeature=fc -CAO -e '
+      my $home = NFC(fc(NFC(shift @ARGV)));
+      my (%seen, %duplicates, %reserved);
+      for my $path (@ARGV) {
+        my $key = NFC(fc(NFC($path)));
+        my $prefix = $home . "/";
+        if (index($key, $prefix) == 0) {
+          my ($first) = split m{/}, substr($key, length($prefix));
+          $reserved{$key} = 1 if $first eq ".git" || $first eq ".trellis";
+        }
+        $duplicates{$key} = 1 if $seen{$key}++;
+      }
+      my @reserved = sort keys %reserved;
+      my @duplicates = sort keys %duplicates;
+      if (@reserved) {
+        print "reserved\t", $reserved[0];
+      } elsif (@duplicates) {
+        print "duplicate\t", $duplicates[0];
+      }
+    ' -- "$_SURFACE_PLAN_CANONICAL_HOME" "${user_destinations[@]}")"; then
+    surface_plan_err "Perl Unicode normalization is unavailable for user harness planning"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  [ -n "$violation" ] || return 0
+  violation_kind="${violation%%$'\t'*}"
+  violation_path="${violation#*$'\t'}"
+  case "$violation_kind" in
+    reserved)
+      surface_plan_err "reserved managed destination alias: $violation_path"
+      return "$TRELLIS_EX_STATE"
+      ;;
+    duplicate)
+      surface_plan_err "duplicate managed destination alias: $violation_path"
+      return "$TRELLIS_EX_CONFLICT"
+      ;;
+    *)
+      surface_plan_err "internal error: invalid user destination alias result"
+      return "$TRELLIS_EX_STATE"
+      ;;
+  esac
+}
+
 surface_plan_add_link_record() {
-  local harness="$1" source="$2" destination="$3" executable="$4" target record
+  local harness="$1" source="$2" destination="$3" executable="$4" payload="${5:-}" target record
 
   surface_plan_register_destination "$destination" || return "$?"
-  target="$(surface_plan_runtime_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
+  if [ "$harness" = "user" ]; then
+    if [ -z "$payload" ]; then
+      surface_plan_err "internal error: user symlink record is missing its immutable payload"
+      return "$TRELLIS_EX_STATE"
+    fi
+    target="$payload/$source"
+  else
+    target="$(surface_plan_runtime_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
+  fi
   record="$(jq -cn \
     --arg harness "$harness" \
     --arg source "$source" \
@@ -378,8 +543,18 @@ surface_plan_emit_direct_link() {
   source="$(printf '%s' "$entry" | jq -r '.source')" || return "$TRELLIS_EX_STATE"
   destination="$(printf '%s' "$entry" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
   executable="$(printf '%s' "$entry" | jq -r '.executable // false')" || return "$TRELLIS_EX_STATE"
-  surface_plan_require_source "$payload" "$source" file || return "$?"
-  surface_plan_add_link_record "$harness" "$source" "$destination" "$executable"
+  if [ "$harness" = "user" ]; then
+    destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
+    if [ -d "$payload/$source" ] && [ ! -L "$payload/$source" ]; then
+      surface_plan_require_source "$payload" "$source" directory || return "$?"
+      surface_plan_assert_tree_safe "$payload" "$payload/$source" || return "$?"
+    else
+      surface_plan_require_source "$payload" "$source" file || return "$?"
+    fi
+  else
+    surface_plan_require_source "$payload" "$source" file || return "$?"
+  fi
+  surface_plan_add_link_record "$harness" "$source" "$destination" "$executable" "$payload"
 }
 
 surface_plan_emit_project_link() {
@@ -484,24 +659,26 @@ surface_plan_emit_children_link() {
     child_relative="${sorted_candidate#"$payload/$source/"}"
     source_relative="$source/$child_relative"
     destination="$destination_dir/$child_relative"
+    if [ "$harness" = "user" ]; then
+      destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
+    fi
 
     if [ "$entry_type" = "directory" ] && [ -n "$required_file" ]; then
       surface_plan_require_source "$payload" "$source_relative/$required_file" file || return "$?"
     else
       surface_plan_require_source "$payload" "$source_relative" "$entry_type" || return "$?"
     fi
-    surface_plan_add_link_record "$harness" "$source_relative" "$destination" "$executable" || return "$?"
+    surface_plan_add_link_record "$harness" "$source_relative" "$destination" "$executable" "$payload" || return "$?"
   done < "$sorted_file"
 
   return 0
 }
 
 # `render_if_absent` marks a seed render: the payload owns the bytes only while
-# the project has none of its own. The planner still emits the record — it has
-# no project checkout to inspect and must stay a pure function of the payload —
-# so the create-only decision belongs to attach, which is the only stage that
-# sees the destination. Restricted to `replace` by the manifest validator:
-# `explicit-json` already coexists with project keys by merging, so a
+# the destination has none of its own. The planner emits the record without
+# inspecting the final destination and remains no-write, so attach owns the
+# create-only decision. Restricted to `replace` by the manifest validator:
+# `explicit-json` already coexists with destination keys by merging, so a
 # skip-if-exists rule there would only mean "never merge".
 surface_plan_emit_render() {
   local payload="$1" harness="$2" entry="$3"
@@ -509,6 +686,9 @@ surface_plan_emit_render() {
 
   template="$(printf '%s' "$entry" | jq -r '.template')" || return "$TRELLIS_EX_STATE"
   destination="$(printf '%s' "$entry" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  if [ "$harness" = "user" ]; then
+    destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
+  fi
   merge="$(printf '%s' "$entry" | jq -r '.merge')" || return "$TRELLIS_EX_STATE"
   mode="$(printf '%s' "$entry" | jq -r '.mode')" || return "$TRELLIS_EX_STATE"
   required="$(printf '%s' "$entry" | jq -r '.required')" || return "$TRELLIS_EX_STATE"
@@ -545,6 +725,10 @@ surface_plan_emit_link_entry() {
 surface_plan_emit_harness() {
   local payload="$1" manifest="$2" harness="$3" entry links_file render_file
 
+  if [ "$harness" = "user" ]; then
+    surface_plan_prepare_user_home || return "$?"
+  fi
+
   surface_plan_make_tempfile || return "$?"
   links_file="$_SURFACE_PLAN_LAST_TMP"
   if ! jq -c --arg harness "$harness" '.harnesses[$harness].links[]' "$manifest" > "$links_file"; then
@@ -570,9 +754,15 @@ surface_plan_emit_harness() {
 }
 
 surface_plan_validate_manifest() {
-  local manifest="$1"
+  local manifest="$1" harness require_user=false
 
-  if ! jq -e '
+  for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
+    if [ "$harness" = "user" ]; then
+      require_user=true
+      break
+    fi
+  done
+  if ! jq -e --argjson require_user "$require_user" '
     def safe_text:
       if type != "string" then false
       else length > 0
@@ -593,37 +783,52 @@ surface_plan_validate_manifest() {
       else false end;
     def safe_destination:
       if safe_relative_path then
-        . != ".git" and (startswith(".git/") | not)
-        and . != ".trellis" and (startswith(".trellis/") | not)
+        (ascii_downcase
+         | . != ".git" and (startswith(".git/") | not)
+         and . != ".trellis" and (startswith(".trellis/") | not))
       else false end;
     def valid_suffix:
       if safe_component then startswith(".") else false end;
     def allowed($allowed_keys): ((keys - $allowed_keys) | length) == 0;
     def optional_boolean($key):
       if has($key) then (.[$key] | type == "boolean") else true end;
-    def valid_direct_link:
+    def valid_home_marker($home):
+      if $home
+      then has("destination_home") and .destination_home == true
+      else (has("destination_home") | not)
+      end;
+    def valid_direct_link($home):
       if type == "object" and has("source") and has("destination")
          and (has("source_children") | not) and (has("project_target") | not)
       then
-        allowed(["destination", "executable", "source"])
+        allowed(if $home
+                then ["destination", "destination_home", "executable", "source"]
+                else ["destination", "executable", "source"]
+                end)
+        and valid_home_marker($home)
         and (.source | safe_relative_path)
         and (.destination | safe_destination)
         and optional_boolean("executable")
       else false end;
-    def valid_project_link:
-      if type == "object" and has("project_target") and has("fallback_source") and has("destination")
-         and (has("source") | not) and (has("source_children") | not)
+    def valid_project_link($home):
+      if $home then false
+      elif type == "object" and has("project_target") and has("fallback_source") and has("destination")
+           and (has("source") | not) and (has("source_children") | not)
       then
         allowed(["destination", "fallback_source", "project_target"])
         and (.project_target | safe_relative_path)
         and (.fallback_source | safe_relative_path)
         and (.destination | safe_destination)
       else false end;
-    def valid_children_link:
+    def valid_children_link($home):
       if type == "object" and has("source_children") and has("destination_dir") and has("entry_type")
          and (has("source") | not) and (has("project_target") | not)
       then
-        allowed(["destination_dir", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"])
+        allowed(if $home
+                then ["destination_dir", "destination_home", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
+                else ["destination_dir", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
+                end)
+        and valid_home_marker($home)
         and (.source_children | safe_relative_path)
         and (.destination_dir | safe_destination)
         and ((.entry_type == "file") or (.entry_type == "directory"))
@@ -640,11 +845,16 @@ surface_plan_validate_manifest() {
                and (if has("required_file") then (.required_file | safe_relative_path) else true end)
              end)
       else false end;
-    def valid_link: valid_direct_link or valid_project_link or valid_children_link;
-    def valid_render:
+    def valid_link($home):
+      valid_direct_link($home) or valid_project_link($home) or valid_children_link($home);
+    def valid_render($home):
       if type == "object" and has("template") and has("destination") and has("merge") and has("mode") and has("required")
       then
-        allowed(["destination", "merge", "mode", "render_if_absent", "required", "template"])
+        allowed(if $home
+                then ["destination", "destination_home", "merge", "mode", "render_if_absent", "required", "template"]
+                else ["destination", "merge", "mode", "render_if_absent", "required", "template"]
+                end)
+        and valid_home_marker($home)
         and (.template | safe_relative_path)
         and (.destination | safe_destination)
         and ((.merge == "explicit-json") or (.merge == "replace"))
@@ -654,21 +864,29 @@ surface_plan_validate_manifest() {
              then (.render_if_absent | type == "boolean") and .merge == "replace"
              else true end)
       else false end;
-    def valid_harness:
+    def valid_harness($home):
       if type == "object" and has("links") and has("render")
       then
         allowed(["links", "render"])
-        and (.links | (type == "array" and all(.[]; valid_link)))
-        and (.render | (type == "array" and all(.[]; valid_render)))
+        and (.links | (type == "array" and all(.[]; valid_link($home))))
+        and (.render | (type == "array" and all(.[]; valid_render($home))))
       else false end;
     if type == "object"
        and ((keys | sort) == ["harnesses", "schema_version"])
        and .schema_version == 1
-       and (.harnesses | (type == "object" and ((keys | sort) == ["claude", "codex", "omp"])))
+       and (.harnesses | (
+         type == "object"
+         and (
+           ((keys | sort) == ["claude", "codex", "omp"])
+           or ((keys | sort) == ["claude", "codex", "omp", "user"])
+         )
+         and (if $require_user then has("user") else true end)
+       ))
     then
-      (.harnesses.claude | valid_harness)
-      and (.harnesses.codex | valid_harness)
-      and (.harnesses.omp | valid_harness)
+      (.harnesses.claude | valid_harness(false))
+      and (.harnesses.codex | valid_harness(false))
+      and (.harnesses.omp | valid_harness(false))
+      and (if .harnesses | has("user") then (.harnesses.user | valid_harness(true)) else true end)
     else false end
   ' "$manifest" >/dev/null 2>&1; then
     surface_plan_err "inheritance manifest is malformed or unsafe: $manifest"
@@ -688,7 +906,7 @@ surface_plan_normalize_harnesses() {
 
   for requested in "$@"; do
     case "$requested" in
-      claude|codex|omp) ;;
+      claude|codex|omp|user) ;;
       *)
         surface_plan_err "unknown harness: ${requested:-<empty>}"
         return "$TRELLIS_EX_USAGE"
@@ -696,7 +914,7 @@ surface_plan_normalize_harnesses() {
     esac
   done
 
-  for canonical in claude codex omp; do
+  for canonical in claude codex omp user; do
     present=false
     for requested in "$@"; do
       if [ "$requested" = "$canonical" ]; then
@@ -749,6 +967,7 @@ surface_plan_emit() {
     _SURFACE_PLAN_OPTIONAL_MISSING=()
     _SURFACE_PLAN_TEMP_FILES=()
     _SURFACE_PLAN_LAST_TMP=""
+    _SURFACE_PLAN_CANONICAL_HOME=""
     trap 'surface_plan_cleanup' EXIT
 
     trellis_home_require_jq || return "$?"
@@ -761,13 +980,14 @@ surface_plan_emit() {
     for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
       surface_plan_emit_harness "$payload_root" "$manifest" "$harness" || return "$?"
     done
+    surface_plan_validate_user_destination_aliases || return "$?"
     surface_plan_write_json
   )
 }
 
 surface_plan_usage() {
   cat <<'EOF'
-Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_PATH [--harness claude|codex|omp]...
+Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_PATH [--harness claude|codex|omp|user]...
 
 Expand the immutable inheritance payload into a deterministic, no-write JSON plan.
 With no --harness selectors, emits Claude Code, Codex, and OMP in canonical order.
@@ -799,7 +1019,7 @@ surface_plan_main() {
         ;;
       --harness)
         if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-          surface_plan_err "--harness requires claude, codex, or omp"
+          surface_plan_err "--harness requires claude, codex, omp, or user"
           return "$TRELLIS_EX_USAGE"
         fi
         harnesses+=("$2")

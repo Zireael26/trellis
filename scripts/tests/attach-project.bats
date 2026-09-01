@@ -666,14 +666,17 @@ SH
   mkdir -p "$python_dir"
   cat > "$python_dir/python3" <<'SH'
 #!/bin/sh
-: > "$T14_PINNED_RUNTIME_BARRIER"
-while [ ! -e "$T14_PINNED_RUNTIME_CONTINUE" ]; do
-  /bin/sleep 0.01
-done
+if [ "$#" -eq 8 ] && [ "$2" = "$T14_PINNED_RUNTIME_ROOT" ]; then
+  : > "$T14_PINNED_RUNTIME_BARRIER"
+  while [ ! -e "$T14_PINNED_RUNTIME_CONTINUE" ]; do
+    /bin/sleep 0.01
+  done
+fi
 exec "$T14_PINNED_RUNTIME_PYTHON" "$@"
 SH
   chmod 755 "$python_dir/python3"
 
+  T14_PINNED_RUNTIME_ROOT="$PROJECT" \
   T14_PINNED_RUNTIME_BARRIER="$barrier" \
     T14_PINNED_RUNTIME_CONTINUE="$continue_file" \
     T14_PINNED_RUNTIME_PYTHON="$real_python" \

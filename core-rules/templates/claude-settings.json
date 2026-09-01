@@ -1,5 +1,4 @@
 {
-  "effortLevel": "xhigh",
   "permissions": {
     "deny": [
       "Read(./node_modules/**)",
@@ -49,6 +48,12 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh",
             "timeout": 5,
             "statusMessage": "Checking command safety..."
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pr-gate-shiftleft.sh",
+            "timeout": 120,
+            "statusMessage": "Running PR process-gate pre-flight..."
           }
         ]
       },
@@ -160,6 +165,12 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-size-preflight.sh",
             "timeout": 10,
             "statusMessage": "Scanning discoverable Skill sizes..."
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/env-echo.sh",
+            "timeout": 5,
+            "statusMessage": "Checking hook environment..."
           }
         ]
       }
@@ -208,6 +219,12 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/propose-rules.sh",
             "timeout": 60,
             "statusMessage": "Proposing rules..."
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/primer-capture-nudge.sh",
+            "timeout": 15,
+            "statusMessage": "Checking primer coverage..."
           },
           {
             "type": "command",

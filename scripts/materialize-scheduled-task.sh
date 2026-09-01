@@ -172,6 +172,46 @@ verify_staged_release_asset() {
   fi
 }
 
+resolve_conductor_auto_execute_top_n() {
+  local release_payload="${1:-}" release_manifest="${2:-}"
+  local source="" expected_oid="" actual_oid="" value=""
+
+  source="$release_payload/trellis.config.json"
+  # Releases predating the shared conductor knob remain byte-for-byte default
+  # off. A present policy must be the regular blob pinned by this run's release
+  # manifest; never consult a mutable checkout or machine-local substitute.
+  if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+    printf '%s\n' 0
+    return 0
+  fi
+  if [ -L "$source" ] || [ ! -f "$source" ]; then
+    materialize_error "verified release conductor policy must be a regular file"
+    return "$TRELLIS_EX_STATE"
+  fi
+  expected_oid="$(release_manifest_blob_oid "$release_manifest" "trellis.config.json")" || return "$?"
+  actual_oid="$(release_store_blob_oid_for_path "$source")" || {
+    materialize_error "could not identify verified release conductor policy"
+    return "$TRELLIS_EX_STATE"
+  }
+  if [ "$actual_oid" != "$expected_oid" ]; then
+    materialize_error "verified release conductor policy differs from its pinned manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  value="$(jq -er '
+    (.conductor.auto_execute_top_n // 0) as $value
+    | if (
+        ($value | type) == "number"
+        and ($value | floor) == $value
+        and $value >= 0
+      ) then $value
+      else error("invalid conductor.auto_execute_top_n") end
+  ' "$source")" || {
+    materialize_error "verified release conductor.auto_execute_top_n must be a non-negative integer"
+    return "$TRELLIS_EX_STATE"
+  }
+  printf '%s\n' "$value"
+}
+
 stage_release_task_assets() {
   local release_payload="${1:-}" release_json="${2:-}" task="${3:-}" stage="${4:-}"
   local relative_root="" asset_stage=""
@@ -1090,7 +1130,7 @@ cmd_materialize() {
   local tasks_dir_real="" fleet_dir_real="" fleet_dir_identity="" stage_identity="" task_lock_held=false
   local canonical_snapshot="" excluded_unavailable="[]" excluded_rows="[]" requires_checkout=false
   local entry_count=0 unavailable_count=0 eligible_count=0 nonexcluded_count=0
-  local detached_only_count=0 conductor_backlog=false registry_state_errors=0
+  local detached_only_count=0 conductor_backlog=false conductor_auto_execute_top_n=0 registry_state_errors=0
   local snapshot_sha256="" planned_errors="[]" manifest_status="ready" detail=""
 
   while [ "$#" -gt 0 ]; do
@@ -1199,6 +1239,9 @@ cmd_materialize() {
   # Every asset identity below comes from this pinned release manifest, never a
   # later live-store read. The live release is reverified before publication.
   stage_release_task_assets "$release_payload" "$release_manifest" "$task" "$stage" || return "$?"
+  if [ "$task" = "conductor" ]; then
+    conductor_auto_execute_top_n="$(resolve_conductor_auto_execute_top_n "$release_payload" "$release_manifest")" || return "$?"
+  fi
   mkdir "$stage/output" || return "$TRELLIS_EX_UNAVAILABLE"
   chmod 700 "$stage/output" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
 
@@ -1301,6 +1344,7 @@ EOF
     --arg status "$manifest_status" \
     --arg aeo_compatibility "$AEO_COMPATIBILITY" \
     --argjson conductor_backlog "$conductor_backlog" \
+    --argjson conductor_auto_execute_top_n "$conductor_auto_execute_top_n" \
     --argjson entry_count "$entry_count" \
     --argjson unavailable_count "$unavailable_count" \
     --argjson identity_error_count "$registry_state_errors" \
@@ -1317,6 +1361,13 @@ EOF
         release_version: $release_version,
         release_commit: $release_commit
       },
+      policy: (
+        if $conductor_backlog then {
+          conductor: {
+            auto_execute_top_n: $conductor_auto_execute_top_n
+          }
+        } else {} end
+      ),
       files: (
         {
           snapshot: "snapshot.json",

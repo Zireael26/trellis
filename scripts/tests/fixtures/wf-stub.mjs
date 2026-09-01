@@ -68,6 +68,8 @@ function cannedAgentResult(opts = {}) {
       id: label.replace(/^build:/, ''),
       route: 'surgical',
       branch: '',
+      pr_number: 0,
+      pr_state: 'NONE',
       pr_url: '',
       gate_green: false,
       notes: 'wf-stub canned held build verdict',

@@ -73,6 +73,42 @@ commit_and_check() {
   [ "$status" -eq 0 ]
 }
 
+# The `analyze` skill emits both the bare and the qualified form. Space-stripping in
+# the parser turned `PASS (1 warning)` into `PASS(1WARNING)`, which matched no arm and
+# was reported as "no recognizable '## Verdict:' line" — so specs using the qualified
+# form warned silently. Inverting the fix (dropping the `PASS\(*` arm) fails this test.
+@test "analyze Verdict: PASS (qualified) -> pass (exit 0)" {
+  commit_and_check \
+    "specs/001-feature/spec.md"    $'# spec\n' \
+    "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: PASS (1 warning)\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no recognizable"* ]]
+}
+
+@test "analyze Verdict: PASS with a multi-word qualifier -> pass (exit 0)" {
+  commit_and_check \
+    "specs/001-feature/spec.md"    $'# spec\n' \
+    "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: PASS (2 warnings, 1 info)\n'
+  [ "$status" -eq 0 ]
+}
+
+# The loosening must not extend to the warn verdicts: a qualified form of either is
+# not something the skill emits, and accepting one would let a typo read as recognized.
+@test "analyze Verdict: NEEDS-REVISION (qualified) is NOT silently accepted -> warn (exit 2)" {
+  commit_and_check \
+    "specs/001-feature/spec.md"    $'# spec\n' \
+    "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: NEEDS-REVISION (3 criticals)\n'
+  [ "$status" -eq 2 ]
+}
+
+@test "analyze Verdict: garbage -> warn (exit 2)" {
+  commit_and_check \
+    "specs/001-feature/spec.md"    $'# spec\n' \
+    "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: MOSTLY FINE\n'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no recognizable"* ]]
+}
+
 @test "analyze Verdict: NEEDS-REVISION -> warn (exit 2)" {
   commit_and_check \
     "specs/001-feature/spec.md"    $'# spec\n' \

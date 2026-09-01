@@ -1,0 +1,77 @@
+{
+  "scenario": "stale_cache",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:10:00Z"
+    },
+    "ingest": {
+      "last_completed_at": "2026-08-23T12:09:00Z",
+      "query_time_rescan": false
+    },
+    "period": {
+      "start": "2026-08-01T00:00:00Z",
+      "end": "2026-08-23T12:10:00Z",
+      "timezone": "UTC"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-omp-stale-cache-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "records": [
+          {
+            "type": "message",
+            "id": "message-stale-cache-001",
+            "timestamp": "2026-08-10T09:00:03Z",
+            "message": {
+              "role": "assistant",
+              "provider": "openai-codex",
+              "model": "gpt-5.6-luna",
+              "usage": {
+                "input": 180,
+                "output": 140,
+                "cacheRead": 20,
+                "cacheWrite": 0,
+                "reasoningTokens": 35,
+                "cost": {
+                  "total": 0.0023
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "status": "partial",
+    "ingest": {
+      "status": "stale",
+      "last_known": {
+        "scanned_through": "2026-08-10T09:00:03Z"
+      },
+      "observed_at": "2026-08-23T12:09:00Z",
+      "expires_at": "2026-08-23T12:10:00Z",
+      "reason_code": "freshness_budget_exceeded"
+    },
+    "lanes": [
+      {
+        "lane_id": "openai-codex",
+        "spend": {
+          "notional_nanos": {
+            "status": "stale",
+            "last_known": 2300000,
+            "source": "message.usage.cost.total",
+            "observed_at": "2026-08-23T12:09:00Z",
+            "expires_at": "2026-08-23T12:10:00Z",
+            "reason_code": "freshness_budget_exceeded"
+          },
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "subscription_has_no_real_invoice_spend"
+          }
+        }
+      }
+    ]
+  }
+}

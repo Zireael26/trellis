@@ -149,6 +149,55 @@ JSON
   # sealed and installed through the bootstrap launcher instead.
   release_fixture_install "$HOME" "$TRELLIS_HOME" "$release" "$repo"
 }
+make_copied_older_release() {
+  local base="$TRELLIS_HOME/releases/1.2.3"
+  local release="$TRELLIS_HOME/releases/1.2.2"
+  local payload="$release/payload"
+  local manifest="$SANDBOX/release-1.2.2.jsonl"
+  local file relative mode oid target
+
+  cp -R "$base" "$release"
+  chmod -R u+w "$release"
+  mkdir -p "$payload/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/attachment.sh" "$payload/scripts/lib/attachment.sh"
+  sed \
+    -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
+    -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
+    -e '/^[[:space:]]*export TRELLIS_ALLOW_MAIN_PUSH SECURITY_GATE_SKIP$/d' \
+    "$payload/scripts/lib/attachment.sh" > "$payload/scripts/lib/attachment.sh.tmp"
+  mv "$payload/scripts/lib/attachment.sh.tmp" "$payload/scripts/lib/attachment.sh"
+  printf '1.2.2\n' > "$payload/core-rules/VERSION"
+
+  : > "$manifest"
+  while IFS= read -r file; do
+    relative="${file#"$payload"/}"
+    if [ -L "$file" ]; then
+      mode=120000
+      target="$(readlink "$file")"
+      oid="$(printf '%s' "$target" | git hash-object --stdin)"
+    elif [ -x "$file" ]; then
+      mode=100755
+      oid="$(git hash-object "$file")"
+    else
+      mode=100644
+      oid="$(git hash-object "$file")"
+    fi
+    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
+      '{path:$path,mode:$mode,oid:$oid}' >> "$manifest"
+  done < <(find "$payload" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  jq -n --arg version 1.2.2 --slurpfile tree "$manifest" '{
+    schema_version:1,
+    version:$version,
+    tag:("v" + $version),
+    commit:"0000000000000000000000000000000000000000",
+    remote:"fixture://copied-older-release",
+    tree:$tree
+  }' > "$release/release.json"
+  find "$payload" -type f -exec chmod a-w {} \;
+  find "$payload" -type d -exec chmod a-w {} \;
+  chmod a-w "$release/release.json" "$release"
+}
+
 
 make_project() {
   PROJECT="$SANDBOX/project with spaces"
@@ -221,6 +270,109 @@ run_detach() {
   jq -e '[.projects[].checkouts[].worktrees[]] | length == 1' "$TRELLIS_HOME/registry.json"
   [ -z "$(git -C "$PROJECT" status --porcelain)" ]
 }
+@test "detach preserves foreign exclude bytes and still refuses managed-block tampering" {
+  local owner managed exclude before foreign_before foreign_after expected tampered_hash with_foreign duplicate_block
+  exclude="$PROJECT/.git/info/exclude"
+  before="$SANDBOX/exclude-before"
+  cp "$exclude" "$before"
+  run_attach
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  [ -f "$owner" ]
+  foreign_before="$SANDBOX/foreign-exclude-before"
+  foreign_after="$SANDBOX/foreign-exclude-after"
+  printf 'foreign prefix embeds %s in arbitrary bytes\n' \
+    '# --- Trellis local attachment exclude block ---' > "$foreign_before"
+  printf 'foreign suffix embeds %s in arbitrary bytes\n' \
+    '# --- end Trellis local attachment exclude block ---' > "$foreign_after"
+  cat "$foreign_before" "$exclude" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  cat "$exclude" "$foreign_after" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  with_foreign="$SANDBOX/exclude-with-foreign"
+  cp "$exclude" "$with_foreign"
+  duplicate_block="$SANDBOX/duplicate-block"
+  sed -n '/^# --- Trellis local attachment exclude block ---$/,/^# --- end Trellis local attachment exclude block ---$/p' \
+    "$exclude" > "$duplicate_block"
+  cat "$duplicate_block" >> "$exclude"
+  run_detach
+  [ "$status" -eq 3 ]
+  cp "$with_foreign" "$exclude"
+  expected="$SANDBOX/exclude-after-detach"
+  cat "$foreign_before" "$before" "$foreign_after" > "$expected"
+
+  run_detach
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$owner" ]
+  cmp -s "$exclude" "$expected"
+  ! grep -Fxq '# --- Trellis local attachment exclude block ---' "$exclude"
+  grep -Fq 'foreign prefix embeds' "$exclude"
+  grep -Fq 'foreign suffix embeds' "$exclude"
+
+  run_attach
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  sed 's|^/\.trellis/runtime$|/.trellis/runtime-tampered|' "$exclude" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  tampered_hash="$(sha256_file "$exclude")"
+
+  run_detach
+
+  [ "$status" -eq 3 ]
+  [ -f "$owner" ]
+  [ -L "$PROJECT/.trellis/runtime" ]
+  [ -e "$managed" ]
+  [ "$(sha256_file "$exclude")" = "$tampered_hash" ]
+  grep -Fq 'foreign prefix embeds' "$exclude"
+  grep -Fq 'foreign suffix embeds' "$exclude"
+}
+
+
+@test "full detach accepts an authentic dispatcher from a copied older payload" {
+  local old_release old_payload manifest owner managed legacy_post legacy_pre
+  make_copied_older_release
+  old_release="$TRELLIS_HOME/releases/1.2.2"
+  old_payload="$old_release/payload"
+
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.2 "$PROJECT"
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  manifest="$(sha256_file "$old_release/release.json")"
+  legacy_post="$(
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$old_payload" \
+      /bin/bash --noprofile --norc -c '
+        source "$1"
+        _attachment_hooks_post_checkout_dispatcher_body "$2" "$3"
+      ' legacy-dispatcher "$old_payload/scripts/lib/attachment.sh" "$old_payload" "$manifest"
+  )"
+  legacy_pre="$(
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$old_payload" \
+      /bin/bash --noprofile --norc -c '
+        source "$1"
+        _attachment_hooks_pre_push_dispatcher_body "$2" "$3" "$4"
+      ' legacy-dispatcher "$old_payload/scripts/lib/attachment.sh" "$old_payload" \
+        core-rules/githooks/pre-push "$manifest"
+  )"
+  [ -n "$legacy_post" ]
+  [ -n "$legacy_pre" ]
+  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]]
+  printf '%s\n' "$legacy_post" > "$managed/post-checkout"
+  printf '%s\n' "$legacy_pre" > "$managed/pre-push"
+  chmod 700 "$managed/post-checkout" "$managed/pre-push"
+
+  run_detach
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$managed" ]
+  [ ! -e "$PROJECT/.trellis/runtime" ]
+  [ -z "$(owner_for_root "$PROJECT")" ]
+  [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$EXCLUDE_HASH" ]
+  jq -e '[.. | objects | .attachment_id? // empty] | length == 0' "$TRELLIS_HOME/registry.json"
+}
+
 
 @test "checkout lock rejects concurrent detach without common-state drift and releases on signal" {
   run_attach
@@ -446,6 +598,63 @@ run_detach() {
   jq -e '[.. | objects | .attachment_id? // empty] | length == 0' "$TRELLIS_HOME/registry.json"
 }
 
+@test "recover finalizes a phase-3 restore journal and clears hooks and registry" {
+  local journal owner managed before_exists before64 exclude temp render
+  run_attach
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+
+  run env ATTACHMENT_FAULT_PHASE=detach-committed "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 5 ]
+  journal="$(find "$TRELLIS_HOME/state/attachment-journals" -type f -name 'detach-*.json' -print)"
+  [ -f "$journal" ]
+  jq -e '
+    .owner_committed == true
+    and .external.phase == 0
+    and .external.exclude_action == "restore"
+    and .external.restore_hooks == true
+    and .external.clear_registry == true
+  ' "$journal"
+
+  while IFS= read -r render; do
+    [ -n "$render" ] || continue
+    rm -f "$PROJECT/$render"
+  done < <(jq -r '.external.renders[].path' "$journal")
+  exclude="$PROJECT/.git/info/exclude"
+  before_exists="$(jq -r '.original_owner.exclude.before_exists' "$journal")"
+  if [ "$before_exists" = true ]; then
+    before64="$(jq -r '.original_owner.exclude.before_base64' "$journal")"
+    if ! printf '%s' "$before64" | base64 -D > "$exclude" 2>/dev/null; then
+      printf '%s' "$before64" | base64 -d > "$exclude"
+    fi
+    chmod 600 "$exclude"
+  else
+    rm -f "$exclude"
+  fi
+  temp="$journal.tmp"
+  jq '.external.phase = 3 | .external.render_phase = (.external.renders | length)' \
+    "$journal" > "$temp"
+  chmod 600 "$temp"
+  mv "$temp" "$journal"
+  jq -e '
+    .owner_committed == true
+    and .external.phase == 3
+    and .external.exclude_action == "restore"
+    and .external.restore_hooks == true
+    and .external.clear_registry == true
+  ' "$journal"
+
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$journal" ]
+  [ ! -e "$managed" ]
+  [ -z "$(git -C "$PROJECT" config --local --get-all core.hooksPath 2>/dev/null || true)" ]
+  [ "$(sha256_file "$exclude")" = "$EXCLUDE_HASH" ]
+  jq -e '[.. | objects | .attachment_id? // empty] | length == 0' "$TRELLIS_HOME/registry.json"
+}
+
 @test "detach retains a preexisting empty harness parent" {
   mkdir "$PROJECT/.claude"
   run_attach
@@ -464,6 +673,7 @@ run_detach() {
 }
 
 @test "final detach restores the exact previous hooksPath and rejects drift" {
+  local current diagnostic current_display root_display managed_display
   mkdir -p "$PROJECT/.husky/_"
   git -C "$PROJECT" config --local core.hooksPath .husky/_
   run_attach
@@ -480,9 +690,16 @@ run_detach() {
   [ "$status" -eq 0 ]
   owner="$(owner_for_root "$PROJECT")"
   rewrite_owner "$owner" ".git_hooks = {\"enabled\":true,\"managed_hooks_path\":\"$managed\",\"previous_hooks_path\":\".husky/_\",\"pre_push_source\":\"core-rules/githooks/pre-push\"}"
-  git -C "$PROJECT" config --local core.hooksPath other-manager
+  current=$'other manager\tpath'
+  git -C "$PROJECT" config --local core.hooksPath "$current"
   run_detach
   [ "$status" -eq 3 ]
+  current_display="$(printf '%q' "$current")"
+  root_display="$(printf '%q' "$PROJECT")"
+  managed_display="$(printf '%q' "$managed")"
+  diagnostic="core.hooksPath is $current_display; the Trellis managed dispatcher is $managed_display; run git -C $root_display config core.hooksPath $managed_display"
+  [[ "$output" == *"trellis attach: refusing detach: $diagnostic"* ]] || { echo "$output"; false; }
+  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$current" ]
   [ -f "$owner" ]
   [ -L "$PROJECT/.trellis/runtime" ]
 }

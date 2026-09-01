@@ -1,0 +1,141 @@
+{
+  "scenario": "meta_post_paid_no_quota",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:45:00Z"
+    },
+    "period": {
+      "start": "2026-08-23T00:00:00Z",
+      "end": "2026-08-23T12:45:00Z",
+      "timezone": "UTC"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-omp-meta-postpaid-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "records": [
+          {
+            "type": "session",
+            "version": 3,
+            "id": "session-meta-postpaid-001",
+            "timestamp": "2026-08-23T12:44:00Z",
+            "cwd": "/synthetic/projects/meta-postpaid"
+          },
+          {
+            "type": "message",
+            "id": "message-meta-postpaid-user-001",
+            "timestamp": "2026-08-23T12:44:01Z",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "PROMPT_SENTINEL_META_POSTPAID_31A9"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "message-meta-postpaid-tool-call-001",
+            "timestamp": "2026-08-23T12:44:02Z",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "toolCall",
+                  "id": "tool-call-meta-postpaid-001",
+                  "name": "fixture_lookup",
+                  "arguments": {
+                    "query": "TOOL_SENTINEL_META_POSTPAID_8D20"
+                  }
+                }
+              ],
+              "provider": "meta",
+              "model": "muse-spark-1.2-contributor",
+              "stopReason": "toolUse"
+            }
+          },
+          {
+            "type": "message",
+            "id": "message-meta-postpaid-tool-result-001",
+            "timestamp": "2026-08-23T12:44:03Z",
+            "message": {
+              "role": "toolResult",
+              "toolCallId": "tool-call-meta-postpaid-001",
+              "toolName": "fixture_lookup",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "TOOL_SENTINEL_META_POSTPAID_8D20"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "message-meta-postpaid-assistant-001",
+            "timestamp": "2026-08-23T12:44:04Z",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "COMPLETION_SENTINEL_META_POSTPAID_5E77"
+                }
+              ],
+              "api": "openai-responses",
+              "provider": "meta",
+              "model": "muse-spark-1.2-contributor",
+              "usage": {
+                "input": 128,
+                "output": 64,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "reasoningTokens": 16,
+                "cost": {
+                  "input": 0.02,
+                  "output": 0.02,
+                  "total": 0.04
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "status": "complete",
+    "lanes": [
+      {
+        "lane_id": "meta",
+        "quota": {
+          "status": "not_supported",
+          "reason_code": "no_quota_api",
+          "observed_at": "2026-08-23T12:45:00Z"
+        },
+        "spend": {
+          "real_nanos": {
+            "status": "fresh",
+            "observed_at": "2026-08-23T12:44:04Z",
+            "expires_at": "2026-08-23T12:45:04Z",
+            "value": 40000000,
+            "source": "message.usage.cost.total"
+          },
+          "notional_nanos": {
+            "status": "not_supported",
+            "reason_code": "post_paid_lane_has_no_subscription_notional"
+          }
+        },
+        "availability": {
+          "status": "available",
+          "observed_at": "2026-08-23T12:44:04Z",
+          "reason_code": "serving_success"
+        }
+      }
+    ]
+  }
+}

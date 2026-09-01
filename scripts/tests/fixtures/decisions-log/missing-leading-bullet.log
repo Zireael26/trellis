@@ -1,0 +1,1 @@
+2026-08-30T12:01:00Z [L3] [pattern] Keep candidate detection broader than validation. Reasoning: Format drift must not disappear from counts. Alternatives considered: Count only conforming entries.

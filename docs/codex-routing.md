@@ -4,6 +4,9 @@ Source: the July-2026 community + benchmark consensus on Claude/Opus vs Codex/GP
 
 The per-model prompting levers live next door: `docs/claude-steering.md` and `docs/gpt-5.x-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
 
+> **Evidence status:** §2 retains the July-2026 routing table as historical evidence. D7 closed-with-shortfall after its 2026-08-15 expiry; this document does not represent the table as re-grounded.
+
+
 ---
 
 ## Current status — direct Codex CLI and optional plugin companion
@@ -24,29 +27,28 @@ receipts and field lessons remain in
 `docs/adr/2026-07-10-codex-parallel-orchestration.md` and
 `specs/013-codex-parallel-orchestration/spec.md`.
 
-The older benchmark evidence below remains historical steering; the direct CLI
-and plugin-owned companion commands above are the current executable surfaces.
+The older benchmark evidence and §2 table below remain July-2026 historical steering evidence; they are not a D7 Phase-B re-ground. The direct CLI and plugin-owned companion commands above are the current executable surfaces.
 
 ## 1. Topology — Claude orchestrates, Codex executors are dispatchable nodes
 
 **Claude is the orchestrator. Deliberate direct Codex CLI execution and, when explicitly selected, plugin-owned `codex-companion.mjs` commands are the dispatchable executor nodes inside Claude-driven workflows and loops.**
+The orchestration surface — `ultracode`, the `Workflow` tool, `/loop` / `/goal`, the fan-out → verify → synthesize discipline — is owned by Claude **as a policy choice, not a capability absence**. Codex-native multi-agent orchestration now exists and was re-checked 2026-07-10 on source evidence (`openai/codex` @ rust-v0.144.0) — a historical D4(d) source check, not a D7 Phase-B consensus sweep, formal topology re-ground, or receipt: `ultra` is a **harness mode, not a deeper model tier** — the API request sends `max` effort (`client.rs` maps `Ultra => Max`) while the harness injects a proactive-delegation developer message that authorizes the model to spawn subagents on its own judgment (CLI default: 4 concurrent threads/session = main + 3 subagents; the c…
 
-The orchestration surface — `ultracode`, the `Workflow` tool, `/loop` / `/goal`, the fan-out → verify → synthesize discipline — is owned by Claude **as a policy choice, not a capability absence**. Codex-native multi-agent orchestration now exists and was re-checked 2026-07-10 on source evidence (`openai/codex` @ rust-v0.144.0) — answering the spec 011 D4(d) topology question ahead of the D7 Phase-B sweep, which remains predicate-gated: `ultra` is a **harness mode, not a deeper model tier** — the API request sends `max` effort (`client.rs` maps `Ultra => Max`) while the harness injects a proactive-delegation developer message that authorizes the model to spawn subagents on its own judgment (CLI default: 4 concurrent threads/session = main + 3 subagents; the c…
 
 This is a topology, not an identity check. Nothing here reads "if Claude, do X; if Codex, do Y." The orchestrator routes; the executor executes.
 
 ## 2. Routing policy — work-type → model
 
-> **Stale-on-launch banner (2026-07-09):** the figures below are pre-5.6 (5.5-era); re-ground pending under spec 011 Phase B. Predicate: ≥2 independent non-OpenAI evaluations of SWE-bench-Pro-class or blind-review-class quality, directionally concordant; expiry 2026-08-15 (then sweep anyway, log the shortfall).
+> **D7 shortfall (durable; closed-with-shortfall 2026-08-23):** The expiry fired 2026-08-15. No ≥2 independent non-OpenAI consensus sweep occurred, and no Phase-B §2 figures/topology re-ground, D7 verification matrix, or Phase-B review/release receipt occurred. The table below remains July-2026 historical evidence, not a re-grounded Phase-B result. No sources, sweep results, or receipts are reconstructed after the fact, because they would not prove the required work ran and would falsely imply Phase-B completion.
 
-The consensus splits cleanly by strength. **Claude** wins on quality, review, planning, and hard reasoning; **Codex** wins on speed, autonomy, token cost, and background/async execution. Concrete signals:
+The retained July-2026 consensus split by strength. **Claude** wins on quality, review, planning, and hard reasoning; **Codex** wins on speed, autonomy, token cost, and background/async execution. Concrete signals:
 
 - **Hard reasoning:** SWE-bench Pro **64.3%** (Claude) vs **58.6%** (Codex).
 - **Code review, blind:** cleaner result **67%** (Claude) vs **25%** (Codex).
 - **Token cost:** Codex is **~3–4× cheaper per task**; one Express refactor ran **$155** (Claude) vs **$15** (Codex).
 - **Broad coding parity:** SWE-bench Verified **87.6%** (Claude) vs **88.7%** (Codex) — near-tied, so this axis does *not* drive routing; the deltas above do.
 
-These figures re-ground on any major model launch or pricing change — re-run the consensus research (community + benchmark sweep, same method as the figures above) and update this table with sources; never hand-edit on launch-day claims. The re-check includes whether §1's "no equivalent orchestration surface" claim still holds. (This instance automates the trigger via its ai-dev-trends adopt loop; forks without it run the sweep manually.)
+For a future material model-launch or pricing-change review, re-run the consensus research (community + benchmark sweep, same method as the figures above) and update this table with sources; never hand-edit on launch-day claims. The D7 2026-08-15 expiry did not produce such a sweep or update, so this table is retained as historical evidence. A future re-check includes whether §1's "no equivalent orchestration surface" claim still holds. (This instance automates the trigger via its ai-dev-trends adopt loop; forks without it run the sweep manually.)
 
 Default routing (a starting policy, tunable per project):
 
@@ -158,6 +160,6 @@ Every row names an existing mechanic; none authorizes a router to rewrite an exp
 
 **Review of executor output is never delegated to the executor that produced the diff, and never skipped** — cross-agent review inside recipes is legitimate; self-review by the producing executor is what's banned. The diff reads like a contributor PR, proof demanded; §4's review gate fires verbatim. Rationale, stated boundedly: the 5.6 system card reports increased agentic-coding overreach vs 5.5 (most pronounced at highest reasoning effort under persistence-heavy prompts) alongside a ~30% *decrease* in misrepresented completions in simulated traffic, and METR reports its highest detected ReAct-harness cheating rate, explicitly prompt/scaffold-dependent. Two failed rounds on the same selected unit end that lane attempt visibly; direct or other-provider execution starts only after explicit caller/operator re-selection, and the takeover is logged.
 
-**Posture: flipped standard since 2026-07-30.** Spec 009 established the bounded work-order predicate; its pilot ledger records the flip, and `core-rules/references/delegation.md` carries the current auto-route contract. Qualifying Codex units use the effort band in §3. Explicit provider locks remain authoritative; pilot history never authorizes an automatic plugin fallback. Token-efficiency framing stays bounded: the "54%" figure is a community-relayed single claim — treat as directional until Phase B.
+**Posture: flipped standard since 2026-07-30.** Spec 009 established the bounded work-order predicate; its pilot ledger records the flip, and `core-rules/references/delegation.md` carries the current auto-route contract. Qualifying Codex units use the effort band in §3. Explicit provider locks remain authoritative; pilot history never authorizes an automatic plugin fallback. Token-efficiency framing stays bounded: the "54%" figure is a community-relayed single claim — treat it as directional; no D7 Phase-B re-ground occurred.
 
 **Mechanics:** Direct command forms are in §4.5. The retired worker mechanics have no active reference file; their field lessons and historical receipts remain in `docs/adr/2026-07-10-codex-parallel-orchestration.md` and `specs/013-codex-parallel-orchestration/spec.md`. Delegated units draw the same per-model budgets (`core-rules/loop-safety.md`) and face the same bright-lines as inline work.

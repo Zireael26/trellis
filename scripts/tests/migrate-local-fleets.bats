@@ -223,6 +223,36 @@ teardown() {
   rm -rf "$SANDBOX"
 }
 
+@test "migration uses GNU stat link count on Linux" {
+  local fakebin="$SANDBOX/fakebin" probe="$SANDBOX/probe"
+  mkdir -p "$fakebin"
+  : > "$probe"
+  cat > "$fakebin/uname" <<'SH'
+#!/bin/sh
+printf 'Linux\n'
+SH
+  cat > "$fakebin/stat" <<'SH'
+#!/bin/sh
+case "$1:$2" in
+  '-c:%d:%i') printf '42:17\n' ;;
+  '-c:%h') printf '1\n' ;;
+  '-f:%d:%i') printf 'File: probe\nID: 42 Namelen: 255 Type: ext2/ext3\n' ;;
+  '-f:%l') printf '255\n' ;;
+  *) exit 64 ;;
+esac
+SH
+  chmod 755 "$fakebin/uname" "$fakebin/stat"
+
+  run env PATH="$fakebin:$PATH" bash -c '
+    . "$1" help >/dev/null
+    migrate_file_identity "$2"
+    migrate_file_link_count "$2"
+  ' _ "$MIGRATE" "$probe"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = $'42:17\n1' ]
+}
+
 @test "dispatcher forwards migrate argv verbatim and preserves engine status" {
   local bin argv
   bin="$SANDBOX/dispatcher bin"
@@ -292,6 +322,218 @@ EOF
   [ "$(project_tree_state "$PROJECT")" = "$before" ]
   [ ! -e "$PROJECT/.trellis.json" ]
   assert_git_metadata_unchanged "$head" "$index"
+}
+
+@test "legacy gptx migrates to a private snapshot handoff and rolls back byte-exactly" {
+  local before expected_command expected_machine legacy_before legacy_mode machine_local snapshot
+  prepare_exact_legacy_project
+  jq --arg socket "$SANDBOX/private router/socket" \
+    --arg sentinel 'do-not-print-gptx-payload' \
+    '. + {gptx:{
+      enabled:true,
+      routing:{default_family:"gpt",socket:$socket},
+      sentinel:$sentinel
+    }}' "$PROJECT/.trellis.config.json" > "$PROJECT/.trellis.config.json.tmp"
+  mv "$PROJECT/.trellis.config.json.tmp" "$PROJECT/.trellis.config.json"
+  legacy_before="$SANDBOX/legacy-before.json"
+  cp "$PROJECT/.trellis.config.json" "$legacy_before"
+  legacy_mode="$(file_mode "$PROJECT/.trellis.config.json")"
+  before="$(project_content_state "$PROJECT")"
+  [ ! -e "$TRELLIS_HOME/registry.json" ]
+
+  run_prepare
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  snapshot="$(snapshot_from_output "$output")"
+  [ -n "$snapshot" ]
+  machine_local="$snapshot/machine-local.json"
+  [ -f "$machine_local" ]
+  [ ! -L "$machine_local" ]
+  [ "$(file_mode "$machine_local")" = 600 ]
+  [ "$(jq -cS . "$machine_local")" = "$(jq -cS '{gptx:.gptx}' "$legacy_before")" ]
+  jq -e 'has("gptx") | not' "$PROJECT/.trellis.json" >/dev/null
+  assert_portable_manifest
+  [ ! -e "$TRELLIS_HOME/registry.json" ]
+
+  printf -v expected_machine '%q' "$machine_local"
+  printf -v expected_command \
+    '%q registry annotate --home %q --fleet FLEET --project %q --metadata-json "$(cat < %q)"' \
+    "$TRELLIS" "$TRELLIS_HOME" "$PROJECT_ID" "$machine_local"
+  [[ "$output" == *"machine-local snapshot: $expected_machine"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"# registry annotate template; replace FLEET:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$expected_command"* ]] || { echo "$output"; false; }
+  [[ "$output" != *'do-not-print-gptx-payload'* ]] || { echo "$output"; false; }
+  [ "$(jq -r '[.entries[].path | select(. == "machine-local.json")] | length' "$snapshot/manifest.json")" -eq 0 ]
+
+  run_rollback "$snapshot"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cmp -s "$legacy_before" "$PROJECT/.trellis.config.json"
+  [ "$(file_mode "$PROJECT/.trellis.config.json")" = "$legacy_mode" ]
+  [ "$(project_content_state "$PROJECT")" = "$before" ]
+  [ ! -e "$TRELLIS_HOME/registry.json" ]
+}
+
+@test "legacy gptx rejects non-object values before migration writes" {
+  local base before value
+  prepare_exact_legacy_project
+  base="$SANDBOX/legacy-base.json"
+  cp "$PROJECT/.trellis.config.json" "$base"
+
+  while IFS= read -r value; do
+    jq --argjson gptx "$value" '. + {gptx:$gptx}' "$base" \
+      > "$PROJECT/.trellis.config.json"
+    before="$(project_tree_state "$PROJECT")"
+
+    run_prepare
+
+    [ "$status" -eq 3 ] || { echo "value=$value"; echo "$output"; false; }
+    [ "$(project_tree_state "$PROJECT")" = "$before" ]
+    [ ! -e "$PROJECT/.trellis.json" ]
+    [ ! -e "$TRELLIS_HOME/state/migrations" ]
+    [ ! -e "$TRELLIS_HOME/registry.json" ]
+  done <<'EOF'
+null
+[]
+"string"
+0
+false
+EOF
+}
+
+@test "legacy gptx exception keeps every other unknown key fail-closed" {
+  local before
+  prepare_exact_legacy_project
+  jq '. + {gptx:{enabled:true},project_extensions:{future:true}}' \
+    "$PROJECT/.trellis.config.json" > "$PROJECT/.trellis.config.json.tmp"
+  mv "$PROJECT/.trellis.config.json.tmp" "$PROJECT/.trellis.config.json"
+  before="$(project_tree_state "$PROJECT")"
+
+  run_prepare
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(project_tree_state "$PROJECT")" = "$before" ]
+  [ ! -e "$PROJECT/.trellis.json" ]
+  [ ! -e "$TRELLIS_HOME/state/migrations" ]
+  [ ! -e "$TRELLIS_HOME/registry.json" ]
+}
+
+@test "legacy policy with another hard link fails closed" {
+  prepare_exact_legacy_project
+  ln "$PROJECT/.trellis.config.json" "$PROJECT/legacy-policy-alias.json"
+
+  run_prepare
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"legacy project policy must not have multiple hard links"* ]] ||
+    { echo "$output"; false; }
+  [ "$PROJECT/.trellis.config.json" -ef "$PROJECT/legacy-policy-alias.json" ]
+  [ ! -e "$PROJECT/.trellis.json" ]
+  [ ! -e "$TRELLIS_HOME/state/migrations" ]
+}
+
+@test "legacy gptx edit after snapshot is preserved and aborts migration" {
+  local before_claude before_ignore bin claim head index marker real_python snapshot
+  prepare_exact_legacy_project
+  jq '. + {gptx:{enabled:true,routing:{default_family:"gpt"}}}' \
+    "$PROJECT/.trellis.config.json" > "$PROJECT/.trellis.config.json.tmp"
+  mv "$PROJECT/.trellis.config.json.tmp" "$PROJECT/.trellis.config.json"
+  before_claude="$(sha256_file "$PROJECT/CLAUDE.md")"
+  before_ignore="$(sha256_file "$PROJECT/.gitignore")"
+  head="$(git -C "$PROJECT" rev-parse HEAD)"
+  index="$(git -C "$PROJECT" write-tree)"
+  bin="$SANDBOX/mutate-on-rename"
+  marker="$SANDBOX/legacy-mutated"
+  real_python="$(command -v python3)"
+  mkdir -p "$bin"
+  cat > "$bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [ "${2:-}" = no-replace ] &&
+  [ "${3:-}" = "$MIGRATE_LEGACY" ] &&
+  [[ "${4:-}" == "$MIGRATE_PROJECT"/.trellis-migrate-removal.* ]] &&
+  [ ! -e "$MIGRATE_MARKER" ]; then
+  jq '.gptx.routing.default_family = "changed-after-snapshot"' \
+    "$MIGRATE_LEGACY" > "$MIGRATE_LEGACY.tmp" || exit 91
+  /bin/mv "$MIGRATE_LEGACY.tmp" "$MIGRATE_LEGACY" || exit 92
+  : > "$MIGRATE_MARKER" || exit 93
+fi
+exec "$MIGRATE_REAL_PYTHON" "$@"
+EOF
+  chmod 755 "$bin/python3"
+
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_LEGACY="$PROJECT/.trellis.config.json" MIGRATE_PROJECT="$PROJECT" \
+    MIGRATE_MARKER="$marker" MIGRATE_REAL_PYTHON="$real_python" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ -e "$marker" ]
+  [ "$(jq -r '.gptx.routing.default_family' "$PROJECT/.trellis.config.json")" = changed-after-snapshot ]
+  [ ! -e "$PROJECT/.trellis.json" ]
+  [ "$(readlink "$PROJECT/.agents/rules/trellis.md")" = "$CANONICAL/core-rules/CLAUDE.md" ]
+  [ "$(readlink "$PROJECT/.claude/rules/trellis.md")" = "$CANONICAL/core-rules/CLAUDE.md" ]
+  [ "$(readlink "$PROJECT/.omp/skills")" = "$CANONICAL/core-rules/skills" ]
+  [ "$(sha256_file "$PROJECT/CLAUDE.md")" = "$before_claude" ]
+  [ "$(sha256_file "$PROJECT/.gitignore")" = "$before_ignore" ]
+  assert_git_metadata_unchanged "$head" "$index"
+  for claim in "$PROJECT"/.trellis-migrate-removal.*; do
+    [ ! -e "$claim" ] && [ ! -L "$claim" ]
+  done
+  snapshot="$(snapshot_from_output "$output")"
+  [ -n "$snapshot" ] && [ -f "$snapshot/machine-local.json" ]
+  [ "$(jq -r '.gptx.routing.default_family' "$snapshot/machine-local.json")" = gpt ]
+  [[ "$output" != *"machine-local snapshot:"* ]] || { echo "$output"; false; }
+
+  run_rollback "$snapshot"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"preserved newer legacy policy during rollback"* ]] || { echo "$output"; false; }
+  [ "$(jq -r '.gptx.routing.default_family' "$PROJECT/.trellis.config.json")" = changed-after-snapshot ]
+  [ ! -e "$PROJECT/.trellis.json" ]
+}
+
+
+@test "rollback never overwrites a legacy policy appearing during restore" {
+  local bin before_claude before_manifest marker real_python snapshot
+  prepare_exact_legacy_project
+  run_prepare
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  snapshot="$(snapshot_from_output "$output")"
+  [ -n "$snapshot" ] && [ -d "$snapshot" ]
+  before_claude="$(sha256_file "$PROJECT/CLAUDE.md")"
+  before_manifest="$(sha256_file "$PROJECT/.trellis.json")"
+  bin="$SANDBOX/mutate-on-publish"
+  marker="$SANDBOX/legacy-published"
+  real_python="$(command -v python3)"
+  mkdir -p "$bin"
+  cat > "$bin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [ "${2:-}" = no-replace ] &&
+  [[ "${3:-}" == "$MIGRATE_PROJECT"/.trellis-migrate-publish.* ]] &&
+  [ "${4:-}" = "$MIGRATE_PROJECT/.trellis.config.json" ] &&
+  [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '%s\n' '{"gptx":{"routing":{"default_family":"concurrent"}}}' > "${4}" || exit 91
+  : > "$MIGRATE_MARKER" || exit 92
+fi
+exec "$MIGRATE_REAL_PYTHON" "$@"
+EOF
+  chmod 755 "$bin/python3"
+
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_PYTHON="$real_python" \
+    bash "$MIGRATE" --rollback "$snapshot"
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ -e "$marker" ]
+  [[ "$output" == *"legacy policy appeared during rollback"* ]] || { echo "$output"; false; }
+  [ "$(jq -r '.gptx.routing.default_family' "$PROJECT/.trellis.config.json")" = concurrent ]
+  [ "$(sha256_file "$PROJECT/CLAUDE.md")" = "$before_claude" ]
+  [ "$(sha256_file "$PROJECT/.trellis.json")" = "$before_manifest" ]
+  [ -d "$snapshot" ]
+  for stage in "$PROJECT"/.trellis-migrate-publish.*; do
+    [ ! -e "$stage" ] && [ ! -L "$stage" ]
+  done
 }
 
 @test "a divergent legacy candidate preserves every project byte and link" {

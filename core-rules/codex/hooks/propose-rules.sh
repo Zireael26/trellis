@@ -15,6 +15,9 @@
 #   - Edit-heavy gate: skip unless ≥3 files OR ≥200 lines changed (same threshold
 #     as code-review) so it does not stack a second per-Stop `claude -p` every turn.
 #   - Returns proposed updates as Stop-safe systemMessage, never blocks.
+#   - At effective L5 only, atomically appends a safe candidate to canonical-root
+#     gotchas.md and logs the action in canonical-root decisions-log.md; L1–L4
+#     remain advisory-only.
 #   - Budget: 30s soft cap (perl-alarm shim — bare `timeout` is a no-op on macOS).
 #
 # Cost note: this hook calls a subagent and reads the session transcript. Both
@@ -63,6 +66,159 @@ run_with_timeout() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# L5 persistence helpers
+#   The subagent output is untrusted. Secret-like material is never emitted or
+#   written: token fingerprints and nonempty quoted or unquoted secret-key
+#   assignments are screened before either boundary. L5 writes stage temporary
+#   siblings before atomic renames.
+# ---------------------------------------------------------------------------
+_pr_has_secret_material() {
+  local candidate="$1"
+  if printf '%s\n' "$candidate" | grep -qE '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})'; then
+    return 0
+  fi
+  printf '%s\n' "$candidate" | grep -qiE "(password|passwd|secret|api[_-]?key|token|access[_-]?key)[[:space:]]*(:|=)[[:space:]]*([\"'][^\"']+[\"']|[^[:space:]\"'#]+)"
+}
+
+_pr_candidate_is_well_formed() {
+  local candidate="$1"
+  [ "${#candidate}" -le 12000 ] || return 1
+  case "$candidate" in
+    *$'\r'*) return 1 ;;
+  esac
+  printf '%s\n' "$candidate" | grep -qE '^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][[:space:]]+[-—][[:space:]]+.+$' || return 1
+  printf '%s\n' "$candidate" | grep -qE '^\*\*Pattern:\*\*[[:space:]]*[^[:space:]].*$' || return 1
+  printf '%s\n' "$candidate" | grep -qE '^\*\*Why it matters:\*\*[[:space:]]*[^[:space:]].*$' || return 1
+  printf '%s\n' "$candidate" | grep -qE '^\*\*Rule:\*\*[[:space:]]*[^[:space:]].*$'
+}
+
+_pr_candidate_rule() {
+  printf '%s\n' "$1" | awk '/^\*\*Rule:\*\*/ { sub(/[[:space:]]+$/, ""); print; exit }'
+}
+
+_pr_candidate_already_present() {
+  local target="$1" candidate="$2" existing rule
+  [ -f "$target" ] || return 1
+  existing=$(cat "$target") || return 1
+  [[ "$existing" == *"$candidate"* ]] && return 0
+  rule=$(_pr_candidate_rule "$candidate")
+  [ -n "$rule" ] && grep -Fqx -- "$rule" "$target" 2>/dev/null
+}
+
+_pr_temp_sibling() {
+  local target="$1" dir base
+  dir=$(dirname "$target") || return 1
+  base=$(basename "$target") || return 1
+  [ -d "$dir" ] || return 1
+  mktemp "$dir/.${base}.tmp.XXXXXX"
+}
+
+_pr_preserve_mode() {
+  local source="$1" target="$2" mode=""
+  [ -f "$source" ] || return 0
+  mode=$(stat -f '%Lp' "$source" 2>/dev/null || stat -c '%a' "$source" 2>/dev/null || true)
+  [ -n "$mode" ] && chmod "$mode" "$target" 2>/dev/null || true
+}
+
+_pr_prepare_append() {
+  local target="$1" entry="$2" header="$3" tmp
+  [ -L "$target" ] && return 1
+  [ -e "$target" ] && [ ! -f "$target" ] && return 1
+  tmp=$(_pr_temp_sibling "$target") || return 1
+
+  if [ -f "$target" ] && [ -s "$target" ]; then
+    if ! cat "$target" > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    if [ -n "$(tail -c 1 "$target" 2>/dev/null)" ]; then
+      printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    printf '%s\n\n' "$header" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  printf '%s\n' "$entry" >> "$tmp" || { rm -f "$tmp"; return 1; }
+  _pr_preserve_mode "$target" "$tmp"
+  printf '%s' "$tmp"
+}
+
+_pr_backup_file() {
+  local source="$1" backup
+  backup=$(_pr_temp_sibling "$source") || return 1
+  if ! cat "$source" > "$backup"; then
+    rm -f "$backup"
+    return 1
+  fi
+  _pr_preserve_mode "$source" "$backup"
+  printf '%s' "$backup"
+}
+
+# Returns 0 when both durable records are written, 2 for an existing candidate,
+# 1 when the staged transaction rolls back, and 3 when a recovery backup is
+# retained after a failed transaction.
+_pr_append_l5_candidate() {
+  local gotchas="$1" decisions="$2" candidate="$3"
+  local gotchas_tmp="" decisions_tmp="" backup="" action_day action
+  local had_gotchas=0
+  _pr_l5_recovery_backup=""
+  _pr_l5_recovery_reason=""
+
+  if [ -L "$gotchas" ] || [ -L "$decisions" ]; then
+    return 1
+  fi
+  if _pr_candidate_already_present "$gotchas" "$candidate"; then
+    return 2
+  fi
+
+  action_day=$(date -u +%Y-%m-%d 2>/dev/null || printf '?')
+  action="- ${action_day} [L5] propose-rules auto-appended a surfaced gotcha to gotchas.md."
+  gotchas_tmp=$(_pr_prepare_append "$gotchas" "$candidate" "# Gotchas") || return 1
+  decisions_tmp=$(_pr_prepare_append "$decisions" "$action" "# Decisions log") || {
+    rm -f "$gotchas_tmp"
+    return 1
+  }
+
+  if [ -f "$gotchas" ]; then
+    had_gotchas=1
+    backup=$(_pr_backup_file "$gotchas") || {
+      rm -f "$gotchas_tmp" "$decisions_tmp"
+      return 1
+    }
+  fi
+
+  if ! mv -f "$gotchas_tmp" "$gotchas"; then
+    rm -f "$gotchas_tmp" "$decisions_tmp"
+    if [ -n "$backup" ] && [ -f "$backup" ]; then
+      _pr_l5_recovery_backup="$backup"
+      _pr_l5_recovery_reason="could not replace canonical gotchas.md"
+      return 3
+    fi
+    return 1
+  fi
+  gotchas_tmp=""
+
+  if ! mv -f "$decisions_tmp" "$decisions"; then
+    rm -f "$decisions_tmp"
+    if [ "$had_gotchas" -eq 1 ]; then
+      if [ -n "$backup" ] && mv -f "$backup" "$gotchas"; then
+        return 1
+      fi
+      if [ -n "$backup" ] && [ -f "$backup" ]; then
+        _pr_l5_recovery_backup="$backup"
+        _pr_l5_recovery_reason="could not restore canonical gotchas.md after the decisions-log write failed"
+      fi
+    elif rm -f "$gotchas"; then
+      return 1
+    fi
+    return 3
+  fi
+
+  rm -f "$backup"
+  return 0
+}
+
 INPUT=$(cat)
 
 # Gate — default-ON for registered projects (DL-P8a-06). Unset → runs;
@@ -77,6 +233,10 @@ __pr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__pr_lib"
 _se_require_jq "propose-rules"
+__pr_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
+[ -f "$__pr_autonomy_lib" ] || { echo "propose-rules: missing sibling lib at $__pr_autonomy_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
+. "$__pr_autonomy_lib"
 
 # --- Guard 1: stop_hook_active ---
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
@@ -104,6 +264,9 @@ cd "$PROJECT_DIR" 2>/dev/null || exit 0
 if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 0
 fi
+
+# Canonical-root files survive worktree cleanup and are shared by both harnesses.
+REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 
 # --- Guard 2: pure-chat turn → nothing to learn from.
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -178,8 +341,9 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 0
 fi
 
-GOTCHAS="$PROJECT_DIR/gotchas.md"
+GOTCHAS="$REPO_ROOT/gotchas.md"
 [ -f "$GOTCHAS" ] || GOTCHAS="/dev/null"
+DECISIONS_LOG="$REPO_ROOT/decisions-log.md"
 
 # Compose the prompt. Keep it small — this runs every Stop turn with the gate set.
 # Note: heredoc-in-$() can mishandle apostrophes in some bash versions, so the
@@ -231,6 +395,44 @@ case "$OUT" in
   ""|"NONE"|*"NONE"*"NONE"*) exit 0 ;;
 esac
 
-# Emit the proposal as a Stop-safe advisory. Never blocks.
-_se_emit_system_message "propose-rules: candidate gotchas.md entry below — review and append if useful.\n\n$OUT"
+# Never echo a possible credential into hook output or persist it in project docs.
+if _pr_has_secret_material "$OUT"; then
+  _se_emit_system_message "propose-rules: candidate contained secret-like material and was not emitted or written."
+  exit 0
+fi
+
+# L1–L4 remain advisory-only. The resolver applies canonical project policy,
+# session overrides, and active-preset ceilings before this write boundary.
+_se_resolve_autonomy "$REPO_ROOT"
+if [ "$AUTONOMY_LEVEL" != "5" ]; then
+  _se_emit_system_message "propose-rules: candidate gotchas.md entry below — review and append if useful.\n\n$OUT"
+  exit 0
+fi
+
+if ! _pr_candidate_is_well_formed "$OUT"; then
+  _se_emit_system_message "propose-rules: candidate did not match the required gotcha format, so it was not auto-appended. Review it manually if useful.\n\n$OUT"
+  exit 0
+fi
+
+_pr_append_l5_candidate "$REPO_ROOT/gotchas.md" "$DECISIONS_LOG" "$OUT"
+append_rc=$?
+case "$append_rc" in
+  0)
+    ctx="propose-rules: auto-appended the candidate to canonical gotchas.md at L5 and logged the action in decisions-log.md.\n\n$OUT"
+    ;;
+  2)
+    ctx="propose-rules: candidate already exists in canonical gotchas.md; no write was made.\n\n$OUT"
+    ;;
+  3)
+    if [ -n "${_pr_l5_recovery_backup:-}" ]; then
+      ctx="propose-rules: ${_pr_l5_recovery_reason}; preserved the intact backup at ${_pr_l5_recovery_backup}. Restore canonical gotchas.md from that path before retrying.\n\n$OUT"
+    else
+      ctx="propose-rules: could not complete the decisions-log write after the gotchas write; inspect canonical files before retrying.\n\n$OUT"
+    fi
+    ;;
+  *)
+    ctx="propose-rules: could not atomically append and log the candidate; no write was retained. Review and append it manually if useful.\n\n$OUT"
+    ;;
+esac
+_se_emit_system_message "$ctx"
 exit 0

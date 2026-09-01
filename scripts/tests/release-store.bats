@@ -339,6 +339,196 @@ install_adoption_releases() {
   install_release "$ADOPTION_VERSION_B" "$repo"
   ADOPTION_PAYLOAD_B="$RELEASE_DIR/payload"
 }
+build_explicit_json_release_repo() {
+  local version="$1" effort="$2" repo manifest tmp
+  repo="$(build_release_repo "$version")" || return 1
+  mkdir -p "$repo/core-rules/templates" || return 1
+  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$repo/core-rules/templates/claude-settings.local.json" || return 1
+  jq --arg effort "$effort" '.effortLevel = $effort' "$repo/core-rules/templates/claude-settings.local.json" > "$repo/core-rules/templates/claude-settings.local.json.next" || return 1
+  mv "$repo/core-rules/templates/claude-settings.local.json.next" "$repo/core-rules/templates/claude-settings.local.json" || return 1
+  manifest="$repo/core-rules/inheritance-manifest.json"
+  tmp="$manifest.tmp"
+  jq '.harnesses.claude.render = [
+    {
+      "template": "core-rules/templates/claude-settings.local.json",
+      "destination": ".claude/settings.local.json",
+      "merge": "explicit-json",
+      "mode": "0600",
+      "required": true
+    }
+  ]' "$manifest" > "$tmp" || return 1
+  mv "$tmp" "$manifest" || return 1
+  retag_release_repo "$repo" "$version" || return 1
+  printf '%s\n' "$repo"
+}
+
+@test "explicit-json adoption preserves unrelated destination keys" {
+  local version_a=1.6.2 version_b=1.6.3 repo project destination owner mode
+  local payload_a payload_b
+
+  repo="$(build_explicit_json_release_repo "$version_a" medium)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_explicit_json_release_repo "$version_b" high)"
+  install_release "$version_b" "$repo"
+  payload_b="$RELEASE_DIR/payload"
+
+  project="$SANDBOX/explicit-json-project"
+  make_portable_project "$project" explicit-json-project
+  attach_portable_project "$project" personal "$version_a"
+  destination="$project/.claude/settings.local.json"
+  jq '.unrelated = "keep-me"' "$destination" > "$destination.next"
+  mv "$destination.next" "$destination"
+  chmod 600 "$destination"
+  owner="$(owner_for_root "$project")"
+
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_a" ]
+  [ "$(jq -r '.release' "$owner")" = "$version_a" ]
+  jq -e 'any(.renders[]; .path == ".claude/settings.local.json" and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))' "$owner" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".claude/settings.local.json" and (.sha256 | test("^[a-f0-9]{64}$")))' "$owner" >/dev/null
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-project
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/explicit-json-project"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
+  [ "$(jq -r '.release' "$owner")" = "$version_b" ]
+  [ "$(registry_release_for_root "$project")" = "$version_b" ]
+  jq -e '.effortLevel == "medium" and .unrelated == "keep-me"' "$destination" >/dev/null
+  case "$(uname -s)" in
+    Darwin) mode="$(stat -f '%Lp' "$destination")" ;;
+    *) mode="$(stat -c '%a' "$destination")" ;;
+  esac
+  [ "$mode" = 600 ]
+  jq -e 'any(.renders[]; .path == ".claude/settings.local.json" and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))' "$owner" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".claude/settings.local.json" and (.sha256 | test("^[a-f0-9]{64}$")))' "$owner" >/dev/null
+}
+@test "explicit-json adoption re-renders missing and changed owned keys" {
+  local version_a=1.6.4 version_b=1.6.5 repo project destination owner mode
+  local payload_a payload_b
+
+  repo="$(build_explicit_json_release_repo "$version_a" medium)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_explicit_json_release_repo "$version_b" high)"
+  install_release "$version_b" "$repo"
+  payload_b="$RELEASE_DIR/payload"
+
+  project="$SANDBOX/explicit-json-rerender"
+  make_portable_project "$project" explicit-json-rerender
+  attach_portable_project "$project" personal "$version_a"
+  destination="$project/.claude/settings.local.json"
+  jq 'del(.effortLevel) | .unrelated = "keep-me"' "$destination" > "$destination.next"
+  mv "$destination.next" "$destination"
+  chmod 600 "$destination"
+  owner="$(owner_for_root "$project")"
+
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_a" ]
+  [ "$(jq -r '.release' "$owner")" = "$version_a" ]
+  jq -e 'any(.renders[]; .path == ".claude/settings.local.json" and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))' "$owner" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".claude/settings.local.json" and (.sha256 | test("^[a-f0-9]{64}$")))' "$owner" >/dev/null
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-rerender
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'re-rendered owned JSON key: .claude/settings.local.json ["effortLevel"] (missing)'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/explicit-json-rerender"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
+  [ "$(jq -r '.release' "$owner")" = "$version_b" ]
+  [ "$(registry_release_for_root "$project")" = "$version_b" ]
+  jq -e '.effortLevel == "medium" and .unrelated == "keep-me"' "$destination" >/dev/null
+  case "$(uname -s)" in
+    Darwin) mode="$(stat -f '%Lp' "$destination")" ;;
+    *) mode="$(stat -c '%a' "$destination")" ;;
+  esac
+  [ "$mode" = 600 ]
+  jq -e 'any(.renders[]; .path == ".claude/settings.local.json" and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))' "$owner" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".claude/settings.local.json" and (.sha256 | test("^[a-f0-9]{64}$")))' "$owner" >/dev/null
+
+  project="$SANDBOX/explicit-json-changed"
+  make_portable_project "$project" explicit-json-changed
+  attach_portable_project "$project" personal "$version_a"
+  destination="$project/.claude/settings.local.json"
+  jq '.effortLevel = "low" | .unrelated = "still-local"' "$destination" > "$destination.next"
+  mv "$destination.next" "$destination"
+  chmod 600 "$destination"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-changed
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'re-rendered owned JSON key: .claude/settings.local.json ["effortLevel"] (changed)'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/explicit-json-changed"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
+  [ "$(registry_release_for_root "$project")" = "$version_b" ]
+  jq -e '.effortLevel == "medium" and .unrelated == "still-local"' "$destination" >/dev/null
+}
+
+@test "explicit-json adoption names an absent render target and changes nothing" {
+  local version_a=1.6.6 version_b=1.6.7 repo project destination owner owner_before
+  local payload_a
+
+  repo="$(build_explicit_json_release_repo "$version_a" medium)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_explicit_json_release_repo "$version_b" high)"
+  install_release "$version_b" "$repo"
+
+  project="$SANDBOX/explicit-json-absent"
+  make_portable_project "$project" explicit-json-absent
+  attach_portable_project "$project" personal "$version_a"
+  destination="$project/.claude/settings.local.json"
+  owner="$(owner_for_root "$project")"
+  owner_before="$(cat "$owner")"
+  rm "$destination"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-absent
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"explicit-json render target is absent: .claude/settings.local.json"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *"adopted:"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_a" ]
+  [ "$(cat "$owner")" = "$owner_before" ]
+  [ "$(registry_release_for_root "$project")" = "$version_a" ]
+  [ ! -e "$destination" ]
+}
+
+@test "explicit-json adoption names invalid JSON and changes nothing" {
+  local version_a=1.6.8 version_b=1.6.9 repo project destination owner owner_before
+  local payload_a invalid_before
+
+  repo="$(build_explicit_json_release_repo "$version_a" medium)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_explicit_json_release_repo "$version_b" high)"
+  install_release "$version_b" "$repo"
+
+  project="$SANDBOX/explicit-json-invalid"
+  make_portable_project "$project" explicit-json-invalid
+  attach_portable_project "$project" personal "$version_a"
+  destination="$project/.claude/settings.local.json"
+  owner="$(owner_for_root "$project")"
+  owner_before="$(cat "$owner")"
+  printf '{"effortLevel":\n' > "$destination"
+  chmod 600 "$destination"
+  invalid_before="$(cat "$destination")"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-invalid
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"explicit-json render target is invalid JSON: .claude/settings.local.json"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *"adopted:"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_a" ]
+  [ "$(cat "$owner")" = "$owner_before" ]
+  [ "$(registry_release_for_root "$project")" = "$version_a" ]
+  [ "$(cat "$destination")" = "$invalid_before" ]
+}
+
 
 @test "annotated tag install uses release.json plus immutable payload and adoption points to payload" {
   repo="$(build_release_repo "1.2.3-rc.1")"
@@ -653,8 +843,40 @@ install_adoption_releases() {
   [ "$(cat "$owner")" = "$owner_before" ]
   [ "$(registry_release_for_root "$project")" = "$ADOPTION_VERSION_A" ]
 }
+@test "adoption reports recorded operator-owned hook authority without repairing it" {
+  install_adoption_releases
+  project="$SANDBOX/hook-operator-owned"
+  make_portable_project "$project" hook-operator-owned
+  git -C "$project" config --local core.hooksPath .husky/_
 
-@test "partial adoption updates available targets and reports unavailable selectors" {
+  attach_portable_project "$project" personal "$ADOPTION_VERSION_A"
+  owner="$(owner_for_root "$project")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  jq -e --arg managed "$managed" '
+    .status == "committed"
+    and .git_hooks.enabled == true
+    and .git_hooks.managed_hooks_path == $managed
+    and .git_hooks.previous_hooks_path == ".husky/_"
+  ' "$owner" >/dev/null
+  [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
+
+  git -C "$project" config --local core.hooksPath .husky/_
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project hook-operator-owned
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"hook authority: operator-owned; core.hooksPath was left unchanged"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/hook-operator-owned"* ]] || { echo "$output"; false; }
+  [ "$(git -C "$project" config --local --get core.hooksPath)" = ".husky/_" ]
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+  [ "$(jq -r '.release' "$owner")" = "$ADOPTION_VERSION_B" ]
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = ".husky/_" ]
+  [ "$(registry_release_for_root "$project")" = "$ADOPTION_VERSION_B" ]
+  [ "$(cat "$managed/release-payload")" = "$ADOPTION_PAYLOAD_B" ]
+}
+
+
+@test "partial bulk adoption updates available targets and reports unavailable selectors" {
   install_adoption_releases
   project="$SANDBOX/partial-available"
   make_portable_project "$project" partial-available
@@ -663,13 +885,124 @@ install_adoption_releases() {
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
     adopt "$ADOPTION_VERSION_B" --fleet personal
-  [ "$status" -eq 5 ]
+  [ "$status" -eq 0 ]
   [[ "$output" == *"unavailable adoption target remains explicit: personal/partial-unavailable"* ]] || { echo "$output"; false; }
   [[ "$output" == *"adopted: personal/partial-available"* ]] || { echo "$output"; false; }
   [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
   [ "$(jq -r '.release' "$(owner_for_root "$project")")" = "$ADOPTION_VERSION_B" ]
   [ "$(registry_release_for_root "$project")" = "$ADOPTION_VERSION_B" ]
 }
+@test "eligible failures outrank unavailable rows - managed anchor preflight dominates unavailable" {
+  install_adoption_releases
+  project="$SANDBOX/eligible-outrank"
+  make_portable_project "$project" eligible-outrank
+  attach_portable_project "$project" personal "$ADOPTION_VERSION_A"
+  owner="$(owner_for_root "$project")"
+  owner_before="$(cat "$owner")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  # Make the eligible project's managed runtime state fail ownership/runtime
+  # preflight without making its registry row unavailable. The unavailable
+  # sibling remains report-only, so the eligible target's class 3 failure must
+  # determine the command status. Corrupting the runtime anchor itself would
+  # also fail preflight but would break the "runtime remains on A" invariant.
+  [ -n "$managed" ] && [ -f "$managed/release-payload" ]
+  printf 'corrupted-payload\n' > "$managed/release-payload"
+  chmod 600 "$managed/release-payload"
+  record_unavailable_root personal unavailable-outrank "$SANDBOX/missing-unavailable-outrank"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --all
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"attachment ownership/runtime preflight failed for personal/eligible-outrank"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"unavailable adoption target remains explicit: personal/unavailable-outrank"* ]] || { echo "$output"; false; }
+  [ "$(grep -c "adopted:" <<<"$output")" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$owner")" = "$owner_before" ]
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+  [ "$(registry_release_for_root "$project")" = "$ADOPTION_VERSION_A" ]
+  [ "$(jq -r '.release' "$owner")" = "$ADOPTION_VERSION_A" ]
+}
+
+@test "bulk adoption commits a healthy target while an eligible sibling fails" {
+  local failed healthy failed_owner failed_owner_before failed_managed healthy_owner
+  install_adoption_releases
+
+  # The failing project sorts first, proving a class-3 row does not suppress a
+  # later eligible success. The final-state assertions also forbid batch-wide
+  # rollback after the healthy row commits.
+  failed="$SANDBOX/bulk-a-failed"
+  make_portable_project "$failed" bulk-a-failed
+  attach_portable_project "$failed" personal "$ADOPTION_VERSION_A"
+  failed_owner="$(owner_for_root "$failed")"
+  failed_owner_before="$(cat "$failed_owner")"
+  failed_managed="$(jq -r '.git_hooks.managed_hooks_path' "$failed_owner")"
+  [ -n "$failed_managed" ] && [ -f "$failed_managed/release-payload" ]
+  printf 'corrupted-payload\n' > "$failed_managed/release-payload"
+  chmod 600 "$failed_managed/release-payload"
+
+  healthy="$SANDBOX/bulk-z-healthy"
+  make_portable_project "$healthy" bulk-z-healthy
+  attach_portable_project "$healthy" personal "$ADOPTION_VERSION_A"
+  healthy_owner="$(owner_for_root "$healthy")"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --all
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"attachment ownership/runtime preflight failed for personal/bulk-a-failed"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/bulk-z-healthy"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"attachment ownership/runtime preflight failed for personal/bulk-a-failed"*"adopted: personal/bulk-z-healthy"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *"adopted: personal/bulk-a-failed"* ]] || { echo "$output"; false; }
+
+  [ "$(readlink "$healthy/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+  [ "$(registry_release_for_root "$healthy")" = "$ADOPTION_VERSION_B" ]
+  [ "$(jq -r '.release' "$healthy_owner")" = "$ADOPTION_VERSION_B" ]
+
+  [ "$(readlink "$failed/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+  [ "$(registry_release_for_root "$failed")" = "$ADOPTION_VERSION_A" ]
+  [ "$(cat "$failed_owner")" = "$failed_owner_before" ]
+}
+
+@test "project-scoped unavailable rows stay report-only beside an eligible worktree" {
+  local healthy failed managed owner owner_before
+  install_adoption_releases
+
+  healthy="$SANDBOX/project-mixed-healthy"
+  make_portable_project "$healthy" project-mixed-healthy
+  attach_portable_project "$healthy" personal "$ADOPTION_VERSION_A"
+  record_unavailable_root personal project-mixed-healthy "$SANDBOX/missing-project-mixed-healthy"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project project-mixed-healthy
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"unavailable adoption target remains explicit: personal/project-mixed-healthy"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/project-mixed-healthy"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$healthy/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+
+  failed="$SANDBOX/project-mixed-failed"
+  make_portable_project "$failed" project-mixed-failed
+  attach_portable_project "$failed" personal "$ADOPTION_VERSION_A"
+  owner="$(owner_for_root "$failed")"
+  owner_before="$(cat "$owner")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  printf 'corrupted-payload\n' > "$managed/release-payload"
+  chmod 600 "$managed/release-payload"
+  record_unavailable_root personal project-mixed-failed "$SANDBOX/missing-project-mixed-failed"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project project-mixed-failed
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"unavailable adoption target remains explicit: personal/project-mixed-failed"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"attachment ownership/runtime preflight failed for personal/project-mixed-failed"* ]] ||
+    { echo "$output"; false; }
+  [ "$(cat "$owner")" = "$owner_before" ]
+  [ "$(readlink "$failed/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+}
+
 
 registry_sha256_text() {
   if command -v shasum >/dev/null 2>&1; then
@@ -804,7 +1137,7 @@ add_empty_worktrees_checkout() {
   grep -qF 'no adoptable registered worktree matched the requested adoption selector' <<<"$output"
 }
 
-@test "an unavailable checkout inventory row swept by --all is reported and floors class 5" {
+@test "a bulk unavailable checkout inventory row is reported without failing a healthy target" {
   install_adoption_releases
   project="$SANDBOX/bulk-checkout-guarded"
   make_portable_project "$project" bulk-checkout-guarded
@@ -818,10 +1151,9 @@ add_empty_worktrees_checkout() {
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --all
   chmod 700 "$empty"
 
-  # The skip branch had no availability guard, so an unavailable checkout row
-  # left the loop with no report and no class while the healthy row adopted and
-  # the run exited 0.
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  # Bulk unavailable rows are reported but do not contribute class 5; the
+  # healthy target still adopts and the run succeeds.
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qF 'unavailable checkout inventory row swept by the adoption selector: personal/bulk-unavailable-checkout' <<<"$output"
   # Per-row continuation: the healthy target still adopts.
   grep -qF 'adopted: personal/bulk-checkout-guarded' <<<"$output"
@@ -849,7 +1181,7 @@ add_empty_worktrees_checkout() {
   [ "$(registry_release_for_root "$sibling")" = "$ADOPTION_VERSION_A" ]
 }
 
-@test "an unreadable registered root stays a class-5 unavailable row, not a state error" {
+@test "an unreadable registered root stays a class-5 unavailable row without failing healthy bulk adoption" {
   install_adoption_releases
   healthy="$SANDBOX/class5-healthy"
   blocked="$SANDBOX/class5-blocked"
@@ -867,7 +1199,7 @@ add_empty_worktrees_checkout() {
     adopt "$ADOPTION_VERSION_B" --fleet personal
   chmod 700 "$blocked"
 
-  [ "$status" -eq 5 ]
+  [ "$status" -eq 0 ]
   [[ "$output" == *"unavailable adoption target remains explicit: personal/class5-blocked"* ]] || { echo "$output"; false; }
   [[ "$output" != *"identity validation: personal/class5-blocked"* ]] || { echo "$output"; false; }
   [[ "$output" == *"adopted: personal/class5-healthy"* ]] || { echo "$output"; false; }
@@ -1620,4 +1952,32 @@ copy_snapshot() {
   [ "$status" -ne 2 ] || { echo "$output"; false; }
   [ "$(grep -cF 'release snapshot destination is unsafe' <<<"$output")" -eq 0 ] ||
     { echo "$output"; false; }
+}
+
+@test "snapshot executor cleans its directory when post-creation owner capture fails" {
+  local fake_bin="$SANDBOX/failing-ps-bin" leftover real_path
+  real_path="$PATH"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/ps" <<'EOF'
+#!/bin/sh
+# The executor has already created its private snapshot when it asks ps for the
+# owner birth record. Failing this probe exercises that post-creation error
+# handoff, rather than the ordinary successful payload-exit cleanup.
+exit 77
+EOF
+  chmod 755 "$fake_bin/ps"
+
+  PATH="$fake_bin:$real_path" run env \
+    TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    PATH="$fake_bin:$real_path" \
+    bash -c '. "$1"; release_store_snapshot_verified_release 0.0.0' \
+    release-snapshot-owner-failure "$RELEASE_STORE_LIB"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"could not determine snapshot owner process birth"* ]] ||
+    { echo "$output"; false; }
+  [ -d "$TRELLIS_HOME_FIX/releases" ]
+  leftover="$(find "$TRELLIS_HOME_FIX/releases" -maxdepth 1 \
+    \( -name '.tmp.*.exec.*' -o -name '.tmp.*.exec.*.owner.json' \) \
+    -print 2>&1)"
+  [ -z "$leftover" ] || { echo "post-creation snapshot leaked: $leftover"; false; }
 }

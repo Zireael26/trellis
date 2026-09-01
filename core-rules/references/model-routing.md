@@ -7,8 +7,9 @@ delegate it. Read it before choosing a `subagent_type`, before assigning a
 teammate, and before picking models inside a dynamic workflow.
 
 The short version: the orchestrator holds the large context and delegates
-execution; route on properties you can verify rather than on a general belief
-about which model is smarter.
+execution; route on a model family that fits the unit and on live facts you can
+verify — quota, availability, authentication, and cost — rather than a belief
+that one named model is always the frontier.
 
 ## Why this file exists
 
@@ -23,8 +24,8 @@ explicit when nothing distinguishes the candidates.
 
 ## Route on verifiable properties
 
-Three properties are decidable before any work begins, and they are the ones that
-should carry a routing decision.
+The following unit properties are decidable before any work begins, and they
+should carry the initial routing decision.
 
 1. **Context footprint.** A unit that must *hold* a large surface — more than
    roughly 200K of it — needs a large-window model and in practice stays close to
@@ -45,33 +46,58 @@ should carry a routing decision.
    rate behind this concern is scaffold-dependent, so it does not decide anything
    on its own. Do not treat it as a hard exclusion.
 
-## Never review work with the context that produced it
+## Multi-provider doctrine
 
-Review must come from a context that did not author the work. In a single-family
-install this means a **fresh-context subagent** reviewing against the spec — not
-the same session continuing on, and not a reviewer handed the author's reasoning.
-A reviewer that shares the author's context shares the author's assumptions, and
-the failure it is most likely to miss is the one the author already talked itself
-past.
+A frontier capability is a class, not a permanent provider or model. Route a
+multi-provider unit from four facts:
 
-This is the form of the rule regardless of which model families are in reach:
-the rule does not lapse when a second family is unavailable — it changes shape.
+1. **Model family.** Select the family whose behavior fits the unit and whose
+   independence requirements it can satisfy. Never assume one named model
+   remains the universal frontier.
+2. **Live quota and availability.** Treat only an explicitly reported unavailable
+   state — `disabled`, `exhausted`, or `limitReached` — as ineligible, regardless
+   of threshold. Unknown, unreported, and unmetered quota remain eligible; disclose
+   that state in the routing result rather than silently treating it as availability.
+   Decide from the current observation, not a previous successful run.
+3. **Authentication and policy.** A candidate without a valid, permitted
+   credential is ineligible. Credential and data-handling policy can rule out a
+   capable provider before price or apparent quality matters.
+4. **Cost.** Among capable, permitted, live candidates, spend the least that
+   meets the unit's required assurance and output shape. Cost may break a tie;
+   it does not justify weakening the oracle or review.
 
-Deterministic gates are exempt: a hook, a type checker, or a test suite is
-mechanism, not self-review.
+Concrete provider/model names, family mappings, ordered role chains, thresholds, and cost data are configuration in
+`core-rules/skills/herdr-foreman/roles.json`, not prose. The live resolver applies
+that configuration from its current observations; an explicit eligible operator
+selection takes precedence. This reference states selection doctrine, not roster or
+resolver mechanics.
+
+## Independent and cross-family review
+
+Review must come from a context that did not author the work. Where an eligible
+second family exists, a reviewer, security reviewer, or refuter MUST use it.
+A fresh context remains necessary: a different family handed the author's
+reasoning merely inherits the same assumptions.
+
+If no eligible second family exists, a fresh-context same-family review can
+still add evidence, but it is **DEGRADED**, not cross-family review. Disclose
+the author and reviewer family, the missing guard, and the limiting condition:
+quota, availability, authentication/policy, or an approved cost boundary.
+Never silently downgrade assurance or self-certify. Deterministic gates are
+exempt: a hook, a type checker, or a test suite is mechanism, not self-review.
 
 ## Profile and effort
 
 | unit shape | choose | evidence |
 |---|---|---|
-| high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | the frontier model, at a low rung | verified: throughput |
-| bounded implementation against a pre-existing oracle | the frontier model | published eval |
-| difficult design, weak-oracle debugging, security-sensitive, high-consequence | the frontier model at `xhigh` | tier definition |
-| short interactive turn, latency felt by a human | the frontier model | verified: TTFT |
-| very cheap read-only fan-out — grep-shaped codebase search | Haiku | operator decision |
+| high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | a live eligible, low-cost candidate in a capable family, at a low rung | verified: throughput |
+| bounded implementation against a pre-existing oracle | a live eligible capable candidate | published eval |
+| difficult design, weak-oracle debugging, security-sensitive, high-consequence | a high-capability live eligible candidate in a suitable family at `xhigh` | tier definition |
+| short interactive turn, latency felt by a human | a live eligible candidate optimized for interactive latency | verified: TTFT |
+| very cheap read-only fan-out — grep-shaped codebase search | a live eligible low-cost read-only candidate | operator decision |
 
-Sonnet and Haiku are not general-purpose choices. Haiku takes cheap read-only
-fan-out; neither takes judgement or implementation work.
+The cheap read-only fan-out role is not a general-purpose choice. It takes
+search-shaped work; it does not take judgment or implementation.
 
 ## Effort
 

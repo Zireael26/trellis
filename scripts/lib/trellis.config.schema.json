@@ -170,8 +170,20 @@
       "description": "Optional. Default JS package manager for hooks and gates that run project scripts (pre-push, stop-verify, process-gate). 'auto' (the default when unset) = detect from lockfile: pnpm-lock.yaml→pnpm, bun.lock(b)→bun, yarn.lock→yarn, package-lock.json→npm. An explicit value (pnpm|npm|bun|yarn) forces that manager regardless of lockfile. Project-local <project>/.trellis.config.json may override with its own 'package_manager'. With the key unset, resolution is byte-identical to pre-config Trellis (pure lockfile detection) — this key is purely additive.",
       "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
     },
+    "conductor": {
+      "description": "Optional. Fleet conductor autonomy controls. Every key is optional. auto_execute_top_n defaults to 0, preserving rank/auto-spec-only behavior; a positive value permits only that many reviewed-ready safe items from the same run to execute to [HOLD] PRs. The conductor never merges.",
+      "type": "object",
+      "properties": {
+        "auto_execute_top_n": {
+          "description": "Maximum reviewed-ready safe conductor items per run that may execute to [HOLD] PRs. Default 0 (disabled). Must be explicitly positive to enable execution; never permits merge.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
     "disk_janitor": {
-      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []; reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; worktree_count_ceiling 25; worktree_total_gb_ceiling 80). Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; release_staging_ttl_days 1; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []; reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; worktree_count_ceiling 25; worktree_total_gb_ceiling 80). Absence of the object is byte-identical to the defaults — this key is purely additive.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -180,6 +192,11 @@
         },
         "cache_ttl_days": {
           "description": "A build-cache directory is a prune candidate only when its mtime is older than this many days. Default 14.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "release_staging_ttl_days": {
+          "description": "An execution snapshot may be reaped only when its mtime is older than this many days and its owner identity is absent or no longer live. Default 1.",
           "type": "integer",
           "minimum": 0
         },

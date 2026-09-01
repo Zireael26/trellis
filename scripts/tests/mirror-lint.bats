@@ -116,6 +116,35 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "canonical google-antigravity provider id remains publishable" {
+  printf 'flash: google-antigravity/gemini-3.7-flash:high\n' > "$MIRROR/omp-config.yml"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "bare retired AntiGravity token is rejected beside the provider id" {
+  printf 'google-antigravity is current; the AntiGravity harness is retired\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"README.md: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
+}
+
+@test "provider identifier must be lowercase and unembedded" {
+  printf 'flash: GOOGLE-ANTIGRAVITY/gemini\n' > "$MIRROR/uppercase.yml"
+  printf 'flash: proxy-google-antigravity/gemini\n' > "$MIRROR/embedded.yml"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"uppercase.yml: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"embedded.yml: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
+}
+
 @test "private Trellis release attachment and task state are rejected structurally" {
   mkdir -p "$MIRROR/.trellis/releases/1.2.3" \
     "$MIRROR/state/attachments" "$MIRROR/state/tasks" \

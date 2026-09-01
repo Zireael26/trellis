@@ -116,7 +116,10 @@ if [ "$release_bundle_mode" = true ]; then
     trellis_home_resolve \
     release_store_normalize_version \
     local_registry_list_json \
-    attachment_verify; do
+    attachment_verify_adoption \
+    attachment_verify_detach \
+    attach_detach_json_keys_detail \
+    attach_detach_json_keys_match; do
     command -v "$release_bundle_function" >/dev/null 2>&1 || {
       printf '%s\n' 'trellis release: verified command bundle is incomplete' >&2
       exit 5
@@ -418,8 +421,17 @@ owner_matches_row() {
   ' "$owner" >/dev/null 2>&1
 }
 
+adoption_verify_owner_base() {
+  local home="$1" owner="$2" record
+  attachment_verify_detach "$home" "$owner" || return "$?"
+  record="$(jq -c . "$owner")" || return "$TRELLIS_EX_STATE"
+  _attachment_contextual_render_context_record_valid "$record" "$home" || return "$TRELLIS_EX_CONFLICT"
+  _attachment_render_pairings_valid "$record" || return "$TRELLIS_EX_CONFLICT"
+  _attachment_verify_adoption_hooks "$home" "$owner"
+}
+
 resolve_verified_adoption_target() {
-  local home="$1" row="$2" binding root trellis root_identity trellis_identity identity current manifest_project_id project_id checkout worktree owner release payload status
+  local home="$1" row="$2" binding root trellis root_identity trellis_identity identity current manifest_project_id project_id checkout worktree owner release payload hook_authority status
   binding="$(adoption_binding_from_row "$row")" || return "$?"
   root="$(printf '%s\n' "$binding" | jq -r '.root')" || return "$TRELLIS_EX_STATE"
   identity="$(local_registry_identity_for_root "$root")" || return "$?"
@@ -453,7 +465,7 @@ resolve_verified_adoption_target() {
   worktree="$(printf '%s\n' "$binding" | jq -r '.worktree_id')" || return "$TRELLIS_EX_STATE"
   owner="$(_attachment_ownership_path "$home" "$checkout" "$worktree")" || return "$TRELLIS_EX_STATE"
   [ -f "$owner" ] && [ ! -L "$owner" ] || return "$TRELLIS_EX_UNAVAILABLE"
-  attachment_verify "$home" "$owner" || return "$?"
+  hook_authority="$(adoption_verify_owner_base "$home" "$owner")" || return "$?"
   release="$(printf '%s\n' "$binding" | jq -r '.release')" || return "$TRELLIS_EX_STATE"
   payload="$(payload_for "$release")" || return "$?"
   owner_matches_row "$owner" "$binding" "$identity" "$payload"
@@ -469,8 +481,9 @@ resolve_verified_adoption_target() {
   jq -cnS --argjson binding "$binding" --argjson identity "$identity" \
     --arg owner "$owner" --arg old_version "$release" --arg old_payload "$payload" \
     --arg root_identity "$root_identity" --arg trellis_identity "$trellis_identity" \
+    --arg hook_authority "$hook_authority" \
     '{binding:$binding,identity:$identity,owner:$owner,old_version:$old_version,old_payload:$old_payload,
-      root_identity:$root_identity,trellis_identity:$trellis_identity}'
+      root_identity:$root_identity,trellis_identity:$trellis_identity,hook_authority:$hook_authority}'
 }
 
 owner_replacement() {
@@ -486,18 +499,105 @@ owner_replacement() {
   _attachment_owner_json_valid "$replacement" || return "$TRELLIS_EX_STATE"
 }
 
-replace_owned_file() {
-  local destination="$1" expected="$2" replacement="$3" parent base temporary
-  [ -f "$destination" ] && [ ! -L "$destination" ] || return "$TRELLIS_EX_CONFLICT"
-  cmp -s "$expected" "$destination" || return "$TRELLIS_EX_CONFLICT"
+replace_owned_file() (
+  local destination="$1" expected="$2" replacement="$3" parent base actual_parent temporary=''
+  local temporary_identity='' destination_identity='' committed=false rc
+
+  replace_owned_file_cleanup() {
+    local status="${1:-$?}" rollback=0 cleanup_status=0
+    trap - EXIT
+    trap '' HUP INT TERM
+
+    if [ -n "$temporary" ]; then
+      if [ "$committed" = true ]; then
+        if [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
+          _attachment_identity_matches "$temporary" "$destination_identity" file &&
+          _attachment_mode_matches "$temporary" 600 &&
+          cmp -s "$expected" "$temporary"; then
+          rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+          [ "$cleanup_status" -eq 0 ] && temporary=''
+        else
+          cleanup_status="$TRELLIS_EX_CONFLICT"
+        fi
+      elif [ -f "$destination" ] && [ ! -L "$destination" ] &&
+        _attachment_identity_matches "$destination" "$temporary_identity" file &&
+        _attachment_mode_matches "$destination" 600 &&
+        cmp -s "$replacement" "$destination"; then
+        release_store_rename_swap "$temporary" "$destination"
+        rollback=$?
+        if [ "$rollback" -eq 0 ]; then
+          if [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
+            _attachment_identity_matches "$temporary" "$temporary_identity" file &&
+            _attachment_mode_matches "$temporary" 600 &&
+            cmp -s "$replacement" "$temporary"; then
+            rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+            [ "$cleanup_status" -eq 0 ] && temporary=''
+          else
+            cleanup_status="$TRELLIS_EX_CONFLICT"
+          fi
+        else
+          cleanup_status="$(max_status "$cleanup_status" "$rollback")"
+        fi
+      elif [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
+        _attachment_identity_matches "$temporary" "$temporary_identity" file &&
+        _attachment_mode_matches "$temporary" 600 &&
+        cmp -s "$replacement" "$temporary"; then
+        rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+        [ "$cleanup_status" -eq 0 ] && temporary=''
+      else
+        cleanup_status="$TRELLIS_EX_CONFLICT"
+      fi
+    fi
+    [ "$cleanup_status" -eq 0 ] || status="$(max_status "$status" "$cleanup_status")"
+    exit "$status"
+  }
+  trap 'replace_owned_file_cleanup "$?"' EXIT
+  trap 'exit "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
+
+  [ -f "$expected" ] && [ ! -L "$expected" ] || return "$TRELLIS_EX_CONFLICT"
+  [ -f "$replacement" ] && [ ! -L "$replacement" ] || return "$TRELLIS_EX_CONFLICT"
+  _attachment_mode_matches "$expected" 600 || return "$TRELLIS_EX_CONFLICT"
   parent="$(dirname "$destination")" || return "$TRELLIS_EX_STATE"
   base="$(basename "$destination")" || return "$TRELLIS_EX_STATE"
-  [ -d "$parent" ] && [ ! -L "$parent" ] || return "$TRELLIS_EX_CONFLICT"
-  temporary="$(mktemp "$parent/.${base}.release-adopt.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  chmod 600 "$temporary" || { rm -f "$temporary"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  cat "$replacement" > "$temporary" || { rm -f "$temporary"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  mv -f "$temporary" "$destination" || { rm -f "$temporary"; return "$TRELLIS_EX_UNAVAILABLE"; }
-}
+  _attachment_canonical_dir "$parent" || return "$TRELLIS_EX_CONFLICT"
+  CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
+  actual_parent="$(pwd -P)" || return "$TRELLIS_EX_CONFLICT"
+  [ "$actual_parent" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
+  destination="./$base"
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return "$TRELLIS_EX_CONFLICT"
+  _attachment_mode_matches "$destination" 600 || return "$TRELLIS_EX_CONFLICT"
+  cmp -s "$expected" "$destination" || return "$TRELLIS_EX_CONFLICT"
+  destination_identity="$(_attachment_fs_identity "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+  temporary="$(mktemp "./.${base}.release-adopt.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -f "$temporary" ] && [ ! -L "$temporary" ] || return "$TRELLIS_EX_CONFLICT"
+  chmod 600 "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
+  cat "$replacement" > "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
+  chmod 600 "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
+    _attachment_mode_matches "$temporary" 600 &&
+    cmp -s "$replacement" "$temporary" || return "$TRELLIS_EX_CONFLICT"
+  temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -f "$destination" ] && [ ! -L "$destination" ] &&
+    _attachment_identity_matches "$destination" "$destination_identity" file &&
+    _attachment_mode_matches "$destination" 600 &&
+    cmp -s "$expected" "$destination" || return "$TRELLIS_EX_CONFLICT"
+  release_store_rename_swap "$temporary" "$destination"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  if ! { [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
+    _attachment_identity_matches "$temporary" "$destination_identity" file &&
+    _attachment_mode_matches "$temporary" 600 &&
+    cmp -s "$expected" "$temporary"; } ||
+    ! { [ -f "$destination" ] && [ ! -L "$destination" ] &&
+    _attachment_identity_matches "$destination" "$temporary_identity" file &&
+    _attachment_mode_matches "$destination" 600 &&
+    cmp -s "$replacement" "$destination"; }; then
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  committed=true
+  return 0
+)
+
 
 hook_payload_matches() {
   local managed="$1" expected="$2" sidecar mode source manifest previous
@@ -610,24 +710,262 @@ replace_hook_payload() (
   exit 0
 )
 
+adoption_render_owned_parents_valid() {
+  local file="$1" keys="$2"
+  jq -e --argjson keys "$keys" '
+    def lookup($value; $path):
+      reduce $path[] as $key ({value:$value,exists:true};
+        if .exists and (.value | type) == "object" and (.value | has($key))
+        then .value = .value[$key]
+        else .exists = false
+        end);
+    . as $current
+    | ($current | type) == "object"
+    and all($keys[];
+      .path as $path
+      | all(range(1; $path | length);
+          lookup($current; $path[0:.]) as $parent
+          | ($parent.exists | not) or (($parent.value | type) == "object")))
+  ' "$file" >/dev/null 2>&1
+}
+
+adoption_render_live_matches() {
+  local destination="$1" source="$2" identity="$3" expected_hash="$4" expected_mode="$5"
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  [ -z "$identity" ] || _attachment_identity_matches "$destination" "$identity" file || return 1
+  [ "$(_attachment_hash "$destination")" = "$expected_hash" ] || return 1
+  _attachment_mode_matches "$destination" "$expected_mode" || return 1
+  cmp -s "$source" "$destination"
+}
+
+adoption_private_render_file_matches() {
+  local path="$1" identity="$2" expected_hash="$3" expected_mode="$4"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  _attachment_identity_matches "$path" "$identity" file || return 1
+  [ "$(_attachment_hash "$path")" = "$expected_hash" ] || return 1
+  _attachment_mode_matches "$path" "$expected_mode"
+}
+
+adoption_snapshot_render() {
+  local root="$1" render="$2" work="$3" number="$4" index="$5"
+  local relative destination after_mode keys path_identity source candidate source_identity source_hash source_mode
+  local candidate_identity candidate_hash drift
+  relative="$(printf '%s\n' "$render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  after_mode="$(printf '%s\n' "$render" | jq -r '.after_mode')" || return "$TRELLIS_EX_STATE"
+  keys="$(printf '%s\n' "$render" | jq -c '.owned_keys')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$relative" || return "$TRELLIS_EX_CONFLICT"
+  destination="$(_attachment_destination "$root" "$relative")" || return "$TRELLIS_EX_STATE"
+  if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+    release_err "explicit-json render target is absent: $relative"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  if [ ! -f "$destination" ] || [ -L "$destination" ]; then
+    release_err "explicit-json render target is not a regular file: $relative"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  source_mode="0$(_attachment_mode "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ "$source_mode" = "$after_mode" ] || return "$TRELLIS_EX_CONFLICT"
+  if ! jq -se 'length == 1 and (.[0] | type == "object")' "$destination" >/dev/null 2>&1; then
+    release_err "explicit-json render target is invalid JSON: $relative"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  adoption_render_owned_parents_valid "$destination" "$keys" || return "$TRELLIS_EX_CONFLICT"
+  path_identity="$(_attachment_fs_identity "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+  source_hash="$(_attachment_hash "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+
+  source="$work/$number.render.$index.source"
+  candidate="$work/$number.render.$index.candidate"
+  cat "$destination" > "$source" || return "$TRELLIS_EX_UNAVAILABLE"
+  chmod "${source_mode#0}" "$source" || return "$TRELLIS_EX_UNAVAILABLE"
+  source_identity="$(_attachment_fs_identity "$source")" || return "$TRELLIS_EX_UNAVAILABLE"
+  adoption_render_live_matches "$destination" "$source" "$path_identity" "$source_hash" "$source_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  drift="$(attach_detach_json_keys_detail "$source" "$keys")" || return "$TRELLIS_EX_CONFLICT"
+
+  jq --argjson keys "$keys" '
+    reduce $keys[] as $owned (. ; setpath($owned.path; $owned.value))
+  ' "$source" > "$candidate" || return "$TRELLIS_EX_CONFLICT"
+  chmod "${after_mode#0}" "$candidate" || return "$TRELLIS_EX_UNAVAILABLE"
+  jq -e 'type == "object"' "$candidate" >/dev/null 2>&1 || return "$TRELLIS_EX_CONFLICT"
+  attach_detach_json_keys_match "$candidate" "$keys" || return "$TRELLIS_EX_CONFLICT"
+  candidate_identity="$(_attachment_fs_identity "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
+  candidate_hash="$(_attachment_hash "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
+
+  jq -cn --argjson render "$render" --arg path "$relative" --arg destination "$destination" \
+    --arg path_identity "$path_identity" --arg source "$source" --arg source_identity "$source_identity" \
+    --arg source_sha256 "$source_hash" --arg source_mode "$source_mode" \
+    --arg candidate "$candidate" --arg candidate_identity "$candidate_identity" \
+    --arg candidate_sha256 "$candidate_hash" --arg candidate_mode "$after_mode" --argjson drift "$drift" \
+    '{render:$render,path:$path,destination:$destination,path_identity:$path_identity,
+      source:$source,source_identity:$source_identity,source_sha256:$source_sha256,source_mode:$source_mode,
+      candidate:$candidate,candidate_identity:$candidate_identity,candidate_sha256:$candidate_sha256,
+      candidate_mode:$candidate_mode,drift:$drift}'
+}
+
+adoption_render_plan_matches_source() {
+  local root="$1" planned="$2" relative destination expected source source_identity source_hash source_mode
+  local candidate candidate_identity candidate_hash candidate_mode keys
+  relative="$(printf '%s\n' "$planned" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$relative" || return "$TRELLIS_EX_CONFLICT"
+  destination="$(_attachment_destination "$root" "$relative")" || return "$TRELLIS_EX_STATE"
+  expected="$(printf '%s\n' "$planned" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  [ "$destination" = "$expected" ] || return "$TRELLIS_EX_CONFLICT"
+  source="$(printf '%s\n' "$planned" | jq -r '.source')" || return "$TRELLIS_EX_STATE"
+  source_identity="$(printf '%s\n' "$planned" | jq -r '.source_identity')" || return "$TRELLIS_EX_STATE"
+  source_hash="$(printf '%s\n' "$planned" | jq -r '.source_sha256')" || return "$TRELLIS_EX_STATE"
+  source_mode="$(printf '%s\n' "$planned" | jq -r '.source_mode')" || return "$TRELLIS_EX_STATE"
+  candidate="$(printf '%s\n' "$planned" | jq -r '.candidate')" || return "$TRELLIS_EX_STATE"
+  candidate_identity="$(printf '%s\n' "$planned" | jq -r '.candidate_identity')" || return "$TRELLIS_EX_STATE"
+  candidate_hash="$(printf '%s\n' "$planned" | jq -r '.candidate_sha256')" || return "$TRELLIS_EX_STATE"
+  candidate_mode="$(printf '%s\n' "$planned" | jq -r '.candidate_mode')" || return "$TRELLIS_EX_STATE"
+  keys="$(printf '%s\n' "$planned" | jq -c '.render.owned_keys')" || return "$TRELLIS_EX_STATE"
+  adoption_private_render_file_matches "$source" "$source_identity" "$source_hash" "$source_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  adoption_private_render_file_matches "$candidate" "$candidate_identity" "$candidate_hash" "$candidate_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  attach_detach_json_keys_match "$candidate" "$keys" || return "$TRELLIS_EX_CONFLICT"
+  adoption_render_live_matches "$destination" "$source" \
+    "$(printf '%s\n' "$planned" | jq -r '.path_identity')" "$source_hash" "$source_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+}
+
+adoption_publish_render() (
+  local planned="$1" direction="$2" destination expected expected_identity expected_file_identity expected_hash expected_mode
+  local replacement replacement_file_identity replacement_hash replacement_mode parent base actual_parent temporary='' destination_identity=''
+  local temporary_identity='' committed=false rc
+
+  adoption_publish_render_cleanup() {
+    local status="${1:-$?}" rollback=0 cleanup_status=0
+    trap - EXIT
+    trap '' HUP INT TERM
+
+    if [ -n "$temporary" ]; then
+      if [ "$committed" = true ]; then
+        if adoption_render_live_matches "$temporary" "$expected" "$expected_identity" "$expected_hash" "$expected_mode"; then
+          rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+          [ "$cleanup_status" -eq 0 ] && temporary=''
+        else
+          cleanup_status="$TRELLIS_EX_CONFLICT"
+        fi
+      elif adoption_render_live_matches "$destination" "$replacement" '' "$replacement_hash" "$replacement_mode" &&
+        _attachment_identity_matches "$destination" "$temporary_identity" file; then
+        release_store_rename_swap "$temporary" "$destination"
+        rollback=$?
+        if [ "$rollback" -eq 0 ]; then
+          if _attachment_identity_matches "$temporary" "$temporary_identity" file &&
+            adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode"; then
+            rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+            [ "$cleanup_status" -eq 0 ] && temporary=''
+          else
+            cleanup_status="$TRELLIS_EX_CONFLICT"
+          fi
+        else
+          cleanup_status="$(max_status "$cleanup_status" "$rollback")"
+        fi
+      elif _attachment_identity_matches "$temporary" "$temporary_identity" file &&
+        adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode"; then
+        rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+        [ "$cleanup_status" -eq 0 ] && temporary=''
+      else
+        cleanup_status="$TRELLIS_EX_CONFLICT"
+      fi
+    fi
+    [ "$cleanup_status" -eq 0 ] || status="$(max_status "$status" "$cleanup_status")"
+    exit "$status"
+  }
+
+  trap 'adoption_publish_render_cleanup "$?"' EXIT
+  trap 'exit "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
+
+  case "$direction" in
+    forward)
+      expected="$(printf '%s\n' "$planned" | jq -r '.source')" || return "$TRELLIS_EX_STATE"
+      expected_identity="$(printf '%s\n' "$planned" | jq -r '.path_identity')" || return "$TRELLIS_EX_STATE"
+      expected_file_identity="$(printf '%s\n' "$planned" | jq -r '.source_identity')" || return "$TRELLIS_EX_STATE"
+      expected_hash="$(printf '%s\n' "$planned" | jq -r '.source_sha256')" || return "$TRELLIS_EX_STATE"
+      expected_mode="$(printf '%s\n' "$planned" | jq -r '.source_mode')" || return "$TRELLIS_EX_STATE"
+      replacement="$(printf '%s\n' "$planned" | jq -r '.candidate')" || return "$TRELLIS_EX_STATE"
+      replacement_file_identity="$(printf '%s\n' "$planned" | jq -r '.candidate_identity')" || return "$TRELLIS_EX_STATE"
+      replacement_hash="$(printf '%s\n' "$planned" | jq -r '.candidate_sha256')" || return "$TRELLIS_EX_STATE"
+      replacement_mode="$(printf '%s\n' "$planned" | jq -r '.candidate_mode')" || return "$TRELLIS_EX_STATE"
+      ;;
+    rollback)
+      expected="$(printf '%s\n' "$planned" | jq -r '.candidate')" || return "$TRELLIS_EX_STATE"
+      expected_identity=''
+      expected_file_identity="$(printf '%s\n' "$planned" | jq -r '.candidate_identity')" || return "$TRELLIS_EX_STATE"
+      expected_hash="$(printf '%s\n' "$planned" | jq -r '.candidate_sha256')" || return "$TRELLIS_EX_STATE"
+      expected_mode="$(printf '%s\n' "$planned" | jq -r '.candidate_mode')" || return "$TRELLIS_EX_STATE"
+      replacement="$(printf '%s\n' "$planned" | jq -r '.source')" || return "$TRELLIS_EX_STATE"
+      replacement_file_identity="$(printf '%s\n' "$planned" | jq -r '.source_identity')" || return "$TRELLIS_EX_STATE"
+      replacement_hash="$(printf '%s\n' "$planned" | jq -r '.source_sha256')" || return "$TRELLIS_EX_STATE"
+      replacement_mode="$(printf '%s\n' "$planned" | jq -r '.source_mode')" || return "$TRELLIS_EX_STATE"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+  destination="$(printf '%s\n' "$planned" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  adoption_private_render_file_matches "$expected" "$expected_file_identity" "$expected_hash" "$expected_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  adoption_private_render_file_matches "$replacement" "$replacement_file_identity" "$replacement_hash" "$replacement_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  parent="$(dirname "$destination")" || return "$TRELLIS_EX_STATE"
+  base="$(basename "$destination")" || return "$TRELLIS_EX_STATE"
+  _attachment_canonical_dir "$parent" || return "$TRELLIS_EX_CONFLICT"
+  CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
+  actual_parent="$(pwd -P)" || return "$TRELLIS_EX_CONFLICT"
+  [ "$actual_parent" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
+  destination="./$base"
+  destination_identity="$(_attachment_fs_identity "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -n "$expected_identity" ] || expected_identity="$destination_identity"
+  adoption_render_live_matches "$destination" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  temporary="$(mktemp "./.${base}.release-adopt-render.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -f "$temporary" ] && [ ! -L "$temporary" ] || return "$TRELLIS_EX_CONFLICT"
+  cat "$replacement" > "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
+  chmod "${replacement_mode#0}" "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
+  adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
+  adoption_render_live_matches "$destination" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
+    return "$TRELLIS_EX_CONFLICT"
+  release_store_rename_swap "$temporary" "$destination"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  if ! adoption_render_live_matches "$temporary" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
+    ! { _attachment_identity_matches "$destination" "$temporary_identity" file &&
+    adoption_render_live_matches "$destination" "$replacement" '' "$replacement_hash" "$replacement_mode"; }; then
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  committed=true
+  return 0
+)
+
 preflight_target() {
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
-  local target binding identity root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier
+  local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
+  local renders='[]' render render_plan index=0
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
   binding="$(printf '%s\n' "$target" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
   identity="$(printf '%s\n' "$target" | jq -cS '.identity')" || return "$TRELLIS_EX_STATE"
   checkout="$(printf '%s\n' "$binding" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
+  root="$(printf '%s\n' "$binding" | jq -r '.root')" || return "$TRELLIS_EX_STATE"
   owner="$(printf '%s\n' "$target" | jq -r '.owner')" || return "$TRELLIS_EX_STATE"
   old_version="$(printf '%s\n' "$target" | jq -r '.old_version')" || return "$TRELLIS_EX_STATE"
   old_payload="$(printf '%s\n' "$target" | jq -r '.old_payload')" || return "$TRELLIS_EX_STATE"
   root_identity="$(printf '%s\n' "$target" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$target" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
+  hook_authority="$(printf '%s\n' "$target" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
 
   old_owner="$work/$number.old.json"
   new_owner="$work/$number.new.json"
   cp "$owner" "$old_owner" && chmod 600 "$old_owner" || return "$TRELLIS_EX_UNAVAILABLE"
   owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" || return "$?"
+  while IFS= read -r render; do
+    index=$((index + 1))
+    render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index")" || return "$?"
+    renders="$(jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
+      return "$TRELLIS_EX_STATE"
+  done < <(jq -c '(.renders // [])[]' "$old_owner")
 
   hooks="$(jq -r '.git_hooks.enabled // false' "$owner")" || return "$TRELLIS_EX_STATE"
   managed=""
@@ -652,29 +990,37 @@ preflight_target() {
     --arg old_version "$old_version" --arg old_payload "$old_payload" \
     --arg new_version "$new_version" --arg new_payload "$new_payload" \
     --arg root_identity "$root_identity" --arg trellis_identity "$trellis_identity" \
-    --arg hooks "$hooks" --arg managed "$managed" \
+    --arg hooks "$hooks" --arg managed "$managed" --arg hook_authority "$hook_authority" \
+    --argjson renders "$renders" \
     '{row:$row,binding:$binding,identity:$identity,owner:$owner,old_owner:$old_owner,new_owner:$new_owner,
       old_version:$old_version,old_payload:$old_payload,new_version:$new_version,new_payload:$new_payload,
-      root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed}'
+      root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed,
+      hook_authority:$hook_authority,renders:$renders}'
 }
 
 plan_matches_old() {
-  local home="$1" plan="$2" row binding planned_identity planned_root_identity planned_trellis_identity target current_binding current_identity current_root_identity current_trellis_identity owner old_owner old_payload old_version new_version new_payload verified_new_payload
+  local home="$1" plan="$2" row binding planned_identity planned_root_identity planned_trellis_identity planned_hook_authority target current_binding current_identity current_root_identity current_trellis_identity current_hook_authority owner old_owner old_payload old_version new_version new_payload verified_new_payload root planned_render status
   row="$(printf '%s\n' "$plan" | jq -c '.row')" || return "$TRELLIS_EX_STATE"
   binding="$(printf '%s\n' "$plan" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
   planned_identity="$(printf '%s\n' "$plan" | jq -cS '.identity')" || return "$TRELLIS_EX_STATE"
   planned_root_identity="$(printf '%s\n' "$plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   planned_trellis_identity="$(printf '%s\n' "$plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
+  planned_hook_authority="$(printf '%s\n' "$plan" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
   current_binding="$(printf '%s\n' "$target" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
   current_identity="$(printf '%s\n' "$target" | jq -cS '.identity')" || return "$TRELLIS_EX_STATE"
   current_root_identity="$(printf '%s\n' "$target" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   current_trellis_identity="$(printf '%s\n' "$target" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
+  current_hook_authority="$(printf '%s\n' "$target" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
   if [ "$current_binding" != "$binding" ] ||
     [ "$current_identity" != "$planned_identity" ] ||
     [ "$current_root_identity" != "$planned_root_identity" ] ||
     [ "$current_trellis_identity" != "$planned_trellis_identity" ]; then
     release_err 'release adoption target drifted after plan validation'
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  if [ "$current_hook_authority" != "$planned_hook_authority" ]; then
+    release_err 'release adoption hook authority drifted after plan validation'
     return "$TRELLIS_EX_CONFLICT"
   fi
   owner="$(printf '%s\n' "$plan" | jq -r '.owner')" || return "$TRELLIS_EX_STATE"
@@ -693,38 +1039,53 @@ plan_matches_old() {
   new_payload="$(printf '%s\n' "$plan" | jq -r '.new_payload')" || return "$TRELLIS_EX_STATE"
   verified_new_payload="$(payload_for "$new_version")" || return "$?"
   [ "$verified_new_payload" = "$new_payload" ] || return "$TRELLIS_EX_CONFLICT"
-  cmp -s "$old_owner" "$owner"
+  if ! cmp -s "$old_owner" "$owner"; then
+    release_err 'release adoption attachment owner changed after plan validation'
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
+  while IFS= read -r planned_render; do
+    adoption_render_plan_matches_source "$root" "$planned_render"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      release_err 'release adoption render source changed after plan validation'
+      return "$status"
+    fi
+  done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
 }
 
 apply_plan() {
-  local plan="$1" root root_identity trellis_identity owner old_owner new_owner old_version old_payload new_version new_payload verified_new_payload rc rollback=0
+  local plan="$1" root root_identity trellis_identity owner old_owner new_owner new_version old_payload new_payload verified_new_payload
+  local planned_render drift_count
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
   root_identity="$(printf '%s\n' "$plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
   owner="$(printf '%s\n' "$plan" | jq -r '.owner')" || return "$TRELLIS_EX_STATE"
   old_owner="$(printf '%s\n' "$plan" | jq -r '.old_owner')" || return "$TRELLIS_EX_STATE"
   new_owner="$(printf '%s\n' "$plan" | jq -r '.new_owner')" || return "$TRELLIS_EX_STATE"
-  old_version="$(printf '%s\n' "$plan" | jq -r '.old_version')" || return "$TRELLIS_EX_STATE"
   new_version="$(printf '%s\n' "$plan" | jq -r '.new_version')" || return "$TRELLIS_EX_STATE"
   old_payload="$(printf '%s\n' "$plan" | jq -r '.old_payload')" || return "$TRELLIS_EX_STATE"
   new_payload="$(printf '%s\n' "$plan" | jq -r '.new_payload')" || return "$TRELLIS_EX_STATE"
   verified_new_payload="$(payload_for "$new_version")" || return "$?"
   [ "$verified_new_payload" = "$new_payload" ] || return "$TRELLIS_EX_CONFLICT"
+
+  while IFS= read -r planned_render; do
+    drift_count="$(printf '%s\n' "$planned_render" | jq '.drift | length')" || return "$TRELLIS_EX_STATE"
+    [ "$drift_count" -gt 0 ] || continue
+    adoption_publish_render "$planned_render" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
+
   runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload" || return "$?"
   release_store_adopt_runtime_anchor_pinned \
     "$new_version" "$root" "$root_identity" "$trellis_identity" "$old_payload" >/dev/null || return "$?"
   replace_owned_file "$owner" "$old_owner" "$new_owner"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    release_store_adopt_runtime_anchor_pinned \
-      "$old_version" "$root" "$root_identity" "$trellis_identity" "$new_payload" >/dev/null || rollback=$?
-    return "$(max_status "$rc" "$rollback")"
-  fi
 }
 
 rollback_plan() {
-  local plan="$1" root root_identity trellis_identity owner old_owner new_owner old_version new_version old_payload new_payload
-  local owner_state='' anchor_state='' owner_reverted=false rc=0 restore=0
+  local plan="$1" root root_identity trellis_identity owner old_owner new_owner old_version old_payload new_payload
+  local planned_render destination source source_hash source_mode candidate candidate_hash candidate_mode
+  local rc=0 one index
+  local -a render_lines=()
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
   root_identity="$(printf '%s\n' "$plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
@@ -732,39 +1093,79 @@ rollback_plan() {
   old_owner="$(printf '%s\n' "$plan" | jq -r '.old_owner')" || return "$TRELLIS_EX_STATE"
   new_owner="$(printf '%s\n' "$plan" | jq -r '.new_owner')" || return "$TRELLIS_EX_STATE"
   old_version="$(printf '%s\n' "$plan" | jq -r '.old_version')" || return "$TRELLIS_EX_STATE"
-  new_version="$(printf '%s\n' "$plan" | jq -r '.new_version')" || return "$TRELLIS_EX_STATE"
   old_payload="$(printf '%s\n' "$plan" | jq -r '.old_payload')" || return "$TRELLIS_EX_STATE"
   new_payload="$(printf '%s\n' "$plan" | jq -r '.new_payload')" || return "$TRELLIS_EX_STATE"
 
-  if cmp -s "$old_owner" "$owner"; then owner_state=old
-  elif cmp -s "$new_owner" "$owner"; then owner_state=new
-  else return "$TRELLIS_EX_CONFLICT"
+  if cmp -s "$old_owner" "$owner"; then
+    :
+  elif cmp -s "$new_owner" "$owner"; then
+    replace_owned_file "$owner" "$new_owner" "$old_owner"
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
-  if runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload"; then anchor_state=old
-  elif runtime_anchor_matches_payload "$root/.trellis/runtime" "$new_payload"; then anchor_state=new
-  else return "$TRELLIS_EX_CONFLICT"
-  fi
-  [ "$owner_state" = old ] && [ "$anchor_state" = old ] && return 0
 
-  # Apply changes runtime then owner, so restore the owner before the runtime.
-  if [ "$owner_state" = new ]; then
-    replace_owned_file "$owner" "$new_owner" "$old_owner" || return "$?"
-    owner_state=old
-    owner_reverted=true
-  fi
-  if [ "$anchor_state" = new ]; then
+  if runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload"; then
+    :
+  elif runtime_anchor_matches_payload "$root/.trellis/runtime" "$new_payload"; then
     release_store_adopt_runtime_anchor_pinned \
       "$old_version" "$root" "$root_identity" "$trellis_identity" "$new_payload" >/dev/null
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
-      if [ "$owner_reverted" = true ]; then
-        replace_owned_file "$owner" "$old_owner" "$new_owner" || restore=$?
-      fi
-      return "$(max_status "$rc" "$restore")"
-    fi
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
-  cmp -s "$old_owner" "$owner" &&
-    runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload"
+
+  while IFS= read -r planned_render; do
+    [ -n "$planned_render" ] && render_lines+=("$planned_render")
+  done < <(printf '%s\n' "$plan" | jq -c '.renders[] | select((.drift | length) > 0)')
+  for ((index=${#render_lines[@]} - 1; index >= 0; index--)); do
+    planned_render="${render_lines[$index]}"
+    destination="$(printf '%s\n' "$planned_render" | jq -r '.destination')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    source="$(printf '%s\n' "$planned_render" | jq -r '.source')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    source_hash="$(printf '%s\n' "$planned_render" | jq -r '.source_sha256')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    source_mode="$(printf '%s\n' "$planned_render" | jq -r '.source_mode')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    candidate="$(printf '%s\n' "$planned_render" | jq -r '.candidate')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    candidate_hash="$(printf '%s\n' "$planned_render" | jq -r '.candidate_sha256')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    candidate_mode="$(printf '%s\n' "$planned_render" | jq -r '.candidate_mode')" || {
+      rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+      continue
+    }
+    if adoption_render_live_matches "$destination" "$source" '' "$source_hash" "$source_mode"; then
+      :
+    elif adoption_render_live_matches "$destination" "$candidate" '' "$candidate_hash" "$candidate_mode"; then
+      adoption_publish_render "$planned_render" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    else
+      rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
+    fi
+  done
+
+  if [ "$rc" -eq 0 ]; then
+    cmp -s "$old_owner" "$owner" || rc="$TRELLIS_EX_CONFLICT"
+    runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload" || rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
+  fi
+  return "$rc"
 }
 
 rollback_plans() {
@@ -897,7 +1298,8 @@ EOF
 adopt_group() (
   local home="$1" version="$2" payload="$3" rows="$4" work="$5"
   local plans="$work/plans.jsonl" changed="$work/changed.jsonl" changed_hooks="$work/changed-hooks.jsonl"
-  local row plan first checkout common rc=0 number=0 label
+  local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state
+  local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
 
   adopt_group_cleanup() {
@@ -977,8 +1379,8 @@ adopt_group() (
     plan_matches_old "$home" "$plan" || return "$?"
   done < "$plans"
 
-  # Re-resolve every exact target immediately before the first runtime mutation.
-  # This closes the small window after the group-wide validation pass.
+  # Re-resolve every exact target immediately before the first checkout
+  # mutation. This closes the small window after group-wide validation.
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
     plan_matches_old "$home" "$plan" || return "$?"
@@ -996,14 +1398,35 @@ adopt_group() (
 
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
-    attachment_verify "$home" "$(printf '%s\n' "$plan" | jq -r '.owner')" || return "$?"
+    owner="$(printf '%s\n' "$plan" | jq -r '.owner')" || return "$TRELLIS_EX_STATE"
+    planned_hook_authority="$(printf '%s\n' "$plan" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
+    current_hook_authority="$(attachment_verify_adoption "$home" "$owner")"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    if [ "$current_hook_authority" != "$planned_hook_authority" ]; then
+      release_err 'release adoption hook authority drifted after apply'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
   done < "$plans"
 
   update_group_registry "$home" "$plans" "$version" || return "$?"
   committed=true
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
-    printf 'adopted: %s\n' "$(target_label "$(printf '%s\n' "$plan" | jq -c '.row')")"
+    while IFS= read -r planned_render; do
+      render_path="$(printf '%s\n' "$planned_render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+      while IFS= read -r repair; do
+        json_path="$(printf '%s\n' "$repair" | jq -r '.path | @json')" || return "$TRELLIS_EX_STATE"
+        repair_state="$(printf '%s\n' "$repair" | jq -r '.state')" || return "$TRELLIS_EX_STATE"
+        printf 're-rendered owned JSON key: %s %s (%s)\n' "$render_path" "$json_path" "$repair_state"
+      done < <(printf '%s\n' "$planned_render" | jq -c '.drift[]')
+    done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
+    label="$(target_label "$(printf '%s\n' "$plan" | jq -c '.row')")" || return "$TRELLIS_EX_STATE"
+    planned_hook_authority="$(printf '%s\n' "$plan" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
+    if [ "$planned_hook_authority" = operator-owned ]; then
+      printf 'hook authority: operator-owned; core.hooksPath was left unchanged: %s\n' "$label"
+    fi
+    printf 'adopted: %s\n' "$label"
   done < "$plans"
   adopt_group_cleanup 0
   return "$?"
@@ -1096,34 +1519,25 @@ adopt_registry() (
       # through to the unavailable-target report below, which is the honest
       # answer to "adopt this project" when it has no worktree to adopt.
       #
-      # SKIPPING IS NOT SWALLOWING. "This row is not an adoption target" says
-      # nothing about the row's own class, and an unhealthy checkout row swept
-      # by a bulk selector was exiting through this branch with no report and no
-      # class at all. The floor below is the WORKTREE branch's predicate
-      # verbatim — availability, status AND exclusion — because those three are
-      # what make a row unusable, and testing only `status = unavailable`
-      # readmitted the two cases the worktree branch refuses: a `detached`
-      # project's empty checkout, and an excluded one. Both were swept by
-      # `--all`, reported as a benign skip, and returned 0. Only after the floor
-      # is the row skipped. (`identity_error` is already floored class 4 by the
-      # branch above and never reaches here.)
+      # Bulk selectors report rows that cannot be adopted, but those inventory
+      # rows are not attempted targets and therefore do not contribute to the
+      # command status. The predicate mirrors the worktree branch so detached
+      # and excluded checkout rows remain visible instead of being mislabeled
+      # as benign empty-checkout skips. `identity_error` is registry corruption,
+      # is handled above, and still contributes class 4.
       if [ "$availability" != available ] || [ "$status" != active ] || [ "$excluded" = true ]; then
         release_err "unavailable checkout inventory row swept by the adoption selector: $label"
-        rc="$(max_status "$rc" "$TRELLIS_EX_UNAVAILABLE")"
       else
         release_err "skipping checkout inventory row with no registered worktree: $label"
       fi
     elif [ "$kind" != worktree ] || [ "$availability" != available ] || [ "$status" != active ] || [ "$excluded" = true ]; then
       release_err "unavailable adoption target remains explicit: $label"
-      rc="$(max_status "$rc" "$TRELLIS_EX_UNAVAILABLE")"
     fi
   done < "$selected"
 
-  # Every exit path AFTER the row loop must be floored with `rc`. The loop has
-  # already proven rows unusable — a class-5 finding outranks class 4 — so a
-  # fixed `return "$TRELLIS_EX_STATE"` here silently DOWNGRADED an adopt that had
-  # just reported unavailable targets, reporting registry corruption instead of
-  # the higher class the rows established.
+  # Every exit path after the row loop preserves `rc`. It carries registry
+  # identity errors; unavailable rows are report-only whenever an eligible
+  # worktree exists. Empty scoped selections still return class 5 below.
   jq -r 'select(.kind == "worktree" and .availability == "available" and .status == "active" and (.excluded // false | not)) | [.fleet,.project_id,.checkout_id] | @tsv' "$selected" | sort -u > "$groups" ||
     return "$(max_status "$rc" "$TRELLIS_EX_STATE")"
   if [ ! -s "$groups" ]; then

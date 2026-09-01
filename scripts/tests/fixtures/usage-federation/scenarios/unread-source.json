@@ -1,0 +1,46 @@
+{
+  "scenario": "unread_source",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:05:00Z"
+    },
+    "period": {
+      "start": "2026-08-23T11:00:00Z",
+      "end": "2026-08-23T12:05:00Z",
+      "timezone": "UTC"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-omp-missing-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "path": "transcripts/missing-unread-source.jsonl"
+      }
+    ]
+  },
+  "expected": {
+    "status": "unavailable",
+    "ingest": {
+      "status": "unavailable",
+      "source_id": "source-omp-missing-001",
+      "reason_code": "source_unread",
+      "observed_at": "2026-08-23T12:05:00Z"
+    },
+    "lanes": [
+      {
+        "lane_id": "openai-codex",
+        "spend": {
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "subscription_has_no_real_invoice_spend"
+          },
+          "notional_nanos": {
+            "status": "unavailable",
+            "reason_code": "source_unread",
+            "observed_at": "2026-08-23T12:05:00Z"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -60,6 +60,11 @@ write_bulk() {
   [ "$status" -eq 0 ]
 }
 
+@test "branch: 'pi-agent/probe' passes (pi worker branch)" {
+  check_branch "pi-agent/probe"
+  [ "$status" -eq 0 ]
+}
+
 @test "branch: 'feat/short-slug' still passes (feature did not shadow feat)" {
   check_branch "feat/short-slug"
   [ "$status" -eq 0 ]

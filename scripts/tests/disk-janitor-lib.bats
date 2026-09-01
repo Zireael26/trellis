@@ -494,6 +494,16 @@ SH
   [ "$status" -ne 0 ]
 }
 
+@test "dj_worktree_in_use treats a deleted-path lsof record as live" {
+  local root="$SANDBOX/deleted worktree" snapshot="$SANDBOX/deleted.snapshot"
+  mkdir -p "$root"
+  printf 'ok\nfcwd\nn%s (deleted)\n' "$root" > "$snapshot"
+
+  run dj_worktree_in_use "$root" "$snapshot"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"live process cwd or open file handle under worktree"* ]] || { echo "$output"; false; }
+}
+
 # ===========================================================================
 # dj_branch_merged — injectable override (the real ladder is network/gh and is
 # NOT exercised here; the override IS the contract for tests).
@@ -517,6 +527,42 @@ SH
   [ "$status" -eq 0 ]
   DJ_BUILD_ACTIVE_OVERRIDE=0 run dj_build_active "$SANDBOX/proj"
   [ "$status" -ne 0 ]
+}
+
+@test "dj_build_active uses executable identity before project argv" {
+  local bin="$SANDBOX/bin" project="$SANDBOX/project"
+  mkdir -p "$bin" "$project"
+  cat > "$bin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${PS_FIXTURE:-}"
+exit 0
+SH
+  chmod +x "$bin/ps"
+  export PATH="$bin:/usr/bin:/bin"
+
+  PS_FIXTURE="600 1 600 node node $project/node_modules/vite/bin/vite.js build"
+  export PS_FIXTURE
+  run dj_build_active "$project"
+  [ "$status" -eq 0 ]
+
+  PS_FIXTURE="601 1 601 node node /opt/herdr.js agent prompt $project vite build"
+  export PS_FIXTURE
+  run dj_build_active "$project"
+  [ "$status" -eq 1 ]
+}
+
+@test "dj_build_active fails closed when the process snapshot fails" {
+  local bin="$SANDBOX/bin"
+  mkdir -p "$bin"
+  cat > "$bin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 3
+SH
+  chmod +x "$bin/ps"
+  export PATH="$bin:/usr/bin:/bin"
+
+  run dj_build_active "$SANDBOX/project"
+  [ "$status" -eq 0 ]
 }
 
 # ===========================================================================

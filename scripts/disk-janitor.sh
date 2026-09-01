@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # trellis disk-janitor — report-first reclaim of build caches, dead worktrees,
-# package stores, and host-global Docker resources across the active fleet.
+# package stores, host-global Docker resources, and release execution staging
+# across the active fleet.
 #
 # Three modes, escalating in destructiveness:
 #   --report (default)  Scan every scope, print a human report to stdout AND
@@ -23,7 +24,8 @@
 #                       Destructive ops are a bright-line guardrail, so the
 #                       prompt is mandatory without --yes. Re-scan + report
 #                       reclaimed bytes. The opt-in nightly apply LaunchAgent
-#                       runs only unattended-safe worktrees + Docker.
+#                       runs unattended-safe worktrees, orphaned release staging,
+#                       and Docker.
 #
 # Worktree reap (default, reap_pushed_worktrees=true) is gated on: is_main==0
 # AND not in use (live cwd/open handles via a fail-safe lsof snapshot) AND
@@ -31,7 +33,10 @@
 # via gh OR pushed to origin with the tip not ahead). An in-use tree or any
 # residual local content is reported for manual review and EXCLUDED from apply.
 # A content-clean but unrecoverable tree under /private/tmp reaps at a short TTL
-# (ephemeral_tmp_ttl_days). Setting
+# (ephemeral_tmp_ttl_days). The same default path may clear ONE exact absent,
+# Git-prunable registration under /sessions or /tmp, authorized by a strict
+# current registry root and never by a broad Git prune; the unattended
+# --safe-only path leaves those registrations for manual apply. Setting
 # reap_pushed_worktrees=false restores the pre-Layer-2 stale+clean+merged gates,
 # still behind the shared non-main + not-in-use safety gates.
 #
@@ -55,14 +60,14 @@ SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 # ---------------------------------------------------------------------------
 MODE="report"            # report | dry-run | apply
 ONLY_PROJECT=""
-SCOPES="caches,worktrees,stores,docker"
+SCOPES="caches,worktrees,stores,docker,releases"
 ASSUME_YES=0
 SAFE_ONLY=0              # --safe-only: unattended-safe worktree reap (merged-only)
 
 print_help() {
   cat <<'EOF'
 trellis disk-janitor — reclaim build caches, dead worktrees, package stores,
-and host-global Docker resources
+and host-global Docker resources and release execution staging
 
 Usage:
   disk-janitor.sh                          Report (read-only). Default mode.
@@ -74,12 +79,13 @@ Usage:
                                            default; previous releases did not.
   disk-janitor.sh --apply --yes            Apply without the per-category prompt.
   disk-janitor.sh --apply --yes --safe-only
-                                           Unattended-safe worktree reap plus the
+                                           Unattended-safe worktree reap and
+                                           orphaned release staging, plus the
                                            same Docker behavior as normal --apply.
   disk-janitor.sh --project ID             Limit to one local-registry project
                                            identity; multiple clones are refused.
-  disk-janitor.sh --scopes caches,worktrees,stores,docker
-                                           Limit scopes (default: all four).
+  disk-janitor.sh --scopes caches,worktrees,stores,docker,releases
+                                           Limit scopes (default: all five).
   disk-janitor.sh --help                   Show this help.
 
 Modes (escalating):
@@ -120,6 +126,10 @@ Config:
                                      tripwire. The installed buildx supports
                                      --reserved-space, so Docker apply uses that
                                      flag rather than unsupported keep-storage flags.
+  disk_janitor.release_staging_ttl_days
+                                     Age before an execution snapshot may be
+                                     considered orphaned; default 1 day. Fresh
+                                     staging is always left intact.
 
 Scopes:
   caches      .turbo/cache, .next/cache, .next/dev older than cache_ttl_days,
@@ -141,6 +151,11 @@ Scopes:
               anonymous volume IDs from the plan, then runs `docker buildx prune
               -f --reserved-space <N>GB`; images are never pruned. If Docker is
               not already live, the scope is skipped without starting Desktop.
+  releases    Host-global TRELLIS_HOME/releases staging. Only real direct-child
+              .tmp.<version>.exec.<alphanumeric-suffix> directories are scanned.
+              Fresh snapshots, live-owner snapshots, and malformed owner records
+              are skipped; aged snapshots without a live owner are reaped with
+              their exact owner sidecar.
 
 Exit codes: 0 success, 1 scan/prune error, 2 bad arguments, 3 identity conflict.
 EOF
@@ -221,11 +236,11 @@ validate_scopes() {
   IFS=','
   for s in $SCOPES; do
     case "$s" in
-      caches|worktrees|stores|docker) ;;
+      caches|worktrees|stores|docker|releases) ;;
       "") ;;
       *)
         IFS="$ifs_save"
-        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker)" >&2
+        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases)" >&2
         exit 2
         ;;
     esac
@@ -281,6 +296,13 @@ if [ "$MODE" = "apply" ] && [ "$DJ_ENABLED" = "false" ]; then
   exit 2
 fi
 CACHE_TTL_DAYS="$(cfg_num '.disk_janitor.cache_ttl_days' 14)"
+RELEASE_STAGING_TTL_DAYS="$(cfg_num '.disk_janitor.release_staging_ttl_days' 1)"
+case "$RELEASE_STAGING_TTL_DAYS" in
+  ''|*[!0-9]*)
+    echo "disk-janitor: WARNING: malformed disk_janitor.release_staging_ttl_days='$RELEASE_STAGING_TTL_DAYS'; using 1" >&2
+    RELEASE_STAGING_TTL_DAYS=1
+    ;;
+esac
 WORKTREE_STALE_DAYS="$(cfg_num '.disk_janitor.worktree_stale_days' 30)"
 FREE_SPACE_FLOOR_GB="$(cfg_num '.disk_janitor.free_space_floor_gb' 30)"
 CACHE_CEILING_GB="$(cfg_num '.disk_janitor.cache_ceiling_gb' 20)"
@@ -352,9 +374,11 @@ final_exit_status() {
 # plan_row <scope> <verdict> <kind> <abs_path> <bytes> <repo_or_dash> <detail>
 #          [fleet project_id checkout_id worktree_id git_common_dir owner_root]
 #
-# The trailing identity columns are deliberately kept out of human rendering,
-# but travel with every deletion candidate so apply can revalidate the exact
-# registry owner rather than recover identity from a path.
+# Project rows use the trailing columns for registry identity. Host-global
+# release-staging rows instead carry VERSION in repo_or_dash and the snapshot's
+# expected device/inode in fleet/project_id; their remaining identity fields are
+# empty. Renderers ignore these machine fields. Apply names and validates them
+# before passing them to the descriptor-relative sink.
 plan_row() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
@@ -438,6 +462,11 @@ fi
 TARGET_KEYS=()
 TARGET_COUNT=0
 VOLUME_KEYS=()
+
+# A checkout can have several registered current worktrees. Phantom Git metadata
+# is inspected once per common directory, always through the first strict,
+# available current-root identity that reaches this scanner.
+PHANTOM_SCAN_KEYS=()
 
 # add_target FLEET PROJECT CHECKOUT_ID WORKTREE_ID ROOT GIT_COMMON_DIR
 add_target() {
@@ -692,6 +721,7 @@ scan_worktrees() {
   local bytes mtime detail verdict worktree_rows rc
   local merged_rc stale_rc pushed_rc recoverable_rc
   local real_wt is_tmp tmp_stale_rc is_detached in_use_reason
+  local phantom_key phantom_known phantom_seen
 
   registered_root="$(dj__abspath "$proj")"
   if worktree_rows="$(dj_list_worktrees "$proj")"; then :; else
@@ -845,7 +875,57 @@ EOF
     echo "disk-janitor: WARNING: registry root is absent from Git worktree metadata: $proj" >&2
     return 1
   fi
+  # A linked checkout can have more than one active registered current root.
+  # Inspect shared Git metadata exactly once, but only after the current root
+  # itself was confirmed in the list above. The entry selector below never
+  # touches a present worktree; it is solely the narrow phantom-registration
+  # cleanup that the normal exact-root scan deliberately excludes.
+  phantom_key="$checkout_id/$common"
+  phantom_seen=0
+  if [ "${#PHANTOM_SCAN_KEYS[@]}" -gt 0 ]; then
+    for phantom_known in "${PHANTOM_SCAN_KEYS[@]}"; do
+      if [ "$phantom_known" = "$phantom_key" ]; then
+        phantom_seen=1
+        break
+      fi
+    done
+  fi
+  [ "$phantom_seen" -eq 0 ] || return 0
+  PHANTOM_SCAN_KEYS+=("$phantom_key")
+
+  # Preserve the documented clean opt-out exactly: this follow-up is part of
+  # the newer worktree-reap behavior, not a hidden expansion of legacy mode.
+  [ "$REAP_PUSHED_WORKTREES" = "false" ] && return 0
+
+  while IFS="$(printf '\t')" read -r wt_path head_sha branch is_main prunable; do
+    [ -n "$wt_path" ] || continue
+    # The helper fails closed for present, symlinked, inaccessible, malformed,
+    # or lexically non-canonical paths. It also resolves /tmp to /private/tmp
+    # before the explicit namespace gate.
+    real_wt="$(dj_phantom_worktree_absent_path "$wt_path" 2>/dev/null)" || continue
+    if ! dj_phantom_worktree_reapable "$registered_root" "$real_wt"; then
+      continue
+    fi
+    if in_use_reason="$(dj_worktree_in_use "$real_wt" "$LSOF_SNAPSHOT_TMP")"; then
+      plan_row worktrees candidate worktree-phantom "$real_wt" 0 "$common" \
+        "candidate (phantom registration in use) — $in_use_reason current-root=$registered_root" \
+        "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+    elif [ "$SAFE_ONLY" -eq 1 ]; then
+      # The unattended schedule remains merged-clean worktrees only; a phantom
+      # registration requires the normal interactive --apply confirmation.
+      plan_row worktrees candidate worktree-phantom "$real_wt" 0 "$common" \
+        "candidate (safe-only: phantom registration requires manual apply) — current-root=$registered_root" \
+        "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+    else
+      plan_row worktrees delete worktree-phantom "$real_wt" 0 "$common" \
+        "phantom registration (absent + prunable + ephemeral) — current-root=$registered_root" \
+        "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+    fi
+  done <<EOF
+$worktree_rows
+EOF
 }
+
 
 # ---------------------------------------------------------------------------
 # Scope C: package stores (best-effort, host-global; report once, not per-proj).
@@ -861,12 +941,87 @@ scan_stores() {
 $plan
 EOF
 }
+# ---------------------------------------------------------------------------
+# Scope D: release execution staging (host-global; scan exactly once).
+# ---------------------------------------------------------------------------
+RELEASE_STAGING_SCAN_REASON=""
+RELEASE_STAGING_DELETE_COUNT=0
+RELEASE_STAGING_DELETE_BYTES=0
+RELEASE_STAGING_ALL_BYTES=0
+RELEASE_STAGING_RECLAIMED_BYTES=0
+
+scan_release_staging() {
+  local releases="$TRELLIS_HOME/releases"
+  local rows base version snapshot_bytes mtime snapshot_dev snapshot_inode
+  local path sidecar sidecar_bytes bytes stale_rc owner_rc owner_detail rc
+
+  RELEASE_STAGING_SCAN_REASON=""
+  if [ ! -d "$releases" ] || [ -L "$releases" ]; then
+    RELEASE_STAGING_SCAN_REASON="releases directory unavailable or symlinked"
+    return 0
+  fi
+  if rows="$(dj_find_release_staging "$releases")"; then :; else
+    rc=$?
+    RELEASE_STAGING_SCAN_REASON="release staging scan failed (exit $rc)"
+    EXIT_STATUS=1
+    return 0
+  fi
+  [ -n "$rows" ] || return 0
+
+  while IFS="$(printf '\t')" read -r base version snapshot_bytes mtime snapshot_dev snapshot_inode; do
+    [ -n "${base:-}" ] || continue
+    path="$releases/$base"
+    sidecar="${path}.owner.json"
+    sidecar_bytes="$(dj_release_staging_sidecar_bytes "$sidecar")"
+    case "$snapshot_bytes" in ''|*[!0-9]*) snapshot_bytes=0 ;; esac
+    case "$sidecar_bytes" in ''|*[!0-9]*) sidecar_bytes=0 ;; esac
+    bytes=$((snapshot_bytes + sidecar_bytes))
+
+    if dj_cache_is_stale "$mtime" "$RELEASE_STAGING_TTL_DAYS" "$NOW_EPOCH"; then
+      stale_rc=0
+    else
+      stale_rc=$?
+    fi
+    if [ "$stale_rc" -ne 0 ]; then
+      plan_row releases skip release-staging "$path" "$bytes" "$version" \
+        "fresh staging — younger than ${RELEASE_STAGING_TTL_DAYS}d; left intact" \
+        "$snapshot_dev" "$snapshot_inode"
+      continue
+    fi
+
+    if owner_detail="$(dj_release_staging_owner_state "$path")"; then
+      owner_rc=0
+    else
+      owner_rc=$?
+    fi
+    case "$owner_rc" in
+      0)
+        plan_row releases candidate release-staging "$path" "$bytes" "$version" \
+          "candidate (owner process is live) — $owner_detail" \
+          "$snapshot_dev" "$snapshot_inode"
+        ;;
+      1)
+        plan_row releases delete release-staging "$path" "$bytes" "$version" \
+          "orphaned aged staging — $owner_detail" \
+          "$snapshot_dev" "$snapshot_inode"
+        ;;
+      *)
+        plan_row releases candidate release-staging "$path" "$bytes" "$version" \
+          "candidate (owner record malformed or unreadable) — $owner_detail" \
+          "$snapshot_dev" "$snapshot_inode"
+        ;;
+    esac
+  done <<EOF
+$rows
+EOF
+}
 
 # ---------------------------------------------------------------------------
-# Scope D: Docker (host-global; scan exactly once, never inside scan_project).
+# Scope E: Docker (host-global; scan exactly once, never inside scan_project).
 # The liveness probe is deliberately only `docker info`: no `open`, Desktop
 # helper, or other command that could start Docker Desktop is ever invoked.
 # ---------------------------------------------------------------------------
+
 DOCKER_LIVE=0
 DOCKER_SCAN_OK=0
 DOCKER_SKIP_REASON=""
@@ -1090,6 +1245,9 @@ if [ "$TARGET_COUNT" -gt 0 ]; then
     fi
   done <"$TARGETS_TMP"
 fi
+if scope_enabled releases; then
+  scan_release_staging
+fi
 
 STORES_PLAN=""
 if scope_enabled stores; then
@@ -1116,9 +1274,15 @@ sum_bytes() {
 CACHE_DELETE_BYTES="$(sum_bytes caches delete)"
 CACHE_ALL_BYTES="$(sum_bytes caches '*')"
 WT_DELETE_BYTES="$(sum_bytes worktrees delete)"
-WT_REAPED_BYTES=0
 WT_CANDIDATE_BYTES="$(sum_bytes worktrees candidate)"
-TOTAL_RECLAIM_BYTES=$((CACHE_DELETE_BYTES + WT_DELETE_BYTES))
+RELEASE_STAGING_DELETE_BYTES="$(sum_bytes releases delete)"
+RELEASE_STAGING_ALL_BYTES="$(sum_bytes releases '*')"
+RELEASE_STAGING_DELETE_COUNT="$(awk -F'\t' '$1=="releases" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")"
+# A phantom registration occupies Git metadata, not a directory, so it has
+# 0 B. Apply must key on planned rows as well as reclaimable bytes.
+WT_DELETE_COUNT="$(awk -F'\t' '$1=="worktrees" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")"
+WT_REAPED_BYTES=0
+TOTAL_RECLAIM_BYTES=$((CACHE_DELETE_BYTES + WT_DELETE_BYTES + RELEASE_STAGING_DELETE_BYTES))
 
 # Largest single cache (for the ceiling tripwire).
 LARGEST_CACHE_BYTES="$(awk -F'\t' '$1=="caches" && $5>m { m=$5 } END { printf "%.0f", m+0 }' "$PLAN_TMP")"
@@ -1162,8 +1326,8 @@ render_report() {
   echo "date:          $(date +%F)"
   echo "fleet:         $TRELLIS_FLEET_NAME"
   echo "worktrees:     $TARGET_COUNT strict local-registry identity/identities"
+  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS release_staging_ttl_days=$RELEASE_STAGING_TTL_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
   echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
-  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
   echo
 
   # --- recurrence pre-pass ---
@@ -1241,10 +1405,25 @@ INNER
       [ "$scope" = "worktrees" ] || continue
       printf '  [%s] %s (%s) — %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done <"$PLAN_TMP"
-    printf '  reclaimable (not-in-use + content-clean + recoverable): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
+    printf '  reclaimable (recoverable content-clean trees + absent ephemeral phantom registrations): %s\n' "$(dj_human_bytes "$WT_DELETE_BYTES")"
     printf '  candidates (manual review, NOT reaped): %s\n' "$(dj_human_bytes "$WT_CANDIDATE_BYTES")"
     echo
   fi
+  # --- release staging --- (host-global, exact orphan cleanup only)
+  if scope_enabled releases; then
+    echo "== Release staging (host-global) =="
+    if [ -n "$RELEASE_STAGING_SCAN_REASON" ]; then
+      echo "  release staging: skipped ($RELEASE_STAGING_SCAN_REASON)"
+    fi
+    while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id common owner_root; do
+      [ "$scope" = "releases" ] || continue
+      printf '  [%s] %s (%s) — %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$detail"
+    done <"$PLAN_TMP"
+    printf '  planned release-staging bytes (aged orphaned): %s\n' "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+    printf '  release-staging footprint scanned: %s\n' "$(dj_human_bytes "$RELEASE_STAGING_ALL_BYTES")"
+    echo
+  fi
+
 
   # --- stores --- (report-only: STORES_PLAN is a best-effort byte estimate)
   if scope_enabled stores; then
@@ -1296,7 +1475,7 @@ INNER
   fi
 
   echo "== Total =="
-  printf '  host-project reclaimable now (caches + reaped worktrees): %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
+  printf '  host-project reclaimable now (caches + reaped worktrees + release staging): %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
   if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
     printf '  Docker VM (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable\n' \
       "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
@@ -1344,7 +1523,7 @@ if [ "$MODE" = "dry-run" ]; then
     echo
   fi
   if scope_enabled worktrees; then
-    echo "== Worktrees to reap (is_main==0 AND not-in-use AND content-clean AND recoverable) =="
+    echo "== Worktrees to reap (recoverable content-clean trees OR exact absent/prunable ephemeral registrations) =="
     awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id worktree_id common owner_root; do
       printf '  git worktree remove  %s  (%s) — gates: %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done
@@ -1355,6 +1534,22 @@ if [ "$MODE" = "dry-run" ]; then
     done
     echo
   fi
+  if scope_enabled releases; then
+    echo "== Release staging to delete (aged orphaned snapshots; host-global) =="
+    if [ -n "$RELEASE_STAGING_SCAN_REASON" ]; then
+      echo "  release staging: skipped ($RELEASE_STAGING_SCAN_REASON)"
+    fi
+    awk -F'\t' '$1=="releases" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id common owner_root; do
+      printf '  descriptor-relative remove  %s  (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
+    done
+    printf '  -> %s planned release-staging bytes\n' "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+    echo "  skipped (fresh, live-owner, or malformed-owner staging) — never deleted:"
+    awk -F'\t' '$1=="releases" && $2!="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id common owner_root; do
+      printf '    %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
+    done
+    echo
+  fi
+
   if scope_enabled docker; then
     echo "== Docker prune plan (host-global) =="
     if [ "$DOCKER_LIVE" -ne 1 ]; then
@@ -1383,6 +1578,9 @@ if [ "$MODE" = "dry-run" ]; then
   fi
   echo "== Planned totals =="
   printf '  host-project plan: %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
+  if scope_enabled releases; then
+    printf '  release-staging plan (aged orphaned snapshots): %s\n' "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+  fi
   if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
     printf '  Docker VM plan (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable, retaining %sGB\n' \
       "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
@@ -1427,6 +1625,50 @@ revalidate_cache_for_apply() {
   fi
   return 0
 }
+revalidate_release_staging_for_apply() {
+  local path="$1" version="$2" expected_device="$3" expected_inode="$4"
+  local releases="$TRELLIS_HOME/releases" identity actual_device actual_inode
+  local mtime owner_detail owner_rc
+  DJ_REVALIDATE_REASON=""
+  if ! dj_release_staging_path_is_safe "$releases" "$path" "$version"; then
+    DJ_REVALIDATE_REASON="release snapshot is no longer an exact canonical direct child"
+    return 1
+  fi
+  identity="$(dj_stat_device_inode "$path" 2>/dev/null)" || {
+    DJ_REVALIDATE_REASON="release snapshot directory identity is unavailable"
+    return 1
+  }
+  actual_device="${identity%%:*}"
+  actual_inode="${identity#*:}"
+  if [ "$actual_device" != "$expected_device" ] || [ "$actual_inode" != "$expected_inode" ]; then
+    DJ_REVALIDATE_REASON="release snapshot directory identity changed"
+    return 1
+  fi
+  mtime="$(dj_mtime "$path")"
+  if ! dj_cache_is_stale "$mtime" "$RELEASE_STAGING_TTL_DAYS" "$(date +%s)"; then
+    DJ_REVALIDATE_REASON="release snapshot is no longer aged"
+    return 1
+  fi
+  if owner_detail="$(dj_release_staging_owner_state "$path")"; then
+    owner_rc=0
+  else
+    owner_rc=$?
+  fi
+  case "$owner_rc" in
+    0)
+      DJ_REVALIDATE_REASON="owner process is live ($owner_detail)"
+      return 1
+      ;;
+    1)
+      return 0
+      ;;
+    *)
+      DJ_REVALIDATE_REASON="owner record malformed or unreadable ($owner_detail)"
+      return 1
+      ;;
+  esac
+}
+
 
 revalidate_worktree_for_apply() {
   local fleet="$1" project_id="$2" checkout_id="$3" worktree_id="$4"
@@ -1514,6 +1756,32 @@ EOF
   return 0
 }
 
+# A phantom's target is deliberately absent and therefore cannot carry a
+# registry row of its own. Its authorizing identity is the live current root
+# that exposed the exact Git registration. Recheck that owner, the narrow
+# absent/prunable/ephemeral predicate, and liveness after confirmation.
+revalidate_phantom_worktree_for_apply() {
+  local fleet="$1" project_id="$2" checkout_id="$3" worktree_id="$4"
+  local common="$5" current_root="$6" phantom_root="$7" in_use_reason
+  DJ_REVALIDATE_REASON=""
+
+  if ! dj_registered_owner_identity "$TRELLIS_HOME" "$fleet" "$project_id" \
+      "$checkout_id" "$worktree_id" "$common" "$current_root" >/dev/null; then
+    DJ_REVALIDATE_REASON="current registry ownership changed or is unavailable"
+    return 1
+  fi
+  if ! dj_phantom_worktree_reapable "$current_root" "$phantom_root"; then
+    DJ_REVALIDATE_REASON="phantom registration is no longer absent, prunable, and ephemeral"
+    return 1
+  fi
+  if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
+  if in_use_reason="$(dj_worktree_in_use "$phantom_root" "$LSOF_SNAPSHOT_TMP")"; then
+    DJ_REVALIDATE_REASON="phantom worktree is in use ($in_use_reason)"
+    return 1
+  fi
+  return 0
+}
+
 # confirm_category <human-label> — return 0 to proceed, 1 to decline. With
 # --yes always proceeds. Reads ONE y/N line; EOF or non-y declines (the
 # destructive default is N). Guards the read under set -e and set -u.
@@ -1564,32 +1832,99 @@ fi
 
 # --- worktrees --- (only verdict==delete; candidate/unverified is excluded)
 if scope_enabled worktrees; then
-  echo "== Worktrees to reap (not-in-use + content-clean + recoverable), $(dj_human_bytes "$WT_DELETE_BYTES") =="
+  echo "== Worktrees to reap (recoverable content-clean worktrees + exact phantom registrations), $(dj_human_bytes "$WT_DELETE_BYTES") =="
   awk -F'\t' '$1=="worktrees" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id worktree_id common owner_root; do
     printf '  %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
   done
-  if [ "$WT_DELETE_BYTES" -gt 0 ] && confirm_category "these recoverable + content-clean worktrees"; then
+  if [ "$WT_DELETE_COUNT" -gt 0 ] && confirm_category "these recoverable + content-clean worktrees and phantom registrations"; then
     # shellcheck disable=SC2034  # This is the one loop that never expands $repo; the name
     # still has to be read to consume the TSV column positionally.
     while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id worktree_id common owner_root; do
       [ "$scope" = "worktrees" ] && [ "$verdict" = "delete" ] || continue
-      if ! revalidate_worktree_for_apply "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
-          "$common" "$owner_root"; then
+      case "$kind" in
+        worktree-phantom)
+          if ! revalidate_phantom_worktree_for_apply "$fleet" "$project_id" "$checkout_id" \
+              "$worktree_id" "$common" "$owner_root" "$path"; then
+            echo "  skipped (plan changed): $path — $DJ_REVALIDATE_REASON"
+          elif dj_reap_phantom_worktree "$TRELLIS_HOME" "$fleet" "$project_id" "$checkout_id" \
+              "$worktree_id" "$common" "$owner_root" "$path" "$LSOF_SNAPSHOT_TMP"; then
+            echo "  reaped: $path"
+            WT_REAPED_BYTES=$((WT_REAPED_BYTES + bytes))
+          else
+            echo "  REFUSED/failed: $path (registry guard rejected or Git error)" >&2
+            EXIT_STATUS=1
+          fi
+          ;;
+        worktree)
+          if ! revalidate_worktree_for_apply "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
+              "$common" "$owner_root"; then
+            echo "  skipped (plan changed): $path — $DJ_REVALIDATE_REASON"
+          elif dj_reap_worktree "$TRELLIS_HOME" "$fleet" "$project_id" "$checkout_id" \
+              "$worktree_id" "$common" "$owner_root"; then
+            echo "  reaped: $path"
+            WT_REAPED_BYTES=$((WT_REAPED_BYTES + bytes))
+          else
+            echo "  REFUSED/failed: $path (registry guard rejected or Git error)" >&2
+            EXIT_STATUS=1
+          fi
+          ;;
+        *)
+          echo "  REFUSED/failed: $path (unexpected worktree plan kind: $kind)" >&2
+          EXIT_STATUS=1
+          ;;
+      esac
+    done <"$PLAN_TMP"
+  fi
+  echo
+fi
+# --- release staging --- host-global; only aged orphaned snapshots are deleted.
+if scope_enabled releases; then
+  echo "== Release staging to delete (aged orphaned snapshots), $(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES") =="
+  awk -F'\t' '$1=="releases" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail release_device release_inode checkout_id worktree_id common owner_root; do
+    printf '  %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
+  done
+  if [ "$RELEASE_STAGING_DELETE_COUNT" -gt 0 ] && confirm_category "these orphaned release staging snapshots"; then
+    while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail release_device release_inode checkout_id worktree_id common owner_root; do
+      [ "$scope" = "releases" ] && [ "$verdict" = "delete" ] || continue
+      case "$release_device" in
+        ''|*[!0-9]*)
+          echo "  REFUSED/failed: $path (plan carried malformed directory device)" >&2
+          EXIT_STATUS=1
+          continue
+          ;;
+      esac
+      case "$release_inode" in
+        ''|*[!0-9]*)
+          echo "  REFUSED/failed: $path (plan carried malformed directory inode)" >&2
+          EXIT_STATUS=1
+          continue
+          ;;
+      esac
+      if ! revalidate_release_staging_for_apply "$path" "$repo" "$release_device" "$release_inode"; then
         echo "  skipped (plan changed): $path — $DJ_REVALIDATE_REASON"
         continue
       fi
-      if dj_reap_worktree "$TRELLIS_HOME" "$fleet" "$project_id" "$checkout_id" \
-          "$worktree_id" "$common" "$owner_root"; then
-        echo "  reaped: $path"
-        WT_REAPED_BYTES=$((WT_REAPED_BYTES + bytes))
+      if removed_bytes="$(dj_remove_release_staging_safely "$TRELLIS_HOME/releases" \
+          "$path" "$repo" "$RELEASE_STAGING_TTL_DAYS" "$release_device" "$release_inode")"; then
+        case "$removed_bytes" in
+          ''|*[!0-9]*)
+            echo "  REFUSED/failed: $path (cleanup returned malformed reclaimed bytes)" >&2
+            EXIT_STATUS=1
+            ;;
+          *)
+            RELEASE_STAGING_RECLAIMED_BYTES=$((RELEASE_STAGING_RECLAIMED_BYTES + removed_bytes))
+            echo "  removed: $path (actual $(dj_human_bytes "$removed_bytes"))"
+            ;;
+        esac
       else
-        echo "  REFUSED/failed: $path (registry guard rejected or Git error)" >&2
+        echo "  REFUSED/failed: $path (descriptor-relative release cleanup refused)" >&2
         EXIT_STATUS=1
       fi
     done <"$PLAN_TMP"
   fi
   echo
 fi
+
 
 # --- stores --- report-only even under --apply (no store-prune in this release).
 if scope_enabled stores; then
@@ -1696,6 +2031,11 @@ if scope_enabled caches; then
 fi
 if scope_enabled worktrees; then
   printf '  worktrees: %s reaped\n' "$(dj_human_bytes "$WT_REAPED_BYTES")"
+fi
+if scope_enabled releases; then
+  printf '  release staging: actual reclaimed %s (planned %s)\n' \
+    "$(dj_human_bytes "$RELEASE_STAGING_RECLAIMED_BYTES")" \
+    "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
 fi
 if scope_enabled docker; then
   if [ "$DOCKER_SCAN_OK" -eq 1 ]; then

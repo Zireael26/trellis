@@ -28,6 +28,9 @@
 #     rung 3: deterministic regex fallback (ALWAYS available) — committed-secret
 #             criticals + left-in-debugger important. Conservative by design:
 #             false criticals cause false hard-blocks downstream.
+#     OMP callers: rung 2 is Claude/Codex-only and MUST NOT be reached from an
+#     OMP stop (hooks.md). OMP-invoked paths go through lib/omp-reviewer.sh —
+#     code-review-subagent.sh switches on TRELLIS_OMP=1 for exactly this.
 #
 #   env vars:
 #     CODE_REVIEWER_CMD          — operator override (rung 1). PATH name or path.

@@ -1,0 +1,41 @@
+{
+  "reports": [
+    {
+      "provider": "openai-codex",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    },
+    {
+      "provider": "xai-oauth",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    },
+    {
+      "provider": "opencode-go",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    },
+    {
+      "provider": "nous-portal",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    },
+    {
+      "provider": "meta",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    },
+    {
+      "provider": "google-antigravity",
+      "limits": [
+        {"id": "shared", "amount": {"remainingFraction": 0.9}}
+      ]
+    }
+  ],
+  "disabledCredentials": []
+}

@@ -406,26 +406,23 @@ dj_cache_is_stale() {
 # return 1 (no active build).
 #
 # Test injection: if $DJ_BUILD_ACTIVE_OVERRIDE is set, "1"→active (return 0),
-# "0"→inactive (return 1). This override is the ONLY way the running-build
-# guard is testable — required. Any other value is treated as unset.
+# "0"→inactive (return 1). Any other value is treated as unset.
 #
-# Real check: pgrep -fl for a dev/build process whose command line mentions the
-# absolute project path AND one of the known bundlers. We require the project
-# path to appear so a build in an UNRELATED project never blocks this one.
+# The real check delegates to the shared process-table helper. That helper
+# anchors identity on the executing binary and uses argv only as secondary
+# project/tool context, so prompt text cannot manufacture a live build. A
+# missing helper or failed/malformed process snapshot is unsafe to interpret as
+# idle and therefore fails closed as active.
 dj_build_active() {
   local proj="$1"
   case "${DJ_BUILD_ACTIVE_OVERRIDE:-}" in
     1) return 0 ;;
     0) return 1 ;;
   esac
-  command -v pgrep >/dev/null 2>&1 || return 1
-  local procs
-  procs="$(pgrep -fl . 2>/dev/null || true)"
-  [ -n "$procs" ] || return 1
-  # Lines mentioning this project that also name a known bundler in dev|build.
-  printf '%s\n' "$procs" \
-    | grep -F -- "$proj" 2>/dev/null \
-    | grep -Eq '(next|vite|turbo|webpack|tsc)[^[:space:]]*[[:space:]].*(dev|build)|(dev|build).*(next|vite|turbo|webpack|tsc)'
+  if "$_DISK_JANITOR_LIB_DIR/../check-process-liveness.sh" --build "$proj" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
 }
 
 # ===========================================================================
@@ -657,9 +654,10 @@ dj_capture_lsof_snapshot() {
 #   fcwd            + n/path       (a process cwd)
 #   f12             + n/path/file  (an open file descriptor)
 # Matching the canonical worktree path exactly or as a slash-delimited prefix
-# catches a cwd anywhere inside the tree and any open handle below it, without a
-# recursive filesystem traversal. Fixed-string grep keeps ~35 checks cheap even
-# when the snapshot contains many thousands of open-file records.
+# catches a cwd anywhere inside the tree and any open handle below it. Linux may
+# append ` (deleted)` after a directory has been unlinked, which remains a live
+# handle and must close the gate too. Fixed-string grep keeps ~35 checks cheap
+# even when the snapshot contains many thousands of open-file records.
 dj_worktree_in_use() {
   local wt="$1" snapshot="$2" real_wt header reason grep_rc matches line open_path
   real_wt="$(dj__abspath "$wt")"
@@ -700,7 +698,7 @@ dj_worktree_in_use() {
         *) continue ;;
       esac
       case "$open_path" in
-        "$real_wt"|"$real_wt"/*)
+        "$real_wt"|"${real_wt} (deleted)"|"$real_wt"/*|"$real_wt"/*' (deleted)')
           printf 'live process cwd or open file handle under worktree'
           return 0
           ;;
@@ -717,6 +715,83 @@ EOF
   fi
   printf 'lsof snapshot search failed (exit %s)' "$grep_rc"
   return 0
+}
+
+# dj_phantom_worktree_absent_path <path>
+#
+# Canonicalize an ABSENT absolute path without trusting the lexical spelling.
+# Unlike dj__abspath, this walks to the nearest accessible existing ancestor,
+# so /tmp aliases, intermediate symlinks, and `..` components cannot make an
+# outside path look ephemeral. An existing path (including a broken symlink),
+# an inaccessible ancestor, or control characters are all refusals.
+#
+# Prints the canonical path only when the final leaf is conclusively absent.
+dj_phantom_worktree_absent_path() {
+  local path="${1:-}" probe="" parent="" base="" suffix="" resolved=""
+
+  [ "$#" -eq 1 ] || return 1
+  case "$path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$path" in
+    *$'\n'*|*$'\t'*) return 1 ;;
+  esac
+  [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+
+  probe="$path"
+  while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+    parent="$(dirname "$probe")"
+    [ "$parent" != "$probe" ] || return 1
+    base="$(basename "$probe")"
+    suffix="/$base$suffix"
+    probe="$parent"
+  done
+  # Requiring search permission on the first existing ancestor distinguishes an
+  # inaccessible path from a missing one. A failed probe must never authorize a
+  # Git metadata mutation.
+  [ -d "$probe" ] && [ -x "$probe" ] || return 1
+  resolved="$(CDPATH='' cd "$probe" 2>/dev/null && pwd -P)" || return 1
+  printf '%s%s\n' "$resolved" "$suffix"
+}
+
+# dj_phantom_worktree_reapable <current_registered_root> <phantom_root>
+#
+# Return 0 only for one exact, absent, non-main, Git-prunable registration below
+# the intentionally narrow ephemeral namespaces /sessions and /tmp. CURRENT is
+# the registered live worktree from which Git metadata is read; its strict local
+# registry identity is checked by the caller immediately before mutation.
+#
+# This intentionally says nothing about arbitrary missing worktree metadata:
+# `git worktree prune` would sweep those broadly. The caller may remove only the
+# one exact registration that this predicate re-observes.
+dj_phantom_worktree_reapable() {
+  local current="${1:-}" phantom="${2:-}" canonical="" worktree_rows=""
+  local wt_path head_sha branch is_main prunable candidate matches=0 eligible=0
+
+  [ "$#" -eq 2 ] || return 1
+  canonical="$(dj_phantom_worktree_absent_path "$phantom")" || return 1
+  [ "$canonical" = "$phantom" ] || return 1
+  case "$phantom" in
+    /sessions/*|/tmp/*|/private/tmp/*) ;;
+    *) return 1 ;;
+  esac
+  if worktree_rows="$(dj_list_worktrees "$current")"; then :; else
+    return 1
+  fi
+  while IFS="$(printf '\t')" read -r wt_path head_sha branch is_main prunable; do
+    [ -n "$wt_path" ] || continue
+    : "${head_sha:-}" "${branch:-}"
+    candidate="$(dj_phantom_worktree_absent_path "$wt_path" 2>/dev/null)" || continue
+    [ "$candidate" = "$phantom" ] || continue
+    matches=$((matches + 1))
+    if [ "$is_main" != "1" ] && [ "$prunable" = "1" ]; then
+      eligible=$((eligible + 1))
+    fi
+  done <<EOF
+$worktree_rows
+EOF
+  [ "$matches" -eq 1 ] && [ "$eligible" -eq 1 ]
 }
 
 # dj_branch_merged <repo_path> <branch>
@@ -837,6 +912,721 @@ dj_pkg_store_plan() {
   fi
 
   echo "$total"
+}
+
+# ===========================================================================
+# scope D: release execution staging (host-global)
+# ===========================================================================
+
+# dj_release_staging_name_parts <basename>
+#
+# Print VERSION<TAB>SUFFIX for one exact execution-snapshot basename. The
+# separator is taken from the final `.exec.` delimiter, then VERSION is
+# validated as a release SemVer. This is deliberately not a prefix/greedy
+# suffix test: a version containing an earlier `.exec.` token remains intact,
+# while a foreign-version snapshot cannot be accepted under a shorter prefix.
+dj_release_staging_name_parts() {
+  local name="${1:-}" rest suffix version marker
+  [ "$#" -eq 1 ] || return 1
+  case "$name" in
+    .tmp.*.exec.*) ;;
+    *) return 1 ;;
+  esac
+  case "$name" in
+    *$'\n'*|*$'\t'*|*$'\r'*) return 1 ;;
+  esac
+  rest="${name#.tmp.}"
+  [ "$rest" != "$name" ] || return 1
+  suffix="${rest##*.exec.}"
+  [ "$suffix" != "$rest" ] || return 1
+  case "$suffix" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  marker=".exec.$suffix"
+  version="${rest%"$marker"}"
+  [ "$version" != "$rest" ] || return 1
+  trellis_home_is_valid_semver "$version" || return 1
+  printf '%s\t%s\n' "$version" "$suffix"
+}
+
+# dj_release_staging_path_is_safe <releases_dir> <snapshot_path> <version>
+#
+# The scanner and sink both use this lexical/canonical gate. It admits one
+# real direct child only; no glob, parent traversal, or symlinked directory is
+# ever treated as a release snapshot.
+dj_release_staging_path_is_safe() {
+  local releases="${1:-}" snapshot="${2:-}" version="${3:-}"
+  local releases_real snapshot_real parent base parsed parsed_version
+  [ "$#" -eq 3 ] || return 1
+  [ -d "$releases" ] && [ ! -L "$releases" ] || return 1
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+  releases_real="$(dj__abspath "$releases")" || return 1
+  snapshot_real="$(dj__abspath "$snapshot")" || return 1
+  [ "$releases_real" = "$releases" ] || return 1
+  [ "$snapshot_real" = "$snapshot" ] || return 1
+  parent="${snapshot%/*}"
+  base="${snapshot##*/}"
+  [ "$parent" = "$releases" ] || return 1
+  parsed="$(dj_release_staging_name_parts "$base")" || return 1
+  IFS="$(printf '\t')" read -r parsed_version _ <<EOF
+$parsed
+EOF
+  [ "$parsed_version" = "$version" ]
+}
+
+# dj_find_release_staging <releases_dir>
+#
+# Emit one row per real, direct-child execution snapshot:
+#   <basename>\t<version>\t<allocated_bytes>\t<mtime_epoch>\t<device>\t<inode>
+#
+# The descriptor-relative walker opens the releases directory and each
+# candidate with O_NOFOLLOW, snapshots identities after opening, and never
+# descends through a symlink. A nested symlink is counted as a leaf (and is
+# therefore safe for the matching descriptor-relative remover to unlink).
+dj_find_release_staging() {
+  local releases="${1:-}"
+  [ "$#" -eq 1 ] || return 1
+  [ -d "$releases" ] && [ ! -L "$releases" ] || return 0
+  [ "$(dj__abspath "$releases")" = "$releases" ] || return 1
+  command -v python3 >/dev/null 2>&1 || {
+    echo "dj_find_release_staging: python3 with descriptor-relative filesystem APIs is required" >&2
+    return 1
+  }
+  python3 - "$releases" <<'PY'
+import os
+import re
+import stat
+import sys
+
+releases = sys.argv[1]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+if not O_DIRECTORY or not O_NOFOLLOW:
+    raise SystemExit("dj_find_release_staging: descriptor no-follow support is unavailable")
+
+version_re = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+"
+    r"(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
+)
+suffix_re = re.compile(r"^[A-Za-z0-9]+$")
+
+
+def allocated_bytes(value):
+    return int(getattr(value, "st_blocks", 0)) * 512
+
+
+def snapshot_parts(name):
+    if not name.startswith(".tmp.") or ".exec." not in name:
+        return None
+    rest = name[len(".tmp."):]
+    separator = rest.rfind(".exec.")
+    if separator <= 0:
+        return None
+    version = rest[:separator]
+    suffix = rest[separator + len(".exec."):]
+    if not suffix_re.fullmatch(suffix) or not version_re.fullmatch(version):
+        return None
+    return version, suffix
+
+
+def lstat_at(parent_fd, name):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def measure_tree(directory_fd, root_device):
+    own = os.fstat(directory_fd)
+    if own.st_dev != root_device:
+        return None
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError:
+        return None
+    total = allocated_bytes(own)
+    for name in names:
+        if name in (".", "..") or "/" in name:
+            return None
+        before = lstat_at(directory_fd, name)
+        if before is None:
+            return None
+        if stat.S_ISDIR(before.st_mode):
+            if before.st_dev != root_device:
+                return None
+            try:
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except OSError:
+                return None
+            try:
+                opened = os.fstat(child_fd)
+                if (
+                    opened.st_dev != before.st_dev
+                    or opened.st_ino != before.st_ino
+                ):
+                    return None
+                nested = measure_tree(child_fd, root_device)
+            finally:
+                os.close(child_fd)
+            current = lstat_at(directory_fd, name)
+            if (
+                nested is None
+                or current is None
+                or current.st_dev != before.st_dev
+                or current.st_ino != before.st_ino
+            ):
+                return None
+            total += nested
+        else:
+            current = lstat_at(directory_fd, name)
+            if (
+                current is None
+                or current.st_dev != before.st_dev
+                or current.st_ino != before.st_ino
+            ):
+                return None
+            total += allocated_bytes(before)
+    return total
+
+
+try:
+    releases_fd = os.open(releases, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+except OSError as error:
+    raise SystemExit("dj_find_release_staging: releases directory cannot be opened safely: %s" % error)
+
+try:
+    releases_stat = os.fstat(releases_fd)
+    if not stat.S_ISDIR(releases_stat.st_mode):
+        raise SystemExit("dj_find_release_staging: releases path is not a directory")
+    for name in sorted(os.listdir(releases_fd)):
+        parts = snapshot_parts(name)
+        if parts is None:
+            continue
+        before = lstat_at(releases_fd, name)
+        if before is None or not stat.S_ISDIR(before.st_mode):
+            continue
+        try:
+            snapshot_fd = os.open(
+                name,
+                os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+                dir_fd=releases_fd,
+            )
+        except OSError:
+            continue
+        try:
+            opened = os.fstat(snapshot_fd)
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or opened.st_dev != releases_stat.st_dev
+            ):
+                continue
+            size = measure_tree(snapshot_fd, releases_stat.st_dev)
+            current = lstat_at(releases_fd, name)
+            if (
+                size is None
+                or current is None
+                or current.st_dev != opened.st_dev
+                or current.st_ino != opened.st_ino
+            ):
+                continue
+            print(
+                "%s\t%s\t%d\t%d\t%d\t%d"
+                % (
+                    name,
+                    parts[0],
+                    size,
+                    int(opened.st_mtime),
+                    int(opened.st_dev),
+                    int(opened.st_ino),
+                )
+            )
+        finally:
+            os.close(snapshot_fd)
+finally:
+    os.close(releases_fd)
+PY
+}
+
+# dj_release_staging_sidecar_bytes <owner_json>
+# Allocated bytes for one exact regular, non-symlink owner sidecar.
+dj_release_staging_sidecar_bytes() {
+  local path="${1:-}" kb
+  [ -f "$path" ] && [ ! -L "$path" ] || { echo 0; return 0; }
+  kb="$(du -k "$path" 2>/dev/null | awk '{print $1}')" || kb=""
+  case "$kb" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$((kb * 1024))" ;;
+  esac
+}
+
+# dj_release_staging_owner_state <snapshot_path>
+#
+# Status is conveyed by the return class:
+#   0 live owner (hard skip)
+#   1 orphaned owner (missing, dead, or birth mismatch; deletion may proceed)
+#   2 malformed/unreadable/indeterminate owner (fail closed)
+#
+# A valid owner record is intentionally checked with only kill(2), through
+# Python so ESRCH is distinguishable from EPERM, and
+# `LC_ALL=C ps -p PID -o lstart=`. We never inspect argv or any command-line
+# text, so PID reuse is rejected by the birth token rather than guessed from a
+# process name.
+dj_release_staging_owner_state() {
+  local snapshot="${1:-}" owner owner_json pid recorded_birth current_birth process_state python_bin
+  [ "$#" -eq 1 ] || { printf 'owner record malformed or unreadable'; return 2; }
+  owner="${snapshot}.owner.json"
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
+    printf 'missing owner record (legacy snapshot)'
+    return 1
+  fi
+  [ -f "$owner" ] && [ ! -L "$owner" ] && [ -r "$owner" ] || {
+    printf 'owner record malformed or unreadable'
+    return 2
+  }
+  command -v jq >/dev/null 2>&1 || {
+    printf 'owner record malformed or unreadable (jq unavailable)'
+    return 2
+  }
+  owner_json="$(<"$owner")" || {
+    printf 'owner record malformed or unreadable'
+    return 2
+  }
+  if ! jq -e '
+    type == "object"
+    and (keys | sort) == ["pid","process_birth","schema_version"]
+    and (.schema_version | type == "number" and floor == . and . == 1)
+    and (.pid | type == "number" and floor == . and . > 0)
+    and (.process_birth | type == "string" and length > 0)
+  ' <<<"$owner_json" >/dev/null 2>&1; then
+    printf 'owner record malformed or unreadable'
+    return 2
+  fi
+  pid="$(jq -r '.pid | tostring' <<<"$owner_json" 2>/dev/null)" || {
+    printf 'owner record malformed or unreadable'
+    return 2
+  }
+  recorded_birth="$(jq -r '.process_birth' <<<"$owner_json" 2>/dev/null)" || {
+    printf 'owner record malformed or unreadable'
+    return 2
+  }
+  # ps formatting pads lstart on some BSD/GNU combinations; normalize only
+  # outer whitespace so producers and the descriptor-relative sink compare the
+  # same process-birth token without touching argv or internal date spacing.
+  recorded_birth="$(printf '%s\n' "$recorded_birth" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$recorded_birth" ] || {
+    printf 'owner record malformed or unreadable'
+    return 2
+  }
+  command -v ps >/dev/null 2>&1 || {
+    printf 'owner liveness could not be determined (ps unavailable)'
+    return 2
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    printf 'owner liveness could not be determined (python3 unavailable)'
+    return 2
+  }
+  python_bin="$(command -v python3)" || {
+    printf 'owner liveness could not be determined (python3 unavailable)'
+    return 2
+  }
+  process_state="$("$python_bin" - "$pid" 2>/dev/null <<'PY'
+import os
+import sys
+
+pid = int(sys.argv[1])
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    print("dead")
+except (PermissionError, OSError):
+    print("indeterminate")
+else:
+    print("live")
+PY
+  )" || {
+    printf 'owner liveness could not be determined (pid %s)' "$pid"
+    return 2
+  }
+  case "$process_state" in
+    dead)
+      printf 'owner process is dead (pid %s)' "$pid"
+      return 1
+      ;;
+    live) ;;
+    *)
+      printf 'owner liveness could not be determined (pid %s)' "$pid"
+      return 2
+      ;;
+  esac
+  if ! current_birth="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"; then
+    printf 'owner liveness could not be determined (pid %s)' "$pid"
+    return 2
+  fi
+  current_birth="$(printf '%s\n' "$current_birth" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$current_birth" ] || {
+    printf 'owner liveness could not be determined (pid %s)' "$pid"
+    return 2
+  }
+  if [ "$current_birth" = "$recorded_birth" ]; then
+    printf 'owner process is live (pid %s)' "$pid"
+    return 0
+  fi
+  printf 'owner process birth mismatch (pid %s)' "$pid"
+  return 1
+}
+
+# dj_remove_release_staging_safely RELEASES_DIR SNAPSHOT VERSION TTL_DAYS
+#   EXPECTED_DEVICE EXPECTED_INODE
+#
+# Validate and remove one exact execution snapshot through descriptors rooted
+# at RELEASES_DIR. Every directory component is opened O_NOFOLLOW and pinned
+# to its lstat identity. The exact adjacent owner sidecar is validated again
+# (including process birth) and unlinked only after the snapshot itself has
+# passed the same checks. No pathname-recursive rm is used.
+dj_remove_release_staging_safely() {
+  local releases="${1:-}" snapshot="${2:-}" version="${3:-}"
+  local ttl_days="${4:-}" expected_device="${5:-}" expected_inode="${6:-}"
+  [ "$#" -eq 6 ] || return 1
+  case "$ttl_days" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expected_device" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expected_inode" in ''|*[!0-9]*) return 1 ;; esac
+  dj_release_staging_path_is_safe "$releases" "$snapshot" "$version" || return 1
+  command -v python3 >/dev/null 2>&1 || {
+    echo "dj_remove_release_staging_safely: python3 with descriptor-relative filesystem APIs is required" >&2
+    return 1
+  }
+  python3 - "$releases" "$snapshot" "$version" "$ttl_days" \
+    "$expected_device" "$expected_inode" <<'PY'
+import errno
+import json
+import math
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+
+releases, snapshot, version = sys.argv[1:4]
+ttl_days = int(sys.argv[4])
+expected_identity = (int(sys.argv[5]), int(sys.argv[6]))
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+if not O_DIRECTORY or not O_NOFOLLOW:
+    sys.stderr.write(
+        "dj_remove_release_staging_safely: descriptor no-follow support is unavailable\n"
+    )
+    raise SystemExit(1)
+
+version_re = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+"
+    r"(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
+)
+suffix_re = re.compile(r"^[A-Za-z0-9]+$")
+
+
+def fail(message):
+    sys.stderr.write("dj_remove_release_staging_safely: %s\n" % message)
+    raise RuntimeError(message)
+
+
+def identity(value):
+    return value.st_dev, value.st_ino
+
+
+def allocated_bytes(value):
+    return int(getattr(value, "st_blocks", 0)) * 512
+
+
+def lstat_at(parent_fd, name):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as error:
+        fail("descriptor-relative stat failed for %s: %s" % (name, error))
+
+
+def open_directory(parent_fd, name, expected=None):
+    before = lstat_at(parent_fd, name)
+    if not stat.S_ISDIR(before.st_mode):
+        fail("release snapshot path component is not a real directory: %s" % name)
+    if before.st_dev != root_device:
+        fail("release snapshot path crosses a filesystem boundary: %s" % name)
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError as error:
+        fail("release snapshot path cannot be opened without following links: %s (%s)" % (name, error))
+    opened = os.fstat(child_fd)
+    if identity(opened) != identity(before):
+        os.close(child_fd)
+        fail("release snapshot path component changed during validation: %s" % name)
+    if expected is not None and identity(opened) != expected:
+        os.close(child_fd)
+        fail("release snapshot directory identity changed")
+    return child_fd, before, opened
+
+
+def remove_contents(directory_fd):
+    try:
+        os.fchmod(directory_fd, 0o700)
+    except OSError as error:
+        fail("could not make release snapshot directory removable: %s" % error)
+    try:
+        names = os.listdir(directory_fd)
+    except OSError as error:
+        fail("could not enumerate release snapshot directory: %s" % error)
+    reclaimed = allocated_bytes(os.fstat(directory_fd))
+    for name in names:
+        if name in (".", "..") or "/" in name:
+            fail("unsafe release snapshot directory entry")
+        before = lstat_at(directory_fd, name)
+        if stat.S_ISDIR(before.st_mode):
+            child_fd, _, child_stat = open_directory(directory_fd, name)
+            try:
+                reclaimed += remove_contents(child_fd)
+                current = lstat_at(directory_fd, name)
+                if identity(current) != identity(child_stat):
+                    fail("release snapshot directory changed before removal: %s" % name)
+                try:
+                    os.rmdir(name, dir_fd=directory_fd)
+                except OSError as error:
+                    fail("could not remove release snapshot directory entry %s: %s" % (name, error))
+            finally:
+                os.close(child_fd)
+        else:
+            current = lstat_at(directory_fd, name)
+            if identity(current) != identity(before):
+                fail("release snapshot entry changed before removal: %s" % name)
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except OSError as error:
+                fail("could not remove release snapshot entry %s: %s" % (name, error))
+            reclaimed += allocated_bytes(before)
+    return reclaimed
+
+
+def whole_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    return value == int(value)
+
+
+def read_owner(root_fd, owner_name):
+    try:
+        before = os.stat(owner_name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError as error:
+        if getattr(error, "errno", None) == errno.ENOENT:
+            return "missing", None, 0
+        fail("owner sidecar could not be inspected: %s" % error)
+    if not stat.S_ISREG(before.st_mode):
+        fail("owner sidecar is not a regular non-symlink file")
+    try:
+        owner_fd = os.open(
+            owner_name,
+            os.O_RDONLY | O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+    except OSError as error:
+        fail("owner sidecar cannot be opened without following links: %s" % error)
+    try:
+        opened = os.fstat(owner_fd)
+        if identity(opened) != identity(before):
+            fail("owner sidecar changed while opening")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(owner_fd, 1024 * 1024)
+
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 1024 * 1024:
+                fail("owner sidecar is too large")
+            chunks.append(chunk)
+        after = os.stat(owner_name, dir_fd=root_fd, follow_symlinks=False)
+        if identity(after) != identity(before):
+            fail("owner sidecar changed while reading")
+    except OSError as error:
+        fail("owner sidecar could not be read: %s" % error)
+    finally:
+        os.close(owner_fd)
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        fail("owner sidecar JSON is malformed")
+    if (
+        not isinstance(payload, dict)
+        or set(payload.keys()) != {"schema_version", "pid", "process_birth"}
+        or not whole_number(payload.get("schema_version"))
+        or int(payload.get("schema_version")) != 1
+        or not whole_number(payload.get("pid"))
+        or int(payload.get("pid")) <= 0
+        or not isinstance(payload.get("process_birth"), str)
+        or not payload.get("process_birth")
+    ):
+        fail("owner sidecar schema is malformed")
+    recorded_birth = payload["process_birth"].strip(" \t\r\n")
+    if not recorded_birth:
+        fail("owner sidecar schema is malformed")
+    pid = int(payload["pid"])
+    try:
+        os.kill(pid, 0)
+    except OSError as error:
+        if getattr(error, "errno", None) == errno.ESRCH:
+            return "orphan", before, allocated_bytes(before)
+        fail("owner process liveness could not be determined")
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    try:
+        result = subprocess.Popen(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        output = result.communicate()[0]
+    except OSError:
+        fail("owner process birth could not be read")
+    if result.returncode != 0 or not output:
+        fail("owner process birth could not be read")
+    try:
+        current_birth = output.decode("utf-8").strip(" \t\r\n")
+    except UnicodeDecodeError:
+        fail("owner process birth could not be read")
+    if not current_birth:
+        fail("owner process birth could not be read")
+    if current_birth == recorded_birth:
+        fail("owner process is live")
+    return "orphan", before, allocated_bytes(before)
+
+
+root_device = None
+root_fd = None
+snapshot_fd = None
+try:
+    if not os.path.isabs(releases) or not os.path.isabs(snapshot):
+        fail("release staging paths must be absolute")
+    if os.path.realpath(releases) != releases:
+        fail("release staging store is not canonical")
+    if os.path.dirname(snapshot) != releases:
+        fail("release snapshot is not a direct child of releases")
+    base = os.path.basename(snapshot)
+    if not base.startswith(".tmp.") or ".exec." not in base:
+        fail("release snapshot name is unsafe")
+    rest = base[len(".tmp."):]
+    separator = rest.rfind(".exec.")
+    if separator <= 0:
+        fail("release snapshot name is unsafe")
+    parsed_version = rest[:separator]
+    suffix = rest[separator + len(".exec."):]
+    if (
+        parsed_version != version
+        or not version_re.fullmatch(parsed_version)
+        or not suffix_re.fullmatch(suffix)
+    ):
+        fail("release snapshot name is unsafe")
+
+    try:
+        root_fd = os.open(
+            releases,
+            os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW,
+        )
+    except OSError as error:
+        fail("release staging store cannot be opened safely: %s" % error)
+    root_stat = os.fstat(root_fd)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        fail("release staging store is not a directory")
+    root_device = root_stat.st_dev
+
+    before = lstat_at(root_fd, base)
+    if not stat.S_ISDIR(before.st_mode):
+        fail("release snapshot is not a real directory")
+    if identity(before) != expected_identity:
+        fail("release snapshot directory identity changed")
+    snapshot_fd, _, opened = open_directory(root_fd, base, expected_identity)
+    if identity(opened) != expected_identity:
+        fail("release snapshot directory identity changed")
+    age = time.time() - opened.st_mtime
+    if age <= ttl_days * 86400:
+        fail("release snapshot is no longer aged")
+
+    owner_name = base + ".owner.json"
+    owner_state, owner_identity, owner_bytes = read_owner(root_fd, owner_name)
+    # Revalidate the exact target and owner immediately before recursive
+    # descriptor-relative removal. A live owner is never deleted, even if it is
+    # observed after the initial plan.
+    current = lstat_at(root_fd, base)
+    if identity(current) != expected_identity or not stat.S_ISDIR(current.st_mode):
+        fail("release snapshot directory identity changed before removal")
+    if time.time() - current.st_mtime <= ttl_days * 86400:
+        fail("release snapshot is no longer aged")
+    owner_state_again, owner_identity_again, owner_bytes_again = read_owner(
+        root_fd, owner_name
+    )
+    if owner_state_again != owner_state:
+        fail("owner sidecar state changed before removal")
+    if (owner_identity is None) != (owner_identity_again is None):
+        fail("owner sidecar appeared or disappeared before removal")
+    if (
+        owner_identity is not None
+        and identity(owner_identity_again) != identity(owner_identity)
+    ):
+        fail("owner sidecar changed before removal")
+
+    reclaimed = remove_contents(snapshot_fd)
+    current = lstat_at(root_fd, base)
+    if identity(current) != expected_identity or not stat.S_ISDIR(current.st_mode):
+        fail("release snapshot directory changed before final removal")
+    try:
+        os.rmdir(base, dir_fd=root_fd)
+    except OSError as error:
+        fail("could not remove release snapshot: %s" % error)
+    if owner_identity is not None:
+        owner_current = lstat_at(root_fd, owner_name)
+        if identity(owner_current) != identity(owner_identity):
+            fail("owner sidecar changed before final removal")
+        try:
+            os.unlink(owner_name, dir_fd=root_fd)
+        except OSError as error:
+            fail("could not remove exact owner sidecar: %s" % error)
+        reclaimed += owner_bytes_again
+    print(str(reclaimed))
+except RuntimeError:
+    raise SystemExit(1)
+except (AttributeError, NotImplementedError) as error:
+    sys.stderr.write(
+        "dj_remove_release_staging_safely: descriptor-relative cleanup is unavailable: %s\n"
+        % error
+    )
+    raise SystemExit(1)
+except OSError as error:
+    sys.stderr.write(
+        "dj_remove_release_staging_safely: descriptor-relative cleanup failed: %s\n"
+        % error
+    )
+    raise SystemExit(1)
+finally:
+    if snapshot_fd is not None:
+        try:
+            os.close(snapshot_fd)
+        except OSError:
+            pass
+    if root_fd is not None:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+PY
 }
 
 # ===========================================================================
@@ -1414,6 +2204,67 @@ dj_reap_worktree() {
 
   if ! trellis_home_lock_release >/dev/null 2>&1; then
     echo "dj_reap_worktree: could not release the registry lock" >&2
+    result=1
+  fi
+  return "$result"
+}
+
+# dj_reap_phantom_worktree HOME FLEET PROJECT_ID CHECKOUT_ID WORKTREE_ID
+#   GIT_COMMON_DIR CURRENT_ROOT PHANTOM_ROOT LSOF_SNAPSHOT
+#
+# Remove ONE exact stale Git worktree registration, never a filesystem tree.
+# CURRENT_ROOT remains the strict, active local-registry owner that authorizes
+# the mutation. PHANTOM_ROOT must still be absent, prunable, non-main, inactive,
+# and below the narrow ephemeral namespaces at the sink. No broad `worktree
+# prune` is used: Git receives only the exact phantom root.
+dj_reap_phantom_worktree() {
+  local home="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
+  local common="$6" current_root="$7" phantom_root="$8" lsof_snapshot="$9"
+  local identity checkout_root checkout_root_real checkout_common in_use_reason
+  local result=1
+
+  [ "$#" -eq 9 ] || {
+    echo "dj_reap_phantom_worktree: expected current registry identity, phantom root, and lsof snapshot" >&2
+    return 1
+  }
+  if ! trellis_home_lock_acquire "$home" registry 30; then
+    echo "dj_reap_phantom_worktree: could not acquire the registry lock" >&2
+    return 1
+  fi
+
+  if identity="$(dj_registered_owner_identity "$home" "$fleet" "$project_id" \
+      "$checkout_id" "$worktree_id" "$common" "$current_root")"; then
+    checkout_root="$(printf '%s\n' "$identity" | jq -r '.checkout_root // empty')"
+    if [ -z "$checkout_root" ] || [ ! -d "$checkout_root" ] || [ -L "$checkout_root" ]; then
+      echo "dj_reap_phantom_worktree: registered primary checkout is unavailable or symlinked" >&2
+    else
+      checkout_root_real="$(dj__abspath "$checkout_root")"
+      checkout_common="$(git -C "$checkout_root" rev-parse --absolute-git-dir 2>/dev/null || echo '')"
+      checkout_common="$(dj__abspath "$checkout_common")"
+      if [ "$checkout_root_real" != "$checkout_root" ]; then
+        echo "dj_reap_phantom_worktree: registered primary checkout is not a canonical real path" >&2
+      elif [ -z "$checkout_common" ] || [ "$checkout_common" != "$common" ]; then
+        echo "dj_reap_phantom_worktree: primary checkout no longer has the registered Git common directory" >&2
+      elif ! dj_phantom_worktree_reapable "$current_root" "$phantom_root"; then
+        echo "dj_reap_phantom_worktree: phantom registration is no longer absent, prunable, and ephemeral" >&2
+      elif in_use_reason="$(dj_worktree_in_use "$phantom_root" "$lsof_snapshot")"; then
+        echo "dj_reap_phantom_worktree: phantom worktree is in use ($in_use_reason)" >&2
+      # Re-observe after the liveness snapshot: a recreated, dirty, or moved
+      # path between plan and sink is a refusal, never an implicit prune.
+      elif ! dj_phantom_worktree_reapable "$current_root" "$phantom_root"; then
+        echo "dj_reap_phantom_worktree: phantom registration changed after liveness check" >&2
+      elif git -C "$checkout_root" worktree remove "$phantom_root" >/dev/null 2>&1; then
+        result=0
+      else
+        echo "dj_reap_phantom_worktree: Git refused exact phantom registration removal: $phantom_root" >&2
+      fi
+    fi
+  else
+    echo "dj_reap_phantom_worktree: current registry ownership changed or is unavailable" >&2
+  fi
+
+  if ! trellis_home_lock_release >/dev/null 2>&1; then
+    echo "dj_reap_phantom_worktree: could not release the registry lock" >&2
     result=1
   fi
   return "$result"

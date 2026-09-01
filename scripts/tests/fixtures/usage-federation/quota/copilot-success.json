@@ -1,0 +1,13 @@
+{
+  "copilot_plan": "fixture-plan",
+  "quota_reset_date": "2026-09-01T00:00:00Z",
+  "quota_snapshots": {
+    "premium_interactions": {
+      "entitlement": 1500,
+      "remaining": 1110,
+      "percent_remaining": 74,
+      "unlimited": false,
+      "overage_permitted": false
+    }
+  }
+}

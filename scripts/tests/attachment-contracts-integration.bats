@@ -20,6 +20,16 @@ teardown() {
   t25_teardown_sandbox
 }
 
+t25_omp_config_get() (
+  unset PI_CODING_AGENT_DIR XDG_CONFIG_HOME
+  HOME="$T25_USER_HOME"
+  TRELLIS_HOME="$T25_TRELLIS_HOME"
+  GIT_CONFIG_NOSYSTEM=1
+  export HOME TRELLIS_HOME GIT_CONFIG_NOSYSTEM
+  cd "$T25_PROJECT"
+  omp config get "$1"
+)
+
 # A rolled-back attach is allowed to leave exactly two marks behind: the machine
 # registry row for the discovered worktree, and the local exclude file hardened
 # to 0600.  Everything else — bytes, modes, symlinks, hook wiring, attachment
@@ -237,6 +247,36 @@ assert_rolled_back_to_baseline() {
   jq -e '.project.claude == "keep"' "$T25_PROJECT/.claude/settings.local.json" >/dev/null
   jq -e '.project.codex == "keep"' "$T25_PROJECT/.codex/hooks.json" >/dev/null
   [ -z "$(t25_git_status "$T25_PROJECT")" ]
+}
+
+@test "OMP project policy takes effect and clean detach removes it" {
+  command -v omp >/dev/null 2>&1 || skip "omp CLI not on PATH; live config-get proof is host-gated"
+  mkdir -p "$T25_USER_HOME/.omp/agent"
+  cat > "$T25_USER_HOME/.omp/agent/config.yml" <<'YAML'
+extendedContext: true
+compaction:
+  idleEnabled: false
+  idleTimeoutSeconds: 600
+YAML
+
+  [ "$(t25_omp_config_get extendedContext)" = true ]
+  [ "$(t25_omp_config_get compaction.idleEnabled)" = false ]
+  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 600 ]
+
+  run t25_attach
+  [ "$status" -eq 0 ]
+  [ -f "$T25_PROJECT/.omp/config.yml" ]
+  [ ! -L "$T25_PROJECT/.omp/config.yml" ]
+  [ "$(t25_omp_config_get extendedContext)" = false ]
+  [ "$(t25_omp_config_get compaction.idleEnabled)" = true ]
+  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 900 ]
+
+  run t25_detach
+  [ "$status" -eq 0 ]
+  t25_path_absent "$T25_PROJECT/.omp/config.yml"
+  [ "$(t25_omp_config_get extendedContext)" = true ]
+  [ "$(t25_omp_config_get compaction.idleEnabled)" = false ]
+  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 600 ]
 }
 
 @test "second three-harness attach rewrites no project machine or artifact byte" {

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "source": "gotchas.md#unrelated-maintenance-notes",
+  "pattern_key": "unrelated-maintenance-notes",
+  "occurrences": [
+    {
+      "ref": "context-log.md#session-2026-08-28",
+      "recorded": true
+    }
+  ],
+  "preconditions": [],
+  "inputs_needed": false,
+  "inputs": [],
+  "steps": [
+    {
+      "order": 1,
+      "action": "Read the project README"
+    },
+    {
+      "order": 2,
+      "action": "Rename a scratch note"
+    },
+    {
+      "order": 3,
+      "action": "Open the issue tracker"
+    }
+  ],
+  "result": "",
+  "verification": "",
+  "secret_values_present": false
+}
