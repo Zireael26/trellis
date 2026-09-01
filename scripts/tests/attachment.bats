@@ -40,10 +40,11 @@ rewrite_json_0600() {
 }
 
 stage_pending_file() {
-  local stage
+  local stage parent_identity
   stage=$1
-  rewrite_json_0600 "$JOURNAL" --arg stage "$stage" \
-    '.pending = {artifact: .artifacts[0], staging_path: $stage, staging_identity: null, destination_identity: null}'
+  parent_identity=$(_attachment_fs_identity "$(dirname "$stage")") || return 1
+  rewrite_json_0600 "$JOURNAL" --arg stage "$stage" --arg parent_identity "$parent_identity" \
+    '.pending = {artifact: .artifacts[0], staging_path: $stage, staging_identity: null, destination_identity: null, parent_identity: $parent_identity}'
 }
 
 record_stage_identity() {
@@ -206,6 +207,45 @@ prepare_managed_hooks() {
   git -C "$PROJECT" config --local core.hooksPath "$managed"
 }
 
+prepare_older_managed_hooks() {
+  local managed payload release old_lib old_lib_tmp old_oid manifest
+  local legacy_post legacy_pre
+  managed="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID"
+  payload="$TRELLIS_HOME/releases/$RELEASE/payload"
+  release="${payload%/payload}"
+  old_lib="$payload/scripts/lib/attachment.sh"
+  old_lib_tmp="${old_lib}.tmp"
+  mkdir -p "$(dirname "$old_lib")"
+  cp "$BATS_TEST_DIRNAME/../lib/attachment.sh" "$old_lib" || return 1
+  sed \
+    -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
+    -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
+    -e '/^[[:space:]]*export TRELLIS_ALLOW_MAIN_PUSH SECURITY_GATE_SKIP$/d' \
+    "$old_lib" > "$old_lib_tmp" || return 1
+  mv "$old_lib_tmp" "$old_lib" || return 1
+  chmod 755 "$old_lib" || return 1
+  old_oid="$(git hash-object "$old_lib")" || return 1
+  rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" \
+    '.tree += [{path:"scripts/lib/attachment.sh",mode:"100755",oid:$oid}]' || return 1
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
+  legacy_post="$(
+    TRELLIS_LIBS_PRELOADED=1 /bin/bash --noprofile --norc -c '
+      source "$1"
+      _attachment_hooks_post_checkout_dispatcher_body "$2" "$3"
+    ' legacy-dispatcher "$old_lib" "$payload" "$manifest"
+  )" || return 1
+  legacy_pre="$(
+    TRELLIS_LIBS_PRELOADED=1 /bin/bash --noprofile --norc -c '
+      source "$1"
+      _attachment_hooks_pre_push_dispatcher_body "$2" "$3" "$4"
+    ' legacy-dispatcher "$old_lib" "$payload" \
+      'core-rules/githooks/pre-push' "$manifest"
+  )" || return 1
+  printf '%s\n' "$legacy_post" > "$managed/post-checkout" || return 1
+  printf '%s\n' "$legacy_pre" > "$managed/pre-push" || return 1
+  chmod 700 "$managed/post-checkout" "$managed/pre-push"
+}
+
 setup() {
   TEMP_ROOT=${TMPDIR:-/tmp}
   ROOT=$(mktemp -d "${TEMP_ROOT%/}/attachment-test.XXXXXX")
@@ -289,6 +329,71 @@ teardown() {
 
   [ "$status" -eq 0 ]
 }
+
+@test "verification accepts authentic dispatchers from an older payload and rejects tampered bytes" {
+  local current_post current_pre older_post older_pre
+  RELEASE="1.2.2"
+  prepare_plan all
+  attachment_commit "$TRELLIS_HOME" "$JOURNAL"
+  prepare_managed_hooks
+  current_post=$(cat "$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/post-checkout")
+  current_pre=$(cat "$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/pre-push")
+  prepare_older_managed_hooks
+  older_post=$(cat "$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/post-checkout")
+  older_pre=$(cat "$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/pre-push")
+
+  [ "$older_post" != "$current_post" ]
+  [ "$older_pre" != "$current_pre" ]
+  run attachment_verify "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 0 ]
+
+  printf '%s\n' '# tampered dispatcher' >> "$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/post-checkout"
+  run attachment_verify "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 3 ]
+}
+@test "exclude verification accepts foreign bytes but refuses managed-block tampering" {
+  local common="$ROOT/common" before="$ROOT/exclude-before" after="$ROOT/exclude-after"
+  local block="$ROOT/managed-block" exclude foreign_before foreign_after state with_foreign
+  mkdir -p "$common/info"
+  TRELLIS_LIBS_PRELOADED=1
+  source "$BATS_TEST_DIRNAME/../attach-project.sh"
+
+  cat > "$block" <<'EOF'
+# --- Trellis local attachment exclude block ---
+/.trellis/runtime
+# --- end Trellis local attachment exclude block ---
+EOF
+  printf '%s\n' '# pre-existing user ignore' > "$before"
+  cat "$before" "$block" > "$after"
+  exclude="$common/info/exclude"
+  foreign_before="$ROOT/foreign-exclude-before"
+  foreign_after="$ROOT/foreign-exclude-after"
+  printf 'foreign prefix embeds %s in arbitrary bytes\n' "$ATTACH_EXCLUDE_BEGIN" > "$foreign_before"
+  printf 'foreign suffix embeds %s in arbitrary bytes\n' "$ATTACH_EXCLUDE_END" > "$foreign_after"
+  cat "$before" "$foreign_before" "$block" "$foreign_after" > "$exclude"
+  with_foreign="$ROOT/exclude-with-foreign"
+  cp "$exclude" "$with_foreign"
+
+  state="$(attach_exclude_state "$common" "$before" "$after" true true true "$block")"
+  [ -n "$state" ]
+  cat "$block" >> "$exclude"
+  run attach_exclude_verify_state "$state"
+  [ "$status" -eq 3 ]
+  cp "$with_foreign" "$exclude"
+  run attach_exclude_verify_state "$state"
+  [ "$status" -eq 0 ]
+  cmp -s "$with_foreign" "$exclude"
+  grep -Fq 'foreign prefix embeds' "$exclude"
+  grep -Fq 'foreign suffix embeds' "$exclude"
+
+  sed 's|^/\.trellis/runtime$|/.trellis/runtime-tampered|' "$exclude" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  run attach_exclude_verify_state "$state"
+  [ "$status" -eq 3 ]
+  grep -Fq 'foreign prefix embeds' "$exclude"
+  grep -Fq 'foreign suffix embeds' "$exclude"
+}
+
 
 @test "exact committed replay writes a full-prefix journal and re-verifies before commit" {
   prepare_plan all
@@ -408,6 +513,17 @@ teardown() {
 
   [ "$status" -eq 4 ]
   [ ! -e "$JOURNAL" ]
+}
+
+@test "Darwin user destination safety rejects case-insensitive TRELLIS_HOME aliases" {
+  user_home="$ROOT/user-home"
+  trellis_home="$user_home/.trellis"
+  mkdir -p "$trellis_home"
+  uname() { printf 'Darwin\n'; }
+
+  run _attachment_user_destination_safe "$user_home" "$trellis_home" "$user_home/.TRELLIS/runtime"
+
+  [ "$status" -eq 4 ]
 }
 
 @test "prepare rejects a noncanonical absolute root path" {
@@ -587,6 +703,67 @@ teardown() {
   [ -f "$PROJECT/attached.txt" ]
   [ -L "$PROJECT/link.txt" ]
   [ -f "$JOURNAL" ]
+}
+
+@test "project metadata including resolved toolchain PATH round-trips through journal and owner" {
+  local toolchain_path
+  make_plan "$PLAN" file
+  toolchain_path="$(_attachment_toolchain_path_resolve "$ROOT")"
+  rewrite_json_0600 "$PLAN" --argjson toolchain_path "$toolchain_path" \
+    '.surface = "project" | .toolchain_path = $toolchain_path'
+
+  run attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.surface' "$JOURNAL")" = project ]
+  [ "$(jq -r '.toolchain_path | join(":")' "$JOURNAL")" = "$ROOT" ]
+
+  run attachment_commit "$TRELLIS_HOME" "$JOURNAL"
+
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.surface' "$OWNER")" = project ]
+  [ "$(jq -r '.toolchain_path | join(":")' "$OWNER")" = "$ROOT" ]
+  run attachment_verify "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 0 ]
+}
+
+@test "recovery upgrades a legacy pending record without parent identity under lock" {
+  prepare_plan file
+  stage=$(pending_stage_path)
+  stage_pending_file "$stage"
+  rewrite_json_0600 "$JOURNAL" 'del(.pending.parent_identity)'
+
+  run attachment_recover "$TRELLIS_HOME" "$JOURNAL"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$stage" ]
+  [ ! -e "$PROJECT/attached.txt" ]
+  [ ! -e "$JOURNAL" ]
+}
+
+@test "recovery reclaims an unrecorded staged directory before rolling back its prefix" {
+  prepare_plan all
+  cp "$SOURCE_FILE" "$PROJECT/attached.txt"
+  ln -s target.txt "$PROJECT/link.txt"
+  stage=$(_attachment_stage_path "$PROJECT" "empty" "$ATTACHMENT_ID")
+  mkdir "$stage"
+  parent_identity=$(_attachment_fs_identity "$PROJECT")
+  rewrite_json_0600 "$JOURNAL" --arg stage "$stage" --arg parent_identity "$parent_identity" '
+    .phase = 2
+    | .applied = .artifacts[0:2]
+    | .pending = {
+        artifact:.artifacts[2],staging_path:$stage,staging_identity:null,
+        destination_identity:null,parent_identity:$parent_identity
+      }
+  '
+
+  run attachment_recover "$TRELLIS_HOME" "$JOURNAL"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$stage" ]
+  [ ! -e "$PROJECT/attached.txt" ]
+  [ ! -e "$PROJECT/link.txt" ]
+  [ ! -e "$JOURNAL" ]
 }
 
 @test "recovery rolls back pending intent before staging begins" {

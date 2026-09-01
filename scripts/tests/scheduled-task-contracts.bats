@@ -34,6 +34,7 @@ EOF
 build_release_repo() {
   mkdir -p "$RELEASE_REPO/core-rules"
   cp -R "$REPO/scheduled-tasks" "$RELEASE_REPO/scheduled-tasks"
+  cp "$REPO/trellis.config.json" "$RELEASE_REPO/trellis.config.json"
   printf '%s\n' '1.2.3' > "$RELEASE_REPO/core-rules/VERSION"
   (
     cd "$RELEASE_REPO" || exit 1
@@ -352,6 +353,7 @@ materialize_task() {
   materialize_task personal conductor
   [ "$status" -eq 0 ]
   [ "$(jq -r '.files.backlog' "$root/manifest.json")" = backlog.json ]
+  [ "$(jq -r '.policy.conductor.auto_execute_top_n' "$root/manifest.json")" -eq 0 ]
   [ "$(jq -r '.items | length' "$root/backlog.json")" -eq 0 ]
 
   printf '%s\n' '{"schema_version":1,"weights":{"deadline":0.35,"impact":0.30,"unblock":0.15,"effort":0.10,"staleness":0.10},"items":[{"id":"alpha-task","project_id":"alpha","title":"Alpha task","note":"Portable local prose","priority":"high","effort":"M","type":"dev","impact":"users","engine":"claude","status":"todo","tags":["fixture"],"auto_spec":false,"surgical":false}]}' > "$root/backlog.json"

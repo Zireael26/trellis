@@ -1,0 +1,8 @@
+# Decision log
+<!-- Historical example, not an entry.
+* 2026-08-30T15:00:00Z [L3] [scope] Commented example. Reasoning: It is not live content. Alternatives considered: Count comments.
+-->
+```text
+* 2026-08-30T15:00:01Z [L3] [scope] Fenced example. Reasoning: It is not live content. Alternatives considered: Count code examples.
+```
+- 2026-08-30T15:00:02Z [L3] [scope] Keep Markdown scaffolding outside the denominator. Reasoning: Only live file content can be a decision entry. Alternatives considered: Count headings, comments, and fenced examples.

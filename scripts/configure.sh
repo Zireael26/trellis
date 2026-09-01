@@ -8,6 +8,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/trellis-home.sh
 . "$SCRIPT_DIR/lib/trellis-home.sh"
+# shellcheck source=lib/release-store.sh
+. "$SCRIPT_DIR/lib/release-store.sh"
+# shellcheck source=lib/attachment.sh
+. "$SCRIPT_DIR/lib/attachment.sh"
 
 print_help() {
   cat <<'EOF'
@@ -76,11 +80,17 @@ usage_error() {
 
 
 config_write() {
-  local home proposed cfg
+  local home proposed cfg rc
   home="$1"
   proposed="$2"
   cfg="$(trellis_home_config_path "$home")"
-  trellis_home_atomic_write_json "$cfg" "$proposed" || trellis_home_die "$?" "failed to write $cfg"
+  if trellis_home_atomic_write_json "$cfg" "$proposed"; then
+    return 0
+  else
+    rc=$?
+    printf 'trellis configure: failed to write %s\n' "$cfg" >&2
+    return "$rc"
+  fi
 }
 
 load_existing_config_or_empty() {
@@ -91,12 +101,166 @@ load_existing_config_or_empty() {
     if [ -L "$cfg" ] || [ ! -f "$cfg" ]; then
       trellis_home_die "$TRELLIS_EX_STATE" "existing config is not a regular file: $cfg"
     fi
+    # Snapshot before validation, which repairs a config's permissions to 0600.
+    cp -p "$cfg" "$out" || trellis_home_die "$TRELLIS_EX_UNAVAILABLE" "could not read existing config: $cfg"
     trellis_home_validate_config "$cfg" || trellis_home_die "$?" "existing config is invalid: $cfg"
-    cp "$cfg" "$out" || trellis_home_die "$TRELLIS_EX_UNAVAILABLE" "could not read existing config: $cfg"
   else
     jq -n '{schema_version: 1, fleets: {}}' > "$out" ||
       trellis_home_die "$TRELLIS_EX_STATE" "failed to create an empty machine config"
   fi
+}
+
+config_restore_bytes() {
+  local dest src dir base tmp src_mode
+  dest="$1"
+  src="$2"
+  trellis_home_require_absolute_safe_path "machine config" "$dest" || return "$?"
+  if [ -L "$dest" ]; then
+    printf 'trellis configure: refusing to restore symlinked machine config: %s\n' "$dest" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ -e "$dest" ] && [ ! -f "$dest" ]; then
+    printf 'trellis configure: machine config destination must be a regular file: %s\n' "$dest" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ -L "$src" ] || [ ! -f "$src" ]; then
+    printf 'trellis configure: machine config rollback source must be a regular file: %s\n' "$src" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  if [ -L "$dir" ]; then
+    printf 'trellis configure: refusing symlinked machine config directory: %s\n' "$dir" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ ! -d "$dir" ]; then
+    printf 'trellis configure: machine config directory is unavailable: %s\n' "$dir" >&2
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  src_mode="$(_attachment_mode "$src")" || return "$TRELLIS_EX_UNAVAILABLE"
+  tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  if ! cp "$src" "$tmp" || ! chmod "$src_mode" "$tmp"; then
+    rm -f "$tmp"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  if ! mv "$tmp" "$dest"; then
+    rm -f "$tmp"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  return 0
+}
+
+config_remove_new() {
+  local dest="$1"
+  trellis_home_require_absolute_safe_path "machine config" "$dest" || return "$?"
+  if [ -L "$dest" ] || [ ! -f "$dest" ]; then
+    printf 'trellis configure: refusing to remove unexpected machine config: %s\n' "$dest" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  rm "$dest" || return "$TRELLIS_EX_UNAVAILABLE"
+  return 0
+}
+
+configure_launcher_rollback() {
+  local dest="$1" snapshot="$2" existed="$3" mode="$4"
+  local local_dir="$5" local_existed="$6" bin_dir="$7" bin_existed="$8"
+  local expected_hash="${9:-}" expected_mode="${10:-}" actual dir base tmp
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    [ -f "$dest" ] && [ ! -L "$dest" ] || {
+      printf 'trellis configure: refusing unexpected launcher during rollback: %s\n' "$dest" >&2
+      return "$TRELLIS_EX_STATE"
+    }
+    if [ -n "$expected_hash" ]; then
+      actual="$(_attachment_hash "$dest")" || return "$TRELLIS_EX_UNAVAILABLE"
+      [ "$actual" = "$expected_hash" ] && _attachment_mode_matches "$dest" "$expected_mode" || {
+        printf 'trellis configure: launcher changed during rollback: %s\n' "$dest" >&2
+        return "$TRELLIS_EX_CONFLICT"
+      }
+    fi
+  fi
+  if [ "$existed" -eq 1 ]; then
+    if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -f "$dest" ]; }; then
+      printf 'trellis configure: refusing to restore unexpected launcher: %s\n' "$dest" >&2
+      return "$TRELLIS_EX_STATE"
+    fi
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return "$TRELLIS_EX_STATE"
+    dir="$(dirname "$dest")"
+    base="$(basename "$dest")"
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return "$TRELLIS_EX_STATE"
+    tmp="$(mktemp "$dir/.${base}.rollback.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    if ! cp "$snapshot" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dest"; then
+      rm -f "$tmp"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    fi
+  else
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      [ -f "$dest" ] && [ ! -L "$dest" ] || {
+        printf 'trellis configure: refusing to remove unexpected launcher: %s\n' "$dest" >&2
+        return "$TRELLIS_EX_STATE"
+      }
+      rm "$dest" || return "$TRELLIS_EX_UNAVAILABLE"
+    fi
+    if [ "$bin_existed" -eq 0 ] && [ -d "$bin_dir" ] && [ ! -L "$bin_dir" ]; then
+      rmdir "$bin_dir" 2>/dev/null || return "$TRELLIS_EX_CONFLICT"
+    fi
+    if [ "$local_existed" -eq 0 ] && [ -d "$local_dir" ] && [ ! -L "$local_dir" ]; then
+      rmdir "$local_dir" 2>/dev/null || return "$TRELLIS_EX_CONFLICT"
+    fi
+  fi
+  return 0
+}
+
+configure_attachment_command_valid() {
+  local command="$1"
+  if [ ! -f "$command" ] || [ -L "$command" ] || [ ! -x "$command" ]; then
+    printf 'trellis configure: release has no safe attachment command: %s\n' "$command" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+}
+
+configure_recover_user_surface() {
+  local home="$1" attach_journal detach_journal recover
+  attach_journal="$(_attachment_user_journal_path "$home")"
+  detach_journal="$(_attachment_user_detach_journal_path "$home")"
+  if [ ! -e "$attach_journal" ] && [ ! -L "$attach_journal" ] &&
+     [ ! -e "$detach_journal" ] && [ ! -L "$detach_journal" ]; then
+    return 0
+  fi
+  recover="$SCRIPT_DIR/attach-project.sh"
+  configure_attachment_command_valid "$recover" || return "$?"
+  TRELLIS_CONFIGURE_USER_LOCK=1 "$recover" relink --user --home "$home" \
+    --configure-lock-held --recover-only
+}
+
+configure_relink_user_surface_if_attached() {
+  local home="$1" release="$2" owner release_dir relink relink_rc
+  owner="$(_attachment_user_owner_path "$home")"
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
+    return 0
+  fi
+  if ! _attachment_user_owner_json_valid "$owner"; then
+    printf 'trellis configure: user attachment owner is malformed or unsafe: %s\n' "$owner" >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  release_dir="$(TRELLIS_HOME="$home" release_store_locate "$release")" || return "$?"
+  relink="$release_dir/payload/scripts/attach-project.sh"
+  configure_attachment_command_valid "$relink" || return "$?"
+  if TRELLIS_CONFIGURE_USER_LOCK=1 "$relink" relink --user --home "$home" --release "$release" \
+    --configure-lock-held; then
+    return 0
+  else
+    relink_rc=$?
+  fi
+  if configure_recover_user_surface "$home"; then
+    owner="$(_attachment_user_owner_path "$home")"
+    if [ -f "$owner" ] && [ ! -L "$owner" ] &&
+       _attachment_user_owner_json_valid "$owner" &&
+       jq -e --arg release "$release" '.release == $release' "$owner" >/dev/null 2>&1 &&
+       attachment_user_verify "$home" "$owner"; then
+      return 0
+    fi
+  fi
+  return "$relink_rc"
 }
 
 cmd_configure() {
@@ -104,7 +268,10 @@ cmd_configure() {
   local launcher_template_opt install_launcher discovery_roots_seen
   local home cfg source_root default_fleet release release_remote roots_tmp
   local base_tmp proposed_tmp root launcher_template launcher_bin roots_json jq_filter
-  local existing_roots_count launcher_action
+  local existing_roots_count launcher_action relink_rc config_existed attachment owner
+  local launcher_snapshot_tmp launcher_existed launcher_mode launcher_local_dir launcher_dir
+  local launcher_local_existed launcher_dir_existed launcher_after_hash launcher_after_mode rollback_rc
+  local -a discovery_roots=()
   home_opt=""
   source_opt=""
   default_fleet_opt=""
@@ -116,8 +283,8 @@ cmd_configure() {
   discovery_roots_seen=0
   base_tmp=""
   proposed_tmp=""
-  roots_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.roots.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
-  trap 'rm -f "${roots_tmp:-}" "${base_tmp:-}" "${proposed_tmp:-}"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
+  roots_tmp=""
+  launcher_snapshot_tmp=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -127,7 +294,7 @@ cmd_configure() {
       --discovery-root)
         [ "$#" -ge 2 ] || usage_error "--discovery-root requires PATH"
         trellis_home_require_absolute_safe_path "discovery root" "$2" || exit "$?"
-        printf '%s\n' "$2" >> "$roots_tmp"
+        discovery_roots+=("$2")
         discovery_roots_seen=1
         shift 2
         ;;
@@ -144,12 +311,19 @@ cmd_configure() {
   if [ "$install_launcher" -eq 0 ] && [ -n "$launcher_template_opt" ]; then
     usage_error "--no-install-launcher cannot be combined with --launcher-template"
   fi
+  roots_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.roots.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+  trap '[ -z "${roots_tmp:-}" ] || rm -f "$roots_tmp"; [ -z "${base_tmp:-}" ] || rm -f "$base_tmp"; [ -z "${proposed_tmp:-}" ] || rm -f "$proposed_tmp"; [ -z "${launcher_snapshot_tmp:-}" ] || rm -f "$launcher_snapshot_tmp"; attachment_user_lock_release >/dev/null 2>&1 || true; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
+  for root in "${discovery_roots[@]+"${discovery_roots[@]}"}"; do
+    printf '%s\n' "$root" >> "$roots_tmp" || exit "$TRELLIS_EX_UNAVAILABLE"
+  done
   trellis_home_require_jq || exit "$?"
   home="$(trellis_home_resolve "$home_opt")" || exit "$?"
   home="$(trellis_home_canonical_home "$home")" || exit "$?"
   trellis_home_prepare_home "$home" || exit "$?"
   cfg="$(trellis_home_config_path "$home")"
   trellis_home_lock_acquire "$home" config 30 || exit "$?"
+  config_existed=0
+  if [ -e "$cfg" ] || [ -L "$cfg" ]; then config_existed=1; fi
 
   base_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.config.base.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
   proposed_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.config.proposed.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
@@ -204,6 +378,26 @@ cmd_configure() {
     trellis_home_die "$TRELLIS_EX_STATE" "failed to construct machine config JSON"
   trellis_home_validate_config "$proposed_tmp" || exit "$?"
 
+  attachment="configure-$$"
+  attachment_user_lock_reclaim "$home" || exit "$?"
+  attachment_user_lock_acquire "$home" "$attachment" || exit "$?"
+  configure_recover_user_surface "$home" || exit "$?"
+  owner="$(_attachment_user_owner_path "$home")"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    _attachment_user_owner_json_valid "$owner" || {
+      printf 'trellis configure: user attachment owner is malformed or unsafe: %s\n' "$owner" >&2
+      exit "$TRELLIS_EX_STATE"
+    }
+  fi
+
+  launcher_existed=0
+  launcher_mode=""
+  launcher_local_dir=""
+  launcher_dir=""
+  launcher_local_existed=0
+  launcher_dir_existed=0
+  launcher_after_hash=""
+  launcher_after_mode=""
   if [ "$install_launcher" -eq 1 ]; then
     if [ -n "$launcher_template_opt" ]; then
       launcher_template="$launcher_template_opt"
@@ -212,17 +406,88 @@ cmd_configure() {
     fi
     [ -n "${HOME:-}" ] ||
       trellis_home_die "$TRELLIS_EX_USAGE" "HOME is required for the stable launcher destination"
-    launcher_bin="$HOME/.local/bin/trellis"
-    trellis_home_install_launcher "$launcher_template" "$launcher_bin" || exit "$?"
-    launcher_action="$TRELLIS_HOME_LAUNCHER_ACTION"
+    launcher_local_dir="$HOME/.local"
+    launcher_dir="$launcher_local_dir/bin"
+    launcher_bin="$launcher_dir/trellis"
+    if [ -e "$launcher_local_dir" ] || [ -L "$launcher_local_dir" ]; then launcher_local_existed=1; fi
+    if [ -e "$launcher_dir" ] || [ -L "$launcher_dir" ]; then launcher_dir_existed=1; fi
+    if [ -L "$launcher_bin" ] || { [ -e "$launcher_bin" ] && [ ! -f "$launcher_bin" ]; }; then
+      printf 'trellis configure: refusing non-regular launcher destination: %s\n' "$launcher_bin" >&2
+      exit "$TRELLIS_EX_CONFLICT"
+    fi
+    launcher_snapshot_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.launcher.before.XXXXXX")" ||
+      exit "$TRELLIS_EX_UNAVAILABLE"
+    if [ -f "$launcher_bin" ]; then
+      launcher_existed=1
+      cp -p "$launcher_bin" "$launcher_snapshot_tmp" || exit "$TRELLIS_EX_UNAVAILABLE"
+      launcher_mode="$(_attachment_mode "$launcher_bin")" || exit "$TRELLIS_EX_UNAVAILABLE"
+    fi
+    if trellis_home_install_launcher "$launcher_template" "$launcher_bin"; then
+      launcher_action="$TRELLIS_HOME_LAUNCHER_ACTION"
+      if launcher_after_hash="$(_attachment_hash "$launcher_bin")" &&
+         launcher_after_mode="$(_attachment_mode "$launcher_bin")"; then
+        :
+      else
+        relink_rc=$?
+        configure_launcher_rollback "$launcher_bin" "$launcher_snapshot_tmp" "$launcher_existed" \
+          "$launcher_mode" "$launcher_local_dir" "$launcher_local_existed" \
+          "$launcher_dir" "$launcher_dir_existed" "" "" || exit "$?"
+        exit "$relink_rc"
+      fi
+    else
+      relink_rc=$?
+      configure_launcher_rollback "$launcher_bin" "$launcher_snapshot_tmp" "$launcher_existed" \
+        "$launcher_mode" "$launcher_local_dir" "$launcher_local_existed" \
+        "$launcher_dir" "$launcher_dir_existed" "" "" || exit "$?"
+      exit "$relink_rc"
+    fi
   else
     launcher_bin=""
     launcher_action="skipped"
   fi
 
-  config_write "$home" "$proposed_tmp"
+  if config_write "$home" "$proposed_tmp"; then
+    :
+  else
+    relink_rc=$?
+    rollback_rc=0
+    if [ "$config_existed" -eq 1 ]; then
+      config_restore_bytes "$cfg" "$base_tmp" || rollback_rc=$?
+    elif [ -e "$cfg" ] || [ -L "$cfg" ]; then
+      config_remove_new "$cfg" || rollback_rc=$?
+    fi
+    if [ "$install_launcher" -eq 1 ]; then
+      configure_launcher_rollback "$launcher_bin" "$launcher_snapshot_tmp" "$launcher_existed" \
+        "$launcher_mode" "$launcher_local_dir" "$launcher_local_existed" \
+        "$launcher_dir" "$launcher_dir_existed" "$launcher_after_hash" "$launcher_after_mode" ||
+        rollback_rc=$?
+    fi
+    [ "$rollback_rc" -eq 0 ] || exit "$rollback_rc"
+    exit "$relink_rc"
+  fi
+  if configure_relink_user_surface_if_attached "$home" "$release"; then
+    :
+  else
+    relink_rc=$?
+    rollback_rc=0
+    if [ "$config_existed" -eq 1 ]; then
+      config_restore_bytes "$cfg" "$base_tmp" || rollback_rc=$?
+    else
+      config_remove_new "$cfg" || rollback_rc=$?
+    fi
+    if [ "$install_launcher" -eq 1 ]; then
+      configure_launcher_rollback "$launcher_bin" "$launcher_snapshot_tmp" "$launcher_existed" \
+        "$launcher_mode" "$launcher_local_dir" "$launcher_local_existed" \
+        "$launcher_dir" "$launcher_dir_existed" "$launcher_after_hash" "$launcher_after_mode" ||
+        rollback_rc=$?
+    fi
+    [ "$rollback_rc" -eq 0 ] || exit "$rollback_rc"
+    exit "$relink_rc"
+  fi
+  attachment_user_lock_release || exit "$?"
   trellis_home_lock_release || exit "$?"
   rm -f "$roots_tmp" "$base_tmp" "$proposed_tmp"
+  [ -z "$launcher_snapshot_tmp" ] || rm -f "$launcher_snapshot_tmp"
   trap - EXIT
 
   printf 'Configured Trellis home: %s\n' "$home"
@@ -239,10 +504,12 @@ cmd_configure() {
 
 cmd_fleet_add_or_update() {
   local mode fleet home_opt shared_infra_root make_default home cfg exists
-  local roots_tmp base_tmp proposed_tmp roots_json roots_count jq_filter
+  local roots_tmp base_tmp proposed_tmp roots_json roots_count jq_filter root
+  local -a roots=()
   mode="$1"
   shift
   [ "$#" -ge 1 ] || usage_error "fleet $mode requires NAME"
+  case "$1" in -h|--help) print_help; return 0 ;; esac
   fleet="$1"
   shift
   trellis_home_require_fleet_name "$fleet" || exit "$?"
@@ -250,17 +517,16 @@ cmd_fleet_add_or_update() {
   home_opt=""
   shared_infra_root=""
   make_default=0
-  roots_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.fleet.roots.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+  roots_tmp=""
   base_tmp=""
   proposed_tmp=""
-  trap 'rm -f "${roots_tmp:-}" "${base_tmp:-}" "${proposed_tmp:-}"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --home) [ "$#" -ge 2 ] || usage_error "--home requires PATH"; home_opt="$2"; shift 2 ;;
       --discovery-root)
         [ "$#" -ge 2 ] || usage_error "--discovery-root requires PATH"
         trellis_home_require_absolute_safe_path "discovery root" "$2" || exit "$?"
-        printf '%s\n' "$2" >> "$roots_tmp"
+        roots+=("$2")
         shift 2
         ;;
       --shared-infra-root) [ "$#" -ge 2 ] || usage_error "--shared-infra-root requires PATH"; shared_infra_root="$2"; shift 2 ;;
@@ -268,6 +534,11 @@ cmd_fleet_add_or_update() {
       -h|--help) print_help; exit 0 ;;
       *) usage_error "unknown option for fleet $mode: $1" ;;
     esac
+  done
+  roots_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.fleet.roots.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+  trap '[ -z "${roots_tmp:-}" ] || rm -f "$roots_tmp"; [ -z "${base_tmp:-}" ] || rm -f "$base_tmp"; [ -z "${proposed_tmp:-}" ] || rm -f "$proposed_tmp"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
+  for root in "${roots[@]+"${roots[@]}"}"; do
+    printf '%s\n' "$root" >> "$roots_tmp" || exit "$TRELLIS_EX_UNAVAILABLE"
   done
 
   trellis_home_require_jq || exit "$?"
@@ -334,12 +605,12 @@ cmd_fleet_add_or_update() {
 cmd_fleet_set_default() {
   local fleet home_opt home cfg proposed_tmp
   [ "$#" -ge 1 ] || usage_error "fleet set-default requires NAME"
+  case "$1" in -h|--help) print_help; return 0 ;; esac
   fleet="$1"
   shift
   trellis_home_require_fleet_name "$fleet" || exit "$?"
   home_opt=""
   proposed_tmp=""
-  trap 'rm -f "${proposed_tmp:-}"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --home) [ "$#" -ge 2 ] || usage_error "--home requires PATH"; home_opt="$2"; shift 2 ;;
@@ -347,6 +618,7 @@ cmd_fleet_set_default() {
       *) usage_error "unknown option for fleet set-default: $1" ;;
     esac
   done
+  trap '[ -z "${proposed_tmp:-}" ] || rm -f "$proposed_tmp"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
 
   trellis_home_require_jq || exit "$?"
   home="$(trellis_home_resolve "$home_opt")" || exit "$?"

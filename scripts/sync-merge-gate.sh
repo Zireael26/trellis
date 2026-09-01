@@ -148,7 +148,7 @@ ACTIVE_REPAIR_RELEASE_DIGEST=""
 ACTIVE_REPAIR_RELEASE_VERSION=""
 
 cleanup_sync() {
-  local status="${1:-0}" cleanup_output cleanup_rc
+  local status="${1:-0}" cleanup_output cleanup_rc=0
   rm -f "$SNAPSHOT" "$TARGETS"
   if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ]; then
     if cleanup_output="$(TRELLIS_HOME="$HOME_PATH" \
@@ -157,16 +157,26 @@ cleanup_sync() {
       :
     else
       cleanup_rc=$?
-      printf '  WARN: active immutable execution snapshot cleanup failed (%s): %s\n' \
-        "$cleanup_rc" "$(diagnostic_escape "${cleanup_output:-no diagnostic}")" >&2
-      if [ "$cleanup_rc" -gt "${RESULT_STATUS:-0}" ]; then
-        RESULT_STATUS="$cleanup_rc"
-      fi
     fi
-    ACTIVE_REPAIR_SNAPSHOT=""
-    ACTIVE_REPAIR_RELEASE_DIGEST=""
-    ACTIVE_REPAIR_RELEASE_VERSION=""
+  elif [ -n "$ACTIVE_REPAIR_RELEASE_VERSION" ]; then
+    if cleanup_output="$(TRELLIS_HOME="$HOME_PATH" \
+        release_store_remove_owned_snapshots \
+          "$ACTIVE_REPAIR_RELEASE_VERSION" 2>&1)"; then
+      :
+    else
+      cleanup_rc=$?
+    fi
   fi
+  if [ "$cleanup_rc" -ne 0 ]; then
+    printf '  WARN: active immutable execution snapshot cleanup failed (%s): %s\n' \
+      "$cleanup_rc" "$(diagnostic_escape "${cleanup_output:-no diagnostic}")" >&2
+    if [ "$cleanup_rc" -gt "${RESULT_STATUS:-0}" ]; then
+      RESULT_STATUS="$cleanup_rc"
+    fi
+  fi
+  ACTIVE_REPAIR_SNAPSHOT=""
+  ACTIVE_REPAIR_RELEASE_DIGEST=""
+  ACTIVE_REPAIR_RELEASE_VERSION=""
   trap - EXIT HUP INT TERM
   if [ "${RESULT_STATUS:-0}" -gt "$status" ]; then
     status="$RESULT_STATUS"
@@ -324,11 +334,34 @@ owner_manages_merge_dispatcher() {
   jq -e 'has("git_hooks") and .git_hooks.enabled == true' "$1" >/dev/null 2>&1
 }
 
+# Clear partial bundle state and recover any snapshot stranded before the
+# command-substitution caller could record its returned path.
+active_cli_repair_bundle_fail() {
+  local status="${1:-$TRELLIS_EX_STATE}" version="${2:-}" cleanup_output cleanup_rc=0
+  if [ -n "$version" ]; then
+    if cleanup_output="$(TRELLIS_HOME="$HOME_PATH" \
+        release_store_remove_owned_snapshots "$version" 2>&1)"; then
+      :
+    else
+      cleanup_rc=$?
+      printf '  WARN: active immutable execution snapshot cleanup failed (%s): %s\n' \
+        "$cleanup_rc" "$(diagnostic_escape "${cleanup_output:-no diagnostic}")" >&2
+    fi
+  fi
+  ACTIVE_REPAIR_SNAPSHOT=""
+  ACTIVE_REPAIR_RELEASE_DIGEST=""
+  ACTIVE_REPAIR_RELEASE_VERSION=""
+  if [ "$cleanup_rc" -gt "$status" ]; then
+    status="$cleanup_rc"
+  fi
+  return "$status"
+}
+
 # Resolve one private snapshot record from the active installed release. The
 # only later consumer of its pathname is the verified in-memory bundle emitter;
 # no snapshot path is ever executed directly.
 active_cli_repair_bundle() {
-  local active_release version record snapshot digest
+  local active_release version record snapshot digest rc
   if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ] && [ -n "$ACTIVE_REPAIR_RELEASE_DIGEST" ] &&
      [ -n "$ACTIVE_REPAIR_RELEASE_VERSION" ]; then
     return 0
@@ -352,26 +385,42 @@ active_cli_repair_bundle() {
   else
     return "$TRELLIS_EX_STATE"
   fi
+  # Arm the release-version cleanup context before command substitution starts.
+  # The producer records the owning shell in its sidecar; cleanup can recover
+  # that exact snapshot if the substitution returns during a signal handoff.
+  ACTIVE_REPAIR_RELEASE_VERSION="$version"
   if record="$(TRELLIS_HOME="$HOME_PATH" \
       release_store_snapshot_verified_release "$active_release" 2>/dev/null)"; then
     :
   else
-    return "$?"
+    rc=$?
+    active_cli_repair_bundle_fail "$rc" "$version"
+    return $?
   fi
   case "$record" in
     *$'\t'*)
       snapshot="${record%%$'\t'*}"
       digest="${record#*$'\t'}"
       ;;
-    *) return "$TRELLIS_EX_STATE" ;;
+    *)
+      active_cli_repair_bundle_fail "$TRELLIS_EX_STATE" "$version"
+      return $?
+      ;;
   esac
   if [ -z "$snapshot" ] || ! release_store_absolute_path_is_clean "$snapshot"; then
-    return "$TRELLIS_EX_STATE"
+    active_cli_repair_bundle_fail "$TRELLIS_EX_STATE" "$version"
+    return $?
   fi
   case "$digest" in
-    ''|*[!0-9a-f]*|*$'\t'*|*$'\r'*|*$'\n'*) return "$TRELLIS_EX_STATE" ;;
+    ''|*[!0-9a-f]*|*$'\t'*|*$'\r'*|*$'\n'*)
+      active_cli_repair_bundle_fail "$TRELLIS_EX_STATE" "$version"
+      return $?
+      ;;
   esac
-  [ "${#digest}" -eq 64 ] || return "$TRELLIS_EX_STATE"
+  if [ "${#digest}" -ne 64 ]; then
+    active_cli_repair_bundle_fail "$TRELLIS_EX_STATE" "$version"
+    return $?
+  fi
   ACTIVE_REPAIR_SNAPSHOT="$snapshot"
   ACTIVE_REPAIR_RELEASE_DIGEST="$digest"
   ACTIVE_REPAIR_RELEASE_VERSION="$version"

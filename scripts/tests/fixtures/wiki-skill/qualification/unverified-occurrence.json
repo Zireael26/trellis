@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "source": "gotchas.md#dispatcher-repair-unverified",
+  "pattern_key": "dispatcher-repair-without-verification",
+  "occurrences": [
+    {
+      "ref": "context-log.md#session-2026-08-25",
+      "recorded": true
+    }
+  ],
+  "preconditions": [
+    "The project is attached to Trellis",
+    "The managed dispatcher path is known"
+  ],
+  "inputs_needed": true,
+  "inputs": [
+    "project root",
+    "managed dispatcher path"
+  ],
+  "steps": [
+    {
+      "order": 1,
+      "action": "Inspect the managed dispatcher path"
+    },
+    {
+      "order": 2,
+      "action": "Restore the dispatcher configuration"
+    },
+    {
+      "order": 3,
+      "action": "Run the doctor check once"
+    }
+  ],
+  "result": "The first doctor check appears to report the dispatcher as current",
+  "verification": "",
+  "secret_values_present": false
+}

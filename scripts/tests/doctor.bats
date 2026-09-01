@@ -45,7 +45,7 @@ LIVE_CANON="$(CDPATH= cd "$REPO_ROOT" && pwd -P)"
 
 # The full canonical inheritance surface a healthy project carries. Kept in
 # lockstep with HC_CANONICAL_SKILLS / HC_CANONICAL_COMMANDS in health-checks.sh.
-CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
+CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing wiki-maintain wiki-skill-propose"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
@@ -226,6 +226,7 @@ build_portable_release() {
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/lib" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/omp/hooks/pre" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-output-styles" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/presets"
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/inheritance-manifest.json"
@@ -233,6 +234,18 @@ build_portable_release() {
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/codex-hooks.local.json"
+  cp "$REPO_ROOT/core-rules/templates/omp-project-policy.yml" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/omp-project-policy.yml"
+  cp "$REPO_ROOT/core-rules/templates/claude-user-settings.json" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-user-settings.json"
+  cp "$REPO_ROOT/core-rules/templates/claude-output-styles/trellis-orchestration.md" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-output-styles/trellis-orchestration.md"
+  cp -R "$REPO_ROOT/core-rules/omp/global" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/omp/"
+  cp -R "$REPO_ROOT/core-rules/skills/herdr-foreman" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/"
+  cp "$REPO_ROOT/core-rules/hooks/herdr-foreman-session.sh" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/herdr-foreman-session.sh"
   mkdir -p "$PORTABLE_RELEASE_PAYLOAD/scripts"
   cp "$REPO_ROOT/scripts/attach-project.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh"
@@ -279,7 +292,7 @@ EOF
   # here: surface-plan treats a declared source as mandatory and exits 4 on the
   # first one missing, which fails prepare_portable_attachment for the whole suite.
   # This builder copies a hand-picked set, so a new manifest entry lands here too.
-  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core slop-patterns spec-gate-core ui-verify-core; do
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core omp-reviewer slop-patterns spec-gate-core ui-verify-core; do
     printf '#!/usr/bin/env bash\nexit 0\n' \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"
     chmod 755 "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"
@@ -323,6 +336,56 @@ EOF
   find "$PORTABLE_RELEASE_PAYLOAD" -type d -exec chmod a-w {} \;
   chmod a-w "$PORTABLE_RELEASE_DIR/release.json" "$PORTABLE_RELEASE_DIR"
 }
+
+copy_portable_older_release() {
+  local base="$PORTABLE_HOME/releases/1.2.3"
+  local release="$PORTABLE_HOME/releases/1.2.2"
+  local payload="$release/payload"
+  local manifest="$SANDBOX/portable-release-1.2.2.jsonl"
+  local file relative mode oid target
+
+  cp -R "$base" "$release"
+  chmod -R u+w "$release"
+  mkdir -p "$payload/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/attachment.sh" "$payload/scripts/lib/attachment.sh"
+  sed \
+    -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
+    -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
+    -e '/^[[:space:]]*export TRELLIS_ALLOW_MAIN_PUSH SECURITY_GATE_SKIP$/d' \
+    "$payload/scripts/lib/attachment.sh" > "$payload/scripts/lib/attachment.sh.tmp"
+  mv "$payload/scripts/lib/attachment.sh.tmp" "$payload/scripts/lib/attachment.sh"
+  printf '1.2.2\n' > "$payload/core-rules/VERSION"
+
+  : > "$manifest"
+  while IFS= read -r file; do
+    relative="${file#"$payload"/}"
+    if [ -L "$file" ]; then
+      mode=120000
+      target="$(readlink "$file")"
+      oid="$(printf '%s' "$target" | git hash-object --stdin)"
+    elif [ -x "$file" ]; then
+      mode=100755
+      oid="$(git hash-object "$file")"
+    else
+      mode=100644
+      oid="$(git hash-object "$file")"
+    fi
+    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
+      '{path:$path,mode:$mode,oid:$oid}' >> "$manifest"
+  done < <(find "$payload" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  jq -n --arg version 1.2.2 --slurpfile tree "$manifest" '{
+    schema_version:1,
+    version:$version,
+    tag:("v" + $version),
+    commit:"0000000000000000000000000000000000000000",
+    remote:"fixture://copied-older-release",
+    tree:$tree
+  }' > "$release/release.json"
+  find "$payload" -type f -exec chmod a-w {} \;
+  find "$payload" -type d -exec chmod a-w {} \;
+  chmod a-w "$release/release.json" "$release"
+}
+
 
 run_portable_doctor() {
   run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" bash "$DOCTOR" "$@"
@@ -372,9 +435,29 @@ run_portable_show_config() {
     ' show-config "$PORTABLE_PROJECT" "$snapshot/scripts/show-config.sh" "$@"
 }
 
+portable_file_mode() {
+  local candidate
+  candidate="$(stat -f '%Lp' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 portable_registry_sha256() {
   bash -c '. "$1"; . "$2"; local_registry_sha256 "$3"' _ \
     "$REPO_ROOT/scripts/lib/trellis-home.sh" "$REPO_ROOT/scripts/lib/local-registry.sh" "$1"
+}
+
+portable_file_sha256() {
+  local digest
+  digest="$(shasum -a 256 "$1" 2>/dev/null)" ||
+    digest="$(sha256sum "$1" 2>/dev/null)" || return 1
+  digest="${digest%% *}"
+  printf '%s\n' "$digest"
 }
 
 rewrite_portable_registry() {
@@ -456,10 +539,11 @@ add_portable_identity_error_sibling() {
 }
 
 prepare_portable_attachment() {
-  local owner_project_id="${1:-portable-fixture}" identity checkout_id worktree_id owner
+  local owner_project_id="${1:-portable-fixture}" release="${2:-1.2.3}"
+  local identity checkout_id worktree_id owner
   run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
-      --fleet personal --release 1.2.3 \
+      --fleet personal --release "$release" \
       --harness claude --harness codex --harness omp "$PORTABLE_PROJECT"
   if [ "$status" -ne 0 ]; then
     printf 'prepare_portable_attachment failed (exit %s):\n%s\n' "$status" "$output" >&2
@@ -477,6 +561,23 @@ prepare_portable_attachment() {
     mv "$owner.next" "$owner"
     chmod 600 "$owner"
   fi
+}
+
+prepare_portable_user_attachment() {
+  local owner
+  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    bash "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh" \
+      attach --user --home "$PORTABLE_HOME" --release 1.2.3
+  if [ "$status" -ne 0 ]; then
+    printf 'prepare_portable_user_attachment failed (exit %s):\n%s\n' "$status" "$output" >&2
+    return "$status"
+  fi
+  owner="$PORTABLE_HOME/attachments/user.json"
+  [ -f "$owner" ] && [ ! -L "$owner" ] || {
+    printf 'prepare_portable_user_attachment did not commit %s\n' "$owner" >&2
+    return 1
+  }
+  PORTABLE_USER_OWNER="$owner"
 }
 
 build_shared_infra_fixture() {
@@ -1529,6 +1630,20 @@ EOF
 # ===========================================================================
 # Portable local-registry doctor (Spec 036 T15)
 # ===========================================================================
+# The reducer's output is the command exit code doctor must use after folding
+# all check results; keep this regression independent of fixture construction.
+@test "portable summary exit reducer never returns zero for errors" {
+  run bash -c '
+    . "$1"
+    type hc_doctor_summary_exit_code >/dev/null 2>&1 || exit 1
+    printf "%s\n" \
+      "$(hc_doctor_summary_exit_code 2 0)" \
+      "$(hc_doctor_summary_exit_code 2 3)" \
+      "$(hc_doctor_summary_exit_code 0 0)"
+  ' _ "$REPO_ROOT/scripts/lib/health-checks.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'1\n3\n0' ]
+}
 
 @test "portable doctor accepts an empty validated local registry" {
   build_portable_doctor_home
@@ -1538,6 +1653,213 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"local registry: validated local fleet inventory"* ]] || { echo "$output"; false; }
   [[ "$output" == *"no locally registered checkout records"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"user surface: unmanaged (no committed user owner record)"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor accepts a healthy committed user surface" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user surface: exact committed owner, immutable release, owned leaves, and explicit-json keys match"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user surface:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "portable doctor rejects an unsafe absent user-owner authority without touching it" {
+  local outside="$SANDBOX/user-owner-authority"
+  build_portable_doctor_home
+  mkdir "$outside"
+  chmod 700 "$outside"
+  ln -s "$outside" "$PORTABLE_HOME/attachments"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface: owner state path is noncanonical, symlinked, or has unsafe private permissions"* ]] ||
+    { echo "$output"; false; }
+  [ -L "$PORTABLE_HOME/attachments" ]
+  [ "$(readlink "$PORTABLE_HOME/attachments")" = "$outside" ]
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ]
+}
+
+@test "portable doctor rejects unsafe user-journal authority with no owner" {
+  local outside="$SANDBOX/user-journal-authority"
+  build_portable_doctor_home
+  mkdir -p "$PORTABLE_HOME/state" "$outside"
+  chmod 700 "$PORTABLE_HOME/state" "$outside"
+  ln -s "$outside" "$PORTABLE_HOME/state/user-attachment-journals"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface: user attachment journal authority is noncanonical, corrupt, or has unsafe private permissions"* ]] ||
+    { echo "$output"; false; }
+  [ -L "$PORTABLE_HOME/state/user-attachment-journals" ]
+  [ "$(readlink "$PORTABLE_HOME/state/user-attachment-journals")" = "$outside" ]
+  [ -z "$(find "$outside" -mindepth 1 -print -quit)" ]
+}
+
+@test "portable doctor reports a pending user transaction without cleanup or recovery" {
+  local journal owner journal_before owner_before
+  build_portable_doctor_home
+
+  run env -u TRELLIS_CONFIG \
+    HOME="$PORTABLE_ACCOUNT_HOME" \
+    TRELLIS_HOME="$PORTABLE_HOME" \
+    ATTACHMENT_FAULT_PHASE=owner-published \
+    bash "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh" \
+      attach --user --home "$PORTABLE_HOME" --release 1.2.3
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+
+  journal="$PORTABLE_HOME/state/user-attachment-journals/attach.json"
+  owner="$PORTABLE_HOME/attachments/user.json"
+  [ -f "$journal" ] && [ -f "$owner" ]
+  journal_before="$(shasum -a 256 "$journal" | awk '{print $1}')"
+  owner_before="$(shasum -a 256 "$owner" | awk '{print $1}')"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user attachment transaction journal is pending; no recovery or cleanup was attempted"* ]] ||
+    { echo "$output"; false; }
+  [ -f "$journal" ] && [ -f "$owner" ]
+  [ "$(shasum -a 256 "$journal" | awk '{print $1}')" = "$journal_before" ]
+  [ "$(shasum -a 256 "$owner" | awk '{print $1}')" = "$owner_before" ]
+  [ -L "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md" ]
+}
+
+@test "portable doctor rejects an unrelated parent claim without deleting the directory" {
+  local unrelated owner_before
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  unrelated="$PORTABLE_ACCOUNT_HOME/unrelated-owned-parent"
+  mkdir "$unrelated"
+  chmod 700 "$unrelated"
+  jq --arg unrelated "$unrelated" \
+    '.artifacts = [{destination:$unrelated,kind:"parent"}] + .artifacts' \
+    "$PORTABLE_USER_OWNER" > "$PORTABLE_USER_OWNER.next"
+  mv "$PORTABLE_USER_OWNER.next" "$PORTABLE_USER_OWNER"
+  chmod 600 "$PORTABLE_USER_OWNER"
+  owner_before="$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface: committed owner does not match the immutable user-surface manifest"* ]] ||
+    { echo "$output"; false; }
+  [ -d "$unrelated" ] && [ ! -L "$unrelated" ]
+  [ "$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')" = "$owner_before" ]
+}
+
+@test "portable doctor binds owned symlink targets to the immutable release" {
+  local destination foreign="$SANDBOX/foreign-user-target" owner_before
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  destination="$(jq -r '[.artifacts[] | select(.kind == "symlink")][0].destination' "$PORTABLE_USER_OWNER")"
+  printf 'foreign\n' > "$foreign"
+  rm "$destination"
+  ln -s "$foreign" "$destination"
+  jq --arg destination "$destination" --arg foreign "$foreign" '
+    (.artifacts[] | select(.kind == "symlink" and .destination == $destination)).target = $foreign
+  ' "$PORTABLE_USER_OWNER" > "$PORTABLE_USER_OWNER.next"
+  mv "$PORTABLE_USER_OWNER.next" "$PORTABLE_USER_OWNER"
+  chmod 600 "$PORTABLE_USER_OWNER"
+  owner_before="$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface: committed owner does not match the immutable user-surface manifest"* ]] ||
+    { echo "$output"; false; }
+  [ "$(readlink "$destination")" = "$foreign" ]
+  [ "$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')" = "$owner_before" ]
+}
+
+@test "portable doctor binds explicit-json artifact mode to the immutable render" {
+  local destination owner_before
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  destination="$(jq -r '.renders[0].destination' "$PORTABLE_USER_OWNER")"
+  jq --arg destination "$destination" '
+    (.artifacts[] | select(.kind == "file" and .destination == $destination)).mode = "0644"
+    | (.renders[] | select(.destination == $destination)).after_mode = "0644"
+  ' "$PORTABLE_USER_OWNER" > "$PORTABLE_USER_OWNER.next"
+  mv "$PORTABLE_USER_OWNER.next" "$PORTABLE_USER_OWNER"
+  chmod 600 "$PORTABLE_USER_OWNER"
+  chmod 644 "$destination"
+  owner_before="$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface:"* ]] || { echo "$output"; false; }
+  [ "$(portable_file_mode "$destination")" = 644 ]
+  [ "$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')" = "$owner_before" ]
+}
+
+@test "portable doctor rejects corrupt explicit-json after-image content" {
+  local owner_before
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  jq '.renders[0].after_base64 = "e30K"' \
+    "$PORTABLE_USER_OWNER" > "$PORTABLE_USER_OWNER.next"
+  mv "$PORTABLE_USER_OWNER.next" "$PORTABLE_USER_OWNER"
+  chmod 600 "$PORTABLE_USER_OWNER"
+  owner_before="$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')"
+
+  run_portable_doctor
+
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"user surface:"* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$PORTABLE_USER_OWNER" | awk '{print $1}')" = "$owner_before" ]
+}
+
+@test "portable doctor reports user explicit-json drift without changing healthy project rows" {
+  local project_owner project_owner_before project_agents_target
+  build_portable_doctor_home
+  prepare_portable_attachment
+  prepare_portable_user_attachment
+  project_owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  project_owner_before="$(shasum -a 256 "$project_owner" | awk '{print $1}')"
+  project_agents_target="$(readlink "$PORTABLE_PROJECT/.omp/AGENTS.md")"
+
+  run_portable_doctor --project portable-fixture
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  jq '.outputStyle = "drifted"' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json" \
+    > "$PORTABLE_ACCOUNT_HOME/.claude/settings.json.next"
+  mv "$PORTABLE_ACCOUNT_HOME/.claude/settings.json.next" "$PORTABLE_ACCOUNT_HOME/.claude/settings.json"
+  chmod 600 "$PORTABLE_ACCOUNT_HOME/.claude/settings.json"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"✗ user surface: committed explicit-json keys do not match the immutable user-surface template"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user surface:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ attachment ownership: exact committed owner, owned artifacts, and managed hooks match"* ]] ||
+    { echo "$output"; false; }
+  [ "$(shasum -a 256 "$project_owner" | awk '{print $1}')" = "$project_owner_before" ]
+  [ "$(readlink "$PORTABLE_PROJECT/.omp/AGENTS.md")" = "$project_agents_target" ]
+  [ "$(jq -r '.outputStyle' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json")" = "drifted" ]
+}
+
+@test "portable doctor reports a missing owned user leaf" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  rm "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md"
+
+  run_portable_doctor
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"✗ user surface: a Trellis-owned leaf is missing, modified, has the wrong mode or target, or conflicts with an unowned artifact"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user surface:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+  [ ! -e "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md" ]
 }
 
 @test "portable --home --project overrides an inherited legacy config" {
@@ -1743,6 +2065,228 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"layout: inert non-user portable manifest (not locally attached)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"attachment ownership: no committed owner record"* ]] || { echo "$output"; false; }
+}
+
+@test "portable doctor reports the managed core.hooksPath without a false positive" {
+  build_portable_doctor_home
+  prepare_portable_attachment
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"git hook authority: core.hooksPath matches the Trellis managed dispatcher at $expected"* ]] ||
+    { echo "$output"; false; }
+}
+@test "portable doctor accepts foreign bytes outside the managed exclude block" {
+  local exclude foreign_before foreign_after with_foreign duplicate_block
+  build_portable_doctor_home
+  prepare_portable_attachment
+  exclude="$PORTABLE_PROJECT/.git/info/exclude"
+  foreign_before="$SANDBOX/foreign-exclude-before"
+  foreign_after="$SANDBOX/foreign-exclude-after"
+  printf 'foreign prefix embeds %s in arbitrary bytes\n' \
+    '# --- Trellis local attachment exclude block ---' > "$foreign_before"
+  printf 'foreign suffix embeds %s in arbitrary bytes\n' \
+    '# --- end Trellis local attachment exclude block ---' > "$foreign_after"
+  cat "$foreign_before" "$exclude" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  cat "$exclude" "$foreign_after" > "$exclude.tmp"
+  mv "$exclude.tmp" "$exclude"
+  with_foreign="$SANDBOX/exclude-with-foreign"
+  cp "$exclude" "$with_foreign"
+  duplicate_block="$SANDBOX/duplicate-block"
+  sed -n '/^# --- Trellis local attachment exclude block ---$/,/^# --- end Trellis local attachment exclude block ---$/p' \
+    "$exclude" > "$duplicate_block"
+  cat "$duplicate_block" >> "$exclude"
+  run_portable_doctor --project portable-fixture
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  cp "$with_foreign" "$exclude"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"managed excludes: exact immutable native-surface block matches; surrounding user bytes drifted at $exclude"* ]] || { echo "$output"; false; }
+  cmp -s "$with_foreign" "$exclude"
+  grep -Fq 'foreign prefix embeds' "$exclude"
+  grep -Fq 'foreign suffix embeds' "$exclude"
+}
+
+
+@test "portable doctor accepts an authentic dispatcher from an older release payload" {
+  local old_release old_payload manifest owner managed legacy_post legacy_pre
+  build_portable_doctor_home
+  copy_portable_older_release
+  prepare_portable_attachment portable-fixture 1.2.2
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  managed="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  old_release="$PORTABLE_HOME/releases/1.2.2"
+  old_payload="$old_release/payload"
+  manifest="$(portable_file_sha256 "$old_release/release.json")"
+  legacy_post="$(
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$old_payload" \
+      /bin/bash --noprofile --norc -c '
+        source "$1"
+        _attachment_hooks_post_checkout_dispatcher_body "$2" "$3"
+      ' legacy-dispatcher "$old_payload/scripts/lib/attachment.sh" "$old_payload" "$manifest"
+  )"
+  legacy_pre="$(
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$old_payload" \
+      /bin/bash --noprofile --norc -c '
+        source "$1"
+        _attachment_hooks_pre_push_dispatcher_body "$2" "$3" "$4"
+      ' legacy-dispatcher "$old_payload/scripts/lib/attachment.sh" "$old_payload" \
+        core-rules/githooks/pre-push "$manifest"
+  )"
+  [ "$(jq -r '.release' "$owner")" = 1.2.2 ]
+  [ -n "$legacy_post" ]
+  [ -n "$legacy_pre" ]
+  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]]
+  printf '%s\n' "$legacy_post" > "$managed/post-checkout"
+  printf '%s\n' "$legacy_pre" > "$managed/pre-push"
+  chmod 700 "$managed/post-checkout" "$managed/pre-push"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  expected="$managed"
+  [[ "$output" == *"git hook authority: core.hooksPath matches the Trellis managed dispatcher at $expected"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor accepts retained explicit-json values after template changes" {
+  local owner rendered rendered_mode rendered_sha rendered64
+  build_portable_doctor_home
+  prepare_portable_attachment
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  rendered="$PORTABLE_PROJECT/.claude/settings.local.json"
+  rendered_mode="$(stat -f '%Lp' "$rendered" 2>/dev/null)" ||
+    rendered_mode="$(stat -c '%a' "$rendered")"
+  # Drift an owned key's local value away from what the template renders. Owned
+  # keys are nested paths derived from the template at render time, so this must
+  # name one the template actually carries -- pinning `effortLevel` broke the
+  # moment that key stopped being shipped.
+  jq '.permissions.deny = ["Read(./legacy/**)"]' "$rendered" > "$rendered.next"
+  mv "$rendered.next" "$rendered"
+  chmod "$rendered_mode" "$rendered"
+  rendered_sha="$(portable_file_sha256 "$rendered")"
+  rendered64="$(base64 < "$rendered" | tr -d '\n')"
+  jq --arg sha "$rendered_sha" --arg after64 "$rendered64" '
+    .artifacts |= map(
+      if .path == ".claude/settings.local.json" then .sha256 = $sha else . end
+    )
+    | .renders |= map(
+      if .path == ".claude/settings.local.json" then
+        .after_sha256 = $sha
+        | .after_base64 = $after64
+        | .owned_keys |= map(
+            if .path == ["permissions","deny"] then .value = ["Read(./legacy/**)"] else . end
+          )
+      else . end
+    )
+  ' "$owner" > "$owner.next"
+  mv "$owner.next" "$owner"
+  chmod 600 "$owner"
+  # The render must actually own the key, or this test proves nothing.
+  [ "$(jq -r '
+    [.renders[] | select(.path == ".claude/settings.local.json")
+     | .owned_keys[] | select(.path == ["permissions","deny"])] | length
+  ' "$owner")" -eq 1 ]
+  [ "$(jq -c '.permissions.deny' "$rendered")" = '["Read(./legacy/**)"]' ]
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"native surfaces: claude, codex, omp match the immutable Claude/Codex/OMP manifest"* ]] ||
+    { echo "$output"; false; }
+  [ "$(jq -c '.permissions.deny' "$rendered")" = '["Read(./legacy/**)"]' ]
+}
+
+@test "portable doctor rejects inconsistent explicit-json after bytes" {
+  local owner
+  build_portable_doctor_home
+  prepare_portable_attachment
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  jq '
+    .renders |= map(
+      if .path == ".claude/settings.local.json" then .after_base64 = "e30K" else . end
+    )
+  ' "$owner" > "$owner.next"
+  mv "$owner.next" "$owner"
+  chmod 600 "$owner"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"native surfaces: committed render bytes, ownership, or live owned keys are invalid"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor treats the recorded previous hooksPath as drift while hooks are enabled" {
+  local current previous diagnostic current_display root_display expected_display
+  build_portable_doctor_home
+  previous=".husky/_"
+  current="$previous"
+  git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+
+  prepare_portable_attachment
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  [ "$(git -C "$PORTABLE_PROJECT" config --local core.hooksPath)" = "$expected" ]
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$previous" ]
+  current=$'other manager\tpath'
+
+  git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  current_display="$(printf '%q' "$current")"
+  root_display="$(printf '%q' "$PORTABLE_PROJECT")"
+  expected_display="$(printf '%q' "$expected")"
+  diagnostic="core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display"
+  [[ "$output" == *"git hook authority: $diagnostic"* ]] || { echo "$output"; false; }
+  [ "$(git -C "$PORTABLE_PROJECT" config --local core.hooksPath)" = "$current" ]
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$previous" ]
+}
+
+
+@test "portable doctor reports drift in the owned OMP project policy" {
+  build_portable_doctor_home
+  prepare_portable_attachment
+
+  run_portable_doctor --project portable-fixture
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  printf '\n# deliberate project policy drift\n' >> "$PORTABLE_PROJECT/.omp/config.yml"
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"attachment ownership: a Trellis-owned artifact is missing, modified, or escapes its recorded state"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"layout: corrupt — local attachment ownership is conflict, not repairable automatically"* ]] ||
+    { echo "$output"; false; }
+  grep -qF '# deliberate project policy drift' "$PORTABLE_PROJECT/.omp/config.yml"
+}
+
+@test "portable doctor reports when Husky reclaims core.hooksPath without repairing it" {
+  local current diagnostic current_display root_display expected_display
+  build_portable_doctor_home
+  prepare_portable_attachment
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  mkdir -p "$PORTABLE_PROJECT/.husky/_"
+  current=".husky/_"
+  git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  current_display="$(printf '%q' "$current")"
+  root_display="$(printf '%q' "$PORTABLE_PROJECT")"
+  expected_display="$(printf '%q' "$expected")"
+  diagnostic="core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display"
+  [[ "$output" == *"git hook authority: $diagnostic"* ]] || { echo "$output"; false; }
+  [ "$(git -C "$PORTABLE_PROJECT" config --local core.hooksPath)" = ".husky/_" ]
+  [ ! -e "$PORTABLE_PROJECT/.husky/_/pre-push" ]
 }
 
 @test "portable show-config separates tracked policy from validated local fleet state" {
@@ -2161,7 +2705,7 @@ copy_show_config_into() {
   [[ "$output" != *"valid strict local attachment"* ]] || { echo "$output"; false; }
 }
 
-@test "portable show-config rejects native surface and exclude drift" {
+@test "portable show-config rejects native surface drift and accepts surrounding exclude drift" {
   build_portable_doctor_home
   prepare_portable_attachment
   jq --arg checkout "$PORTABLE_CHECKOUT_ID" '
@@ -2198,9 +2742,8 @@ copy_show_config_into() {
 
   run_portable_show_config
 
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"managed excludes: exact Trellis-owned block or surrounding user bytes changed"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"valid strict local attachment"* ]] || { echo "$output"; false; }
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"attachment:            valid strict local attachment"* ]] || { echo "$output"; false; }
 }
 @test "portable show-config rejects a forged owner exclude block that differs from immutable surfaces" {
   build_portable_doctor_home

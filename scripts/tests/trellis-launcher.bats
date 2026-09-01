@@ -14,6 +14,7 @@ setup() {
   SOURCE_POISON="$SANDBOX/source-poison"
   SOURCE_POISON_MARKER="$SANDBOX/source-poison-ran"
   ARGV_LOG="$HOME/trellis-launcher-argv.log"
+  ATTACH_PATH_LOG="$HOME/trellis-launcher-attach-path.log"
   ROUTE_LOG="$SANDBOX/route.log"
   LAUNCHER="$SANDBOX/bin/trellis"
   DISPATCH_ROOT="$SANDBOX/dispatcher"
@@ -86,6 +87,7 @@ make_release() {
   printf '%s\n' "$#"
   for argument in "$@"; do printf '<%s>\n' "$argument"; done
 } > "$HOME/trellis-launcher-argv.log"
+printf '%s\n' "${TRELLIS_ATTACH_CALLER_PATH-__UNSET__}" > "$HOME/trellis-launcher-attach-path.log"
 exit 3
 EOF
       ;;
@@ -360,7 +362,7 @@ launcher_verified_ssh_auth_sock"
 }
 
 @test "copied launcher runs only active immutable payload with exact argv and status" {
-  local expected
+  local expected expected_path="$PATH"
   make_release 1.2.3
 
 
@@ -369,6 +371,14 @@ launcher_verified_ssh_auth_sock"
   expected="$(printf '%s\n' 4 '<attach>' '<--fleet>' '<work fleet>' '<>')"
   [ "$(cat "$ARGV_LOG")" = "$expected" ]
   [ ! -e "$SOURCE_POISON_MARKER" ]
+  [ "$(cat "$ATTACH_PATH_LOG")" = "$expected_path" ]
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(cat "$ATTACH_PATH_LOG")" = __UNSET__ ]
+  # The dispatcher intentionally exits 3 after the launcher has created and
+  # handed off its sealed snapshot. Cleanup is required on this error path too,
+  # not only after a successful payload exit.
+  assert_no_execution_snapshot
 }
 
 @test "direct launcher bootstrap ignores BASH startup and exported function payloads" {

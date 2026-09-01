@@ -30,10 +30,17 @@ if (!passed) {
 NODE
 }
 
-@test "generic recipe dispatch inherits the main loop model at every site" {
+@test "generic recipe dispatch inherits the main loop model at every site except conductor's routed auto-execution" {
   run bash "$REPO/scripts/lint-recipe-routing.sh" --list "$FANOUT" "$DRIFT" "$DIGEST" "$CONDUCTOR" "$TEMPLATE"
   [ "$status" -eq 0 ]
+  # conductor now routes Auto-spec + Review specs + Auto-execute via explicit agentType (distinct-family);
+  # Refresh/Rank and all other recipes remain inherited. Digest now has triage + skeptic (4 sites).
   [ "$(printf '%s\n' "$output" | grep -c ':inherit$')" -eq 12 ]
+  [ "$(printf '%s\n' "$output" | grep -c ':agentType$')" -eq 3 ]
+  run bash "$REPO/scripts/lint-recipe-routing.sh" --list "$CONDUCTOR"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c ':inherit$')" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | grep -c ':agentType$')" -eq 3 ]
 
   run node --input-type=module - "$STUB" "$FANOUT" "$DRIFT" "$DIGEST" "$CONDUCTOR" "$TEMPLATE" <<'NODE'
 import { pathToFileURL } from 'node:url'
@@ -77,9 +84,11 @@ const cases = [
       approved: [{ id: 'P1', route: 'surgical' }],
       __agentOutputByLabel: {
         'ingest-digest': { candidates: [{ id: 'P1', title: 'probe', effort: 'S', risk: 'lo' }], skipped_settled: 0 },
+        'triage:P1': { id: 'P1', title: 'probe', route: 'surgical', rationale: 'ok' },
+        'skeptic:P1': { id: 'P1', skeptic_upheld: true },
       },
     },
-    expected: ['ingest-digest', 'triage:P1', 'build:P1'],
+    expected: ['ingest-digest', 'triage:P1', 'skeptic:P1', 'build:P1'],
   },
   {
     name: 'conductor',
@@ -113,6 +122,36 @@ for (const item of cases) {
       fail(`${item.name}:${label} owns agentType — generic dispatch must inherit the main loop's model`, run)
     }
   }
+}
+// Conductor auto-execution must be typed with distinct-family agents, not inherited.
+{
+  const sha = '2222222222222222222222222222222222222222'
+  const run = await runWorkflow(conductor, {
+    today: '2026-08-03',
+    backlogPath: '/private/tasks/personal/conductor/backlog.json',
+    registryPath: '/private/tasks/personal/conductor/snapshot.json',
+    autoSpecTopN: 1,
+    autoExecuteTopN: 1,
+    authorAgent: 'sol',
+    reviewerAgent: 'grok',
+    __agentOutputByLabel: {
+      'refresh-refs': { complete: true, refs: [{ project: 'repo', repo_path: '/tmp/repo', main_sha: sha }], notes: 'ok' },
+      rank: { generated_for: '2026-08-03', ranked: [{ id: 'alpha', project: 'repo', title: 'alpha', score: 1, reasons: 'top', eligible_auto_spec: true, auto_spec: null, delivered_on_main: false, existing_spec_path: '', auto_spec_exclusions: [], safe: null, surgical: false, status: 'todo' }] },
+      'spec:alpha': { id: 'alpha', branch: 'feature/alpha', spec_path: 'specs/001-alpha/', ready: true, notes: 'ready' },
+      'review:alpha': { id: 'alpha', reviewed: true, ready: true, notes: 'approved' },
+      'execute:alpha': { id: 'alpha', branch: 'feature/alpha', pr_url: 'https://github.com/example/repo/pull/7', gate_green: true, notes: 'green' },
+    },
+  })
+  if (run.error) fail('conductor routed auto-execution threw', run)
+  const spec = run.prompts.find((p) => p.opts.label === 'spec:alpha')
+  const rev = run.prompts.find((p) => p.opts.label === 'review:alpha')
+  const exe = run.prompts.find((p) => p.opts.label === 'execute:alpha')
+  if (!spec || !rev || !exe) fail('conductor routed auto-execution did not dispatch spec+review+execute', run)
+  if (spec.opts.agentType !== 'sol') fail('conductor spec must carry author agentType sol when autoExecute', run)
+  if (rev.opts.agentType !== 'grok') fail('conductor review must carry reviewer agentType grok', run)
+  if (exe.opts.agentType !== 'sol') fail('conductor execute must carry author agentType sol', run)
+  if (hasOwn(spec.opts, 'agent') || hasOwn(rev.opts, 'agent') || hasOwn(exe.opts, 'agent')) fail('conductor routed stages must use agentType only, not agent', run)
+  if (run.result.routing_status !== 'routed' || run.result.auto_execute_hold !== false) fail('conductor routed run must be routing_status routed and not held', run)
 }
 NODE
   [ "$status" -eq 0 ]
@@ -306,7 +345,7 @@ NODE
   run_recipe "$DRIFT" '{"maxParallel":8,"drifts":[{"project":"alpha","path":"hooks/a.sh","fix":"intentional divergence","mechanical":false}]}'
   json_assert '!r.error && r.result.verdicts.length===0'
 
-  run_recipe "$DIGEST" '{"maxParallel":8,"digestPath":"digest.md","approved":[{"id":"P1","route":"validation-only"}],"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"already present","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"already present","route":"validation-only","rationale":"no mutation","skeptic_upheld":true}}}'
+  run_recipe "$DIGEST" '{"maxParallel":8,"digestPath":"digest.md","approved":[{"id":"P1","route":"validation-only"}],"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"already present","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"already present","route":"validation-only","rationale":"no mutation"},"skeptic:P1":{"id":"P1","skeptic_upheld":true}}}'
   json_assert '!r.error && r.result.verdicts.length===0'
 
   run_recipe "$CONDUCTOR" '{"maxParallel":8,"today":"2026-07-28","backlogPath":"/private/tasks/personal/conductor/backlog.json","registryPath":"/private/tasks/personal/conductor/snapshot.json","__agentOutputByLabel":{"refresh-refs":{"complete":true,"refs":[],"notes":"none"},"rank":{"generated_for":"2026-07-28","ranked":[]}}}'

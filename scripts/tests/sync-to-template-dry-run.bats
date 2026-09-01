@@ -21,7 +21,8 @@ setup() {
   PAYLOAD="$RELEASE_DIR/payload"
 
   mkdir -p \
-    "$SOURCE/scripts/lib" "$SOURCE/core-rules" "$SOURCE/docs" "$SOURCE/audits" \
+    "$SOURCE/scripts/lib" "$SOURCE/core-rules/skills/herdr-foreman" \
+    "$SOURCE/core-rules/references" "$SOURCE/docs" "$SOURCE/audits" \
     "$MIRROR" "$SANDBOX/projects" "$HOME/.local/bin" "$TRELLIS_HOME/releases"
   chmod 700 "$TRELLIS_HOME"
 
@@ -49,6 +50,8 @@ EOF
   # CLAUDE.md and publishes it explicitly, so the fixture must too. A fixture
   # without it cannot reach the symlink-destination paths at all.
   ln -s CLAUDE.md "$SOURCE/core-rules/AGENTS.md"
+  printf '# Private executable skill fixture\n' > "$SOURCE/core-rules/skills/herdr-foreman/SKILL.md"
+  printf '# Public Herdr doctrine fixture\n' > "$SOURCE/core-rules/references/herdr-foreman.md"
 
   git -C "$SOURCE" init -q
   git -C "$SOURCE" config user.email ci-bats@trellis.test
@@ -329,6 +332,61 @@ EOF
   [[ "$output" == *'MIRROR LINT FAILED'* ]] || { echo "$output"; false; }
   [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
   [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before_sha" ]
+}
+
+@test "apply refuses an unpaired nested private core-rules entry before staging" {
+  mirror_script="$SOURCE/scripts/sync-to-template.sh"
+  /usr/bin/awk '$0 != "  '\''core-rules/skills/herdr-foreman'\''"' \
+    "$mirror_script" > "$SANDBOX/unpaired-sync-to-template.sh"
+  cat "$SANDBOX/unpaired-sync-to-template.sh" > "$mirror_script"
+  rm -f "$SANDBOX/unpaired-sync-to-template.sh"
+  git -C "$SOURCE" add scripts/sync-to-template.sh
+  git -C "$SOURCE" commit -qm 'unpaired private core-rules policy'
+  SOURCE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
+
+  # Build and seal a fresh release from the committed invalid policy rather than
+  # changing the already-verified payload behind its release record.
+  chmod u+w "$RELEASE_DIR" "$RELEASE_DIR/release.json"
+  find "$PAYLOAD" -type f -exec chmod u+w {} \;
+  find "$PAYLOAD" -depth -type d -exec chmod u+w {} \;
+  rm -rf "$PAYLOAD"
+  mkdir -p "$PAYLOAD"
+  git -C "$SOURCE" archive --format=tar "$SOURCE_COMMIT" | tar -x -C "$PAYLOAD"
+  write_release_record
+  find "$PAYLOAD" -type f -exec chmod a-w {} \;
+  find "$PAYLOAD" -type d -exec chmod a-w {} \;
+  chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
+
+  mkdir -p "$MIRROR/core-rules/skills/herdr-foreman"
+  printf '# Existing published executable\n' > "$MIRROR/core-rules/skills/herdr-foreman/SKILL.md"
+  before="$(shasum -a 256 "$MIRROR/core-rules/skills/herdr-foreman/SKILL.md" | cut -d ' ' -f 1)"
+
+  run_sync --apply
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'nested private core-rules path is missing exact delist prune pair: skills/herdr-foreman -> core-rules/skills/herdr-foreman'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *'Staging portable policy'* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/core-rules/skills/herdr-foreman/SKILL.md" | cut -d ' ' -f 1)" = "$before" ]
+}
+
+@test "apply excludes and prunes the private Herdr skill while publishing its doctrine reference" {
+  mkdir -p "$MIRROR/core-rules/skills/herdr-foreman"
+  printf '# Stale published executable\n' > "$MIRROR/core-rules/skills/herdr-foreman/SKILL.md"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+
+  run_sync --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$MIRROR/core-rules/skills/herdr-foreman/SKILL.md" ]
+  [ ! -e "$MIRROR/core-rules/references/herdr-foreman.md" ]
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$MIRROR/core-rules/skills/herdr-foreman" ]
+  [ "$(cat "$MIRROR/core-rules/references/herdr-foreman.md")" = '# Public Herdr doctrine fixture' ]
 }
 
 @test "clean-tree apply publishes committed engineering bytes and portable config" {

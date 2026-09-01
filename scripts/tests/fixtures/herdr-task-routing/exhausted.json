@@ -1,0 +1,87 @@
+{
+  "reports": [
+    {
+      "provider": "opencode",
+      "limits": [
+        {
+          "id": "window",
+          "status": "exhausted"
+        }
+      ]
+    },
+    {
+      "provider": "google-antigravity",
+      "limits": [
+        {
+          "id": "window",
+          "amount": {
+            "remainingFraction": 0.1
+          }
+        }
+      ]
+    },
+    {
+      "provider": "openai-codex",
+      "limits": [
+        {
+          "id": "luna-window",
+          "status": "exhausted",
+          "scope": {
+            "modelId": "gpt-5.6-luna"
+          }
+        },
+        {
+          "id": "sol-window",
+          "amount": {
+            "remainingFraction": 0.9
+          },
+          "scope": {
+            "modelId": "gpt-5.6-sol"
+          }
+        }
+      ]
+    },
+    {
+      "provider": "opencode-go",
+      "limits": [
+        {
+          "id": "glm-window",
+          "status": "exhausted",
+          "scope": {
+            "modelId": "glm-5.3-flash"
+          }
+        },
+        {
+          "id": "deepseek-window",
+          "status": "exhausted",
+          "scope": {
+            "modelId": "deepseek-v4-flash"
+          }
+        }
+      ]
+    },
+    {
+      "provider": "nous-portal",
+      "limits": [
+        {
+          "id": "window",
+          "status": "exhausted"
+        }
+      ]
+    },
+    {
+      "provider": "xai-oauth",
+      "limits": [
+        {
+          "id": "window",
+          "status": "exhausted"
+        }
+      ]
+    }
+  ],
+  "disabledCredentials": [
+    {
+      "provider": "opencode-go-2"
+    }
+  ]
+}

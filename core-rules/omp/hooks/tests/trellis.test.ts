@@ -28,6 +28,7 @@ import trellisExtension, {
 	normalizeToolInput,
 	parseHookOutput,
 	policyMarker,
+	readTrellisOrchestrationStyle,
 	resolveTrellisRoot,
 	resolveTrellisRuntime,
 	runCanonicalHook,
@@ -39,6 +40,7 @@ import trellisExtension, {
 	type OmpBeforeAgentStartEvent,
 	type OmpContext,
 	type OmpInputEvent,
+	type OmpLogger,
 	type OmpSessionStopEvent,
 	type OmpToolCallEvent,
 	type OmpToolResultEvent,
@@ -152,7 +154,11 @@ function makeReleaseFixture(entries: PayloadFixtureEntry[]): ReleaseFixture {
 	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-release-")));
 	const releaseDir = path.join(root, "releases", "1.0.0");
 	const payloadRoot = path.join(releaseDir, "payload");
-	for (const entry of entries) {
+	const overridden = new Set(entries.map((entry) => entry.path));
+	const fixtureEntries = overridden.has(ORCHESTRATION_STYLE_PATH)
+		? entries
+		: [...entries, { path: ORCHESTRATION_STYLE_PATH, content: ORCHESTRATION_STYLE_SOURCE }];
+	for (const entry of fixtureEntries) {
 		const fullPath = path.join(payloadRoot, entry.path);
 		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
 		if (entry.symlinkTarget !== undefined) {
@@ -167,13 +173,24 @@ function makeReleaseFixture(entries: PayloadFixtureEntry[]): ReleaseFixture {
 }
 
 /** Temp immutable payload with the given canonical script names. */
+const ENV_ECHO_PROBE = '#!/usr/bin/env bash\nfor name in "$@" ${TRELLIS_PROBE_VARS:-}; do\n  case "$name" in\n    \'\'|*[!A-Za-z0-9_]*) continue ;;\n  esac\n  printf \'%s=%s\\n\' "$name" "$(printenv "$name" 2>/dev/null || true)"\ndone\nexit 0\n';
+
+/** Default fixture ships a working env-echo probe: adapter creation verifies TRELLIS_OMP=1 through it. */
 function makeHooksDir(scripts: string[], extraEntries: PayloadFixtureEntry[] = []): string {
-	return makeReleaseFixture([
+	const overridden = new Set(extraEntries.map((entry) => entry.path));
+	const entries: PayloadFixtureEntry[] = [
 		{ path: "core-rules/omp/hooks/pre/trellis.ts", content: "// installed OMP adapter\n" },
 		{ path: "core-rules/hooks/.keep", content: "" },
-		...scripts.map((script) => ({ path: `core-rules/hooks/${script}`, content: "" })),
+		// Working probe by default; an explicit env-echo.sh in extraEntries wins.
+		...(overridden.has("core-rules/hooks/env-echo.sh")
+			? []
+			: [{ path: "core-rules/hooks/env-echo.sh", content: ENV_ECHO_PROBE, mode: 0o755 }]),
+		...scripts
+			.filter((script) => !overridden.has(`core-rules/hooks/${script}`))
+			.map((script) => ({ path: `core-rules/hooks/${script}`, content: "" })),
 		...extraEntries,
-	]).hooksDir;
+	];
+	return makeReleaseFixture(entries).hooksDir;
 }
 
 /** Temp project dir with an optional CLAUDE.md. */
@@ -273,6 +290,20 @@ Second overlay line.`;
 
 const PROJECT_POLICY_MARKER = "# Example project policy";
 
+const ORCHESTRATION_STYLE_PATH = "core-rules/templates/claude-output-styles/trellis-orchestration.md";
+const ORCHESTRATION_STYLE_SOURCE = `---
+name: Trellis Orchestration
+description: Dispatch independent work concurrently while keeping linear and mechanical tasks inline.
+keep-coding-instructions: true
+---
+
+Standing orchestration rule: when a request lists 2+ independent targets (files, projects, skills, questions), dispatch one concurrent Agent per target after shared discovery, rather than processing the targets inline. If concurrency is impossible, state why.
+
+Guard: a single linear unit stays inline, including one cross-repo symbol rename and one failing test; set-wide mechanical work needing no per-item model judgment stays inline.`;
+const ORCHESTRATION_STYLE_BODY = `Standing orchestration rule: when a request lists 2+ independent targets (files, projects, skills, questions), dispatch one concurrent Agent per target after shared discovery, rather than processing the targets inline. If concurrency is impossible, state why.
+
+Guard: a single linear unit stays inline, including one cross-repo symbol rename and one failing test; set-wide mechanical work needing no per-item model judgment stays inline.`;
+
 function makeCtx(overrides: Partial<OmpContext> = {}): OmpContext {
 	return {
 		cwd: makeProjectDir(PROJECT_CLAUDE_MD),
@@ -283,7 +314,13 @@ function makeCtx(overrides: Partial<OmpContext> = {}): OmpContext {
 }
 
 function makeAdapter(
-	options: { spawn?: SpawnFn; hooksDir?: string; tmpDir?: string; trellisRoot?: string } = {},
+	options: {
+		spawn?: SpawnFn;
+		hooksDir?: string;
+		tmpDir?: string;
+		trellisRoot?: string;
+		logger?: OmpLogger;
+	} = {},
 ): { adapter: TrellisAdapter; spawn: SpawnFn; calls: SpawnCall[] } {
 	const hooksDir = options.hooksDir ?? makeHooksDir(ALL_CANONICAL_SCRIPTS);
 	const trellisRoot = options.trellisRoot ?? path.dirname(path.dirname(hooksDir));
@@ -294,6 +331,7 @@ function makeAdapter(
 		trellisRoot,
 		hooksDir,
 		spawn,
+		logger: options.logger,
 		tmpDir: options.tmpDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-tmp-")),
 	});
 	return { adapter, spawn, calls };
@@ -829,6 +867,15 @@ describe("policy marker detection", () => {
 	});
 });
 
+describe("release orchestration style", () => {
+	it("returns exactly the trimmed source body after frontmatter", () => {
+		const hooksDir = makeHooksDir([], [{ path: ORCHESTRATION_STYLE_PATH, content: ORCHESTRATION_STYLE_SOURCE }]);
+		const trellisRoot = path.dirname(path.dirname(hooksDir));
+		const sourceBody = ORCHESTRATION_STYLE_SOURCE.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
+		assert.equal(readTrellisOrchestrationStyle(trellisRoot), sourceBody);
+	});
+});
+
 describe("Trellis preset policy discovery", () => {
 	it("loads only managed preset links resolving inside the canonical preset root", () => {
 		const strictPolicy = "# Compliance strict preset\nCanonical preset body.";
@@ -1176,13 +1223,13 @@ describe("before_agent_start", () => {
 		assert.equal(result.message?.display, false);
 		// Live project policy appended to the system prompt for the child.
 		assert.ok(result.systemPrompt, "expected policy appended to systemPrompt");
-		assert.deepEqual(result.systemPrompt, ["task child prompt without policy", PROJECT_CLAUDE_MD]);
+		assert.deepEqual(result.systemPrompt, ["task child prompt without policy", PROJECT_CLAUDE_MD, ORCHESTRATION_STYLE_BODY]);
 		assert.ok(calls.some((call) => call.script === "session-context.sh"));
 		assert.ok(calls.some((call) => call.script === "inject-primer-index.sh"));
 		assert.ok(calls.some((call) => call.script === "skill-size-preflight.sh"));
 	});
 
-	it("does not duplicate policy when the system prompt already carries it (main session)", async () => {
+	it("does not duplicate project policy and appends the orchestration body (main session)", async () => {
 		const { spawn } = makeSpawn({
 			"session-context.sh": { stdout: sessionContextOut, status: 0 },
 		});
@@ -1193,8 +1240,71 @@ describe("before_agent_start", () => {
 
 		const result = await adapter.onBeforeAgentStart(agentStartEvent(), ctx);
 		assert.ok(result, "session context still injected");
-		assert.equal(result.systemPrompt, undefined, "no policy duplication");
+		assert.deepEqual(result.systemPrompt, ["header", PROJECT_CLAUDE_MD, "tail", ORCHESTRATION_STYLE_BODY]);
 		assert.match(result.message?.content ?? "", /Branch: main/);
+	});
+
+	it("appends the release-owned orchestration body after an existing CLAUDE policy", async () => {
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: ORCHESTRATION_STYLE_PATH, content: ORCHESTRATION_STYLE_SOURCE },
+		]);
+		const trellisRoot = path.dirname(path.dirname(hooksDir));
+		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
+		const { adapter } = makeAdapter({
+			spawn,
+			hooksDir,
+			trellisRoot,
+		});
+
+		const result = await adapter.onBeforeAgentStart(
+			agentStartEvent(),
+			makeCtx({ getSystemPrompt: () => [PROJECT_CLAUDE_MD] }),
+		);
+
+		assert.deepEqual(result?.systemPrompt, [PROJECT_CLAUDE_MD, ORCHESTRATION_STYLE_BODY]);
+	});
+
+	it("does not duplicate the orchestration body already present in the system prompt", async () => {
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: ORCHESTRATION_STYLE_PATH, content: ORCHESTRATION_STYLE_SOURCE },
+		]);
+		const trellisRoot = path.dirname(path.dirname(hooksDir));
+		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
+		const { adapter } = makeAdapter({ spawn, hooksDir, trellisRoot });
+
+		const result = await adapter.onBeforeAgentStart(
+			agentStartEvent(),
+			makeCtx({ getSystemPrompt: () => [PROJECT_CLAUDE_MD, ORCHESTRATION_STYLE_BODY] }),
+		);
+
+		assert.equal(result?.systemPrompt, undefined);
+		assert.match(result?.message?.content ?? "", /Branch: main/);
+	});
+
+	it("does not inject a malformed style and logs the error once per session", async () => {
+		const malformedStyle = "---\nname: Trellis Orchestration\n-- not a frontmatter close --\n\n" + ORCHESTRATION_STYLE_BODY;
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: ORCHESTRATION_STYLE_PATH, content: malformedStyle },
+		]);
+		const trellisRoot = path.dirname(path.dirname(hooksDir));
+		const errors: string[] = [];
+		const logger: OmpLogger = {
+			warn(): void {},
+			error(...args: unknown[]): void {
+				errors.push(args.map(String).join(" "));
+			},
+		};
+		const { spawn } = makeSpawn({ "session-context.sh": { stdout: sessionContextOut, status: 0 } });
+		const { adapter } = makeAdapter({ spawn, hooksDir, trellisRoot, logger });
+		const ctx = makeCtx({ getSystemPrompt: () => [PROJECT_CLAUDE_MD] });
+
+		const first = await adapter.onBeforeAgentStart(agentStartEvent(), ctx);
+		const second = await adapter.onBeforeAgentStart(agentStartEvent(), ctx);
+
+		assert.equal(first?.systemPrompt, undefined);
+		assert.equal(second, undefined);
+		assert.equal(errors.length, 1);
+		assert.match(errors[0] ?? "", /orchestration style/);
 	});
 
 	it("injects canonical Trellis presets that OMP does not discover natively", async () => {
@@ -1217,7 +1327,7 @@ describe("before_agent_start", () => {
 			makeCtx({ cwd: projectDir, getSystemPrompt: () => [PROJECT_CLAUDE_MD] }),
 		);
 
-		assert.deepEqual(result?.systemPrompt, [PROJECT_CLAUDE_MD, preset]);
+		assert.deepEqual(result?.systemPrompt, [PROJECT_CLAUDE_MD, preset, ORCHESTRATION_STYLE_BODY]);
 	});
 
 	it("injects only once per session", async () => {
@@ -1246,7 +1356,7 @@ describe("before_agent_start", () => {
 			agentStartEvent(),
 			makeCtx({ cwd: trellisRoot, getSystemPrompt: () => ["base"] }),
 		);
-		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy]);
+		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy, ORCHESTRATION_STYLE_BODY]);
 	});
 
 	it("uses immutable payload policy when an attached project has no CLAUDE.md", async () => {
@@ -1271,18 +1381,21 @@ describe("before_agent_start", () => {
 			makeCtx({ cwd: projectDir, getSystemPrompt: () => ["base"] }),
 		);
 
-		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy]);
+		assert.deepEqual(result?.systemPrompt, ["base", canonicalPolicy, ORCHESTRATION_STYLE_BODY]);
 	});
 
-	it("skips policy injection when the project has no CLAUDE.md", async () => {
+	it("injects the orchestration body when the project has no CLAUDE.md", async () => {
 		const { spawn } = makeSpawn({
 			"session-context.sh": { stdout: sessionContextOut, status: 0 },
 		});
 		const { adapter } = makeAdapter({ spawn });
-		const ctx = makeCtx({ cwd: fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-nopolicy-")) });
+		const ctx = makeCtx({
+			cwd: fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-nopolicy-")),
+			getSystemPrompt: () => ["base"],
+		});
 		const result = await adapter.onBeforeAgentStart(agentStartEvent(), ctx);
 		assert.ok(result);
-		assert.equal(result.systemPrompt, undefined);
+		assert.deepEqual(result.systemPrompt, ["base", ORCHESTRATION_STYLE_BODY]);
 	});
 });
 
@@ -1428,6 +1541,31 @@ describe("session_stop", () => {
 		assert.equal(calls.length, STOP_SCRIPTS_EXPECTED.length);
 	});
 
+	it("exports TRELLIS_OMP=1 to every stop-script environment", async () => {
+		const { spawn, calls } = makeSpawn({});
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trellis-omp-stop-"));
+		const { adapter } = makeAdapter({ spawn, tmpDir });
+
+		await adapter.onStop(stopEvent(), makeCtx());
+		assert.ok(calls.length > 0);
+		for (const call of calls) {
+			assert.equal(call.options.env.TRELLIS_OMP, "1", `${call.script} must run under the OMP marker`);
+		}
+	});
+
+	it("keeps tool-call gate environments on the OMP marker too", async () => {
+		const { spawn, calls } = makeSpawn({ "block-destructive.sh": { stdout: "", status: 0 } });
+		const { adapter } = makeAdapter({ spawn });
+
+		await adapter.onToolCall(
+			{ type: "tool_call", toolCallId: "call-marker", toolName: "bash", input: { command: "true" } },
+			makeCtx(),
+		);
+		const [call] = calls;
+		if (!call) throw new Error("expected a canonical gate invocation");
+		assert.equal(call.options.env.TRELLIS_OMP, "1");
+	});
+
 	it("skips the whole pass on a continuation (stop_hook_active)", async () => {
 		const { spawn, calls } = makeSpawn({});
 		const { adapter } = makeAdapter({ spawn });
@@ -1465,6 +1603,31 @@ describe("adapter setup refusal", () => {
 	it("throws when the canonical hooks directory is missing", () => {
 		const missing = path.join(os.tmpdir(), "trellis-omp-no-hooks");
 		assert.throws(() => createTrellisAdapter({ trellisRoot: "/tmp", hooksDir: missing }), /canonical hooks directory missing/);
+	});
+
+	it("refuses to create the adapter when TRELLIS_OMP=1 cannot reach canonical scripts", () => {
+		// A payload whose env-echo probe is broken (non-zero exit) must fail
+		// adapter creation: the marker is what keeps model-backed stop scripts
+		// off the Claude rung, so an unprovable marker fails closed at attach.
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{ path: "core-rules/hooks/env-echo.sh", content: "#!/usr/bin/env bash\nexit 3\n", mode: 0o755 },
+		]);
+		assert.throws(
+			() => makeAdapter({ hooksDir }).adapter,
+			/TRELLIS_OMP=1 was not exported/,
+		);
+	});
+
+	it("creates the adapter when the env-echo probe confirms the marker", () => {
+		const hooksDir = makeHooksDir(ALL_CANONICAL_SCRIPTS, [
+			{
+				path: "core-rules/hooks/env-echo.sh",
+				content: '#!/usr/bin/env bash\nprintf \'TRELLIS_OMP=%s\\n\' "$TRELLIS_OMP"\n',
+				mode: 0o755,
+			},
+		]);
+		const { adapter } = makeAdapter({ hooksDir });
+		assert.ok(adapter, "expected adapter creation to succeed");
 	});
 
 	it("runs a real script through runCanonicalHook with the envelope on stdin", () => {

@@ -1,0 +1,35 @@
+{
+  "generatedAt": 1787486400000,
+  "reports": [
+    {
+      "provider": "openai-codex",
+      "fetchedAt": 1787486400000,
+      "limits": [
+        {
+          "id": "openai-codex:primary",
+          "label": "7 days",
+          "scope": {
+            "provider": "openai-codex",
+            "windowId": "7d",
+            "shared": true
+          },
+          "window": {
+            "id": "7d",
+            "label": "7 days",
+            "durationMs": 604800000,
+            "resetsAt": 1788091200000
+          },
+          "amount": {
+            "used": 26,
+            "limit": 100,
+            "remaining": 74,
+            "usedFraction": 0.26,
+            "remainingFraction": 0.74,
+            "unit": "percent"
+          },
+          "status": "ok"
+        }
+      ]
+    }
+  ]
+}

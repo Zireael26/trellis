@@ -864,6 +864,83 @@ release_store_verify() {
   return "$rc"
 }
 
+# An execution snapshot is owned by the long-lived shell that requested it,
+# rather than by the short-lived command-substitution process that creates it.
+# Bash 3.2 keeps $$ bound to that long-lived shell across both subshell forms.
+release_store_write_snapshot_owner() {
+  local snapshot="${1:-}" owner owner_pid owner_birth owner_json python_bin
+  [ "$#" -eq 1 ] || {
+    release_store_err "snapshot owner requires SNAPSHOT_PATH"
+    return 2
+  }
+  release_store_absolute_path_is_clean "$snapshot" || {
+    release_store_err "snapshot owner path is unsafe: $snapshot"
+    return 2
+  }
+  owner="${snapshot}.owner.json"
+  owner_pid="$$"
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      release_store_err "snapshot owner process id is invalid"
+      return 5
+      ;;
+  esac
+  [ "$owner_pid" -gt 0 ] || {
+    release_store_err "snapshot owner process id is invalid"
+    return 5
+  }
+  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || {
+    release_store_err "could not determine snapshot owner process birth"
+    return 5
+  }
+  [ -n "$owner_birth" ] || {
+    release_store_err "could not determine snapshot owner process birth"
+    return 5
+  }
+  command -v jq >/dev/null 2>&1 || {
+    release_store_err "jq is required to write snapshot owner metadata"
+    return 5
+  }
+  owner_json="$(jq -cn --argjson pid "$owner_pid" --arg process_birth "$owner_birth" \
+    '{schema_version:1,pid:$pid,process_birth:$process_birth}')" || {
+    release_store_err "could not encode snapshot owner metadata"
+    return 5
+  }
+  [ -n "$owner_json" ] || {
+    release_store_err "could not encode snapshot owner metadata"
+    return 5
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    release_store_err "python3 with no-follow create support is required for snapshot owner metadata"
+    return 5
+  }
+  python_bin="$(command -v python3)" || return 5
+  if ! "$python_bin" - "$owner" "$owner_json" 2>/dev/null <<'PY'
+import os
+import sys
+
+path, payload = sys.argv[1:3]
+no_follow = getattr(os, "O_NOFOLLOW", 0)
+if not no_follow:
+    raise SystemExit(1)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow, 0o600)
+try:
+    data = (payload + "\n").encode("utf-8")
+    while data:
+        written = os.write(fd, data)
+        if written <= 0:
+            raise OSError("short owner metadata write")
+        data = data[written:]
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    release_store_err "could not create snapshot owner metadata: $owner"
+    return 5
+  fi
+}
+
 # Snapshotting closes the verify-then-execute gap for consumers of an installed
 # release.  Every source lookup below is rooted in an O_NOFOLLOW release-store
 # descriptor; the returned snapshot is private, immutable, and independently
@@ -1372,7 +1449,7 @@ release_store_snapshot_name_is_safe() {
 }
 
 release_store_remove_snapshot() {
-  local snapshot="${1:-}" version="${2:-}" releases parent base python_bin rc
+  local snapshot="${1:-}" version="${2:-}" releases parent base owner python_bin rc
   [ "$#" -eq 2 ] || {
     release_store_err "remove snapshot requires SNAPSHOT_PATH VERSION"
     return 2
@@ -1389,25 +1466,36 @@ release_store_remove_snapshot() {
     release_store_err "snapshot path is not a managed execution snapshot: $snapshot"
     return 2
   }
-  if [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ]; then
+  owner="${snapshot}.owner.json"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ ! -L "$owner" ] && [ -f "$owner" ] || {
+      release_store_err "snapshot owner path is not a regular file: $owner"
+      return 4
+    }
+  fi
+  if [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ] &&
+     [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
     return 0
   fi
-  [ ! -L "$snapshot" ] && [ -d "$snapshot" ] || {
-    release_store_err "snapshot path is not a real directory: $snapshot"
-    return 4
-  }
+  if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    [ ! -L "$snapshot" ] && [ -d "$snapshot" ] || {
+      release_store_err "snapshot path is not a real directory: $snapshot"
+      return 4
+    }
+  fi
   command -v python3 >/dev/null 2>&1 || {
     release_store_err "python3 with descriptor-relative snapshot cleanup support is required"
     return 5
   }
   python_bin="$(command -v python3)" || return 5
 
-  "$python_bin" - "$releases" "$base" <<'PY'
+  "$python_bin" - "$releases" "$base" "${base}.owner.json" <<'PY'
+import errno
 import os
 import stat
 import sys
 
-releases, snapshot_name = sys.argv[1:3]
+releases, snapshot_name, owner_name = sys.argv[1:4]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -1437,6 +1525,15 @@ def lstat_at(parent_fd, name, label):
     except OSError as error:
         state("could not inspect %s without following links: %s" % (label, error))
 
+def optional_lstat_at(parent_fd, name, label):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except (AttributeError, NotImplementedError):
+        unavailable("descriptor-relative no-follow snapshot cleanup support is unavailable")
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return None
+        state("could not inspect %s without following links: %s" % (label, error))
 
 def open_directory(parent_fd, name, label):
     before = lstat_at(parent_fd, name, label)
@@ -1505,6 +1602,7 @@ if not O_DIRECTORY or not O_NOFOLLOW:
 releases_fd = None
 snapshot_fd = None
 snapshot_identity = None
+owner_before = None
 try:
     try:
         releases_fd = os.open(releases, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
@@ -1512,21 +1610,53 @@ try:
         state("could not open release snapshot store without following links: %s" % error)
     if not stat.S_ISDIR(os.fstat(releases_fd).st_mode):
         state("release snapshot store is not a directory")
-    snapshot_fd, snapshot_identity = open_directory(
+
+    owner_before = optional_lstat_at(
+        releases_fd,
+        owner_name,
+        "release execution snapshot owner",
+    )
+    if owner_before is not None and not stat.S_ISREG(owner_before.st_mode):
+        state("release execution snapshot owner is not a regular file")
+
+    snapshot_before = optional_lstat_at(
         releases_fd,
         snapshot_name,
         "release execution snapshot",
     )
-    remove_contents(snapshot_fd, "")
-    os.close(snapshot_fd)
-    snapshot_fd = None
-    current = lstat_at(releases_fd, snapshot_name, "release execution snapshot")
-    if not stat.S_ISDIR(current.st_mode) or identity(current) != snapshot_identity:
-        state("release execution snapshot changed during cleanup")
-    try:
-        os.rmdir(snapshot_name, dir_fd=releases_fd)
-    except OSError as error:
-        state("could not remove release execution snapshot: %s" % error)
+    if snapshot_before is not None:
+        if not stat.S_ISDIR(snapshot_before.st_mode):
+            state("release execution snapshot is not a real directory")
+        snapshot_fd, snapshot_identity = open_directory(
+            releases_fd,
+            snapshot_name,
+            "release execution snapshot",
+        )
+        remove_contents(snapshot_fd, "")
+        os.close(snapshot_fd)
+        snapshot_fd = None
+        current = lstat_at(releases_fd, snapshot_name, "release execution snapshot")
+        if not stat.S_ISDIR(current.st_mode) or identity(current) != snapshot_identity:
+            state("release execution snapshot changed during cleanup")
+        try:
+            os.rmdir(snapshot_name, dir_fd=releases_fd)
+        except OSError as error:
+            state("could not remove release execution snapshot: %s" % error)
+
+    if owner_before is not None:
+        current_owner = optional_lstat_at(
+            releases_fd,
+            owner_name,
+            "release execution snapshot owner",
+        )
+        if current_owner is not None:
+            if not stat.S_ISREG(current_owner.st_mode) or identity(current_owner) != identity(owner_before):
+                state("release execution snapshot owner changed during cleanup")
+            try:
+                os.unlink(owner_name, dir_fd=releases_fd)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    state("could not remove release execution snapshot owner: %s" % error)
 except (AttributeError, NotImplementedError):
     unavailable("descriptor-relative no-follow snapshot cleanup support is unavailable")
 except OSError as error:
@@ -1538,6 +1668,58 @@ finally:
         os.close(releases_fd)
 PY
   rc=$?
+  return "$rc"
+}
+
+# Recover snapshots created by this shell if a command substitution returned
+# between creation and the caller arming its normal cleanup state.
+release_store_remove_owned_snapshots() {
+  local input_version="${1:-}" version releases owner owner_pid owner_birth snapshot owner_rc rc=0
+  [ "$#" -eq 1 ] || {
+    release_store_err "owned snapshot cleanup requires VERSION"
+    return 2
+  }
+  version="$(release_store_normalize_version "$input_version")" || return $?
+  releases="$(release_store_canonical_releases_dir)" || return $?
+  owner_pid="$$"
+  case "$owner_pid" in
+    ''|*[!0-9]*) return 5 ;;
+  esac
+  [ "$owner_pid" -gt 0 ] || return 5
+  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || return 5
+  [ -n "$owner_birth" ] || return 5
+  command -v jq >/dev/null 2>&1 || return 5
+  for owner in "$releases/.tmp.$version.exec."*.owner.json; do
+    [ -e "$owner" ] || [ -L "$owner" ] || continue
+    if [ -L "$owner" ] || [ ! -f "$owner" ]; then
+      release_store_err "snapshot owner path is not a regular file: $owner"
+      rc=4
+      continue
+    fi
+    if ! jq -e --argjson pid "$owner_pid" --arg process_birth "$owner_birth" '
+      type == "object"
+      and (keys | sort) == ["pid","process_birth","schema_version"]
+      and .schema_version == 1
+      and .pid == $pid
+      and .process_birth == $process_birth
+    ' "$owner" >/dev/null 2>&1; then
+      continue
+    fi
+    snapshot="${owner%.owner.json}"
+    if release_store_snapshot_name_is_safe "$releases" "${snapshot##*/}" "$version"; then
+      :
+    else
+      continue
+    fi
+    if release_store_remove_snapshot "$snapshot" "$version" >/dev/null 2>&1; then
+      :
+    else
+      owner_rc=$?
+      if [ "$owner_rc" -gt "$rc" ]; then
+        rc="$owner_rc"
+      fi
+    fi
+  done
   return "$rc"
 }
 
@@ -1566,7 +1748,10 @@ release_store_snapshot_verified_release() (
       fi
     fi
   }
-  trap cleanup_snapshot EXIT INT TERM
+  trap cleanup_snapshot EXIT
+  trap 'cleanup_snapshot; exit 129' HUP
+  trap 'cleanup_snapshot; exit 130' INT
+  trap 'cleanup_snapshot; exit 143' TERM
 
   pinned_digest="$(release_store_release_json_sha256_no_follow "$releases" "$version")" || return $?
   release_store_verify_path "$source" "$version" || return $?
@@ -1580,6 +1765,7 @@ release_store_snapshot_verified_release() (
     release_store_err "could not create private release execution snapshot"
     return 5
   }
+  release_store_write_snapshot_owner "$snapshot" || return $?
   release_store_assert_temp_dir_contained "$snapshot" || return $?
   snapshot_base="${snapshot##*/}"
   release_store_snapshot_name_is_safe "$releases" "$snapshot_base" "$version" || {
@@ -1601,7 +1787,7 @@ release_store_snapshot_verified_release() (
     return 4
   fi
 
-  trap - EXIT INT TERM
+  trap - EXIT HUP INT TERM
   printf '%s\t%s\n' "$snapshot" "$pinned_digest"
 )
 

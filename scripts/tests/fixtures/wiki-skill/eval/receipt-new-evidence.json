@@ -1,0 +1,15 @@
+{
+  "skill": "one-skill",
+  "proposal_sha": "3333333333333333333333333333333333333333",
+  "eval_cmd": "python3 -m scripts.aggregate_benchmark benchmarks/2026-08-29T120500Z --skill-name one-skill",
+  "score": "0.90",
+  "best_before": "0.60",
+  "baseline": "0.60",
+  "verdict": "eval-passed",
+  "run_at": "2026-08-29T12:05:00Z",
+  "runner_model": {
+    "proposer": "gpt::openai/gpt-5.6",
+    "evaluator": "gemini::google/gemini-3.1-pro",
+    "judge": "gemini::google/gemini-3.1-pro"
+  }
+}

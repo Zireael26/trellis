@@ -137,6 +137,10 @@ _pgcfg_validate_policy_fallback() {
         and ((has("branch") | not) or (.branch | safe_git_branch))
         and ((has("redact_paths") | not) or (.redact_paths | valid_portable_path_list))
       else false end;
+    def valid_conductor:
+      if type == "object" then
+        optional_nonnegative_integer("auto_execute_top_n")
+      else false end;
     def valid_disk_janitor:
       if type == "object" then
         optional_boolean("enabled")
@@ -236,6 +240,7 @@ _pgcfg_validate_policy_fallback() {
       else true
       end
     )
+    and (if has("conductor") then (.conductor | valid_conductor) else true end)
     and (if has("disk_janitor") then (.disk_janitor | valid_disk_janitor) else true end)
     and (if has("loop_safety") then (.loop_safety | valid_loop_safety) else true end)
     and (if has("mandatory_pipeline") then (.mandatory_pipeline | valid_mandatory_pipeline) else true end)

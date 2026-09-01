@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source": "gotchas.md#possible-dispatcher-drift",
+  "pattern_key": "possible-managed-dispatcher-drift",
+  "occurrences": [
+    {
+      "ref": "context-log.md#session-2026-08-18-note",
+      "recorded": false
+    },
+    {
+      "ref": "context-log.md#session-2026-08-22-note",
+      "recorded": false
+    }
+  ],
+  "preconditions": [
+    "The project is attached to Trellis"
+  ],
+  "inputs_needed": false,
+  "inputs": [],
+  "steps": [
+    {
+      "order": 1,
+      "action": "Note that the managed dispatcher might need inspection"
+    }
+  ],
+  "result": "The same possible drift is mentioned twice",
+  "verification": "No doctor run or independent confirmation is recorded",
+  "secret_values_present": false
+}

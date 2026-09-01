@@ -1,0 +1,21 @@
+{
+  "plan_type": "fixture-plan",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": {
+        "value": 20
+      },
+      "limit_window_seconds": 18000,
+      "reset_at": 1787497200
+    },
+    "secondary_window": {
+      "used_percent": {
+        "value": 26
+      },
+      "limit_window_seconds": 604800,
+      "reset_at": 1788091200
+    }
+  }
+}

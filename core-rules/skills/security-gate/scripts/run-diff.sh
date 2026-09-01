@@ -118,7 +118,37 @@ if [ -z "$BASELINE" ] || [ ! -f "$BASELINE" ]; then
 fi
 
 # --- changed files in range -----------------------------------------------
-CHANGED="$(git -C "$PROJECT_DIR" diff --name-only --diff-filter=ACMR "$RANGE" 2>/dev/null || true)"
+# An empty file list and a FAILED diff are different facts, and the previous
+# form could not tell them apart: `2>/dev/null || true` swallowed the error, so
+# a wrong repository, an unresolvable range or any git error produced an empty
+# CHANGED and three green rows with MERGEABLE. A secret scan that reports clean
+# having scanned nothing is worse than no scan, because it carries assurance.
+# Capture the status separately and let a failed diff BLOCK.
+CHANGED_ERR="$(mktemp)"
+CHANGED="$(git -C "$PROJECT_DIR" diff --name-only --diff-filter=ACMR "$RANGE" 2>"$CHANGED_ERR")"
+CHANGED_RC=$?
+if [ "$CHANGED_RC" -ne 0 ]; then
+  printf 'security-gate: could not resolve the diff for range %s in %s (git exit %s)\n' \
+    "$RANGE" "$PROJECT_DIR" "$CHANGED_RC" >&2
+  sed 's/^/security-gate: git: /' "$CHANGED_ERR" >&2
+  rm -f "$CHANGED_ERR"
+  print_verdict "❌ fail" "❌ fail" "❌ fail" "BLOCKED"
+  exit 1
+fi
+rm -f "$CHANGED_ERR"
+
+# `-C` changes the working directory only; it does NOT override an inherited
+# GIT_DIR, so the diff above can be routed at a repository that is not
+# PROJECT_DIR. Assert the resolution landed where we intended before trusting
+# an empty result to mean "nothing changed".
+RESOLVED_TOP="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '')"
+if [ -z "$RESOLVED_TOP" ] || [ "$(cd "$RESOLVED_TOP" 2>/dev/null && pwd -P)" != "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" ]; then
+  printf 'security-gate: diff resolved to %s, expected %s — refusing to report a verdict\n' \
+    "${RESOLVED_TOP:-<unresolvable>}" "$PROJECT_DIR" >&2
+  print_verdict "❌ fail" "❌ fail" "❌ fail" "BLOCKED"
+  exit 1
+fi
+
 if [ -z "$CHANGED" ]; then
   print_verdict "✅ pass" "✅ pass" "✅ pass" "MERGEABLE"
   exit 0

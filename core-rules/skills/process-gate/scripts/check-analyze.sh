@@ -4,8 +4,8 @@
 #
 # If any specs/NNN-*/ path is touched in the range, read each touched spec
 # dir's authoritative analyze report `## Verdict:` line:
-#   PASS                       -> pass
-#   NEEDS-REVISION | BLOCKED   -> warn
+#   PASS  /  PASS (<qualifier>) -> pass
+#   NEEDS-REVISION | BLOCKED   -> warn (exact match only)
 #   analyze report missing     -> warn ("analyze not run for <dir>")
 # Worst across touched dirs wins. If no spec dir is touched -> pass.
 #
@@ -96,8 +96,15 @@ while IFS= read -r dir; do
   # Read the `## Verdict:` line; tolerate absence / odd casing in the value.
   verdict_line="$(grep -m1 -E '^##[[:space:]]*Verdict:' "$analyze" 2>/dev/null || true)"
   verdict="$(printf "%s" "$verdict_line" | sed -E 's/^##[[:space:]]*Verdict:[[:space:]]*//' | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  # A qualified PASS is still a PASS. The `analyze` skill emits both
+  # `## Verdict: PASS` and `## Verdict: PASS (1 warning)`; the space-stripping above
+  # turns the second into `PASS(1WARNING)`, which matched no arm and fell through to
+  # "no recognizable Verdict line" — so every spec using the qualified form had been
+  # warning unnoticed. NEEDS-REVISION and BLOCKED stay exact by decision: a qualified
+  # form of either is not a thing the skill emits, and loosening them would let a
+  # typo read as a recognized verdict.
   case "$verdict" in
-    PASS)
+    PASS|PASS\(*)
       passes+=("$dir: analyze verdict is PASS ($analyze_name)") ;;
     NEEDS-REVISION|BLOCKED)
       findings+=("$dir: analyze verdict is ${verdict} ($analyze_name) — resolve before merge")

@@ -1,0 +1,641 @@
+#!/usr/bin/env bash
+# Test-only Git mutation fence.
+#
+# scripts/run-tests.sh puts this directory first on PATH and gives every shard a
+# private TRELLIS_TEST_GIT_FENCE_ROOT. Read-only Git commands pass through. A
+# command that can mutate repository/config/worktree state is delegated only
+# when its canonical Git common directory (or init/clone/config destination) is
+# strictly below that root. This is intentionally a second boundary after the
+# runner clears hook-exported GIT_* routing variables: a broken fixture must fail
+# loudly, never fall back to the checkout that launched the suite.
+
+set -uo pipefail
+
+FENCE_ROOT="${TRELLIS_TEST_GIT_FENCE_ROOT:-}"
+REAL_GIT="${TRELLIS_TEST_REAL_GIT:-}"
+SELF="${BASH_SOURCE[0]}"
+ORIGINAL_ARGS=("$@")
+
+fence_die() {
+  printf 'test-git-fence: REFUSED: %s\n' "$*" >&2
+  exit 97
+}
+
+[ -n "$FENCE_ROOT" ] || fence_die "TRELLIS_TEST_GIT_FENCE_ROOT is not set"
+[ -d "$FENCE_ROOT" ] || fence_die "test root is unavailable: $FENCE_ROOT"
+[ -n "$REAL_GIT" ] || fence_die "TRELLIS_TEST_REAL_GIT is not set"
+[ -x "$REAL_GIT" ] || fence_die "real Git is unavailable: $REAL_GIT"
+[ "$REAL_GIT" != "$SELF" ] || fence_die "real Git resolves to the fence itself"
+
+canonical_path() {
+  command -v python3 >/dev/null 2>&1 || fence_die "python3 is required to canonicalize mutation targets"
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(os.path.abspath(sys.argv[1])))
+PY
+}
+
+FENCE_ROOT="$(canonical_path "$FENCE_ROOT")" || fence_die "could not canonicalize test root"
+
+path_is_fenced() {
+  local candidate
+  candidate="$(canonical_path "$1")" || return 1
+  case "$candidate/" in
+    "$FENCE_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_fenced_path() {
+  local operation="$1" candidate="$2" canonical
+  canonical="$(canonical_path "$candidate")" || fence_die "$operation target cannot be canonicalized: $candidate"
+  if ! path_is_fenced "$canonical"; then
+    fence_die "$operation targets '$canonical' outside test root '$FENCE_ROOT'"
+  fi
+}
+
+# Parse Git's global options so repository probes use exactly the same -C,
+# --git-dir, and other routing arguments as the requested command. Track -C's
+# effective directory separately for relative init/clone/config-file targets.
+GIT_PREFIX=()
+SUBCOMMAND=""
+ROUTED_GIT_DIR="${GIT_DIR:-}"
+ROUTED_WORK_TREE="${GIT_WORK_TREE:-}"
+EFFECTIVE_CWD="$(canonical_path "$PWD")" || fence_die "could not canonicalize the current directory"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C)
+      [ "$#" -ge 2 ] || fence_die "Git option -C is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      case "$2" in
+        /*) EFFECTIVE_CWD="$2" ;;
+        *) EFFECTIVE_CWD="$EFFECTIVE_CWD/$2" ;;
+      esac
+      EFFECTIVE_CWD="$(canonical_path "$EFFECTIVE_CWD")" || fence_die "could not canonicalize Git -C target: $2"
+      shift 2
+      ;;
+    -C?*)
+      GIT_PREFIX+=("$1")
+      case "${1#-C}" in
+        /*) EFFECTIVE_CWD="${1#-C}" ;;
+        *) EFFECTIVE_CWD="$EFFECTIVE_CWD/${1#-C}" ;;
+      esac
+      EFFECTIVE_CWD="$(canonical_path "$EFFECTIVE_CWD")" || fence_die "could not canonicalize Git -C target: ${1#-C}"
+      shift
+      ;;
+    --git-dir)
+      [ "$#" -ge 2 ] || fence_die "Git option --git-dir is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      ROUTED_GIT_DIR="$2"
+      shift 2
+      ;;
+    --git-dir=*)
+      GIT_PREFIX+=("$1")
+      ROUTED_GIT_DIR="${1#--git-dir=}"
+      shift
+      ;;
+    --work-tree)
+      [ "$#" -ge 2 ] || fence_die "Git option --work-tree is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      ROUTED_WORK_TREE="$2"
+      shift 2
+      ;;
+    --work-tree=*)
+      GIT_PREFIX+=("$1")
+      ROUTED_WORK_TREE="${1#--work-tree=}"
+      shift
+      ;;
+    -c)
+      [ "$#" -ge 2 ] || fence_die "Git option -c is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      config_key_prefix="$(printf '%s' "${2%%=*}" | tr '[:upper:]' '[:lower:]')"
+      if [ "$config_key_prefix" = "core.worktree" ] && [ "${2#*=}" != "$2" ]; then
+        ROUTED_WORK_TREE="${2#*=}"
+      fi
+      shift 2
+      ;;
+    --config-env)
+      [ "$#" -ge 2 ] || fence_die "Git option --config-env is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      config_env_key="$(printf '%s' "${2%%=*}" | tr '[:upper:]' '[:lower:]')"
+      config_env_name="${2#*=}"
+      if [ "$config_env_key" = "core.worktree" ] && [ "$config_env_name" != "$2" ]; then
+        case "$config_env_name" in
+          ''|[0-9]*|*[!A-Za-z0-9_]*) fence_die "invalid --config-env variable name: $config_env_name" ;;
+        esac
+        ROUTED_WORK_TREE="${!config_env_name:-}"
+        [ -n "$ROUTED_WORK_TREE" ] || fence_die "--config-env work-tree variable is empty: $config_env_name"
+      fi
+      shift 2
+      ;;
+    --config-env=*)
+      GIT_PREFIX+=("$1")
+      config_env_spec="${1#--config-env=}"
+      config_env_key="$(printf '%s' "${config_env_spec%%=*}" | tr '[:upper:]' '[:lower:]')"
+      config_env_name="${config_env_spec#*=}"
+      if [ "$config_env_key" = "core.worktree" ] && [ "$config_env_name" != "$config_env_spec" ]; then
+        case "$config_env_name" in
+          ''|[0-9]*|*[!A-Za-z0-9_]*) fence_die "invalid --config-env variable name: $config_env_name" ;;
+        esac
+        ROUTED_WORK_TREE="${!config_env_name:-}"
+        [ -n "$ROUTED_WORK_TREE" ] || fence_die "--config-env work-tree variable is empty: $config_env_name"
+      fi
+      shift
+      ;;
+    --namespace|--super-prefix)
+      [ "$#" -ge 2 ] || fence_die "Git option $1 is missing its value"
+      GIT_PREFIX+=("$1" "$2")
+      shift 2
+      ;;
+    --namespace=*|--super-prefix=*)
+      GIT_PREFIX+=("$1")
+      shift
+      ;;
+    --)
+      GIT_PREFIX+=("$1")
+      shift
+      [ "$#" -gt 0 ] || break
+      SUBCOMMAND="$1"
+      shift
+      break
+      ;;
+    -*)
+      GIT_PREFIX+=("$1")
+      shift
+      ;;
+    *)
+      SUBCOMMAND="$1"
+      shift
+      break
+      ;;
+  esac
+done
+SUBCOMMAND_ARGS=("$@")
+SUBCOMMAND_ARG_COUNT="$#"
+
+resolve_command_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$EFFECTIVE_CWD/$1" ;;
+  esac
+}
+
+require_fenced_mutation_routes() {
+  local operation="$1" route
+  if [ -n "${GIT_CONFIG_PARAMETERS:-}" ] || [ -n "${GIT_CONFIG_COUNT:-}" ]; then
+    fence_die "$operation inherits dynamic Git config routing"
+  fi
+  if [ -n "$ROUTED_GIT_DIR" ]; then
+    route="$(resolve_command_path "$ROUTED_GIT_DIR")"
+    require_fenced_path "$operation routed Git directory" "$route"
+  fi
+  if [ -n "$ROUTED_WORK_TREE" ]; then
+    route="$(resolve_command_path "$ROUTED_WORK_TREE")"
+    require_fenced_path "$operation routed work tree" "$route"
+  fi
+  if [ -n "${GIT_COMMON_DIR:-}" ]; then
+    route="$(resolve_command_path "$GIT_COMMON_DIR")"
+    require_fenced_path "$operation routed common directory" "$route"
+  fi
+  if [ -n "${GIT_INDEX_FILE:-}" ]; then
+    route="$(resolve_command_path "$GIT_INDEX_FILE")"
+    require_fenced_path "$operation routed index" "$route"
+  fi
+  if [ -n "${GIT_OBJECT_DIRECTORY:-}" ]; then
+    route="$(resolve_command_path "$GIT_OBJECT_DIRECTORY")"
+    require_fenced_path "$operation routed object directory" "$route"
+  fi
+  if [ -n "${GIT_QUARANTINE_PATH:-}" ]; then
+    route="$(resolve_command_path "$GIT_QUARANTINE_PATH")"
+    require_fenced_path "$operation quarantine directory" "$route"
+  fi
+  if [ -n "${GIT_SHALLOW_FILE:-}" ]; then
+    route="$(resolve_command_path "$GIT_SHALLOW_FILE")"
+    require_fenced_path "$operation shallow file" "$route"
+  fi
+}
+
+require_fenced_repo() {
+  local operation="$1" common git_dir configured_work_tree unresolved_target
+  require_fenced_mutation_routes "$operation"
+  if ! common="$(GIT_OPTIONAL_LOCKS=0 "$REAL_GIT" ${GIT_PREFIX[@]+"${GIT_PREFIX[@]}"} rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || [ -z "$common" ]; then
+    # A creating/just-created fixture can legitimately have no resolvable common
+    # directory yet. That is safe only when the actual routed destination (or,
+    # absent one, Git's effective cwd) is itself inside the private root. An
+    # inherited outside GIT_DIR was already rejected above and cannot fall back.
+    unresolved_target="${ROUTED_GIT_DIR:-${GIT_COMMON_DIR:-${GIT_OBJECT_DIRECTORY:-$EFFECTIVE_CWD}}}"
+    unresolved_target="$(resolve_command_path "$unresolved_target")"
+    require_fenced_path "$operation unresolved repository target" "$unresolved_target"
+    return 0
+  fi
+  require_fenced_path "$operation Git common directory" "$common"
+  if ! git_dir="$(GIT_OPTIONAL_LOCKS=0 "$REAL_GIT" ${GIT_PREFIX[@]+"${GIT_PREFIX[@]}"} rev-parse --path-format=absolute --absolute-git-dir 2>/dev/null)" || [ -z "$git_dir" ]; then
+    fence_die "$operation has no provable per-worktree Git directory"
+  fi
+  require_fenced_path "$operation per-worktree Git directory" "$git_dir"
+  # A persisted core.worktree can redirect checkout/clean even without an env or
+  # CLI routing option. It is absent for ordinary linked worktrees; when present
+  # it must be an absolute path below the private root.
+  configured_work_tree="$(GIT_OPTIONAL_LOCKS=0 "$REAL_GIT" ${GIT_PREFIX[@]+"${GIT_PREFIX[@]}"} config --get core.worktree 2>/dev/null || true)"
+  if [ -n "$configured_work_tree" ]; then
+    case "$configured_work_tree" in
+      /*) require_fenced_path "$operation configured work tree" "$configured_work_tree" ;;
+      *) fence_die "$operation has an unprovable relative configured work tree: $configured_work_tree" ;;
+    esac
+  fi
+}
+
+config_is_mutation() {
+  local arg positional_count=0 explicit_read=0 skip_value=0
+  for arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+    if [ "$skip_value" -eq 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      --add|--replace-all|--unset|--unset-all|--rename-section|--remove-section|--edit|-e)
+        return 0
+        ;;
+      set|unset|unset-all|rename-section|remove-section|edit)
+        return 0
+        ;;
+      get|get-all|get-regexp|get-urlmatch|list|--get|--get-all|--get-regexp|--get-urlmatch|--list|-l|--get-color|--get-colorbool)
+        explicit_read=1
+        ;;
+      --file|-f|--blob|--default|--type)
+        # The following token is an option value, not a key/value positional.
+        skip_value=1
+        ;;
+      --global|--system|--local|--worktree|--fixed-value|--includes|--no-includes|--show-origin|--show-scope|--null|-z|--name-only|--type=*|--bool|--int|--bool-or-int|--path|--expiry-date|--default=*|--file=*|-f?*|--blob=*)
+        ;;
+      --)
+        ;;
+      -*)
+        ;;
+      *)
+        positional_count=$((positional_count + 1))
+        ;;
+    esac
+  done
+  [ "$explicit_read" -eq 1 ] && return 1
+  [ "$positional_count" -ge 2 ]
+}
+
+fence_config_mutation() {
+  local index arg scope=repo target="${GIT_CONFIG:-}" config_key="" config_value="" skip_value=0
+  # Even an explicit --file/--global destination must not smuggle an inherited
+  # repository route outside the fence. Reject every mutation route first.
+  require_fenced_mutation_routes "git config write"
+  [ -z "$target" ] || scope="file"
+  for ((index = 0; index < SUBCOMMAND_ARG_COUNT; index++)); do
+    arg="${SUBCOMMAND_ARGS[$index]}"
+    case "$arg" in
+      --global) scope=global ;;
+      --system) scope=system ;;
+      --local|--worktree) scope=repo ;;
+      --file=*) scope="file"; target="${arg#--file=}" ;;
+      -f?*) scope="file"; target="${arg#-f}" ;;
+      --file|-f)
+        index=$((index + 1))
+        [ "$index" -lt "$SUBCOMMAND_ARG_COUNT" ] || fence_die "git config $arg is missing its path"
+        scope="file"
+        target="${SUBCOMMAND_ARGS[$index]}"
+        ;;
+    esac
+  done
+
+  # A fenced config file must not route a later checkout/clean to an arbitrary
+  # host tree. Capture the ordinary legacy form (`core.worktree PATH`) and the
+  # modern form (`set core.worktree PATH`); unset/remove forms carry no target.
+  for arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+    if [ "$skip_value" -eq 1 ]; then
+      skip_value=0
+      continue
+    fi
+    case "$arg" in
+      --file|-f|--blob|--default|--type) skip_value=1 ;;
+      --global|--system|--local|--worktree|--add|--replace-all|--fixed-value|--includes|--no-includes|--show-origin|--show-scope|--null|-z|--name-only|--type=*|--bool|--int|--bool-or-int|--path|--expiry-date|--default=*|--file=*|-f?*|--blob=*|set) ;;
+      --|-*) ;;
+      *)
+        if [ -z "$config_key" ]; then
+          config_key="$arg"
+        elif [ -z "$config_value" ]; then
+          config_value="$arg"
+        fi
+        ;;
+    esac
+  done
+  config_key="$(printf '%s' "$config_key" | tr '[:upper:]' '[:lower:]')"
+  if [ "$config_key" = "core.worktree" ] && [ -n "$config_value" ]; then
+    case "$config_value" in
+      /*) require_fenced_path "git config core.worktree" "$config_value" ;;
+      *) fence_die "git config core.worktree uses an unprovable relative target: $config_value" ;;
+    esac
+  fi
+
+  case "$scope" in
+    repo)
+      require_fenced_repo "git config write"
+      ;;
+    global)
+      target="${GIT_CONFIG_GLOBAL:-${HOME:-}/.gitconfig}"
+      [ -n "$target" ] || fence_die "git config --global has no provable destination"
+      target="$(resolve_command_path "$target")"
+      require_fenced_path "git config --global write" "$target"
+      ;;
+    system)
+      target="${GIT_CONFIG_SYSTEM:-}"
+      [ -n "$target" ] || fence_die "git config --system writes are forbidden in tests"
+      target="$(resolve_command_path "$target")"
+      require_fenced_path "git config --system write" "$target"
+      ;;
+    file)
+      [ -n "$target" ] || fence_die "git config file write has no destination"
+      target="$(resolve_command_path "$target")"
+      require_fenced_path "git config file write" "$target"
+      ;;
+  esac
+}
+
+fence_maintenance() {
+  local arg action="" global_target
+  for arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+    case "$arg" in
+      -*) ;;
+      *) action="$arg"; break ;;
+    esac
+  done
+  case "$action" in
+    run)
+      require_fenced_repo "git maintenance run"
+      ;;
+    register|unregister)
+      require_fenced_repo "git maintenance $action"
+      global_target="${GIT_CONFIG_GLOBAL:-${HOME:-}/.gitconfig}"
+      [ -n "$global_target" ] || fence_die "git maintenance $action has no provable global config destination"
+      global_target="$(resolve_command_path "$global_target")"
+      require_fenced_path "git maintenance $action global config" "$global_target"
+      ;;
+    start|stop)
+      fence_die "git maintenance $action may modify host scheduler state"
+      ;;
+    *)
+      fence_die "git maintenance action is unknown or unsupported: ${action:-<none>}"
+      ;;
+  esac
+}
+
+fence_init() {
+  local index arg target="" separate="" routed="" skip_next=0 end_options=0
+  require_fenced_mutation_routes "git init"
+  for ((index = 0; index < SUBCOMMAND_ARG_COUNT; index++)); do
+    arg="${SUBCOMMAND_ARGS[$index]}"
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    if [ "$end_options" -eq 1 ]; then
+      target="$arg"
+      continue
+    fi
+    case "$arg" in
+      --separate-git-dir=*) separate="${arg#--separate-git-dir=}" ;;
+      --separate-git-dir)
+        index=$((index + 1))
+        [ "$index" -lt "$SUBCOMMAND_ARG_COUNT" ] || fence_die "git init --separate-git-dir is missing its path"
+        separate="${SUBCOMMAND_ARGS[$index]}"
+        ;;
+      -b|--initial-branch|--template|--object-format|--ref-format)
+        skip_next=1
+        ;;
+      --initial-branch=*|--template=*|--object-format=*|--ref-format=*|-b?*|-q|--quiet|--bare|--shared|--shared=*)
+        ;;
+      --) end_options=1 ;;
+      -*) ;;
+      *) target="$arg" ;;
+    esac
+  done
+  if [ -n "$ROUTED_GIT_DIR" ]; then
+    routed="$(resolve_command_path "$ROUTED_GIT_DIR")"
+    require_fenced_path "git init routed Git directory" "$routed"
+  fi
+  target="${target:-$EFFECTIVE_CWD}"
+  target="$(resolve_command_path "$target")"
+  require_fenced_path "git init" "$target"
+  if [ -n "$separate" ]; then
+    separate="$(resolve_command_path "$separate")"
+    require_fenced_path "git init separate Git directory" "$separate"
+  fi
+}
+
+fence_clone() {
+  local arg positional=() positional_count=0 skip_next=0 waiting_option="" separate="" destination routed="" source_name end_options=0
+  require_fenced_mutation_routes "git clone"
+  for arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+    if [ "$skip_next" -eq 1 ]; then
+      if [ "$waiting_option" = "--separate-git-dir" ]; then
+        separate="$arg"
+      fi
+      skip_next=0
+      waiting_option=""
+      continue
+    fi
+    if [ "$end_options" -eq 1 ]; then
+      positional+=("$arg")
+      positional_count=$((positional_count + 1))
+      continue
+    fi
+    case "$arg" in
+      -b|-o|-u|-c|-j|--branch|--origin|--upload-pack|--reference|--reference-if-able|--separate-git-dir|--template|--depth|--shallow-since|--shallow-exclude|--jobs|--server-option|--filter|--config|--bundle-uri|--ref-format|--object-format)
+        skip_next=1
+        waiting_option="$arg"
+        ;;
+      --) end_options=1 ;;
+      --separate-git-dir=*) separate="${arg#--separate-git-dir=}" ;;
+      --branch=*|--origin=*|--upload-pack=*|--reference=*|--reference-if-able=*|--template=*|--depth=*|--shallow-since=*|--shallow-exclude=*|--jobs=*|--server-option=*|--filter=*|--config=*|--bundle-uri=*|--ref-format=*|--object-format=*|-c?*|-j?*) ;;
+      -l|--local|--no-local|-s|--shared|--hardlinks|--no-hardlinks|-q|--quiet|-v|--verbose|--progress|--checkout|--no-checkout|-n|--bare|--mirror|--dissociate|--reject-shallow|--no-reject-shallow|--single-branch|--no-single-branch|--tags|--no-tags|--recurse-submodules|--recurse-submodules=*|--shallow-submodules|--no-shallow-submodules|--remote-submodules|--no-remote-submodules|--sparse|--also-filter-submodules|--no-also-filter-submodules|-4|--ipv4|-6|--ipv6) ;;
+      -*) fence_die "git clone uses an unsupported option: $arg" ;;
+      *) positional+=("$arg"); positional_count=$((positional_count + 1)) ;;
+    esac
+  done
+  if [ -n "$ROUTED_GIT_DIR" ]; then
+    routed="$(resolve_command_path "$ROUTED_GIT_DIR")"
+    require_fenced_path "git clone routed Git directory" "$routed"
+  fi
+  [ "$positional_count" -ge 1 ] || fence_die "git clone has no source"
+  if [ "$positional_count" -ge 2 ]; then
+    destination="${positional[$((positional_count - 1))]}"
+  else
+    source_name="${positional[0]%/}"
+    source_name="${source_name##*/}"
+    source_name="${source_name%.git}"
+    [ -n "$source_name" ] || fence_die "git clone default destination cannot be derived safely"
+    destination="$source_name"
+  fi
+  destination="$(resolve_command_path "$destination")"
+  require_fenced_path "git clone destination" "$destination"
+  if [ -n "$separate" ]; then
+    separate="$(resolve_command_path "$separate")"
+    require_fenced_path "git clone separate Git directory" "$separate"
+  fi
+}
+
+case "$SUBCOMMAND" in
+  "")
+    GIT_OPTIONAL_LOCKS=0 exec "$REAL_GIT" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+    ;;
+  init)
+    fence_init
+    ;;
+  clone)
+    fence_clone
+    ;;
+  config)
+    if config_is_mutation; then
+      fence_config_mutation
+    fi
+    ;;
+  maintenance)
+    fence_maintenance
+    ;;
+  worktree)
+    worktree_action=""
+    for worktree_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$worktree_arg" in
+        --|-*) ;;
+        *) worktree_action="$worktree_arg"; break ;;
+      esac
+    done
+    case "$worktree_action" in
+      add|remove|prune|move|repair|lock|unlock)
+        # Some janitor cases deliberately put a linked tree under /private/tmp.
+        # Its path may therefore be outside FENCE_ROOT; ownership is proved by
+        # both the common dir and per-worktree gitdir remaining inside the
+        # freshly-created fixture repo. Git cannot remove an unrelated tree
+        # through that fixture common dir.
+        require_fenced_repo "git worktree $worktree_action"
+        ;;
+    esac
+    ;;
+  clean)
+    clean_dry_run=0
+    clean_end_options=0
+    for clean_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      if [ "$clean_end_options" -eq 1 ]; then
+        continue
+      fi
+      case "$clean_arg" in
+        --) clean_end_options=1 ;;
+        -n|--dry-run) clean_dry_run=1 ;;
+        --no-dry-run) clean_dry_run=0 ;;
+      esac
+    done
+    # Combined short options are conservatively fenced; only exact dry-run
+    # switches bypass repository proof.
+    [ "$clean_dry_run" -eq 1 ] || require_fenced_repo "git clean"
+    ;;
+  add|am|apply|bisect|checkout|cherry-pick|commit|commit-tree|fetch|filter-branch|gc|merge|mktree|mv|notes|pack-refs|prune|pull|push|read-tree|rebase|reflog|repack|replace|reset|restore|revert|rm|sparse-checkout|stage|stash|submodule|switch|update-index|update-ref)
+    require_fenced_repo "git $SUBCOMMAND"
+    ;;
+  archive)
+    # Reads repository objects and writes only its requested output stream/file;
+    # it cannot mutate refs, config, the worktree, or the object store.
+    ;;
+  hash-object)
+    # Hashing is read-only unless -w asks Git to persist the object.
+    hash_object_writes=0
+    for hash_object_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$hash_object_arg" in -w) hash_object_writes=1 ;; esac
+    done
+    [ "$hash_object_writes" -eq 0 ] || require_fenced_repo "git hash-object -w"
+    ;;
+  write-tree)
+    # This does not move a ref, but it does persist a tree in the object store.
+    require_fenced_repo "git write-tree"
+    ;;
+  symbolic-ref)
+    symbolic_positionals=0
+    for symbolic_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$symbolic_arg" in
+        -d|--delete) symbolic_positionals=2; break ;;
+        --|-*) ;;
+        *) symbolic_positionals=$((symbolic_positionals + 1)) ;;
+      esac
+    done
+    if [ "$symbolic_positionals" -ge 2 ]; then
+      require_fenced_repo "git symbolic-ref mutation"
+    fi
+    ;;
+  branch)
+    branch_reads=0
+    for branch_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$branch_arg" in
+        -d|-D|-m|-M|-c|-C|-f|--delete|--move|--copy|--force|--track|--no-track|--set-upstream-to|--unset-upstream|--edit-description)
+          require_fenced_repo "git branch mutation"
+          branch_reads=1
+          break
+          ;;
+        -a|--all|-r|--remotes|-l|--list|--list=*|--show-current|--contains|--contains=*|--no-contains|--no-contains=*|--merged|--merged=*|--no-merged|--no-merged=*|--points-at|--points-at=*)
+          branch_reads=1
+          ;;
+      esac
+    done
+    # No arguments is the ordinary list. Anything else not positively
+    # identified as a read mode can create/reset/configure a branch.
+    if [ "$SUBCOMMAND_ARG_COUNT" -gt 0 ] && [ "$branch_reads" -eq 0 ]; then
+      require_fenced_repo "git branch mutation"
+    fi
+    ;;
+  remote)
+    remote_action=""
+    for remote_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$remote_arg" in
+        --|-*) ;;
+        *) remote_action="$remote_arg"; break ;;
+      esac
+    done
+    case "$remote_action" in
+      add|remove|rename|set-head|set-branches|set-url|prune|update)
+        require_fenced_repo "git remote $remote_action"
+        ;;
+    esac
+    ;;
+  tag)
+    tag_reads=0
+    tag_positionals=0
+    for tag_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
+      case "$tag_arg" in
+        -d|--delete|-a|--annotate|-s|--sign|-f|--force|-m|--message|--message=*|-F|--file|--file=*|-u|--local-user|--local-user=*|--create-reflog)
+          require_fenced_repo "git tag mutation"
+          tag_reads=1
+          break
+          ;;
+        -l|--list|--list=*|-n|-n?*|-v|--verify|--contains|--contains=*|--no-contains|--no-contains=*|--merged|--merged=*|--no-merged|--no-merged=*|--points-at|--points-at=*|--format|--format=*|--sort|--sort=*|--column|--column=*|--no-column|--color|--no-color|--ignore-case)
+          tag_reads=1
+          ;;
+        --|-*) ;;
+        *) tag_positionals=$((tag_positionals + 1)) ;;
+      esac
+    done
+    # A bare tag name creates a lightweight tag. Positional names are readable
+    # only when an explicit list/verify/filter mode makes the command inspect.
+    if [ "$tag_reads" -eq 0 ] && [ "$tag_positionals" -gt 0 ]; then
+      require_fenced_repo "git tag mutation"
+    fi
+    ;;
+  annotate|blame|cat-file|check-attr|check-ignore|check-mailmap|check-ref-format|column|describe|diff|diff-files|diff-index|diff-tree|for-each-ref|grep|help|log|ls-files|ls-remote|ls-tree|merge-base|name-rev|rev-list|rev-parse|show|show-branch|status|version|whatchanged)
+    # Known inspection-only commands may read the source checkout. The runner
+    # exports GIT_OPTIONAL_LOCKS=0 so status-like commands cannot refresh its
+    # index as a side effect.
+    ;;
+  *)
+    # Unknown subcommands include aliases and external git-* helpers. Refuse
+    # them outright: proving only the current common directory is insufficient
+    # when an alias can run clone/init or an arbitrary shell command elsewhere.
+    fence_die "git $SUBCOMMAND is not in the explicit test allowlist"
+    ;;
+esac
+
+GIT_OPTIONAL_LOCKS=0 exec "$REAL_GIT" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}

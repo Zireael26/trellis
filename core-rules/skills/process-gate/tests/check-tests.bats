@@ -41,19 +41,120 @@ setup() {
   PROJECT_DIR="$(mktemp -d)"
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   unset CODEX_PROJECT_DIR TRELLIS_ROOT
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
   # Don't let an operator's ambient PROCESS_GATE_* config leak into auto-detect.
   unset PROCESS_GATE_TYPECHECK_CMD PROCESS_GATE_LINT_CMD PROCESS_GATE_TEST_CMD
   unset PROCESS_GATE_COVERAGE_CMD PROCESS_GATE_COVERAGE_FLOOR
+  unset PROCESS_GATE_MUTATION_SPOTCHECK PROCESS_GATE_MUTATION_TIMEOUT
+  unset MUTATION_BEHAVIOR MUTATION_LOG
 }
 
 teardown() {
   if [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ]; then
     rm -rf "$PROJECT_DIR"
   fi
+  if [ -n "${MUTATION_LOG:-}" ] && [ -f "$MUTATION_LOG" ]; then
+    rm -f "$MUTATION_LOG"
+  fi
 }
 
 run_gate() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT'"
+}
+
+# make_mutation_fixture <js|python|go>
+#   Build a clean two-commit repo whose second commit changes supported tests.
+# The committed runner passes the control, then either kills, survives, or hangs
+# only after it observes the language-specific assertion flip in the clone.
+make_mutation_fixture() {
+  local kind="$1"
+  command -v git >/dev/null 2>&1 || skip "git not installed"
+  if ! command -v timeout >/dev/null 2>&1 \
+    && ! command -v gtimeout >/dev/null 2>&1 \
+    && ! command -v perl >/dev/null 2>&1; then
+    skip "no bounded timeout runner"
+  fi
+
+  git init -q "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" config user.name "Process Gate Fixture"
+  git -C "$PROJECT_DIR" config user.email "process-gate@example.invalid"
+  git -C "$PROJECT_DIR" config commit.gpgsign false
+  git -C "$PROJECT_DIR" config core.hooksPath /dev/null
+  MUTATION_LOG="$(mktemp)"
+  export MUTATION_LOG
+
+  cat > "$PROJECT_DIR/mutation-runner.sh" <<'SH'
+#!/usr/bin/env bash
+# The baseline intentionally inherits its caller context. Disposable
+# control/mutant runs must not: a leaked GIT_DIR could redirect their Git work
+# back into the caller checkout.
+if [ "$PWD" != "${CLAUDE_PROJECT_DIR:-}" ] && [ "${GIT_DIR+x}" = x ]; then
+  exit 86
+fi
+js=0
+python=0
+go=0
+[ ! -f tests/a.test.js ] || js="$(grep -cF '.not.toBe' tests/a.test.js)"
+[ ! -f tests/test_example.py ] || python="$(grep -cF 'assert not True' tests/test_example.py)"
+[ ! -f sample_test.go ] || go="$(grep -cF 'if got == want {' sample_test.go)"
+printf '%s|%s|%s|%s\n' "$PWD" "$js" "$python" "$go" >> "$MUTATION_LOG"
+[ "$((js + python + go))" -gt 0 ] || exit 0
+case "${MUTATION_BEHAVIOR:-kill}" in
+  survive) exit 0 ;;
+  timeout) sleep 5; exit 0 ;;
+  *)       exit 1 ;;
+esac
+SH
+  chmod +x "$PROJECT_DIR/mutation-runner.sh"
+
+  case "$kind" in
+    js)
+      mkdir -p "$PROJECT_DIR/tests"
+      printf '%s\n' 'test("a", () => expect(true).toBe(true))' > "$PROJECT_DIR/tests/a.test.js"
+      printf '%s\n' 'test("z", () => expect(true).toBe(true))' > "$PROJECT_DIR/tests/z.test.js"
+      ;;
+    python)
+      mkdir -p "$PROJECT_DIR/tests"
+      printf '%s\n' 'def test_example():' '    assert True' > "$PROJECT_DIR/tests/test_example.py"
+      ;;
+    go)
+      printf '%s\n' \
+        'package sample' \
+        'import "testing"' \
+        'func TestExample(t *testing.T) {' \
+        '    got, want := 1, 1' \
+        '    if got != want {' \
+        '        t.Fatalf("got %d want %d", got, want)' \
+        '    }' \
+        '}' > "$PROJECT_DIR/sample_test.go"
+      ;;
+  esac
+  git -C "$PROJECT_DIR" add .
+  git -C "$PROJECT_DIR" commit -qm "base fixture"
+
+  case "$kind" in
+    js)
+      printf '%s\n' '// changed' >> "$PROJECT_DIR/tests/a.test.js"
+      printf '%s\n' '// changed' >> "$PROJECT_DIR/tests/z.test.js"
+      ;;
+    python) printf '%s\n' '# changed' >> "$PROJECT_DIR/tests/test_example.py" ;;
+    go)     printf '%s\n' '// changed' >> "$PROJECT_DIR/sample_test.go" ;;
+  esac
+  git -C "$PROJECT_DIR" add .
+  git -C "$PROJECT_DIR" commit -qm "change test contract"
+}
+
+run_mutation_gate() {
+  run env \
+    "MUTATION_LOG=$MUTATION_LOG" \
+    "MUTATION_BEHAVIOR=${MUTATION_BEHAVIOR:-kill}" \
+    "PROCESS_GATE_TYPECHECK_CMD=true" \
+    "PROCESS_GATE_LINT_CMD=true" \
+    "PROCESS_GATE_TEST_CMD=./mutation-runner.sh" \
+    "PROCESS_GATE_MUTATION_SPOTCHECK=${PROCESS_GATE_MUTATION_SPOTCHECK:-1}" \
+    "PROCESS_GATE_MUTATION_TIMEOUT=${PROCESS_GATE_MUTATION_TIMEOUT:-3}" \
+    bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
 }
 
 # run_resolver [runtime_root]
@@ -554,4 +655,169 @@ JSON
   [[ "$output" == *"typecheck:"*"exited 124"* ]] || { echo "$output"; false; }
   # ...while the test command, well inside the raised test ceiling, is untouched.
   [[ "$output" != *"tests:"*"exited"* ]] || { echo "$output"; false; }
+}
+
+# --- Optional assertion-flip mutation spot-check (Spec 001 Phase 8a) ---
+# The feature is opt-in and report-only. Fixtures use real two-commit repos so
+# changed-file selection, isolated clone setup, deterministic assertion choice,
+# and caller-tree preservation are all exercised together.
+@test "mutation spot-check is default-off and runs no extra test command" {
+  make_mutation_fixture js
+  PROCESS_GATE_MUTATION_SPOTCHECK=0
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" != *"mutation spot-check"* ]] || { echo "$gate_output"; false; }
+  [ "$(wc -l < "$MUTATION_LOG" | tr -d '[:space:]')" -eq 1 ] ||
+    { cat "$MUTATION_LOG"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "mutation scratch allocation failure warns instead of aborting under set -e" {
+  make_mutation_fixture js
+  mkdir -p "$PROJECT_DIR/fail-bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$PROJECT_DIR/fail-bin/mktemp"
+  chmod +x "$PROJECT_DIR/fail-bin/mktemp"
+
+  PATH="$PROJECT_DIR/fail-bin:$PATH" run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"unable to create mutation scratch directory — skipped"* ]] ||
+    { echo "$gate_output"; false; }
+  [ "$(wc -l < "$MUTATION_LOG" | tr -d '[:space:]')" -eq 1 ] ||
+    { cat "$MUTATION_LOG"; false; }
+}
+
+@test "JS assertion flip kills the lexicographically first changed assertion in an isolated clone" {
+  make_mutation_fixture js
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+  local last_run
+  last_run="$(tail -n 1 "$MUTATION_LOG")"
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip killed in tests/a.test.js"* ]] ||
+    { echo "$gate_output"; false; }
+  [ "$(wc -l < "$MUTATION_LOG" | tr -d '[:space:]')" -eq 3 ] ||
+    { cat "$MUTATION_LOG"; false; }
+  [[ "$last_run" == *"|1|0|0" ]] || { cat "$MUTATION_LOG"; false; }
+  [ "$(grep -cF "$PROJECT_DIR|" "$MUTATION_LOG")" -eq 1 ] ||
+    { cat "$MUTATION_LOG"; false; }
+  [ "$(grep -cF '.not.toBe' "$PROJECT_DIR/tests/a.test.js" || true)" -eq 0 ] ||
+    { cat "$PROJECT_DIR/tests/a.test.js"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "JS assertion flip targets the expect matcher after an earlier toFixed call" {
+  make_mutation_fixture js
+  printf '%s\n' \
+    'test("price", () => expect((1).toFixed(2)).toBe("1.00"))' \
+    '// changed' > "$PROJECT_DIR/tests/a.test.js"
+  git -C "$PROJECT_DIR" add tests/a.test.js
+  git -C "$PROJECT_DIR" commit -q --amend --no-edit
+
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip killed in tests/a.test.js"* ]] ||
+    { echo "$gate_output"; false; }
+  [[ "$(tail -n 1 "$MUTATION_LOG")" == *"|1|0|0" ]] ||
+    { cat "$MUTATION_LOG"; false; }
+  [ "$(grep -cF '.not.toFixed' "$PROJECT_DIR/tests/a.test.js" || true)" -eq 0 ] ||
+    { cat "$PROJECT_DIR/tests/a.test.js"; false; }
+}
+
+@test "inherited GIT_DIR cannot redirect scratch checkout or test commands into caller state" {
+  make_mutation_fixture js
+  local head_before index_before worktree_before status_before
+  head_before="$(cat "$PROJECT_DIR/.git/HEAD")"
+  index_before="$(git hash-object "$PROJECT_DIR/.git/index")"
+  worktree_before="$(git hash-object "$PROJECT_DIR/tests/a.test.js")"
+  status_before="$(git -C "$PROJECT_DIR" status --porcelain=v1 --untracked-files=all)"
+
+  export GIT_DIR="$PROJECT_DIR/.git"
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+  unset GIT_DIR
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip killed in tests/a.test.js"* ]] ||
+    { echo "$gate_output"; false; }
+  [ "$(cat "$PROJECT_DIR/.git/HEAD")" = "$head_before" ] ||
+    { cat "$PROJECT_DIR/.git/HEAD"; false; }
+  [ "$(git hash-object "$PROJECT_DIR/.git/index")" = "$index_before" ] ||
+    { echo "caller index bytes changed"; false; }
+  [ "$(git hash-object "$PROJECT_DIR/tests/a.test.js")" = "$worktree_before" ] ||
+    { echo "caller test bytes changed"; false; }
+  run git -C "$PROJECT_DIR" status --porcelain=v1 --untracked-files=all
+  [ "$status" -eq 0 ] && [ "$output" = "$status_before" ] ||
+    { echo "$output"; false; }
+}
+
+@test "surviving assertion flip is a warning, never a hard failure" {
+  make_mutation_fixture js
+  MUTATION_BEHAVIOR=survive
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"mutation spot-check: assertion flip survived in tests/a.test.js"* ]] ||
+    { echo "$gate_output"; false; }
+  [[ "$(tail -n 1 "$MUTATION_LOG")" == *"|1|0|0" ]] ||
+    { cat "$MUTATION_LOG"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "Python assert inversion is recognized and killed" {
+  make_mutation_fixture python
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip killed in tests/test_example.py"* ]] ||
+    { echo "$gate_output"; false; }
+  [[ "$(tail -n 1 "$MUTATION_LOG")" == *"|0|1|0" ]] ||
+    { cat "$MUTATION_LOG"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "Go testing comparison inversion is recognized and killed" {
+  make_mutation_fixture go
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 0 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip killed in sample_test.go"* ]] ||
+    { echo "$gate_output"; false; }
+  [[ "$(tail -n 1 "$MUTATION_LOG")" == *"|0|0|1" ]] ||
+    { cat "$MUTATION_LOG"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "mutation command timeout warns and stays bounded" {
+  make_mutation_fixture js
+  MUTATION_BEHAVIOR=timeout
+  PROCESS_GATE_MUTATION_TIMEOUT=1
+  run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+
+  [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"assertion flip timed out after 1s in tests/a.test.js"* ]] ||
+    { echo "$gate_output"; false; }
+
+  run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
 }

@@ -9,7 +9,7 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/skill-preload.sh disable=SC1091
 . "$HOOK_DIR/lib/skill-preload.sh"
 
-command -v jq >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || { printf '%s\n' 'skill-size-preflight: jq not found; degrading to no-op' >&2; exit 0; }
 if ! printf '%s' "$INPUT" | jq -e '
   .hook_event_name == "SessionStart"
   and ((.source // "startup") == "startup" or (.source // "startup") == "resume")

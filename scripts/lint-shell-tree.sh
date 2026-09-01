@@ -18,6 +18,10 @@
 #
 # core-rules/evals/ stays carved out: those are eval fixture seeds — illustrative
 # drifted or older hook bodies a check is graded against, not shipped code.
+# `.claude/worktrees/` stays carved out: those are detached git worktrees whose
+# shell files are not part of the main checkout's tree and must not poison the
+# process-gate shellcheck (21 wf_* trees ≈ 3400 sh files as of 2026-08-19).
+# `.claude/skills`, hooks, and settings remain in the tree.
 # `.claude/skills/security-gate-local/local.config.sh` pins the security gate's
 # ShellCheck scope to the same carve-out so the two gates agree.
 #
@@ -63,14 +67,19 @@ shebang_is_shell() {
 shell_tree_files() {
   find "${ROOTS[@]}" \
     \( -name '*.sh' -o -name '*.bash' \) -type f \
-    -not -path 'core-rules/evals/*' -print0
+    -not -path 'core-rules/evals/*' \
+    -not -path '.claude/worktrees/*' -print0
 
   local file
+  # `if`, not `&&`: a while loop's status is its body's last command, so a final
+  # non-shell file left the function at 1. Under `set -o pipefail` that turned a
+  # clean lint into a silent red gate — exit 1, no output, ShellCheck itself 0.
   while IFS= read -r -d '' file; do
-    shebang_is_shell "$file" && printf '%s\0' "$file"
+    if shebang_is_shell "$file"; then printf '%s\0' "$file"; fi
   done < <(find "${ROOTS[@]}" \
     ! -name '*.*' -type f \
-    -not -path 'core-rules/evals/*' -print0)
+    -not -path 'core-rules/evals/*' \
+    -not -path '.claude/worktrees/*' -print0)
 }
 
 if [ "$LIST_ONLY" -eq 1 ]; then

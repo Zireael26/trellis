@@ -14,11 +14,16 @@
 # the POSIX prologue too. `scripts/tests/posix-bootstrap-prologue.bats` re-checks
 # each prologue as `sh` to keep that guarantee, since this line removes it here.
 launcher_ssh_auth_sock=${SSH_AUTH_SOCK-}
+launcher_attach_caller_path=
+if [ "${1-}" = attach ]; then
+  launcher_attach_caller_path=${PATH-}
+fi
 # shellcheck disable=SC2093  # nothing after this exec runs in the outer shell:
 # the trusted body below the marker is read as DATA by the re-exec'd bootstrap.
 exec /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
   "SSH_AUTH_SOCK=$launcher_ssh_auth_sock" \
+  "TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
   /bin/bash --noprofile --norc -c '
 set -u
@@ -39,6 +44,7 @@ fi
 exec /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
   "SSH_AUTH_SOCK=${SSH_AUTH_SOCK-}" \
+  "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
   "TRELLIS_LAUNCHER_BODY=$launcher_body" \
   /bin/bash --noprofile --norc "$launcher_body" "$@"
@@ -51,7 +57,14 @@ exec /usr/bin/env -i \
 # ~/.local/bin/trellis). It intentionally contains its release verification
 # logic so installed launchers never depend on a mutable source checkout.
 
-unset BASH_ENV ENV CDPATH
+# Capture the caller's REAL PATH here: this line runs before the hardening
+# below replaces PATH with the system set, so this is the only point at which
+# the user's toolchain (homebrew, nvm, pyenv shims) is still visible. Using
+# `-` rather than `:-` recorded an empty value whenever the override was unset,
+# which made the attach-time toolchain capture record the system set it was
+# built to replace, leaving every gate stage at exit 127.
+launcher_attach_caller_path=${TRELLIS_ATTACH_CALLER_PATH:-${PATH-}}
+unset BASH_ENV ENV CDPATH TRELLIS_ATTACH_CALLER_PATH
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 set -u
@@ -1316,6 +1329,130 @@ launcher_snapshot_name_is_safe() {
     "${releases%/releases}" "$releases/$name/payload" "$version"
 }
 
+# An execution snapshot is owned by the long-lived launcher shell, rather than
+# by the short-lived command-substitution process that creates it. Bash 3.2
+# keeps $$ bound to that long-lived shell across both subshell forms.
+launcher_write_snapshot_owner() {
+  local snapshot="${1:-}" owner owner_pid owner_birth owner_json python_bin
+  [ "$#" -eq 1 ] || {
+    launcher_error "snapshot owner requires SNAPSHOT_PATH"
+    return "$TRELLIS_EX_USAGE"
+  }
+  launcher_absolute_path_is_clean "$snapshot" || {
+    launcher_error "snapshot owner path is unsafe: $snapshot"
+    return "$TRELLIS_EX_USAGE"
+  }
+  owner="${snapshot}.owner.json"
+  owner_pid="$$"
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      launcher_error "snapshot owner process id is invalid"
+      return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+  esac
+  [ "$owner_pid" -gt 0 ] || {
+    launcher_error "snapshot owner process id is invalid"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || {
+    launcher_error "could not determine snapshot owner process birth"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  [ -n "$owner_birth" ] || {
+    launcher_error "could not determine snapshot owner process birth"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  command -v jq >/dev/null 2>&1 || {
+    launcher_error "jq is required to write snapshot owner metadata"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  owner_json="$(jq -cn --argjson pid "$owner_pid" --arg process_birth "$owner_birth" \
+    '{schema_version:1,pid:$pid,process_birth:$process_birth}')" || {
+    launcher_error "could not encode snapshot owner metadata"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  [ -n "$owner_json" ] || {
+    launcher_error "could not encode snapshot owner metadata"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    launcher_error "python3 with no-follow create support is required for snapshot owner metadata"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
+  if ! "$python_bin" - "$owner" "$owner_json" 2>/dev/null <<'PY'
+import os
+import sys
+
+path, payload = sys.argv[1:3]
+no_follow = getattr(os, "O_NOFOLLOW", 0)
+if not no_follow:
+    raise SystemExit(1)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow, 0o600)
+try:
+    data = (payload + "\n").encode("utf-8")
+    while data:
+        written = os.write(fd, data)
+        if written <= 0:
+            raise OSError("short owner metadata write")
+        data = data[written:]
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    launcher_error "could not create snapshot owner metadata: $owner"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+}
+
+# Recover snapshots created by this shell if a command substitution returned
+# between creation and the caller arming its normal cleanup state.
+launcher_remove_owned_snapshots() {
+  local releases="${1:-}" version="${2:-}" owner owner_pid owner_birth snapshot owner_rc rc=0
+  [ "$#" -eq 2 ] || return "$TRELLIS_EX_USAGE"
+  launcher_absolute_path_is_clean "$releases" || return "$TRELLIS_EX_USAGE"
+  case "$version" in
+    ''|*/*|*$'\t'*|*$'\n'*|*$'\r'*) return "$TRELLIS_EX_USAGE" ;;
+  esac
+  owner_pid="$$"
+  case "$owner_pid" in
+    ''|*[!0-9]*) return "$TRELLIS_EX_UNAVAILABLE" ;;
+  esac
+  [ "$owner_pid" -gt 0 ] || return "$TRELLIS_EX_UNAVAILABLE"
+  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ -n "$owner_birth" ] || return "$TRELLIS_EX_UNAVAILABLE"
+  command -v jq >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
+  for owner in "$releases/.tmp.$version.exec."*.owner.json; do
+    [ -e "$owner" ] || [ -L "$owner" ] || continue
+    if [ -L "$owner" ] || [ ! -f "$owner" ]; then
+      launcher_error "snapshot owner path is not a regular file: $owner"
+      rc="$TRELLIS_EX_STATE"
+      continue
+    fi
+    if ! jq -e --argjson pid "$owner_pid" --arg process_birth "$owner_birth" '
+      type == "object"
+      and (keys | sort) == ["pid","process_birth","schema_version"]
+      and .schema_version == 1
+      and .pid == $pid
+      and .process_birth == $process_birth
+    ' "$owner" >/dev/null 2>&1; then
+      continue
+    fi
+    snapshot="${owner%.owner.json}"
+    launcher_snapshot_name_is_safe "$releases" "${snapshot##*/}" "$version" || continue
+    if launcher_remove_snapshot "$releases" "$snapshot" "$version" >/dev/null 2>&1; then
+      :
+    else
+      owner_rc=$?
+      if [ "$owner_rc" -gt "$rc" ]; then
+        rc="$owner_rc"
+      fi
+    fi
+  done
+  return "$rc"
+}
+
 launcher_copy_snapshot_no_follow() {
   local releases="${1:-}" version="${2:-}" snapshot_base="${3:-}" digest="${4:-}" python_bin
   launcher_absolute_path_is_clean "$releases" || return "$TRELLIS_EX_USAGE"
@@ -1644,7 +1781,7 @@ PY
 
 
 launcher_remove_snapshot() {
-  local releases="${1:-}" snapshot="${2:-}" version="${3:-}" parent base python_bin rc
+  local releases="${1:-}" snapshot="${2:-}" version="${3:-}" parent base owner python_bin rc
   [ "$#" -eq 3 ] || return "$TRELLIS_EX_USAGE"
   launcher_absolute_path_is_clean "$releases" &&
     launcher_absolute_path_is_clean "$snapshot" || return "$TRELLIS_EX_USAGE"
@@ -1653,25 +1790,36 @@ launcher_remove_snapshot() {
   [ "$parent" = "$releases" ] &&
     launcher_snapshot_name_is_safe "$releases" "$base" "$version" ||
     return "$TRELLIS_EX_USAGE"
-  if [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ]; then
+  owner="${snapshot}.owner.json"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ ! -L "$owner" ] && [ -f "$owner" ] || {
+      launcher_error "snapshot owner path is not a regular file: $owner"
+      return "$TRELLIS_EX_STATE"
+    }
+  fi
+  if [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ] &&
+     [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
     return 0
   fi
-  [ ! -L "$snapshot" ] && [ -d "$snapshot" ] || {
-    launcher_error "release execution snapshot is not a real directory: $snapshot"
-    return "$TRELLIS_EX_STATE"
-  }
+  if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    [ ! -L "$snapshot" ] && [ -d "$snapshot" ] || {
+      launcher_error "release execution snapshot is not a real directory: $snapshot"
+      return "$TRELLIS_EX_STATE"
+    }
+  fi
   command -v python3 >/dev/null 2>&1 || {
     launcher_error "python3 with descriptor-relative snapshot cleanup support is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$base" <<'PY'
+  "$python_bin" - "$releases" "$base" "${base}.owner.json" <<'PY'
+import errno
 import os
 import stat
 import sys
 
-releases, snapshot_name = sys.argv[1:3]
+releases, snapshot_name, owner_name = sys.argv[1:4]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -1701,6 +1849,15 @@ def lstat_at(parent_fd, name, label):
     except OSError as error:
         state("could not inspect %s without following links: %s" % (label, error))
 
+def optional_lstat_at(parent_fd, name, label):
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except (AttributeError, NotImplementedError):
+        unavailable("descriptor-relative no-follow snapshot cleanup support is unavailable")
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return None
+        state("could not inspect %s without following links: %s" % (label, error))
 
 def open_directory(parent_fd, name, label):
     before = lstat_at(parent_fd, name, label)
@@ -1769,6 +1926,7 @@ if not O_DIRECTORY or not O_NOFOLLOW:
 releases_fd = None
 snapshot_fd = None
 snapshot_identity = None
+owner_before = None
 try:
     try:
         releases_fd = os.open(releases, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
@@ -1776,21 +1934,53 @@ try:
         state("could not open release snapshot store without following links: %s" % error)
     if not stat.S_ISDIR(os.fstat(releases_fd).st_mode):
         state("release snapshot store is not a directory")
-    snapshot_fd, snapshot_identity = open_directory(
+
+    owner_before = optional_lstat_at(
+        releases_fd,
+        owner_name,
+        "release execution snapshot owner",
+    )
+    if owner_before is not None and not stat.S_ISREG(owner_before.st_mode):
+        state("release execution snapshot owner is not a regular file")
+
+    snapshot_before = optional_lstat_at(
         releases_fd,
         snapshot_name,
         "release execution snapshot",
     )
-    remove_contents(snapshot_fd, "")
-    os.close(snapshot_fd)
-    snapshot_fd = None
-    current = lstat_at(releases_fd, snapshot_name, "release execution snapshot")
-    if not stat.S_ISDIR(current.st_mode) or identity(current) != snapshot_identity:
-        state("release execution snapshot changed during cleanup")
-    try:
-        os.rmdir(snapshot_name, dir_fd=releases_fd)
-    except OSError as error:
-        state("could not remove release execution snapshot: %s" % error)
+    if snapshot_before is not None:
+        if not stat.S_ISDIR(snapshot_before.st_mode):
+            state("release execution snapshot is not a real directory")
+        snapshot_fd, snapshot_identity = open_directory(
+            releases_fd,
+            snapshot_name,
+            "release execution snapshot",
+        )
+        remove_contents(snapshot_fd, "")
+        os.close(snapshot_fd)
+        snapshot_fd = None
+        current = lstat_at(releases_fd, snapshot_name, "release execution snapshot")
+        if not stat.S_ISDIR(current.st_mode) or identity(current) != snapshot_identity:
+            state("release execution snapshot changed during cleanup")
+        try:
+            os.rmdir(snapshot_name, dir_fd=releases_fd)
+        except OSError as error:
+            state("could not remove release execution snapshot: %s" % error)
+
+    if owner_before is not None:
+        current_owner = optional_lstat_at(
+            releases_fd,
+            owner_name,
+            "release execution snapshot owner",
+        )
+        if current_owner is not None:
+            if not stat.S_ISREG(current_owner.st_mode) or identity(current_owner) != identity(owner_before):
+                state("release execution snapshot owner changed during cleanup")
+            try:
+                os.unlink(owner_name, dir_fd=releases_fd)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    state("could not remove release execution snapshot owner: %s" % error)
 except (AttributeError, NotImplementedError):
     unavailable("descriptor-relative no-follow snapshot cleanup support is unavailable")
 except OSError as error:
@@ -1820,7 +2010,10 @@ launcher_snapshot_verified_release() (
         launcher_error "could not clean failed release execution snapshot: $snapshot"
     fi
   }
-  trap cleanup_snapshot EXIT INT TERM
+  trap cleanup_snapshot EXIT
+  trap 'cleanup_snapshot; exit 129' HUP
+  trap 'cleanup_snapshot; exit 130' INT
+  trap 'cleanup_snapshot; exit 143' TERM
 
   pinned_digest="$(launcher_release_json_sha256_no_follow "$releases" "$version")" || return $?
   launcher_verify_release "$source" "$version" >/dev/null || return $?
@@ -1834,6 +2027,7 @@ launcher_snapshot_verified_release() (
     launcher_error "could not create private release execution snapshot"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
+  launcher_write_snapshot_owner "$snapshot" || return $?
   chmod 700 "$snapshot" || {
     launcher_error "could not secure release execution snapshot"
     return "$TRELLIS_EX_UNAVAILABLE"
@@ -1867,7 +2061,7 @@ launcher_snapshot_verified_release() (
     return "$TRELLIS_EX_STATE"
   fi
 
-  trap - EXIT INT TERM
+  trap - EXIT HUP INT TERM
   printf '%s\t%s\n' "$snapshot" "$pinned_digest"
 )
 
@@ -2223,18 +2417,28 @@ LAUNCHER_EXECUTION_SNAPSHOT_STORE=""
 LAUNCHER_EXECUTION_SNAPSHOT_VERSION=""
 
 launcher_cleanup() {
-  local snapshot="${LAUNCHER_EXECUTION_SNAPSHOT:-}" releases="${LAUNCHER_EXECUTION_SNAPSHOT_STORE:-}" version="${LAUNCHER_EXECUTION_SNAPSHOT_VERSION:-}" rc=0
+  local snapshot="${LAUNCHER_EXECUTION_SNAPSHOT:-}" releases="${LAUNCHER_EXECUTION_SNAPSHOT_STORE:-}" version="${LAUNCHER_EXECUTION_SNAPSHOT_VERSION:-}" rc=0 body_rc=0
   LAUNCHER_EXECUTION_SNAPSHOT=""
   LAUNCHER_EXECUTION_SNAPSHOT_STORE=""
   LAUNCHER_EXECUTION_SNAPSHOT_VERSION=""
-  if [ -n "$snapshot" ] || [ -n "$releases" ]; then
-    if [ -z "$snapshot" ] || [ -z "$releases" ] || [ -z "$version" ] ||
+  if [ -n "$snapshot" ]; then
+    if [ -z "$releases" ] || [ -z "$version" ] ||
       ! launcher_remove_snapshot "$releases" "$snapshot" "$version"; then
       launcher_error "could not clean release execution snapshot"
       rc="$TRELLIS_EX_UNAVAILABLE"
     fi
+  elif [ -n "$releases" ] || [ -n "$version" ]; then
+    if [ -z "$releases" ] || [ -z "$version" ] ||
+      ! launcher_remove_owned_snapshots "$releases" "$version"; then
+      launcher_error "could not clean release execution snapshot"
+      rc="$TRELLIS_EX_UNAVAILABLE"
+    fi
   fi
-  launcher_cleanup_body || [ "$rc" -ne 0 ] || rc=$?
+  launcher_cleanup_body
+  body_rc=$?
+  if [ "$body_rc" -gt "$rc" ]; then
+    rc="$body_rc"
+  fi
   return "$rc"
 }
 
@@ -2244,6 +2448,7 @@ trap 'launcher_cleanup; exit 130' INT
 trap 'launcher_cleanup; exit 143' TERM
 launcher_main() {
   local home_candidate home user_home config releases release_dir version cli payload snapshot snapshot_info release_json_sha256 ssh_auth_sock child_status cleanup_status
+  local -a attach_environment
   if [ "${1:-}" = "hook" ]; then
     [ -n "${TRELLIS_HOME:-}" ] ||
       launcher_die "$TRELLIS_EX_USAGE" "TRELLIS_HOME is required for SessionStart hook routes"
@@ -2322,6 +2527,11 @@ launcher_main() {
   # Freeze a complete, independently verified payload before any executable
   # path is selected.  Never hand the just-verified installed release path to
   # a child: the only executable payload is the sealed private snapshot.
+  # Arm the release-store cleanup context before command substitution starts.
+  # The producer records the owning shell in its sidecar; cleanup can recover
+  # that exact snapshot if the substitution returns during a signal handoff.
+  LAUNCHER_EXECUTION_SNAPSHOT_STORE="$releases"
+  LAUNCHER_EXECUTION_SNAPSHOT_VERSION="$version"
   snapshot_info="$(launcher_snapshot_verified_release "$releases" "$version")" || exit "$?"
   case "$snapshot_info" in
     *$'\t'*) ;;
@@ -2347,6 +2557,10 @@ launcher_main() {
   launcher_cleanup_body ||
     launcher_die "$TRELLIS_EX_UNAVAILABLE" "could not remove trusted launcher bootstrap"
   unset TRELLIS_LAUNCHER_BODY
+  attach_environment=("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+  if [ "${1:-}" = attach ]; then
+    attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
+  fi
   if [ "${1:-}" = release ] || [ "${1:-}" = upgrade ]; then
     set -o pipefail
     launcher_emit_verified_command_bundle "$snapshot" "$release_json_sha256" "$1" "$version" |
@@ -2363,7 +2577,7 @@ launcher_main() {
       "HOME=$HOME" "TRELLIS_HOME=$home" \
       "TRELLIS_VERIFIED_PAYLOAD=$payload" "TRELLIS_VERIFIED_RELEASE_VERSION=$version" \
       "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$ssh_auth_sock" \
-      "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+      "${attach_environment[@]}" \
       /bin/bash --noprofile --norc "$cli" "$@"
     child_status=$?
   fi

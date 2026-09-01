@@ -187,6 +187,8 @@ t25_make_immutable_release() {
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
     "$repo/core-rules/templates/codex-hooks.local.json"
+  cp "$REPO_ROOT/core-rules/templates/omp-project-policy.yml" \
+    "$repo/core-rules/templates/omp-project-policy.yml"
   printf '# fixture OMP preamble\n' > "$repo/core-rules/templates/omp-preamble.md"
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
@@ -213,7 +215,8 @@ t25_make_immutable_release() {
         {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
       ],
       "render": [
-        {"template": "core-rules/templates/omp-preamble.md", "destination": ".omp/PREAMBLE.md", "merge": "replace", "mode": "0644", "required": true}
+        {"template": "core-rules/templates/omp-preamble.md", "destination": ".omp/PREAMBLE.md", "merge": "replace", "mode": "0644", "required": true},
+        {"template": "core-rules/templates/omp-project-policy.yml", "destination": ".omp/config.yml", "merge": "replace", "mode": "0644", "required": false}
       ]
     }
   }

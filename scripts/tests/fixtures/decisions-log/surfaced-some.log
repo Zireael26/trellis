@@ -1,0 +1,2 @@
+- 2026-08-30T12:04:00Z [L4] [architectural] Keep the first boundary visible during execution. Reasoning: The decision was discussed in the operator surface. Alternatives considered: Record it only after execution. SURFACED INLINE
+- 2026-08-30T12:04:01Z [L4] [architectural] Keep the second boundary in the durable log. Reasoning: No inline surfacing evidence exists for this decision. Alternatives considered: Fabricate a surfacing marker.

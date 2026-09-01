@@ -171,6 +171,12 @@ export interface CompactResult {
 // the adapter-side mirror of the canonical Claude `claude-settings.json` hook
 // manifest (core-rules/templates/claude-settings.json). Timeouts match the
 // manifest; scripts are never copied, only executed from core-rules/hooks.
+//
+// No-Anthropic stop guarantee: every model-backed stop script receives
+// TRELLIS_OMP=1 in its environment. That flag is the scripts' contract to use
+// the non-Anthropic reviewer route (lib/omp-reviewer.sh) instead of the
+// Claude/Codex `claude -p` rung, and to skip Claude-only proposal paths — so a
+// default claude process is never reachable from an OMP stop.
 // ============================================================================
 
 /** OMP tool name -> canonical Claude tool name used in the hook envelope. */
@@ -919,6 +925,32 @@ export function systemPromptHasPolicy(systemPrompt: string[] | undefined, marker
 	const haystack = (systemPrompt ?? []).join("\n").replace(/\s+/g, " ").trim();
 	return haystack.includes(needle);
 }
+
+const TRELLIS_ORCHESTRATION_STYLE_PATH = path.join(
+	"core-rules",
+	"templates",
+	"claude-output-styles",
+	"trellis-orchestration.md",
+);
+
+/**
+ * Read the release-owned orchestration style without exposing its YAML
+ * frontmatter to OMP. A style is valid only when it starts with a frontmatter
+ * opener and has a standalone `---` closing line.
+ */
+export function readTrellisOrchestrationStyle(trellisRoot: string): string | undefined {
+	let source: string;
+	try {
+		source = fs.readFileSync(path.join(trellisRoot, TRELLIS_ORCHESTRATION_STYLE_PATH), "utf8");
+	} catch {
+		return undefined;
+	}
+	const frontmatter = source.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+	if (!frontmatter) return undefined;
+	const body = source.slice(frontmatter[0].length).trim();
+	return body.length > 0 ? body : undefined;
+}
+
 /**
  * Live Trellis preset policies enabled for this project. Claude Code loads the
  * managed `.claude/rules/preset-*.md` links natively; OMP does not, so the
@@ -1007,7 +1039,8 @@ function canonicalHookScriptPath(options: RunHookOptions): string | undefined {
 /**
  * Execute a live canonical hook with the normalized envelope on stdin.
  * `CLAUDE_PROJECT_DIR` and `TRELLIS_ROOT` are exported for every script, plus
- * `CLAUDE_TRANSCRIPT_PATH` when a transcript is provided. A missing script
+ * `CLAUDE_TRANSCRIPT_PATH` when a transcript is provided and `TRELLIS_OMP=1`
+ * so model-backed scripts take their non-Anthropic OMP route. A missing script
  * yields a non-null-status-style error result carrying the exact path — callers
  * decide the fail-closed mapping.
  */
@@ -1035,6 +1068,9 @@ export function runCanonicalHook(options: RunHookOptions, spawn: SpawnFn = spawn
 				...process.env,
 				CLAUDE_PROJECT_DIR: options.projectDir,
 				TRELLIS_ROOT: options.trellisRoot,
+				// Harness marker consumed by lib/omp-reviewer.sh and propose-rules.sh:
+				// "you are running under OMP — never shell out to claude."
+				TRELLIS_OMP: "1",
 				...(options.transcriptPath ? { CLAUDE_TRANSCRIPT_PATH: options.transcriptPath } : {}),
 				...(options.env ?? {}),
 			},
@@ -1129,6 +1165,7 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 		envelope: Record<string, unknown>,
 		timeoutMs: number,
 		transcriptPath?: string,
+		extraEnv?: Record<string, string>,
 	): RunHookResult {
 		return runCanonicalHook(
 			{
@@ -1139,6 +1176,7 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 				envelope,
 				timeoutMs,
 				transcriptPath,
+				env: extraEnv,
 			},
 			spawn,
 		);
@@ -1146,6 +1184,33 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 
 	function logScriptFailure(script: string, message: string): void {
 		logger.error(`trellis adapter: ${script} failed: ${message}`);
+	}
+
+	// One-time no-Anthropic guarantee check (hooks.md: OMP owns its stop
+	// event; a model-backed hook reached from it must never inherit a Claude
+	// default). runCanonicalHook exports TRELLIS_OMP=1 for every script; this
+	// proves the plumbing through a real spawn so a regression here fails at
+	// attach time, not silently on the first model-backed stop script. The
+	// probe script ships in the canonical payload and echoes one env var.
+	// Deliberately the REAL spawnSync, never the injectable `spawn`: an
+	// injected fake could claim any output, making the proof vacuous. One real
+	// ~5ms bash invocation at attach time is the cost of the guarantee.
+	const markerProbe = runCanonicalHook(
+		{
+			hooksDir: options.hooksDir,
+			trellisRoot: options.trellisRoot,
+			script: "env-echo.sh",
+			projectDir: options.trellisRoot,
+			envelope: {},
+			timeoutMs: 5_000,
+			env: { TRELLIS_PROBE_VARS: "TRELLIS_OMP" },
+		},
+		spawnSync,
+	);
+	if (markerProbe.status !== 0 || !markerProbe.stdout.split("\n").includes("TRELLIS_OMP=1")) {
+		throw new Error(
+			`trellis adapter: TRELLIS_OMP=1 was not exported to canonical scripts (${markerProbe.stderr.trim() || "no marker in child environment"})`,
+		);
 	}
 
 	// --- input: slash-skill size guard -------------------------------------
@@ -1289,7 +1354,6 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 				display: false,
 			};
 		}
-
 		// Context parity: OMP task children exclude AGENTS.md from inherited
 		// context files, and OMP does not natively load Claude's managed preset
 		// rules. Append any missing project policy and the immutable payload
@@ -1315,6 +1379,22 @@ export function createTrellisAdapter(options: TrellisAdapterOptions): TrellisAda
 			if (!systemPromptHasPolicy([...(systemPrompt ?? []), ...additions], policyMarker(preset))) {
 				additions.push(preset);
 			}
+		}
+		const orchestrationStyle = readTrellisOrchestrationStyle(options.trellisRoot);
+		if (!orchestrationStyle) {
+			logger.error(
+				`trellis adapter: release-owned orchestration style missing, malformed, or unreadable at ${path.join(
+					options.trellisRoot,
+					TRELLIS_ORCHESTRATION_STYLE_PATH,
+				)}`,
+			);
+		} else if (
+			!systemPromptHasPolicy(
+				[...(systemPrompt ?? []), ...additions],
+				policyMarker(orchestrationStyle),
+			)
+		) {
+			additions.push(orchestrationStyle);
 		}
 		if (additions.length > 0) result.systemPrompt = [...(systemPrompt ?? []), ...additions];
 

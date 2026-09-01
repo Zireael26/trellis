@@ -1,0 +1,253 @@
+{
+  "scenario": "contradictory_429",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-22T13:01:00Z"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-spark-meter-001",
+        "format": "provider-quota-json",
+        "provider": "openai-codex",
+        "meter": "spark",
+        "records": [
+          {
+            "record_id": "spark-meter-concurrent-001",
+            "observed_at": "2026-08-22T13:00:03Z",
+            "status": "ok",
+            "windows": [
+              {
+                "window_id": "spark:primary",
+                "duration": "5h",
+                "remaining_fraction": 1.0,
+                "status": "ok"
+              },
+              {
+                "window_id": "spark:secondary",
+                "duration": "7d",
+                "remaining_fraction": 1.0,
+                "status": "ok"
+              }
+            ]
+          },
+          {
+            "record_id": "spark-meter-catch-up-001",
+            "observed_at": "2026-08-22T13:00:30Z",
+            "status": "ok",
+            "role": "catch_up",
+            "windows": [
+              {
+                "window_id": "spark:primary",
+                "duration": "5h",
+                "remaining_fraction": 0,
+                "status": "ok",
+                "exhausted": true
+              },
+              {
+                "window_id": "spark:secondary",
+                "duration": "7d",
+                "remaining_fraction": 0.41,
+                "status": "ok"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "source_id": "source-omp-serving-429-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "provider": "openai-codex",
+        "path": "transcripts/omp-429-then-success.jsonl",
+        "read_until": "2026-08-22T13:00:04Z"
+      }
+    ],
+    "observations_in_order": [
+      {
+        "kind": "quota_poll",
+        "observed_at": "2026-08-22T13:00:03Z",
+        "source_id": "source-spark-meter-001",
+        "meter": "spark",
+        "status": "ok",
+        "value": {
+          "windows": [
+            {
+              "window_id": "spark:primary",
+              "duration": "5h",
+              "remaining_fraction": 1.0,
+              "status": "ok"
+            },
+            {
+              "window_id": "spark:secondary",
+              "duration": "7d",
+              "remaining_fraction": 1.0,
+              "status": "ok"
+            }
+          ]
+        }
+      },
+      {
+        "kind": "serving_outcome",
+        "observed_at": "2026-08-22T13:00:03Z",
+        "source_id": "source-omp-serving-429-001",
+        "route": "openai-responses",
+        "http_status": 429,
+        "status": "rate_limited",
+        "reason_code": "usage_limit_reached",
+        "reset_at": "2026-08-22T13:30:00Z",
+        "persisted": true,
+        "resolved_model": "openai-codex/gpt-5.6-luna:max"
+      },
+      {
+        "kind": "quota_poll",
+        "observed_at": "2026-08-22T13:00:30Z",
+        "source_id": "source-spark-meter-001",
+        "meter": "spark",
+        "status": "ok",
+        "role": "catch_up",
+        "establishes_block": false,
+        "value": {
+          "windows": [
+            {
+              "window_id": "spark:primary",
+              "duration": "5h",
+              "remaining_fraction": 0,
+              "status": "ok",
+              "exhausted": true
+            },
+            {
+              "window_id": "spark:secondary",
+              "duration": "7d",
+              "remaining_fraction": 0.41,
+              "status": "ok"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "expected": {
+    "status": "complete",
+    "lanes": [
+      {
+        "lane_id": "openai-codex",
+        "quota": {
+          "status": "fresh",
+          "observed_at": "2026-08-22T13:00:30Z",
+          "source": "source-spark-meter-001",
+          "value": {
+            "windows": [
+              {
+                "window_id": "spark:primary",
+                "duration": "5h",
+                "remaining_fraction": 0,
+                "status": "ok",
+                "exhausted": true
+              },
+              {
+                "window_id": "spark:secondary",
+                "duration": "7d",
+                "remaining_fraction": 0.41,
+                "status": "ok"
+              }
+            ]
+          },
+          "observations": [
+            {
+              "observed_at": "2026-08-22T13:00:03Z",
+              "status": "ok",
+              "role": "concurrent",
+              "windows": [
+                {
+                  "window_id": "spark:primary",
+                  "duration": "5h",
+                  "remaining_fraction": 1.0,
+                  "status": "ok"
+                },
+                {
+                  "window_id": "spark:secondary",
+                  "duration": "7d",
+                  "remaining_fraction": 1.0,
+                  "status": "ok"
+                }
+              ]
+            },
+            {
+              "observed_at": "2026-08-22T13:00:30Z",
+              "status": "ok",
+              "role": "catch_up",
+              "establishes_block": false,
+              "windows": [
+                {
+                  "window_id": "spark:primary",
+                  "duration": "5h",
+                  "remaining_fraction": 0,
+                  "status": "ok",
+                  "exhausted": true
+                },
+                {
+                  "window_id": "spark:secondary",
+                  "duration": "7d",
+                  "remaining_fraction": 0.41,
+                  "status": "ok"
+                }
+              ]
+            }
+          ]
+        },
+        "models": [
+          {
+            "route": "openai-responses",
+            "model": "openai-codex/gpt-5.6-luna:max",
+            "availability": {
+              "status": "blocked",
+              "observed_at": "2026-08-22T13:00:03Z",
+              "reason_code": "usage_limit_reached",
+              "reset_at": "2026-08-22T13:30:00Z",
+              "block_established_by": "serving_refusal",
+              "disagreement": {
+                "status": "conflict",
+                "reason_code": "healthy_meter_conflicts_with_serving_refusal",
+                "meter": {
+                  "observed_at": "2026-08-22T13:00:03Z",
+                  "status": "ok",
+                  "windows": [
+                    {
+                      "window_id": "spark:primary",
+                      "duration": "5h",
+                      "remaining_fraction": 1.0,
+                      "status": "ok"
+                    },
+                    {
+                      "window_id": "spark:secondary",
+                      "duration": "7d",
+                      "remaining_fraction": 1.0,
+                      "status": "ok"
+                    }
+                  ]
+                },
+                "serving": {
+                  "observed_at": "2026-08-22T13:00:03Z",
+                  "status": "rate_limited",
+                  "reason_code": "usage_limit_reached",
+                  "reset_at": "2026-08-22T13:30:00Z"
+                }
+              }
+            },
+            "last_observed_refusal": {
+              "observed_at": "2026-08-22T13:00:03Z",
+              "reason_code": "usage_limit_reached",
+              "reset_at": "2026-08-22T13:30:00Z",
+              "persisted": true
+            }
+          }
+        ],
+        "availability": {
+          "status": "unknown",
+          "observed_at": "2026-08-22T13:00:03Z",
+          "reason_code": "model_only_outcome_no_lane_wide_evidence"
+        }
+      }
+    ]
+  }
+}

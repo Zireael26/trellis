@@ -110,11 +110,17 @@ dependency-ordered landing sequence.
 
 ## Ultra-as-a-node
 
-**Status (2026-07-10).** Spec 011 D4a prerequisites are SATISFIED (telemetry
+**Status (2026-08-24).** Spec 011 D4a prerequisites remain SATISFIED (telemetry
 via `codex exec --json`; ×4 accounting in loop-safety anchored to the CLI's
 default 4-thread cap; instrumented paired run measured 1.38–2.09× spend vs
 xhigh with multi-agent machinery engaged — receipts in
-`docs/adr/2026-07-10-sol-ultra-capability-reground.md`). What remains split:
+`docs/adr/2026-07-10-sol-ultra-capability-reground.md`). Per-stage routing
+revisit has **fired**: the Workflow engine now exposes explicit per-stage model
+selection via `agentType`/`agent` in `agent()` opts, with lint enforcement
+(`scripts/lint-recipe-routing.sh` requires every `agent()` site to declare
+`agentType` or `// routing: inherit — <reason>`). No engine change to
+resumability/receipts was needed — the contract below restates the current
+capability as doctrine.
 
 - **ATTENDED main-loop Bash-direct: UNLOCKED.** Reserved for coupled,
   decomposable work where one ultra node replaces a wider fan-out without
@@ -125,16 +131,31 @@ xhigh with multi-agent machinery engaged — receipts in
   2026-07-10). Declare a per-unit token ceiling and check it against the
   `turn.completed` usage in the captured full JSONL receipt; a breach halts
   further ultra dispatch for the run.
-- **Inside `.wf.js` recipes: hard-reject direct Codex dispatch.** Workflow
-  recipes run every stage on the orchestrator's inherited model. A workflow
-  agent that holds Bash must never invoke `codex exec` itself; deliberate
-  direct Codex dispatch remains an attended main-loop operation. Revisit only
-  when the workflow engine exposes explicit per-stage model selection,
-  resumable visibility, and equivalent receipt accounting.
+- **Inside `.wf.js` recipes: per-stage `agentType` is now the
+  supported path (lint-typed); direct `codex exec` inside a workflow agent
+  remains hard-reject.** Workflow recipes that need a different model per
+  stage declare it via `agentType` in the `agent()` opts; stages
+  without a declared type still inherit the calling main loop by construction.
+  For conductor's auto-execution path (Auto-spec → Review specs → Auto-execute), the
+  caller MUST supply explicit author and reviewer routing inputs — `authorAgent`
+  + `reviewerAgent` (or `routing: {author, reviewer}`) or an equivalent
+  existing resolver-fed structure such as `roles`/`resolvedRoles` containing
+  `implementer`/`reviewer` chosen agents — and the recipe enforces reviewer
+  family != author family (families from `core-rules/skills/herdr-foreman/roles.json`)
+  **before** review. Missing, unknown, same-family, or family-mismatch routing => `DEGRADED`/`HOLD`
+  (log `DEGRADED:` + `HOLD:` + `conductor_routing_hold` JSON, return
+  `routing_status: "DEGRADED"`, `auto_execute_hold: true`, `hold_reason` named),
+  prevents unattended execution, and never silently inherits the parent for both
+  stages. Propose-only (`autoExecuteTopN=0`) remains compatible and does not
+  require routing. A recipe-side ultra request via `codex exec` still records
+  the rejection and the surface reason.
 
-**Guardrails.** Counts ×4 against any concurrency-derived budget arithmetic,
+**Guardrails.** Ultra counts ×4 against any concurrency-derived budget arithmetic,
 cannot oversubscribe a wave, requires a named justification, never a default,
-never on the sandboxless hatch. Ultra's injected instruction voids "don't
+never on the sandboxless hatch. Conductor's Auto-spec, Review, and Execute stages MUST be typed
+with the routed named agents when auto-execution is requested (`autoExecuteTopN > 0`); `DEGRADED/HOLD` is the
+only allowed outcome when routing is absent, unknown, same-family, or family-mismatch, and `HOLD` never
+masquerades as `reviewed_ready`. Ultra's injected instruction voids "don't
 spawn subagents" rules and high-persistence executors have a documented
 overreach failure mode (see `core-rules/references/model-prompting-deltas.md`)
 — output passes the same independent verification gate as any executor unit, and
@@ -144,7 +165,10 @@ not aggregate into the parent total.
 **Receipt contract.** Record the unlock-evidence pointer (the ADR), unit id,
 ×4 slot accounting, token telemetry from the JSONL, model/effort,
 justification, wall-clock, diff stat, proof, verifier verdict, and final cap
-utilization. A recipe-side ultra request still records the rejection and the
+utilization. For conductor, record routed author/reviewer agents and families,
+routing_status (`routed`|`DEGRADED`|`inherit`), hold reason, per-stage
+`agentType` values, and the `conductor_routing_hold` / `workflow_stage_gate`
+hold logs. A recipe-side ultra request still records the rejection and the
 surface reason.
 
 speed comes from topology, not effort — higher effort is slower per unit; spend it only where quality gates demand.

@@ -1,0 +1,3 @@
+# Decisions
+
+- 2026-08-30T12:00:00Z [L2] [interpretation] Preserve the documented command contract. Reasoning: Operators need stable behavior. Alternatives considered: Infer behavior from implementation.

@@ -1,0 +1,3 @@
+bash core-rules/skills/process-gate/scripts/run-all.sh --range=origin/main..HEAD
+exit: 0
+Overall: MERGEABLE

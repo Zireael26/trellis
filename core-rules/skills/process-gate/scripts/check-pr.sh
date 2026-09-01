@@ -24,7 +24,10 @@ else
   # `feature` is in the list because the spec/plan/tasks skills *mandate*
   # `feature/<slug>` (spec/SKILL.md:37,58,83; plan/SKILL.md:28; tasks/SKILL.md:26).
   # Without it every branch produced by the canonical pipeline failed this gate.
-  if ! printf "%s" "$branch" | grep -qE '^(codex|feature|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*$'; then
+  # pi-agent branches are the one hyphen-separated form: @tintinweb/pi-subagents
+  # hardcodes `pi-agent-${agentId}` (worktree.js:70) and takes no name argument,
+  # so requiring `pi-agent/<slug>` would reject every worker branch pi produces.
+  if ! printf "%s" "$branch" | grep -qE '^(pi-agent-[a-z0-9][a-z0-9-]*|(codex|pi-agent|feature|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*)$'; then
     findings+=("branch:$branch — does not match <type>/<kebab-slug>")
     [ "$worst" = "pass" ] && worst="warn"
   fi
@@ -35,7 +38,10 @@ declare -a bad_subjects=()
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   # Conventional Commits: type(scope)?(!)? : subject  -> first line
-  if ! printf "%s" "$line" | grep -qE '^(codex|feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
+  # `pi-agent` joins `codex` as a harness-authored type: @tintinweb/pi-subagents
+  # writes `pi-agent: <description>` itself (index.js) and takes no template, so
+  # without it every worker branch fails on its own commit subject.
+  if ! printf "%s" "$line" | grep -qE '^(pi-agent|codex|feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
     bad_subjects+=("$line")
   elif [ "${#line}" -gt 72 ]; then
     bad_subjects+=("$line  (>72 chars)")

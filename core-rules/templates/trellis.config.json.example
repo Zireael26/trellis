@@ -26,14 +26,24 @@
     { "name": "claude-in-chrome", "purpose": "Browser navigation + DOM-aware actions", "scope": "fleet" }
   ],
 
-  "comment_disk_janitor": "Optional. Tuning for `trellis disk-janitor`. The whole object is optional and every key inside it is optional — omit any key (or the whole block) to take the default shown below. The janitor never auto-deletes; the launchd agent runs `--report` only.",
+  "comment_conductor": "Optional (spec 005 C8). Default OFF: 0 preserves rank/auto-spec-only behavior. A positive value permits only that many reviewed-ready safe items from the same conductor run to execute to [HOLD] PRs. The conductor never merges.",
+  "conductor": {
+    "auto_execute_top_n": 0
+  },
+
+  "comment_disk_janitor": "Optional. Tuning for `trellis disk-janitor`. The whole object is optional and every key inside it is optional — omit any key (or the whole block) to take the default shown below. The janitor never auto-deletes; the launchd agent runs `--report` only. Tune tripwires only from your own recorded reports; do not copy one operator fleet's thresholds blindly.",
   "disk_janitor": {
     "enabled": true,
     "cache_ttl_days": 14,
+    "release_staging_ttl_days": 1,
     "worktree_stale_days": 30,
     "free_space_floor_gb": 30,
     "cache_ceiling_gb": 20,
-    "skip_projects": []
+    "skip_projects": [],
+    "reap_pushed_worktrees": true,
+    "ephemeral_tmp_ttl_days": 2,
+    "worktree_count_ceiling": 25,
+    "worktree_total_gb_ceiling": 80
   },
 
   "comment_mandatory_pipeline": "Optional (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff over spec_required_diff_lines cannot be pushed without ONE of: a spec triad added on this branch (+ interview artifact), a size-capped `/surgical` declaration (<= surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push (equal on Claude + Codex by construction) with a Stop-hook early-warning. Default OFF: absence or enabled:false is byte-identical to prior behavior; a present-but-malformed block fails CLOSED. Leave enabled:false until your team is ready to require specs for feature-sized changes.",

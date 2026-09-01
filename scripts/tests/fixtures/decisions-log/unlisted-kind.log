@@ -1,0 +1,3 @@
+# Decisions
+
+- 2026-08-30T12:03:00Z [L4] [audit-remediation] Add an unsupported decision kind. Reasoning: The fixture must expose the offending token. Alternatives considered: Reuse a listed kind.

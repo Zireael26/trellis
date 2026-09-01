@@ -5,7 +5,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
+# One subshell, not two: ${0%/*} matches dirname for every invocation that
+# carries a slash, and the bare-name branch reproduces dirname's "." fallback
+# before the same physical-resolution cd/pwd pair.
+case "$0" in
+  */*) SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd -P)" ;;
+  *)   SCRIPT_DIR="$(CDPATH='' cd -- "." && pwd -P)" ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -35,6 +41,7 @@ Existing commands:
   mirror        Publish the verified immutable policy payload to a mirror
   sync          Sync Claude hooks into managed projects
   worktree      Create/repair a worktree with Trellis inheritance seeded
+  usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
 EOF
 }
 
@@ -203,6 +210,7 @@ case "$cmd" in
                 ;;
   worktree)     shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
   task)         shift; exec "$SCRIPT_DIR/materialize-scheduled-task.sh" "$@" ;;
+  usage)        shift; exec "$SCRIPT_DIR/usage-federation.py" "$@" ;;
   help|-h|--help) usage ;;
   *)            usage >&2; exit 2 ;;
 esac

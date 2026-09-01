@@ -1,0 +1,2 @@
+- 2026-08-30T12:06:00Z [L4] [architectural] Preserve the storage boundary in the durable record. Reasoning: The decision was not surfaced during execution. Alternatives considered: Claim unobserved inline surfacing.
+- 2026-08-30T12:06:01Z [L4] [architectural] Preserve the transport boundary in the durable record. Reasoning: The decision was not surfaced during execution. Alternatives considered: Claim unobserved inline surfacing.

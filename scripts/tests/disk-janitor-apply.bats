@@ -55,6 +55,9 @@ teardown() {
   if [ -n "${EXTERNAL_WT_ROOT:-}" ] && [ -d "$EXTERNAL_WT_ROOT" ]; then
     rm -rf "$EXTERNAL_WT_ROOT"
   fi
+  if [ -n "${OUTSIDE_WT_ROOT:-}" ] && [ -d "$OUTSIDE_WT_ROOT" ]; then
+    rm -rf "$OUTSIDE_WT_ROOT"
+  fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
   fi
@@ -153,6 +156,40 @@ add_worktree() {
   register_fixture_root "$wt"
 }
 
+# add_unregistered_worktree <repo> <wt> <branch> — linked only in Git metadata.
+# Phantom-registration pruning is authorized by a separate strict current root,
+# never by treating this arbitrary target as a registry owner.
+add_unregistered_worktree() {
+  local repo="$1" wt="$2" branch="$3"
+  mkdir -p "$(dirname "$wt")"
+  ( cd "$repo" && git worktree add -q -b "$branch" "$wt" >/dev/null 2>&1 )
+}
+
+# Allocate a real path outside the only phantom namespaces. $SANDBOX may itself
+# live under /tmp on some runners, so it is not a valid negative control.
+make_outside_phantom_root() {
+  local parent candidate canonical
+  for parent in /private/var/tmp /var/tmp; do
+    [ -d "$parent" ] || continue
+    candidate="$(mktemp -d "$parent/dj-phantom-outside.XXXXXX" 2>/dev/null)" || continue
+    canonical="$(cd "$candidate" && pwd -P)" || {
+      rm -rf "$candidate"
+      continue
+    }
+    case "$canonical/" in
+      /sessions/*|/tmp/*|/private/tmp/*)
+        rm -rf "$candidate"
+        ;;
+      *)
+        OUTSIDE_WT_ROOT="$canonical"
+        printf '%s\n' "$OUTSIDE_WT_ROOT"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 # add_worktree_ignoring <repo> <wt> <branch> <gitignore-line...>
 add_worktree_ignoring() {
   local repo="$1" wt="$2" branch="$3"; shift 3
@@ -181,6 +218,185 @@ EOF
 }
 
 run_dj() { run bash "$DJ" "$@"; }
+# ---------------------------------------------------------------------------
+# RELEASE EXECUTION SNAPSHOT FIXTURES
+# ---------------------------------------------------------------------------
+
+# make_release_execution_snapshot <version> <suffix> <touch-stamp|fresh>
+# creates the same direct-child namespace the executor uses. The payload marker
+# makes the directory observably real rather than a vacuous pathname match.
+make_release_execution_snapshot() {
+  local version="$1" suffix="$2" stamp="$3" snapshot
+  snapshot="$TRELLIS_HOME/releases/.tmp.$version.exec.$suffix"
+  mkdir -p "$snapshot/payload"
+  printf 'release snapshot fixture\n' > "$snapshot/payload/marker"
+  if [ "$stamp" = fresh ]; then
+    touch "$snapshot"
+  else
+    touch -t "$stamp" "$snapshot"
+  fi
+  printf '%s\n' "$snapshot"
+}
+
+# write_release_execution_owner <snapshot> <pid> <process-birth>
+# The owner record is deliberately closed: the janitor must reject any extra
+# key instead of treating a merely plausible pid as ownership evidence.
+write_release_execution_owner() {
+  local snapshot="$1" pid="$2" process_birth="$3"
+  jq -cn --argjson pid "$pid" --arg process_birth "$process_birth" \
+    '{schema_version:1,pid:$pid,process_birth:$process_birth}' \
+    > "$snapshot.owner.json"
+  chmod 600 "$snapshot.owner.json"
+}
+
+release_process_birth() {
+  # Keep the exact token shape used by dj_release_staging_owner_state; command
+  # substitution removes only ps's trailing newline.
+  LC_ALL=C ps -p "$1" -o lstart=
+}
+
+# ===========================================================================
+# RELEASE EXECUTION SNAPSHOTS — direct store children and owner identity
+# ===========================================================================
+
+@test "--apply --yes --scopes releases retains a fresh execution snapshot" {
+  local snapshot
+  snapshot="$(make_release_execution_snapshot 1.2.3 FreshA1 fresh)"
+
+  # Report mode renders every planned row, including a fresh retention skip;
+  # this is the positive control that proves the exact directory was scanned.
+  run_dj --report --scopes releases
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[skip]"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"younger"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes releases </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Filesystem proof: a real directory with payload content survived.
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+  [ -f "$snapshot/payload/marker" ]
+}
+
+@test "--apply --yes --scopes releases removes an aged orphan and its owner sidecar" {
+  local snapshot owner
+  snapshot="$(make_release_execution_snapshot 1.2.3 DeadA1 "$STALE_TOUCH")"
+  owner="$snapshot.owner.json"
+  # A schema-valid record for a mismatched/dead owner must not authorize
+  # retention. The impossible pid keeps this independent of the host process
+  # table while still exercising the strict owner-record parser.
+  write_release_execution_owner "$snapshot" 2147483647 "dead-process"
+
+  # First capture the complete plan row; --apply may print only rows that will
+  # be deleted, so the report is the non-vacuous planned-target control.
+  run_dj --report --scopes releases
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"orphaned"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[delete]"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes releases </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$snapshot" ] && [ ! -L "$snapshot" ]
+  [ ! -e "$owner" ] && [ ! -L "$owner" ]
+  # Both planning and execution must name the actual target, and the summary
+  # must report reclaimed work rather than passing on an empty plan.
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"delete"* || "$output" == *"reclaim"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"removed"* || "$output" == *"reaped"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"reclaimed"* ]] || { echo "$output"; false; }
+}
+
+@test "an aged execution snapshot with a strict live owner is retained without argv matching" {
+  local snapshot owner birth command_line
+  snapshot="$(make_release_execution_snapshot 1.2.3 LiveA1 "$STALE_TOUCH")"
+
+  # Keep the process in the sandbox, but do not place the snapshot path in its
+  # argv. Retention therefore proves pid + LC_ALL=C ps lstart identity rather
+  # than a command-line substring heuristic.
+  ( cd "$SANDBOX" && exec /bin/sleep 300 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  birth="$(release_process_birth "$LIVE_PID")"
+  [ -n "$birth" ] || { echo "could not read live process birth"; false; }
+  command_line="$(LC_ALL=C ps -o command= -p "$LIVE_PID")"
+  [[ "$command_line" != *"$snapshot"* ]] || {
+    echo "live owner fixture unexpectedly contains snapshot path in argv: $command_line"
+    false
+  }
+  write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
+  owner="$snapshot.owner.json"
+
+  # Report mode is the explicit plan evidence for a retained candidate; apply
+  # must then leave both the directory and its owner sidecar untouched.
+  run_dj --report --scopes releases
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"owner process is live"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes releases </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+  [ -f "$owner" ] && [ ! -L "$owner" ]
+}
+
+@test "an aged live owner fails closed when its process birth probe fails" {
+  local snapshot owner birth fake_bin real_ps
+  snapshot="$(make_release_execution_snapshot 1.2.3 ProbeFailA1 "$STALE_TOUCH")"
+  ( cd "$SANDBOX" && exec /bin/sleep 300 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  birth="$(release_process_birth "$LIVE_PID")"
+  [ -n "$birth" ] || { echo "could not read live process birth"; false; }
+  write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
+  owner="$snapshot.owner.json"
+
+  real_ps="$(command -v ps)"
+  fake_bin="$SANDBOX/failing-owner-ps"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/ps" <<'EOF'
+#!/bin/bash
+if [ "$*" = "-p $FAIL_PS_PID -o lstart=" ]; then
+  exit 69
+fi
+exec "$REAL_PS" "$@"
+EOF
+  chmod +x "$fake_bin/ps"
+
+  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" FAIL_PS_PID="$LIVE_PID" \
+    bash "$DJ" --report --scopes releases
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"could not be determined"* ]] || { echo "$output"; false; }
+
+  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" FAIL_PS_PID="$LIVE_PID" \
+    bash "$DJ" --apply --yes --scopes releases </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+  [ -f "$owner" ] && [ ! -L "$owner" ]
+}
+
+@test "an aged execution snapshot with a malformed owner fails closed" {
+  local snapshot owner
+  snapshot="$(make_release_execution_snapshot 1.2.3 MalformedA1 "$STALE_TOUCH")"
+  owner="$snapshot.owner.json"
+  jq -cn '{schema_version:1,pid:1,process_birth:"not-authoritative",extra:true}' > "$owner"
+  chmod 600 "$owner"
+
+  run_dj --report --scopes releases
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"malformed"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes releases </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
+  [ -f "$owner" ] && [ ! -L "$owner" ]
+}
+
 
 # ===========================================================================
 # CACHE PRUNE — TTL discrimination
@@ -626,6 +842,119 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"[delete]"*"$wt"* ]] || { echo "$output"; false; }
   [[ "$output" == *"candidate"* ]] || { echo "$output"; false; }
+}
+
+
+# ===========================================================================
+# PHANTOM GIT REGISTRATIONS — missing ephemeral entries only
+#
+# A phantom is a Git worktree registration whose directory is gone. The target
+# itself is intentionally unregistered; the live main checkout is the strict
+# local-registry current root that authorizes inspecting its Git metadata.
+# ===========================================================================
+
+@test "registered current root reaps one absent /tmp phantom without broad-pruning an outside registration" {
+  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  git_init_at "$PROJECTS/alpha"
+  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom.XXXXXX)"
+  local phantom="$TMP_WT_ROOT/stale"
+  make_outside_phantom_root >/dev/null || skip "no writable path outside /sessions and /tmp"
+  local outside="$OUTSIDE_WT_ROOT/stale"
+
+  add_unregistered_worktree "$PROJECTS/alpha" "$phantom" "phantom/stale"
+  add_unregistered_worktree "$PROJECTS/alpha" "$outside" "phantom/outside"
+  rm -rf "$phantom" "$outside"
+
+  run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[delete]"*"$phantom"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"phantom registration"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$outside"* ]] || { echo "$output"; false; }
+
+  # The unattended merged-only schedule must leave phantom registration cleanup
+  # to the normal manually-confirmed apply path.
+  run_dj --apply --yes --safe-only --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$phantom"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$outside"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reaped: $phantom"* ]] || { echo "$output"; false; }
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$phantom"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$outside"* ]] || { echo "$output"; false; }
+}
+
+
+@test "phantom registration cleanup honors reap_pushed_worktrees=false" {
+  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
+  git_init_at "$PROJECTS/alpha"
+  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom-legacy.XXXXXX)"
+  local phantom="$TMP_WT_ROOT/legacy"
+  add_unregistered_worktree "$PROJECTS/alpha" "$phantom" "phantom/legacy"
+  rm -rf "$phantom"
+  write_config_dj '{ "reap_pushed_worktrees": false }'
+
+  run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$phantom"* ]] || { echo "$output"; false; }
+}
+
+@test "phantom pruning refuses an active deleted cwd plus existing dirty and outside worktrees" {
+  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
+  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
+  git_init_at "$PROJECTS/alpha"
+  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom-guards.XXXXXX)"
+  local active="$TMP_WT_ROOT/active"
+  local existing="$TMP_WT_ROOT/existing"
+  local dirty="$TMP_WT_ROOT/dirty"
+  make_outside_phantom_root >/dev/null || skip "no writable path outside /sessions and /tmp"
+  local outside="$OUTSIDE_WT_ROOT/guarded"
+  local tries=0
+
+  add_unregistered_worktree "$PROJECTS/alpha" "$active" "phantom/active"
+  add_unregistered_worktree "$PROJECTS/alpha" "$existing" "phantom/existing"
+  add_unregistered_worktree "$PROJECTS/alpha" "$dirty" "phantom/dirty"
+  add_unregistered_worktree "$PROJECTS/alpha" "$outside" "phantom/outside"
+  printf 'precious WIP\n' > "$dirty/UNCOMMITTED.txt"
+  ( cd "$active" && exec sleep 30 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  while [ "$tries" -lt 50 ]; do
+    lsof -a -d cwd -- "$active" >/dev/null 2>&1 && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  lsof -a -d cwd -- "$active" >/dev/null 2>&1
+  rm -rf "$active" "$outside"
+
+  run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[candidate]"*"$active"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$active"*"phantom registration in use"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$active"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$existing"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$dirty"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$outside"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  [ -d "$PROJECTS/alpha" ]
+  [ -d "$existing" ]
+  [ -d "$dirty" ]
+  [ -f "$dirty/UNCOMMITTED.txt" ]
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$active"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$existing"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$dirty"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$outside"* ]] || { echo "$output"; false; }
 }
 
 # ===========================================================================

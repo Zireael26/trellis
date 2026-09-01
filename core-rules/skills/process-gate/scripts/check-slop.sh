@@ -143,14 +143,15 @@ while IFS= read -r f; do
   case "$lang" in
     ts) TS_FILES+=("$f") ;;
     py) PY_FILES+=("$f") ;;
-    go|rs) OTHER_FILES+=("$f	$lang") ;;
+    go|rs|java) OTHER_FILES+=("$f	$lang") ;;
   esac
 done < <(cut -f1 "$LOOKUP" | sort -u)
 
 # --- detection ladder ------------------------------------------------------
 # An INSTALLED PROFILE means the native linter owns that language; the grep
 # pattern set is the fallback everywhere else. Go and Rust are pattern-only in v1
-# (their profiles ship dormant).
+# (their profiles ship dormant); Java is pattern-only because it has no native
+# lane at all — see profiles/java/README.md § Why no native engine.
 #
 # "Installed profile" is the profile's own marker in the config, never the mere
 # existence of a config file: oxlint keys off the vendored plugin's name, ruff off

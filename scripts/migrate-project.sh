@@ -11,6 +11,8 @@ SOURCE_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 . "$SCRIPT_DIR/lib/trellis-home.sh"
 # shellcheck source=lib/local-registry.sh
 . "$SCRIPT_DIR/lib/local-registry.sh"
+# shellcheck source=lib/release-store.sh
+. "$SCRIPT_DIR/lib/release-store.sh"
 
 MIGRATE_BEGIN_PREFIX='# --- Trellis inheritance symlinks'
 MIGRATE_END='# --- end Trellis fragment ---'
@@ -52,6 +54,31 @@ migrate_file_mode() {
     return 0
   fi
   return 1
+}
+
+migrate_file_identity() {
+  local identity
+  case "$(uname -s)" in
+    Darwin|*BSD|DragonFly) identity="$(stat -f '%d:%i' "$1" 2>/dev/null)" || return 1 ;;
+    *) identity="$(stat -c '%d:%i' "$1" 2>/dev/null)" || return 1 ;;
+  esac
+  case "$identity" in
+    *[!0-9:]*|*:*:*|:*|*:|'') return 1 ;;
+    *:*) printf '%s\n' "$identity" ;;
+    *) return 1 ;;
+  esac
+}
+
+migrate_file_link_count() {
+  local count
+  case "$(uname -s)" in
+    Darwin|*BSD|DragonFly) count="$(stat -f '%l' "$1" 2>/dev/null)" || return 1 ;;
+    *) count="$(stat -c '%h' "$1" 2>/dev/null)" || return 1 ;;
+  esac
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$count" ;;
+  esac
 }
 
 migrate_real_root() {
@@ -429,6 +456,154 @@ migrate_sha256_file() {
   printf '%s\n' "$output"
 }
 
+migrate_claim_legacy_policy() {
+  local path="$1" claimed="$2" parent claimed_parent rc
+  [ -f "$path" ] && [ ! -L "$path" ] || {
+    migrate_err 'legacy policy changed after snapshot; preserved the current path'
+    return "$TRELLIS_EX_CONFLICT"
+  }
+  parent="$(dirname "$path")" || return "$TRELLIS_EX_STATE"
+  claimed_parent="$(dirname "$claimed")" || return "$TRELLIS_EX_STATE"
+  [ "$claimed_parent" = "$parent" ] || return "$TRELLIS_EX_STATE"
+  case "$(basename "$claimed")" in
+    .trellis-migrate-removal.*) ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+  [ ! -e "$claimed" ] && [ ! -L "$claimed" ] || return "$TRELLIS_EX_CONFLICT"
+  release_store_rename_no_clobber "$path" "$claimed"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  legacy_claim_acquired=true
+  [ -f "$claimed" ] && [ ! -L "$claimed" ] ||
+    return "$TRELLIS_EX_CONFLICT"
+  legacy_claim_identity="$(migrate_file_identity "$claimed")" ||
+    return "$TRELLIS_EX_STATE"
+  legacy_claim_sha="$(migrate_sha256_file "$claimed")" ||
+    return "$TRELLIS_EX_STATE"
+  legacy_claim_pinned=true
+  return 0
+}
+
+migrate_copy_file_exclusive() {
+  local source="$1" destination="$2" mode="$3" python_bin identity rc
+  python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
+  identity="$("$python_bin" - "$source" "$destination" "$mode" <<'PY'
+import os
+import stat
+import sys
+
+source, destination, mode_text = sys.argv[1:4]
+source_fd = None
+destination_fd = None
+created_identity = None
+try:
+    mode = int(mode_text, 8)
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    source_stat = os.fstat(source_fd)
+    if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
+        raise OSError("unsafe source")
+    destination_fd = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    destination_stat = os.fstat(destination_fd)
+    created_identity = (destination_stat.st_dev, destination_stat.st_ino)
+    while True:
+        chunk = os.read(source_fd, 1024 * 1024)
+        if not chunk:
+            break
+        offset = 0
+        while offset < len(chunk):
+            offset += os.write(destination_fd, chunk[offset:])
+    os.fchmod(destination_fd, mode)
+    os.fsync(destination_fd)
+    destination_stat = os.fstat(destination_fd)
+    if not stat.S_ISREG(destination_stat.st_mode) or destination_stat.st_nlink != 1:
+        raise OSError("unsafe destination")
+    print(f"{destination_stat.st_dev}:{destination_stat.st_ino}")
+except FileExistsError:
+    sys.exit(17)
+except (OSError, ValueError):
+    if created_identity is not None:
+        try:
+            current = os.lstat(destination)
+            if (current.st_dev, current.st_ino) == created_identity:
+                os.unlink(destination)
+        except OSError:
+            pass
+    sys.exit(19)
+finally:
+    if destination_fd is not None:
+        os.close(destination_fd)
+    if source_fd is not None:
+        os.close(source_fd)
+PY
+  )"
+  rc=$?
+  case "$rc" in
+    0)
+      printf '%s\n' "$identity"
+      return 0
+      ;;
+    17) return "$TRELLIS_EX_CONFLICT" ;;
+    *) return "$TRELLIS_EX_UNAVAILABLE" ;;
+  esac
+}
+
+migrate_publish_file_exclusive() (
+  local source="$1" destination="$2" mode="$3"
+  local parent stage="" stage_identity source_sha rc stage_owned=false
+  migrate_publish_cleanup() {
+    local status="${1:-$?}"
+    trap - EXIT HUP INT TERM
+    if [ "$stage_owned" = true ] && [ -n "$stage" ] &&
+      [ -f "$stage" ] && [ ! -L "$stage" ] &&
+      [ "$(migrate_file_link_count "$stage")" = 1 ] &&
+      [ "$(migrate_file_identity "$stage")" = "$stage_identity" ]; then
+      rm "$stage" 2>/dev/null
+    fi
+    exit "$status"
+  }
+  trap 'migrate_publish_cleanup "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ -f "$source" ] && [ ! -L "$source" ] || return "$TRELLIS_EX_STATE"
+  parent="$(dirname "$destination")" || return "$TRELLIS_EX_STATE"
+  stage="$(mktemp "$parent/.trellis-migrate-publish.XXXXXX")" ||
+    return "$TRELLIS_EX_UNAVAILABLE"
+  rm "$stage" || return "$TRELLIS_EX_UNAVAILABLE"
+  stage_identity="$(migrate_copy_file_exclusive "$source" "$stage" "$mode")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    stage=""
+    return "$rc"
+  fi
+  stage_owned=true
+  source_sha="$(migrate_sha256_file "$source")" || return "$TRELLIS_EX_STATE"
+  if [ ! -f "$stage" ] || [ -L "$stage" ] ||
+    [ "$(migrate_file_link_count "$stage")" != 1 ] ||
+    [ "$(migrate_file_identity "$stage")" != "$stage_identity" ] ||
+    [ "$(migrate_sha256_file "$stage")" != "$source_sha" ]; then
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  release_store_rename_no_clobber "$stage" "$destination"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  stage_owned=false
+  stage=""
+  if [ ! -f "$destination" ] || [ -L "$destination" ] ||
+    [ "$(migrate_file_link_count "$destination")" != 1 ] ||
+    [ "$(migrate_file_identity "$destination")" != "$stage_identity" ] ||
+    [ "$(migrate_sha256_file "$destination")" != "$source_sha" ] ||
+    [ "$(migrate_file_mode "$destination")" != "$mode" ]; then
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  trap - EXIT HUP INT TERM
+  return 0
+)
+
 migrate_snapshot_path_allowed() {
   local rel="$1" parent name
   case "$rel" in
@@ -492,8 +667,9 @@ migrate_entry_matches_state() {
 
 migrate_snapshot_create() {
   local home="$1" root="$2" project_id="$3" actions_file="$4" candidate="$5" transforms="$6"
+  local machine_local_source="${7:-}" legacy_source_sha="${8:-}" legacy_source_identity="${9:-}"
   local snapshot_root snapshot identity head index rel path type mode target file sha
-  local post_type post_source post_mode post_sha counter=0
+  local post_type post_source post_mode post_sha machine_local_mode rc counter=0
   snapshot_root="$home/state/migrations"
   trellis_home_prepare_private_dir "$snapshot_root" 'migration snapshots directory' || return "$?"
   snapshot="$snapshot_root/$(date -u '+%Y%m%dT%H%M%SZ')-$$"
@@ -528,6 +704,15 @@ migrate_snapshot_create() {
       post_sha="$(migrate_sha256_file "$post_source")" || { rm -rf "$snapshot"; return "$TRELLIS_EX_STATE"; }
     fi
 
+    if [ "$rel" = '.trellis.config.json' ] && [ -n "$legacy_source_sha" ]; then
+      if [ ! -f "$path" ] || [ -L "$path" ] ||
+        [ "$(migrate_file_link_count "$path")" != 1 ] ||
+        [ "$(migrate_file_identity "$path")" != "$legacy_source_identity" ]; then
+        rm -rf "$snapshot"
+        migrate_err 'legacy policy changed while preparing migration'
+        return "$TRELLIS_EX_CONFLICT"
+      fi
+    fi
     if [ -L "$path" ]; then
       type=symlink
       target="$(readlink "$path")" || { rm -rf "$snapshot"; return "$TRELLIS_EX_STATE"; }
@@ -547,6 +732,14 @@ migrate_snapshot_create() {
         migrate_err "project file changed while snapshotting: $rel"
         return "$TRELLIS_EX_CONFLICT"
       }
+      if [ "$rel" = '.trellis.config.json' ] && [ -n "$legacy_source_sha" ] &&
+        { [ "$sha" != "$legacy_source_sha" ] ||
+          [ "$(migrate_file_link_count "$path")" != 1 ] ||
+          [ "$(migrate_file_identity "$path")" != "$legacy_source_identity" ]; }; then
+        rm -rf "$snapshot"
+        migrate_err 'legacy policy changed while preparing migration'
+        return "$TRELLIS_EX_CONFLICT"
+      fi
       jq -cnS --arg path "$rel" --arg type "$type" --arg mode "$mode" --arg file "$file" --arg sha256 "$sha" \
         --arg post_type "$post_type" --arg post_sha256 "$post_sha" --arg post_mode "$post_mode" \
         '{path:$path,type:$type,mode:$mode,file:$file,sha256:$sha256,post_type:$post_type}
@@ -564,7 +757,38 @@ migrate_snapshot_create() {
     fi
   done < "$actions_file"
 
-  identity="$(local_registry_identity_for_root "$root")" || { rm -rf "$snapshot"; return "$?"; }
+  if [ -n "$machine_local_source" ]; then
+    [ -f "$machine_local_source" ] && [ ! -L "$machine_local_source" ] &&
+      jq -e 'type == "object" and keys == ["gptx"] and (.gptx | type == "object")' \
+        "$machine_local_source" >/dev/null 2>&1 || {
+      rm -rf "$snapshot"
+      return "$TRELLIS_EX_STATE"
+    }
+    migrate_publish_file "$machine_local_source" "$snapshot/machine-local.json" 600 || {
+      rc="$?"
+      rm -rf "$snapshot"
+      return "$rc"
+    }
+    [ -f "$snapshot/machine-local.json" ] && [ ! -L "$snapshot/machine-local.json" ] || {
+      rm -rf "$snapshot"
+      return "$TRELLIS_EX_STATE"
+    }
+    machine_local_mode="$(migrate_file_mode "$snapshot/machine-local.json")" || {
+      rm -rf "$snapshot"
+      return "$TRELLIS_EX_STATE"
+    }
+    [ "$machine_local_mode" = 600 ] &&
+      cmp -s "$machine_local_source" "$snapshot/machine-local.json" || {
+      rm -rf "$snapshot"
+      return "$TRELLIS_EX_STATE"
+    }
+  fi
+
+  identity="$(local_registry_identity_for_root "$root")" || {
+    rc="$?"
+    rm -rf "$snapshot"
+    return "$rc"
+  }
   head="$(git -C "$root" rev-parse HEAD 2>/dev/null)" || { rm -rf "$snapshot"; return "$TRELLIS_EX_STATE"; }
   index="$(git -C "$root" write-tree 2>/dev/null)" || { rm -rf "$snapshot"; return "$TRELLIS_EX_STATE"; }
   jq -sS \
@@ -580,7 +804,9 @@ migrate_snapshot_create() {
 
 migrate_prepare() (
   local home_opt="" project_id_opt="" legacy_root_opt="" root_opt="" home root manifest legacy existing_id project_id candidate work actions transforms
-  local snapshot rel path mode rule_targets import_targets import_lines canonical_roots legacy_root=""
+  local snapshot rel path mode rule_targets import_targets import_lines canonical_roots legacy_root="" rc
+  local legacy_source="" legacy_source_sha="" legacy_source_identity="" legacy_claim="" machine_local_source=""
+  local legacy_claim_identity="" legacy_claim_sha="" legacy_claim_acquired=false legacy_claim_pinned=false
   local -a owned_paths=(
     '.claude/rules/trellis.md'
     '.agents/rules/trellis.md'
@@ -641,7 +867,35 @@ migrate_prepare() (
   fi
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/trellis-migrate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  trap 'rm -rf "${work:-}"' EXIT HUP INT TERM
+  migrate_prepare_cleanup() {
+    local status="${1:-$?}" cleanup_status=0
+    trap - EXIT
+    trap '' HUP INT TERM
+    if [ "$legacy_claim_acquired" = true ] && [ -n "$legacy_claim" ] &&
+      { [ -e "$legacy_claim" ] || [ -L "$legacy_claim" ]; }; then
+      if [ ! -f "$legacy_claim" ] || [ -L "$legacy_claim" ]; then
+        cleanup_status="$TRELLIS_EX_CONFLICT"
+      elif [ "$legacy_claim_pinned" = true ] &&
+        { [ "$(migrate_file_identity "$legacy_claim")" != "$legacy_claim_identity" ] ||
+          [ "$(migrate_sha256_file "$legacy_claim")" != "$legacy_claim_sha" ]; }; then
+        cleanup_status="$TRELLIS_EX_CONFLICT"
+      elif [ ! -e "$legacy" ] && [ ! -L "$legacy" ]; then
+        release_store_rename_no_clobber "$legacy_claim" "$legacy" ||
+          cleanup_status="$?"
+      else
+        cleanup_status="$TRELLIS_EX_CONFLICT"
+      fi
+    fi
+    rm -rf "${work:-}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+    if [ "$cleanup_status" -ne 0 ] && [ "$status" -lt "$cleanup_status" ]; then
+      status="$cleanup_status"
+    fi
+    exit "$status"
+  }
+  trap 'migrate_prepare_cleanup "$?"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   candidate="$work/manifest.json"
   actions="$work/actions"
   transforms="$work/transforms"
@@ -659,6 +913,19 @@ migrate_prepare() (
   if [ -f "$manifest" ]; then
     cp "$manifest" "$candidate" || return "$TRELLIS_EX_UNAVAILABLE"
   elif [ -f "$legacy" ]; then
+    legacy_source="$work/legacy.json"
+    legacy_source_identity="$(migrate_file_identity "$legacy")" || return "$TRELLIS_EX_STATE"
+    if [ "$(migrate_file_link_count "$legacy")" != 1 ]; then
+      migrate_err 'legacy project policy must not have multiple hard links'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+    cp "$legacy" "$legacy_source" || return "$TRELLIS_EX_UNAVAILABLE"
+    legacy_source_sha="$(migrate_sha256_file "$legacy_source")" || return "$TRELLIS_EX_STATE"
+    if [ "$legacy_source_sha" != "$(migrate_sha256_file "$legacy")" ] ||
+      [ "$legacy_source_identity" != "$(migrate_file_identity "$legacy")" ]; then
+      migrate_err 'legacy policy changed while preparing migration'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
     if ! jq -e '
       def portable_string:
         if type == "string" then
@@ -671,16 +938,24 @@ migrate_prepare() (
         else portable_string
         end;
       type == "object"
-      and portable
-      and ((keys_unsorted - ["$schema","schema_version","project_id","presets","autonomy","package_manager","loop_safety","mandatory_pipeline","gate_profiles"]) | length == 0)
+      and ((keys_unsorted - ["$schema","schema_version","project_id","presets","autonomy","package_manager","loop_safety","mandatory_pipeline","gate_profiles","gptx"]) | length == 0)
+      and ((has("gptx") | not) or (.gptx | type == "object"))
+      and (del(.gptx) | portable)
       and ((has("schema_version") | not) or .schema_version == 1)
       and ((has("project_id") | not) or .project_id == $project_id)
-    ' --arg project_id "$project_id" "$legacy" >/dev/null 2>&1; then
+    ' --arg project_id "$project_id" "$legacy_source" >/dev/null 2>&1; then
       migrate_err 'legacy policy contains ambiguous, machine-local, or invalid fields'
       return "$TRELLIS_EX_CONFLICT"
     fi
+    if jq -e 'has("gptx")' "$legacy_source" >/dev/null 2>&1; then
+      machine_local_source="$work/machine-local.json"
+      (umask 077; jq -S '{gptx:.gptx}' "$legacy_source" > "$machine_local_source") ||
+        return "$TRELLIS_EX_STATE"
+      chmod 600 "$machine_local_source" || return "$TRELLIS_EX_UNAVAILABLE"
+    fi
     jq -S --arg project_id "$project_id" --arg schema "$MIGRATE_PROJECT_SCHEMA" \
-      '. + {"$schema":$schema,schema_version:1,project_id:$project_id}' "$legacy" > "$candidate" || return "$TRELLIS_EX_STATE"
+      'del(.gptx) + {"$schema":$schema,schema_version:1,project_id:$project_id}' \
+      "$legacy_source" > "$candidate" || return "$TRELLIS_EX_STATE"
   else
     jq -nS --arg project_id "$project_id" --arg schema "$MIGRATE_PROJECT_SCHEMA" \
       '{"$schema":$schema,schema_version:1,project_id:$project_id}' > "$candidate" || return "$TRELLIS_EX_STATE"
@@ -752,21 +1027,43 @@ migrate_prepare() (
     return "$TRELLIS_EX_CONFLICT"
   fi
 
-  if [ -f "$legacy" ]; then printf '.trellis.config.json\n' >> "$actions"; fi
+  if [ -n "$legacy_source" ]; then printf '.trellis.config.json\n' >> "$actions"; fi
   if [ ! -f "$manifest" ]; then printf '.trellis.json\n' >> "$actions"; fi
   LC_ALL=C sort -u "$actions" -o "$actions" || return "$TRELLIS_EX_STATE"
 
-  snapshot="$(migrate_snapshot_create "$home" "$root" "$project_id" "$actions" "$candidate" "$transforms")" || return "$?"
+  snapshot="$(migrate_snapshot_create "$home" "$root" "$project_id" "$actions" "$candidate" \
+    "$transforms" "$machine_local_source" "$legacy_source_sha" "$legacy_source_identity")" || return "$?"
   printf 'snapshot: %s\n' "$snapshot"
   printf 'rollback: %q --rollback %q\n' "$0" "$snapshot"
-
+  if [ -n "$legacy_source" ]; then
+    migrate_parent_safe "$root" '.trellis.config.json' || return "$TRELLIS_EX_CONFLICT"
+    legacy_claim="$(mktemp "$root/.trellis-migrate-removal.XXXXXX")" ||
+      return "$TRELLIS_EX_UNAVAILABLE"
+    rm "$legacy_claim" || return "$TRELLIS_EX_UNAVAILABLE"
+    migrate_claim_legacy_policy "$legacy" "$legacy_claim"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+        legacy_claim=""
+      fi
+      return "$rc"
+    fi
+    if [ "$(migrate_file_link_count "$legacy_claim")" != 1 ] ||
+      [ "$legacy_claim_identity" != "$legacy_source_identity" ] ||
+      [ "$legacy_claim_sha" != "$legacy_source_sha" ] ||
+      [ "$(migrate_file_identity "$legacy_claim")" != "$legacy_claim_identity" ] ||
+      [ "$(migrate_sha256_file "$legacy_claim")" != "$legacy_claim_sha" ]; then
+      migrate_err 'legacy policy changed after snapshot; preserving the captured file'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  fi
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     migrate_parent_safe "$root" "$rel" || return "$TRELLIS_EX_CONFLICT"
     path="$root/$rel"
     case "$rel" in
       .trellis.json) migrate_publish_file "$candidate" "$path" 644 || return "$?" ;;
-      .trellis.config.json) rm -f "$path" || return "$TRELLIS_EX_UNAVAILABLE" ;;
+      .trellis.config.json) continue ;;
       CLAUDE.md)
         mode="$(migrate_file_mode "$path")" || return "$TRELLIS_EX_STATE"
         migrate_publish_file "$transforms/CLAUDE.md" "$path" "$mode" || return "$?" ;;
@@ -776,13 +1073,45 @@ migrate_prepare() (
       *) rm -f "$path" || return "$TRELLIS_EX_UNAVAILABLE" ;;
     esac
   done < "$actions"
+  if [ -n "$legacy_source" ] &&
+    { [ -e "$legacy" ] || [ -L "$legacy" ]; }; then
+    migrate_err 'legacy policy reappeared during migration; use the printed rollback command'
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  if [ -n "$legacy_claim" ]; then
+    trap '' HUP INT TERM
+    if [ ! -f "$legacy_claim" ] || [ -L "$legacy_claim" ] ||
+      [ "$(migrate_file_link_count "$legacy_claim")" != 1 ] ||
+      [ "$(migrate_file_identity "$legacy_claim")" != "$legacy_source_identity" ] ||
+      [ "$(migrate_sha256_file "$legacy_claim")" != "$legacy_source_sha" ]; then
+      migrate_err 'legacy retirement claim changed before migration commit'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      migrate_err 'legacy policy reappeared at the migration commit boundary'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+    rm "$legacy_claim" || return "$TRELLIS_EX_UNAVAILABLE"
+    legacy_claim=""
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      migrate_err 'legacy policy reappeared while committing migration'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  fi
+  if [ -n "$machine_local_source" ]; then
+    printf 'machine-local snapshot: %q\n' "$snapshot/machine-local.json"
+    printf '# registry annotate template; replace FLEET:\n'
+    printf '%q registry annotate --home %q --fleet FLEET --project %q --metadata-json "$(cat < %q)"\n' \
+      "$SCRIPT_DIR/trellis" "$home" "$project_id" "$snapshot/machine-local.json"
+  fi
 
   printf 'prepared migration: %s\n' "$root"
 )
 
 migrate_rollback() (
   local snapshot="${1:-}" original_snapshot manifest plan home snapshot_root root identity checkout worktree
-  local entry rel type path file mode target current_head current_index actual expected
+  local entry rel type post_type path file mode target current_head current_index actual expected rc preserve_legacy=false
+  local legacy_rollback_state="" preserve_legacy_identity="" preserve_legacy_sha=""
   [ -n "$snapshot" ] || { migrate_usage_error 'rollback requires SNAPSHOT'; return $?; }
   [ "$#" -eq 1 ] || { migrate_usage_error 'rollback accepts one SNAPSHOT'; return $?; }
   home="$(trellis_home_resolve)" || return "$?"
@@ -893,11 +1222,22 @@ migrate_rollback() (
         return "$TRELLIS_EX_STATE"
       }
     fi
-    migrate_entry_matches_state "$path" "$entry" pre ||
-      migrate_entry_matches_state "$path" "$entry" post || {
+    if migrate_entry_matches_state "$path" "$entry" pre; then
+      [ "$rel" != '.trellis.config.json' ] || legacy_rollback_state=pre
+    elif migrate_entry_matches_state "$path" "$entry" post; then
+      [ "$rel" != '.trellis.config.json' ] || legacy_rollback_state=post
+    else
+      post_type="$(printf '%s\n' "$entry" | jq -r '.post_type')" || return "$TRELLIS_EX_STATE"
+      if [ "$rel" = '.trellis.config.json' ] && [ "$type" = file ] &&
+        [ "$post_type" = absent ] && [ -f "$path" ] && [ ! -L "$path" ]; then
+        preserve_legacy=true
+        preserve_legacy_identity="$(migrate_file_identity "$path")" || return "$TRELLIS_EX_STATE"
+        preserve_legacy_sha="$(migrate_sha256_file "$path")" || return "$TRELLIS_EX_STATE"
+      else
         migrate_err "rollback destination changed since prepare: $rel"
         return "$TRELLIS_EX_CONFLICT"
-      }
+      fi
+    fi
   done < <(jq -c '.entries[]' "$manifest")
 
   while IFS= read -r entry; do
@@ -905,6 +1245,39 @@ migrate_rollback() (
     type="$(printf '%s\n' "$entry" | jq -r '.type')"
     path="$root/$rel"
     migrate_parent_safe "$root" "$rel" || return "$TRELLIS_EX_CONFLICT"
+    if [ "$rel" = '.trellis.config.json' ]; then
+      if [ "$preserve_legacy" = true ]; then
+        if [ -f "$path" ] && [ ! -L "$path" ] &&
+          [ "$(migrate_file_identity "$path")" = "$preserve_legacy_identity" ] &&
+          [ "$(migrate_sha256_file "$path")" = "$preserve_legacy_sha" ]; then
+          continue
+        fi
+        if ! migrate_entry_matches_state "$path" "$entry" post; then
+          migrate_err 'newer legacy policy changed during rollback'
+          return "$TRELLIS_EX_CONFLICT"
+        fi
+        preserve_legacy=false
+        legacy_rollback_state=post
+      fi
+      [ -n "$legacy_rollback_state" ] &&
+        migrate_entry_matches_state "$path" "$entry" "$legacy_rollback_state" || {
+        migrate_err 'legacy policy changed during rollback'
+        return "$TRELLIS_EX_CONFLICT"
+      }
+      if [ "$legacy_rollback_state" = pre ]; then
+        continue
+      fi
+      [ "$type" = file ] || return "$TRELLIS_EX_STATE"
+      file="$(printf '%s\n' "$entry" | jq -r '.file')"
+      mode="$(printf '%s\n' "$entry" | jq -r '.mode')"
+      migrate_publish_file_exclusive "$plan/files/$file" "$path" "$mode" || {
+        rc=$?
+        [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
+          migrate_err 'legacy policy appeared during rollback; preserved the current path'
+        return "$rc"
+      }
+      continue
+    fi
     rm -f "$path" || return "$TRELLIS_EX_UNAVAILABLE"
     case "$type" in
       absent) ;;
@@ -923,7 +1296,10 @@ migrate_rollback() (
         chmod "$mode" "$path" || return "$TRELLIS_EX_UNAVAILABLE"
         ;;
     esac
-  done < <(jq -c '.entries[]' "$manifest")
+  done < <(jq -c '.entries | sort_by(if .path == ".trellis.config.json" then 0 else 1 end)[]' "$manifest")
+  if [ "$preserve_legacy" = true ]; then
+    printf 'preserved newer legacy policy during rollback: %s\n' "$root/.trellis.config.json"
+  fi
   printf 'restored migration snapshot: %s\n' "$original_snapshot"
   chmod -R u+w "$plan" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
   trap - EXIT HUP INT TERM

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "source": "gotchas.md#dispatcher-path-fact",
+  "pattern_key": "managed-dispatcher-path-fact",
+  "occurrences": [
+    {
+      "ref": "context-log.md#session-2026-08-27",
+      "recorded": true
+    }
+  ],
+  "preconditions": [],
+  "inputs_needed": false,
+  "inputs": [],
+  "steps": [
+    {
+      "order": 1,
+      "action": "Record the configured managed dispatcher path"
+    }
+  ],
+  "result": "The managed dispatcher path is recorded as project-local",
+  "verification": "No second occurrence or reusable repair procedure is recorded",
+  "secret_values_present": false
+}

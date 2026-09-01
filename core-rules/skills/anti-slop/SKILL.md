@@ -1,6 +1,6 @@
 ---
 name: anti-slop
-description: Evidence-doctrine tooling for any registered Trellis project. Use to audit a repo for slop patterns before a de-slop cleanup session, and to install a per-language profile (TypeScript and Python live, Go and Rust dormant) so the project's own lint hooks enforce it. Not for turn-time enforcement — the tripwire hook and the process-gate row own that.
+description: Evidence-doctrine tooling for any registered Trellis project. Use to audit a repo for slop patterns before a de-slop cleanup session, and to install a per-language profile (TypeScript, Python, and Java live; Go and Rust dormant) so the project's own lint hooks enforce it. Not for turn-time enforcement — the tripwire hook and the process-gate row own that.
 ---
 
 # anti-slop
@@ -57,7 +57,9 @@ bash scripts/audit-slop.sh --json          # machine output
   only, never the project's whole config. Degradation prints as a note, never as a clean
   result; a native engine that exits ≥ 2 discards that language's native findings rather
   than letting an unrun tool read as clean.
-- Go and Rust report from the pattern layer only; their profiles ship dormant.
+- Java reports from the pattern layer only, but its rows are live and counted; it has
+  no native lane because every Java engine is a build-time plugin. Go and Rust also
+  report from the pattern layer only, and their profiles ship dormant.
 
 The output is a work list, not a score — deliberately no slop score anywhere.
 
@@ -69,6 +71,7 @@ The output is a work list, not a score — deliberately no slop score anywhere.
 | Python | `ruff-fragment.toml`, `mypy-fragment.ini` | `profiles/python/README.md` § Install | live |
 | Go | `golangci-fragment.yml` | `profiles/go/README.md` | dormant |
 | Rust | `cargo-lints-fragment.toml` | `profiles/rust/README.md` | dormant |
+| Java | rows in `hooks/lib/slop-patterns.sh` | `profiles/java/README.md` | live, pattern layer only |
 
 Every install follows the same shape:
 

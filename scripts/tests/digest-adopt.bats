@@ -31,13 +31,18 @@ json_assert() {
 }
 
 @test "propose-only return reports spend using an explicit rate override" {
-  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","loopSafety":{"usd_per_mtok":17.5},"usdPerMTok":10,"__budgetSpentTokens":200000,"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test proposal","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test proposal","route":"surgical","rationale":"small","skeptic_upheld":true}}}'
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","loopSafety":{"usd_per_mtok":17.5},"usdPerMTok":10,"__budgetSpentTokens":200000,"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test proposal","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test proposal","route":"surgical","rationale":"small"},"skeptic:P1":{"id":"P1","skeptic_upheld":true}}}'
   json_assert "!r.error && r.result.note.startsWith('PROPOSE-ONLY') && r.result.costLine === 'spent_usd 2.000000 / budget_ceiling_usd 60.00 (200000 output tokens at usd_per_mtok 10.00)' && r.logs.some((line) => line.includes(r.result.costLine))"
 }
 
 @test "execution report converts output tokens with the exact fractional rate" {
-  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","approved":[{"id":"P1","route":"surgical"}],"usdPerMTok":12.5,"__budgetSpentTokens":400000,"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test proposal","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test proposal","route":"surgical","rationale":"small","skeptic_upheld":true},"build:P1":{"id":"P1","route":"surgical","branch":"feat/adopt-p1","pr_url":"https://example.test/pr/1","gate_green":true,"notes":"ok"}}}'
-  json_assert "!r.error && r.result.verdicts.length === 1 && r.result.costLine === 'spent_usd 5.000000 / budget_ceiling_usd 60.00 (400000 output tokens at usd_per_mtok 12.5)' && r.logs.some((line) => line.includes(r.result.costLine))"
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","approved":[{"id":"P1","route":"surgical"}],"usdPerMTok":12.5,"__budgetSpentTokens":400000,"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test proposal","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test proposal","route":"surgical","rationale":"small"},"skeptic:P1":{"id":"P1","skeptic_upheld":true},"build:P1":{"id":"P1","route":"surgical","branch":"feat/adopt-p1","pr_number":1,"pr_state":"OPEN","pr_url":"https://github.com/example/repo/pull/1","gate_green":true,"notes":"ok"}}}'
+  json_assert "!r.error && r.result.verdicts.length === 1 && r.result.costLine === 'spent_usd 5.000000 / budget_ceiling_usd 60.00 (400000 output tokens at usd_per_mtok 12.5)' && r.logs.some((line) => line.includes('1/1 HOLD PRs opened')) && r.logs.some((line) => line.includes(r.result.costLine))"
+}
+
+@test "URL-only verdict fails closed instead of counting a HOLD PR as opened" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","approved":[{"id":"P1","route":"surgical"}],"__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test proposal","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test proposal","route":"surgical","rationale":"small"},"skeptic:P1":{"id":"P1","skeptic_upheld":true},"build:P1":{"id":"P1","route":"surgical","branch":"feat/adopt-p1","pr_url":"https://github.com/example/repo/pull/1","gate_green":true,"notes":"URL without opened-state or PR-number receipt"}}}'
+  json_assert "!r.error && r.result.verdicts.length === 1 && r.logs.some((line) => line.includes('0/1 HOLD PRs opened'))"
 }
 
 @test "early return reports unavailable output-token metering honestly" {
@@ -56,4 +61,34 @@ json_assert() {
     run_recipe "{\"digestPath\":\"research/ai-dev-trends/digests/test.md\",\"usdPerMTok\":$rate}"
     json_assert "r.error && r.error.message.includes('args.usdPerMTok must be a finite number greater than 0') && r.prompts.length === 0"
   done
+}
+
+@test "triage splits generator and verifier into distinct agent invocations per candidate" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"A","effort":"S","risk":"lo"},{"id":"P2","title":"B","effort":"M","risk":"med"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"A","route":"surgical","rationale":"small"},"triage:P2":{"id":"P2","title":"B","route":"feature","rationale":"needs design"},"skeptic:P1":{"id":"P1","skeptic_upheld":true},"skeptic:P2":{"id":"P2","skeptic_upheld":false}}}'
+  json_assert "!r.error && r.result.triage.length===2 && r.result.triage.find(t=>t.id==='P1').skeptic_upheld===true && r.result.triage.find(t=>t.id==='P2').skeptic_upheld===false && r.result.triage.find(t=>t.id==='P1').route==='surgical' && r.result.triage.find(t=>t.id==='P2').route==='feature' && r.prompts.filter(p=>p.opts.label.startsWith('triage:')).length===2 && r.prompts.filter(p=>p.opts.label.startsWith('skeptic:')).length===2"
+}
+
+@test "generator schema cannot set skeptic_upheld and verifier alone emits it" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"A","effort":"S","risk":"lo"},{"id":"P2","title":"B","effort":"M","risk":"med"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"A","route":"surgical","rationale":"small"},"triage:P2":{"id":"P2","title":"B","route":"feature","rationale":"needs design"},"skeptic:P1":{"id":"P1","skeptic_upheld":true},"skeptic:P2":{"id":"P2","skeptic_upheld":false}}}'
+  json_assert "(() => { const gen=r.prompts.find(p=>p.opts.label==='triage:P1'); const sk=r.prompts.find(p=>p.opts.label==='skeptic:P1'); return gen && sk && gen.opts.schema.required.includes('rationale') && !gen.opts.schema.required.includes('skeptic_upheld') && gen.opts.schema.additionalProperties===false && sk.opts.schema.required.includes('skeptic_upheld') && !sk.opts.schema.required.includes('route') && !sk.opts.schema.required.includes('rationale') && sk.opts.schema.additionalProperties===false; })() && r.prompts.find(p=>p.opts.label==='skeptic:P1').prompt.includes('CANDIDATE') && r.prompts.find(p=>p.opts.label==='skeptic:P1').prompt.includes('GENERATOR CLASSIFICATION') && r.prompts.find(p=>p.opts.label==='skeptic:P1').prompt.includes('skeptical-evaluator')"
+}
+
+@test "generator output cannot self-uphold — smuggled skeptic_upheld fails closed" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test","route":"surgical","rationale":"small","skeptic_upheld":true},"skeptic:P1":{"id":"P1","skeptic_upheld":false}}}'
+  json_assert "r.error && /Triage/.test(r.error.message)"
+}
+
+@test "missing skeptic verifier receipt fails closed" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test","route":"surgical","rationale":"small"}}}'
+  json_assert "r.error && /Triage/.test(r.error.message)"
+}
+
+@test "mismatched skeptic ID fails closed" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"Test","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"Test","route":"surgical","rationale":"small"},"skeptic:P1":{"id":"P2","skeptic_upheld":true}}}'
+  json_assert "r.error && /Triage/.test(r.error.message)"
+}
+
+@test "parallelism across candidates preserved — all generators and verifiers fan out" {
+  run_recipe '{"digestPath":"research/ai-dev-trends/digests/test.md","__agentOutputByLabel":{"ingest-digest":{"candidates":[{"id":"P1","title":"A","effort":"S","risk":"lo"},{"id":"P2","title":"B","effort":"S","risk":"lo"},{"id":"P3","title":"C","effort":"S","risk":"lo"}],"skipped_settled":0},"triage:P1":{"id":"P1","title":"A","route":"surgical","rationale":"a"},"triage:P2":{"id":"P2","title":"B","route":"surgical","rationale":"b"},"triage:P3":{"id":"P3","title":"C","route":"surgical","rationale":"c"},"skeptic:P1":{"id":"P1","skeptic_upheld":true},"skeptic:P2":{"id":"P2","skeptic_upheld":true},"skeptic:P3":{"id":"P3","skeptic_upheld":false}}}'
+  json_assert "!r.error && r.result.triage.length===3 && r.prompts.filter(p=>p.opts.label.startsWith('triage:')).length===3 && r.prompts.filter(p=>p.opts.label.startsWith('skeptic:')).length===3 && r.result.triage.map(t=>t.id).join(',')==='P1,P2,P3'"
 }

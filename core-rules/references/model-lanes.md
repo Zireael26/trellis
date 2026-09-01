@@ -90,6 +90,12 @@ caller must:
 Do not ask the router to substitute silently. Do not widen the unit during an
 explicitly selected rerun. Do not report the unavailable attempt as success.
 
+## Herdr foreman lane
+
+Inside Herdr (`HERDR_ENV=1`) a multi-unit task may run through an OMP foreman pane
+whose workers are chosen per role from live quota. Topology, the cross-family rule,
+and commit-at-phase-boundary obligations: `core-rules/references/herdr-foreman.md`.
+
 ## Precedent and deliberate limits
 
 The durable rules a foreign-lane route must follow: pin a first-party

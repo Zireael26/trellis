@@ -1,0 +1,1124 @@
+{
+  "scenario": "nvidia_advertised_171_served_102",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:40:00Z"
+    },
+    "raw_sources": [
+      {
+        "source_id": "omp-advertised-models",
+        "format": "advertised-model-inventory-json",
+        "provider": "nvidia",
+        "lane_id": "nvidia",
+        "route": "nvidia",
+        "collection": "configuration",
+        "observed_at": "2026-08-23T12:40:00Z",
+        "models": [
+          {
+            "id": "deepseek-v4-flash"
+          },
+          {
+            "id": "nvidia/synthetic-model-001"
+          },
+          {
+            "id": "nvidia/synthetic-model-002"
+          },
+          {
+            "id": "nvidia/synthetic-model-003"
+          },
+          {
+            "id": "nvidia/synthetic-model-004"
+          },
+          {
+            "id": "nvidia/synthetic-model-005"
+          },
+          {
+            "id": "nvidia/synthetic-model-006"
+          },
+          {
+            "id": "nvidia/synthetic-model-007"
+          },
+          {
+            "id": "nvidia/synthetic-model-008"
+          },
+          {
+            "id": "nvidia/synthetic-model-009"
+          },
+          {
+            "id": "nvidia/synthetic-model-010"
+          },
+          {
+            "id": "nvidia/synthetic-model-011"
+          },
+          {
+            "id": "nvidia/synthetic-model-012"
+          },
+          {
+            "id": "nvidia/synthetic-model-013"
+          },
+          {
+            "id": "nvidia/synthetic-model-014"
+          },
+          {
+            "id": "nvidia/synthetic-model-015"
+          },
+          {
+            "id": "nvidia/synthetic-model-016"
+          },
+          {
+            "id": "nvidia/synthetic-model-017"
+          },
+          {
+            "id": "nvidia/synthetic-model-018"
+          },
+          {
+            "id": "nvidia/synthetic-model-019"
+          },
+          {
+            "id": "nvidia/synthetic-model-020"
+          },
+          {
+            "id": "nvidia/synthetic-model-021"
+          },
+          {
+            "id": "nvidia/synthetic-model-022"
+          },
+          {
+            "id": "nvidia/synthetic-model-023"
+          },
+          {
+            "id": "nvidia/synthetic-model-024"
+          },
+          {
+            "id": "nvidia/synthetic-model-025"
+          },
+          {
+            "id": "nvidia/synthetic-model-026"
+          },
+          {
+            "id": "nvidia/synthetic-model-027"
+          },
+          {
+            "id": "nvidia/synthetic-model-028"
+          },
+          {
+            "id": "nvidia/synthetic-model-029"
+          },
+          {
+            "id": "nvidia/synthetic-model-030"
+          },
+          {
+            "id": "nvidia/synthetic-model-031"
+          },
+          {
+            "id": "nvidia/synthetic-model-032"
+          },
+          {
+            "id": "nvidia/synthetic-model-033"
+          },
+          {
+            "id": "nvidia/synthetic-model-034"
+          },
+          {
+            "id": "nvidia/synthetic-model-035"
+          },
+          {
+            "id": "nvidia/synthetic-model-036"
+          },
+          {
+            "id": "nvidia/synthetic-model-037"
+          },
+          {
+            "id": "nvidia/synthetic-model-038"
+          },
+          {
+            "id": "nvidia/synthetic-model-039"
+          },
+          {
+            "id": "nvidia/synthetic-model-040"
+          },
+          {
+            "id": "nvidia/synthetic-model-041"
+          },
+          {
+            "id": "nvidia/synthetic-model-042"
+          },
+          {
+            "id": "nvidia/synthetic-model-043"
+          },
+          {
+            "id": "nvidia/synthetic-model-044"
+          },
+          {
+            "id": "nvidia/synthetic-model-045"
+          },
+          {
+            "id": "nvidia/synthetic-model-046"
+          },
+          {
+            "id": "nvidia/synthetic-model-047"
+          },
+          {
+            "id": "nvidia/synthetic-model-048"
+          },
+          {
+            "id": "nvidia/synthetic-model-049"
+          },
+          {
+            "id": "nvidia/synthetic-model-050"
+          },
+          {
+            "id": "nvidia/synthetic-model-051"
+          },
+          {
+            "id": "nvidia/synthetic-model-052"
+          },
+          {
+            "id": "nvidia/synthetic-model-053"
+          },
+          {
+            "id": "nvidia/synthetic-model-054"
+          },
+          {
+            "id": "nvidia/synthetic-model-055"
+          },
+          {
+            "id": "nvidia/synthetic-model-056"
+          },
+          {
+            "id": "nvidia/synthetic-model-057"
+          },
+          {
+            "id": "nvidia/synthetic-model-058"
+          },
+          {
+            "id": "nvidia/synthetic-model-059"
+          },
+          {
+            "id": "nvidia/synthetic-model-060"
+          },
+          {
+            "id": "nvidia/synthetic-model-061"
+          },
+          {
+            "id": "nvidia/synthetic-model-062"
+          },
+          {
+            "id": "nvidia/synthetic-model-063"
+          },
+          {
+            "id": "nvidia/synthetic-model-064"
+          },
+          {
+            "id": "nvidia/synthetic-model-065"
+          },
+          {
+            "id": "nvidia/synthetic-model-066"
+          },
+          {
+            "id": "nvidia/synthetic-model-067"
+          },
+          {
+            "id": "nvidia/synthetic-model-068"
+          },
+          {
+            "id": "nvidia/synthetic-model-069"
+          },
+          {
+            "id": "nvidia/synthetic-model-070"
+          },
+          {
+            "id": "nvidia/synthetic-model-071"
+          },
+          {
+            "id": "nvidia/synthetic-model-072"
+          },
+          {
+            "id": "nvidia/synthetic-model-073"
+          },
+          {
+            "id": "nvidia/synthetic-model-074"
+          },
+          {
+            "id": "nvidia/synthetic-model-075"
+          },
+          {
+            "id": "nvidia/synthetic-model-076"
+          },
+          {
+            "id": "nvidia/synthetic-model-077"
+          },
+          {
+            "id": "nvidia/synthetic-model-078"
+          },
+          {
+            "id": "nvidia/synthetic-model-079"
+          },
+          {
+            "id": "nvidia/synthetic-model-080"
+          },
+          {
+            "id": "nvidia/synthetic-model-081"
+          },
+          {
+            "id": "nvidia/synthetic-model-082"
+          },
+          {
+            "id": "nvidia/synthetic-model-083"
+          },
+          {
+            "id": "nvidia/synthetic-model-084"
+          },
+          {
+            "id": "nvidia/synthetic-model-085"
+          },
+          {
+            "id": "nvidia/synthetic-model-086"
+          },
+          {
+            "id": "nvidia/synthetic-model-087"
+          },
+          {
+            "id": "nvidia/synthetic-model-088"
+          },
+          {
+            "id": "nvidia/synthetic-model-089"
+          },
+          {
+            "id": "nvidia/synthetic-model-090"
+          },
+          {
+            "id": "nvidia/synthetic-model-091"
+          },
+          {
+            "id": "nvidia/synthetic-model-092"
+          },
+          {
+            "id": "nvidia/synthetic-model-093"
+          },
+          {
+            "id": "nvidia/synthetic-model-094"
+          },
+          {
+            "id": "nvidia/synthetic-model-095"
+          },
+          {
+            "id": "nvidia/synthetic-model-096"
+          },
+          {
+            "id": "nvidia/synthetic-model-097"
+          },
+          {
+            "id": "nvidia/synthetic-model-098"
+          },
+          {
+            "id": "nvidia/synthetic-model-099"
+          },
+          {
+            "id": "nvidia/synthetic-model-100"
+          },
+          {
+            "id": "nvidia/synthetic-model-101"
+          },
+          {
+            "id": "nvidia/synthetic-model-102"
+          },
+          {
+            "id": "nvidia/synthetic-model-103"
+          },
+          {
+            "id": "nvidia/synthetic-model-104"
+          },
+          {
+            "id": "nvidia/synthetic-model-105"
+          },
+          {
+            "id": "nvidia/synthetic-model-106"
+          },
+          {
+            "id": "nvidia/synthetic-model-107"
+          },
+          {
+            "id": "nvidia/synthetic-model-108"
+          },
+          {
+            "id": "nvidia/synthetic-model-109"
+          },
+          {
+            "id": "nvidia/synthetic-model-110"
+          },
+          {
+            "id": "nvidia/synthetic-model-111"
+          },
+          {
+            "id": "nvidia/synthetic-model-112"
+          },
+          {
+            "id": "nvidia/synthetic-model-113"
+          },
+          {
+            "id": "nvidia/synthetic-model-114"
+          },
+          {
+            "id": "nvidia/synthetic-model-115"
+          },
+          {
+            "id": "nvidia/synthetic-model-116"
+          },
+          {
+            "id": "nvidia/synthetic-model-117"
+          },
+          {
+            "id": "nvidia/synthetic-model-118"
+          },
+          {
+            "id": "nvidia/synthetic-model-119"
+          },
+          {
+            "id": "nvidia/synthetic-model-120"
+          },
+          {
+            "id": "nvidia/synthetic-model-121"
+          },
+          {
+            "id": "nvidia/synthetic-model-122"
+          },
+          {
+            "id": "nvidia/synthetic-model-123"
+          },
+          {
+            "id": "nvidia/synthetic-model-124"
+          },
+          {
+            "id": "nvidia/synthetic-model-125"
+          },
+          {
+            "id": "nvidia/synthetic-model-126"
+          },
+          {
+            "id": "nvidia/synthetic-model-127"
+          },
+          {
+            "id": "nvidia/synthetic-model-128"
+          },
+          {
+            "id": "nvidia/synthetic-model-129"
+          },
+          {
+            "id": "nvidia/synthetic-model-130"
+          },
+          {
+            "id": "nvidia/synthetic-model-131"
+          },
+          {
+            "id": "nvidia/synthetic-model-132"
+          },
+          {
+            "id": "nvidia/synthetic-model-133"
+          },
+          {
+            "id": "nvidia/synthetic-model-134"
+          },
+          {
+            "id": "nvidia/synthetic-model-135"
+          },
+          {
+            "id": "nvidia/synthetic-model-136"
+          },
+          {
+            "id": "nvidia/synthetic-model-137"
+          },
+          {
+            "id": "nvidia/synthetic-model-138"
+          },
+          {
+            "id": "nvidia/synthetic-model-139"
+          },
+          {
+            "id": "nvidia/synthetic-model-140"
+          },
+          {
+            "id": "nvidia/synthetic-model-141"
+          },
+          {
+            "id": "nvidia/synthetic-model-142"
+          },
+          {
+            "id": "nvidia/synthetic-model-143"
+          },
+          {
+            "id": "nvidia/synthetic-model-144"
+          },
+          {
+            "id": "nvidia/synthetic-model-145"
+          },
+          {
+            "id": "nvidia/synthetic-model-146"
+          },
+          {
+            "id": "nvidia/synthetic-model-147"
+          },
+          {
+            "id": "nvidia/synthetic-model-148"
+          },
+          {
+            "id": "nvidia/synthetic-model-149"
+          },
+          {
+            "id": "nvidia/synthetic-model-150"
+          },
+          {
+            "id": "nvidia/synthetic-model-151"
+          },
+          {
+            "id": "nvidia/synthetic-model-152"
+          },
+          {
+            "id": "nvidia/synthetic-model-153"
+          },
+          {
+            "id": "nvidia/synthetic-model-154"
+          },
+          {
+            "id": "nvidia/synthetic-model-155"
+          },
+          {
+            "id": "nvidia/synthetic-model-156"
+          },
+          {
+            "id": "nvidia/synthetic-model-157"
+          },
+          {
+            "id": "nvidia/synthetic-model-158"
+          },
+          {
+            "id": "nvidia/synthetic-model-159"
+          },
+          {
+            "id": "nvidia/synthetic-model-160"
+          },
+          {
+            "id": "nvidia/synthetic-model-161"
+          },
+          {
+            "id": "nvidia/synthetic-model-162"
+          },
+          {
+            "id": "nvidia/synthetic-model-163"
+          },
+          {
+            "id": "nvidia/synthetic-model-164"
+          },
+          {
+            "id": "nvidia/synthetic-model-165"
+          },
+          {
+            "id": "nvidia/synthetic-model-166"
+          },
+          {
+            "id": "nvidia/synthetic-model-167"
+          },
+          {
+            "id": "nvidia/synthetic-model-168"
+          },
+          {
+            "id": "nvidia/synthetic-model-169"
+          },
+          {
+            "id": "nvidia/synthetic-model-170"
+          }
+        ]
+      },
+      {
+        "source_id": "source-nvidia-model-list-001",
+        "format": "openai-model-list-json",
+        "provider": "nvidia",
+        "lane_id": "nvidia",
+        "route": "nvidia",
+        "endpoint": "https://synthetic.invalid/nvidia/v1/models",
+        "response": {
+          "object": "list",
+          "data": [
+            {
+              "id": "deepseek-v4-flash",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-001",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-002",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-003",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-004",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-005",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-006",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-007",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-008",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-009",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-010",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-011",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-012",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-013",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-014",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-015",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-016",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-017",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-018",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-019",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-020",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-021",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-022",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-023",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-024",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-025",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-026",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-027",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-028",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-029",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-030",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-031",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-032",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-033",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-034",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-035",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-036",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-037",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-038",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-039",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-040",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-041",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-042",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-043",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-044",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-045",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-046",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-047",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-048",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-049",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-050",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-051",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-052",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-053",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-054",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-055",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-056",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-057",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-058",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-059",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-060",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-061",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-062",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-063",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-064",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-065",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-066",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-067",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-068",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-069",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-070",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-071",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-072",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-073",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-074",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-075",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-076",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-077",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-078",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-079",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-080",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-081",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-082",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-083",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-084",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-085",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-086",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-087",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-088",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-089",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-090",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-091",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-092",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-093",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-094",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-095",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-096",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-097",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-098",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-099",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-100",
+              "object": "model",
+              "owned_by": "nvidia"
+            },
+            {
+              "id": "nvidia/synthetic-model-101",
+              "object": "model",
+              "owned_by": "nvidia"
+            }
+          ]
+        }
+      },
+      {
+        "source_id": "nvidia-passive-serving-outcomes",
+        "format": "serving-outcome-json",
+        "provider": "nvidia",
+        "collection": "passive_only",
+        "records": [
+          {
+            "outcome_id": "nvidia-deepseek-v4-flash-410-001",
+            "kind": "serving_outcome",
+            "observed_at": "2026-08-23T12:40:00Z",
+            "source_id": "nvidia-passive-serving-outcomes",
+            "lane_id": "nvidia",
+            "route": "nvidia",
+            "model": "deepseek-v4-flash",
+            "status": "disabled",
+            "http_status": 410,
+            "reason_code": "model_gone",
+            "persisted": true
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "status": "complete",
+    "lanes": [
+      {
+        "lane_id": "nvidia",
+        "catalog": {
+          "advertised": {
+            "status": "fresh",
+            "observed_at": "2026-08-23T12:40:00Z",
+            "value": {
+              "model_count": 171
+            }
+          },
+          "served": {
+            "status": "fresh",
+            "observed_at": "2026-08-23T12:40:00Z",
+            "value": {
+              "model_count": 102
+            }
+          }
+        },
+        "models": [
+          {
+            "route": "nvidia",
+            "model": "deepseek-v4-flash",
+            "serving": {
+              "status": "disabled",
+              "observed_at": "2026-08-23T12:40:00Z",
+              "reason_code": "model_gone"
+            },
+            "last_observed_refusal": {
+              "observed_at": "2026-08-23T12:40:00Z",
+              "reason_code": "model_gone",
+              "http_status": 410,
+              "persisted": true
+            }
+          }
+        ],
+        "availability": {
+          "status": "unknown",
+          "observed_at": "2026-08-23T12:40:00Z",
+          "reason_code": "model_only_outcome_no_lane_wide_evidence"
+        }
+      }
+    ]
+  }
+}

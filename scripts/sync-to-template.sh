@@ -457,9 +457,22 @@ sync_paths=(
   'trellis.config.json'
 )
 
+
 # Every core-rules subtree is either published above or consciously private.
+# Entries are relative to core-rules/. A private entry nested below a published
+# parent is removed from the stage, and its exact public-tree counterpart must
+# also appear in `delist_prune` so an existing mirror loses stale copies.
 core_rules_no_sync=(
   'evals'
+  'skills/herdr-foreman'
+  # Both name this operator's LIVE provider routes -- the same reason
+  # `core-rules/templates/omp-project-policy.yml` is excluded below. `pi/agents`
+  # pins models per agent (including `opencode-go-2`, a second private account),
+  # and `usage-federation/lane-catalog.json` enumerates `google-antigravity`,
+  # `nous-portal` and `xai-oauth`. Neither carries a secret; both carry the
+  # roster, which is what this list is for.
+  'pi'
+  'usage-federation'
 )
 
 # Exact payload paths that a wholesale directory entry above would otherwise
@@ -470,6 +483,21 @@ core_rules_no_sync=(
 # published copy forever.
 payload_no_publish=(
   'docs/adr/2026-08-07-fleet-hosting-substrate-policy.md'
+  # Withheld for the same reason as core-rules/pi and core-rules/usage-federation:
+  # it names this operator's live provider routes. quota/ carries one module per
+  # provider -- antigravity, xai, opencode, openrouter -- so the package structure
+  # IS the roster. `scripts/` is allowlisted wholesale for its policy value, which
+  # is exactly what this list exists to carve into.
+  'scripts/lib/usage_federation'
+  # Its test suite names the same provider modules, so it is withheld with it.
+  'scripts/tests/usage-federation.bats'
+  # The OMP project policy template carries this operator's model roster --
+  # `agentModelOverrides` naming live provider routes including `google-antigravity`.
+  # `core-rules/templates/` is published for its policy value; this one file inside it
+  # is operator-specific, which is exactly what this list is for. Excluded rather than
+  # renamed: `google-antigravity` is the LIVE provider id, and renaming it to satisfy
+  # the lint re-introduces the flash misroute fixed on 2026-08-23.
+  'core-rules/templates/omp-project-policy.yml'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -482,9 +510,14 @@ payload_no_publish=(
 # mirror permanently unpublishable, and an entry here with no lint term deletes
 # silently instead of failing loudly.
 delist_prune=(
+  'scripts/lib/usage_federation'
+  'scripts/tests/usage-federation.bats'
+  'core-rules/pi'
+  'core-rules/usage-federation'
   'docs/antigravity-steering.md'
   'docs/gpt-5.5-steering.md'
   'docs/opus-4.8-steering.md'
+  'core-rules/skills/herdr-foreman'
   'scheduled-tasks'
   'local'
   '.trellis'
@@ -498,6 +531,7 @@ delist_prune=(
   'blacklist.md'
   'recon.md'
   'docs/adr/2026-08-07-fleet-hosting-substrate-policy.md'
+  'core-rules/templates/omp-project-policy.yml'
   'AGENT_ONBOARD_GPTX.md'
   'docs/gptx.md'
   'docs/gptx-security.md'
@@ -507,12 +541,54 @@ delist_prune=(
 
 safe_prune_path() {
   case "$1" in
-    ''|'.'|'..'|/*|*'//'|*$'\t'*|*$'\n'*|*$'\r'*|./*|../*|*'/./'*|*'/../'*|*/.|*/..) return 1 ;;
+    ''|'.'|'..'|/*|*'//'*|*$'\t'*|*$'\n'*|*$'\r'*|./*|../*|*'/./'*|*'/../'*|*/|*/.|*/..) return 1 ;;
     *) return 0 ;;
   esac
 }
 
+preflight_payload_no_publish_prunes() {
+  # The `payload_no_publish` header states that every entry must also appear in
+  # `delist_prune`, or an already-published copy is never deleted. Nothing enforced it
+  # -- the invariant lived in a comment, and a comment does not fail a build. Added
+  # 2026-08-24 after satisfying the pairing BY HAND for the OMP policy template, which
+  # is precisely how the next entry would have skipped it silently.
+  local path prune found
+  for path in "${payload_no_publish[@]}"; do
+    safe_prune_path "$path" || {
+      printf 'trellis mirror: unsafe payload_no_publish path: %s\n' "$path" >&2
+      return 1
+    }
+    found=
+    for prune in "${delist_prune[@]}"; do
+      [ "$prune" = "$path" ] && { found=1; break; }
+    done
+    [ -n "$found" ] || {
+      printf 'trellis mirror: payload_no_publish entry is missing its exact delist prune pair: %s\n' "$path" >&2
+      return 1
+    }
+  done
+}
 
+preflight_core_rules_private_prunes() {
+  local private prune expected
+  for private in "${core_rules_no_sync[@]}"; do
+    safe_prune_path "$private" || {
+      printf 'trellis mirror: unsafe private core-rules path: %s\n' "$private" >&2
+      return 1
+    }
+    case "$private" in
+      */*)
+        expected="core-rules/$private"
+        for prune in "${delist_prune[@]}"; do
+          [ "$prune" = "$expected" ] && continue 2
+        done
+        printf 'trellis mirror: nested private core-rules path is missing exact delist prune pair: %s -> %s\n' \
+          "$private" "$expected" >&2
+        return 1
+        ;;
+    esac
+  done
+}
 
 mirror_require_real_parent() {
   local root="$1" relative="$2" parent rest component current
@@ -940,16 +1016,32 @@ stage_verified_payload() {
     rm -rf "$stage/${path%/}/workflows" || return 5
     rm -f "$stage/${path%/}/full-audit-sweep-ledger.mjs" || return 5
   done
-  # Drop the named-file exclusions a wholesale directory entry pulled in. These
-  # are exact relative paths, never globs, so nothing outside the list can be
-  # removed by a surprising expansion.
+  # Drop consciously private core-rules subtrees pulled in by a published
+  # parent. The register is relative to core-rules/; validate each entry before
+  # removal so a malformed future entry cannot broaden the deletion.
+  for path in "${core_rules_no_sync[@]}"; do
+    safe_prune_path "$path" || {
+      printf 'trellis mirror: unsafe private core-rules path: %s\n' "$path" >&2
+      return 4
+    }
+    rm -rf "$stage/core-rules/$path" || return 5
+  done
+  # Drop the named exclusions a wholesale directory entry pulled in. These are
+  # exact relative paths, never globs, so nothing outside the list can be removed
+  # by a surprising expansion. An entry may name a directory -- a package whose
+  # structure is itself operator-specific -- so remove recursively; the target is
+  # always inside the disposable stage, never the source tree.
   for path in "${payload_no_publish[@]}"; do
     case "$path" in
       /*|*..*) printf 'trellis mirror: unsafe no-publish path: %s\n' "$path" >&2; return 4 ;;
     esac
-    rm -f "$stage/$path" || return 5
+    rm -rf "$stage/$path" || return 5
   done
 }
+
+printf '==> Checking private core-rules prune pairing\n'
+preflight_core_rules_private_prunes || exit 4
+preflight_payload_no_publish_prunes || exit 4
 
 printf '==> Verifying immutable publication payload\n'
 [ -d "$PAYLOAD_ROOT" ] && [ ! -L "$PAYLOAD_ROOT" ] || {

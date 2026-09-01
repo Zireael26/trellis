@@ -82,6 +82,81 @@ glob's `*` crosses `/`, so `**/tests/**` does not reach `src/__tests__/foo.ts`.
 Globs match the **repo-relative** path: a directory name above the work-tree root
 cannot silence a whole checkout.
 
+## State a threshold as a threshold
+
+When a requirement *is* a threshold, express the threshold in the code. Never
+approach it by computing an offset from something you measured.
+
+Measured on the fleet, 2026-08-23: a nav touch target had to be at least 44px.
+
+```
+padding: 12px  -> 40.3px   shipped, wrong
+padding: 14px  -> 43.3px   "the fix", still wrong
+min-height: 44px -> 44.0px  correct
+```
+
+Both padding attempts were arithmetic against the measured height of the text
+box. That height is not a constant: `line-height: normal` delegates it to the
+font's own metrics, and the same page measured **16.3px once and 15.3px the
+next time**. So the derived value was never going to be stable, and a passing
+measurement was not evidence the next measurement passes.
+
+The oracle was not the problem — it was a real live-device profile, and it
+caught both wrong answers. The problem was deriving a value where the
+requirement was a constraint. Any implementation that reaches a threshold by
+offset arithmetic will be re-derived wrongly the moment anything upstream
+moves: a font, a line-height, a parent's box model, a browser default.
+
+Applies well beyond CSS — timeouts, retry budgets, buffer sizes, rate limits.
+If the spec says "at least N", the code says at least N.
+
+## A receipt covers the whole matrix, or names the subset
+
+A test command that runs part of a configured matrix and reports green is the
+same defect as a green pipeline that never executed the specs: the gate reports
+success for work it did not do.
+
+Measured the same day: a project's `playwright.config.ts` defines five
+projects. Local runs had only ever exercised `chromium-desktop` and
+`webkit-desktop`. The 44px defect above was invisible locally and failed on
+`chromium-tablet` and `webkit-mobile` — two of the three that had never run —
+and the suite had already been reported green in a DoD receipt.
+
+So: before emitting a receipt for a suite, check what the suite is *configured*
+to cover and either run all of it or state the subset and why in the receipt
+itself. "Tests pass" is not a claim about the matrix; "5/5 projects pass" is.
+A habitual subset is the most expensive kind of green, because it is trusted.
+
+## Report the count you verified, not the count you configured
+
+A roster, a panel, a matrix, a fleet: the number you intended is not evidence
+for the number you got. Say which one you are quoting.
+
+Three independent instances on 2026-08-23, all in the same afternoon:
+
+- A refuter panel of three agents reported "3/3 independent families". Two of
+  the seats resolved to the same family, so the real count was two, and the
+  third seat returned the second seat's prior back as corroboration.
+- The guard meant to catch that reads
+  `if role in cross and impl_fam and fam.get(cand["agent"]) == impl_fam:`.
+  `impl_fam` is `None` whenever the implementer's name is absent from the map,
+  so the conjunction short-circuits and the cross-family filter is skipped for
+  *every* candidate — one unmapped name silently disables collapse checking
+  across the whole panel, and the roster still reports as examined.
+- A CI suite reported failure on every job. Each job had run **zero steps**:
+  the account was billing-blocked. A blocked job is marked failed, so `needs:`
+  dependents skip, and a PR reads as though it broke a suite that never ran.
+
+The common shape is a component reporting on work it did not do. It is not
+detectable from the report, because a healthy report and an unexamined one are
+the same string. It is only detectable by asking what the number is *of*.
+
+So: quote the verified count, and when a lookup can come back empty, make the
+empty case say so out loud rather than falling through to the silent branch.
+A guard that cannot check something must report that it cannot check it — the
+absence of a finding is a claim, and an unmapped, unrun, or unresolved input
+is not entitled to make it.
+
 ## Suppression: native syntax, mandatory reason
 
 There is no Trellis-specific suppression marker. Use the linter's own, and put a

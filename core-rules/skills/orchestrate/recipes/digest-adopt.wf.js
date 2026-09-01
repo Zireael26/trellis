@@ -23,6 +23,14 @@
 // P2 skeptical-evaluator persona (`references/skeptical-evaluator.md`); the run
 // report carries the P3 `spent_usd / budget_ceiling_usd` cost line.
 //
+// Triage is split into two distinct invocations per candidate (generator +
+// independent skeptical verifier). The generator classifies route/rationale but
+// MUST NOT set skeptic_upheld (its schema forbids the field). A separate verifier
+// receives the immutable candidate plus the generator receipt and alone emits
+// the skeptic_upheld verdict. The workflow merges only matching IDs and fails
+// closed on any missing/mismatched verifier receipt. Parallelism is across
+// candidates; the human approval gate is unchanged.
+//
 // Inputs (from `args`, never baked literals):
 //   args.digestPath   repo-relative path to the digest to adopt, e.g.
 //                     'research/ai-dev-trends/digests/2026-07-07.md'. Required.
@@ -196,28 +204,40 @@ const CANDIDATE_LIST = {
   },
 }
 
-const TRIAGE = {
+const TRIAGE_DRAFT = {
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'title', 'route', 'rationale', 'skeptic_upheld'],
+  required: ['id', 'title', 'route', 'rationale'],
   properties: {
     id: { type: 'string' },
     title: { type: 'string' },
     route: { type: 'string', description: "one of: validation-only | surgical | feature | watch" },
     rationale: { type: 'string', description: 'why this route (honest effort/risk read)' },
+  },
+}
+
+const SKEPTIC_VERDICT = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'skeptic_upheld'],
+  properties: {
+    id: { type: 'string' },
     skeptic_upheld: { type: 'boolean', description: 'true iff an independent skeptical verifier upheld the route (is it REALLY surgical? does Trellis REALLY already do this? is the effort tag honest?)' },
   },
 }
 
 const VERDICT = {
+
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'route', 'branch', 'pr_url', 'gate_green', 'notes'],
+  required: ['id', 'route', 'branch', 'pr_number', 'pr_state', 'pr_url', 'gate_green', 'notes'],
   properties: {
     id: { type: 'string' },
     route: { type: 'string' },
     branch: { type: 'string' },
-    pr_url: { type: 'string', description: 'HOLD PR URL, empty if none opened' },
+    pr_number: { type: 'integer', minimum: 0, description: 'PR number from gh pr view; 0 if no PR identity was verified' },
+    pr_state: { type: 'string', enum: ['NONE', 'OPEN', 'CLOSED', 'MERGED'], description: 'PR state from gh pr view; NONE if no PR identity was verified' },
+    pr_url: { type: 'string', description: 'PR URL from gh pr view; empty if no PR identity was verified' },
     gate_green: { type: 'boolean', description: 'true iff process-gate --mode=merge was green before the PR opened' },
     notes: { type: 'string' },
   },
@@ -308,21 +328,23 @@ if (candidates.length === 0) {
 }
 
 // --- Phase: Triage --------------------------------------------------------
-// Classify each candidate into a route, each classification CHECKED by an
-// independent skeptical verifier (the P2 persona): is it REALLY surgical? does
-// Trellis REALLY already do this? is the effort tag honest? A route the skeptic
-// does not uphold is surfaced (skeptic_upheld=false) so the human sees the doubt.
+// Classify each candidate into a route (generator), then CHECK each
+// classification with an independent skeptical verifier (the P2 persona).
+// The generator MUST NOT set skeptic_upheld — its schema forbids the field —
+// and the verifier alone emits the uphold verdict from the immutable candidate
+// plus the generator receipt. Merge requires matching IDs; missing/mismatched
+// verifier receipts fail closed. Parallelism is across candidates; human gate
+// remains unchanged.
 phase('Triage')
 const candidateIds = candidates.map((c) => String(c.id))
-const triageReceipts = await parallel(
+
+// Generator barrier — one agent per candidate classifies route/rationale
+const draftReceipts = await parallel(
   candidates.map((c) => () => settle(String(c.id), async () => {
-    // routing: inherit — skeptical triage; the main loop's model owns the judgement
-    const triage = await agent(
+    // routing: inherit — triage generator classifies route/rationale; the main loop's model owns the judgement
+    const draft = await agent(
       [
-        'You are the TRIAGE stage for ONE digest proposal. Classify its route and',
-        'then adopt the skeptical-evaluator persona',
-        '(`core-rules/skills/orchestrate/references/skeptical-evaluator.md`) to CHECK',
-        'your own classification — default to doubt, uphold only on evidence.',
+        'You are the TRIAGE GENERATOR for ONE digest proposal. Classify its route.',
         '',
         'PROPOSAL ' + c.id + ': ' + c.title + '  (effort ' + c.effort + ', risk ' + c.risk + ')',
         c.touchpoint ? 'Touchpoint: ' + c.touchpoint : '',
@@ -333,19 +355,71 @@ const triageReceipts = await parallel(
         "  feature         — needs design; the clarify->spec->plan->tasks pipeline.",
         "  watch           — park to the watchlist, no action.",
         '',
-        'Skeptical checks before you commit to a route: is it REALLY surgical (not a',
-        'feature in disguise)? does Trellis REALLY already do this (read the touchpoint',
-        'before claiming validation-only)? is the digest effort tag honest? Set',
-        'skeptic_upheld=false if your own skeptical pass does not confirm the route.',
+        'Return {id, title, route, rationale}. Do NOT set skeptic_upheld; a separate',
+        'skeptical verifier will uphold or doubt your route. Be honest about effort/risk.',
       ].join('\n'),
-      // routing: inherit — skeptical triage; the main loop's model owns the judgement
-      { label: 'triage:' + c.id, phase: 'Triage', schema: TRIAGE },
+      // routing: inherit — triage generator classifies route/rationale; the main loop's model owns the judgement
+      { label: 'triage:' + c.id, phase: 'Triage', schema: TRIAGE_DRAFT },
     )
-    return triage?.id === c.id ? triage : null
+    if (draft == null) return null
+    if (draft.id !== c.id) return null
+    if ('skeptic_upheld' in draft) return null
+    if (typeof draft.title !== 'string' || typeof draft.route !== 'string' || typeof draft.rationale !== 'string') return null
+    return draft
   })),
 )
-requireStage('Triage', candidateIds, triageReceipts, candidateIds.length)
-const triaged = triageReceipts.map((receipt) => receipt.value)
+requireStage('Triage', candidateIds, draftReceipts, candidateIds.length)
+const draftsById = new Map(draftReceipts.map((receipt) => [String(receipt.value.id), receipt.value]))
+
+// Independent skeptical verifier barrier — one agent per candidate judges the generator
+const skepticReceipts = await parallel(
+  candidates.map((c) => () => settle(String(c.id), async () => {
+    const draft = draftsById.get(String(c.id))
+    if (!draft) return null
+    // routing: inherit — independent skeptical verifier; the main loop's model judges the generator's route
+    const verdict = await agent(
+      [
+        'You are the INDEPENDENT SKEPTICAL VERIFIER for ONE digest proposal.',
+        'Adopt the skeptical-evaluator persona (`core-rules/skills/orchestrate/references/skeptical-evaluator.md`): default to doubt, uphold only on evidence. You did NOT generate the classification; you judge it.',
+        '',
+        'CANDIDATE (immutable): ' + JSON.stringify(c),
+        'GENERATOR CLASSIFICATION: ' + JSON.stringify(draft),
+        '',
+        'Checks before you uphold: is it REALLY surgical (not a feature in disguise)? does Trellis REALLY already do this (read the touchpoint before claiming validation-only)? is the digest effort tag honest?',
+        'Return only {id, skeptic_upheld}.',
+      ].join('\n'),
+      // routing: inherit — independent skeptical verifier; the main loop's model judges the generator's route
+      { label: 'skeptic:' + c.id, phase: 'Triage', schema: SKEPTIC_VERDICT },
+    )
+    if (verdict == null) return null
+    if (verdict.id !== String(c.id)) return null
+    if (verdict.id !== draft.id) return null
+    if (typeof verdict.skeptic_upheld !== 'boolean') return null
+    if ('route' in verdict || 'rationale' in verdict || 'title' in verdict) return null
+    return verdict
+  })),
+)
+requireStage('Triage', candidateIds, skepticReceipts, candidateIds.length)
+const skepticsById = new Map(skepticReceipts.map((receipt) => [String(receipt.value.id), receipt.value]))
+
+// Merge — only matching IDs; fail closed on any missing/mismatch
+const triaged = candidateIds.map((id) => {
+  const draft = draftsById.get(id)
+  const verdict = skepticsById.get(id)
+  if (!draft || !verdict) return null
+  if (String(draft.id) !== String(verdict.id) || String(draft.id) !== id) return null
+  return {
+    id: draft.id,
+    title: draft.title,
+    route: draft.route,
+    rationale: draft.rationale,
+    skeptic_upheld: verdict.skeptic_upheld,
+  }
+})
+if (triaged.some((v) => v == null)) throw new Error('workflow stage "Triage" failed: merge of generator and skeptic receipts failed (missing or mismatched IDs)')
+for (const t of triaged) {
+  if (t == null || typeof t.skeptic_upheld !== 'boolean') throw new Error('workflow stage "Triage" failed: merged triage missing skeptic_upheld from verifier')
+}
 
 // --- Human gate (bright-line, in code) ------------------------------------
 // With no approved routes, STOP here: return the triage proposal for the human
@@ -404,9 +478,11 @@ function executePrompt(a) {
     'Match surrounding style. Commit conventionally (subject <=72 chars, no comma in scope).',
     'Push with -u and open a **HOLD PR** (`gh pr create`, "[HOLD]" in title, "DO NOT MERGE without',
     'human review" in the body). Do NOT merge. Leave the worktree in place.',
+    'After `gh pr create`, run `gh pr view --json number,state,url`; a URL alone is not an opened-PR receipt.',
     '',
-    'Return the VERDICT for id="' + t.id + '". If you could not open a clean PR, set pr_url empty',
-    'and explain in notes.',
+    'Return the VERDICT for id="' + t.id + '". Copy pr_number, pr_state, and pr_url from that',
+    '`gh pr view` receipt. If no PR identity was verified, use pr_number=0, pr_state="NONE",',
+    'and pr_url empty, then explain in notes.',
   ].join('\n')
 }
 
@@ -434,7 +510,11 @@ const verdicts = verdictReceipts.map((receipt) => receipt.value)
 // P3 cost line every run + ledger-update instructions + carryover. budget.spent()
 // is output-token-native, so convert through the resolved USD-per-MTok rate
 // before displaying it beside the USD ceiling. Nothing here merges.
-const opened = verdicts.filter((v) => v.pr_url)
+const opened = verdicts.filter((v) => v.pr_state === 'OPEN'
+  && Number.isInteger(v.pr_number)
+  && v.pr_number > 0
+  && typeof v.pr_url === 'string'
+  && v.pr_url.trim() !== '')
 const costLine = emitCostLine(opened.length + '/' + verdicts.length + ' HOLD PRs opened')
 
 return {
@@ -443,6 +523,7 @@ return {
   costLine,
   ledgerPath,
   note: 'HOLD PRs are the human to merge (spec 008 bright-line). Update ' + ledgerPath
-    + ': set each opened item to in-progress (with its PR), each validation-only/watch to its note. '
+    + ': set only items with an OPEN pr_state, positive pr_number, and nonempty pr_url to '
+    + 'in-progress (with that PR); set each validation-only/watch item to its note. '
     + 'Park un-built approved items to carryover for the next run.',
 }

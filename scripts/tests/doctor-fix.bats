@@ -50,9 +50,9 @@ WORKTREE_HOOKS="$REPO_ROOT/core-rules/hooks"
 SHARED_FIXTURE="$BATS_TEST_DIRNAME/fixtures/shared-infra"
 # The repo's configured canonical clone — what doctor must NOT print when run
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
-LIVE_CANON="$(jq -r '.trellis_root' "$REPO_ROOT/trellis.config.json" 2>/dev/null || true)"
+LIVE_CANON="$(CDPATH= cd "$REPO_ROOT" && pwd -P)"
 
-CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing"
+CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing wiki-maintain wiki-skill-propose"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 
 setup() {
@@ -285,6 +285,17 @@ sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 # ===========================================================================
 # Flag-relationship guards (no fixture mutation; pure arg handling).
 # ===========================================================================
+
+@test "portable doctor --help keeps the user surface report-only" {
+  run env -u TRELLIS_CONFIG HOME="$FIXTURE_HOME" TRELLIS_HOME="$FIXTURE_TRELLIS_HOME" \
+    bash "$DOCTOR" --home "$FIXTURE_TRELLIS_HOME" --help
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"--fix repairs only safe project attachment rows through attach/relink/recover;"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"the user-surface row is report-only and prints an attach/relink remedy."* ]] ||
+    { echo "$output"; false; }
+}
 
 @test "--dry-run without --fix is rejected (exit 2)" {
   build_canonical_tree
@@ -894,6 +905,7 @@ EOF
 
   [ "$status" -eq 5 ]
   [[ "$output" == *"repair boundary: attach/relink is withheld until recorded immutable release 1.2.3 validates"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"user attachment is report-only; remedy: trellis attach --user"* ]] || { echo "$output"; false; }
   [ ! -e "$PORTABLE_PROJECT/.trellis/runtime" ]
   [ "$(shasum -a 256 "$PORTABLE_PROJECT/.trellis.json" | awk '{print $1}')" = "$before" ]
 }
@@ -944,7 +956,7 @@ EOF
   chmod 755 "$repo/core-rules/githooks/pre-push"
   # Mirrors doctor.bats: every lib the manifest declares as an explicit codex link
   # source is mandatory in the payload, so a new manifest entry lands here too.
-  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core slop-patterns spec-gate-core ui-verify-core; do
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core omp-reviewer slop-patterns spec-gate-core ui-verify-core; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/hooks/lib/$hook.sh"
     chmod 755 "$repo/core-rules/hooks/lib/$hook.sh"
   done
@@ -1176,8 +1188,70 @@ portable_identity_for_root() {
   [[ "$output" == *"immutable release: 1.2.3 is corrupt or unsafe"* ]] || { echo "$output"; false; }
   [[ "$output" != *"[auto] trellis attach"* ]] || { echo "$output"; false; }
 }
+@test "portable doctor relinks a missing runtime with unrelated explicit-json keys" {
+  build_portable_doctor_fix_home
+  attach_portable_doctor_project
 
-@test "portable doctor does not relink when native surfaces or excludes drift" {
+  local settings settings_mode mode
+  settings="$PORTABLE_PROJECT/.claude/settings.local.json"
+  case "$(uname -s)" in
+    Darwin) settings_mode="$(stat -f '%Lp' "$settings")" ;;
+    *) settings_mode="$(stat -c '%a' "$settings")" ;;
+  esac
+  [ "$settings_mode" = 600 ]
+  jq '.unrelated = "keep-me"' "$settings" > "$settings.next"
+  chmod "$settings_mode" "$settings.next"
+  mv "$settings.next" "$settings"
+  rm "$PORTABLE_PROJECT/.trellis/runtime"
+
+  run_portable_doctor_fix --fix
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"safe repair delegated through trellis relink and passed strict post-repair verification"* ]] \
+    || { echo "$output"; false; }
+  [ -L "$PORTABLE_PROJECT/.trellis/runtime" ]
+  [ "$(jq -r '.unrelated' "$settings")" = "keep-me" ]
+  case "$(uname -s)" in
+    Darwin) mode="$(stat -f '%Lp' "$settings")" ;;
+    *) mode="$(stat -c '%a' "$settings")" ;;
+  esac
+  [ "$mode" = "$settings_mode" ]
+  [ "$mode" = 600 ]
+}
+@test "portable doctor never relinks when enabled hook authority drifts" {
+  local owner expected current current_display root_display expected_display diagnostic
+  build_portable_doctor_fix_home
+  current=".husky/_"
+  git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+  attach_portable_doctor_project
+
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$current" ]
+
+  git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+  rm "$PORTABLE_PROJECT/.trellis/runtime"
+
+  run_portable_doctor_fix --fix
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  current_display="$(printf '%q' "$current")"
+  root_display="$(printf '%q' "$PORTABLE_PROJECT")"
+  expected_display="$(printf '%q' "$expected")"
+  diagnostic="core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display"
+  [[ "$output" == *"git hook authority: $diagnostic"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[auto] trellis relink"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"safe repair delegated through trellis relink and passed strict post-repair verification"* ]] \
+    || { echo "$output"; false; }
+  [ ! -e "$PORTABLE_PROJECT/.trellis/runtime" ]
+  [ ! -L "$PORTABLE_PROJECT/.trellis/runtime" ]
+  [ "$(git -C "$PORTABLE_PROJECT" config --local --get core.hooksPath)" = "$current" ]
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$current" ]
+}
+
+
+
+@test "portable doctor rejects native-surface drift but relinks through surrounding exclude drift" {
   build_portable_doctor_fix_home
   attach_portable_doctor_project
   rm "$PORTABLE_PROJECT/.trellis/runtime"
@@ -1204,10 +1278,9 @@ portable_identity_for_root() {
   [[ "$output" == *"native surfaces: registry harness selection does not exactly match"* ]] || { echo "$output"; false; }
   [[ "$output" != *"[auto] trellis relink"* ]] || { echo "$output"; false; }
 
-  # Restore the attached harness selection so the expected block matches again,
-  # leaving the appended user bytes as the only drift. That is the fixture in
-  # which the byte-level wording IS reachable, so the exclude-byte invariant
-  # this test is named for stays proven rather than merely asserted.
+  # Restore the attached harness selection so the immutable block matches
+  # again. The appended user bytes are advisory, so they must not withhold the
+  # otherwise-safe runtime relink.
   jq --arg checkout "$PORTABLE_CHECKOUT_ID" \
     '.projects["personal/portable-fixture"].checkouts[$checkout].harnesses = ["claude", "codex", "omp"]' \
     "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.next"
@@ -1216,9 +1289,9 @@ portable_identity_for_root() {
 
   run_portable_doctor_fix --fix --dry-run
 
-  [ "$status" -eq 3 ]
-  [[ "$output" == *"managed excludes: exact Trellis-owned block or surrounding user bytes changed"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"[auto] trellis relink"* ]] || { echo "$output"; false; }
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *"managed excludes: exact immutable native-surface block matches; surrounding user bytes drifted at $PORTABLE_PROJECT/.git/info/exclude"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[auto] trellis relink"* ]] || { echo "$output"; false; }
 }
 
 @test "portable doctor reports identity drift and still enumerates a later row" {

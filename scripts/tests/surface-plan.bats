@@ -57,6 +57,47 @@ rewrite_manifest() {
   ' >/dev/null
 }
 
+@test "user manifest owns the Claude orchestration output style at HOME" {
+  local user_home="$SANDBOX/user home"
+  mkdir -p "$user_home"
+
+  jq -e '
+    ([.harnesses.user.links[] |
+      select(
+        .source == "core-rules/templates/claude-output-styles/trellis-orchestration.md"
+        and .destination == ".claude/output-styles/trellis-orchestration.md"
+        and .destination_home == true
+      )
+    ] | length) == 1
+  ' "$MANIFEST" >/dev/null
+
+  HOME="$user_home" run_plan --harness user
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e --arg home "$user_home" --arg target "$PAYLOAD/core-rules/templates/claude-output-styles/trellis-orchestration.md" '
+    .harnesses == ["user"]
+    and ([.artifacts[] |
+      select(
+        .kind == "symlink"
+        and .source == "core-rules/templates/claude-output-styles/trellis-orchestration.md"
+        and .source_scope == "payload"
+        and .destination == ($home + "/.claude/output-styles/trellis-orchestration.md")
+        and .target == $target
+      )
+    ] | length) == 1
+  ' >/dev/null
+}
+
+@test "legacy three-harness manifests still plan the project surface" {
+  rewrite_manifest 'del(.harnesses.user)'
+
+  run_plan
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["claude", "codex", "omp"]
+    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "omp"]
+  ' >/dev/null
+}
+
 @test "output is byte-stable, dynamically discovers skills and commands, and honors suffix filtering" {
   run_plan --harness claude
   [ "$status" -eq 0 ]
@@ -222,6 +263,101 @@ rewrite_manifest() {
   run_plan --harness unknown
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown harness: unknown"* ]] || { echo "$output"; false; }
+}
+
+@test "user planning matches attachment runtime HOME shape acceptance" {
+  real_parent="$SANDBOX/real-parent"
+  real_home="$real_parent/home"
+  mkdir -p "$real_home"
+  export HOME="$real_home"
+
+  run_plan --harness user
+  [ "$status" -eq 0 ]
+
+  ln -s "$real_home" "$SANDBOX/home-link"
+  export HOME="$SANDBOX/home-link"
+  run_plan --harness user
+  [ "$status" -eq 5 ]
+  [[ "$output" == *"HOME is unavailable or is a symlink"* ]] || { echo "$output"; false; }
+
+  export HOME="$real_home/"
+  run_plan --harness user
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"HOME must be a canonical absolute path"* ]] || { echo "$output"; false; }
+
+  export HOME="$real_parent//home"
+  run_plan --harness user
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"HOME must be a canonical absolute path"* ]] || { echo "$output"; false; }
+
+  ln -s "$real_parent" "$SANDBOX/parent-link"
+  export HOME="$SANDBOX/parent-link/home"
+  run_plan --harness user
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e --arg home "$real_home" '
+    all(.artifacts[]; .destination | startswith($home + "/"))
+  ' >/dev/null
+}
+
+@test "case-folded aliases of reserved control destinations are invalid manifest state" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  rewrite_manifest '.harnesses.user.links[0].destination = ".TrElLiS/runtime/escape"'
+
+  run_plan --harness user
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"inheritance manifest is malformed or unsafe"* ]] || { echo "$output"; false; }
+
+  cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
+  rewrite_manifest '.harnesses.user.links[0].destination = ".trelli\u017f/runtime/escape"'
+
+  run_plan --harness user
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"reserved managed destination alias:"* ]] || { echo "$output"; false; }
+
+  cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
+  rewrite_manifest '.harnesses.claude.links[0].destination = ".GiT/config"'
+
+  run_plan --harness claude
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"inheritance manifest is malformed or unsafe"* ]] || { echo "$output"; false; }
+}
+
+@test "user destination case aliases fail with a deterministic duplicate result" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  rewrite_manifest '.harnesses.user.links += [
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".OMP/agent/Alias.md", "destination_home": true},
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/AGENT/alias.md", "destination_home": true}
+  ]'
+
+  run_plan --harness user
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"duplicate managed destination alias:"* ]] || { echo "$output"; false; }
+  first_error="$output"
+
+  cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
+  rewrite_manifest '.harnesses.user.links += [
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/AGENT/alias.md", "destination_home": true},
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".OMP/agent/Alias.md", "destination_home": true}
+  ]'
+
+  run_plan --harness user
+  [ "$status" -eq 3 ]
+  [ "$output" = "$first_error" ]
+}
+
+@test "user destination Unicode canonical aliases cannot produce a plan" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  rewrite_manifest '.harnesses.user.links += [
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/agent/\u00c5lias.md", "destination_home": true},
+    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/agent/A\u030alias.md", "destination_home": true}
+  ]'
+
+  run_plan --harness user
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"duplicate managed destination alias:"* ]] || { echo "$output"; false; }
 }
 
 @test "duplicate managed destinations are ownership conflicts" {

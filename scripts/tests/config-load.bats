@@ -312,6 +312,27 @@ EOF
   [ ! -e "$sentinel" ]
 }
 
+@test "fallback validates conductor auto_execute_top_n as a non-negative integer" {
+  local value
+  for value in -1 1.5 '"2"'; do
+    write_policy "$POLICY" "Portable Maintainer" "portable-user"
+    jq --argjson value "$value" \
+      '.conductor.auto_execute_top_n = $value' "$POLICY" > "$POLICY.tmp"
+    mv "$POLICY.tmp" "$POLICY"
+
+    run_loader_without_ajv "$POLICY"
+
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"portable policy failed schema validation"* ]] || { echo "$output"; false; }
+  done
+
+  write_policy "$POLICY" "Portable Maintainer" "portable-user"
+  jq '.conductor.auto_execute_top_n = 2' "$POLICY" > "$POLICY.tmp"
+  mv "$POLICY.tmp" "$POLICY"
+  run_loader_without_ajv "$POLICY"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
 @test "keeps an unavailable discovery root in fleet-local state" {
   local fleet_state missing
   missing="$SANDBOX/missing volume"

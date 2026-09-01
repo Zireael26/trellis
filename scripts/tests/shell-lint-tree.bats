@@ -70,6 +70,30 @@ sandbox_list() {
   [[ "$output" != *"core-rules/evals/seed/pre-push"* ]] || { echo "$output"; false; }
 }
 
+@test ".claude/worktrees is excluded from the shell tree" {
+  # Suffixed, extensionless, and nested paths under .claude/worktrees must all be excluded,
+  # while .claude/skills remains in the tree (the carve-out is precise, not a wholesale .claude drop).
+  plant ".claude/worktrees/wf_fake/scripts/bad.sh" "#!/usr/bin/env bash"
+  plant ".claude/worktrees/wf_fake/scripts/bad.bash" "#!/usr/bin/env bash"
+  plant ".claude/worktrees/wf_fake/hooks/bad" "#!/usr/bin/env bash"
+  plant ".claude/skills/foo/scripts/keep.sh" "#!/usr/bin/env bash"
+  sandbox_list
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *".claude/worktrees/wf_fake/scripts/bad.sh"* ]] || { echo "$output"; false; }
+  [[ "$output" != *".claude/worktrees/wf_fake/scripts/bad.bash"* ]] || { echo "$output"; false; }
+  [[ "$output" != *".claude/worktrees/wf_fake/hooks/bad"* ]] || { echo "$output"; false; }
+  [[ "$output" == *".claude/skills/foo/scripts/keep.sh"* ]] || { echo "$output"; false; }
+
+  # A defect under .claude/worktrees must not fail the lint run (even at warning severity).
+  mkdir -p "$SANDBOX/.claude/worktrees/wf_fake/scripts"
+  printf '#!/usr/bin/env bash\nunused_here="value"\ntrue\n' > "$SANDBOX/.claude/worktrees/wf_fake/scripts/bad.sh"
+  chmod +x "$SANDBOX/.claude/worktrees/wf_fake/scripts/bad.sh"
+  run bash -c "cd '$SANDBOX' && bash scripts/lint-shell-tree.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"wf_fake"* ]] || { echo "$output"; false; }
+}
+
 @test "a defect in an extensionless script fails the lint run" {
   # SC2034 is warning severity, so it lands inside the gate's floor — SC2086 and
   # friends are `info` and would not. Under the old suffix-only find this file

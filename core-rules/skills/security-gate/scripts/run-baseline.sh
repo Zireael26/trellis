@@ -54,6 +54,10 @@ PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
 
 # --- load project-local config --------------------------------------------
 CFG_LOADED=0
+_SG_ALLEXPORT_WAS_OFF=1
+case $- in *a*) _SG_ALLEXPORT_WAS_OFF=0;; esac
+export -n _SG_ALLEXPORT_WAS_OFF 2>/dev/null || true
+set -a
 for cfg in \
   "$PROJECT_DIR/.claude/skills/security-gate-local/local.config.sh" \
   "$PROJECT_DIR/.agents/skills/security-gate-local/local.config.sh"; do
@@ -63,6 +67,8 @@ for cfg in \
     CFG_LOADED=1
   fi
 done
+if [ "$_SG_ALLEXPORT_WAS_OFF" -eq 1 ]; then set +a; fi
+unset _SG_ALLEXPORT_WAS_OFF
 
 PROFILE="${PROFILE_OVERRIDE:-${SECURITY_GATE_STACK_PROFILE:-web-next}}"
 AUDIT_DIR_REL="${SECURITY_GATE_AUDIT_DIR:-audits}"

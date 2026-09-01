@@ -26,6 +26,50 @@ DOCTOR_EX_UNAVAILABLE=5
 # shellcheck source=lib/legacy-config.sh
 . "$SCRIPT_DIR/lib/legacy-config.sh"
 
+# ---------------------------------------------------------------------------
+# One private scratch tree per doctor invocation. EVERY temporary artifact in
+# either mode is created inside it, and one trap set — installed here, BEFORE
+# any mode dispatches — is the only cleanup path. Functions NEVER
+# install their own traps: a `trap … EXIT` silently replaces this one
+# (traps are global to the process, even from a subshell), dropping HUP/INT/
+# TERM coverage and every other owner's cleanup with it.
+#
+# The tree is created HERE, in the parent shell, NOT lazily inside a helper:
+# several consumers (the SQLite copy-probes) run inside command substitutions,
+# and an assignment made there dies with the subshell — a lazy create would be
+# re-run and orphaned once per probe. Created eagerly, DOCTOR_SCRATCH_DIR is
+# inherited unchanged by every subshell below. Private from birth (umask 077 /
+# mktemp -d 0700); removed on normal exit and on SIGHUP/SIGINT/SIGTERM alike.
+# ---------------------------------------------------------------------------
+DOCTOR_SCRATCH_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/trellis-doctor.XXXXXXXX" 2>/dev/null)" ||
+  DOCTOR_SCRATCH_DIR=""
+
+doctor_scratch_cleanup() {
+  [ -n "$DOCTOR_SCRATCH_DIR" ] && rm -rf -- "$DOCTOR_SCRATCH_DIR"
+  return 0
+}
+trap 'doctor_scratch_cleanup' EXIT
+# On a terminating signal, clean up AND terminate: a handler that merely
+# returns lets bash RESUME the interrupted script — with its scratch tree
+# already gone. Disarm every trap before re-raising so the default action
+# delivers the signal's own exit status and EXIT cleanup cannot run twice.
+trap 'doctor_scratch_cleanup; trap - EXIT HUP INT TERM; kill -HUP "$$"'  HUP
+trap 'doctor_scratch_cleanup; trap - EXIT HUP INT TERM; kill -INT "$$"'  INT
+trap 'doctor_scratch_cleanup; trap - EXIT HUP INT TERM; kill -TERM "$$"' TERM
+
+# doctor_scratch_require — verify the invocation scratch tree exists in THIS
+# shell. The eager creation above runs before any dispatch, so this only
+# re-arms a subshell that inherited the (non-exported) empty fallback.
+doctor_scratch_require() {
+  if [ -z "$DOCTOR_SCRATCH_DIR" ]; then
+    DOCTOR_SCRATCH_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/trellis-doctor.XXXXXXXX" 2>/dev/null)" || {
+      DOCTOR_SCRATCH_DIR=""
+      return 1
+    }
+  fi
+  return 0
+}
+
 # An explicitly supplied config with any historic machine-local key is the
 # compatibility contract. Do not fall through to TRELLIS_HOME for a malformed
 # explicit config: that would turn a deterministic legacy invocation into an
@@ -424,13 +468,13 @@ run_shared_infra_checks() {
   # Loud, not silent: without the capture files the two delegated rows below
   # would simply not be reported, and a Tier-0 row that quietly disappears reads
   # as a row that passed.
-  if shared_out="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-shared-out.XXXXXX")"; then
+  if shared_out="$(doctor_scratch_require && mktemp "$DOCTOR_SCRATCH_DIR/shared-out.XXXXXX")"; then
     :
   else
     report_line "  " "$HC_ERROR" "shared-infra delegation: could not create a diagnostic capture file"
     return 0
   fi
-  if shared_err="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-shared-err.XXXXXX")"; then
+  if shared_err="$(doctor_scratch_require && mktemp "$DOCTOR_SCRATCH_DIR/shared-err.XXXXXX")"; then
     :
   else
     rm -f "$shared_out"
@@ -1085,10 +1129,15 @@ usage() {
 Usage: trellis doctor [--home PATH] [--fleet NAME] [--project ID]
        trellis doctor --fix [--home PATH] [--fleet NAME] [--project ID] [--dry-run]
 
-Enumerates local registry rows including unavailable paths. Validates immutable
-releases, exact local attachment ownership, local excludes, and manifest-driven
-Claude/Codex/OMP leaves. --fix uses attach/relink/recover only; it never deletes
-project-owned files or migrates legacy/mixed layouts.
+Enumerates local registry rows including unavailable paths. Validates the
+report-only user-surface row, immutable releases, exact local attachment
+ownership, local excludes, and manifest-driven Claude/Codex/OMP leaves.
+--fix repairs only safe project attachment rows through attach/relink/recover;
+the user-surface row is report-only and prints an attach/relink remedy. It
+never deletes project-owned files or migrates legacy/mixed layouts.
+
+Usage visibility diagnostics are advisory and read-only: they inspect one private
+snapshot, never collect, refresh, probe providers, or create/migrate a store.
 EOF
 }
 while [ "$#" -gt 0 ]; do
@@ -1139,11 +1188,20 @@ portable_check_failure_class() {
         *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
       esac
       ;;
+    hc_portable_user_surface)
+      case "${HC_PORTABLE_USER_SURFACE_STATE:-}" in
+        conflict|stale) printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
+      ;;
     hc_portable_owner)
       case "${HC_PORTABLE_OWNER_STATE:-}" in
         conflict|runtime-missing) printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
         *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
       esac
+      ;;
+    hc_portable_hooks_path)
+      printf '%s\n' "$DOCTOR_EX_CONFLICT"
       ;;
     hc_portable_layout)
       case "${HC_PORTABLE_LAYOUT:-}:${HC_PORTABLE_OWNER_STATE:-}" in
@@ -1197,7 +1255,7 @@ report() {
 run_check() {
   local indent="$1" fn="$2" output_file output status exit_class=""
   shift 2
-  output_file="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-check.XXXXXX")" || { report "$indent" "$HC_ERROR" 'doctor could not create a diagnostic scratch file' "$DOCTOR_EX_STATE"; return "$HC_ERROR"; }
+  output_file="$(doctor_scratch_require && mktemp "$DOCTOR_SCRATCH_DIR/check.XXXXXXX")" || { report "$indent" "$HC_ERROR" 'doctor could not create a diagnostic scratch file' "$DOCTOR_EX_STATE"; return "$HC_ERROR"; }
   if "$fn" "$@" > "$output_file"; then status=0; else status=$?; fi
   output="$(cat "$output_file")"; rm -f "$output_file"
   if [ "$status" -eq "$HC_ERROR" ]; then
@@ -1206,6 +1264,531 @@ run_check() {
   report "$indent" "$status" "$output" "$exit_class"
   return "$status"
 }
+# ---------------------------------------------------------------------------
+# Usage federation (spec 039) — READ-ONLY semantic inspection of the private
+# usage store under TRELLIS_HOME.
+#
+# These checks deliberately do NOT invoke scripts/usage-federation.py against
+# the operator's private store: its own doctor opens the store through
+# UsageStore.open, which CREATES <TRELLIS_HOME>/usage/usage.sqlite3 and its
+# directory when missing and fchmods both to 0600/0700 (store.py
+# _open_private_file/_secure_sqlite_file). The throwaway CLI probe below is
+# isolated inside the invocation scratch tree; a health report must never
+# mutate local state.
+#
+# SQLite probe contract (ONE consistent snapshot per invocation): the store is
+# WAL-mode (persistent in the file header), so a `-readonly` connection cannot
+# open a quiescent store — its -shm does not exist until a live writer makes it
+# — while opening the real file read-write would create -wal/-shm sidecars next
+# to it. The database is therefore copied ONCE, together with its live -wal
+# tail, into the invocation's private scratch tree, and every probe in the run
+# aggregates over that same snapshot: one point-in-time view, so the counts one
+# check reports cannot contradict the ages another reports. The operator's
+# store sees only plain reads; nothing is created, chmodded, or written in
+# place. A writer racing the copy can at worst cost the snapshot its WAL tail;
+# every probe is advisory (WARN-class at worst), never a gate.
+#
+# All rows are WARN-class at worst (like the Tooling baseline): usage
+# federation is an optional subsystem, a degraded or absent store is reported
+# honestly without gating the exit, and none of these checks enters the
+# --fix repair plan. USAGE_DB_SCHEMA_VERSION mirrors store.py's
+# STORE_SCHEMA_VERSION (currently v5); bump it here when the store migrates
+# forward.
+#
+# The usage visibility checks below are advisory and read-only. They use one
+# private snapshot per invocation and never collect, refresh, probe providers,
+# or create/migrate a store.
+#
+# hc_usage_cli validates the same surface the `trellis usage` dispatcher runs:
+# scripts/usage-federation.py must be a regular executable file whose library
+# imports resolve through this checkout's lib/. One invocation proves both —
+# catalog loads from the release tree, the private-home rule is enforced, and
+# exit codes follow TOP_STATUS_EXIT (0 complete / 4 partial / 5 unavailable,
+# 2 usage). openrouter is NOT a fallback here or anywhere else in this file:
+# an unavailable opencode-go endpoint is reported as exactly that.
+# ---------------------------------------------------------------------------
+USAGE_DB_SCHEMA_VERSION=5
+hc_usage_cli() {
+  local cli="$SCRIPT_DIR/usage-federation.py" home="$1" rc probe_json route
+  if [ -L "$cli" ] || [ ! -f "$cli" ]; then
+    printf 'usage-federation CLI missing at %s' "$cli"
+    return "$HC_WARN"
+  fi
+  if [ ! -x "$cli" ]; then
+    printf 'usage-federation CLI is not executable at %s' "$cli"
+    return "$HC_WARN"
+  fi
+  if [ ! -r "$SCRIPT_DIR/lib/usage_federation/cli.py" ]; then
+    printf 'usage-federation CLI library missing at lib/usage_federation/cli.py'
+    return "$HC_WARN"
+  fi
+  # One throwaway invocation validates everything a static listing cannot: the
+  # catalog loads from this checkout, the private-home rule is enforced, and
+  # the exit contract matches TOP_STATUS_EXIT (0 complete / 4 partial /
+  # 5 unavailable). It runs against a THROWAWAY private home inside the
+  # invocation scratch tree, never against the operator's TRELLIS_HOME:
+  # UsageStore.open migrates an older store forward on open (v1/v2/v3 -> v4) and
+  # creates a missing one, and a health check must not do either to real
+  # state. stdout JSON is parsed only to confirm an exit-5 run carries its
+  # own unavailable receipt; nothing from it is ever printed.
+  local probe_home
+  doctor_scratch_require || {
+    printf '%s' 'doctor: no private scratch tree for the usage-federation CLI probe' >&2
+    return "$HC_WARN"
+  }
+  # Canonical spelling: the CLI's private-home rule refuses any path with a
+  # symlink component (e.g. macOS /var), so resolve through pwd -P.
+  probe_home="$(cd "$DOCTOR_SCRATCH_DIR" && pwd -P)/probe-home.XXXXXXXX"
+  if ! mkdir "$probe_home" || ! chmod 700 "$probe_home"; then
+    rm -rf "$probe_home"
+    printf '%s' 'usage-federation CLI probe could not create a throwaway private home'
+    return "$HC_WARN"
+  fi
+  # Bounded parser probes validate the public visibility routes and the private
+  # receipt help route without entering watch, receipt begin/bind, refresh,
+  # collection, or any provider/network path. Help output is intentionally
+  # discarded so diagnostics remain content-free.
+  for route in strip watch report receipt; do
+    if ! TRELLIS_HOME="$probe_home" "$cli" "$route" --help >/dev/null 2>&1; then
+      printf 'usage-federation %s help route failed validation' "$route"
+      return "$HC_WARN"
+    fi
+  done
+
+  probe_json="$(TRELLIS_HOME="$probe_home" "$cli" doctor --json 2>/dev/null)" && rc=0 || rc=$?
+  case "$rc" in
+    5)
+      if printf '%s' "$probe_json" | jq -e '.store.available == false' >/dev/null 2>&1; then
+        printf 'usage-federation CLI validated end-to-end (exit-5 store-unavailable receipt honored)'
+      else
+        printf 'usage-federation CLI exited %s without an unavailable-store receipt' "$rc"
+        return "$HC_WARN"
+      fi
+      ;;
+    *)
+      printf 'usage-federation CLI doctor exited %s on a missing store (expected 5)' "$rc"
+      return "$HC_WARN"
+  esac
+}
+hc_usage_receipts() {
+  local home="$1"
+  local db="$home/usage/usage.sqlite3"
+  local relations="" receipt_table="" binding_table="" shape="" summary=""
+  local total_receipts="" total_bindings="" pending="" path_bound=""
+  local session_bound="" unresolved="" invalid="" missing_binding=""
+  local orphan_binding="" value=""
+
+  if [ ! -f "$db" ] || [ -L "$db" ]; then
+    printf 'dispatch receipt evidence unavailable: no existing private usage store'
+    return "$HC_WARN"
+  fi
+
+  # Never inspect the live database directly. _hc_usage_sqlite reuses the
+  # invocation-wide copied main database plus WAL tail.
+  relations="$(_hc_usage_sqlite "$db" "
+    SELECT
+      (SELECT COUNT(*) FROM sqlite_master
+       WHERE type = 'table' AND name = 'dispatch_receipts'),
+      (SELECT COUNT(*) FROM sqlite_master
+       WHERE type = 'table' AND name = 'dispatch_bindings')
+  ")" || {
+    printf 'dispatch receipt evidence unreadable: relation probe failed through a non-mutating snapshot'
+    return "$HC_WARN"
+  }
+  IFS='|' read -r receipt_table binding_table <<< "$relations"
+  case "$receipt_table|$binding_table" in
+    1\|1) ;;
+    *)
+      printf 'dispatch receipt evidence unavailable: schema v4 receipt/binding relations are missing (counts not inferred as zero)'
+      return "$HC_WARN"
+      ;;
+  esac
+
+  # Validate the stable v4 columns and STRICT table declarations without
+  # exposing the SQL or any private row values.
+  shape="$(_hc_usage_sqlite "$db" "
+    SELECT
+      (SELECT COUNT(*) FROM pragma_table_info('dispatch_receipts')
+       WHERE name IN ('dispatch_id', 'requested_at', 'requested_at_us',
+                      'worktree', 'request_source', 'harness')),
+      (SELECT COUNT(*) FROM pragma_table_info('dispatch_bindings')
+       WHERE name IN ('dispatch_id', 'bound_at', 'bound_at_us',
+                      'session_canonical_path', 'session_id', 'resolution')),
+      (SELECT CASE WHEN lower(COALESCE(sql, '')) LIKE '%strict%'
+                   THEN 1 ELSE 0 END
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'dispatch_receipts'),
+      (SELECT CASE WHEN lower(COALESCE(sql, '')) LIKE '%strict%'
+                   THEN 1 ELSE 0 END
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'dispatch_bindings')
+  ")" || {
+    printf 'dispatch receipt evidence unreadable: v4 relation shape could not be inspected'
+    return "$HC_WARN"
+  }
+  case "$shape" in
+    6\|6\|1\|1) ;;
+    *)
+      printf 'dispatch receipt evidence malformed: v4 receipt/binding relation shape is invalid'
+      return "$HC_WARN"
+      ;;
+  esac
+
+  summary="$(_hc_usage_sqlite "$db" "
+    SELECT
+      (SELECT COUNT(*) FROM dispatch_receipts),
+      (SELECT COUNT(*) FROM dispatch_bindings),
+      (SELECT COUNT(*) FROM dispatch_bindings WHERE resolution = 'pending'),
+      (SELECT COUNT(*) FROM dispatch_bindings WHERE resolution = 'session_path_bound'),
+      (SELECT COUNT(*) FROM dispatch_bindings WHERE resolution = 'session_bound'),
+      (SELECT COUNT(*) FROM dispatch_bindings WHERE resolution = 'unresolved'),
+      (SELECT COUNT(*) FROM dispatch_bindings
+       WHERE resolution IS NULL
+          OR resolution NOT IN
+             ('pending', 'session_path_bound', 'session_bound', 'unresolved')),
+      (SELECT COUNT(*) FROM dispatch_receipts AS r
+       LEFT JOIN dispatch_bindings AS b ON b.dispatch_id = r.dispatch_id
+       WHERE b.dispatch_id IS NULL),
+      (SELECT COUNT(*) FROM dispatch_bindings AS b
+       LEFT JOIN dispatch_receipts AS r ON r.dispatch_id = b.dispatch_id
+       WHERE r.dispatch_id IS NULL)
+  ")" || {
+    printf 'dispatch receipt evidence unreadable: aggregate probe failed through a non-mutating snapshot'
+    return "$HC_WARN"
+  }
+  IFS='|' read -r total_receipts total_bindings pending path_bound session_bound unresolved \
+    invalid missing_binding orphan_binding <<< "$summary"
+  for value in "$total_receipts" "$total_bindings" "$pending" "$path_bound" \
+    "$session_bound" "$unresolved" "$invalid" "$missing_binding" "$orphan_binding"; do
+    case "$value" in
+      ''|*[!0-9]*)
+        printf 'dispatch receipt evidence malformed: aggregate counts are not numeric'
+        return "$HC_WARN"
+        ;;
+    esac
+  done
+  if [ "$invalid" -ne 0 ] || [ "$missing_binding" -ne 0 ] ||
+     [ "$orphan_binding" -ne 0 ] || [ "$total_receipts" -ne "$total_bindings" ]; then
+    printf 'dispatch receipt evidence malformed: receipts=%s bindings=%s invalid_resolution=%s missing_binding=%s orphan_binding=%s' \
+      "$total_receipts" "$total_bindings" "$invalid" "$missing_binding" "$orphan_binding"
+    return "$HC_WARN"
+  fi
+
+  printf 'dispatch receipt evidence readable (schema v4; receipts=%s; bindings=%s; pending=%s; session_path_bound=%s; session_bound=%s; unresolved=%s)' \
+    "$total_receipts" "$total_bindings" "$pending" "$path_bound" "$session_bound" "$unresolved"
+}
+hc_usage_visibility() {
+  local home="$1" db
+  db="$home/usage/usage.sqlite3"
+  local schema="" tables="" summary="" value="" visibility_status="$HC_OK"
+  local lane_catalog_table="" advertised_table="" enumeration_table=""
+  local enumeration_models_table="" outcomes_table="" observations_table=""
+  local coverage_table=""
+  local lane_count="" advertised_count="" enumeration_count=""
+  local outcomes_count="" observation_count="" fresh_count="" stale_count=""
+  local no_activity_count="" not_supported_count="" unreported_count=""
+  local unavailable_count=""
+  local auth_error_count=""
+  local rate_limited_count=""
+  local schema_error_count="" unknown_count="" coverage_count=""
+
+  if [ ! -f "$db" ] || [ -L "$db" ]; then
+    printf 'usage visibility unavailable: no existing private usage store (strip/watch/report remain read-only; transport=cli-only; http=none; daemon=none; provider_probes=forbidden)'
+    return "$HC_WARN"
+  fi
+
+  # Keep visibility on the same invocation-wide snapshot as every other usage
+  # check. This only reads the schema marker; it never opens the live database.
+  schema="$(_hc_usage_sqlite "$db" 'SELECT MAX(version) FROM schema_version')" || {
+    printf 'usage visibility unreadable: schema version probe failed through a non-mutating snapshot'
+    return "$HC_WARN"
+  }
+  case "$schema" in
+    ''|*[!0-9]*)
+      printf 'usage visibility malformed: schema version is not numeric (no display state inferred)'
+      return "$HC_WARN"
+      ;;
+    "$USAGE_DB_SCHEMA_VERSION") ;;
+    *)
+      printf 'usage visibility unavailable: schema v%s is not the required v%s (no display state inferred)' \
+        "$schema" "$USAGE_DB_SCHEMA_VERSION"
+      return "$HC_WARN"
+      ;;
+  esac
+
+  # Verify relation presence before querying any relation. An older or
+  # hand-created store must not turn a missing visibility relation into a
+  # healthy empty count.
+  tables="$(_hc_usage_sqlite "$db" "
+    SELECT
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'lane_catalog'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'advertised_models'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_enumerations'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_enumeration_models'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'serving_outcomes'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_observations'),
+      (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_coverage')
+  ")" || {
+    printf 'usage visibility unreadable: relation probe failed through a non-mutating snapshot'
+    return "$HC_WARN"
+  }
+  IFS='|' read -r lane_catalog_table advertised_table enumeration_table \
+    enumeration_models_table outcomes_table observations_table coverage_table <<< "$tables"
+  case "$lane_catalog_table|$advertised_table|$enumeration_table|$enumeration_models_table|$outcomes_table|$observations_table|$coverage_table" in
+    1\|1\|1\|1\|1\|1\|1) ;;
+    *)
+      printf 'usage visibility unavailable: schema v4 catalog/enumeration/serving relations are missing (counts not inferred as zero)'
+      return "$HC_WARN"
+      ;;
+  esac
+
+  # Counts are aggregate-only and use fixed, contract-defined state labels.
+  # No model, provider, project, route, reason, path, or raw JSON value is
+  # selected for public diagnostics. An empty observations relation is called
+  # out as "none" below rather than presented as healthy numeric zero.
+  summary="$(_hc_usage_sqlite "$db" "
+    SELECT
+      (SELECT COUNT(*) FROM lane_catalog),
+      (SELECT COUNT(*) FROM advertised_models),
+      (SELECT COUNT(*) FROM model_enumerations),
+      (SELECT COUNT(*) FROM serving_outcomes),
+      (SELECT COUNT(*) FROM source_observations),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'fresh'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'stale'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'no_activity'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'not_supported'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'unreported'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'unavailable'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'auth_error'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'rate_limited'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'schema_error'),
+      (SELECT COUNT(*) FROM source_observations WHERE status = 'unknown'),
+      (SELECT COUNT(*) FROM source_coverage)
+  ")" || {
+    printf 'usage visibility unreadable: aggregate probe failed through a non-mutating snapshot'
+    return "$HC_WARN"
+  }
+  IFS='|' read -r lane_count advertised_count enumeration_count outcomes_count \
+    observation_count fresh_count stale_count no_activity_count \
+    not_supported_count unreported_count unavailable_count auth_error_count \
+    rate_limited_count schema_error_count unknown_count coverage_count <<< "$summary"
+  for value in "$lane_count" "$advertised_count" "$enumeration_count" \
+    "$outcomes_count" "$observation_count" "$fresh_count" "$stale_count" \
+    "$no_activity_count" "$not_supported_count" "$unreported_count" \
+    "$unavailable_count" "$auth_error_count" "$rate_limited_count" \
+    "$schema_error_count" "$unknown_count" "$coverage_count"; do
+    case "$value" in
+      ''|*[!0-9]*)
+        printf 'usage visibility malformed: aggregate counts are not numeric (no display state inferred)'
+        return "$HC_WARN"
+        ;;
+    esac
+  done
+  if [ "$stale_count" -ne 0 ] || [ "$unavailable_count" -ne 0 ] ||
+     [ "$auth_error_count" -ne 0 ] || [ "$rate_limited_count" -ne 0 ] ||
+     [ "$schema_error_count" -ne 0 ]; then
+    visibility_status="$HC_WARN"
+  fi
+  if [ "$observation_count" -eq 0 ]; then
+    printf 'usage visibility ready (schema v4; catalog=%s; advertised_models=%s; enumerations=%s; serving_outcomes=%s; observations=none; coverage=%s; routes=strip,watch,report; transport=cli-only; http=none; daemon=none; provider_probes=forbidden; advisory=read-only)' \
+      "$lane_count" "$advertised_count" "$enumeration_count" "$outcomes_count" "$coverage_count"
+    return "$visibility_status"
+  fi
+  printf 'usage visibility ready (schema v4; catalog=%s; advertised_models=%s; enumerations=%s; serving_outcomes=%s; observations=%s; states=fresh:%s,stale:%s,no_activity:%s,not_supported:%s,unreported:%s,unavailable:%s,auth_error:%s,rate_limited:%s,schema_error:%s,unknown:%s; coverage=%s; routes=strip,watch,report; transport=cli-only; http=none; daemon=none; provider_probes=forbidden; advisory=read-only)' \
+    "$lane_count" "$advertised_count" "$enumeration_count" "$outcomes_count" \
+    "$observation_count" "$fresh_count" "$stale_count" "$no_activity_count" \
+    "$not_supported_count" "$unreported_count" "$unavailable_count" \
+    "$auth_error_count" "$rate_limited_count" "$schema_error_count" \
+    "$unknown_count" "$coverage_count"
+  return "$visibility_status"
+}
+
+
+hc_usage_root() {
+  local home="$1" uid
+  if [ ! -e "$home" ]; then
+    printf 'configured root absent at %s — usage federation unavailable' "$home"
+    return "$HC_WARN"
+  fi
+  if ! _attachment_canonical_dir "$home"; then
+    printf 'configured root at %s is a symlink or non-directory — usage federation unavailable' "$home"
+    return "$HC_WARN"
+  fi
+  uid="$(stat -c %u "$home" 2>/dev/null || stat -f %u "$home" 2>/dev/null)" || {
+    printf 'configured root at %s could not be inspected' "$home"
+    return "$HC_WARN"
+  }
+  if [ "$uid" != "$(id -u)" ]; then
+    printf 'configured root at %s is not owned by the effective user — store refuses to open' "$home"
+    return "$HC_WARN"
+  fi
+  printf 'configured root usable for usage store (%s; mode %s)' "$home" "$(_attachment_mode "$home")"
+}
+
+hc_usage_store() {
+  local home="$1" usage_dir db dir_mode db_mode summary
+  usage_dir="$home/usage"
+  db="$usage_dir/usage.sqlite3"
+  if [ ! -e "$usage_dir" ] && [ ! -e "$db" ]; then
+    printf 'private usage store not initialized at %s (unavailable; doctor never creates it)' "$db"
+    return "$HC_WARN"
+  fi
+  if ! _attachment_canonical_dir "$usage_dir"; then
+    printf 'usage path at %s is a symlink or non-directory — store unavailable' "$usage_dir"
+    return "$HC_WARN"
+  fi
+  dir_mode="$(_attachment_mode "$usage_dir")" || {
+    printf 'usage path at %s could not be inspected' "$usage_dir"
+    return "$HC_WARN"
+  }
+  if [ "$dir_mode" != 700 ]; then
+    printf 'usage directory mode is %s, expected 700 — store refuses to open until private' "$dir_mode"
+    return "$HC_WARN"
+  fi
+  if [ ! -e "$db" ]; then
+    printf 'usage database missing at %s (unavailable; doctor never creates it)' "$db"
+    return "$HC_WARN"
+  fi
+  if ! _attachment_canonical_file "$db"; then
+    printf 'usage database at %s is a symlink or non-regular file — store unavailable' "$db"
+    return "$HC_WARN"
+  fi
+  db_mode="$(_attachment_mode "$db")" || {
+    printf 'usage database at %s could not be inspected' "$db"
+    return "$HC_WARN"
+  }
+  if [ "$db_mode" != 600 ]; then
+    printf 'usage database mode is %s, expected 600 — store refuses to open until private' "$db_mode"
+    return "$HC_WARN"
+  fi
+  summary="$(_hc_usage_sqlite "$db" \
+    'SELECT COUNT(*), MIN(version), MAX(version) FROM schema_version')" || {
+    printf 'usage database at %s exists but its schema could not be read through a non-mutating probe' "$db"
+    return "$HC_WARN"
+  }
+  local rows min_version max_version
+  rows="${summary%%|*}"
+  summary="${summary#*|}"; min_version="${summary%%|*}"
+  max_version="${summary#*|}"
+  case "$rows${rows:+$min_version$max_version}" in
+    ''|*[!0-9]*)
+      printf 'usage database at %s has a malformed schema_version table — corrupt store' "$db"
+      return "$HC_WARN"
+      ;;
+  esac
+  if [ "$min_version" != 1 ] || [ "$max_version" -lt 1 ] ||
+     [ "$rows" != "$((max_version - min_version + 1))" ]; then
+    printf 'usage database at %s has a non-contiguous schema_version history — corrupt store' "$db"
+    return "$HC_WARN"
+  fi
+  if [ "$max_version" -gt "$USAGE_DB_SCHEMA_VERSION" ]; then
+    printf 'usage database schema v%s is newer than this checkout understands (max v%s) — upgrade before use' \
+      "$max_version" "$USAGE_DB_SCHEMA_VERSION"
+    return "$HC_WARN"
+  fi
+  printf 'private usage store readable (%s; dir mode %s, db mode %s, schema v%s)' \
+    "$db" "$dir_mode" "$db_mode" "$max_version"
+}
+
+# _hc_usage_snapshot <database> — materialize THE ONE snapshot of the live WAL
+# store this invocation probes, and print its path. The file name is FIXED
+# inside the private scratch tree: whichever probe runs first creates it and
+# every later probe — including ones running inside command substitutions,
+# where an assignment would die with the subshell — reuses the same bytes.
+# The main database is copied first, then the live -wal tail beside it; the
+# first sqlite3 open replays that WAL into the copy, so every probe in the run
+# aggregates over ONE point-in-time view that includes committed-but-
+# uncheckpointed transactions (a plain file copy of only the main db would
+# silently miss them). A writer racing the two copies can at worst make the
+# tail partially inapplicable; recovery stops cleanly at the mismatch and the
+# probes stay advisory. Any -wal/-shm/-journal sidecars SQLite leaves beside
+# the snapshot stay inside the 0700 scratch tree; no function installs its own
+# trap — the invocation-wide EXIT/HUP/INT/TERM traps at the top of doctor.sh
+# own cleanup even when a probe never returns.
+_hc_usage_snapshot() {
+  local db="$1" snap="$DOCTOR_SCRATCH_DIR/usage-snapshot.sqlite3"
+  if [ -f "$snap" ]; then
+    printf '%s' "$snap"
+    return 0
+  fi
+  : > "$snap" || return 1
+  chmod 600 "$snap"
+  if ! cp "$db" "$snap" 2>/dev/null; then
+    rm -f "$snap" "$snap-wal" "$snap-shm" "$snap-journal"
+    return 1
+  fi
+  if [ -f "$db-wal" ]; then
+    cp "$db-wal" "$snap-wal" 2>/dev/null || :
+  fi
+  printf '%s' "$snap"
+}
+
+_hc_usage_sqlite() {
+  local db="$1" sql="$2" snap result rc
+  doctor_scratch_require || {
+    printf '%s' 'doctor: no private scratch tree available for a read-only usage probe' >&2
+    return 1
+  }
+  snap="$(_hc_usage_snapshot "$db")" || return 1
+  result="$(sqlite3 "$snap" "$sql" 2>/dev/null)"
+  rc=$?
+  [ "$rc" -eq 0 ] && printf '%s' "$result"
+  return "$rc"
+}
+
+hc_usage_watermarks() {
+  local home="$1" db counts status n total=0 degraded="" last_us now age="unknown"
+  db="$home/usage/usage.sqlite3"
+  if [ ! -f "$db" ] || [ -L "$db" ]; then
+    printf 'source watermarks unreadable: no existing private usage store'
+    return "$HC_WARN"
+  fi
+  counts="$(_hc_usage_sqlite "$db" \
+    "SELECT status || '=' || COUNT(*) FROM source_files WHERE is_current = 1 GROUP BY status ORDER BY status")" || {
+    printf 'source watermarks unreadable: watermark query failed through a non-mutating probe'
+    return "$HC_WARN"
+  }
+  while IFS='=' read -r status n; do
+    [ -n "$status" ] || continue
+    case "$n" in
+      ''|*[!0-9]*) printf 'source watermarks unreadable: malformed watermark row'; return "$HC_WARN" ;;
+    esac
+    total=$((total + n))
+    case "$status" in
+      discovered|ready|complete) : ;;
+      *)
+        case "$status" in
+          *[!a-z0-9_]*) status="<unsafe>" ;;
+        esac
+        degraded="$degraded $status=$n"
+        ;;
+    esac
+  done <<EOF
+$counts
+EOF
+  if [ "$total" -eq 0 ]; then
+    printf 'no watermarked transcript sources recorded yet'
+    return "$HC_INFO"
+  fi
+  last_us="$(_hc_usage_sqlite "$db" \
+    'SELECT MAX(last_scan_at_us) FROM source_files WHERE is_current = 1')" || last_us=""
+  case "${last_us:-}" in
+    ''|*[!0-9]*) : ;;
+    *)
+      now="$(date +%s)"
+      age=$((now - last_us / 1000000))
+      [ "$age" -ge 0 ] || age=0
+      age="${age}s old"
+      ;;
+  esac
+  # Counts and ages only: transcript paths and content are never printed.
+  if [ -n "$degraded" ]; then
+    printf '%d current watermark(s); degraded:%s (newest scan %s)' "$total" "$degraded" "$age"
+    return "$HC_WARN"
+  fi
+  printf '%d current watermark(s) healthy; newest scan %s' "$total" "$age"
+}
+
 SAFE_REPAIR=""; SAFE_REPAIR_BLOCKED=""; SAFE_REPAIR_BLOCKED_CLASS=""; SAFE_REPAIR_HARNESSES=""
 SAFE_REPAIR_OWNER_SHA256=""; SAFE_REPAIR_OWNER_PARENT_DEV_INO=""
 journal_matches_registry_row() {
@@ -1264,7 +1847,8 @@ plan_safe_repair() {
   local root="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5"
   local attachment_id="$6" release="$7" owner_state="$8" layout="$9" release_ok="${10}"
   local excludes_ok="${11}" surfaces_ok="${12}" registry_status="${13}" excluded="${14}"
-  local identity_state="${15}" diagnostics_ok="${16}" harnesses="${17}" journal candidate journal_name status journal_root rc matches=0 normalized_harnesses matched_journal matched_journal_state manual_recover_command owner
+  local identity_state="${15}" diagnostics_ok="${16}" harnesses="${17}" hooks_authority="${18}"
+  local journal candidate journal_name status journal_root rc matches=0 normalized_harnesses matched_journal matched_journal_state manual_recover_command owner
   SAFE_REPAIR=""; SAFE_REPAIR_BLOCKED=""; SAFE_REPAIR_BLOCKED_CLASS=""; SAFE_REPAIR_HARNESSES=""
   SAFE_REPAIR_OWNER_SHA256=""; SAFE_REPAIR_OWNER_PARENT_DEV_INO=""
   [ "$registry_status" = active ] || return 0
@@ -1364,6 +1948,19 @@ plan_safe_repair() {
       fi
       ;;
     portable-attached:runtime-missing:true)
+      case "$hooks_authority" in
+        managed) ;;
+        operator-owned)
+          SAFE_REPAIR_BLOCKED='automatic relink is withheld because core.hooksPath is operator-owned; no repair was attempted'
+          SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_CONFLICT"
+          return 0
+          ;;
+        *)
+          SAFE_REPAIR_BLOCKED='automatic relink is withheld because managed hook authority could not be proven; no repair was attempted'
+          SAFE_REPAIR_BLOCKED_CLASS="$DOCTOR_EX_CONFLICT"
+          return 0
+          ;;
+      esac
       if [ "$excludes_ok" = true ] && [ "$surfaces_ok" = true ]; then
         owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"
         if safe_repair_capture_owner_binding "$owner"; then
@@ -1438,8 +2035,10 @@ apply_safe_repair() {
 verify_safe_repair_result() (
   local home="$1" root="$2" fleet="$3" project_id="$4" snapshot rows row
   local checkout_id worktree_id attachment_id release harnesses owner
-  snapshot="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-post-repair.XXXXXX")" || return 1
-  trap 'rm -f "$snapshot"' EXIT
+  # Inside the invocation scratch tree; the invocation-wide trap owns it — a
+  # subshell-local EXIT trap here would replace that cleanup for the WHOLE
+  # process (traps are global, not per-subshell).
+  snapshot="$(doctor_scratch_require && mktemp "$DOCTOR_SCRATCH_DIR/post-repair.XXXXXXXX")" || return 1
   local_registry_list_diagnostic_json "$home" "$fleet" > "$snapshot" || return 1
   rows="$(jq -c --arg root "$root" --arg fleet "$fleet" --arg project "$project_id" '
     [.entries[]
@@ -1480,8 +2079,29 @@ fi
 run_check '  ' hc_portable_source_root "$HOME_PATH" || true
 run_check '  ' hc_portable_release_store "$HOME_PATH" || true
 run_check '  ' hc_portable_active_cli_release "$HOME_PATH" || true
-SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/trellis-doctor-registry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
-trap 'rm -f "$SNAPSHOT"' EXIT HUP INT TERM
+if run_check '  ' hc_portable_user_surface "$HOME_PATH"; then
+  :
+else
+  case "${HC_PORTABLE_USER_SURFACE_STATE:-}" in
+    unmanaged)
+      printf '%s\n' '  [manual] user attachment is report-only; remedy: trellis attach --user' ;;
+    stale)
+      printf '%s\n' '  [manual] user attachment is report-only; remedy: trellis relink --user' ;;
+    *)
+      printf '%s\n' '  [manual] user attachment is report-only; remedy: review, then use trellis attach --user for an unmanaged surface or trellis relink --user for an owned surface' ;;
+  esac
+fi
+run_check '  ' hc_usage_cli "$HOME_PATH" || true
+run_check '  ' hc_usage_root "$HOME_PATH" || true
+run_check '  ' hc_usage_store "$HOME_PATH" || true
+run_check '  ' hc_usage_visibility "$HOME_PATH" || true
+run_check '  ' hc_usage_watermarks "$HOME_PATH" || true
+run_check '  ' hc_usage_receipts "$HOME_PATH" || true
+# The snapshot lives INSIDE the invocation scratch tree, and NO trap is
+# installed here: a second `trap … EXIT` would silently replace the
+# invocation-wide cleanup trap above and strand that tree on every exit.
+SNAPSHOT="$(doctor_scratch_require && mktemp "$DOCTOR_SCRATCH_DIR/registry.XXXXXXXX")" ||
+  { echo 'doctor: could not create a private scratch file for the registry snapshot' >&2; exit "$TRELLIS_EX_UNAVAILABLE"; }
 if local_registry_list_diagnostic_json "$HOME_PATH" "$ONLY_FLEET" > "$SNAPSHOT"; then :; else
   status=$?; report '  ' "$HC_ERROR" "local registry: invalid, unsafe, or unavailable at $REGISTRY_PATH"; echo '== Summary =='; exit "$status"
 fi
@@ -1559,6 +2179,7 @@ while IFS= read -r row; do
   safe_root="$(local_registry_safe_display "${root:-<no root>}")"
   safe_identity_detail="$(local_registry_safe_display "${identity_detail:-registered row cannot be verified}")"
   [ -z "$ONLY_PROJECT" ] || [ "$project_id" = "$ONLY_PROJECT" ] || continue
+  HC_PORTABLE_HOOKS_AUTHORITY=""
   ROW_ERRORS_AT_START="$N_ERROR"
   ROWS_CHECKED=$((ROWS_CHECKED + 1)); printf '\n%s/%s (%s)\n' "$fleet" "$project_id" "$kind"
   payload=""; release_ok=false
@@ -1614,15 +2235,24 @@ while IFS= read -r row; do
   fi
   owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"; owner_state=missing
   if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
+  if [ "$owner_state" != missing ]; then
+    run_check '  ' hc_portable_hooks_path "$HOME_PATH" "$root" "$checkout_id" "$owner" || true
+  fi
   if [ -z "$release" ] && [ "$owner_state" != missing ]; then
     report '  ' "$HC_ERROR" 'immutable release: registry worktree has no recorded release' "$DOCTOR_EX_STATE"
   fi
   excludes_ok=false; surfaces_ok=false
   if [ "$owner_state" = attached ] || [ "$owner_state" = runtime-missing ]; then
     if [ -n "$payload" ] &&
-       run_check '  ' hc_portable_excludes "$owner" "$payload/payload" "$harnesses"; then excludes_ok=true; fi
-    if [ -n "$payload" ] && run_check '  ' hc_portable_native_surfaces "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then surfaces_ok=true; fi
+       run_check '  ' hc_portable_excludes "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then excludes_ok=true; fi
+    if [ -n "$payload" ] &&
+       run_check '  ' hc_portable_native_surfaces "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then surfaces_ok=true; fi
   fi
+  # The owner/native checks validate recorded artifact metadata, but release
+  # adoption can advance the runtime manifest without materializing a newly
+  # declared discovery leaf.  Inspect the concrete checkout before computing any
+  # safe-repair route; this drift is detection-only and requires detach/attach.
+  run_check '  ' health_checks_missing_leaves "$root" "$harnesses" "$HOME_PATH" "$release" || true
   run_check '  ' hc_portable_layout "$root" "$owner_state" "$project_id" || true
   layout="$HC_PORTABLE_LAYOUT"
   # Anti-slop presence (spec 037): read-only, OK/INFO only — it reports whether a
@@ -1634,7 +2264,7 @@ while IFS= read -r row; do
   plan_safe_repair "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
     "$attachment_id" "$release" "$owner_state" "$layout" "$release_ok" \
     "$excludes_ok" "$surfaces_ok" "$registry_status" "$excluded" "$identity_state" "$row_diagnostics_ok" \
-    "$harnesses"
+    "$harnesses" "$HC_PORTABLE_HOOKS_AUTHORITY"
   if [ -n "$SAFE_REPAIR_BLOCKED" ]; then
     if [ -z "$SAFE_REPAIR_BLOCKED_CLASS" ]; then
       case "$SAFE_REPAIR_BLOCKED" in
@@ -1680,8 +2310,8 @@ echo; echo '== Summary =='
 printf '%s %d error(s)  %s %d warning(s)  %s %d info  (%d local row(s) checked)\n' "$GLYPH_ERR" "$N_ERROR" "$GLYPH_WARN" "$N_WARN" "$GLYPH_INFO" "$N_INFO" "$ROWS_CHECKED"
 if [ "$DO_DRY_RUN" -eq 1 ]; then
   echo "$GLYPH_INFO dry-run: no repair was applied"
-  [ "$N_ERROR" -eq 0 ] || exit "${DOCTOR_EXIT:-1}"
-  exit 0
+  summary_exit_code="$(hc_doctor_summary_exit_code "$N_ERROR" "$DOCTOR_EXIT")"
+  exit "$summary_exit_code"
 fi
-[ "$N_ERROR" -eq 0 ] || exit "${DOCTOR_EXIT:-1}"
-exit 0
+summary_exit_code="$(hc_doctor_summary_exit_code "$N_ERROR" "$DOCTOR_EXIT")"
+exit "$summary_exit_code"

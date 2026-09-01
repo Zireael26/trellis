@@ -13,7 +13,7 @@
 #     with consumer scripts. Bash 3.2 safe; sourcing has no side effects.
 #
 # Contract:
-#   slop_lang_for_ext <ext>       -> ts|py|go|rs on stdout, status 1 if unknown
+#   slop_lang_for_ext <ext>       -> ts|py|go|rs|java on stdout, status 1 if unknown
 #   slop_lang_for_path <path>     -> same, keyed off the path's extension
 #   slop_patterns_for_lang <lang> -> TSV rows: <id> <match-ERE> <suppress-ERE|->
 #   slop_carve_out_globs          -> one glob per line
@@ -40,7 +40,7 @@
 # bash, not from an interactive shell.
 # shellcheck disable=SC2034 # the SLOP_* values are consumed by the callers.
 
-SLOP_LANGS="ts py go rs"
+SLOP_LANGS="ts py go rs java"
 SLOP_DOCTRINE_REF="core-rules/references/anti-slop.md"
 
 # --- native-engine contract ------------------------------------------------
@@ -79,6 +79,7 @@ slop_lang_for_ext() {
     py) printf 'py\n' ;;
     go) printf 'go\n' ;;
     rs) printf 'rs\n' ;;
+    java) printf 'java\n' ;;
     *) return 1 ;;
   esac
 }
@@ -137,6 +138,37 @@ slop_patterns_for_lang() {
         'rs-expect' '\.expect\(' '-' \
         'rs-unsafe-block' '(^|[^A-Za-z0-9_])unsafe[[:space:]]*\{' 'SAFETY:'
       ;;
+    java)
+      # Rows CALIBRATED against a real 171-file Spring service before shipping, so each
+      # one is a signal row rather than a fatigue row; profiles/java/README.md
+      # § Calibration records the measured count per row and why the rejected
+      # candidates were rejected.
+      #
+      # java-object-param spells its two alternatives out ('(Object' and
+      # '([^)]*[^A-Za-z0-9_]Object') rather than the obvious '\((|...)'. An EMPTY
+      # alternative is not POSIX: macOS awk rejects it with 'illegal primary in
+      # regular expression' and ABORTS THE WHOLE SCAN at that row, so every pattern
+      # AFTER it silently stops firing. Measured, not theorised.
+      #
+      # No '\b' anywhere. awk's ERE is POSIX and has no word-boundary escape — which
+      # is exactly why every other language here spells it '[^A-Za-z0-9_]'. A row
+      # written with '\b' matches a literal 'b' on some awks and then silently never
+      # fires, the one failure this file's self-test exists to catch.
+      #
+      # 'throws Exception' was measured (5 hits) and deliberately EXCLUDED: a Spring
+      # configure() override, an HMAC helper and two worker internals — defensible
+      # code, so the row would only teach readers to skim findings.
+      printf '%s\t%s\t%s\n' \
+        'java-unchecked-cast' '\([A-Za-z_][A-Za-z0-9_.]*<[^>()]*>\)' 'SAFETY:' \
+        'java-suppress-warnings' '@SuppressWarnings' 'SAFETY:' \
+        'java-object-param' '\((Object|[^)]*[^A-Za-z0-9_]Object)[[:space:]]+[a-z][A-Za-z0-9_]*[,)]' 'SAFETY:' \
+        'java-empty-catch' 'catch[[:space:]]*\([^)]*\)[[:space:]]*\{[[:space:]]*\}' '-' \
+        'java-print-stack-trace' '\.printStackTrace\(' '-' \
+        'java-raw-collection' '(^|[^A-Za-z0-9_])(Map|List|Set|Collection)[[:space:]]+[a-z][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*new[[:space:]]' '-' \
+        'java-reflection' '(setAccessible\(|getDeclaredField\(|getDeclaredMethod\()' 'SAFETY:' \
+        'java-optional-get' 'Optional[^;]*\.get\(\)' '-' \
+        'java-mock-static' '(mockStatic\(|Mockito\.mock\()' '-'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -171,6 +203,7 @@ slop_carve_out_globs() {
     '**/conftest.py' \
     '**/dist/**' \
     '**/build/**' \
+    '**/target/**' \
     '**/*.gen.*' \
     '**/*_pb2.py' \
     '**/migrations/**' \
@@ -293,6 +326,18 @@ let name = widget.name.expect("name present");
 unsafe { ptr::read(handle) };
 EOF
       ;;
+    java) cat <<'EOF'
+        return (Set<String>) request.getAttribute(BRANDS_ATTR);
+    @SuppressWarnings("unchecked")
+    private static String str(Object value) {
+        try { parse(raw); } catch (ParseException e) {}
+            e.printStackTrace();
+        Map rows = new HashMap();
+        field.setAccessible(true);
+        var name = Optional.ofNullable(raw).get();
+        mockStatic(Clock.class);
+EOF
+      ;;
   esac
 }
 
@@ -345,6 +390,27 @@ let name = widget.name.ok_or(Error::Missing)?;
 unsafe { ptr::read(handle) };
 EOF
       ;;
+    java) cat <<'EOF'
+    Set<String> brands = BrandSet.of(request);
+    // SAFETY: the annotation claims the cast is sound; this comment is the proof,
+    // and it sits on the cast because that is the construct being justified.
+    @SuppressWarnings("unchecked")
+    private static Set<String> brandsOf(HttpServletRequest request) {
+        // SAFETY: ApiKeyAuthFilter stamps BRANDS_ATTR as a Set<String> on the
+        // bearer branch only, and this method is unreachable on any other branch.
+        return (Set<String>) request.getAttribute(BRANDS_ATTR);
+    }
+    private static String render(Money amount) {
+        try {
+            parse(raw);
+        } catch (ParseException e) {
+            LOG.warn("unparseable row skipped", e);
+        }
+        Map<String, Widget> rows = new HashMap<>();
+        var name = maybeWidget.map(Widget::name).orElseThrow(Missing::new);
+        when(clock.instant()).thenReturn(FIXED);
+EOF
+      ;;
   esac
 }
 
@@ -359,6 +425,10 @@ go|go-unchecked-assert|	ptr := raw.(*Widget)
 py|py-any-annotation|    payload: Any,
 py|py-any-annotation|) -> Any:
 ts|ts-as-any|	const raw = JSON.parse(body) as any;
+java|java-unchecked-cast|        return (java.util.Set<String>) http.getAttribute(A);
+java|java-object-param|    static String str(Object o) {
+java|java-object-param|    static String pick(String key, Object value) {
+java|java-raw-collection|        List rows = new ArrayList();
 EOF
 }
 
@@ -404,6 +474,8 @@ EOF
   for path in tests/helpers/build.ts src/__tests__/widget.ts src/__mocks__/client.ts \
     test/setup.ts e2e/checkout.ts cypress/support/index.ts playwright/global.ts \
     src/lib/foo_test.go app/test_client.py \
+    apps/service/src/test/java/com/acme/WidgetTest.java \
+    apps/service/target/generated-sources/Api.java \
     conftest.py dist/bundle.js src/schema.gen.ts proto/thing_pb2.py \
     api/migrations/0001_init.py vendor/x/y.go tools/oxlint/anti-slop/index.ts \
     profiles/typescript/fixtures/red.ts src/foo.spec.ts pnpm-lock.yaml; do
@@ -415,7 +487,8 @@ EOF
     fi
   done
 
-  for path in src/app/main.ts app/client.py internal/handle.go src/lib.rs; do
+  for path in src/app/main.ts app/client.py internal/handle.go src/lib.rs \
+    apps/service/src/main/java/com/acme/Widget.java; do
     if slop_path_carved_out "$path"; then
       echo "FAIL carve-out: $path should NOT be carved out"
       rc=1

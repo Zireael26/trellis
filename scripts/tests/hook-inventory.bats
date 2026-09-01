@@ -2,6 +2,15 @@
 
 ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 
+# This is a closed exception list: adding a hook here requires a corresponding
+# exact local-template registration assertion below.
+is_local_template_only_hook() {
+  case "$1" in
+    wiki-skill-suggest.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 @test "canonical hook README lists every shipped Claude hook script" {
   local script base
   while IFS= read -r script; do
@@ -13,10 +22,15 @@ ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
   done < <(find "$ROOT/core-rules/hooks" -maxdepth 1 -type f -name '*.sh' | sort)
 }
 
-@test "canonical settings wire every shipped Claude hook script" {
+@test "legacy Claude settings wire every hook not declared local-template-only" {
   local script base
   while IFS= read -r script; do
     base="${script##*/}"
+    # Herdr role resolution is a user-global SessionStart hook. It is shipped
+    # beside project hooks for release packaging, but must not be duplicated in
+    # each attached project's canonical settings.
+    [ "$base" = "herdr-foreman-session.sh" ] && continue
+    is_local_template_only_hook "$base" && continue
     jq -e --arg base "$base" \
       '[.hooks[][]?.hooks[]?.command | select(endswith("/" + $base))] | length == 1' \
       "$ROOT/core-rules/templates/claude-settings.json" >/dev/null || {
@@ -24,6 +38,28 @@ ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
         return 1
       }
   done < <(find "$ROOT/core-rules/hooks" -maxdepth 1 -type f -name '*.sh' | sort)
+}
+
+@test "explicit local-template-only hooks are wired once locally and absent from legacy manifests" {
+  local template legacy hook_path base
+  while IFS='|' read -r template legacy hook_path; do
+    base="${hook_path##*/}"
+    jq -e --arg suffix "/$hook_path\"" '
+      [.hooks[][]?.hooks[]?.command | select(endswith($suffix))] | length == 1
+    ' "$ROOT/$template" >/dev/null || {
+      echo "missing or duplicate local-template hook wiring: $template -> $hook_path"
+      return 1
+    }
+    jq -e --arg base "$base" '
+      [.hooks[][]?.hooks[]?.command | select(contains("/" + $base))] | length == 0
+    ' "$ROOT/$legacy" >/dev/null || {
+      echo "local-template-only hook leaked into legacy manifest: $legacy -> $base"
+      return 1
+    }
+  done <<'EOF'
+core-rules/templates/claude-settings.local.json|core-rules/templates/claude-settings.json|core-rules/hooks/wiki-skill-suggest.sh
+core-rules/templates/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/wiki-skill-suggest.sh
+EOF
 }
 
 # Every script at the top of a hook directory is EXECUTED by path — both harness

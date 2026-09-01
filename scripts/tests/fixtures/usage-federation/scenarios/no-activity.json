@@ -1,0 +1,58 @@
+{
+  "scenario": "no_activity",
+  "inputs": {
+    "clock": {
+      "now": "2026-08-23T12:00:00Z"
+    },
+    "period": {
+      "start": "2026-08-23T11:00:00Z",
+      "end": "2026-08-23T12:00:00Z",
+      "timezone": "UTC"
+    },
+    "raw_sources": [
+      {
+        "source_id": "source-omp-empty-001",
+        "format": "omp-jsonl",
+        "harness": "omp",
+        "records": []
+      },
+      {
+        "source_id": "source-claude-empty-001",
+        "format": "claude-jsonl",
+        "harness": "claude",
+        "records": []
+      }
+    ]
+  },
+  "expected": {
+    "status": "complete",
+    "ingest": {
+      "status": "fresh",
+      "observed_at": "2026-08-23T12:00:00Z",
+      "expires_at": "2026-08-23T12:01:00Z",
+      "source": "complete_ingest",
+      "value": {
+        "complete": true,
+        "scanned_through": "2026-08-23T12:00:00Z"
+      }
+    },
+    "lanes": [
+      {
+        "lane_id": "openai-codex",
+        "spend": {
+          "notional_nanos": {
+            "status": "no_activity",
+            "observed_at": "2026-08-23T12:00:00Z",
+            "expires_at": "2026-08-23T12:01:00Z",
+            "source": "complete_ingest",
+            "value": 0
+          },
+          "real_nanos": {
+            "status": "not_supported",
+            "reason_code": "subscription_has_no_real_invoice_spend"
+          }
+        }
+      }
+    ]
+  }
+}

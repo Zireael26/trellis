@@ -278,14 +278,40 @@ lint_mirror() {
   done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
     -exec grep -HnE -- '/(Users|home)/[[:alnum:]_.-]+/' {} + 2>/dev/null)
 
-  # Preserve the historical-record boundary for retired private integrations.
-  # The lint implementation itself is allowed to name the tokens it detects.
+  # Preserve the historical-record boundary for the retired AntiGravity
+  # harness. The canonical `google-antigravity` OMP provider id remains live
+  # and publishable; remove only that exact token before looking for stale
+  # harness references.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
     case "$rel" in
       docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats|scripts/sync-to-template.sh) ;;
-      *) printf "%s: stale 'antigravity' in current operator surface\n" "$rel"; rc=1 ;;
+      *)
+        if awk '
+          {
+            line = $0
+            token = "google-antigravity"
+            while ((pos = index(line, token)) != 0) {
+              before = pos == 1 ? "" : substr(line, pos - 1, 1)
+              after = substr(line, pos + length(token), 1)
+              if (before ~ /[[:alnum:]_-]/ || after ~ /[[:alnum:]_-]/) {
+                stale = 1
+                exit
+              }
+              line = substr(line, 1, pos - 1) substr(line, pos + length(token))
+            }
+            if (index(tolower(line), "antigravity")) {
+              stale = 1
+              exit
+            }
+          }
+          END { exit stale ? 0 : 1 }
+        ' "$f"; then
+          printf "%s: stale 'antigravity' in current operator surface\n" "$rel"
+          rc=1
+        fi
+        ;;
     esac
   done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
     -exec grep -IliF -- 'antigravity' {} + 2>/dev/null)

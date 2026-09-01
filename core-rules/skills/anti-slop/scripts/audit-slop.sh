@@ -290,6 +290,19 @@ if [ -s "$WORK/files.py" ]; then
   printf 'py\t%s\t%s\t%s\n' "$py_engine" "$(wc -l < "$WORK/files.py" | tr -d ' ')" 0 >> "$WORK/langsum"
 fi
 
+# --- Java ------------------------------------------------------------------
+# Pattern layer, LIVE (not dormant): Java is a first-class profile whose rows are
+# calibrated in profiles/java/README.md. There is deliberately no native lane yet
+# — Error Prone / NullAway are javac plugins, so wiring one edits the project's
+# build and runs on every compile, which is a different blast radius from a lint
+# config. The note says "no native lane" rather than "profile dormant" so a reader
+# cannot mistake a live pattern-layer result for an unrun profile.
+if [ -s "$WORK/files.java" ]; then
+  scan_patterns java patterns >> "$WORK/hits"
+  note "java: pattern layer (no native lane) — profiles/java/README.md § Known gaps"
+  printf 'java\tpatterns\t%s\t%s\n' "$(wc -l < "$WORK/files.java" | tr -d ' ')" 0 >> "$WORK/langsum"
+fi
+
 # --- Go, Rust --------------------------------------------------------------
 # Pattern layer only: both profiles ship dormant (spec §4 non-goal), so there is
 # no installed-config lane to prefer yet.
@@ -348,13 +361,14 @@ lang_label() {
     py) printf 'Python\n' ;;
     go) printf 'Go\n' ;;
     rs) printf 'Rust\n' ;;
+    java) printf 'Java\n' ;;
   esac
 }
 
 printf 'anti-slop audit — %s (%d tracked files in scope)\n' "$SCOPE" "$SCANNED"
 
 if [ ! -s "$WORK/langsum" ]; then
-  printf '\nno files in a covered language (.ts .tsx .js .jsx .py .go .rs) after carve-outs\n'
+  printf '\nno files in a covered language (.ts .tsx .js .jsx .py .go .rs .java) after carve-outs\n'
   exit 0
 fi
 
@@ -364,7 +378,7 @@ while IFS=$'\t' read -r lang engine files count; do
 done < "$WORK/langsum"
 
 printf '\nsummary\n'
-awk -F'\t' '{ printf "  %-3s %-12s %5s files  %5s findings\n", $1, $2, $3, $4 }' "$WORK/langsum"
+awk -F'\t' '{ printf "  %-4s %-12s %5s files  %5s findings\n", $1, $2, $3, $4 }' "$WORK/langsum"
 printf '  total %s findings in %s of %s files scanned\n' "$TOTAL" "$FILES_HIT" "$SCANNED"
 
 if [ -s "$WORK/notes" ]; then

@@ -168,7 +168,7 @@ Minimal config:
 ```bash
 SECURITY_GATE_STACK_PROFILE="web-next"     # web-next | web-static | web-rag-llm | monorepo-saas | unity-game
 LLM_PROVIDER="anthropic"                    # anthropic | openai | gemini | ollama | none
-LLM_MODEL="claude-opus-5"                   # provider-specific model id; keep current
+LLM_MODEL="claude-opus-5"                   # anthropic defaults to claude-opus-5; openai/gemini/ollama require an explicit LLM_MODEL (no default)
 SECURITY_GATE_AUDIT_DIR="audits"            # default; relative to project root
 SECURITY_GATE_LLM_TIMEOUT_S=120             # per-call ceiling
 
@@ -182,8 +182,9 @@ SECURITY_GATE_LLM_TIMEOUT_S=120             # per-call ceiling
 # SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS="core-rules/evals/*"
 ```
 
-Missing config → skill defaults to `web-next` with a `warn` line and runs `--no-llm` if `llm` is not on PATH.
+Non-Anthropic providers have no implicit model. With `LLM_PROVIDER=openai|gemini|ollama` and an empty `LLM_MODEL`, `scripts/lib/llm-call.sh` fails closed (exit 2) with a warning and no `llm` invocation — set `LLM_MODEL` explicitly to the current model id you intend to run.
 
+Missing config → skill defaults to `web-next` with a `warn` line and runs `--no-llm` if `llm` is not on PATH or a required `LLM_MODEL` is absent.
 ### Shell coverage
 
 Semgrep's registry has no shell ruleset, so diff mode runs ShellCheck at `severity=warning` as the SAST engine for shell and merges its findings into the same SAST row. Scope is every changed `*.sh` / `*.bash` file **plus every changed file whose shebang names `sh`, `bash`, `dash`, or `ksh`** — extensionless scripts such as `pre-push`, `commit-msg`, and CLI entrypoints are shell and are scanned as shell. `*.zsh` reaches semgrep only; ShellCheck has no zsh dialect, so a zsh file is in practice grepped for secrets and nothing more.

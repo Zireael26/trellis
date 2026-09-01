@@ -1,0 +1,2 @@
+- 2026-08-30T12:05:00Z [L5] [architectural] Surface the storage boundary while choosing it. Reasoning: The operator participated in the decision. Alternatives considered: Defer the choice silently. SURFACED INLINE
+- 2026-08-30T12:05:01Z [L5] [architectural] Surface the transport boundary while choosing it. Reasoning: The operator participated in the decision. Alternatives considered: Defer the choice silently. SURFACED INLINE
