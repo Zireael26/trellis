@@ -96,6 +96,12 @@ Paste [`AGENT_ONBOARD_PROJECT.md`](AGENT_ONBOARD_PROJECT.md) into an agent open 
 
 Works for new projects, fresh clones of registered projects, and drift repair.
 
+### Optional — set up the pi worker harness
+
+Trellis drives multi-model fan-out through an opinionated [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) install. Paste [`AGENT_PI_SETUP.md`](AGENT_PI_SETUP.md) into an agent with filesystem tools and it will do the whole thing: pinned pi version, five add-ons, Keychain-backed credentials, fail-closed subagent settings, and a durable worktree root — with a reasoning section explaining why each choice is what it is.
+
+You supply your own model providers. The roster of agents Trellis itself runs is not published, because each agent pins a model and that roster states which provider accounts its author holds; the guide gives you the schema and boundary rules to write your own.
+
 ---
 
 ## The three tiers, in 30 seconds
@@ -181,6 +187,7 @@ A handful of `scripts/` round out the control plane:
 ├── SETUP.md                   ← human-facing setup walkthrough
 ├── AGENT_SETUP.md             ← paste-into-agent prompt that does setup for you
 ├── AGENT_ONBOARD_PROJECT.md   ← onboard a project after Trellis is bootstrapped
+├── AGENT_PI_SETUP.md          ← paste-into-agent setup for the pi worker harness
 ├── LICENSE                    ← MIT
 │
 ├── core-rules/                ← THE PARENT LAYER — what every project inherits
