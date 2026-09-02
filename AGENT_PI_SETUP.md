@@ -5,7 +5,7 @@ This guide has two reading modes:
 - **Skim:** the checklist below shows the complete order and the expected checkpoint.
 - **Execute:** run every numbered **Command** and **Verify** block in order in the same Bash shell. Stop on the first non-zero exit. Within a step, do not substitute versions, paths, or settings — those are pinned for a reason the reasoning section gives. Providers and models are the one thing you *are* expected to swap; see the next section. Blocks marked **UNVERIFIED** are operator actions and are the only exceptions.
 
-The operator input is six credential actions: paste two OpenCode Go keys and one OpenRouter key into hidden terminal prompts, then complete the ChatGPT Codex, xAI, and Google Antigravity OAuth browser flows. The executing agent must hand those actions to the operator and must never ask the operator to paste a secret into chat.
+The operator input is six credential actions: paste two OpenCode Go keys and one OpenRouter key into hidden terminal prompts, then complete the ChatGPT Codex, xAI, and `antigravity` (Google) OAuth browser flows. The executing agent must hand those actions to the operator and must never ask the operator to paste a secret into chat.
 
 ## What this repository does and does not ship
 
@@ -27,7 +27,7 @@ Substitute your own providers. Everything from step 1 to step 8 is provider-shap
 | 2 | Install five active add-ons | four npm packages locked to checked versions plus local `opencode-go-2.ts` source |
 | 3 | Put API keys in macOS Keychain | all three Keychain lookups succeed without printing a key |
 | 4 | Configure command-backed API-key auth | mode `0600`; four API-provider commands match |
-| 5 | Perform subscription OAuth logins | Codex, xAI, and Antigravity credentials are ready |
+| 5 | Perform subscription OAuth logins | Codex, xAI, and `antigravity` credentials are ready |
 | 6 | Write `subagents.json` | exact four fail-closed settings print |
 | 7 | Write `pi-statusline.json` | exact ordered segment list prints |
 | 8 | Configure account 2 and durable pi temp root | account-2 env loads; `os.tmpdir()` resolves under `~/.trellis` |
@@ -367,7 +367,7 @@ PY
 zsh -lc 'pi --offline --no-session --list-models antigravity' | awk '$1 == "antigravity" { found=1 } END { if (!found) exit 1; print "provider:antigravity=ready" }'
 ```
 
-Expected: ready markers for Codex, xAI, the Antigravity OAuth object, and the Antigravity provider catalogue. `pi auth check` only knows built-in providers, so the local Antigravity check uses its OAuth object plus runtime model registration.
+Expected: ready markers for Codex, xAI, the `antigravity` OAuth object, and the `antigravity` provider catalogue. `pi auth check` only knows built-in providers, so the local `antigravity` check uses its OAuth object plus runtime model registration.
 
 ## 6. Write `subagents.json`
 
@@ -673,7 +673,7 @@ Expected: exactly this one line and exit 0:
 TRELLIS_TOOLS=Agent,SubagentWorkflow,bash,edit,get_subagent_result,intercom,read,steer_subagent,write
 ```
 
-The four default coding tools are `read`, `bash`, `edit`, `write`; `@tintinweb/pi-subagents` adds `Agent`, `SubagentWorkflow`, `get_subagent_result`, and `steer_subagent`; `pi-intercom` adds `intercom`. The statusline, Antigravity provider, and local account-2 provider intentionally add no tools.
+The four default coding tools are `read`, `bash`, `edit`, `write`; `@tintinweb/pi-subagents` adds `Agent`, `SubagentWorkflow`, `get_subagent_result`, and `steer_subagent`; `pi-intercom` adds `intercom`. The statusline, `antigravity` provider, and local account-2 provider intentionally add no tools.
 
 ## Why each customization exists
 
@@ -753,9 +753,9 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 **Customization:** install `@tintinweb/pi-subagents@0.19.0`, `pi-intercom@0.12.1`, `@narumitw/pi-statusline@0.50.0`, `pi-antigravity@0.5.2`, and local `opencode-go-2.ts`.
 
-**What breaks without it:** omitting subagents removes four active tools and makes the roster undispatchable; omitting intercom removes session-to-session messaging; omitting statusline removes the provider/model/tool/context/usage footer; omitting Antigravity makes `flash-ro`'s `antigravity/gemini-3.7-flash` unavailable; omitting the local provider removes the separate account-2 lanes used by three roster files.
+**What breaks without it:** omitting subagents removes four active tools and makes the roster undispatchable; omitting intercom removes session-to-session messaging; omitting statusline removes the provider/model/tool/context/usage footer; omitting `pi-antigravity` makes an `antigravity/`-routed read-only agent unavailable; omitting the local provider removes the separate account-2 lanes used by three roster files.
 
-**Demonstration:** step 2 checks all four npm versions and the local account-2 registration source; step 8 checks its runtime catalogue; step 5 checks the Antigravity catalogue; step 12 proves the tool-producing registrations remain active.
+**Demonstration:** step 2 checks all four npm versions and the local account-2 registration source; step 8 checks its runtime catalogue; step 5 checks the `antigravity` catalogue; step 12 proves the tool-producing registrations remain active.
 
 ### Fail-closed subagent settings
 
