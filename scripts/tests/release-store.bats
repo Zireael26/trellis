@@ -8,11 +8,33 @@ RELEASE_STORE_LIB="$REPO_ROOT/scripts/lib/release-store.sh"
 LOCAL_FLEET_FIXTURES="$REPO_ROOT/scripts/tests/fixtures/local-fleets"
 ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 REGISTRY_LIB="$REPO_ROOT/scripts/lib/local-registry.sh"
+# release.sh admits a TMPDIR candidate only when it is a private mode-0700
+# `.cmd.*` child of THAT home's command scratch root, the shape the stable
+# launcher builds. This suite drives the installed payload by pathname, so it
+# inherits the Git fence's own TMPDIR; without a launcher-shaped directory per
+# fixture home every release command exits 4 before it starts.
+provision_command_scratch() {
+  local home="$1" scratch="$1/state/scratch/.cmd.release-store"
+  mkdir -p "$scratch"
+  chmod 700 "$home" "$home/state" "$home/state/scratch" "$scratch"
+  export TMPDIR="$scratch"
+}
+
 setup() {
   SANDBOX="$(mktemp -d)"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   TRELLIS_HOME_FIX="$SANDBOX/trellis-home"
   mkdir -p "$TRELLIS_HOME_FIX"
+  provision_command_scratch "$TRELLIS_HOME_FIX"
+  # attach derives its trusted local SessionStart render context from the
+  # operator launcher at $HOME/.local/bin/trellis, and the isolated gate hands
+  # every suite an empty private HOME. Install the launcher the way the sibling
+  # attachment suites do, or every render-bearing manifest fails to attach.
+  OPERATOR_HOME="$SANDBOX/operator-home"
+  mkdir -p "$OPERATOR_HOME/.local/bin"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$OPERATOR_HOME/.local/bin/trellis"
+  chmod 755 "$OPERATOR_HOME/.local/bin/trellis"
+  export HOME="$OPERATOR_HOME"
   RELEASE_TEST_STORE_BARRIER="$SANDBOX/release-store-barrier"
   RELEASE_TEST_ADOPTION_BARRIER="$SANDBOX/adoption-barrier"
   RELEASE_TEST_HOOK_BARRIER="$SANDBOX/hook-swap-barrier"
@@ -163,10 +185,6 @@ build_release_repo() {
     "codex": {
       "links": [{"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}],
       "render": []
-    },
-    "omp": {
-      "links": [{"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}],
-      "render": []
     }
   }
 }
@@ -181,6 +199,7 @@ exit 0
 EOF
   chmod 755 "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
   cp "$REPO_ROOT/scripts/release.sh" "$repo/scripts/release.sh"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   fixture="${4:-}"
   case "$fixture" in
@@ -360,6 +379,55 @@ build_explicit_json_release_repo() {
   mv "$tmp" "$manifest" || return 1
   retag_release_repo "$repo" "$version" || return 1
   printf '%s\n' "$repo"
+}
+
+assert_malformed_hook_adoption_preserves_current_release() {
+  local kind="$1" repo project owner managed before_state before_owner before_registry before_inode
+  repo="$(build_release_repo 1.8.0)"
+  install_release 1.8.0 "$repo"
+  project="$SANDBOX/malformed-target"
+  make_portable_project "$project" malformed-target
+  attach_portable_project "$project" personal 1.8.0
+  owner="$(owner_for_root "$project")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  before_state="$(hook_state_listing "$managed")"
+  before_inode="$(directory_inode "$managed")"
+  before_owner="$(cat "$owner")"
+  before_registry="$(cat "$TRELLIS_HOME_FIX/registry.json")"
+
+  repo="$(build_release_repo 1.8.1)"
+  case "$kind" in
+    failure) rm "$repo/scripts/trellis-launcher.sh" ;;
+    empty)
+      cat > "$repo/scripts/lib/attachment.sh" <<'GENERATOR'
+_attachment_hooks_post_checkout_dispatcher_body() { return 0; }
+_attachment_hooks_pre_push_dispatcher_body() { return 0; }
+GENERATOR
+      ;;
+    *) return 1 ;;
+  esac
+  retag_release_repo "$repo" 1.8.1
+  install_release 1.8.1 "$repo"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.8.1 --project malformed-target
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'managed hook generation failed'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'adopted:'* ]]
+  [ "$(hook_state_listing "$managed")" = "$before_state" ]
+  [ "$(directory_inode "$managed")" = "$before_inode" ]
+  [ "$(cat "$owner")" = "$before_owner" ]
+  [ "$(cat "$TRELLIS_HOME_FIX/registry.json")" = "$before_registry" ]
+  [ "$(readlink "$project/.trellis/runtime")" = "$TRELLIS_HOME_FIX/releases/1.8.0/payload" ]
+  [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
+  [ -z "$(find "$TRELLIS_HOME_FIX/state/git-hooks" -name '*.release-adopt.*' -print)" ]
+}
+
+@test "adoption preserves current hooks when target hook generation fails" {
+  assert_malformed_hook_adoption_preserves_current_release failure
+}
+
+@test "adoption preserves current hooks when target hook generation succeeds empty" {
+  assert_malformed_hook_adoption_preserves_current_release empty
 }
 
 @test "explicit-json adoption preserves unrelated destination keys" {
@@ -1261,6 +1329,7 @@ add_empty_worktrees_checkout() {
   chmod u+w "$SANDBOX" 2>/dev/null
   TRELLIS_HOME_FIX="$SANDBOX/trellis-home-tag"
   mkdir -p "$TRELLIS_HOME_FIX"
+  provision_command_scratch "$TRELLIS_HOME_FIX"
   bootstrap_repo="$(build_release_repo "0.0.1" annotated "0.0.1" bootstrap-fixture)"
   TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
     '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
@@ -1577,7 +1646,7 @@ managed_link_map() {
 # The policy an attached harness surface actually resolves to, per harness leaf.
 resolved_policy_markers() {
   local root="$1" leaf
-  for leaf in .claude/rules/trellis.md .agents/rules/trellis.md .omp/AGENTS.md; do
+  for leaf in .claude/rules/trellis.md .agents/rules/trellis.md; do
     [ -L "$root/$leaf" ] || return 1
     printf '%s\t%s\n' "$leaf" "$(sha256_file "$root/$leaf")"
   done
@@ -1955,17 +2024,31 @@ copy_snapshot() {
 }
 
 @test "snapshot executor cleans its directory when post-creation owner capture fails" {
-  local fake_bin="$SANDBOX/failing-ps-bin" leftover real_path
+  local fake_bin="$SANDBOX/failing-ps-bin" leftover real_path real_python
   real_path="$PATH"
+  real_python="$(command -v python3)"
   mkdir -p "$fake_bin"
   cat > "$fake_bin/ps" <<'EOF'
 #!/bin/sh
-# The executor has already created its private snapshot when it asks ps for the
+# The executor has already created its private snapshot when it asks for the
 # owner birth record. Failing this probe exercises that post-creation error
 # handoff, rather than the ordinary successful payload-exit cleanup.
 exit 77
 EOF
   chmod 755 "$fake_bin/ps"
+  # Darwin reads the birth token through libproc in a private python3 program
+  # rather than through ps, so the ps stub alone would leave the probe healthy
+  # and the case vacuous. Fail exactly that program -- identified by the
+  # libproc flavour constant only it carries -- and pass every other python3
+  # call in the snapshot path through to the real interpreter.
+  {
+    printf '#!/bin/sh\n'
+    printf 'for arg in "$@"; do\n'
+    printf '  case "$arg" in *PROC_PIDTBSDINFO*) exit 77 ;; esac\n'
+    printf 'done\n'
+    printf 'exec %q "$@"\n' "$real_python"
+  } > "$fake_bin/python3"
+  chmod 755 "$fake_bin/python3"
 
   PATH="$fake_bin:$real_path" run env \
     TRELLIS_HOME="$TRELLIS_HOME_FIX" \

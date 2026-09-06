@@ -52,6 +52,19 @@ EOF
   chmod +x "$RUNNER"
 }
 
+# Build a minimal command PATH that intentionally has no perl. The hook still
+# gets its normal shell utilities and jq, while the runner is proved untouched.
+make_no_perl_path() {
+  local out command_name source_path
+  out="$(mktemp -d "$BATS_TMPDIR/pr-gate-no-perl.XXXXXX")"
+  for command_name in awk bash cat date dirname env git grep jq mktemp mv rm sed sort tail tr wc; do
+    if source_path="$(command -v "$command_name" 2>/dev/null)"; then
+      ln -s "$source_path" "$out/$command_name"
+    fi
+  done
+  printf '%s' "$out"
+}
+
 run_hook() {
   local hook="$1" command="$2" input
   input="$(jq -nc --arg c "$command" '{tool_name:"Bash",tool_input:{command:$c}}')"
@@ -207,6 +220,42 @@ run_hook() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"TIMED OUT after 1s"* ]]
   [ -f "$PROJECT_DIR/child.pid" ]
+}
+
+@test "timeout: missing Perl skips the canonical runner with one visible degradation" {
+  write_runner
+  NO_PERL_PATH="$(make_no_perl_path)"
+  input="$(jq -nc --arg c 'gh pr create --fill' '{tool_name:"Bash",tool_input:{command:$c}}')"
+  PATH_BACKUP="$PATH"
+  export PATH="$NO_PERL_PATH"
+  run_with_stderr "$HOOK" "$input"
+  export PATH="$PATH_BACKUP"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$GATE_LOG" ]
+  [[ "$stderr" == *"pr-gate-shiftleft"*"Perl"* ]]
+  [ "$(printf '%s' "$stderr" | grep -Fc 'Perl')" -eq 1 ]
+  [[ "$output" != *"process-gate BLOCKED"* ]]
+  rm -rf "$NO_PERL_PATH"
+}
+
+@test "timeout: missing Perl skips the Codex runner with one visible degradation" {
+  write_runner
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  unset CLAUDE_PROJECT_DIR
+  NO_PERL_PATH="$(make_no_perl_path)"
+  input="$(jq -nc --arg c 'gh pr create --fill' '{tool_name:"Bash",tool_input:{command:$c}}')"
+  PATH_BACKUP="$PATH"
+  export PATH="$NO_PERL_PATH"
+  run_with_stderr "$CODEX_HOOK" "$input"
+  export PATH="$PATH_BACKUP"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$GATE_LOG" ]
+  [[ "$stderr" == *"pr-gate-shiftleft"*"Perl"* ]]
+  [ "$(printf '%s' "$stderr" | grep -Fc 'Perl')" -eq 1 ]
+  [[ "$output" != *"process-gate BLOCKED"* ]]
+  rm -rf "$NO_PERL_PATH"
 }
 
 @test "gate outcome: NEEDS CHANGES is surfaced without blocking" {

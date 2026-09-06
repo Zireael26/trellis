@@ -32,7 +32,8 @@ release_payload() {
 
 make_release_source() {
   local version="$1"
-  mkdir -p "$RELEASE_SOURCE/core-rules/githooks" "$RELEASE_SOURCE/scripts"
+  mkdir -p "$RELEASE_SOURCE/core-rules/githooks" "$RELEASE_SOURCE/core-rules/hooks/lib" \
+    "$RELEASE_SOURCE/core-rules/pi/extensions" "$RELEASE_SOURCE/scripts"
   # attach reconciles managed Git hooks out of the RELEASE payload, so a usable
   # fixture release must carry the pre-push carrier and the reconcile entry
   # point — the same minimal payload detach-project.bats seals.
@@ -42,9 +43,27 @@ make_release_source() {
     "$RELEASE_SOURCE/scripts/seed-inheritance-symlinks.sh"
   printf '%s\n' "$version" > "$RELEASE_SOURCE/core-rules/VERSION"
   printf '# portable fixture policy %s\n' "$version" > "$RELEASE_SOURCE/core-rules/CLAUDE.md"
+  # Payload stand-ins for the two harness-owned (non-shared) leaves below.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$RELEASE_SOURCE/core-rules/hooks/lib/action-normalize.sh"
+  chmod 755 "$RELEASE_SOURCE/core-rules/hooks/lib/action-normalize.sh"
+  printf 'export const trellis = {};\n' > "$RELEASE_SOURCE/core-rules/pi/extensions/trellis.ts"
+  # Schema 2 is the only shape scripts/lib/surface-plan.sh accepts for the
+  # current harness set: the key set must be exactly claude+codex+pi+
+  # shared_agents, optionally plus user.  `user` is omitted because it is
+  # planned only by the separate `--user` mode, which this suite never
+  # exercises, and the validator demands it only when that harness is selected.
+  #
+  # OMP is retired.  The old `omp` entry's structural role — a second,
+  # non-Claude harness destination — belongs to `shared_agents`, which is where
+  # production owns .agents/rules/trellis.md and which codex and pi both
+  # consume.  Every entry below is copied verbatim from the production
+  # core-rules/inheritance-manifest.json; only the sources are stubbed above.
+  # The `pi` entry gives Pi a distinct, non-shared destination in the plan
+  # shape.  It is fixture structure only: nothing in this suite is evidence
+  # that a native Pi runtime consumes it.
   cat > "$RELEASE_SOURCE/core-rules/inheritance-manifest.json" <<'JSON'
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harnesses": {
     "claude": {
       "links": [
@@ -52,15 +71,21 @@ make_release_source() {
       ],
       "render": []
     },
-    "codex": {
+    "shared_agents": {
       "links": [
         {"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}
       ],
       "render": []
     },
-    "omp": {
+    "codex": {
       "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
+        {"source": "core-rules/hooks/lib/action-normalize.sh", "destination": ".codex/hooks/lib/action-normalize.sh", "executable": true}
+      ],
+      "render": []
+    },
+    "pi": {
+      "links": [
+        {"source": "core-rules/pi/extensions/trellis.ts", "destination": ".pi/extensions/trellis.ts"}
       ],
       "render": []
     }

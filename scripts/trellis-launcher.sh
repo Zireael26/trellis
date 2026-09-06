@@ -30,24 +30,15 @@ set -u
 umask 077
 launcher_source="$1"
 shift
-launcher_body="$(/usr/bin/mktemp /tmp/trellis-launcher.XXXXXX)" || {
-  /usr/bin/printf "%s\n" "trellis: could not prepare trusted launcher bootstrap" >&2
-  exit 5
-}
-if ! /usr/bin/awk "body { print } /^# -- trellis launcher body --\$/ { body = 1 }" "$launcher_source" > "$launcher_body" ||
-  ! /bin/test -s "$launcher_body" ||
-  ! /bin/chmod 600 "$launcher_body"; then
-  /bin/rm -f "$launcher_body"
+# Capture must finish successfully before any body command runs. This shell is
+# already clean; builtin eval avoids a global tempfile and preserves caller stdin.
+if ! launcher_body="$(/usr/bin/awk "body { print } /^# -- trellis launcher body --\$/ { body = 1 }" "$launcher_source")" ||
+  [ -z "$launcher_body" ]; then
   /usr/bin/printf "%s\n" "trellis: could not prepare trusted launcher bootstrap" >&2
   exit 5
 fi
-exec /usr/bin/env -i \
-  "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
-  "SSH_AUTH_SOCK=${SSH_AUTH_SOCK-}" \
-  "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
-  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-  "TRELLIS_LAUNCHER_BODY=$launcher_body" \
-  /bin/bash --noprofile --norc "$launcher_body" "$@"
+# Keep eval last: the body owns exit status and traps, with set -u and umask 077.
+eval "$launcher_body"
 ' trellis-launcher-bootstrap "$0" "$@"
 
 # -- trellis launcher body --
@@ -68,12 +59,6 @@ unset BASH_ENV ENV CDPATH TRELLIS_ATTACH_CALLER_PATH
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 set -u
-
-launcher_cleanup_body() {
-  local body="${TRELLIS_LAUNCHER_BODY:-}"
-  [ -z "$body" ] || /bin/rm -f "$body"
-}
-trap 'launcher_cleanup_body' EXIT
 
 TRELLIS_EX_USAGE=2
 TRELLIS_EX_CONFLICT=3
@@ -386,7 +371,65 @@ launcher_validate_payload_parent() {
   done
 }
 
-launcher_verify_release() (
+# Successful verification is memoized for the shell process that performed it
+# and its subshells (call sites capture through `$(...)`, which is why the
+# value is exported rather than plain). Every key is prefixed with that
+# shell's `$$`, so a value inherited by an exec'd child -- which would carry
+# an arbitrarily old success verdict across a fresh process boundary -- can
+# never match and the child re-verifies. Failure is never recorded.
+# Key: canonical release dir, sha256(release.json) from
+# launcher_release_json_sha256_no_follow, and expected_version.
+# TOCTOU: equivalent to the existing verify-then-use window. The launcher already
+# verifies and then snapshots/executes; a same-process tamper after a successful
+# verify was already outside that check. The memo is not shared across processes,
+# so a cross-process tamper is still refused on the next invocation.
+: "${_TRELLIS_LAUNCHER_VERIFY_MEMO:=}"
+
+launcher_verify_release_memo_key() {
+  local release_dir="${1-}" version="${2-}" canon parent base digest
+  [ -n "$release_dir" ] || return 1
+  [ ! -L "$release_dir" ] && [ -d "$release_dir" ] || return 1
+  canon="$(CDPATH='' cd "$release_dir" && pwd -P)" || return 1
+  parent="$(dirname "$canon")"
+  base="$(basename "$canon")"
+  [ -n "$parent" ] && [ -n "$base" ] || return 1
+  digest="$(launcher_release_json_sha256_no_follow "$parent" "$base" 2>/dev/null)" || return 1
+  case "$digest" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$$"$'\t'"$canon"$'\t'"$digest"$'\t'"$version"
+}
+
+launcher_verify_release_memo_hit() {
+  local key="${1-}" line
+  [ -n "$key" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" = "$key" ] && return 0
+  done <<EOF
+${_TRELLIS_LAUNCHER_VERIFY_MEMO}
+EOF
+  return 1
+}
+
+launcher_verify_release() {
+  local release_dir="${1-}" version="${2-}" key="" rc=0 cli=""
+  key="$(launcher_verify_release_memo_key "$release_dir" "$version")" || key=""
+  if [ -n "$key" ] && launcher_verify_release_memo_hit "$key"; then
+    printf '%s\n' "$release_dir/payload/scripts/trellis"
+    return 0
+  fi
+  cli="$(launcher_verify_release_body "$release_dir" "$version")" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$key" ] && [ -n "$cli" ]; then
+    _TRELLIS_LAUNCHER_VERIFY_MEMO="${_TRELLIS_LAUNCHER_VERIFY_MEMO}${key}"$'\n'
+    export _TRELLIS_LAUNCHER_VERIFY_MEMO
+    printf '%s\n' "$cli"
+    return 0
+  fi
+  return "$rc"
+}
+
+launcher_verify_release_body() (
   local release_dir="$1" version="$2" record payload record_version record_tag cli
   local tmp manifest_paths manifest_rows manifest_dirs actual_raw actual_paths actual_dirs actual_link_paths
   local actual_link_paths_nul actual_link_targets actual_link_rows actual_link_target_dir
@@ -431,7 +474,9 @@ launcher_verify_release() (
     return "$TRELLIS_EX_STATE"
   }
 
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/trellis-launcher.XXXXXX")" || {
+  # Callers use the verified private release store for source, stage and snapshot
+  # releases. Keep verification scratch beside them, never in ambient temp space.
+  tmp="$(mktemp -d "${release_dir%/*}/.tmp.$version.verify.XXXXXX")" || {
     launcher_error "could not allocate release verification state"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
@@ -606,8 +651,8 @@ launcher_verify_release() (
       return "$TRELLIS_EX_STATE"
     }
   tab="$(printf '\t')"
-  if ! awk -F "$tab" -v type_rows="$actual_metadata_types" '
-    FILENAME == type_rows {
+  if ! awk -F "$tab" '
+    FILENAME == ARGV[1] {
       type[$2] = $1
       count++
       next
@@ -624,13 +669,13 @@ launcher_verify_release() (
     launcher_error "could not collect configured release metadata"
     return "$TRELLIS_EX_STATE"
   fi
-  if ! awk -F "$tab" -v link_rows="$actual_link_rows" -v metadata_rows="$actual_metadata_typed_rows" '
-    FILENAME == link_rows {
+  if ! awk -F "$tab" '
+    FILENAME == ARGV[1] {
       type[$1] = "symlink"
       target_index[$1] = $2
       next
     }
-    FILENAME == metadata_rows {
+    FILENAME == ARGV[2] {
       type[$2] = $1
       permissions[$2] = $3
       next
@@ -1329,6 +1374,128 @@ launcher_snapshot_name_is_safe() {
     "${releases%/releases}" "$releases/$name/payload" "$version"
 }
 
+# Pinned copies of `trellis_process_birth_python` and `trellis_process_birth`
+# (scripts/lib/trellis-home.sh — the normative definitions and the reason the
+# Darwin reader exists at all). Byte-identical by contract once the name prefix
+# is applied; scripts/tests/process-birth.bats compares the extracted bodies.
+# The launcher is copied verbatim to a user-owned executable and, by
+# design, never depends on a source checkout for the logic it runs while it
+# is still deciding which payload may execute at all — the same reason
+# launcher_snapshot_payload_matches above is a copy.
+launcher_process_birth_python() {
+  cat <<'TRELLIS_PROCESS_BIRTH_PY'
+import ctypes
+import sys
+import time
+
+# proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info) fills `struct
+# proc_bsdinfo` (<sys/proc_info.h>) and returns the number of bytes written:
+#
+#   uint32_t pbi_flags, pbi_status, pbi_xstatus, pbi_pid, pbi_ppid,
+#            pbi_uid, pbi_gid, pbi_ruid, pbi_rgid, pbi_svuid, pbi_svgid, rfu_1;
+#   char     pbi_comm[MAXCOMLEN];      /* 16 */
+#   char     pbi_name[2 * MAXCOMLEN];  /* 32 */
+#   uint32_t pbi_nfiles, pbi_pgid, pbi_pjobc, e_tdev, e_tpgid;
+#   int32_t  pbi_nice;
+#   uint64_t pbi_start_tvsec, pbi_start_tvusec;
+#
+# Only pbi_pid (head[3]) and pbi_start_tvsec are read; the rest is layout.
+PROC_PIDTBSDINFO = 3
+ESRCH = 3
+
+
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("head", ctypes.c_uint32 * 12),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("tail", ctypes.c_uint32 * 5),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+if len(sys.argv) != 2 or not sys.argv[1].isdigit():
+    raise SystemExit(2)
+pid = int(sys.argv[1])
+# Reject a non-canonical spelling as well as an out-of-range value: the pid
+# crosses into C as a signed int, and "007" is not the pid any record stored.
+if str(pid) != sys.argv[1] or pid < 1 or pid > 2147483647:
+    raise SystemExit(2)
+
+try:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pidinfo = libproc.proc_pidinfo
+except (OSError, AttributeError):
+    raise SystemExit(1)
+proc_pidinfo.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.POINTER(ProcBsdInfo),
+    ctypes.c_int,
+]
+proc_pidinfo.restype = ctypes.c_int
+
+info = ProcBsdInfo()
+ctypes.set_errno(0)
+written = proc_pidinfo(
+    pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+)
+saved_errno = ctypes.get_errno()
+# A short write is a failure, never a partially trusted record. ESRCH is the
+# only errno that means "gone"; EPERM and an unsupported flavour are
+# indeterminate and must not be reported as death.
+if written != ctypes.sizeof(info):
+    raise SystemExit(3 if saved_errno == ESRCH else 1)
+if info.head[3] != pid:
+    raise SystemExit(1)
+if info.pbi_start_tvsec < 1:
+    raise SystemExit(1)
+try:
+    token = time.strftime(
+        "%a %b %e %H:%M:%S %Y", time.localtime(info.pbi_start_tvsec)
+    )
+except (OSError, OverflowError, ValueError):
+    raise SystemExit(1)
+# `ps -o lstart=` emits exactly 28 columns and a newline; anything else is not
+# the schema every stored owner record was written in.
+if not token or len(token) > 28:
+    raise SystemExit(1)
+sys.stdout.write(token.ljust(28) + "\n")
+TRELLIS_PROCESS_BIRTH_PY
+}
+
+# launcher_process_birth <pid>
+#
+# The process-birth token for PID: `LC_ALL=C ps -p PID -o lstart=` wherever ps
+# runs, and the libproc reader above on Darwin. Both emit the same 28-column
+# localtime string, so the stored `process_birth` schema is unchanged and a
+# record written by either reader compares equal to one read by the other.
+#
+# Status: 0 with the token on stdout, 2 for a malformed or out-of-range pid, 3
+# when the Darwin reader reports ESRCH, 1 for every other failure. Callers must
+# keep mapping EVERY nonzero status to "indeterminate": a birth read that fails
+# after kill(0) reported the process live has not proved it dead and must never
+# authorize cleanup.
+launcher_process_birth() {
+  local pid program
+  pid="${1:-}"
+  case "$pid" in
+    ""|*[!0-9]*|0*) return 2 ;;
+  esac
+  [ "$pid" -le 2147483647 ] || return 2
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    command -v python3 >/dev/null 2>&1 || return 1
+    program="$(launcher_process_birth_python)" || return 1
+    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    return 0
+  fi
+  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  return 0
+}
+
 # An execution snapshot is owned by the long-lived launcher shell, rather than
 # by the short-lived command-substitution process that creates it. Bash 3.2
 # keeps $$ bound to that long-lived shell across both subshell forms.
@@ -1354,7 +1521,7 @@ launcher_write_snapshot_owner() {
     launcher_error "snapshot owner process id is invalid"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
-  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || {
+  owner_birth="$(launcher_process_birth "$owner_pid")" || {
     launcher_error "could not determine snapshot owner process birth"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
@@ -1420,7 +1587,7 @@ launcher_remove_owned_snapshots() {
     ''|*[!0-9]*) return "$TRELLIS_EX_UNAVAILABLE" ;;
   esac
   [ "$owner_pid" -gt 0 ] || return "$TRELLIS_EX_UNAVAILABLE"
-  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || return "$TRELLIS_EX_UNAVAILABLE"
+  owner_birth="$(launcher_process_birth "$owner_pid")" || return "$TRELLIS_EX_UNAVAILABLE"
   [ -n "$owner_birth" ] || return "$TRELLIS_EX_UNAVAILABLE"
   command -v jq >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
   for owner in "$releases/.tmp.$version.exec."*.owner.json; do
@@ -2412,15 +2579,430 @@ finally:
 PY
 }
 
+# The command-scoped scratch directory: one private mode-0700 directory per
+# launcher invocation, under the already validated private home. Children
+# receive it as TMPDIR, so every `${TMPDIR:-/tmp}` allocation a command makes
+# lands inside this machine's own private Trellis namespace instead of the
+# global temp directory.
+#
+# Both programs below reach python3 through `-c`, never a heredoc. Derivation
+# runs BEFORE a TMPDIR exists and cleanup runs while that directory is being
+# removed; Bash 3.2 spools every heredoc through $TMPDIR and falls back to the
+# current directory when that fails, so a heredoc here would reintroduce exactly
+# the ambient-temp dependence this directory exists to remove. The program text
+# carries no single quote for the same reason: it is a single-quoted shell
+# literal, not a here-document.
+#
+# EXTRACTION CONTRACT. scripts/lib/attachment.sh extracts the two definitions
+# below — launcher_command_scratch_create_program and
+# launcher_command_scratch_remove_program — verbatim by line range, from
+# `<name>() {` through the matching column-zero `}`, and emits them into every
+# generated managed post-checkout/pre-push dispatcher so a managed hook uses
+# this allocator rather than a second, independently maintained copy. It never
+# sources or executes this file: launcher_main runs unconditionally at load.
+# Therefore, for both functions: keep the names fixed, keep exactly one
+# definition of each, keep the opening line spelled `<name>() {` and the closing
+# `}` in column zero, and keep the body free of a column-zero `}` and of any
+# single quote outside the printf wrapper. Any byte change here changes managed
+# dispatcher bytes and requires re-attach, the same as any generator change.
+launcher_command_scratch_create_program() {
+  printf '%s' 'import errno
+import os
+import stat
+import sys
+
+home = sys.argv[1]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def fail(code, message):
+    sys.stderr.write("trellis: %s\n" % message)
+    raise SystemExit(code)
+
+
+def identity(value):
+    return (value.st_dev, value.st_ino)
+
+
+if not O_DIRECTORY or not O_NOFOLLOW:
+    fail(5, "descriptor-relative no-follow command scratch support is unavailable")
+
+euid = os.geteuid()
+
+if sys.platform == "darwin":
+    try:
+        import ctypes
+        acl_lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        acl_lib.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_lib.acl_get_fd_np.restype = ctypes.c_void_p
+        acl_lib.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        acl_lib.acl_get_entry.restype = ctypes.c_int
+        acl_lib.acl_free.argtypes = [ctypes.c_void_p]
+        acl_lib.acl_free.restype = ctypes.c_int
+    except (ImportError, AttributeError, OSError) as error:
+        fail(5, "descriptor ACL inspection is unavailable: %s" % error)
+
+
+def reject_acl(descriptor, label):
+    if sys.platform == "darwin":
+        # Darwin sys/acl.h: ACL_TYPE_EXTENDED=0x100, ACL_FIRST_ENTRY=0.
+        # Native retained-fd probes establish NULL/ENOENT as absent ACL;
+        # other NULL results are errors, not evidence of privacy.
+        ctypes.set_errno(0)
+        acl = acl_lib.acl_get_fd_np(descriptor, 0x100)
+        if not acl:
+            error = ctypes.get_errno()
+            if error == errno.ENOENT:
+                return
+            fail(5, "could not inspect ACL on %s: %s" % (label, os.strerror(error)))
+        try:
+            entry = ctypes.c_void_p()
+            ctypes.set_errno(0)
+            result = acl_lib.acl_get_entry(acl, 0, ctypes.byref(entry))
+            if result != 0:
+                fail(5, "could not inspect ACL entry on %s: %s" % (label, os.strerror(ctypes.get_errno())))
+        finally:
+            if acl_lib.acl_free(acl) != 0:
+                fail(5, "could not free ACL inspection on %s" % label)
+        fail(4, "%s has an ACL" % label)
+    elif sys.platform.startswith("linux"):
+        for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
+            try:
+                os.getxattr(descriptor, attribute)
+            except OSError as error:
+                if error.errno == errno.ENODATA:
+                    continue
+                fail(5, "could not inspect ACL on %s: %s" % (label, error))
+            except (AttributeError, NotImplementedError) as error:
+                fail(5, "descriptor ACL inspection is unavailable: %s" % error)
+            fail(4, "%s has an ACL" % label)
+    else:
+        fail(5, "descriptor ACL inspection is unavailable on this platform")
+
+
+def open_canonical(path):
+    components = path.split("/")[1:]
+    if not path.startswith("/") or any(part in ("", ".", "..") for part in components):
+        fail(2, "command scratch home must have a canonical absolute spelling")
+    descriptor = os.open("/", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    try:
+        for component in components:
+            child_fd = os.open(component, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child_fd
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def check(descriptor, label):
+    value = os.fstat(descriptor)
+    if not stat.S_ISDIR(value.st_mode):
+        fail(4, "%s is not a real directory" % label)
+    if value.st_uid != euid:
+        fail(4, "%s is not owned by the effective user" % label)
+    if stat.S_IMODE(value.st_mode) & 0o077:
+        fail(4, "%s is not a private directory" % label)
+    reject_acl(descriptor, label)
+    return value
+
+
+def open_directory(parent_fd, name, label):
+    # An absent parent is created private; an existing one is validated and
+    # never chmodded. O_NOFOLLOW is what refuses a symlinked parent, so no
+    # pathname is ever re-traversed after it was checked.
+    created = False
+    while True:
+        try:
+            descriptor = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd)
+        except (AttributeError, NotImplementedError):
+            fail(5, "descriptor-relative no-follow command scratch support is unavailable")
+        except OSError as error:
+            if not created and error.errno == errno.ENOENT:
+                created = True
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent_fd)
+                except OSError as inner:
+                    if inner.errno != errno.EEXIST:
+                        fail(4, "could not create %s: %s" % (label, inner))
+                continue
+            fail(4, "could not open %s without following links: %s" % (label, error))
+        check(descriptor, label)
+        return descriptor
+
+
+home_fd = None
+state_fd = None
+root_fd = None
+scratch_fd = None
+try:
+    try:
+        home_fd = open_canonical(home)
+    except OSError as error:
+        fail(4, "could not open the Trellis home without following links: %s" % error)
+    check(home_fd, "the Trellis home")
+    state_fd = open_directory(home_fd, "state", "the Trellis state directory")
+    root_fd = open_directory(state_fd, "scratch", "the command scratch root")
+    root = os.fstat(root_fd)
+    name = None
+    for _ in range(8):
+        candidate = ".cmd." + os.urandom(8).hex()
+        try:
+            os.mkdir(candidate, 0o700, dir_fd=root_fd)
+        except OSError as error:
+            if error.errno == errno.EEXIST:
+                continue
+            fail(4, "could not create the command scratch directory: %s" % error)
+        name = candidate
+        break
+    if name is None:
+        fail(4, "could not allocate a unique command scratch directory")
+    before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    scratch_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=root_fd)
+    opened = check(scratch_fd, "the command scratch directory")
+    after = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    if identity(before) != identity(opened) or identity(after) != identity(opened):
+        fail(4, "the command scratch directory changed while opening")
+    sys.stdout.write("%s\t%d:%d\t%d:%d\n" % (
+        name, opened.st_dev, opened.st_ino, root.st_dev, root.st_ino))
+except (AttributeError, NotImplementedError):
+    fail(5, "descriptor-relative no-follow command scratch support is unavailable")
+finally:
+    for descriptor in (scratch_fd, root_fd, state_fd, home_fd):
+        if descriptor is not None:
+            os.close(descriptor)
+'
+}
+
+launcher_command_scratch_remove_program() {
+  printf '%s' 'import errno
+import os
+import re
+import stat
+import sys
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def fail(code, message):
+    sys.stderr.write("trellis: %s\n" % message)
+    raise SystemExit(code)
+
+
+def identity(value):
+    return "%d:%d" % (value.st_dev, value.st_ino)
+
+
+if len(sys.argv) != 5:
+    fail(2, "command scratch cleanup requires root, name and two identities")
+root, name, scratch_identity, root_identity = sys.argv[1:5]
+if any(re.fullmatch(r"[0-9]+:[0-9]+", value) is None for value in (scratch_identity, root_identity)):
+    fail(2, "command scratch identities must be decimal device:inode pairs")
+if re.fullmatch(r"\.cmd\.[0-9a-f]+", name) is None:
+    fail(2, "command scratch cleanup requires a safe child name")
+
+if not O_DIRECTORY or not O_NOFOLLOW:
+    fail(5, "descriptor-relative no-follow command scratch cleanup support is unavailable")
+
+
+def open_canonical(path):
+    components = path.split("/")[1:]
+    if not path.startswith("/") or any(part in ("", ".", "..") for part in components):
+        fail(2, "command scratch root must have a canonical absolute spelling")
+    descriptor = os.open("/", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    try:
+        for component in components:
+            child_fd = os.open(component, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child_fd
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def lstat_at(parent_fd, child, label):
+    try:
+        return os.stat(child, dir_fd=parent_fd, follow_symlinks=False)
+    except (AttributeError, NotImplementedError):
+        fail(5, "descriptor-relative no-follow command scratch cleanup support is unavailable")
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return None
+        fail(4, "could not inspect %s without following links: %s" % (label, error))
+
+
+def open_directory(parent_fd, child, label, expected):
+    before = lstat_at(parent_fd, child, label)
+    if before is None or not stat.S_ISDIR(before.st_mode):
+        fail(4, "%s is not a real directory" % label)
+    try:
+        descriptor = os.open(child, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd)
+    except (AttributeError, NotImplementedError):
+        fail(5, "descriptor-relative no-follow command scratch cleanup support is unavailable")
+    except OSError as error:
+        fail(4, "could not open %s without following links: %s" % (label, error))
+    opened = os.fstat(descriptor)
+    after = lstat_at(parent_fd, child, label)
+    if (not stat.S_ISDIR(opened.st_mode) or after is None
+            or identity(before) != identity(opened) or identity(after) != identity(opened)):
+        os.close(descriptor)
+        fail(4, "%s changed while opening" % label)
+    if identity(opened) != expected:
+        os.close(descriptor)
+        fail(4, "%s is not the directory this launcher recorded" % label)
+    return descriptor
+
+
+def remove_contents(directory_fd, label):
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError as error:
+        fail(4, "could not read %s: %s" % (label, error))
+    for child in names:
+        if child in ("", ".", "..") or "/" in child or "\x00" in child:
+            fail(4, "command scratch cleanup encountered an unsafe name")
+        child_label = label + "/" + child
+        value = lstat_at(directory_fd, child, child_label)
+        if value is None:
+            continue
+        if stat.S_ISDIR(value.st_mode):
+            child_fd = open_directory(directory_fd, child, child_label, identity(value))
+            try:
+                remove_contents(child_fd, child_label)
+            finally:
+                os.close(child_fd)
+            current = lstat_at(directory_fd, child, child_label)
+            if current is None or identity(current) != identity(value):
+                fail(4, "command scratch cleanup target changed: %s" % child_label)
+            try:
+                os.rmdir(child, dir_fd=directory_fd)
+            except OSError as error:
+                fail(4, "could not remove %s: %s" % (child_label, error))
+        else:
+            # A command scratch holds arbitrary command temp entries, not a
+            # sealed payload: regular files, symlinks, sockets and FIFOs are all
+            # ordinary here. Each is unlinked by name relative to the open
+            # descriptor, so a child symlink is removed and never traversed.
+            current = lstat_at(directory_fd, child, child_label)
+            if current is None or identity(current) != identity(value):
+                fail(4, "command scratch cleanup target changed: %s" % child_label)
+            try:
+                os.unlink(child, dir_fd=directory_fd)
+            except OSError as error:
+                fail(4, "could not remove %s: %s" % (child_label, error))
+
+
+root_fd = None
+scratch_fd = None
+try:
+    try:
+        root_fd = open_canonical(root)
+    except OSError as error:
+        fail(4, "could not open the command scratch root without following links: %s" % error)
+    opened_root = os.fstat(root_fd)
+    if not stat.S_ISDIR(opened_root.st_mode) or identity(opened_root) != root_identity:
+        fail(4, "the command scratch root changed since it was recorded")
+    if lstat_at(root_fd, name, "the command scratch directory") is None:
+        raise SystemExit(0)
+    scratch_fd = open_directory(root_fd, name, "the command scratch directory", scratch_identity)
+    remove_contents(scratch_fd, name)
+    os.close(scratch_fd)
+    scratch_fd = None
+    current = lstat_at(root_fd, name, "the command scratch directory")
+    if current is None or identity(current) != scratch_identity:
+        fail(4, "the command scratch directory changed during cleanup")
+    try:
+        os.rmdir(name, dir_fd=root_fd)
+    except OSError as error:
+        fail(4, "could not remove the command scratch directory: %s" % error)
+except (AttributeError, NotImplementedError):
+    fail(5, "descriptor-relative no-follow command scratch cleanup support is unavailable")
+finally:
+    for descriptor in (scratch_fd, root_fd):
+        if descriptor is not None:
+            os.close(descriptor)
+'
+}
+
+# Allocate this invocation the directory and record what cleanup must find
+# again: its own device/inode and its root parent device/inode. Nothing is
+# written to disk about the owner — there is no sidecar and no new schema.
+launcher_derive_command_scratch() {
+  local home="${1:-}" program python_bin record rest name scratch_identity root_identity
+  [ "$#" -eq 1 ] || return "$TRELLIS_EX_USAGE"
+  launcher_absolute_path_is_clean "$home" || return "$TRELLIS_EX_USAGE"
+  command -v python3 >/dev/null 2>&1 || {
+    launcher_error "python3 with descriptor-relative no-follow support is required for the command scratch directory"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
+  program="$(launcher_command_scratch_create_program)" || return "$TRELLIS_EX_UNAVAILABLE"
+  record="$(LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return "$?"
+  case "$record" in
+    *$'\t'*$'\t'*) ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+  name="${record%%$'\t'*}"
+  rest="${record#*$'\t'}"
+  scratch_identity="${rest%%$'\t'*}"
+  root_identity="${rest#*$'\t'}"
+  case "$name" in .cmd.*) ;; *) return "$TRELLIS_EX_STATE" ;; esac
+  case "${name#.cmd.}" in ''|*[!0-9a-f]*) return "$TRELLIS_EX_STATE" ;; esac
+  [[ "$scratch_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return "$TRELLIS_EX_STATE"
+  [[ "$root_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return "$TRELLIS_EX_STATE"
+  LAUNCHER_COMMAND_SCRATCH_ROOT="$home/state/scratch"
+  LAUNCHER_COMMAND_SCRATCH_NAME="$name"
+  LAUNCHER_COMMAND_SCRATCH_IDENTITY="$scratch_identity"
+  LAUNCHER_COMMAND_SCRATCH_ROOT_IDENTITY="$root_identity"
+  LAUNCHER_COMMAND_SCRATCH="$LAUNCHER_COMMAND_SCRATCH_ROOT/$name"
+}
+
+# Remove exactly the recorded directory, or refuse. This is the same class of
+# guarantee as launcher_remove_snapshot: it is not protection against an
+# arbitrary same-UID process mutating the namespace concurrently.
+launcher_remove_command_scratch() {
+  local root="${1:-}" name="${2:-}" scratch_identity="${3:-}" root_identity="${4:-}" program python_bin
+  [ "$#" -eq 4 ] || return "$TRELLIS_EX_USAGE"
+  launcher_absolute_path_is_clean "$root" || return "$TRELLIS_EX_USAGE"
+  case "$name" in .cmd.*) ;; *) return "$TRELLIS_EX_USAGE" ;; esac
+  case "${name#.cmd.}" in ''|*[!0-9a-f]*) return "$TRELLIS_EX_USAGE" ;; esac
+  [[ "$scratch_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return "$TRELLIS_EX_USAGE"
+  [[ "$root_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return "$TRELLIS_EX_USAGE"
+  command -v python3 >/dev/null 2>&1 || {
+    launcher_error "python3 with descriptor-relative command scratch cleanup support is required"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
+  program="$(launcher_command_scratch_remove_program)" || return "$TRELLIS_EX_UNAVAILABLE"
+  LC_ALL=C "$python_bin" -I -c "$program" "$root" "$name" "$scratch_identity" "$root_identity"
+}
+
+LAUNCHER_COMMAND_SCRATCH=""
+LAUNCHER_COMMAND_SCRATCH_ROOT=""
+LAUNCHER_COMMAND_SCRATCH_NAME=""
+LAUNCHER_COMMAND_SCRATCH_IDENTITY=""
+LAUNCHER_COMMAND_SCRATCH_ROOT_IDENTITY=""
 LAUNCHER_EXECUTION_SNAPSHOT=""
 LAUNCHER_EXECUTION_SNAPSHOT_STORE=""
 LAUNCHER_EXECUTION_SNAPSHOT_VERSION=""
 
 launcher_cleanup() {
-  local snapshot="${LAUNCHER_EXECUTION_SNAPSHOT:-}" releases="${LAUNCHER_EXECUTION_SNAPSHOT_STORE:-}" version="${LAUNCHER_EXECUTION_SNAPSHOT_VERSION:-}" rc=0 body_rc=0
+  local snapshot="${LAUNCHER_EXECUTION_SNAPSHOT:-}" releases="${LAUNCHER_EXECUTION_SNAPSHOT_STORE:-}" version="${LAUNCHER_EXECUTION_SNAPSHOT_VERSION:-}" rc=0
+  local scratch="${LAUNCHER_COMMAND_SCRATCH:-}" scratch_root="${LAUNCHER_COMMAND_SCRATCH_ROOT:-}"
+  local scratch_name="${LAUNCHER_COMMAND_SCRATCH_NAME:-}"
+  local scratch_identity="${LAUNCHER_COMMAND_SCRATCH_IDENTITY:-}"
+  local scratch_root_identity="${LAUNCHER_COMMAND_SCRATCH_ROOT_IDENTITY:-}"
   LAUNCHER_EXECUTION_SNAPSHOT=""
   LAUNCHER_EXECUTION_SNAPSHOT_STORE=""
   LAUNCHER_EXECUTION_SNAPSHOT_VERSION=""
+  LAUNCHER_COMMAND_SCRATCH=""
+  LAUNCHER_COMMAND_SCRATCH_ROOT=""
+  LAUNCHER_COMMAND_SCRATCH_NAME=""
+  LAUNCHER_COMMAND_SCRATCH_IDENTITY=""
+  LAUNCHER_COMMAND_SCRATCH_ROOT_IDENTITY=""
   if [ -n "$snapshot" ]; then
     if [ -z "$releases" ] || [ -z "$version" ] ||
       ! launcher_remove_snapshot "$releases" "$snapshot" "$version"; then
@@ -2434,10 +3016,16 @@ launcher_cleanup() {
       rc="$TRELLIS_EX_UNAVAILABLE"
     fi
   fi
-  launcher_cleanup_body
-  body_rc=$?
-  if [ "$body_rc" -gt "$rc" ]; then
-    rc="$body_rc"
+  # After the snapshot, so snapshot cleanup keeps its status precedence: both
+  # failures report the same unavailable class, and the retained scratch is
+  # named rather than silently guessed at.
+  if [ -n "$scratch" ]; then
+    if [ -z "$scratch_root" ] || [ -z "$scratch_name" ] || [ -z "$scratch_identity" ] ||
+      [ -z "$scratch_root_identity" ] ||
+      ! launcher_remove_command_scratch "$scratch_root" "$scratch_name" "$scratch_identity" "$scratch_root_identity"; then
+      launcher_error "could not clean command scratch directory: $scratch"
+      rc="$TRELLIS_EX_UNAVAILABLE"
+    fi
   fi
   return "$rc"
 }
@@ -2447,7 +3035,7 @@ trap 'launcher_cleanup; exit 129' HUP
 trap 'launcher_cleanup; exit 130' INT
 trap 'launcher_cleanup; exit 143' TERM
 launcher_main() {
-  local home_candidate home user_home config releases release_dir version cli payload snapshot snapshot_info release_json_sha256 ssh_auth_sock child_status cleanup_status
+  local home_candidate home user_home config releases release_dir version cli payload snapshot snapshot_info release_json_sha256 ssh_auth_sock child_status cleanup_status command_scratch
   local -a attach_environment
   if [ "${1:-}" = "hook" ]; then
     [ -n "${TRELLIS_HOME:-}" ] ||
@@ -2524,6 +3112,18 @@ launcher_main() {
   [ "$(launcher_real_directory "$release_dir")" = "$releases/$version" ] ||
     launcher_die "$TRELLIS_EX_STATE" "configured release escapes release store: $release_dir"
 
+  # One private command directory per invocation, derived under the already
+  # validated home and handed to every child below as TMPDIR. Nothing ambient
+  # reaches here: the POSIX bootstrap dropped the caller's TMPDIR before this
+  # shell started, and the derivation reads only the validated home. It is
+  # armed before the sealed snapshot so the snapshot producer's own heredocs
+  # and helper temporaries already allocate inside it.
+  launcher_derive_command_scratch "$home" ||
+    launcher_die "$?" "could not derive a private command scratch directory under: $home/state/scratch"
+  command_scratch="$LAUNCHER_COMMAND_SCRATCH"
+  TMPDIR="$command_scratch"
+  export TMPDIR
+
   # Freeze a complete, independently verified payload before any executable
   # path is selected.  Never hand the just-verified installed release path to
   # a child: the only executable payload is the sealed private snapshot.
@@ -2554,9 +3154,6 @@ launcher_main() {
     launcher_die "$TRELLIS_EX_STATE" "verified release snapshot has an invalid CLI path"
   }
   ssh_auth_sock="$(launcher_verified_ssh_auth_sock)"
-  launcher_cleanup_body ||
-    launcher_die "$TRELLIS_EX_UNAVAILABLE" "could not remove trusted launcher bootstrap"
-  unset TRELLIS_LAUNCHER_BODY
   attach_environment=("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
   if [ "${1:-}" = attach ]; then
     attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
@@ -2568,6 +3165,7 @@ launcher_main() {
         "HOME=$HOME" "TRELLIS_HOME=$home" \
         "TRELLIS_VERIFIED_PAYLOAD=$payload" "TRELLIS_VERIFIED_RELEASE_VERSION=$version" \
         "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$ssh_auth_sock" \
+        "TMPDIR=$command_scratch" \
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
         /bin/bash --noprofile --norc -s -- "$@"
     child_status=$?
@@ -2577,6 +3175,7 @@ launcher_main() {
       "HOME=$HOME" "TRELLIS_HOME=$home" \
       "TRELLIS_VERIFIED_PAYLOAD=$payload" "TRELLIS_VERIFIED_RELEASE_VERSION=$version" \
       "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$ssh_auth_sock" \
+      "TMPDIR=$command_scratch" \
       "${attach_environment[@]}" \
       /bin/bash --noprofile --norc "$cli" "$@"
     child_status=$?

@@ -43,7 +43,9 @@ _sh_prompt() {
 }
 
 @test "the .md prompt block and the .sh heredoc are byte-identical" {
-  diff <(_md_prompt) <(_sh_prompt)
+  _md_prompt > "$BATS_TEST_TMPDIR/md-prompt"
+  _sh_prompt > "$BATS_TEST_TMPDIR/sh-prompt"
+  diff "$BATS_TEST_TMPDIR/md-prompt" "$BATS_TEST_TMPDIR/sh-prompt"
 }
 
 @test "the coverage line is present in both copies (A1)" {

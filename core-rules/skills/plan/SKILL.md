@@ -35,7 +35,7 @@ One new file: `specs/<NNN>-<slug>/plan.md`. The skill must not modify `spec.md` 
 
 ## How to use
 
-1. **Re-read the spec.** Including all eight sections. If any section says "TBD" or lists an unanswered open question, stop and surface it. Don't silently invent answers.
+1. **Re-read the spec.** Including all eight sections. Triage every "TBD" and open question rather than treating each as a stop: one that would change the design and that nothing settles is surfaced before you plan around it; one the spec explicitly deferred is carried into the plan *with its deferral and its impact stated*, not quietly resolved; one already answered elsewhere — a later operator message, `clarify.md`, an ADR, existing authorization — is answered, with the source named. What is forbidden is silently inventing an answer, or blocking the whole plan on an unknown that does not bear on it.
 2. **Read the project's `CLAUDE.md`, `gotchas.md`, and recent `docs/adr/*.md`.** These constrain the plan; cite by filename when a constraint applies.
 3. **Read every file the spec hints at.** If the spec mentions auth, read `src/auth/*`. If it mentions billing, read `src/billing/*`. The plan is grounded in current code, not speculation.
 4. **Draft `plan.md`** using `references/plan-template.md` as the structure: technical approach, data model + schema changes, API surface, file-by-file change list, sequencing + dependencies, test strategy, rollout plan, risks + mitigations, decisions log.
@@ -43,7 +43,7 @@ One new file: `specs/<NNN>-<slug>/plan.md`. The skill must not modify `spec.md` 
    **Prefer the artifact over the description.** Where a decision is easier to judge as a thing than as a paragraph, put the thing in the plan: a concrete type or interface definition, a sample request/response payload, a migration's actual SQL, a table of fixture rows. Reference source that already implements the semantics you want rather than restating them ("`<path>` implements exactly this ordering; match it"). Prose is the fallback, not the default.
 5. **Cite specifics.** "Add a new endpoint" is not a plan. "Add `POST /api/orders/replay` in `src/api/orders/replay.ts`, route handler delegates to `replayOrder()` in `src/services/orders/replay.ts`, both new" is a plan.
 6. **Surface trade-offs.** When two approaches are viable, name both, pick one, justify in the decisions-log section. Don't paper over the choice.
-7. **Stop after writing.** The plan is reviewed before tasks are generated. Don't invoke `tasks` in the same turn unless the operator asks.
+7. **Stop after writing — the plan is this skill's whole output.** No code here, whatever the plan says needs writing. Review the plan you just wrote before anything depends on it; then continue into `tasks` if the caller is already authorized for the pipeline, or hand back if they asked for a plan only or for a review point here. An explicit plan-only request ends with the plan, full stop.
 
 ## Authoring rules
 
@@ -67,12 +67,12 @@ One new file: `specs/<NNN>-<slug>/plan.md`. The skill must not modify `spec.md` 
 - **One file written.** `specs/<NNN>-<slug>/plan.md`. Nothing else. No code, no config, no test scaffolding.
 - **Read-only against the rest of the tree.** Read whatever you need; modify nothing except the plan file itself.
 - **No `tasks.md` here.** That belongs to the `tasks` skill, after this plan is reviewed.
-- **Refuse to overwrite an existing plan.** If `plan.md` already exists, the operator must explicitly remove it. Plans don't get silently rewritten — they get revised in a follow-up commit.
+- **Never silently rewrite an existing plan.** If `plan.md` already exists and no revision was asked for, leave it and say so. When a revision *is* authorized, edit it in place: change the sections the revision actually touches, keep the decisions log, the deferrals and every untouched section as they stand, and note what moved. No deletion by the operator is required, and the artifact is never destroyed and recreated.
 
 ## Sensible failure modes
 
 - `specs/` directory missing → tell the operator to run the `spec` skill first.
 - `specs/<NNN>-<slug>/spec.md` missing → same.
-- Spec exists but has unanswered open questions → stop, list them, ask.
+- Spec exists but has unanswered open questions → triage per step 1; stop and ask only for the ones that would change this design and that nothing on hand settles.
 - Current branch is not `feature/<slug>` → warn and ask; don't silently switch branches.
 - Two specs match the slug heuristic → stop and ask which one.

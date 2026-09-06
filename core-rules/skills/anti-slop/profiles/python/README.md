@@ -2,7 +2,7 @@
 
 Evidence-doctrine config for Python projects: escape-hatch types out of contracts,
 boundary data parsed rather than laundered, suppressions that name what they suppress.
-Doctrine and the cross-language pattern tables live in `references/anti-slop.md`.
+Doctrine and the cross-language pattern tables live in `core-rules/references/anti-slop.md`.
 
 Unlike the TypeScript profile this is **not vendored** — upstream anti-slop is
 TypeScript-only, so there is no provenance to track and nothing to re-sync. Both files
@@ -112,7 +112,7 @@ Both pattern rules stay enabled in test code either way. An `Any` contract or an
 suppression is worth reporting in a test double too, and neither fires on ordinary test
 code — `fixtures/green.py` is the guard for that.
 
-The canonical carve-out glob list for the script lane is `hooks/lib/slop-patterns.sh`.
+The canonical carve-out glob list for the script lane is `core-rules/hooks/lib/slop-patterns.sh`.
 The fragments repeat only the globs a linter config can express; they are not a second
 source of truth.
 
@@ -127,7 +127,7 @@ source of truth.
 - **`cast()` without a `# SAFETY:` comment and `mock.patch("dotted.module")` have no
   ruff or mypy rule.** Neither tool expresses "this needs a stated invariant" or
   "prefer a real seam". Both are pattern-layer findings, owned by
-  `hooks/lib/slop-patterns.sh` and reported by the tripwire, audit, and gate scripts.
+  `core-rules/hooks/lib/slop-patterns.sh` and reported by the tripwire, audit, and gate scripts.
   `fixtures/red.py` includes both so the fixture stays honest about what the profile
   does and does not catch on its own.
 

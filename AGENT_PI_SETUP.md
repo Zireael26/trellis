@@ -9,20 +9,46 @@ The operator input is six credential actions: paste two OpenCode Go keys and one
 
 ## What this repository does and does not ship
 
-Steps 0-8 and 12 are complete and reproducible as written. Steps 9-11 describe policy whose reference implementation is **not** published here, because those files state a specific operator's live provider accounts rather than any portable rule:
+The boundary is a **subset**, not the whole pi tree. The public publisher withholds exactly one directory under `core-rules/pi` — `agents/`, the provider roster — and publishes everything else there. So the machinery this guide depends on is in the public mirror:
+
+| Published | What it is |
+|---|---|
+| `core-rules/pi/patches/` | the version-pinned patch bundles, their installers, their regression tests and `COMPACTION.md` |
+| `core-rules/pi/extensions/trellis.ts` | the pi extension |
+| `core-rules/pi/hooks/dispatch.sh` | the hook dispatcher |
+| `core-rules/pi/tests/` | the boundary and transport tests |
+| `core-rules/inheritance-manifest.json` | the manifest the attach planner reads, projected so it declares no withheld source |
+
+Two things stay private, because each states a specific operator's live provider accounts rather than any portable rule:
 
 | Not published | Why | What this guide gives you instead |
 |---|---|---|
 | `core-rules/pi/agents/*.md` | one pinned `model:` per agent is a direct statement of which provider subscriptions the author holds | the agent-file schema, a template, and the fail-closed boundary rules the roster must satisfy (step 9) |
 | `core-rules/skills/herdr-foreman/` | same reason; it also encodes that roster in its dispatch table | the placement policy your launcher must implement, stated as a rule (steps 9-10) |
 
+The published `inheritance-manifest.json` is projected to match: the publisher removes exactly the two link entries that name those two withheld sources, and nothing else. A mirror user's planner therefore closes against the sources they actually have, instead of failing on a path they can never obtain. It is not a blanket "drop what is missing" filter — any *other* dangling source is still a publication failure, which is what keeps the projection from hiding a real defect.
+
 Substitute your own providers. Everything from step 1 to step 8 is provider-shaped, not provider-specific: swap the model ids for the accounts you actually have and the rest of the setup is unchanged.
+
+### Pi is an opt-in harness selection, not a new default
+
+`trellis.config.json` publishes with `"harnesses": ["claude"]`. That placeholder is unchanged and is *not* a statement that pi is unsupported — it is the same conservative default the mirror has always shipped. To get the pi surface, name it: add `"pi"` to `harnesses` in your own `trellis.config.json` before attaching, or pass `--harness pi` to the planner directly. Selecting `pi` or `codex` also pulls in the shared `.agents` surface; selecting neither leaves both untouched.
+
+You can see exactly what a selection would install, with no writes and no attachment, by running the planner against a checkout's `core-rules` directory:
+
+```bash
+bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi
+```
+
+### Conformance fixtures publish through the existing `scripts/` allowlist
+
+`scripts/harness-conformance.py` is a source-only adapter fixture corpus covering the Claude, Codex and pi rows. It reaches the mirror because `scripts/` is already an allowlisted directory — no new export rule was added for it, and it is not a capability database. There is **no** `core-rules/harness-capabilities.json` in this repository; do not look for one and do not write code against it. The script requires the caller to supply OS write and network containment, and by construction it reports nothing about native host outcomes.
 
 ## Checklist
 
 | Step | Action | Passing checkpoint |
 |---:|---|---|
-| 0 | Enter the Trellis checkout | Darwin host and a git checkout found |
+| 0 | Enter the Trellis checkout | Darwin host, git checkout, and required patch bundle found |
 | 1 | Install pi 0.84.4 | `pi --version` prints `0.84.4` |
 | 2 | Install five active add-ons | four npm packages locked to checked versions plus local `opencode-go-2.ts` source |
 | 3 | Put API keys in macOS Keychain | all three Keychain lookups succeed without printing a key |
@@ -50,6 +76,14 @@ export TRELLIS_REPO_ROOT="$PWD"
 ```bash
 test "$(uname -s)" = "Darwin"
 test -d "$TRELLIS_REPO_ROOT/.git"
+# The patch bundle is part of the published subset, so this check is a
+# corrupted-checkout guard rather than a "go find it elsewhere" gate.
+if [ ! -f "$TRELLIS_REPO_ROOT/core-rules/pi/patches/apply-pi-subagents-patches.sh" ] || \
+   [ ! -f "$TRELLIS_REPO_ROOT/core-rules/pi/patches/pi-subagents-0.19.0-preserve-cleanup-worktree.patch" ]; then
+  printf '%s\n' 'Required pi-subagents 0.19.0 cleanup-preservation patch bundle is missing; check out the full tree before continuing.' >&2
+  exit 1
+fi
+
 printf 'repo=%s\nos=%s\n' "$TRELLIS_REPO_ROOT" "$(uname -s)"
 ```
 
@@ -60,6 +94,8 @@ This guide is macOS-only by construction: step 3 stores keys in the macOS Keycha
 ## 1. Install pi 0.84.4
 
 The package version is exact. Do not use `latest` or omit `@0.84.4`.
+
+**This recipe is pinned and verified at 0.84.4 only.** Later sections quote measurements taken on other versions, and one patch bundle is pinned to 0.85.0. Those are separate installations with their own version gates; a green result here says nothing about them, and nothing in this recipe should be read as native proof for 0.85.0 or 0.85.1. Where a step's evidence came from a different version, it says so.
 
 **Command**
 
@@ -106,6 +142,10 @@ PY
   cd "$HOME/.pi/agent/npm"
   npm ci --legacy-peer-deps
 )
+
+# npm ci restores upstream files, including the 0.19.0 cleanup-on-error defect.
+bash "$TRELLIS_REPO_ROOT/core-rules/pi/patches/apply-pi-subagents-patches.sh" \
+  "$HOME/.pi/agent/npm/node_modules/@tintinweb/pi-subagents"
 
 mkdir -p "$HOME/.pi/agent/extensions"
 cat > "$HOME/.pi/agent/extensions/opencode-go-2.ts" <<'TS'
@@ -612,6 +652,8 @@ Against your own launcher: start five panes with the same `--tab` label and asse
 
 **It is not installed by step 2 and no implementation ships here.** The design is settled; implementation and live runtime acceptance are pending. This section is the contract to build against, not a component you can install today.
 
+**Do not confuse it with the native compaction patches.** `core-rules/pi/patches/COMPACTION.md` describes repairs to pi's own local compactor, separate from this recipe's 0.84.4 pin. The installer selects exact package/bundle pairs: **0.85.0 / `chunk-WZB2R5YO.js`** or **0.85.1 / `chunk-JVUZSMYM.js`**; other identities are refused. The 0.85.1 repair passed copied-package SDK/bundle tests and subsequent installed SDK/bundle checks with synthetic responses, not a native provider call. Local application was backed up and verified; existing Pi processes retain their loaded code until restarted. The original 0.85.0 patch bytes are preserved, but its fixture was unavailable for this qualification and its tests were not rerun. Read `COMPACTION.md` before applying either patch; do not force it onto a different version.
+
 After landing, it is working only when all three are true:
 
 1. a Codex compaction emits the extension's distinct remote-success log rather than a skip/failure;
@@ -675,6 +717,55 @@ TRELLIS_TOOLS=Agent,SubagentWorkflow,bash,edit,get_subagent_result,intercom,read
 
 The four default coding tools are `read`, `bash`, `edit`, `write`; `@tintinweb/pi-subagents` adds `Agent`, `SubagentWorkflow`, `get_subagent_result`, and `steer_subagent`; `pi-intercom` adds `intercom`. The statusline, `antigravity` provider, and local account-2 provider intentionally add no tools.
 
+## Trellis skills and commands in this management checkout
+
+This section is about working *in* this source checkout, not about the portable install above. `.pi/settings.json` adds two directory pointers so native pi discovers the canonical resources it already owns:
+
+```json
+{
+  "skills": ["../core-rules/skills"],
+  "prompts": ["../core-rules/commands", "../core-rules/commands/*.md"]
+}
+```
+
+Relative paths in `.pi/settings.json` resolve against `.pi`, not the repository root. Nothing is copied or enumerated, so a skill or command added under `core-rules/` is discovered on reload or the next launch with no second list to update.
+
+Commands need both entries. Pi collects candidate files only from **plain** path entries; a pattern entry merely filters that set, so a glob on its own — `["../core-rules/commands/*.md"]` — discovers nothing at all. The plain directory supplies the files, and because a settings directory is scanned *recursively* (unlike the non-recursive default `prompts/`), the root-only glob is what keeps `core-rules/commands/templates/` from registering `/primer-template` and `/primer-index-template` as user commands.
+
+**Namespaces differ by kind.** Skills register as `/skill:<name>` — `/skill:execute`, `/skill:process-gate`. Prompt templates register as `/<name>` — `/explore`, `/trellis-doctor`. There is no `/execute`, and no `/skill:explore`.
+
+**Trust and reload.** Trust this checkout before loading its project resources. In an already-trusted session, run `/reload` to reload settings, skills, prompts and autocomplete without restarting. A changed `/trust` decision requires a restart to take effect; restarting is also an option for ordinary resource edits. A fresh-process probe does not prove that an existing pane has reloaded.
+
+**Discovery is not enforcement.** These pointers make resources reachable from the editor. They install no hook, no rule, and no gate, and they do not attach this source checkout to a runtime: there is no `.trellis/runtime` here and this checkout is not an immutable release. Parent policy in `core-rules/CLAUDE.md` still governs, by being read, not by being wired.
+
+**The management checkout and an attached project are two different mechanisms, and only one of them installs anything.**
+
+| | Management checkout (`/reload`) | Attached project (immutable runtime) |
+|---|---|---|
+| What supplies the files | this mutable checkout, read in place | a verified immutable release payload |
+| What is written | nothing | owned leaves under `.pi/`, `.agents/`, `.claude/`, `.codex/` |
+| What decides the set | `.pi/settings.json` directory pointers | `core-rules/inheritance-manifest.json`, expanded by the planner |
+| How you refresh it | `/reload` in an already-trusted session | detach and re-attach against the release |
+| Scope of the guarantee | the editor can *see* the resources | the resources are *installed*, at known paths, with known ownership |
+
+Use `/reload` as a **preview** of resource content while editing this checkout. It is not a rehearsal of attachment: it never renders a manifest, never resolves a HOME-scoped user leaf, and never tells you whether a manifest source actually exists. The planner command in the boundary section above is the thing that answers those, and it is still no-write.
+
+**Verify**
+
+The management-resources probe lives under this repository's spec tree, which is not part of the published subset. In a public mirror checkout, these commands validate planner source closure and count the canonical filesystem inventory. They do not verify native pi discovery or replace the management-resources probe:
+
+```bash
+bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi >/dev/null && echo "plan closes"
+ls core-rules/skills | wc -l
+ls core-rules/commands/*.md | wc -l
+```
+
+The stricter probe drives the installed bundled CLI (`pi --mode rpc --no-session --no-tools`, `get_commands` only — no model request). Disposable regression fixtures explicitly use `--approve --no-extensions --offline`, without changing saved trust or global settings. The separate `capture` mode preserves the checkout's actual native trust and extension configuration. Its expected set is the complete canonical roster read off disk, so a canonical resource pi fails to discover, or any file below `core-rules/commands` that becomes a user command, exits non-zero with its raw cause rather than being filtered out of the expectation.
+
+**Measured once, on pi 0.85.0, in one operator's local checkout: 17 of 17 skills and 9 of 9 commands**, each once, from its canonical realpath, with the user's own global resources untouched and no collision diagnostics — the legacy `.agents/skills` symlinks resolve to the same realpaths and are deduped silently, so they need no removal. That figure is local evidence from a version this recipe does not install, it has not been re-measured on 0.85.1, and it is not certified by any published test. Re-run the count against your own checkout rather than inheriting it.
+
+Getting there required fixing three canonical files whose frontmatter was not valid YAML, which pi had been rejecting: `core-rules/skills/{orchestrate,security-gate}/SKILL.md` (unquoted `: ` inside `description`) and `core-rules/commands/surgical.md` (a quoted `argument-hint` followed by bare `| --emergency …`). The affected values are now single-quoted; their intended text and the file bodies are preserved. Keep new frontmatter values quoted when they contain `: `, `|`, or `"` — pi warns for a skill and drops a prompt template silently.
+
 ## Why each customization exists
 
 Each line below names the measured failure, not a preference.
@@ -725,7 +816,7 @@ Each line below names the measured failure, not a preference.
 
 **What breaks without it:** the package computes `hasWriteTools` as `write || edit` at `agent-runner.ts:658`. `bash` is uncounted, so a nominally read-only child with `bash` can still mutate through redirects, heredocs, or commands such as `echo x > sentinel`.
 
-**Demonstration:** step 9 rejects `bash`, `write`, or `edit` in every read-only file. The live sentinel failure is recorded in [`../evidence/t8-sentinel-fence.txt`](../evidence/t8-sentinel-fence.txt).
+**Demonstration:** step 9 rejects `bash`, `write`, or `edit` in every read-only file. The live sentinel failure was captured in an unpublished local evidence file, so reproduce it rather than cite it: give a read-only agent `bash`, ask it to `echo x > sentinel`, and observe the file appear.
 
 ### `maxConcurrent` is 64
 
@@ -743,7 +834,7 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 ### Reinstall npm extensions with `npm ci --legacy-peer-deps`, never `npm install`
 
-**Customization:** preserve `~/.pi/agent/npm/package-lock.json` and run `npm ci --legacy-peer-deps` from that directory. The flag is required because these extensions declare pi peer packages that are supplied by the global pi installation and intentionally absent from this local lockfile.
+**Customization:** preserve `~/.pi/agent/npm/package-lock.json` and run `npm ci --legacy-peer-deps` from that directory. The flag is required because these extensions declare pi peer packages that are supplied by the global pi installation and intentionally absent from this local lockfile. After every reinstall, run `core-rules/pi/patches/apply-pi-subagents-patches.sh` from the selected Trellis source with the installed package root as its argument, as in step 2. It accepts only the pinned version and expected source; a refusal requires investigation before mutating worker runs. Restart pi at an attended boundary to load updated extension code.
 
 **What breaks without it:** `npm install` may float the caret-ranged declarations to newer extension versions; plain npm 12 `npm ci` instead fails by trying to add the globally supplied pi peers to the local lock. Either path prevents a reproducible reinstall.
 

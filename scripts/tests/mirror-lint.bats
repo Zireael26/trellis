@@ -116,13 +116,88 @@ teardown() {
   [ -z "$output" ]
 }
 
+@test "the portable pi subset lints clean beside the published inheritance manifest" {
+  # The pi export is a positive allowlist carve-out: `core-rules/pi/agents` is
+  # withheld and everything else under `core-rules/pi` publishes. That subset
+  # plus the projected manifest is now ordinary mirror content, so it has to
+  # pass this lint with no widened token list and no new exemption path.
+  mkdir -p "$MIRROR/core-rules/pi/extensions" "$MIRROR/core-rules/pi/hooks" \
+    "$MIRROR/core-rules/pi/patches/tests"
+  printf 'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";\n' \
+    > "$MIRROR/core-rules/pi/extensions/trellis.ts"
+  printf '#!/usr/bin/env bash\nset -euo pipefail\nexec "$HOME/.pi/hooks/$1"\n' \
+    > "$MIRROR/core-rules/pi/hooks/dispatch.sh"
+  printf 'pi install npm:pi-antigravity@0.5.2\n/login antigravity\n' \
+    > "$MIRROR/core-rules/pi/patches/COMPACTION.md"
+  printf -- '--- a/dist/index.js\n+++ b/dist/index.js\n' \
+    > "$MIRROR/core-rules/pi/patches/pi-coding-agent-0.85.0-compaction-integrity.patch"
+  printf 'process.exit(0);\n' \
+    > "$MIRROR/core-rules/pi/patches/tests/pi-compaction-integrity.mjs"
+  cat > "$MIRROR/core-rules/inheritance-manifest.json" <<'JSON'
+{
+  "schema_version": 2,
+  "harnesses": {
+    "pi": {
+      "links": [
+        {
+          "source": "core-rules/pi/extensions/trellis.ts",
+          "destination": ".pi/extensions/trellis.ts"
+        }
+      ],
+      "render": []
+    }
+  }
+}
+JSON
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ]
+}
+
 @test "canonical google-antigravity provider id remains publishable" {
-  printf 'flash: google-antigravity/gemini-3.7-flash:high\n' > "$MIRROR/omp-config.yml"
+  printf 'flash: google-antigravity/gemini-3.8-flash:high\n' > "$MIRROR/omp-config.yml"
 
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "live pi provider tokens are publishable" {
+  # The pi provider extension package and the bare lowercase pi provider id
+  # name live, current things — the retired harness was always prose-cased.
+  printf 'pi install npm:pi-antigravity@0.5.2\n' > "$MIRROR/install.md"
+  printf 'Type `/login antigravity` and complete sign-in.\n' > "$MIRROR/login.md"
+  printf 'pi --offline --list-models antigravity\n' > "$MIRROR/probe.sh"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "prose-cased Antigravity is still rejected beside live pi tokens" {
+  # Case is the discriminator: allowing the lowercase id must not let the
+  # retired harness back in through the same file.
+  printf 'npm:pi-antigravity@0.5.2 is live; Google Antigravity is not\n' > "$MIRROR/mixed.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mixed.md: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
+}
+
+@test "bare pi provider id must not be embedded in a longer identifier" {
+  printf 'antigravity-harness is retired\n' > "$MIRROR/suffixed.md"
+  printf 'myantigravity shim\n' > "$MIRROR/prefixed.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"suffixed.md: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"prefixed.md: stale 'antigravity' in current operator surface"* ]] || { echo "$output"; false; }
 }
 
 @test "bare retired AntiGravity token is rejected beside the provider id" {

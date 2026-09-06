@@ -20,15 +20,30 @@ teardown() {
   t25_teardown_sandbox
 }
 
-t25_omp_config_get() (
-  unset PI_CODING_AGENT_DIR XDG_CONFIG_HOME
-  HOME="$T25_USER_HOME"
-  TRELLIS_HOME="$T25_TRELLIS_HOME"
-  GIT_CONFIG_NOSYSTEM=1
-  export HOME TRELLIS_HOME GIT_CONFIG_NOSYSTEM
-  cd "$T25_PROJECT"
-  omp config get "$1"
-)
+# Retirement reduced nine tests to eight; this helper regression restores nine,
+# not the retired native OMP proof and not a new native Pi proof.
+@test "harness selectors preserve schema 1 defaults select schema 2 and refuse malformed manifests before attach" {
+  local manifest="$T25_SANDBOX/selector-manifest.json" command
+
+  T25_MANIFEST="$manifest"
+  printf '%s\n' '{"schema_version":1,"harnesses":{"claude":{},"codex":{}}}' > "$manifest"
+  t25_harness_flags
+  [ "${#T25_HARNESS_FLAGS[@]}" -eq 0 ]
+
+  printf '%s\n' '{"schema_version":2,"harnesses":{"claude":{},"shared_agents":{},"codex":{},"pi":{}}}' > "$manifest"
+  t25_harness_flags
+  [ "${#T25_HARNESS_FLAGS[@]}" -eq 6 ]
+  [ "${T25_HARNESS_FLAGS[*]}" = '--harness claude --harness codex --harness pi' ]
+
+  # Observe the helper's command boundary, not a provider or fake attach result.
+  t25_attachment_env() { printf 'unexpected attach call\n' > "$T25_SANDBOX/attach-called"; }
+  printf '{malformed\n' > "$manifest"
+  for command in t25_attach t25_attach_with_fault; do
+    run "$command" 13
+    [ "$status" -ne 0 ]
+    [ ! -e "$T25_SANDBOX/attach-called" ]
+  done
+}
 
 # A rolled-back attach is allowed to leave exactly two marks behind: the machine
 # registry row for the discovered worktree, and the local exclude file hardened
@@ -73,25 +88,26 @@ assert_rolled_back_to_baseline() {
 # deliberate, separately-tested contract — see the "attach defers a project-authored
 # AGENTS.md regular file" test in attach-project.bats and the show-config deferral
 # tests in doctor.bats. What this test adds over those is the three-harness
-# integration view: two deferrals at once, across Codex and OMP, proving the
-# deferral is a partial YIELD and not a partial attach — every leaf the plan
-# still owns lands, and the exclude block covers those and only those.
-@test "three-harness late Codex and OMP destinations defer to the project without claiming a byte" {
-  local codex_before omp_before codex_after omp_after owner git_before
+# integration view: two deferrals at once, one on the SHARED `.agents` leaf that
+# both Codex and Pi consume and one on a Pi-private leaf, proving the deferral is
+# a partial YIELD and not a partial attach — every leaf the plan still owns
+# lands, and the exclude block covers those and only those.
+@test "three-harness late shared-agents and Pi destinations defer to the project without claiming a byte" {
+  local shared_before pi_before shared_after pi_after owner git_before
 
-  mkdir -p "$T25_PROJECT/.agents/rules"
+  mkdir -p "$T25_PROJECT/.agents/rules" "$T25_PROJECT/.pi/hooks"
   # Both bodies are non-empty and match no canonical source, which is what makes
   # them authored content rather than a dropping — the narrow condition
   # `_attachment_symlink_destination_authored` requires before deferring.
-  printf 'project-owned Codex destination\n' > "$T25_PROJECT/.agents/rules/trellis.md"
-  printf 'project-owned OMP destination\n' > "$T25_PROJECT/.omp/AGENTS.md"
+  printf 'project-owned shared agents destination\n' > "$T25_PROJECT/.agents/rules/trellis.md"
+  printf 'project-owned Pi destination\n' > "$T25_PROJECT/.pi/hooks/dispatch.sh"
   chmod 640 "$T25_PROJECT/.agents/rules/trellis.md"
-  chmod 600 "$T25_PROJECT/.omp/AGENTS.md"
+  chmod 600 "$T25_PROJECT/.pi/hooks/dispatch.sh"
   printf '# collision sentinel\n*.must-remain\n' > "$T25_EXCLUDE"
   chmod 640 "$T25_EXCLUDE"
 
-  codex_before="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
-  omp_before="$(t25_sha256_file "$T25_PROJECT/.omp/AGENTS.md")"
+  shared_before="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
+  pi_before="$(t25_sha256_file "$T25_PROJECT/.pi/hooks/dispatch.sh")"
   git_before="$(t25_git_status "$T25_PROJECT")"
 
   run t25_attach
@@ -103,32 +119,33 @@ assert_rolled_back_to_baseline() {
   owner="$(t25_owner_path "$T25_PROJECT")"
   [ -L "$T25_PROJECT/.trellis/runtime" ] || { echo "$output"; false; }
   [ -L "$T25_PROJECT/.claude/rules/trellis.md" ] || { echo "$output"; false; }
-  [ -f "$T25_PROJECT/.omp/PREAMBLE.md" ] || { echo "$output"; false; }
+  [ -L "$T25_PROJECT/.codex/hooks/fixture-hook.sh" ] || { echo "$output"; false; }
+  [ -f "$T25_PROJECT/.pi/fixture-policy.md" ] || { echo "$output"; false; }
   jq -e '.status == "committed"' "$owner" >/dev/null || { jq -cS '.status' "$owner"; false; }
 
   # Both destinations stay project-owned regular files: same bytes, same mode,
   # never replaced by a Trellis symlink.
-  [ -f "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'codex leaf is not a regular file'; false; }
-  [ ! -L "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'codex leaf became a symlink'; false; }
-  [ -f "$T25_PROJECT/.omp/AGENTS.md" ] || { echo 'omp leaf is not a regular file'; false; }
-  [ ! -L "$T25_PROJECT/.omp/AGENTS.md" ] || { echo 'omp leaf became a symlink'; false; }
-  codex_after="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
-  omp_after="$(t25_sha256_file "$T25_PROJECT/.omp/AGENTS.md")"
-  [ "$codex_after" = "$codex_before" ] || { echo 'codex destination bytes changed'; false; }
-  [ "$omp_after" = "$omp_before" ] || { echo 'omp destination bytes changed'; false; }
+  [ -f "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'shared leaf is not a regular file'; false; }
+  [ ! -L "$T25_PROJECT/.agents/rules/trellis.md" ] || { echo 'shared leaf became a symlink'; false; }
+  [ -f "$T25_PROJECT/.pi/hooks/dispatch.sh" ] || { echo 'pi leaf is not a regular file'; false; }
+  [ ! -L "$T25_PROJECT/.pi/hooks/dispatch.sh" ] || { echo 'pi leaf became a symlink'; false; }
+  shared_after="$(t25_sha256_file "$T25_PROJECT/.agents/rules/trellis.md")"
+  pi_after="$(t25_sha256_file "$T25_PROJECT/.pi/hooks/dispatch.sh")"
+  [ "$shared_after" = "$shared_before" ] || { echo 'shared destination bytes changed'; false; }
+  [ "$pi_after" = "$pi_before" ] || { echo 'pi destination bytes changed'; false; }
   [ "$(t25_mode "$T25_PROJECT/.agents/rules/trellis.md")" = 640 ] ||
-    { echo "codex destination mode is $(t25_mode "$T25_PROJECT/.agents/rules/trellis.md")"; false; }
-  [ "$(t25_mode "$T25_PROJECT/.omp/AGENTS.md")" = 600 ] ||
-    { echo "omp destination mode is $(t25_mode "$T25_PROJECT/.omp/AGENTS.md")"; false; }
+    { echo "shared destination mode is $(t25_mode "$T25_PROJECT/.agents/rules/trellis.md")"; false; }
+  [ "$(t25_mode "$T25_PROJECT/.pi/hooks/dispatch.sh")" = 600 ] ||
+    { echo "pi destination mode is $(t25_mode "$T25_PROJECT/.pi/hooks/dispatch.sh")"; false; }
 
   # The owner record names both deferrals and claims neither as an artifact.
   jq -e '
-    ([.pre_existing[] | select(.path == ".agents/rules/trellis.md" or .path == ".omp/AGENTS.md")
+    ([.pre_existing[] | select(.path == ".agents/rules/trellis.md" or .path == ".pi/hooks/dispatch.sh")
       | {path, kind, reason}] | sort_by(.path)
       == [{path:".agents/rules/trellis.md",kind:"symlink",reason:"project-authored-file"},
-          {path:".omp/AGENTS.md",kind:"symlink",reason:"project-authored-file"}])
+          {path:".pi/hooks/dispatch.sh",kind:"symlink",reason:"project-authored-file"}])
     and ([.artifacts[].path
-          | select(. == ".agents/rules/trellis.md" or . == ".omp/AGENTS.md")] | length) == 0
+          | select(. == ".agents/rules/trellis.md" or . == ".pi/hooks/dispatch.sh")] | length) == 0
   ' "$owner" >/dev/null || { jq -cS '{pre_existing,artifacts:[.artifacts[].path]}' "$owner"; false; }
 
   # A deferred leaf gets no managed exclude line at all. The claude leaf is the
@@ -138,7 +155,7 @@ assert_rolled_back_to_baseline() {
   [ "$status" -eq 0 ] || { cat "$T25_EXCLUDE"; false; }
   run grep -Fx '/.agents/rules/trellis.md' "$T25_EXCLUDE"
   [ "$status" -ne 0 ] || { cat "$T25_EXCLUDE"; false; }
-  run grep -Fx '/.omp/AGENTS.md' "$T25_EXCLUDE"
+  run grep -Fx '/.pi/hooks/dispatch.sh' "$T25_EXCLUDE"
   [ "$status" -ne 0 ] || { cat "$T25_EXCLUDE"; false; }
   # The operator's own pre-existing sentinel lines survive verbatim.
   run grep -Fx '*.must-remain' "$T25_EXCLUDE"
@@ -159,8 +176,10 @@ assert_rolled_back_to_baseline() {
 
   # A fully release-owned `replace` render, not one of the merge destinations
   # the project already owns: nothing may claim it from underneath the project.
-  printf 'project-owned preamble\n' > "$T25_PROJECT/.omp/PREAMBLE.md"
-  chmod 644 "$T25_PROJECT/.omp/PREAMBLE.md"
+  # It is Pi-owned and deliberately NOT the shared `.agents` leaf, so a refusal
+  # here is provably a Pi collision rather than a shared-leaf collision.
+  printf 'project-owned pi policy\n' > "$T25_PROJECT/.pi/fixture-policy.md"
+  chmod 644 "$T25_PROJECT/.pi/fixture-policy.md"
   git_before="$(t25_git_status "$T25_PROJECT")"
   t25_snapshot_tree "$T25_PROJECT" "$project_before"
   t25_snapshot_tree "$T25_TRELLIS_HOME" "$home_before"
@@ -175,7 +194,7 @@ assert_rolled_back_to_baseline() {
   t25_attachment_state_absent "$T25_PROJECT"
   [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ]
 
-  rm "$T25_PROJECT/.omp/PREAMBLE.md"
+  rm "$T25_PROJECT/.pi/fixture-policy.md"
   mkdir "$T25_PROJECT/.trellis"
   printf 'project-owned runtime anchor\n' > "$T25_PROJECT/.trellis/runtime"
   chmod 600 "$T25_PROJECT/.trellis/runtime"
@@ -203,7 +222,7 @@ assert_rolled_back_to_baseline() {
 
   [ "$status" -eq 0 ]
   harnesses="$(jq -r '.harnesses | keys_unsorted | sort | join(",")' "$T25_MANIFEST")"
-  [ "$harnesses" = 'claude,codex,omp' ]
+  [ "$harnesses" = 'claude,codex,pi,shared_agents' ]
 
   # Every declared link is a symlink to the pinned immutable payload source.
   while IFS= read -r destination; do
@@ -249,35 +268,15 @@ assert_rolled_back_to_baseline() {
   [ -z "$(t25_git_status "$T25_PROJECT")" ]
 }
 
-@test "OMP project policy takes effect and clean detach removes it" {
-  command -v omp >/dev/null 2>&1 || skip "omp CLI not on PATH; live config-get proof is host-gated"
-  mkdir -p "$T25_USER_HOME/.omp/agent"
-  cat > "$T25_USER_HOME/.omp/agent/config.yml" <<'YAML'
-extendedContext: true
-compaction:
-  idleEnabled: false
-  idleTimeoutSeconds: 600
-YAML
-
-  [ "$(t25_omp_config_get extendedContext)" = true ]
-  [ "$(t25_omp_config_get compaction.idleEnabled)" = false ]
-  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 600 ]
-
-  run t25_attach
-  [ "$status" -eq 0 ]
-  [ -f "$T25_PROJECT/.omp/config.yml" ]
-  [ ! -L "$T25_PROJECT/.omp/config.yml" ]
-  [ "$(t25_omp_config_get extendedContext)" = false ]
-  [ "$(t25_omp_config_get compaction.idleEnabled)" = true ]
-  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 900 ]
-
-  run t25_detach
-  [ "$status" -eq 0 ]
-  t25_path_absent "$T25_PROJECT/.omp/config.yml"
-  [ "$(t25_omp_config_get extendedContext)" = true ]
-  [ "$(t25_omp_config_get compaction.idleEnabled)" = false ]
-  [ "$(t25_omp_config_get compaction.idleTimeoutSeconds)" = 600 ]
-}
+# RETIRED, NOT MIGRATED: @test "OMP project policy takes effect and clean detach
+# removes it" (with its `t25_omp_config_get` helper) covered a host-gated LIVE
+# `omp config get` precedence proof — that an attached project's rendered
+# `.omp/config.yml` overrode the user-level OMP config, and that a clean detach
+# restored the user values. Both the OMP attachment plane and the OMP CLI are
+# gone (1b2189e4 "refactor(surface): retire omp attachment plane"), so the
+# requirement is retired with the harness. It is deliberately NOT renamed into a
+# Pi equivalent: this fixture establishes no equivalent native Pi
+# config-precedence assertion, so renaming it would invent unobserved proof.
 
 @test "second three-harness attach rewrites no project machine or artifact byte" {
   local project_first="$T25_SANDBOX/idempotent-project.first"
@@ -390,6 +389,8 @@ YAML
   # is exactly as long as the run of phases that faulted.
   [ "$status" -eq 0 ] || { echo "phase $phase exited $status: $output"; false; }
   [ "$faulted" -eq "$(t25_owner_artifact_count)" ]
+  # Adding a fixture artifact must also update the late-fault index below.
+  [ "$faulted" -eq 13 ]
   [ "$faulted" -ge 8 ]
   [ -L "$T25_PROJECT/.trellis/runtime" ]
   [ -z "$(t25_git_status "$T25_PROJECT")" ]
@@ -406,18 +407,20 @@ YAML
   t25_snapshot_tree_without "$T25_PROJECT" "$project_baseline" './.git/info/exclude'
   t25_snapshot_tree_without "$T25_TRELLIS_HOME" "$home_baseline" './registry.json'
 
-  # This fixture plans three missing parents, the runtime anchor, three harness
-  # leaves, both explicit-JSON renders and one replace render.  Phase 9 fails
-  # after both project-owned merge destinations have already been replaced.
-  run t25_attach_with_fault 9
+  # This fixture plans five missing parents, the runtime anchor, four harness
+  # leaves and three renders — thirteen phases, which the sweep above proves is
+  # the whole plan.  Phase 13 is therefore the LAST one, so it fails after both
+  # project-owned explicit-JSON merge destinations have already been replaced.
+  run t25_attach_with_fault 13
 
   [ "$status" -eq 5 ]
   assert_rolled_back_to_baseline "$project_baseline" "$home_baseline" \
     "$exclude_baseline" "$hooks_baseline" "$git_baseline"
   t25_path_absent "$T25_PROJECT/.claude/rules/trellis.md"
   t25_path_absent "$T25_PROJECT/.agents/rules/trellis.md"
-  t25_path_absent "$T25_PROJECT/.omp/AGENTS.md"
-  t25_path_absent "$T25_PROJECT/.omp/PREAMBLE.md"
+  t25_path_absent "$T25_PROJECT/.codex/hooks/fixture-hook.sh"
+  t25_path_absent "$T25_PROJECT/.pi/hooks/dispatch.sh"
+  t25_path_absent "$T25_PROJECT/.pi/fixture-policy.md"
   jq -e '.project.claude == "keep" and (has("hooks") | not)' \
     "$T25_PROJECT/.claude/settings.local.json" >/dev/null
   jq -e '.project.codex == "keep" and (has("hooks") | not)' \
@@ -437,15 +440,17 @@ YAML
   # leaves the local exclude file hardened to 0600.  Both are asserted by name
   # below; project-owned bytes, modes and symlinks are compared exactly.
   t25_snapshot_tree_without "$T25_PROJECT" "$project_before" \
-    './.git/info/exclude' './.claude/rules' './.agents/rules' './.trellis'
+    './.git/info/exclude' './.claude/rules' './.agents/rules' './.codex/hooks' \
+    './.pi/hooks' './.trellis'
 
   run t25_attach
 
   [ "$status" -eq 0 ]
   [ -L "$T25_PROJECT/.claude/rules/trellis.md" ]
   [ -L "$T25_PROJECT/.agents/rules/trellis.md" ]
-  [ -L "$T25_PROJECT/.omp/AGENTS.md" ]
-  [ -f "$T25_PROJECT/.omp/PREAMBLE.md" ]
+  [ -L "$T25_PROJECT/.codex/hooks/fixture-hook.sh" ]
+  [ -L "$T25_PROJECT/.pi/hooks/dispatch.sh" ]
+  [ -f "$T25_PROJECT/.pi/fixture-policy.md" ]
   jq -e '.project.claude == "keep" and (.hooks.SessionStart | length) == 1' \
     "$T25_PROJECT/.claude/settings.local.json" >/dev/null
   jq -e '.project.codex == "keep" and (.hooks.SessionStart | length) == 1' \
@@ -457,7 +462,8 @@ YAML
 
   [ "$status" -eq 0 ]
   t25_snapshot_tree_without "$T25_PROJECT" "$project_after_first" \
-    './.git/info/exclude' './.claude/rules' './.agents/rules' './.trellis'
+    './.git/info/exclude' './.claude/rules' './.agents/rules' './.codex/hooks' \
+    './.pi/hooks' './.trellis'
   cmp -s "$project_before" "$project_after_first"
   [ "$(t25_sha256_file "$T25_EXCLUDE")" = "$exclude_before" ]
   [ "$(t25_hooks_path "$T25_PROJECT")" = "$hooks_before" ]
@@ -465,13 +471,16 @@ YAML
   t25_path_absent "$T25_PROJECT/.trellis/runtime"
   t25_path_absent "$T25_PROJECT/.claude/rules/trellis.md"
   t25_path_absent "$T25_PROJECT/.agents/rules/trellis.md"
-  t25_path_absent "$T25_PROJECT/.omp/AGENTS.md"
-  t25_path_absent "$T25_PROJECT/.omp/PREAMBLE.md"
+  t25_path_absent "$T25_PROJECT/.codex/hooks/fixture-hook.sh"
+  t25_path_absent "$T25_PROJECT/.pi/hooks/dispatch.sh"
+  t25_path_absent "$T25_PROJECT/.pi/fixture-policy.md"
   # FOLLOW-UP: inverse cleanup stops at the leaves — the parents attach created
   # survive detach as empty directories.  Asserting emptiness keeps the residue
   # bounded and makes a future full inverse cleanup fail here on purpose.
   t25_directory_is_empty "$T25_PROJECT/.claude/rules"
   t25_directory_is_empty "$T25_PROJECT/.agents/rules"
+  t25_directory_is_empty "$T25_PROJECT/.codex/hooks"
+  t25_directory_is_empty "$T25_PROJECT/.pi/hooks"
   t25_directory_is_empty "$T25_PROJECT/.trellis"
   [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ]
   t25_snapshot_tree "$T25_TRELLIS_HOME" "$home_after_first"
@@ -497,9 +506,9 @@ YAML
   [ "$status" -eq 0 ]
   owner="$(t25_owner_path "$T25_PROJECT")"
 
-  # `.omp/PREAMBLE.md` is a fully owned `replace` render, so any local edit is
-  # drift the inverse transaction must refuse rather than overwrite.
-  printf 'locally edited owned render\n' > "$T25_PROJECT/.omp/PREAMBLE.md"
+  # `.pi/fixture-policy.md` is a fully owned `replace` render, so any local edit
+  # is drift the inverse transaction must refuse rather than overwrite.
+  printf 'locally edited owned render\n' > "$T25_PROJECT/.pi/fixture-policy.md"
   t25_snapshot_tree "$T25_PROJECT" "$attached_project"
   t25_snapshot_tree "$T25_TRELLIS_HOME" "$attached_home"
 
@@ -513,6 +522,6 @@ YAML
   [ -f "$owner" ]
   [ -L "$T25_PROJECT/.trellis/runtime" ]
   [ -L "$T25_PROJECT/.claude/rules/trellis.md" ]
-  [ "$(cat "$T25_PROJECT/.omp/PREAMBLE.md")" = 'locally edited owned render' ]
+  [ "$(cat "$T25_PROJECT/.pi/fixture-policy.md")" = 'locally edited owned render' ]
   [ -z "$(t25_journal_files)" ]
 }

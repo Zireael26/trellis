@@ -21,6 +21,7 @@ missing_leaf_install_release() {
   cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" \
     "$repo/scripts/seed-inheritance-symlinks.sh"
   cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   chmod 755 "$repo/scripts/seed-inheritance-symlinks.sh" "$repo/scripts/attach-project.sh"
 
@@ -52,14 +53,6 @@ missing_leaf_install_release() {
       "links": [
         {"source_children":"core-rules/skills","destination_dir":".agents/skills","entry_type":"directory","required_file":"SKILL.md"},
         {"source_children":"core-rules/commands","destination_dir":".agents/commands","entry_type":"file","suffix":".md"}
-      ],
-      "render": []
-    },
-    "omp": {
-      "links": [
-        {"source_children":"core-rules/skills","destination_dir":".omp/skills","entry_type":"directory","required_file":"SKILL.md"},
-        {"source_children":"core-rules/commands","destination_dir":".omp/commands","entry_type":"file","suffix":".md"},
-        {"source_children":"core-rules/agents","destination_dir":".omp/agents","entry_type":"file","suffix":".md"}
       ],
       "render": []
     }
@@ -141,5 +134,4 @@ run_missing_leaf_doctor() {
   [ "$status" -ne 0 ] || { echo "$output"; false; }
   t25_contains "$output" 'manifest leaves: missing declared leaf(s): .agents/skills/adopted-only'
   t25_contains "$output" '.claude/skills/adopted-only'
-  t25_contains "$output" '.omp/skills/adopted-only'
 }

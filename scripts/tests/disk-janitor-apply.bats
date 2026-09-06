@@ -33,7 +33,11 @@ STALE_TOUCH="200001010000"          # touch -t form: CCYYMMDDhhmm
 OLD_COMMIT_DATE="2020-01-01T00:00:00 +0000"
 
 setup() {
-  SANDBOX="$(mktemp -d)"
+  # Templated so the path honours TMPDIR: macOS `mktemp -d` with no template
+  # ignores it and uses the per-user Darwin temp directory, which puts the
+  # sandbox outside the write-allowed root of the isolated verification fence
+  # and fails every case here at setup. BATS_TEST_TMPDIR is already under it.
+  SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/dj-apply.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
@@ -43,6 +47,8 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS" "$TRELLIS_HOME"
   chmod 700 "$TRELLIS_HOME"
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
+  # Mock build liveness for cache orchestration; not a native process observation.
+  export DJ_BUILD_ACTIVE_OVERRIDE=0
   build_canonical_min
   write_config
 }
@@ -54,9 +60,6 @@ teardown() {
   fi
   if [ -n "${EXTERNAL_WT_ROOT:-}" ] && [ -d "$EXTERNAL_WT_ROOT" ]; then
     rm -rf "$EXTERNAL_WT_ROOT"
-  fi
-  if [ -n "${OUTSIDE_WT_ROOT:-}" ] && [ -d "$OUTSIDE_WT_ROOT" ]; then
-    rm -rf "$OUTSIDE_WT_ROOT"
   fi
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     rm -rf "$SANDBOX"
@@ -165,29 +168,65 @@ add_unregistered_worktree() {
   ( cd "$repo" && git worktree add -q -b "$branch" "$wt" >/dev/null 2>&1 )
 }
 
-# Allocate a real path outside the only phantom namespaces. $SANDBOX may itself
-# live under /tmp on some runners, so it is not a valid negative control.
-make_outside_phantom_root() {
-  local parent candidate canonical
-  for parent in /private/var/tmp /var/tmp; do
-    [ -d "$parent" ] || continue
-    candidate="$(mktemp -d "$parent/dj-phantom-outside.XXXXXX" 2>/dev/null)" || continue
-    canonical="$(cd "$candidate" && pwd -P)" || {
-      rm -rf "$candidate"
-      continue
-    }
-    case "$canonical/" in
-      /sessions/*|/tmp/*|/private/tmp/*)
-        rm -rf "$candidate"
-        ;;
-      *)
-        OUTSIDE_WT_ROOT="$canonical"
-        printf '%s\n' "$OUTSIDE_WT_ROOT"
-        return 0
-        ;;
-    esac
-  done
+# ephemeral_tmp_root <label> — a fixture root inside the /private/tmp ephemeral
+# namespace. run-tests.sh points TMPDIR (hence BATS_TEST_TMPDIR) at a per-shard
+# Git fence root whose physical path is under the real /private/tmp, so the
+# test's OWN temp directory already is that namespace. A bare
+# `mktemp -d /private/tmp/...` writes outside the isolated verification fence
+# and is denied there, so it is never used.
+ephemeral_tmp_root() {
+  local label="$1" candidate canonical
+  candidate="$(mktemp -d "$BATS_TEST_TMPDIR/$label.XXXXXX")" || return 1
+  canonical="$(cd "$candidate" && pwd -P)" || {
+    rm -rf "$candidate"
+    return 1
+  }
+  case "$canonical/" in
+    /private/tmp/*)
+      printf '%s\n' "$canonical"
+      return 0
+      ;;
+  esac
+  rm -rf "$candidate"
   return 1
+}
+
+# register_absent_outside_worktree <repo> <name> <branch> — the NON-ephemeral
+# negative control, printed as its absent pathname.
+#
+# Mint a REAL linked worktree inside the fence, then repoint ONLY its private
+# gitdir backlink at a unique, asserted-absent path in a non-temporary
+# namespace and delete the real tree. Git then reports exactly one absent,
+# prunable, non-main registration there, so the phantom predicate is reached
+# with every other precondition satisfied and may refuse it only on the
+# namespace gate. Nothing is created or removed outside the fence.
+#
+# Call this AFTER every other `git worktree add` in a test: the suite's Git
+# fence requires every registered worktree path to sit inside its root, so this
+# registration deliberately ends further worktree mutation on that repository.
+register_absent_outside_worktree() {
+  local repo="$1" name="$2" branch="$3"
+  local candidate parent="" absent src="$SANDBOX/outside-src/$name"
+  for candidate in /private/var/tmp /var/tmp; do
+    [ -d "$candidate" ] && [ -x "$candidate" ] || continue
+    candidate="$(cd "$candidate" && pwd -P)" || continue
+    case "$candidate/" in
+      /sessions/*|/tmp/*|/private/tmp/*) continue ;;
+    esac
+    parent="$candidate"
+    break
+  done
+  [ -n "$parent" ] || return 1
+  absent="$parent/dj-absent-outside.$$.${BATS_TEST_NUMBER:-0}.$name/stale"
+  # Both leaves must be genuinely absent so no host path is ever shadowed.
+  [ ! -e "$absent" ] && [ ! -L "$absent" ] || return 1
+  [ ! -e "${absent%/stale}" ] && [ ! -L "${absent%/stale}" ] || return 1
+  mkdir -p "$SANDBOX/outside-src"
+  ( cd "$repo" && git worktree add -q -b "$branch" "$src" >/dev/null 2>&1 ) || return 1
+  [ -f "$repo/.git/worktrees/$name/gitdir" ] || return 1
+  printf '%s\n' "$absent/.git" > "$repo/.git/worktrees/$name/gitdir"
+  rm -rf "$src"
+  printf '%s\n' "$absent"
 }
 
 # add_worktree_ignoring <repo> <wt> <branch> <gitignore-line...>
@@ -250,9 +289,13 @@ write_release_execution_owner() {
 }
 
 release_process_birth() {
-  # Keep the exact token shape used by dj_release_staging_owner_state; command
-  # substitution removes only ps's trailing newline.
-  LC_ALL=C ps -p "$1" -o lstart=
+  # The PRODUCTION reader, so a fixture can never record a token the janitor
+  # would not read back. Calling ps directly here made every live-owner case
+  # fail at setup inside the seatbelt fences this suite is verified in, because
+  # macOS ships ps setgid `kmem`. Sourced in a subshell so the library's
+  # globals stay out of the janitor fixtures; command substitution at the call
+  # site removes only the trailing newline, exactly as it did for ps.
+  ( . "$REPO_ROOT/scripts/lib/trellis-home.sh" && trellis_process_birth "$1" )
 }
 
 # ===========================================================================
@@ -310,21 +353,23 @@ release_process_birth() {
 }
 
 @test "an aged execution snapshot with a strict live owner is retained without argv matching" {
-  local snapshot owner birth command_line
+  local snapshot owner birth argument
+  local -a owner_command=(/bin/sleep 300)
   snapshot="$(make_release_execution_snapshot 1.2.3 LiveA1 "$STALE_TOUCH")"
 
-  # Keep the process in the sandbox, but do not place the snapshot path in its
-  # argv. Retention therefore proves pid + LC_ALL=C ps lstart identity rather
-  # than a command-line substring heuristic.
-  ( cd "$SANDBOX" && exec /bin/sleep 300 ) >/dev/null 2>&1 &
+  # Construct the exact command vector without the snapshot path; this is a
+  # fixture guarantee, not a measurement of native argv. Retention therefore
+  # proves pid + process birth identity rather than a substring heuristic.
+  for argument in "${owner_command[@]}"; do
+    [[ "$argument" != *"$snapshot"* ]] || {
+      echo "live owner fixture unexpectedly contains snapshot path in argv: $argument"
+      false
+    }
+  done
+  ( cd "$SANDBOX" && exec "${owner_command[@]}" ) >/dev/null 2>&1 &
   LIVE_PID=$!
   birth="$(release_process_birth "$LIVE_PID")"
   [ -n "$birth" ] || { echo "could not read live process birth"; false; }
-  command_line="$(LC_ALL=C ps -o command= -p "$LIVE_PID")"
-  [[ "$command_line" != *"$snapshot"* ]] || {
-    echo "live owner fixture unexpectedly contains snapshot path in argv: $command_line"
-    false
-  }
   write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
   owner="$snapshot.owner.json"
 
@@ -343,7 +388,7 @@ release_process_birth() {
 }
 
 @test "an aged live owner fails closed when its process birth probe fails" {
-  local snapshot owner birth fake_bin real_ps
+  local snapshot owner birth fake_bin real_ps real_python3
   snapshot="$(make_release_execution_snapshot 1.2.3 ProbeFailA1 "$STALE_TOUCH")"
   ( cd "$SANDBOX" && exec /bin/sleep 300 ) >/dev/null 2>&1 &
   LIVE_PID=$!
@@ -352,8 +397,13 @@ release_process_birth() {
   write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
   owner="$snapshot.owner.json"
 
+  # The birth probe has two implementations, so break both: ps for the
+  # platforms that shell out to it, and the `python3 -I -c` libproc reader for
+  # Darwin. Whichever one this host uses, the probe fails while kill(0) still
+  # reports the owner live — the exact indeterminate case that must retain.
   real_ps="$(command -v ps)"
-  fake_bin="$SANDBOX/failing-owner-ps"
+  real_python3="$(command -v python3)"
+  fake_bin="$SANDBOX/failing-owner-birth"
   mkdir -p "$fake_bin"
   cat > "$fake_bin/ps" <<'EOF'
 #!/bin/bash
@@ -362,17 +412,26 @@ if [ "$*" = "-p $FAIL_PS_PID -o lstart=" ]; then
 fi
 exec "$REAL_PS" "$@"
 EOF
-  chmod +x "$fake_bin/ps"
+  # `-I -c` is the birth reader's invocation and nothing else's; every other
+  # python3 the janitor runs must pass straight through.
+  cat > "$fake_bin/python3" <<'EOF'
+#!/bin/bash
+if [ "$1" = "-I" ] && [ "$2" = "-c" ]; then
+  exit 69
+fi
+exec "$REAL_PYTHON3" "$@"
+EOF
+  chmod +x "$fake_bin/ps" "$fake_bin/python3"
 
-  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" FAIL_PS_PID="$LIVE_PID" \
-    bash "$DJ" --report --scopes releases
+  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" REAL_PYTHON3="$real_python3" \
+    FAIL_PS_PID="$LIVE_PID" bash "$DJ" --report --scopes releases
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
   [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
   [[ "$output" == *"could not be determined"* ]] || { echo "$output"; false; }
 
-  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" FAIL_PS_PID="$LIVE_PID" \
-    bash "$DJ" --apply --yes --scopes releases </dev/null
+  run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" REAL_PYTHON3="$real_python3" \
+    FAIL_PS_PID="$LIVE_PID" bash "$DJ" --apply --yes --scopes releases </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
   [ -f "$owner" ] && [ ! -L "$owner" ]
@@ -479,9 +538,23 @@ EOF
 }
 
 @test "worktree NOT reaped when branch is UNMERGED (override=unmerged), even if stale+clean" {
+  # The suite's fixtures live under the shard fence root, whose physical path is
+  # inside /private/tmp, so the DEFAULT 2-day ephemeral policy would legitimately
+  # reap this tree for being throwaway rather than for being merged. Configure a
+  # long ephemeral TTL so the only discriminator left is the merge verdict; the
+  # dedicated ephemeral cases below keep the default policy.
+  write_config_dj '{ "ephemeral_tmp_ttl_days": 36500 }'
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
+
+  # Positive control: the worktree really was scanned, under the configured TTL,
+  # and landed on the manual-candidate side of the merge discriminator.
+  DJ_MERGED_OVERRIDE=unmerged run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ephemeral_tmp_ttl_days=36500"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[candidate]"*"$wt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"unmerged"* ]] || { echo "$output"; false; }
 
   DJ_MERGED_OVERRIDE=unmerged run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -490,6 +563,9 @@ EOF
 }
 
 @test "worktree reported as candidate but NOT reaped when merge is UNVERIFIED (override=unverified)" {
+  # See above: a long ephemeral TTL isolates the merge verdict from the
+  # /private/tmp throwaway policy that the shard fence root falls under.
+  write_config_dj '{ "ephemeral_tmp_ttl_days": 36500 }'
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
@@ -497,6 +573,7 @@ EOF
   # Report classifies it as a candidate (unverified merge), excluded from apply.
   DJ_MERGED_OVERRIDE=unverified run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
+  [[ "$output" == *"ephemeral_tmp_ttl_days=36500"* ]] || { echo "$output"; false; }
   [[ "$output" == *"candidate"* ]] || { echo "$output"; false; }
   [[ "$output" == *"unverified"* ]] || { echo "$output"; false; }
 
@@ -656,12 +733,17 @@ EOF
 }
 
 @test "local-only unmerged (neither merged nor pushed) -> candidate (not recoverable), NOT reaped" {
+  # A long ephemeral TTL keeps the recoverability verdict the only discriminator;
+  # the fixture root is physically under /private/tmp, where the default 2-day
+  # throwaway policy would otherwise reap it regardless of recoverability.
+  write_config_dj '{ "ephemeral_tmp_ttl_days": 36500 }'
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
+  [[ "$output" == *"ephemeral_tmp_ttl_days=36500"* ]] || { echo "$output"; false; }
   [[ "$output" == *"candidate (not recoverable)"* ]] || { echo "$output"; false; }
 
   DJ_MERGED_OVERRIDE=unmerged DJ_PUSHED_OVERRIDE=unpushed run_dj --apply --yes --scopes worktrees </dev/null
@@ -754,16 +836,19 @@ EOF
 # ===========================================================================
 # LAYER 2 — /private/tmp ephemerality (short TTL, no upstream needed)
 #
-# These MUST create fixtures under the real /private/tmp (the only way to hit
-# that branch); guarded by [ -d /private/tmp ] and cleaned in teardown via
-# TMP_WT_ROOT. A registered /private/tmp worktree remains eligible because
-# explicit registry identity, not discovery-root placement, is the boundary.
+# These MUST place fixtures inside the real /private/tmp (the only way to hit
+# that branch). ephemeral_tmp_root allocates them in the test's own temp
+# directory, which the runner puts there, and asserts that physical prefix
+# instead of writing to /private/tmp directly; teardown clears TMP_WT_ROOT.
+# These cases deliberately keep the DEFAULT ephemeral policy. A registered
+# /private/tmp worktree remains eligible because explicit registry identity,
+# not discovery-root placement, is the boundary.
 # ===========================================================================
 
 @test "/private/tmp clean tree, stale + no upstream + not-detached -> delete verdict" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-eph)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local wt="$TMP_WT_ROOT/wt"
   # Backdated init commit -> HEAD is far past -> stale at the 2d ephemeral TTL.
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
@@ -777,9 +862,9 @@ EOF
 }
 
 @test "/private/tmp clean stale registered tree is actually REAPED by --apply" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-eph)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
   register_fixture_root "$wt"
@@ -793,9 +878,9 @@ EOF
 }
 
 @test "/private/tmp stale tree with gitignored local content -> candidate, NOT reaped" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-eph)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
   register_fixture_root "$wt"
@@ -814,9 +899,9 @@ EOF
 }
 
 @test "/private/tmp clean tree that is YOUNGER than the TTL -> candidate, NOT delete" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-eph)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local wt="$TMP_WT_ROOT/wt"
   ( cd "$PROJECTS/alpha" && git worktree add -q -b feat/x "$wt" >/dev/null 2>&1 )
   register_fixture_root "$wt"
@@ -830,9 +915,9 @@ EOF
 }
 
 @test "/private/tmp clean tree that is DETACHED -> candidate, NOT delete (no branch ref)" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-eph.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-eph)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local wt="$TMP_WT_ROOT/wt"
   # Detached HEAD at the backdated init commit -> stale but branchless.
   ( cd "$PROJECTS/alpha" && git worktree add -q --detach "$wt" HEAD >/dev/null 2>&1 )
@@ -851,26 +936,43 @@ EOF
 # A phantom is a Git worktree registration whose directory is gone. The target
 # itself is intentionally unregistered; the live main checkout is the strict
 # local-registry current root that authorizes inspecting its Git metadata.
+# Only /sessions and /tmp registrations are ever prunable; the negative control
+# for everything else is register_absent_outside_worktree, which reaches the
+# same predicate with a non-temporary pathname and no write outside the fence.
 # ===========================================================================
 
-@test "registered current root reaps one absent /tmp phantom without broad-pruning an outside registration" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
+@test "registered current root reaps exactly one absent ephemeral phantom, never broad-pruning" {
   command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-phantom)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local phantom="$TMP_WT_ROOT/stale"
-  make_outside_phantom_root >/dev/null || skip "no writable path outside /sessions and /tmp"
-  local outside="$OUTSIDE_WT_ROOT/stale"
+  local held="$TMP_WT_ROOT/held"
+  local tries=0
 
   add_unregistered_worktree "$PROJECTS/alpha" "$phantom" "phantom/stale"
-  add_unregistered_worktree "$PROJECTS/alpha" "$outside" "phantom/outside"
-  rm -rf "$phantom" "$outside"
+  add_unregistered_worktree "$PROJECTS/alpha" "$held" "phantom/held"
+  # A real process whose cwd is the second tree; `git worktree prune` would
+  # sweep BOTH absent registrations, so `held` surviving is the narrowness
+  # proof. Start it and wait until lsof observes OUR OWN pid holding that cwd —
+  # never a sleep guess — before deleting either directory.
+  ( cd "$held" && exec sleep 30 ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  while [ "$tries" -lt 100 ]; do
+    lsof -a -d cwd -p "$LIVE_PID" -- "$held" >/dev/null 2>&1 && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  lsof -a -d cwd -p "$LIVE_PID" -- "$held" >/dev/null 2>&1 ||
+    { echo "own live process cwd never observed inside $held"; false; }
+  rm -rf "$phantom" "$held"
 
   run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]
   [[ "$output" == *"[delete]"*"$phantom"* ]] || { echo "$output"; false; }
   [[ "$output" == *"phantom registration"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"[delete]"*"$outside"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[candidate]"*"$held"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete]"*"$held"* ]] || { echo "$output"; false; }
 
   # The unattended merged-only schedule must leave phantom registration cleanup
   # to the normal manually-confirmed apply path.
@@ -879,7 +981,7 @@ EOF
   run git -C "$PROJECTS/alpha" worktree list --porcelain
   [ "$status" -eq 0 ]
   [[ "$output" == *"$phantom"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"$outside"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$held"* ]] || { echo "$output"; false; }
 
   run_dj --apply --yes --scopes worktrees </dev/null
   [ "$status" -eq 0 ]
@@ -887,14 +989,43 @@ EOF
   run git -C "$PROJECTS/alpha" worktree list --porcelain
   [ "$status" -eq 0 ]
   [[ "$output" != *"$phantom"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"$outside"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$held"* ]] || { echo "$output"; false; }
+}
+
+@test "an absent prunable registration outside the ephemeral namespaces is never planned or pruned" {
+  git_init_at "$PROJECTS/alpha"
+  local outside
+  outside="$(register_absent_outside_worktree "$PROJECTS/alpha" outside phantom/outside)" ||
+    { echo "could not mint the non-ephemeral absent registration"; false; }
+
+  # Fixture control: this really does reach the prune boundary. Git reports it
+  # as an absent, prunable, non-main registration, so the ONLY thing that may
+  # refuse it below is the janitor's ephemeral-namespace gate.
+  [ ! -e "$outside" ] && [ ! -L "$outside" ]
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"worktree $outside"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"prunable"* ]] || { echo "$output"; false; }
+
+  run_dj --report --scopes worktrees
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"[delete]"*"$outside"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"$outside"*"phantom registration"* ]] || { echo "$output"; false; }
+
+  run_dj --apply --yes --scopes worktrees </dev/null
+  [ "$status" -eq 0 ]
+  # The registration survives: outside the ephemeral namespaces the janitor
+  # must never touch Git metadata, however prunable Git considers the entry.
+  run git -C "$PROJECTS/alpha" worktree list --porcelain
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"worktree $outside"* ]] || { echo "$output"; false; }
 }
 
 
 @test "phantom registration cleanup honors reap_pushed_worktrees=false" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom-legacy.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-phantom-legacy)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local phantom="$TMP_WT_ROOT/legacy"
   add_unregistered_worktree "$PROJECTS/alpha" "$phantom" "phantom/legacy"
   rm -rf "$phantom"
@@ -908,31 +1039,36 @@ EOF
 }
 
 @test "phantom pruning refuses an active deleted cwd plus existing dirty and outside worktrees" {
-  [ -d /private/tmp ] || skip "/private/tmp not present on this host"
   command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   git_init_at "$PROJECTS/alpha"
-  TMP_WT_ROOT="$(mktemp -d /private/tmp/dj-phantom-guards.XXXXXX)"
+  TMP_WT_ROOT="$(ephemeral_tmp_root dj-phantom-guards)" ||
+    skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local active="$TMP_WT_ROOT/active"
   local existing="$TMP_WT_ROOT/existing"
   local dirty="$TMP_WT_ROOT/dirty"
-  make_outside_phantom_root >/dev/null || skip "no writable path outside /sessions and /tmp"
-  local outside="$OUTSIDE_WT_ROOT/guarded"
+  local outside
   local tries=0
 
   add_unregistered_worktree "$PROJECTS/alpha" "$active" "phantom/active"
   add_unregistered_worktree "$PROJECTS/alpha" "$existing" "phantom/existing"
   add_unregistered_worktree "$PROJECTS/alpha" "$dirty" "phantom/dirty"
-  add_unregistered_worktree "$PROJECTS/alpha" "$outside" "phantom/outside"
+  # Minted LAST: it is the only registration outside the fence root, and the
+  # suite's Git fence refuses any further worktree mutation once it exists.
+  outside="$(register_absent_outside_worktree "$PROJECTS/alpha" guarded phantom/outside)" ||
+    { echo "could not mint the non-ephemeral absent registration"; false; }
+  [ ! -e "$outside" ] && [ ! -L "$outside" ]
   printf 'precious WIP\n' > "$dirty/UNCOMMITTED.txt"
+  # Wait for lsof to observe OUR OWN pid holding that cwd, not a sleep guess.
   ( cd "$active" && exec sleep 30 ) >/dev/null 2>&1 &
   LIVE_PID=$!
-  while [ "$tries" -lt 50 ]; do
-    lsof -a -d cwd -- "$active" >/dev/null 2>&1 && break
+  while [ "$tries" -lt 100 ]; do
+    lsof -a -d cwd -p "$LIVE_PID" -- "$active" >/dev/null 2>&1 && break
     sleep 0.05
     tries=$((tries + 1))
   done
-  lsof -a -d cwd -- "$active" >/dev/null 2>&1
-  rm -rf "$active" "$outside"
+  lsof -a -d cwd -p "$LIVE_PID" -- "$active" >/dev/null 2>&1 ||
+    { echo "own live process cwd never observed inside $active"; false; }
+  rm -rf "$active"
 
   run_dj --report --scopes worktrees
   [ "$status" -eq 0 ]

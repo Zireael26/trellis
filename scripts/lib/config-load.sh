@@ -189,7 +189,7 @@ _pgcfg_validate_policy_fallback() {
     and (.github_user? | safe_text)
     and ((.harnesses? | type) == "array")
     and ((.harnesses | length) > 0)
-    and ([.harnesses[] | . == "claude" or . == "codex" or . == "omp"] | all)
+    and ([.harnesses[] | . == "claude" or . == "codex"] | all)
     and ((.harnesses | unique | length) == (.harnesses | length))
     and (
       [
@@ -279,9 +279,10 @@ _pgcfg_validate_policy() {
   fi
 
   # Prefer an AJV executable injected by the caller (including
-  # `npx -p ajv-cli`), then an installed npx package.  Compilation is the
-  # capability probe: unsupported AJV versions fall back to the deterministic
-  # jq validator instead of rejecting valid portable policy.
+  # `npx -p ajv-cli`), then a local-only npx probe (--offline --no-install).
+  # --no-update-notifier also prevents npm's independent update metadata fetch.
+  # Compilation is the capability probe: unavailable or unsupported AJV versions
+  # fall back to the deterministic jq validator instead of rejecting valid policy.
   if command -v ajv >/dev/null 2>&1 &&
      ajv compile --spec=draft2020 --strict=false -s "$schema" >/dev/null 2>&1; then
     if ajv validate --spec=draft2020 --strict=false -s "$schema" -d "$cfg" >/dev/null 2>&1; then
@@ -291,8 +292,8 @@ _pgcfg_validate_policy() {
     return "$?"
   fi
   if command -v npx >/dev/null 2>&1 &&
-     npx --no-install ajv compile --spec=draft2020 --strict=false -s "$schema" >/dev/null 2>&1; then
-    if npx --no-install ajv validate --spec=draft2020 --strict=false -s "$schema" -d "$cfg" >/dev/null 2>&1; then
+     npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s "$schema" >/dev/null 2>&1; then
+    if npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s "$schema" -d "$cfg" >/dev/null 2>&1; then
       return 0
     fi
     _pgcfg_error "$_PGCFG_EX_STATE" "portable policy failed schema validation: $cfg"

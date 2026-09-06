@@ -1,13 +1,11 @@
 #!/usr/bin/env bats
-# Tests for run-all.sh idx-5 stack-profile validator RESOLUTION (DL-P7-08).
+# Tests for run-all.sh idx-5 stack-profile validator (DL-P7-08).
 #
-# Root cause fixed here: resolve_stack_validator used `[ -x ... ]` on a script
-# that is then RUN via `bash "$vpath"` (idx-5 block) — so the exec bit is
-# irrelevant. A present-but-mode-644 validator (the state after a mirror-sync,
-# which does NOT preserve the exec bit) failed the -x test -> vpath empty ->
-# worst=fail -> idx 5 BLOCKS every merge in a stack-profile repo. Both -x tests
-# (absolute-path arm + candidate-loop) were changed to `-f` (regular-file test,
-# correct for a bash-invoked script).
+# Invariant: resolve_stack_validator uses `[ -f ... ]` (regular-file) because
+# validators are run via `bash "$vpath"` — the exec bit is irrelevant. A
+# present-but-mode-644 validator (e.g. after mirror-sync) must be located and
+# run; only a missing regular file is "validator missing". Both lookup arms
+# (absolute-path and candidate-loop) use `-f`.
 #
 # Discriminator: with -f a 644 validator is LOCATED + run via bash (its rc/output
 # flows through); with -x it is treated as MISSING -> idx 5 fail -> BLOCKED.

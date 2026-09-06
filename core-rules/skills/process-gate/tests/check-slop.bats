@@ -273,15 +273,15 @@ EOF
   [[ "$output" != *"pre-existing violation"* ]] || { echo "$output"; false; }
 }
 
-# A PATH with jq but no ruff/mypy. Truncating to `/usr/bin:/bin` assumed jq lives
-# in /usr/bin: on a host where jq is Homebrew- or apt-installed elsewhere the
-# script takes its `jq unavailable -> info n/a` branch and the test fails for a
-# reason that has nothing to do with the ladder.
+# Curate gate dependencies from the caller's PATH, preserving its Git/mktemp
+# fences and Python without exposing host linters through a directory suffix.
 linter_free_path() {
-  local shim="$PROJECT_DIR/.shim"
-  mkdir -p "$shim"
-  ln -sf "$(command -v jq)" "$shim/jq"
-  printf '%s:/usr/bin:/bin' "$shim"
+  local shim tool
+  shim="$(mktemp -d "$BATS_TEST_TMPDIR/slop-tools.XXXXXX")" || return 1
+  for tool in bash git mktemp python3 jq dirname awk cut sort grep rm cat head; do
+    ln -s "$(command -v "$tool")" "$shim/$tool" || return 1
+  done
+  printf '%s' "$shim"
 }
 
 @test "ladder: a profile config with no runnable linter falls back to patterns, not to a false clean" {
@@ -296,7 +296,18 @@ linter_free_path() {
     git add app/client.py
     git commit -q -m "add py slop"
   )
-  run bash -c "cd '$PROJECT_DIR' && PATH='$(linter_free_path)' '$SCRIPT' --range=HEAD~1..HEAD"
+  local tools caller_git caller_mktemp
+  caller_git="$(command -v git)"
+  caller_mktemp="$(command -v mktemp)"
+  tools="$(linter_free_path)"
+  [ "$(readlink "$tools/git")" = "$caller_git" ]
+  [ "$(readlink "$tools/mktemp")" = "$caller_mktemp" ]
+  [ "$(PATH="$tools" command -v git)" = "$tools/git" ]
+  PATH="$tools" python3 -c 'import sys; assert sys.version_info.major == 3'
+  PATH="$tools" jq -en 'true' >/dev/null
+  ! PATH="$tools" command -v ruff
+  ! PATH="$tools" command -v mypy
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tools' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 0 ]
   [[ "$output" == warn* ]] || { echo "$output"; false; }
   [[ "$output" == *"detection:"*"py=patterns"* ]] || { echo "$output"; false; }
@@ -326,9 +337,8 @@ linter_free_path() {
   [[ "$output" == *"app/client.py:4 — py-any-annotation"* ]] || { echo "$output"; false; }
 }
 
-# The inversion of the case above, and the one that actually shipped broken: a
-# broken linter over CLEAN added lines used to print `pass` at posture=enforced —
-# an unrun engine's empty output wearing the native lane's authority.
+# Invariant: a native engine that fails to run (exit >=2) over clean lines must warn
+# and degrade to patterns; an unrun engine's empty output must never render as pass.
 @test "ladder: a broken native engine over clean lines WARNS, it never passes" {
   posture enforced
   printf '[lint]\nselect = ["ANN401"]\n' > "$PROJECT_DIR/ruff.toml"

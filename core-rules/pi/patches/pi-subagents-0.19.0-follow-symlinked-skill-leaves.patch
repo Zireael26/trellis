@@ -1,0 +1,87 @@
+--- a/src/skill-loader.ts
++++ b/src/skill-loader.ts
+@@ -19,7 +19,7 @@
+  */
+ 
+ import type { Dirent } from "node:fs";
+-import { existsSync, readdirSync } from "node:fs";
++import { existsSync, readdirSync, statSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { join } from "node:path";
+ import { getAgentDir } from "@earendil-works/pi-coding-agent";
+@@ -79,11 +79,18 @@
+     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+ 
+     for (const entry of entries) {
+-      if (!entry.isDirectory()) continue;
+       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+ 
+-      // Symlinked dirs already filtered by entry.isDirectory() — Dirent uses lstat semantics.
+       const path = join(current, entry.name);
++      let isDirectory = entry.isDirectory();
++      if (entry.isSymbolicLink()) {
++        try {
++          isDirectory = statSync(path).isDirectory();
++        } catch {
++          continue;
++        }
++      }
++      if (!isDirectory) continue;
+       const skillMd = join(path, "SKILL.md");
+       const isSkillDir = existsSync(skillMd);
+ 
+@@ -95,6 +102,9 @@
+         continue; // Pi rule: skills don't nest — don't descend into a skill dir
+       }
+ 
++      // Follow only a symlinked skill leaf. Do not traverse arbitrary symlink trees.
++      if (entry.isSymbolicLink()) continue;
++
+       queue.push(path);
+     }
+   }
+--- a/dist/skill-loader.js
++++ b/dist/skill-loader.js
+@@ -17,7 +17,7 @@
+  *
+  * Symlinks are rejected for security (deviation from Pi, which follows them).
+  */
+-import { existsSync, readdirSync } from "node:fs";
++import { existsSync, readdirSync, statSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { join } from "node:path";
+ import { getAgentDir } from "@earendil-works/pi-coding-agent";
+@@ -70,12 +70,20 @@
+         // Deterministic byte-order traversal — locale-independent.
+         entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+         for (const entry of entries) {
+-            if (!entry.isDirectory())
+-                continue;
+             if (entry.name.startsWith(".") || entry.name === "node_modules")
+                 continue;
+-            // Symlinked dirs already filtered by entry.isDirectory() — Dirent uses lstat semantics.
+             const path = join(current, entry.name);
++            let isDirectory = entry.isDirectory();
++            if (entry.isSymbolicLink()) {
++                try {
++                    isDirectory = statSync(path).isDirectory();
++                }
++                catch {
++                    continue;
++                }
++            }
++            if (!isDirectory)
++                continue;
+             const skillMd = join(path, "SKILL.md");
+             const isSkillDir = existsSync(skillMd);
+             if (isSkillDir) {
+@@ -86,6 +94,9 @@
+                 }
+                 continue; // Pi rule: skills don't nest — don't descend into a skill dir
+             }
++            // Follow only a symlinked skill leaf. Do not traverse arbitrary symlink trees.
++            if (entry.isSymbolicLink())
++                continue;
+             queue.push(path);
+         }
+     }

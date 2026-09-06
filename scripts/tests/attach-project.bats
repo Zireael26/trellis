@@ -33,6 +33,44 @@ fixture_dev_ino() {
   printf '%s\n' "$candidate"
 }
 
+# GNU `stat -f` is --file-system and prints a filesystem block before failing on
+# the format operand, so shape-check the BSD result before trusting it.
+fixture_mode() {
+  local path="$1" candidate
+  candidate="$(/usr/bin/stat -f '%Lp' "$path" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(/usr/bin/stat -c '%a' "$path" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+# Retain a regression check for the retired release-store scratch namespace.
+release_verify_scratch() {
+  find "$TRELLIS_HOME/releases" -maxdepth 1 -name '.tmp.*.verify.*' -print 2>/dev/null
+}
+
+command_scratch() {
+  find "$TRELLIS_HOME/state/scratch" -mindepth 1 -maxdepth 1 -name '.cmd.*' -print 2>/dev/null
+}
+
+ambient_verify_scratch() {
+  find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -name 'trellis-release-verify.*' -print 2>/dev/null
+}
+
+release_tree_state() {
+  local entry
+  find "$TRELLIS_HOME/releases/1.2.3" | sort | while IFS= read -r entry; do
+    if [ -f "$entry" ] && [ ! -L "$entry" ]; then
+      printf '%s\t%s\t%s\n' "${entry#"$TRELLIS_HOME/"}" "$(fixture_mode "$entry")" "$(sha256_file "$entry")"
+    else
+      printf '%s\t%s\t-\n' "${entry#"$TRELLIS_HOME/"}" "$(fixture_mode "$entry")"
+    fi
+  done
+}
+
 bootstrap_release_admin() {
   local bootstrap="$SANDBOX/bootstrap release source ${TRELLIS_HOME##*/}" config user_home trellis_home
   mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME" "$bootstrap/scripts"
@@ -113,12 +151,6 @@ SH
     "codex": {
       "links": [
         {"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}
-      ],
-      "render": []
-    },
-    "omp": {
-      "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
       ],
       "render": []
     }
@@ -209,8 +241,7 @@ SH
       "render": [
         {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": true}
       ]
-    },
-    "omp": {"links": [], "render": []}
+    }
   }
 }
 JSON
@@ -370,13 +401,12 @@ run_managed_pre_push() {
   run bash -c 'cd "$1" && "$2" origin fixture < "$3"' _ "$PROJECT" "$managed/pre-push" "$refs"
 }
 
-@test "attach expands all three harnesses into absent local parent leaves and keeps tracked Git clean" {
+@test "attach expands both harnesses into absent local parent leaves and keeps tracked Git clean" {
   run_attach
   [ "$status" -eq 0 ]
   [ -L "$PROJECT/.trellis/runtime" ]
   [ -L "$PROJECT/.claude/rules/trellis.md" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
-  [ -L "$PROJECT/.omp/AGENTS.md" ]
   [ -f "$PROJECT/.git/info/exclude" ]
   grep -F '# --- Trellis local attachment exclude block ---' "$PROJECT/.git/info/exclude"
   [ -z "$(git -C "$PROJECT" status --porcelain)" ]
@@ -987,13 +1017,12 @@ SH
   [[ "$(cat "$output_file")" == *"Git worktree filesystem identity changed while holding the checkout lock"* ]] || { cat "$output_file"; false; }
 }
 
-@test "harness selector attaches only requested native surfaces" {
-  run_attach --harness omp
+@test "harness selector attaches only the requested native surface" {
+  run_attach --harness codex
   [ "$status" -eq 0 ]
   [ -L "$PROJECT/.trellis/runtime" ]
-  [ -L "$PROJECT/.omp/AGENTS.md" ]
   [ ! -e "$PROJECT/.claude" ]
-  [ ! -e "$PROJECT/.agents" ]
+  [ -L "$PROJECT/.agents/rules/trellis.md" ]
   [ -z "$(git -C "$PROJECT" status --porcelain)" ]
 }
 
@@ -1032,8 +1061,8 @@ SH
   run_attach
   [ "$status" -eq 0 ]
   rm "$PROJECT/.trellis/runtime"
-  rm "$PROJECT/.omp/AGENTS.md"
-  ln -s wrong-target "$PROJECT/.omp/AGENTS.md"
+  rm "$PROJECT/.agents/rules/trellis.md"
+  ln -s wrong-target "$PROJECT/.agents/rules/trellis.md"
 
   run "$ATTACH" relink --home "$TRELLIS_HOME" "$PROJECT"
   [ "$status" -eq 3 ]
@@ -1044,12 +1073,12 @@ SH
   run_attach
   [ "$status" -eq 0 ]
   WORKTREE="$SANDBOX/linked worktree"
-  git -C "$PROJECT" worktree add -qb fixture-linked "$WORKTREE"
+  git -C "$PROJECT" worktree add -q -b fixture-linked "$WORKTREE"
 
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
   [ "$status" -eq 0 ]
   [ -L "$WORKTREE/.trellis/runtime" ]
-  [ -L "$WORKTREE/.omp/AGENTS.md" ]
+  [ -L "$WORKTREE/.agents/rules/trellis.md" ]
   [ "$(grep -c '^# --- Trellis local attachment exclude block ---$' "$PROJECT/.git/info/exclude")" -eq 1 ]
   [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print | wc -l | tr -d ' ')" -eq 2 ]
   jq -s -e 'map(.exclude.managed_by_attachment) | sort == [false, true]' $(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)
@@ -1058,16 +1087,16 @@ SH
 }
 
 @test "idempotent attach rejects harness and environment override drift" {
-  run_attach --harness omp
+  run_attach --harness codex
   [ "$status" -eq 0 ]
 
   run_attach --harness claude
   [ "$status" -eq 3 ]
-  run env TRELLIS_RELEASE=1.2.4 "$ATTACH" attach --home "$TRELLIS_HOME" --harness omp "$PROJECT"
+  run env TRELLIS_RELEASE=1.2.4 "$ATTACH" attach --home "$TRELLIS_HOME" --harness codex "$PROJECT"
   [ "$status" -eq 3 ]
-  run env TRELLIS_FLEET=work "$ATTACH" attach --home "$TRELLIS_HOME" --harness omp "$PROJECT"
+  run env TRELLIS_FLEET=work "$ATTACH" attach --home "$TRELLIS_HOME" --harness codex "$PROJECT"
   [ "$status" -eq 3 ]
-  run_attach --harness omp
+  run_attach --harness codex
   [ "$status" -eq 0 ]
 }
 
@@ -1207,6 +1236,102 @@ SH
   [[ "$output" != *"tampered post-checkout reconciler"* ]] || { echo "$output"; false; }
 }
 
+@test "managed dispatchers allocate private command scratch and clean it after execution" {
+  local hook previous="$PROJECT/.previous-hooks" observed
+  mkdir -p "$previous"
+  git -C "$PROJECT" config --local core.hooksPath .previous-hooks
+  git -C "$PROJECT" config --local trellis.fixture-scratch-root "$TRELLIS_HOME/state/scratch"
+  for hook in post-checkout pre-push; do
+    cat > "$previous/$hook" <<'SH'
+#!/usr/bin/env bash
+set -eu
+root="$(git config --local trellis.fixture-scratch-root)"
+set -- "$root"/.cmd.*
+[ "$#" -eq 1 ] && [ -d "$1" ] && [ ! -L "$1" ]
+mode="$(stat -f '%Lp' "$1" 2>/dev/null)" || mode="$(stat -c '%a' "$1")"
+[ "$mode" = 700 ]
+printf '%s\n' "scratch-observed:$1"
+printf 'owned fixture probe\n' > "$1/probe"
+SH
+    chmod 755 "$previous/$hook"
+  done
+  run_attach
+  [ "$status" -eq 0 ]
+  managed="$(managed_hooks_path)"
+  for hook in post-checkout pre-push; do
+    run bash -c 'cd "$1" && "$2" old new 1 </dev/null' _ "$PROJECT" "$managed/$hook"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    observed="$(printf '%s\n' "$output" | sed -n 's/^scratch-observed://p')"
+    [[ "$observed" == "$TRELLIS_HOME/state/scratch/.cmd."* ]] || { echo "$output"; false; }
+    [ ! -e "$observed" ] && [ ! -L "$observed" ]
+    [ -z "$(command_scratch)" ] || { command_scratch; false; }
+    [ -z "$(release_verify_scratch)" ] || { release_verify_scratch; false; }
+    [ -z "$(ambient_verify_scratch)" ] || { ambient_verify_scratch; false; }
+  done
+}
+
+@test "managed post-checkout verifies its sealed release with a read-only store and no ambient temporary space" {
+  run_attach
+  [ "$status" -eq 0 ]
+  managed="$(managed_hooks_path)"
+  sealed="$(release_tree_state)"
+  local restore_mode="$(fixture_mode "$TRELLIS_HOME/releases")"
+  chmod a-w "$TRELLIS_HOME/releases"
+
+  run env -u TMPDIR -u TMP -u TEMP bash -c 'cd "$1" && "$2" "$3" "$4" 1' _ "$PROJECT" "$managed/post-checkout" old new
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  chmod "$restore_mode" "$TRELLIS_HOME/releases"
+  [ "$(release_tree_state)" = "$sealed" ] || { diff <(printf '%s\n' "$sealed") <(release_tree_state); false; }
+  [ -z "$(command_scratch)" ] || { command_scratch; false; }
+  [ -z "$(release_verify_scratch)" ] || { release_verify_scratch; false; }
+  [ -z "$(ambient_verify_scratch)" ] || { ambient_verify_scratch; false; }
+}
+
+@test "managed post-checkout leaves no verification scratch after a sealed content mismatch" {
+  run_attach
+  [ "$status" -eq 0 ]
+  managed="$(managed_hooks_path)"
+  reconciler="$TRELLIS_HOME/releases/1.2.3/payload/scripts/seed-inheritance-symlinks.sh"
+  chmod u+w "$reconciler"
+  printf '#!/usr/bin/env bash\nprintf "mismatch post-checkout reconciler\\n" >&2\nexit 0\n' > "$reconciler"
+  chmod 500 "$reconciler"
+
+  run env -u TMPDIR -u TMP -u TEMP bash -c 'cd "$1" && "$2" "$3" "$4" 1' _ "$PROJECT" "$managed/post-checkout" old new
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"trellis post-checkout: attachment reconciliation failed"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"mismatch post-checkout reconciler"* ]] || { echo "$output"; false; }
+  [ -z "$(command_scratch)" ] || { command_scratch; false; }
+  [ -z "$(release_verify_scratch)" ] || { release_verify_scratch; false; }
+  [ -z "$(ambient_verify_scratch)" ] || { ambient_verify_scratch; false; }
+}
+
+@test "managed post-checkout refuses unwritable command scratch without ambient fallback" {
+  run_attach
+  [ "$status" -eq 0 ]
+  managed="$(managed_hooks_path)"
+  scratch_root="$TRELLIS_HOME/state/scratch"
+  mkdir -p "$scratch_root"
+  chmod 700 "$scratch_root"
+  restore_mode="$(fixture_mode "$scratch_root")"
+  chmod a-w "$scratch_root"
+  denied_mode="$(fixture_mode "$scratch_root")"
+
+  run env -u TMPDIR -u TMP -u TEMP bash -c 'cd "$1" && "$2" "$3" "$4" 1' _ "$PROJECT" "$managed/post-checkout" old new
+  hook_status="$status"
+  hook_output="$output"
+  after_mode="$(fixture_mode "$scratch_root")"
+  chmod "$restore_mode" "$scratch_root"
+
+  [ "$hook_status" -eq 1 ] || { echo "$hook_output"; false; }
+  [[ "$hook_output" == *"trellis managed hook: could not create a private command scratch directory"* ]] || { echo "$hook_output"; false; }
+  [ "$after_mode" = "$denied_mode" ] || { echo "$denied_mode -> $after_mode"; false; }
+  [ -z "$(command_scratch)" ] || { command_scratch; false; }
+  [ -z "$(release_verify_scratch)" ] || { release_verify_scratch; false; }
+  [ -z "$(ambient_verify_scratch)" ] || { ambient_verify_scratch; false; }
+}
+
 @test "relink recreates a missing managed pre-push dispatcher atomically" {
   run_attach
   [ "$status" -eq 0 ]
@@ -1315,12 +1440,6 @@ make_deferral_release() {
     "codex": {
       "links": [
         {"project_target": "CLAUDE.md", "fallback_source": "core-rules/CLAUDE.md", "destination": "AGENTS.md"}
-      ],
-      "render": []
-    },
-    "omp": {
-      "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
       ],
       "render": []
     }

@@ -13,6 +13,7 @@ set -uo pipefail
 
 FENCE_ROOT="${TRELLIS_TEST_GIT_FENCE_ROOT:-}"
 REAL_GIT="${TRELLIS_TEST_REAL_GIT:-}"
+FIXED_PYTHON="${TRELLIS_TEST_REAL_PYTHON:-}"
 SELF="${BASH_SOURCE[0]}"
 ORIGINAL_ARGS=("$@")
 
@@ -26,10 +27,22 @@ fence_die() {
 [ -n "$REAL_GIT" ] || fence_die "TRELLIS_TEST_REAL_GIT is not set"
 [ -x "$REAL_GIT" ] || fence_die "real Git is unavailable: $REAL_GIT"
 [ "$REAL_GIT" != "$SELF" ] || fence_die "real Git resolves to the fence itself"
+if [ -n "$FIXED_PYTHON" ]; then
+  case "$FIXED_PYTHON" in /*) ;; *) fence_die "fixed Python is not absolute: $FIXED_PYTHON" ;; esac
+  [ -x "$FIXED_PYTHON" ] || fence_die "fixed Python is unavailable: $FIXED_PYTHON"
+fi
+
+fence_python() {
+  if [ -n "$FIXED_PYTHON" ]; then
+    "$FIXED_PYTHON" "$@"
+  else
+    command -v python3 >/dev/null 2>&1 || fence_die "python3 is required to inspect mutation targets"
+    python3 "$@"
+  fi
+}
 
 canonical_path() {
-  command -v python3 >/dev/null 2>&1 || fence_die "python3 is required to canonicalize mutation targets"
-  python3 - "$1" <<'PY'
+  fence_python - "$1" <<'PY'
 import os
 import sys
 
@@ -245,6 +258,86 @@ require_fenced_repo() {
       *) fence_die "$operation has an unprovable relative configured work tree: $configured_work_tree" ;;
     esac
   fi
+}
+
+fence_worktree_operands() {
+  fence_python - "$FENCE_ROOT" "$REAL_GIT" "$EFFECTIVE_CWD" "${#GIT_PREFIX[@]}" \
+    ${GIT_PREFIX[@]+"${GIT_PREFIX[@]}"} ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"} <<'PY_WORKTREES'
+import os
+import subprocess
+import sys
+
+root, git, cwd, prefix_count = sys.argv[1:5]
+count = int(prefix_count)
+prefix = sys.argv[5:5 + count]
+args = sys.argv[5 + count:]
+
+def refuse(reason):
+    print("test-git-fence: REFUSED: " + reason, file=sys.stderr)
+    raise SystemExit(97)
+
+def fenced(path):
+    resolved = os.path.realpath(os.path.join(cwd, path))
+    if os.path.commonpath([root, resolved]) != root:
+        refuse("git worktree target outside test root: " + resolved)
+
+# Do not store NUL-delimited output in a shell variable: command substitution
+# strips NULs and can merge paths with the following HEAD/branch records.
+try:
+    listing = subprocess.check_output([git, *prefix, "worktree", "list", "--porcelain", "-z"])
+except subprocess.CalledProcessError:
+    refuse("cannot enumerate registered Git worktrees")
+paths = [os.fsdecode(item[9:]) for item in listing.split(b"\0") if item.startswith(b"worktree ")]
+if not paths:
+    refuse("no registered Git worktree paths")
+# Git accepts short worktree aliases. Proving every registered path is contained
+# prevents an innocent-looking basename resolving to an outside checkout.
+for path in paths:
+    fenced(path)
+
+if not args:
+    refuse("missing worktree operation")
+action, remaining = args[0], iter(args[1:])
+positionals = []
+end_options = False
+for arg in remaining:
+    if end_options:
+        positionals.append(arg)
+    elif arg == "--":
+        end_options = True
+    elif arg in {"-b", "-B", "--reason", "--track"}:
+        if arg == "--track":
+            continue
+        if next(remaining, None) is None:
+            refuse("missing worktree option value: " + arg)
+    elif arg.startswith(("--reason=", "--track=")):
+        continue
+    elif arg in {"-f", "--force", "-q", "--quiet", "--detach", "--lock", "--checkout", "--no-checkout", "--guess-remote", "--no-guess-remote", "--orphan", "--no-track"}:
+        continue
+    elif arg.startswith("-"):
+        refuse("unsupported worktree option: " + arg)
+    else:
+        positionals.append(arg)
+
+if action == "add":
+    if not 1 <= len(positionals) <= 2:
+        refuse("worktree add requires a destination and optional ref")
+    targets = positionals[:1]
+elif action == "move":
+    if len(positionals) != 2:
+        refuse("worktree move requires source and destination")
+    targets = positionals
+elif action == "repair":
+    targets = positionals
+else:
+    if len(positionals) != 1:
+        refuse("worktree operation requires one target")
+    targets = positionals
+for target in targets:
+    fenced(target)
+PY_WORKTREES
+  local rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
 }
 
 config_is_mutation() {
@@ -501,21 +594,14 @@ case "$SUBCOMMAND" in
     fence_maintenance
     ;;
   worktree)
-    worktree_action=""
-    for worktree_arg in ${SUBCOMMAND_ARGS[@]+"${SUBCOMMAND_ARGS[@]}"}; do
-      case "$worktree_arg" in
-        --|-*) ;;
-        *) worktree_action="$worktree_arg"; break ;;
-      esac
-    done
+    worktree_action="${SUBCOMMAND_ARGS[0]:-}"
     case "$worktree_action" in
-      add|remove|prune|move|repair|lock|unlock)
-        # Some janitor cases deliberately put a linked tree under /private/tmp.
-        # Its path may therefore be outside FENCE_ROOT; ownership is proved by
-        # both the common dir and per-worktree gitdir remaining inside the
-        # freshly-created fixture repo. Git cannot remove an unrelated tree
-        # through that fixture common dir.
+      add|remove|move|repair|lock|unlock)
         require_fenced_repo "git worktree $worktree_action"
+        fence_worktree_operands
+        ;;
+      prune)
+        require_fenced_repo "git worktree prune"
         ;;
     esac
     ;;

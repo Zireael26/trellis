@@ -15,6 +15,8 @@ Usage:
   registry.sh list [--fleet NAME] [--json] [--home PATH]
   registry.sh rebuild --fleet NAME ROOT... [--apply] [--max-depth N]
                       [--progress|--no-progress] [--home PATH]
+  registry.sh deregister --fleet NAME (--project ID | --root PATH |
+                         --worktree-root PATH) [--force] [--home PATH]
   registry.sh annotate --fleet NAME --project NAME --metadata-json JSON
                        [--home PATH]
 
@@ -22,8 +24,22 @@ Usage:
 registry.json. It requires --fleet NAME to already exist in this machine's
 config; create it first with `trellis fleet add NAME --discovery-root PATH`.
 `rebuild` scans only explicit roots for valid .trellis.json files, prints a
-deterministic preview by default, and writes only with --apply. `annotate` sets
+deterministic preview by default, and writes only with --apply. `deregister`
+removes registered worktree rows matched by one selector and prints each
+removed row; a row whose path still exists is refused unless --force is
+given. `annotate` sets
 machine-local metadata on one already-registered project row.
+
+Deregister options:
+  --project ID          Remove every registered worktree row for project ID
+                        in the fleet (all of its checkouts).
+  --root PATH           Remove every registered worktree row whose checkout
+                        root is PATH (the whole checkout).
+  --worktree-root PATH  Remove the registered worktree row whose worktree
+                        root is PATH (one row). PATH values are canonicalized
+                        but need not exist; that is the point — dead rows
+                        whose paths are gone are removed without --force.
+  --force               Also remove rows whose worktree root still exists.
 
 Import options:
   --projects-root PATH  Resolve every legacy row path that is not an existing
@@ -619,6 +635,7 @@ rebuild_candidates() {
 
 cmd_rebuild() {
   local home_opt="" fleet="" apply=0 home state candidates filtered preview base proposal candidate project_id checkout_root common checkout_id worktree_root worktree_id metadata rc=0 result_rc
+  local dup_report="" dup="" dup_id="" dup_manifests=""
   local max_depth="$REBUILD_MAX_DEPTH_DEFAULT" progress=auto
   local -a roots=()
   while [ "$#" -gt 0 ]; do
@@ -662,7 +679,18 @@ cmd_rebuild() {
   fi
   mv "$filtered" "$candidates" || { rm -f "$state" "$candidates" "$filtered"; return "$TRELLIS_EX_UNAVAILABLE"; }
   if ! jq -s -e '([.[].project_id] | length) == ([.[].project_id] | unique | length)' "$candidates" >/dev/null; then
-    rm -f "$state" "$candidates"; local_registry_err "rebuild found duplicate project IDs in selected roots"; return "$TRELLIS_EX_CONFLICT"
+    dup_report="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.duplicates.XXXXXX")" || { rm -f "$state" "$candidates"; return "$TRELLIS_EX_UNAVAILABLE"; }
+    if jq -s -c 'group_by(.project_id) | map(select(length > 1))[] | {project_id: .[0].project_id, manifests: ([.[].metadata.rebuild.manifest] | sort)}' "$candidates" > "$dup_report" 2>/dev/null; then
+      while IFS= read -r dup; do
+        [ -n "$dup" ] || continue
+        dup_id="$(printf '%s\n' "$dup" | jq -r '.project_id')" || dup_id='?'
+        dup_manifests="$(printf '%s\n' "$dup" | jq -r '.manifests | join(", ")')" || dup_manifests='?'
+        local_registry_err "rebuild duplicate project ID '$dup_id' in manifests: $dup_manifests"
+      done < "$dup_report"
+    fi
+    rm -f "$dup_report" "$state" "$candidates"
+    local_registry_err "rebuild found duplicate project IDs in selected roots"
+    return "$TRELLIS_EX_CONFLICT"
   fi
   preview="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.preview.XXXXXX")" || { rm -f "$state" "$candidates"; return "$TRELLIS_EX_UNAVAILABLE"; }
   jq -s -S --arg fleet "$fleet" '{action: "rebuild", fleet: $fleet, apply_required: true, candidates: sort_by(.project_id, .worktree_root)}' "$candidates" > "$preview" || {
@@ -709,6 +737,192 @@ cmd_rebuild() {
   return "$rc"
 }
 
+# Removes registered worktree rows matched by exactly one selector. Rows whose
+# worktree root still exists are refused unless --force is given, so a live
+# checkout cannot be deregistered by accident; rows whose paths are already
+# gone (the dead-row case) are removed without --force. Checkouts left with no
+# worktrees are pruned, as are projects left with no checkouts and no
+# unavailable-root records. Owner/attachment state files are untouched (they
+# are evidence for recover). Each removed row is printed to stdout as
+# `deregistered: <project_id> <worktree_root>`; all diagnostics go to stderr.
+cmd_deregister() {
+  local home_opt="" fleet="" project="" root="" worktree_root="" force=0 home state matched proposal base
+  local selector="" selector_value="" row row_project row_worktree_root row_checkout still=""
+  local live_refused=0 rc=0 result_rc
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --home) [ "$#" -ge 2 ] || usage_error "--home requires PATH"; home_opt="$2"; shift 2 ;;
+      --fleet) [ "$#" -ge 2 ] || usage_error "--fleet requires NAME"; fleet="$2"; shift 2 ;;
+      --project) [ "$#" -ge 2 ] || usage_error "--project requires ID"; project="$2"; shift 2 ;;
+      --root) [ "$#" -ge 2 ] || usage_error "--root requires PATH"; root="$2"; shift 2 ;;
+      --worktree-root) [ "$#" -ge 2 ] || usage_error "--worktree-root requires PATH"; worktree_root="$2"; shift 2 ;;
+      --force) force=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      --*) usage_error "unknown deregister option: $1" ;;
+      *) usage_error "unknown deregister argument: $1" ;;
+    esac
+  done
+  [ -n "$fleet" ] || usage_error "deregister requires --fleet NAME"
+  trellis_home_require_fleet_name "$fleet" || return "$?"
+  selector=""; selector_value=""
+  if [ -n "$project" ]; then selector="project"; selector_value="$project"; fi
+  if [ -n "$root" ]; then
+    [ -z "$selector" ] || usage_error "deregister accepts exactly one of --project, --root, --worktree-root"
+    selector="root"; selector_value="$root"
+  fi
+  if [ -n "$worktree_root" ]; then
+    [ -z "$selector" ] || usage_error "deregister accepts exactly one of --project, --root, --worktree-root"
+    selector="worktree-root"; selector_value="$worktree_root"
+  fi
+  [ -n "$selector" ] || usage_error "deregister requires one of --project ID, --root PATH, --worktree-root PATH"
+  if [ "$selector" = project ]; then
+    local_registry_require_project_id "$project" || return "$?"
+  elif [ "$selector" = root ]; then
+    root="$(local_registry_normalize_absolute_safe_path "deregister root" "$root")" || return "$?"
+    selector_value="$root"
+  else
+    worktree_root="$(local_registry_normalize_absolute_safe_path "deregister worktree root" "$worktree_root")" || return "$?"
+    selector_value="$worktree_root"
+  fi
+  home="$(local_registry_home "$home_opt")" || return "$?"
+  require_configured_fleet "$home" "$fleet" || return "$?"
+  state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  matched="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.deregister.XXXXXX")" || { rm -f "$state"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  # Diagnostic (lenient) read on purpose: strict identity validation fails the
+  # WHOLE listing on any row whose path is present but unresolvable, and that
+  # row is exactly what deregister exists to remove -- a chicken-and-egg that
+  # made a dead consumer row unremovable on 2026-09-04. The write below
+  # re-reads under the lock through local_registry_load and stays strict.
+  local_registry_read_diagnostic_state "$home" > "$state" || { rc="$?"; rm -f "$state" "$matched"; return "$rc"; }
+  if ! jq -c --arg fleet "$fleet" --arg project "$project" --arg root "$root" --arg worktree_root "$worktree_root" --arg selector "$selector" '
+    .projects | to_entries[] | .key as $key | .value as $stored
+    | select($stored.fleet == $fleet)
+    | select($selector != "project" or $stored.project_id == $project)
+    | .value.checkouts | to_entries[] | .key as $checkout_id | .value as $checkout
+    | select($selector != "root" or $checkout.root == $root)
+    | .value.worktrees | to_entries[] | .key as $worktree_id | .value as $worktree
+    | select($selector != "worktree-root" or $worktree.root == $worktree_root)
+    | {project_key: $key, project_id: $stored.project_id, checkout_id: $checkout_id,
+       checkout_root: $checkout.root, worktree_id: $worktree_id, worktree_root: $worktree.root}
+  ' "$state" > "$matched"; then
+    rm -f "$state" "$matched"
+    local_registry_err "could not select deregister rows for --$selector $selector_value in fleet $fleet"
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ ! -s "$matched" ]; then
+    rm -f "$state" "$matched"
+    local_registry_err "deregister matched no registered rows: --$selector $selector_value in fleet $fleet"
+    return "$TRELLIS_EX_STATE"
+  fi
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    row_project="$(printf '%s\n' "$row" | jq -r '.project_id')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
+    row_worktree_root="$(printf '%s\n' "$row" | jq -r '.worktree_root')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
+    row_checkout="$(printf '%s\n' "$row" | jq -r '.checkout_id')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
+    if [ "$force" -eq 0 ] && { [ -e "$row_worktree_root" ] || [ -L "$row_worktree_root" ]; }; then
+      local_registry_err "deregister refuses a live row without --force: $fleet/$row_project root $row_worktree_root checkout $row_checkout"
+      live_refused=1
+    fi
+  done < "$matched"
+  if [ "$live_refused" -ne 0 ]; then
+    rm -f "$state" "$matched"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  trellis_home_prepare_home "$home" || { rc="$?"; rm -f "$state" "$matched"; return "$rc"; }
+  trellis_home_lock_acquire "$home" registry 30 || { rc="$?"; rm -f "$state" "$matched"; return "$rc"; }
+  base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || {
+    trellis_home_lock_release >/dev/null 2>&1 || true
+    rm -f "$state" "$matched"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.deregister-apply.XXXXXX")" || {
+    rm -f "$base"
+    trellis_home_lock_release >/dev/null 2>&1 || true
+    rm -f "$state" "$matched"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  # Reload under the lock exactly like cmd_rebuild: the selection above was
+  # read without it, so the removal is re-applied to the locked base and every
+  # selected row is verified gone before the write. Only checkouts and projects
+  # touched by the selection can lose members; untouched rows (including empty
+  # checkout shells and unavailable-root records) are preserved as written.
+  local_registry_load "$home" "$base" || rc="$?"
+  if [ "$rc" -eq 0 ]; then
+    # NOTE (jq): a function argument after `|` is evaluated against the
+    # pipe's output, not the outer entry, so every key used inside a
+    # membership test is bound to a $variable BEFORE the pipe. Membership
+    # itself uses any() with scalar == comparisons: jq 1.7 `index` never
+    # matches array elements, so tuple-IN-index silently misses.
+    if jq -S --slurpfile matched "$matched" '
+      ($matched | map([.project_key, .checkout_id, .worktree_id])) as $doomed
+      | ($matched | map([.project_key, .checkout_id]) | unique) as $doomed_checkouts
+      | ($matched | map(.project_key) | unique) as $doomed_projects
+      | def doomed_wt($p; $c; $w): any($doomed[]; .[0] == $p and .[1] == $c and .[2] == $w);
+        def doomed_co($p; $c): any($doomed_checkouts[]; .[0] == $p and .[1] == $c);
+        def doomed_pr($p): any($doomed_projects[]; . == $p);
+        .projects |= with_entries(
+        .key as $pkey
+        | .value.checkouts |= (if type == "object" then with_entries(
+          .key as $ckey
+          | if doomed_co($pkey; $ckey) then
+              (. | .value.worktrees |= (if type == "object" then with_entries(
+                .key as $wkey
+                | select(doomed_wt($pkey; $ckey; $wkey) | not)
+              ) else . end))
+            else .
+            end
+        ) else . end)
+        | .value.checkouts |= (if type == "object" then with_entries(
+          .key as $ckey
+          | select(if doomed_co($pkey; $ckey)
+                   then ((.value.worktrees // {} | length) > 0)
+                   else true end)
+        ) else . end)
+      )
+      | .projects |= with_entries(
+        .key as $pkey
+        | select(if doomed_pr($pkey)
+                 then (((.value.checkouts // {} | length) > 0) or ((.value.unavailable_roots // []) | length) > 0)
+                 else true end)
+      )
+    ' "$base" > "$proposal" 2>/dev/null; then
+      :
+    else
+      rc="$TRELLIS_EX_STATE"
+      local_registry_err "could not construct deregister proposal for --$selector $selector_value in fleet $fleet"
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    still="$(jq --slurpfile matched "$matched" '
+      ($matched | map([.project_key, .checkout_id, .worktree_id])) as $doomed
+      | [.projects | to_entries[] | .key as $key
+         | (.value.checkouts // {}) | to_entries[] | .key as $checkout_key
+         | ((.value.worktrees // {}) | keys[]) as $worktree_key
+         | [$key, $checkout_key, $worktree_key]]
+      | map(select(. as $candidate
+        | ([$doomed[] | select(.[0] == $candidate[0] and .[1] == $candidate[1] and .[2] == $candidate[2])] | length) > 0)) | length
+    ' "$proposal" 2>/dev/null)" || rc="$TRELLIS_EX_STATE"
+  fi
+  if [ "$rc" -eq 0 ] && [ "${still:-0}" != 0 ]; then
+    rc="$TRELLIS_EX_CONFLICT"
+    local_registry_err "deregister target changed before write for --$selector $selector_value in fleet $fleet; retry"
+  fi
+  if [ "$rc" -eq 0 ]; then local_registry_write_locked "$home" "$proposal" || rc="$?"; fi
+  trellis_home_lock_release >/dev/null 2>&1
+  result_rc="$?"
+  rc="$(highest_exit "$rc" "$result_rc")"
+  if [ "$rc" -eq 0 ]; then
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      row_project="$(printf '%s\n' "$row" | jq -r '.project_id')" || { rc="$TRELLIS_EX_STATE"; break; }
+      row_worktree_root="$(printf '%s\n' "$row" | jq -r '.worktree_root')" || { rc="$TRELLIS_EX_STATE"; break; }
+      printf 'deregistered: %s %s\n' "$row_project" "$row_worktree_root"
+    done < "$matched"
+  fi
+  rm -f "$state" "$matched" "$proposal" "$base"
+  return "$rc"
+}
+
 # Machine-local metadata setter for an already-registered row. It exists because
 # machine-local facts a migrated project can no longer track — per-project gptx
 # routing being the case that forced it — need a home that survives migration,
@@ -744,6 +958,7 @@ main() {
     import) shift; cmd_import "$@" ;;
     list) shift; cmd_list "$@" ;;
     rebuild) shift; cmd_rebuild "$@" ;;
+    deregister) shift; cmd_deregister "$@" ;;
     annotate) shift; cmd_annotate "$@" ;;
     -h|--help|help|'') usage ;;
     *) usage_error "unknown command: $command" ;;

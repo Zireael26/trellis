@@ -9,28 +9,43 @@ to an executor node, and how a named teammate is released. Read it when
 orchestrating a multi-stage workflow, selecting a route, considering an executor
 node, or holding a live teammate.
 
+## Supported harness triad
+
+Trellis supports exactly three native harnesses for herdr/foreman workflows:
+
+- **codex** — GPT-agent computer use and web search through Codex CLI.
+- **pi** — GPT and non-GPT models; the default foreman and worker harness.
+- **claude code** — Claude-family agents.
+
 ## Deterministic task-shape routing
 
 Classify every dispatchable unit before dispatch as exactly one finite shape. Do
-not choose from overlapping subjective notions of model fit. The classifier's
-preferred primary lanes and effort are:
+not choose from overlapping subjective notions of model fit. Shapes describe
+work; concrete agents, compatible chains, effort and eligibility come from
+`core-rules/skills/herdr-foreman/roles.json` through `scripts/resolve-roles.py`
+in that skill, not a copied model table here.
 
-| task shape | intended primary agent/lane | effort | Sol eligibility |
-|---|---|---|---|
-| `scan` | Flash | `high` | never |
-| `mechanical-coding` | Luna | `max` | never |
-| `bounded-review` | Muse (`cheap`) | `xhigh` | never |
-| `deep-work` | GLM Flash (`glm-flash-go` first, prepaid `glm-flash` fallback) | `max` | never |
-| `hard-work` | Luna / GLM Flash primary; Grok / Sol tail | `max` primary; `xhigh` tail | reserved; Sol only at `xhigh` |
-| `security-review` | Grok / Sol primary; GLM Flash fallback | `xhigh` primary; `max` fallback | eligible; Sol only at `xhigh` |
-| `merge-review` | Sol / Grok | `xhigh` | eligible; Sol only at `xhigh` |
+| task shape | bounded purpose |
+|---|---|
+| `scan` | Read-only discovery and source inventory |
+| `mechanical-coding` | Implementation against a pre-existing oracle |
+| `bounded-review` | Independent first-pass review of a known scope |
+| `deep-work` | Sustained investigation or implementation with substantial context |
+| `hard-work` | Difficult implementation or weak-oracle problem solving |
+| `security-review` | Adversarial security verdict |
+| `merge-review` | Final merge-readiness verdict |
 
-`bounded-review` is a bounded first-pass review against a known scope or oracle.
-It is not a merge or security verdict. `security-review` and `merge-review` are
-verdict roles: their selected reviewer family must differ from the producer
-family, and their compatible chains may use Sol. Sol is never `max` and is never
-a bounded first-pass reviewer. `hard-work` may use a compatible deep/hard chain,
-with Sol reserved for eligible `xhigh` work.
+`bounded-review` is not the final merge or security gate, but the classifier
+still requires its reviewer family to differ from the producer family, as for
+`security-review` and `merge-review`. Preserve those checks and the configured
+capability/effort restrictions; a cheaper first pass does not waive independence.
+
+Orthogonal to shape: a unit whose execution needs live web search or computer
+use, when it resolves to a GPT/Codex-family agent, runs on the Codex CLI harness
+through Herdr (`herdr agent start --kind codex -- --search`), rather than the
+text-only pi workflow (operator ruling 2026-09-02). Codex CLI is the only
+non-Claude harness with native `web_search` and working computer use; pi GPT
+lanes are text-only workflow/subagent workers.
 
 Every dispatch requires one finite task shape, including dispatches with an
 operator-named agent. The operator agent then wins exactly over automatic
@@ -69,7 +84,7 @@ rejects the unit.
   synthesize**. If it does not, run the same stages yourself — the
   decompose / verify / synthesize discipline holds regardless of harness.
 - Keep planning and synthesis on the orchestrator. It coordinates review and
-  acceptance; classified review units themselves route according to the table and
+  acceptance; classified review units themselves route through the classifier and
   return for the orchestrator's gate.
 
 ## Which paradigm for parallel work
@@ -121,9 +136,10 @@ correctness cost: it changes which agent runs a unit, never what that agent can 
 
 - When a dispatchable executor node is available, route classified
   `mechanical-coding` and eligible `hard-work` units to it. Planning and
-  synthesis stay on the orchestrator; classified review units route according to
-  the table and return for its acceptance gate. When no executor node is
-  available, run every unit on the orchestrator itself.
+  synthesis stay on the orchestrator; classified review units route through the
+  classifier and return for its acceptance gate. Without an executor node,
+  eligible implementation can stay inline under the parent delegation policy;
+  required independent review remains unmet if no eligible reviewer is available.
 - **This is a capability gate, not a model-identity branch.** Inspect the
   dispatch surfaces the session actually exposes; do not infer them from which
   model owns the main loop.
@@ -139,8 +155,9 @@ correctness cost: it changes which agent runs a unit, never what that agent can 
   and bright-line ops still stay on the orchestrator.
 - Trellis ships no custom executor-agent definitions. Deliberate direct Codex CLI
   dispatch (`codex exec --json ...` from the orchestrator, which holds Bash) is
-  the supported executor route; generic Codex CLI harness support is independent
-  of any plugin. Inside a Workflow engine (no shell), dispatch a general-purpose
+  one supported executor route, not the only one; the classifier or explicit
+  operator selection determines the actual model and host. Generic Codex CLI
+  harness support is independent of any plugin. Inside a Workflow engine (no shell), dispatch a general-purpose
   agent to run the executor mechanics rather than an agent-type alias for a
   removed custom agent.
 - Executor output always passes the orchestrator's review gate and observed-route
@@ -175,7 +192,7 @@ workflow agents auto-terminate, named teammates do not.
   orchestrator slot but does not prove the operating-system process exited.
 - Declaring done with teammates still live leaks panes and memory — see
   `core-rules/CLAUDE.md` § Definition of done.
-- The same rule binds **OMP panes**, which are not `TaskStop` teammates: close each
+- The same rule binds **pi panes**, which are not `TaskStop` teammates: close each
   with `herdr pane close <pane_id>` at the moment its own output is accepted, in
   the same turn, rather than batching teardown at the end of the workstream. On a
   review panel, close the reviewers before starting the judge — the judge reads
@@ -186,7 +203,7 @@ workflow agents auto-terminate, named teammates do not.
   tokens OpenAI bills 2x input and 1.5x output for the entire request**, not just
   the overage — `gpt-5.6-sol` goes $5/$30 to $10/$45 per 1M. Keep
   `compaction.methodOrder` remote-first (`remote` is provider-native server
-  compaction, the mechanism that holds a session under the line) and close panes
+  compaction, the mechanism that holds a pi session under the line) and close panes
   at acceptance so there is no context to re-send.
 
 ## Panel layout in a terminal multiplexer
@@ -195,8 +212,10 @@ Where agents occupy panes the operator can see, layout is part of the contract:
 an unreadable panel is an unreviewable one, and review is the bottleneck these
 fan-outs exist to feed.
 
-The rules themselves — 2x2 grid per tab, a separate grid tab past three workers,
-visible panes over headless whenever the operator wants to watch, and a finished
+The rules themselves — full-height Apex on the left 40%, up to four foremen
+filling the right 60% as a 2x2 on demand, overflow only after all four slots fill,
+visible panes over headless whenever the operator wants to watch, preserved focus,
+closing completed owned panes (never unrelated operator panes), and a finished
 tab being a held resource like a pane — are stated once, in
 [`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).
 Harness-specific commands belong in the harness's own implementation.

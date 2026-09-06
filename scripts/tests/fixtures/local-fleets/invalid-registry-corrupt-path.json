@@ -12,7 +12,7 @@
           "root": "relative/projects/alpha",
           "git_common_dir": "/Users/alex/projects/alpha/.git",
           "release": "1.0.0-rc.24",
-          "harnesses": ["claude", "codex", "omp"],
+          "harnesses": ["claude", "codex"],
           "worktrees": {}
         }
       }

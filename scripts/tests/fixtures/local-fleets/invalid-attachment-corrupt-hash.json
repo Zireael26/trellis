@@ -9,7 +9,7 @@
   "release": "1.0.0-rc.24",
   "artifacts": [
     {
-      "path": ".omp/hooks/pre/trellis.ts",
+      "path": ".codex/hooks/session-context.sh",
       "kind": "symlink"
     }
   ],

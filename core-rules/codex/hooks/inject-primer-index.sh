@@ -6,18 +6,17 @@
 #
 # Contract:
 #   - Runs on SessionStart with source=startup or source=resume.
-#   - Reads <canonical-root>/.claude/primers/INDEX.md.
+#   - Reads the existing .claude primer index, or the manifest-rendered .agents
+#     index for a Codex-only attachment. Existing shared primer authority wins.
 #   - For each primer file: parses `pinned_to:` frontmatter + Entry points
 #     section, runs `git rev-list --count <pinned>..HEAD -- <entry-paths>`,
 #     buckets FRESH (0) / WARM (1-10) / STALE (11+). Verifies each entry
 #     path exists.
 #   - Emits Codex SessionStart hookSpecificOutput additionalContext.
 #   - Output trimmed to ≤ 1500 chars. Never blocks. Exit 0 always.
-#   - Skips silently if .claude/primers/INDEX.md absent (opt-in projects).
+#   - Skips silently if neither primer INDEX.md exists (opt-in projects).
 #
 # Dependencies: jq (required), git (optional — degrades gracefully).
-#
-# Status: new in v0.3.1.
 
 set -u
 
@@ -40,6 +39,9 @@ cd "$PROJECT_DIR" 2>/dev/null || exit 0
 REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 
 PRIMERS_DIR="${REPO_ROOT}/.claude/primers"
+if [ ! -f "${PRIMERS_DIR}/INDEX.md" ]; then
+  PRIMERS_DIR="${REPO_ROOT}/.agents/primers"
+fi
 INDEX="${PRIMERS_DIR}/INDEX.md"
 [ -f "$INDEX" ] || exit 0  # opt-in; project hasn't bootstrapped primers
 
@@ -55,6 +57,7 @@ OUT="## Primers (auto-injected)"$'\n'
 #   - [slug](./slug.md) — description
 # We parse out the slug (between `[` and `]`) and locate <slug>.md.
 in_fence=0
+in_comment=0
 while IFS= read -r line; do
   # toggle fence state on ``` lines; skip content inside fences
   case "$line" in
@@ -62,9 +65,24 @@ while IFS= read -r line; do
   esac
   [ "$in_fence" -eq 0 ] || continue
 
-  # skip blanks + headings + comments + bold/em markers
+  # skip HTML comment blocks, including multi-line ones. The bootstrap INDEX
+  # template ships its example rows inside a `<!-- ... -->` block; without
+  # this the examples parse as real primers and every fresh project reports
+  # three phantom MISSING_FILE entries.
+  if [ "$in_comment" -eq 1 ]; then
+    case "$line" in
+      *'-->'*) in_comment=0 ;;
+    esac
+    continue
+  fi
   case "$line" in
-    ''|\#*|'<!--'*) continue ;;
+    *'<!--'*'-->'*) continue ;;
+    *'<!--'*) in_comment=1; continue ;;
+  esac
+
+  # skip blanks + headings
+  case "$line" in
+    ''|\#*) continue ;;
   esac
   # extract slug from `- [slug](./slug.md) — desc`
   slug=$(printf '%s' "$line" | sed -n 's/^[[:space:]]*-[[:space:]]*\[\([^]]*\)\].*/\1/p')
@@ -81,7 +99,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  status="FRESH"
+  status="UNKNOWN"
   detail=""
 
   if [ "$HAS_GIT" = "1" ]; then
@@ -121,13 +139,16 @@ while IFS= read -r line; do
           while IFS= read -r __p; do
             __path_arr+=("$__p")
           done <<< "$paths"
-          count=$(git -C "$REPO_ROOT" rev-list --count "${pinned}..HEAD" -- "${__path_arr[@]}" 2>/dev/null || echo 0)
-          if [ "$count" -eq 0 ]; then
-            status="FRESH"
-          elif [ "$count" -le 10 ]; then
-            status="WARM"; detail="${count} commits"
+          if count=$(git -C "$REPO_ROOT" rev-list --count "${pinned}..HEAD" -- "${__path_arr[@]}" 2>/dev/null); then
+            if [ "$count" -eq 0 ]; then
+              status="FRESH"
+            elif [ "$count" -le 10 ]; then
+              status="WARM"; detail="${count} commits"
+            else
+              status="STALE"; detail="${count} commits → /primer-refresh"
+            fi
           else
-            status="STALE"; detail="${count} commits → /primer-refresh"
+            status="UNKNOWN"
           fi
         fi
       else
@@ -135,6 +156,8 @@ while IFS= read -r line; do
         detail="primer missing ## Entry points section"
       fi
     fi
+  else
+    status="UNKNOWN"
   fi
 
   if [ -n "$detail" ]; then

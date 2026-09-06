@@ -37,7 +37,7 @@
 #            variables, mutates no shell state, touches no files. The caller
 #            (sync-hooks.sh) owns change-detection, DRY_RUN, and the temp-file
 #            write. This separation lets the bats suite bind to the pure
-#            function (mirrors sync-coverage.sh / sync-coverage.bats).
+#            function.
 #   This file intentionally does NOT set `set -euo pipefail`: sourcing it must
 #   not alter the caller's / test harness's shell.
 #

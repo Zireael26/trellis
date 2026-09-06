@@ -40,8 +40,8 @@ set -u
 #   reaches only the direct child, so a grandchild (e.g. claude's Node
 #   descendants + a long HTTP request) would otherwise keep the captured pipe
 #   open past the deadline. Exits 142 on timeout; propagates the command's own
-#   exit status otherwise. If perl is absent we run the command WITHOUT a
-#   wall-clock cap and rely on the caller's --max-turns 1 to bound it.
+#   exit status otherwise. If Perl is absent we emit an advisory degradation
+#   and skip the external proposal command instead of running it uncapped.
 # ---------------------------------------------------------------------------
 run_with_timeout() {
   local secs="$1"; shift
@@ -54,15 +54,18 @@ run_with_timeout() {
       if ($pid == 0) { POSIX::setsid(); exec @ARGV or POSIX::_exit(127); }
       $SIG{ALRM} = sub {
         kill("TERM", -$pid); select(undef, undef, undef, 0.3);
-        kill("KILL", -$pid); waitpid($pid, 0); exit(142);
+        kill("KILL", -$pid); waitpid($pid, 0);
+        exit(142);
       };
+      # SAFETY: 30 s is the documented proposal budget (core-rules/hooks.md § propose-rules Budget); status 142 takes the advisory no-proposal path.
       alarm $secs;
       waitpid($pid, 0);
       my $st = $?;
       exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
     ' "$secs" "$@"
   else
-    "$@"
+    printf '%s\n' 'propose-rules: Perl is unavailable; skipped the proposal command rather than running without a wall-clock cap (advisory degradation).' >&2
+    return 1
   fi
 }
 
@@ -87,7 +90,7 @@ _pr_candidate_is_well_formed() {
   case "$candidate" in
     *$'\r'*) return 1 ;;
   esac
-  printf '%s\n' "$candidate" | grep -qE '^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][[:space:]]+[-—][[:space:]]+.+$' || return 1
+  printf '%s\n' "$candidate" | grep -qE '^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][[:space:]]+(-|—)[[:space:]]+.+$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Pattern:\*\*[[:space:]]*[^[:space:]].*$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Why it matters:\*\*[[:space:]]*[^[:space:]].*$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Rule:\*\*[[:space:]]*[^[:space:]].*$'
@@ -388,7 +391,7 @@ OUT="$( export TRELLIS_REVIEW_IN_PROGRESS=1; {
   printf '\n--- GOTCHAS.MD ---\n'
   cat "$GOTCHAS" 2>/dev/null
 } | run_with_timeout 30 claude -p --max-turns 1 --output-format text \
-      --tools Read 2>/dev/null )"
+      --tools Read )"
 
 # Empty or NONE → no proposal.
 case "$OUT" in

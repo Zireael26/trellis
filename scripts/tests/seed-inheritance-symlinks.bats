@@ -7,7 +7,7 @@
 # Fixture layout:
 #   $SANDBOX/root/         — fake TRELLIS_ROOT with core-rules/
 #   $SANDBOX/main/         — fake MAIN git checkout with inheritance symlinks
-#                            (.claude/, .agents/, and .omp/ surfaces)
+#                            (.claude/ and .agents/ surfaces)
 #   $SANDBOX/wt/           — fake linked worktree (via git worktree add)
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -28,8 +28,7 @@ setup() {
     "$ROOT/core-rules/skills/process-gate" \
     "$ROOT/core-rules/skills/security-gate" \
     "$ROOT/core-rules/agents" \
-    "$ROOT/core-rules/commands" \
-    "$ROOT/core-rules/omp/hooks"
+    "$ROOT/core-rules/commands"
   printf '# Trellis rules\n' > "$ROOT/core-rules/CLAUDE.md"
   printf 'x\n' > "$ROOT/core-rules/skills/process-gate/SKILL.md"
   printf 'x\n' > "$ROOT/core-rules/skills/security-gate/SKILL.md"
@@ -45,11 +44,11 @@ setup() {
     git config user.name  "test"
     git config commit.gpgsign false
 
-    # .gitignore — ignore the inheritance symlink directories (incl. .omp)
-    printf '.claude/rules\n.claude/skills\n.claude/commands\n.claude/agents\n.agents/rules\n.agents/skills\n.omp/AGENTS.md\n.omp/skills\n.omp/commands\n.omp/agents\n.omp/hooks\n' > .gitignore
+    # .gitignore — ignore the inheritance symlink directories.
+    printf '.claude/rules\n.claude/skills\n.claude/commands\n.claude/agents\n.agents/rules\n.agents/skills\n' > .gitignore
 
     # Tracked files so git worktree add works and the worktree gets its own
-    # CLAUDE.md (the .omp/AGENTS.md target is the checkout's own overlay).
+    # CLAUDE.md.
     printf 'tracked\n' > README.md
     printf '# project overlay\n' > CLAUDE.md
     git add README.md CLAUDE.md .gitignore
@@ -61,25 +60,15 @@ setup() {
     "$MAIN/.claude/rules" \
     "$MAIN/.claude/skills" \
     "$MAIN/.claude/commands" \
-    "$MAIN/.claude/agents" \
-    "$MAIN/.omp"
+    "$MAIN/.claude/agents"
   ln -s "$ROOT/core-rules/CLAUDE.md"              "$MAIN/.claude/rules/trellis.md"
   ln -s "$ROOT/core-rules/skills/process-gate"    "$MAIN/.claude/skills/process-gate"
   ln -s "$ROOT/core-rules/skills/security-gate"   "$MAIN/.claude/skills/security-gate"
   ln -s "$ROOT/core-rules/commands/primer.md"     "$MAIN/.claude/commands/primer.md"
   ln -s "$ROOT/core-rules/agents/verify-agent.md" "$MAIN/.claude/agents/verify-agent.md"
 
-  # OMP live surface: one project-overlay file link plus four whole-directory
-  # links into canonical core-rules.
-  ln -s "$MAIN/CLAUDE.md"            "$MAIN/.omp/AGENTS.md"
-  ln -s "$ROOT/core-rules/skills"    "$MAIN/.omp/skills"
-  ln -s "$ROOT/core-rules/commands"  "$MAIN/.omp/commands"
-  ln -s "$ROOT/core-rules/agents"    "$MAIN/.omp/agents"
-  ln -s "$ROOT/core-rules/omp/hooks" "$MAIN/.omp/hooks"
-
   # Non-inheritance symlink that must NOT be mirrored
   ln -s "/tmp" "$MAIN/.claude/other"
-  ln -s "/tmp" "$MAIN/.omp/other"
 
   # Create the linked worktree
   git -C "$MAIN" worktree add --detach "$WT" >/dev/null 2>&1
@@ -116,8 +105,7 @@ worktree_surface_snapshot() {
   for path in \
     .claude/rules/trellis.md .claude/skills/process-gate \
     .claude/skills/security-gate .claude/commands/primer.md \
-    .claude/agents/verify-agent.md .claude/other \
-    .omp/AGENTS.md .omp/skills .omp/commands .omp/agents .omp/hooks .omp/other; do
+    .claude/agents/verify-agent.md .claude/other; do
     if [ -L "$target/$path" ]; then
       printf '%s\tlink\t%s\n' "$path" "$(readlink "$target/$path")"
     elif [ -e "$target/$path" ]; then
@@ -258,7 +246,7 @@ touch "$marker"
 exit 97
 EOF
   chmod +x "$T14_PROJECT/scripts/attach-project.sh"
-  git -C "$T14_PROJECT" worktree add -qb t14-source-poison "$linked"
+  git -C "$T14_PROJECT" worktree add -q -b t14-source-poison "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -309,7 +297,7 @@ t14_add_broken_sibling_row() {
   [ "$?" -eq 0 ]
   t14_add_broken_sibling_row
   linked="$T14_SANDBOX/healthy linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-healthy-sibling "$linked"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-healthy-sibling "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -326,7 +314,7 @@ t14_add_broken_sibling_row() {
   t14_attach
   [ "$?" -eq 0 ]
   linked="$T14_SANDBOX/own-drift linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-own-drift "$linked"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-own-drift "$linked"
 
   # Repoint the bound checkout row at a present directory that is not this
   # (or any) Git worktree. Only the row being bound is corrupted.
@@ -355,7 +343,7 @@ t14_add_broken_sibling_row() {
   primary_owner="$(t14_owner_for_root "$T14_PROJECT")"
   rm "$primary_owner"
   linked="$T14_SANDBOX/missing donor linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-missing-donor "$linked"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-missing-donor "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -375,7 +363,7 @@ t14_add_broken_sibling_row() {
   printf '{broken\n' > "$primary_owner"
   chmod 600 "$primary_owner"
   linked="$T14_SANDBOX/corrupt donor linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-corrupt-donor "$linked"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-corrupt-donor "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -397,7 +385,7 @@ assert_stale_donor_binding_rejected() {
   barrier="$T14_SANDBOX/expected-binding-barrier"
   output_file="$T14_SANDBOX/reconcile.out"
   mkdir "$barrier"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb "t14-race-$mutation" "$linked"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b "t14-race-$mutation" "$linked"
   linked="$(t14_canonical_dir "$linked")"
 
   env TRELLIS_HOME="$TRELLIS_HOME" \

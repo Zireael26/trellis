@@ -3,8 +3,8 @@
 # Source: Trellis / core-rules / codex hooks.
 #
 # Contract:
-#   - Reads tool event JSON on stdin, extracts tool_input.file_path.
-#   - Runs the per-file linter for the file's extension.
+#   - Normalizes legacy file events and native multi-file apply_patch events.
+#   - Runs the per-file linter for every declared existing mutation target.
 #   - On failure: emits {"decision":"block","reason":...} on stdout, exit 2.
 #   - On success / non-code file / no linter: exit 0 silently.
 #
@@ -28,20 +28,36 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "post-edit-verify"
 
-FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty')
+__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || { echo "post-edit-verify: missing action normalizer — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
+. "$__ta_lib"
 
-if [ -z "$FILE_PATH" ]; then
-  exit 0
-fi
+NORMALIZED=$(_ta_normalize_action codex post_action "$INPUT") || {
+  echo "post-edit-verify: malformed tool envelope — verification unavailable" >&2
+  exit 1
+}
+[ "$(printf '%s' "$NORMALIZED" | jq -r '.action.family')" = "file_mutation" ] || exit 0
+[ "$(printf '%s' "$NORMALIZED" | jq -r '.result.status')" != "failed" ] || exit 0
 
-# Only check supported source extensions. Everything else is silent.
-case "$FILE_PATH" in
-  *.ts|*.tsx|*.js|*.jsx|*.py|*.rs|*.go) ;;
-  *) exit 0 ;;
-esac
+ACTION_CWD=$(printf '%s' "$NORMALIZED" | jq -r '.cwd // empty')
+[ -d "$ACTION_CWD" ] || ACTION_CWD="$(_se_project_dir)"
+cd "$ACTION_CWD" 2>/dev/null || exit 0
 
 ERRORS=""
-FILE_DIR=$(dirname "$FILE_PATH")
+RUST_CHECKED=0
+
+lint_target() {
+  local FILE_PATH="$1" FILE_DIR OUT
+
+  # Only check supported source extensions. Everything else is silent.
+  case "$FILE_PATH" in
+    *.ts|*.tsx|*.js|*.jsx|*.py|*.rs|*.go) ;;
+    *) return 0 ;;
+  esac
+  [ -f "$FILE_PATH" ] || return 0
+  FILE_DIR=$(dirname "$FILE_PATH")
 
 # --- JS / TS ---
 case "$FILE_PATH" in
@@ -80,7 +96,8 @@ esac
 # --- Rust (project-wide; cargo has no per-file lint) ---
 case "$FILE_PATH" in
   *.rs)
-    if command -v cargo >/dev/null 2>&1 && [ -f "Cargo.toml" ]; then
+    if [ "$RUST_CHECKED" -eq 0 ] && command -v cargo >/dev/null 2>&1 && [ -f "Cargo.toml" ]; then
+      RUST_CHECKED=1
       OUT=$(cargo clippy --quiet --message-format=short -- -D warnings 2>&1)
       if [ $? -ne 0 ]; then
         ERRORS="${ERRORS}clippy: (project-wide)
@@ -97,7 +114,7 @@ case "$FILE_PATH" in
   *.go)
     if ! ABS_FILE_DIR=$(cd "$FILE_DIR" 2>/dev/null && pwd -P); then
       echo "post-edit-verify: skipping Go lint for ${FILE_PATH}: file directory not found" >&2
-      exit 0
+      return 0
     fi
 
     MODULE_ROOT="$ABS_FILE_DIR"
@@ -105,7 +122,7 @@ case "$FILE_PATH" in
       PARENT_DIR=$(dirname "$MODULE_ROOT")
       if [ "$PARENT_DIR" = "$MODULE_ROOT" ]; then
         echo "post-edit-verify: skipping Go lint for ${FILE_PATH}: no owning go.mod found" >&2
-        exit 0
+        return 0
       fi
       MODULE_ROOT="$PARENT_DIR"
     done
@@ -138,6 +155,25 @@ ${OUT}
     fi
     ;;
 esac
+}
+
+SEEN_PATHS=""
+while IFS=$'\t' read -r OPERATION SOURCE_PATH DESTINATION; do
+  case "$OPERATION" in
+    delete) continue ;;
+    rename) TARGET_PATH="$DESTINATION" ;;
+    create|update) TARGET_PATH="$SOURCE_PATH" ;;
+    *) continue ;;
+  esac
+  FILE_PATH=$(_ta_resolve_path "$ACTION_CWD" "$TARGET_PATH") || continue
+  case "$SEEN_PATHS" in
+    *$'\n'"$FILE_PATH"$'\n'*) continue ;;
+  esac
+  SEEN_PATHS="${SEEN_PATHS}
+${FILE_PATH}
+"
+  lint_target "$FILE_PATH"
+done < <(_ta_targets_tsv "$NORMALIZED")
 
 if [ -n "$ERRORS" ]; then
   TRUNCATED=$(printf '%s' "$ERRORS" | head -50)

@@ -146,9 +146,9 @@ where a command supports it.
 
 `trellis attach --user` manages the machine-level user surface from an
 installed, verified release. It is separate from project attachments: it takes
-no project path, fleet, or harness selector. The OMP portion is deliberately
-limited to OMP's default profile (`$HOME/.omp/agent`); named profiles and other
-profile locations remain unmanaged.
+no project path, fleet, or harness selector. The managed user surface is
+Claude Code only: the manifest's `user` group renders three `.claude/` links
+plus `.claude/settings.json`, and no other harness has a user-level surface.
 
 The normal first attach uses the active release (or an explicitly selected
 installed release):

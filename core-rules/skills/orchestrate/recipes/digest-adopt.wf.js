@@ -1,11 +1,8 @@
-// digest-adopt — turn an ai-dev-trends digest into shipped Trellis change.
+// digest-adopt — turn an ai-dev-trends digest into shipped Trellis change (spec 008).
 //
-// The IMPLEMENTATION half of `research/ai-dev-trends/` (spec 008). The research
-// task is read-only and writes only inside its own folder; this recipe is its
-// more-privileged counterpart: it reads a digest + the Trellis repo, triages
-// each proposal, and — only for routes a human has approved — fans out
-// worktree-isolated agents that open **HOLD PRs**. It NEVER merges and NEVER
-// writes to a project's main: the human merges. (spec 008 stopping point.)
+// Reads a digest + the Trellis repo, triages each proposal, and — only for routes
+// a human has approved — fans out worktree-isolated agents that open **HOLD PRs**.
+// It NEVER merges and NEVER writes to a project's main: the human merges.
 //
 // Loop shape (per `core-rules/references/loops.md`): a proactive/time outer loop
 // (fires when a digest lands) wrapping a goal loop over the digest's actionable

@@ -12,8 +12,10 @@ Every unit runs on exactly one executor; wall-clock speed comes from the
 patterns below — overlapping *different* work — never from redundant
 generation. Operator directive 2026-07-10.
 
-**What replaced racing.** Pick the leg per unit from the routing table
-(`docs/codex-routing.md §2`) and commit to it. If the selected leg fails or
+**What replaced racing.** Pick the leg per unit from the live classifier — the
+finite task shapes in `core-rules/references/delegation.md`, resolved through
+`core-rules/skills/herdr-foreman/roles.json` and its `scripts/resolve-roles.py`,
+with an explicit operator selection winning — and commit to it. If the selected leg fails or
 degrades, record and surface that failure; the unit fails closed on the selected
 lane. Do not automatically re-dispatch it. A sequential dispatch to another lane
 requires explicit caller/operator selection and never runs concurrently.
@@ -31,9 +33,12 @@ lives in git history if ever re-evaluated.
 **When to use.** Use for two or more independent or dependency-ordered units when
 generation and verification can overlap.
 
-**Mechanics.** A cheap, low-effort Claude verifier checks the actual diff and
-proof for unit N while Codex generates unit N+1. Schedule continuously as units
-land; do not insert a within-wave or whole-fan-out barrier.
+**Mechanics.** A cheap, low-effort verifier — selected the same way as any other
+leg, and cross-family to the producer — checks the actual diff and proof for unit N
+while the producer generates unit N+1. A Claude verifier against a Codex generator is
+one instance of that shape, not a fixed identity and not a ranking: use whichever
+eligible independent routes the classifier or the operator selected. Schedule
+continuously as units land; do not insert a within-wave or whole-fan-out barrier.
 
 **Guardrails.** The producing executor never verifies itself. A unit is not
 merge-ready until its independent verification is green. Preserve dependency

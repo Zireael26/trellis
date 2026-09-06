@@ -11,7 +11,7 @@ CODEX_HOOKS_DIR="$(cd "$HOOKS_DIR/../codex/hooks" && pwd)"
 # stop-verify's working-tree check works), and export CLAUDE_PROJECT_DIR.
 setup_project_dir() {
   PROJECT_DIR="$(mktemp -d)"
-  ( cd "$PROJECT_DIR" && git init -q && git commit --allow-empty -q -m init )
+  ( cd "$PROJECT_DIR" && git init -q && git config user.email "ci-bats@trellis.test" && git config user.name "Trellis CI" && git commit --allow-empty -q -m init )
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
 }
 

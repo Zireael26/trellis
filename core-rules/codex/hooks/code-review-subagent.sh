@@ -212,37 +212,74 @@ REVIEW_PAYLOAD=$(jq -nc \
 # its perl-alarm shim.
 # NB: no `2>/dev/null` here. lib/code-reviewer.sh deliberately leaves the rung-2
 # `claude` stderr unsuppressed so a failing reviewer is visible; silencing fd 2
-# on the caller side would re-introduce that documented mistake. stdout (the one
-# findings line) is what we capture. `|| true` so a nonzero ladder never aborts.
-if [ ! -f "$HOOK_DIR/lib/code-reviewer.sh" ]; then
-  # Fail-OPEN: the ladder core was not synced beside this hook. Never block.
+# on the caller side would hide the degradation. stdout (the one findings line)
+# is captured and validated before it can authorize an idempotency marker.
+REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
+if [ ! -f "$REVIEWER_LIB" ]; then
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer library unavailable; this diff will be retried on the next Stop' >&2
   exit 0
 fi
-FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$HOOK_DIR/lib/code-reviewer.sh" || true)
 
-if [ -n "$FINDINGS" ]; then
-  CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)
-  if [ -n "$CRITICAL" ]; then
-    REASON="Code review flagged critical issues — resolve or explicitly defer:
-${CRITICAL}"
-    jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
-    # Block path: do NOT touch the marker — a blocked turn must re-review the
-    # corrected diff (which will hash differently anyway).
-    exit 2
-  fi
-
-  # Advisory findings → Stop-safe systemMessage (shown to the model, not blocking).
-  ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -30)
-  if [ -n "$ADVISORY" ]; then
-    _se_emit_system_message "<review>
-${ADVISORY}
-</review>"
-  fi
+REVIEWER_STATUS=0
+if FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$REVIEWER_LIB"); then
+  :
+else
+  REVIEWER_STATUS=$?
+fi
+if [ "$REVIEWER_STATUS" -ne 0 ]; then
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer command failed; this diff will be retried on the next Stop' >&2
+  exit 0
 fi
 
-# Review completed (clean or advisory) — record the idempotency marker so the
-# execute-body review does not re-charge the LLM for this exact diff this turn.
-mkdir -p "$REPO_ROOT/.codex" 2>/dev/null || true
-: > "$MARKER" 2>/dev/null || true
+# Parse exactly one JSON object. `fromjson?` turns malformed reviewer text into
+# an empty result without leaking parser internals; the caller emits one bounded,
+# stable degradation below. A missing status is the legacy completed envelope.
+if VALIDATED_FINDINGS=$(printf '%s' "$FINDINGS" | jq -Rces '
+    fromjson?
+    | select(type == "object")
+    | select(.findings | type == "array")
+    | select(all(.findings[]; type == "object"
+        and (.severity | type == "string")
+        and (.file | type == "string")
+        and (.msg | type == "string")))
+    | select((has("status") | not) or .status == "completed" or .status == "degraded")
+  '); then
+  :
+else
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer returned a malformed findings envelope; this diff will be retried on the next Stop' >&2
+  exit 0
+fi
+FINDINGS="$VALIDATED_FINDINGS"
+COMPLETION_STATUS=$(printf '%s' "$FINDINGS" | jq -r '.status // "completed"')
+
+CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' | head -10)
+if [ -n "$CRITICAL" ]; then
+  REASON="Code review flagged critical issues — resolve or explicitly defer:
+${CRITICAL}"
+  jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
+  # Block path: do NOT touch the marker — a blocked turn must re-review the
+  # corrected diff (which will hash differently anyway).
+  exit 2
+fi
+
+# Advisory findings → Stop-safe systemMessage (shown to the model, not blocking).
+ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' | head -30)
+if [ -n "$ADVISORY" ]; then
+  _se_emit_system_message "<review>
+${ADVISORY}
+</review>"
+fi
+
+# Only a validated completed review authorizes the idempotency marker. A
+# degraded deterministic fallback remains advisory and is retried next Stop.
+if [ "$COMPLETION_STATUS" != "completed" ]; then
+  exit 0
+fi
+if ! mkdir -p "$REPO_ROOT/.codex"; then
+  exit 0
+fi
+if ! : > "$MARKER"; then
+  exit 0
+fi
 
 exit 0

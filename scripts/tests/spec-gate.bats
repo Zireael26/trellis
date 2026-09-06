@@ -107,6 +107,34 @@ _protected_branch() {
   ( . "$CORE" && sg_protected_branch "$REPO_DIR" )
 }
 
+_verdict_with_git_diff_failure() {
+  local failing_mode="$1"
+  (
+    git() {
+      if [ "${3:-}" = "diff" ] && [ "${4:-}" = "$failing_mode" ]; then
+        return 70
+      fi
+      command git "$@"
+    }
+    . "$CORE"
+    sg_verdict "$REPO_DIR"
+  )
+}
+
+_verdict_with_triad_grep_failure() {
+  (
+    grep() {
+      if [ "${1:-}" = "-E" ] \
+        && [ "${2:-}" = '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$' ]; then
+        return 2
+      fi
+      command grep "$@"
+    }
+    . "$CORE"
+    sg_verdict "$REPO_DIR"
+  )
+}
+
 _write_fleet_autonomy() {
   export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   if [ -f "$TRELLIS_FIXTURE/trellis.config.json" ]; then
@@ -268,6 +296,29 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "root-level AGENT_*.md guides do not count toward the gated diff" {
+  _config true 80 400
+  # Paste-into-agent guides live at the root, not under docs/, because the public
+  # mirror surfaces them there. They are prose, not feature code.
+  _write_lines AGENT_SETUP.md 300
+  _write_lines AGENT_PI_SETUP.md 500
+  git checkout -q -b docs/agent-guides
+  git add -A && git commit -qm "docs: agent guides" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
+@test "AGENT_ prefixed source files still count toward the gated diff" {
+  _config true 80 400
+  # The exemption is for .md guides only; it must not launder code.
+  _write_lines AGENT_runner.py 200
+  git checkout -q -b feat/agent-runner
+  git add -A && git commit -qm "feat: runner" >/dev/null
+  run _gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BLOCKED"* ]] || { echo "$output"; false; }
+}
+
 @test "supported test basenames do not count toward the gated diff" {
   _config true 80 400
   _write_lines src/legacy_test.js 100
@@ -384,6 +435,19 @@ JSON
   run _gate
   [ "$status" -eq 0 ]
   grep -q "emergency-override" "$REPO_DIR/.claude/spec-gate-audit.log"
+}
+
+@test "emergency marker with an unwritable audit target does not silently pass" {
+  _config true 80 120
+  _write_lines src/f.js 200
+  git checkout -q -b feat/emergency-unloggable
+  git add -A && git commit -qm "hotfix: urgent but unloggable" >/dev/null
+  ( cd "$REPO_DIR" && bash "$GATE" --mark-emergency "audit required" >/dev/null )
+  mkdir "$REPO_DIR/.claude/spec-gate-audit.log"
+
+  run _gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCKED"* ]] || { echo "$output"; false; }
 }
 
 @test "surgical marker is branch-bound: ignored on a different branch" {
@@ -625,6 +689,39 @@ NODE
 }
 
 # --- fail-open on a broken environment --------------------------------------
+
+@test "failed numstat diff is advisory rather than a zero-line pass" {
+  _config true 80 400
+  _write_lines src/f.js 20
+  git checkout -q -b feat/numstat-failure
+  git add -A && git commit -qm "fix: tiny" >/dev/null
+
+  run _verdict_with_git_diff_failure --numstat
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+}
+
+@test "failed git triad discovery is advisory rather than no-triad block" {
+  _config true 80 400
+  _write_lines src/f.js 200
+  git checkout -q -b feat/triad-git-failure
+  git add -A && git commit -qm "feat: big" >/dev/null
+
+  run _verdict_with_git_diff_failure --name-only
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+}
+
+@test "failed grep triad discovery is advisory rather than no-triad block" {
+  _config true 80 400
+  _write_lines src/f.js 200
+  git checkout -q -b feat/triad-grep-failure
+  git add -A && git commit -qm "feat: big" >/dev/null
+
+  run _verdict_with_triad_grep_failure
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+}
 
 @test "detached HEAD -> advisory (fail-open, exit 0)" {
   _config true 80 400

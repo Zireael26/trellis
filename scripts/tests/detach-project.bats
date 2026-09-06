@@ -134,12 +134,6 @@ make_release() {
       "render": [
         {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": true}
       ]
-    },
-    "omp": {
-      "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
-      ],
-      "render": []
     }
   }
 }
@@ -154,12 +148,13 @@ make_copied_older_release() {
   local release="$TRELLIS_HOME/releases/1.2.2"
   local payload="$release/payload"
   local manifest="$SANDBOX/release-1.2.2.jsonl"
-  local file relative mode oid target
 
   cp -R "$base" "$release"
   chmod -R u+w "$release"
   mkdir -p "$payload/scripts/lib"
   cp "$REPO_ROOT/scripts/lib/attachment.sh" "$payload/scripts/lib/attachment.sh"
+  # The copied generator extracts command-scratch programs from its own launcher.
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$payload/scripts/trellis-launcher.sh"
   sed \
     -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
     -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
@@ -168,23 +163,7 @@ make_copied_older_release() {
   mv "$payload/scripts/lib/attachment.sh.tmp" "$payload/scripts/lib/attachment.sh"
   printf '1.2.2\n' > "$payload/core-rules/VERSION"
 
-  : > "$manifest"
-  while IFS= read -r file; do
-    relative="${file#"$payload"/}"
-    if [ -L "$file" ]; then
-      mode=120000
-      target="$(readlink "$file")"
-      oid="$(printf '%s' "$target" | git hash-object --stdin)"
-    elif [ -x "$file" ]; then
-      mode=100755
-      oid="$(git hash-object "$file")"
-    else
-      mode=100644
-      oid="$(git hash-object "$file")"
-    fi
-    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
-      '{path:$path,mode:$mode,oid:$oid}' >> "$manifest"
-  done < <(find "$payload" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  python3 "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$manifest"
   jq -n --arg version 1.2.2 --slurpfile tree "$manifest" '{
     schema_version:1,
     version:$version,
@@ -193,8 +172,8 @@ make_copied_older_release() {
     remote:"fixture://copied-older-release",
     tree:$tree
   }' > "$release/release.json"
-  find "$payload" -type f -exec chmod a-w {} \;
-  find "$payload" -type d -exec chmod a-w {} \;
+  find "$payload" -type f -exec chmod a-w {} +
+  find "$payload" -type d -exec chmod a-w {} +
   chmod a-w "$release/release.json" "$release"
 }
 
@@ -263,7 +242,6 @@ run_detach() {
   [ ! -e "$PROJECT/.claude/rules/trellis.md" ]
   [ ! -e "$PROJECT/.agents/rules/trellis.md" ]
   [ ! -e "$PROJECT/.codex/hooks.json" ]
-  [ ! -e "$PROJECT/.omp/AGENTS.md" ]
   [ ! -e "$owner" ]
   [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$EXCLUDE_HASH" ]
   jq -e '[.. | objects | .attachment_id? // empty] | length == 0' "$TRELLIS_HOME/registry.json"
@@ -418,8 +396,13 @@ run_detach() {
       kill -"$signal" "$(checkout_lock_pid)" || exit 1
     ) &
     signaler_pid=$!
-    run env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
-    [ "$status" -eq 5 ]
+    # Bats' within-file semaphore launches tests as asynchronous Bash jobs,
+    # which inherit SIGINT ignored. Restore foreground-command disposition
+    # before exec so the real detach process can install its own INT trap.
+    run env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" \
+      python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+      "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
+    [ "$status" -eq 5 ] || { printf 'signal=%s status=%s\n%s\n' "$signal" "$status" "$output" >&2; false; }
     signaler_status=0
     wait "$signaler_pid" || signaler_status=$?
     [ "$signaler_status" -eq 0 ]
@@ -462,10 +445,258 @@ run_detach() {
   jq -e '[.hooks.SessionStart[].hooks[].command] | length == 3
     and all(.[]; contains("${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}") and (contains("__TRELLIS_") | not))' \
     "$PROJECT/.codex/hooks.json"
-  [ -L "$PROJECT/.omp/AGENTS.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]
   owner="$(owner_for_root "$PROJECT")"
-  jq -e '[.artifacts[].path | if . == "AGENTS.md" or startswith(".agents/") or startswith(".codex/") then "codex" elif startswith(".omp/") then "omp" else empty end] | unique | sort == ["codex","omp"]' "$owner"
+  jq -e '[.artifacts[].path | if . == "AGENTS.md" or startswith(".agents/") or startswith(".codex/") then "codex" else empty end] | unique == ["codex"]' "$owner"
+  jq -e --slurpfile owner "$owner" '
+    .projects["personal/fixture-project"].checkouts[$owner[0].checkout_id]
+    | .harnesses == ["codex"] and .release == $owner[0].release
+      and .worktrees[$owner[0].worktree_id].attachment_id == $owner[0].attachment_id
+  ' "$TRELLIS_HOME/registry.json"
+}
+
+# Contents, modes and link targets across managed and project state. Lock
+# bookkeeping is intentionally excluded; it is acquired even on a refusal.
+detach_state_snapshot() {
+  python3 - "$PROJECT" "$TRELLIS_HOME/registry.json" "$TRELLIS_HOME/state/attachments" "$TRELLIS_HOME/state/attachment-journals" "$@" <<'PY'
+import hashlib, json, os, stat, sys
+rows = []
+for root in sys.argv[1:]:
+    paths = [root]
+    if os.path.isdir(root):
+        for directory, dirs, files in os.walk(root):
+            paths.extend(os.path.join(directory, name) for name in dirs + files)
+    for path in sorted(paths):
+        if not os.path.lexists(path):
+            continue
+        mode = os.lstat(path).st_mode
+        content = os.readlink(path) if stat.S_ISLNK(mode) else (
+            hashlib.sha256(open(path, 'rb').read()).hexdigest() if stat.S_ISREG(mode) else None)
+        rows.append([path, mode, content])
+print(json.dumps(rows, sort_keys=True))
+PY
+}
+
+@test "partial detach refuses multiple owners even all-worktrees with byte-identical state" {
+  run_attach
+  [ "$status" -eq 0 ]
+  WORKTREE="$SANDBOX/linked partial"
+  git -C "$PROJECT" worktree add -q -b partial-linked "$WORKTREE"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
+  [ "$status" -eq 0 ]
+  before="$(detach_state_snapshot)"
+  for selector in single all; do
+    if [ "$selector" = all ]; then run_detach --harness claude --all-worktrees
+    else run_detach --harness claude; fi
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    [[ "$output" == *"exactly one matching registry attachment binding"* ]]
+    [ "$(detach_state_snapshot)" = "$before" ]
+    [ -L "$WORKTREE/.claude/rules/trellis.md" ]
+    [ -L "$WORKTREE/.agents/rules/trellis.md" ]
+  done
+}
+
+# Real dependencies and owner planner: the helper oracle must not be masked by
+# CLI owner verification or later durable-journal validation.
+partial_registry_proposal() {
+  bash -c '
+    . "$1"
+    original="$(jq -c . "$3")" || exit
+    plan="$(attach_detach_owner_plan "$original" "[\"claude\"]")" || exit
+    next="$(printf "%s\n" "$plan" | jq -c .next_owner)" || exit
+    attach_detach_partial_registry "$2" "$original" "$next"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$owner"
+}
+
+@test "partial detach refuses orphan owners pending journals and registry disagreement before mutation" {
+  # Construct before attach installs post-checkout: this fixture does not test
+  # generated dispatchers or their temporary-directory allocation.
+  WORKTREE="$SANDBOX/linked refusal"
+  git -C "$PROJECT" worktree add -q -b refusal-linked "$WORKTREE"
+  run_attach
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-original.json"
+  before="$(detach_state_snapshot "$WORKTREE")"
+  expected_proposal="$(jq -cS '.projects[].checkouts[] | {expected:.,after:(. | .harnesses = ["codex"])}' "$TRELLIS_HOME/registry.json")"
+  run partial_registry_proposal
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | jq -cS .)" = "$expected_proposal" ]
+  [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
+  for fault in registry pending; do
+    case "$fault" in
+      registry)
+        jq '.projects[].checkouts[].harnesses = ["claude"]' "$SANDBOX/registry-original.json" > "$TRELLIS_HOME/registry.json"
+        expect_status=3
+        expect_message='committed owner no longer exactly matches the expected local registry binding' ;;
+      pending)
+        cp "$owner" "$TRELLIS_HOME/state/attachment-journals/pending.json"
+        expect_status=3
+        expect_message='partial harness detach conflicts with a pending checkout journal' ;;
+    esac
+    before="$(detach_state_snapshot "$WORKTREE")"
+    run_detach --harness claude
+    [ "$status" -eq "$expect_status" ] || { echo "$fault: $output"; false; }
+    [[ "$output" == *"$expect_message"* ]]
+    [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
+    cp "$SANDBOX/registry-original.json" "$TRELLIS_HOME/registry.json"
+    rm -f "$TRELLIS_HOME/state/attachment-journals/pending.json"
+  done
+
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  linked_owner="$(owner_for_root "$WORKTREE")"
+  for canonical_owner in "$owner" "$linked_owner"; do
+    run bash -c '. "$1"; attachment_verify_detach "$2" "$3"' _ "$ATTACH" "$TRELLIS_HOME" "$canonical_owner"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+  jq -se 'map(select(.exclude.managed_by_attachment)) | length == 1' "$owner" "$linked_owner"
+  jq -e '.exclude.managed_by_attachment == false' "$linked_owner"
+  run bash -c '
+    . "$1"
+    state="$(local_registry_read_diagnostic_state "$2")" || exit
+    for owner in "$3" "$4"; do
+      local_registry_validate_bound_row_identity "$state" "$(jq -r .checkout_id "$owner")" "$(jq -r .worktree_id "$owner")" || exit
+    done
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$owner" "$linked_owner"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-both.json"
+  for fault in owner-without-binding binding-without-owner; do
+    case "$fault" in
+      owner-without-binding)
+        jq --slurpfile linked "$linked_owner" 'del(.projects["personal/fixture-project"].checkouts[$linked[0].checkout_id].worktrees[$linked[0].worktree_id].attachment_id)' \
+          "$SANDBOX/registry-both.json" > "$TRELLIS_HOME/registry.json"
+        expect_message='partial harness detach requires exactly one committed owner; orphan or multiple owners found' ;;
+      binding-without-owner)
+        mv "$linked_owner" "$SANDBOX/linked-owner-backup.json"
+        expect_message='partial harness detach requires exactly one matching registry attachment binding' ;;
+    esac
+    before="$(detach_state_snapshot "$WORKTREE")"
+    expected_proposal="$(jq -cS '.projects[].checkouts[] | {expected:.,after:(. | .harnesses = ["codex"])}' "$TRELLIS_HOME/registry.json")"
+    run partial_registry_proposal
+    # A disposable source mutant must reach this business assertion with the
+    # exact proposal, not fail setup or an unrelated preflight predicate.
+    if [ "$status" -eq 0 ]; then
+      [ "$(printf '%s\n' "$output" | jq -cS .)" = "$expected_proposal" ]
+      [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
+      echo "MUTATION-ESCAPE $fault status=0 exact-expected-after-proposal state=unchanged: $output"
+    fi
+    [ "$status" -eq 3 ] || { echo "HELPER-REFUSAL $fault status=$status: $output"; false; }
+    [ "$output" = "trellis attach: $expect_message" ]
+    [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
+    run_detach --harness claude
+    [ "$status" -eq 3 ] || { echo "$fault: $output"; false; }
+    [[ "$output" == *"$expect_message"* ]]
+    [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
+    cp "$SANDBOX/registry-both.json" "$TRELLIS_HOME/registry.json"
+    if [ "$fault" = binding-without-owner ]; then
+      mv "$SANDBOX/linked-owner-backup.json" "$linked_owner"
+    fi
+  done
+  # Positive CLI control after restoring both independent corruptions.
+  run "$ATTACH" detach --home "$TRELLIS_HOME" "$WORKTREE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run_detach --harness claude
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -L "$PROJECT/.claude/rules/trellis.md" ]
+  [ -L "$PROJECT/.agents/rules/trellis.md" ]
+  jq -e '.projects[].checkouts[].harnesses == ["codex"]' "$TRELLIS_HOME/registry.json"
+}
+
+@test "partial detach registry rename crashes recover before and after durable write" {
+  WORKTREE="$SANDBOX/detached inventory"
+  git -C "$PROJECT" worktree add -q -b detached-inventory "$WORKTREE"
+  run bash -c '. "$1"; local_registry_register_worktree "$2" personal fixture-project "$3" "" "[]" "" "{}"' \
+    _ "$REPO_ROOT/scripts/lib/local-registry.sh" "$TRELLIS_HOME" "$WORKTREE"
+  [ "$status" -eq 0 ]
+  for fault in detach-registry-before detach-registry-after; do
+    run_attach
+    [ "$status" -eq 0 ]
+    inventory_before="$(jq -c '.projects[].checkouts[].worktrees' "$TRELLIS_HOME/registry.json")"
+    run env ATTACHMENT_FAULT_PHASE="$fault" "$ATTACH" detach --home "$TRELLIS_HOME" --harness claude "$PROJECT"
+    [ "$status" -eq 5 ] || { echo "$output"; false; }
+    journal="$(find "$TRELLIS_HOME/state/attachment-journals" -name 'detach-*.json')"
+    jq -e '.owner_committed and .external.phase == 4 and .external.registry_update != null' "$journal"
+    if [ "$fault" = detach-registry-before ]; then snapshot=expected; else snapshot=after; fi
+    jq -e --slurpfile journal "$journal" --arg snapshot "$snapshot" '
+      .projects["personal/fixture-project"].checkouts[$journal[0].checkout_id] == $journal[0].external.registry_update[$snapshot]
+    ' "$TRELLIS_HOME/registry.json"
+    run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ ! -e "$journal" ]
+    [ "$(jq -c '.projects[].checkouts[].worktrees' "$TRELLIS_HOME/registry.json")" = "$inventory_before" ]
+    jq -e '.projects[].checkouts[].harnesses == ["codex"]' "$TRELLIS_HOME/registry.json"
+    [ ! -L "$PROJECT/.claude/rules/trellis.md" ]
+    [ -L "$PROJECT/.agents/rules/trellis.md" ]
+    run_detach
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+}
+
+@test "partial recovery rejects registry conflicts malformed snapshots and legacy journals without mutation" {
+  run_attach
+  [ "$status" -eq 0 ]
+  run env ATTACHMENT_FAULT_PHASE=detach-prepared "$ATTACH" detach --home "$TRELLIS_HOME" --harness claude "$PROJECT"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  journal="$(find "$TRELLIS_HOME/state/attachment-journals" -name 'detach-*.json')"
+  cp "$journal" "$SANDBOX/journal-original.json"
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-original.json"
+  jq '.projects[].checkouts[].release = "1.2.4"' "$SANDBOX/registry-original.json" > "$TRELLIS_HOME/registry.json"
+  before="$(detach_state_snapshot)"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(detach_state_snapshot)" = "$before" ]
+  cp "$SANDBOX/registry-original.json" "$TRELLIS_HOME/registry.json"
+  # `del(.external.registry_update)` is the HISTORICAL legacy shape: a partial
+  # detach journal written before the trusted registry snapshot existed. It is
+  # kept deliberately — the field is absent, not null — because that older
+  # journal is still recoverable-on-disk and must be refused, not replayed.
+  # The forged parent covers ordered_subset: a next_owner artifact list may omit
+  # original entries but may never gain a fabricated one.
+  for filter in 'del(.external.registry_update)' '.external.registry_update.extra = true' \
+    '.external.registry_update.after.release = "1.2.4"' \
+    '.external.registry_update.expected.harnesses = ["claude"]' \
+    '.external.registry_update.after.harnesses = ["pi"]' \
+    '.external.registry_update.expected.worktrees = {} | .external.registry_update.after.worktrees = {}' \
+    '.next_owner.artifacts += [{path:".claude/forged-parent",kind:"parent"}]' \
+    '.external.clear_registry = true'; do
+    jq "$filter" "$SANDBOX/journal-original.json" > "$journal"
+    before="$(detach_state_snapshot)"
+    run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+    [ "$status" -eq 4 ] || { echo "$filter: $output"; false; }
+    if [ "$filter" = 'del(.external.registry_update)' ]; then
+      [[ "$output" == *"legacy partial detach journal lacks a trusted registry snapshot"* ]]
+    fi
+    [ "$(detach_state_snapshot)" = "$before" ]
+  done
+  cp "$SANDBOX/journal-original.json" "$journal"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "partial detach filters only removed harness pre-existing records" {
+  mkdir -p "$PROJECT/.claude/rules" "$PROJECT/.agents/rules"
+  printf '# local Claude\n' > "$PROJECT/.claude/rules/trellis.md"
+  printf '# local shared\n' > "$PROJECT/.agents/rules/trellis.md"
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(owner_for_root "$PROJECT")"
+  jq -e '.pre_existing | length == 2' "$owner"
+  run env ATTACHMENT_FAULT_PHASE=detach-prepared "$ATTACH" detach --home "$TRELLIS_HOME" --harness claude "$PROJECT"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  journal="$(find "$TRELLIS_HOME/state/attachment-journals" -name 'detach-*.json')"
+  cp "$journal" "$SANDBOX/deferred-original.json"
+  jq '.next_owner.pre_existing = []' "$SANDBOX/deferred-original.json" > "$journal"
+  before="$(detach_state_snapshot)"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ "$(detach_state_snapshot)" = "$before" ]
+  cp "$SANDBOX/deferred-original.json" "$journal"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.pre_existing | length == 1 and .[0].path == ".agents/rules/trellis.md"' "$owner"
+  [ "$(cat "$PROJECT/.claude/rules/trellis.md")" = '# local Claude' ]
+  [ "$(cat "$PROJECT/.agents/rules/trellis.md")" = '# local shared' ]
 }
 
 @test "modified owned artifact blocks detach before any mutation" {
@@ -473,8 +704,8 @@ run_detach() {
   [ "$status" -eq 0 ]
   owner="$(owner_for_root "$PROJECT")"
   exclude_attached="$(sha256_file "$PROJECT/.git/info/exclude")"
-  rm "$PROJECT/.omp/AGENTS.md"
-  ln -s wrong-target "$PROJECT/.omp/AGENTS.md"
+  rm "$PROJECT/.agents/rules/trellis.md"
+  ln -s wrong-target "$PROJECT/.agents/rules/trellis.md"
 
   run_detach
 
@@ -483,7 +714,7 @@ run_detach() {
   [ -L "$PROJECT/.trellis/runtime" ]
   [ -L "$PROJECT/.claude/rules/trellis.md" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
-  [ "$(readlink "$PROJECT/.omp/AGENTS.md")" = wrong-target ]
+  [ "$(readlink "$PROJECT/.agents/rules/trellis.md")" = wrong-target ]
   [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_attached" ]
 }
 
@@ -493,7 +724,7 @@ run_detach() {
   run_attach
   [ "$status" -eq 0 ]
   WORKTREE="$SANDBOX/linked worktree"
-  git -C "$PROJECT" worktree add -qb fixture-linked "$WORKTREE"
+  git -C "$PROJECT" worktree add -q -b fixture-linked "$WORKTREE"
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
   [ "$status" -eq 0 ]
   manager_owner="$(owner_for_root "$PROJECT")"
@@ -525,7 +756,7 @@ run_detach() {
   run_attach
   [ "$status" -eq 0 ]
   WORKTREE="$SANDBOX/all linked worktrees"
-  git -C "$PROJECT" worktree add -qb fixture-all "$WORKTREE"
+  git -C "$PROJECT" worktree add -q -b fixture-all "$WORKTREE"
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
   [ "$status" -eq 0 ]
 
@@ -544,7 +775,7 @@ run_detach() {
   run_attach
   [ "$status" -eq 0 ]
   WORKTREE="$SANDBOX/partial linked worktree"
-  git -C "$PROJECT" worktree add -qb fixture-partial "$WORKTREE"
+  git -C "$PROJECT" worktree add -q -b fixture-partial "$WORKTREE"
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$WORKTREE"
   [ "$status" -eq 0 ]
   manager_owner="$(owner_for_root "$PROJECT")"
@@ -586,6 +817,9 @@ run_detach() {
   [ "$status" -eq 5 ]
   journal="$(find "$TRELLIS_HOME/state/attachment-journals" -type f -name 'detach-*.json' -print)"
   [ -f "$journal" ]
+  # Production full detach emits explicit null. Legacy full-detach journals may
+  # omit the field; the phase-3 recovery case below preserves that coverage.
+  jq -e '.external | has("registry_update") and .registry_update == null' "$journal" >/dev/null
   grep -F '# --- Trellis local attachment exclude block ---' "$PROJECT/.git/info/exclude"
 
   run_detach
@@ -633,7 +867,7 @@ run_detach() {
     rm -f "$exclude"
   fi
   temp="$journal.tmp"
-  jq '.external.phase = 3 | .external.render_phase = (.external.renders | length)' \
+  jq '.external.phase = 3 | .external.render_phase = (.external.renders | length) | del(.external.registry_update)' \
     "$journal" > "$temp"
   chmod 600 "$temp"
   mv "$temp" "$journal"
@@ -800,4 +1034,84 @@ run_detach() {
   chmod 600 "$journal"
   run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
   [ "$status" -eq 4 ]
+}
+
+phase5_capture() {
+  local label="$1"
+  mkdir -p "$evidence/$label"
+  cp "$TRELLIS_HOME/registry.json" "$evidence/$label/registry.json"
+  cp "$owner" "$evidence/$label/owner.json"
+  if [ -f "$journal" ]; then cp "$journal" "$evidence/$label/journal.json"; fi
+  detach_state_snapshot > "$evidence/$label/state.json"
+}
+
+phase5_case() {
+  local variant="$1" expected_status="$2"
+  local evidence="${PHASE5_EVIDENCE:-$SANDBOX/evidence}/$variant" owner journal
+  mkdir -p "$evidence"
+  run_attach
+  printf '%s\n' "$output" > "$evidence/attach.log"
+  [ "$status" -eq 0 ] || return 1
+  [ -x "$HOME/.local/bin/trellis" ] || return 1
+  owner="$(owner_for_root "$PROJECT")"
+  run env ATTACHMENT_FAULT_PHASE=detach-registry-after "$ATTACH" detach --home "$TRELLIS_HOME" --harness claude "$PROJECT"
+  printf '%s\n' "$output" > "$evidence/fault.log"
+  printf '%s\n' "$status" > "$evidence/fault.status"
+  [ "$status" -eq 5 ] || return 1
+  local journals=("$TRELLIS_HOME"/state/attachment-journals/detach-*.json)
+  [ "${#journals[@]}" -eq 1 ] || return 1
+  journal="${journals[0]}"
+  phase5_capture phase4
+  jq -e '.owner_committed == true and .external.phase == 4' "$journal" || return 1
+  jq -e --slurpfile j "$journal" '.projects["personal/fixture-project"].checkouts[$j[0].checkout_id] == $j[0].external.registry_update.after' "$TRELLIS_HOME/registry.json" || return 1
+  run bash -c '. "$1"; attachment_detach_mark_external_phase "$2" "$3" 5' _ "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$journal"
+  printf '%s\n' "$output" > "$evidence/mark.log"
+  printf '%s\n' "$status" > "$evidence/mark.status"
+  [ "$status" -eq 0 ] || return 1
+  jq -e '.owner_committed == true and .external.phase == 5' "$journal" || return 1
+  phase5_capture marked
+  if [ "$variant" != after ]; then
+    jq --slurpfile j "$journal" --arg variant "$variant" '
+      .projects["personal/fixture-project"].checkouts[$j[0].checkout_id] =
+      (if $variant == "expected" then $j[0].external.registry_update.expected
+       else ($j[0].external.registry_update.after | .harnesses = ["claude"]) end)
+    ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/registry-new.json" || return 1
+    cp "$SANDBOX/registry-new.json" "$TRELLIS_HOME/registry.json"
+  fi
+  phase5_capture before
+  # All fixture and durable-marker checks passed; failures below are business assertions.
+  printf 'business\n' > "$evidence/stage"
+  if [ -n "${PHASE5_EVIDENCE:-}" ]; then rm -f "$PHASE5_EVIDENCE/setup-incomplete"; fi
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  printf '%s\n' "$output" > "$evidence/recover.log"
+  printf '%s\n' "$status" > "$evidence/recover.status"
+  phase5_capture after
+  echo "phase5 $variant actual_recover_status=$status expected=$expected_status evidence=$evidence"
+  [ "$status" -eq "$expected_status" ]
+  if [ "$variant" = after ]; then
+    [ ! -e "$journal" ]
+    cmp "$evidence/before/registry.json" "$evidence/after/registry.json"
+    cmp "$evidence/before/owner.json" "$evidence/after/owner.json"
+    jq -e --slurpfile owner "$owner" --slurpfile j "$evidence/before/journal.json" '
+      .projects["personal/fixture-project"].checkouts[$owner[0].checkout_id] |
+      . == $j[0].external.registry_update.after and $owner[0] == $j[0].next_owner and
+      .harnesses == ["codex"] and .release == $owner[0].release and
+      .worktrees[$owner[0].worktree_id].attachment_id == $owner[0].attachment_id
+    ' "$TRELLIS_HOME/registry.json"
+    [ ! -L "$PROJECT/.claude/rules/trellis.md" ]
+    [ -L "$PROJECT/.agents/rules/trellis.md" ]
+  else
+    [ -f "$journal" ]
+    cmp "$evidence/before/state.json" "$evidence/after/state.json"
+  fi
+}
+
+@test "phase5 expected registry rollback must conflict without mutation" {
+  phase5_case expected 3
+}
+@test "phase5 unchanged after snapshot recovers with registry owner agreement" {
+  phase5_case after 0
+}
+@test "phase5 other valid harness drift conflicts without mutation" {
+  phase5_case drift 3
 }

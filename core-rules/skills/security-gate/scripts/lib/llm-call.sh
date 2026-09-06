@@ -49,28 +49,34 @@ fi
 # Compose the call. simonw/llm reads stdin as the user message; -s sets the system prompt.
 SYSTEM_PROMPT="$(cat "$PROMPT")"
 
-# Honor `timeout` if available (gnu coreutils / brew). On bare macOS, fall back.
+# Honor `timeout` when available (GNU coreutils / brew).
 if command -v timeout >/dev/null 2>&1; then
   RUNNER=(timeout --preserve-status "$TIMEOUT")
 elif command -v gtimeout >/dev/null 2>&1; then
   RUNNER=(gtimeout --preserve-status "$TIMEOUT")
 else
-  RUNNER=()
+  echo "warn: neither timeout nor gtimeout is available — refusing to invoke llm without a deadline" >&2
+  : > "$OUT"
+  exit 2
 fi
 
 # Try the call. If it fails (auth, network, model unknown), surface a `warn`
 # and write an empty out so the caller falls through to no-LLM mode.
-if [ "${#RUNNER[@]}" -gt 0 ]; then
-  CMD=("${RUNNER[@]}" llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
-else
-  CMD=(llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
-fi
-
-if ! "${CMD[@]}" < "$INPUT" > "$OUT" 2>/tmp/security-gate-llm.err; then
-  echo "warn: llm call failed (model=$MODEL provider=$PROVIDER) — see /tmp/security-gate-llm.err" >&2
+DIAGNOSTIC_TEMPLATE="${TMPDIR:-/tmp}/security-gate-llm.XXXXXX"
+if ! DIAGNOSTIC="$(umask 077; mktemp "$DIAGNOSTIC_TEMPLATE")"; then
+  echo "warn: unable to allocate private llm diagnostic at $DIAGNOSTIC_TEMPLATE" >&2
   : > "$OUT"
   exit 2
 fi
+CMD=("${RUNNER[@]}" llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
+
+# SAFETY: SECURITY_GATE_LLM_TIMEOUT_S, default 120 seconds per the env contract above, bounds external provider I/O.
+if ! "${CMD[@]}" < "$INPUT" > "$OUT" 2>"$DIAGNOSTIC"; then
+  echo "warn: llm call failed (model=$MODEL provider=$PROVIDER) — see $DIAGNOSTIC" >&2
+  : > "$OUT"
+  exit 2
+fi
+rm -f "$DIAGNOSTIC"
 
 if [ ! -s "$OUT" ]; then
   echo "warn: llm returned empty output — treating as no-LLM run" >&2

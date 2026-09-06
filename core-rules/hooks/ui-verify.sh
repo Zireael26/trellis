@@ -50,12 +50,6 @@ if [ -f "${PROJECT_DIR}/.claude/hooks/config.sh" ]; then
   set +a
 fi
 
-emit_block() {
-  local reason="$1"
-  jq -nc --arg reason "UI-visible change requires visual verification. $reason" '{decision: "block", reason: $reason}'
-  exit 2
-}
-
 # --- Delegate to the decision core. ---
 # The core ignores stdin; redirect from /dev/null so it never blocks on a tty.
 # Discard stderr and `|| true` so a core infra failure surfaces as empty output
@@ -86,7 +80,8 @@ case "$VERDICT" in
     exit 0
     ;;
   block)
-    emit_block "$REASON"
+    jq -nc --arg reason "UI-visible change requires visual verification. $REASON" '{decision: "block", reason: $reason}'
+    exit 2
     ;;
   *)
     # Unknown verdict → fail-open.

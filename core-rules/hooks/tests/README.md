@@ -22,7 +22,7 @@ CI runs the suite via `.github/workflows/bats.yml`.
 | `block-destructive.bats` | P1.1 (rm-rf rule covers absolute paths), P1.2 (DELETE-without-WHERE handles terminated SQL), P1.5 (jq fail-closed) |
 | `stop-verify.bats` | P1.3 (todo check runs before dirty-tree skip; stop_hook_active short-circuit) |
 | `save-context-log.bats` | P1.4 (JSONL filter excludes tool_result wrappers; envelope validation) |
-| `jq-fail-closed.bats` | P1.5 across all 18 hooks (Claude + Codex) — fails closed without env, degrades cleanly with `TRELLIS_NO_JQ_DEGRADE=1` |
+| `jq-fail-closed.bats` | P1.5 across jq-dependent executable hooks derived from both hook trees — fails closed without env, degrades cleanly with `TRELLIS_NO_JQ_DEGRADE=1` |
 
 ## Authoring conventions
 

@@ -213,6 +213,12 @@ sg_is_excluded_path() {
     *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
     package.json|*/package.json|trellis.config.json|.trellis.config.json) return 0 ;;
     *.yml|*.yaml) return 0 ;;
+    # Root-level paste-into-agent guides: AGENT_SETUP.md, AGENT_ONBOARD_PROJECT.md,
+    # AGENT_UPGRADE.md, AGENT_PI_SETUP.md. Prose documentation, the same category
+    # `docs/*` already exempts one directory down; these sit at the root only
+    # because the public mirror surfaces them there. Anchored at the start of the
+    # path, so a nested docs/AGENT_*.md is covered by the docs/ rule instead.
+    AGENT_*.md) return 0 ;;
     CHANGELOG.md) return 0 ;;
     *) return 1 ;;
   esac
@@ -221,36 +227,57 @@ sg_is_excluded_path() {
 # Echoes the net gated diff size (added+deleted, excluded paths removed) for the
 # branch vs merge-base. Echoes "-1" if the diff cannot be computed (fail-open).
 sg_compute_gated_diff() {
-  local dir="$1" base="$2" total=0 adds dels relp
+  local dir="$1" base="$2" total=0 adds dels relp numstat
   [ -n "$base" ] || { printf '%s' "-1"; return; }
+  if ! numstat=$(git -C "$dir" diff --numstat "$base"...HEAD 2>/dev/null); then
+    printf '%s' "-1"; return
+  fi
   while IFS=$'\t' read -r adds dels relp; do
     [ -z "$relp" ] && continue
     [ "$adds" = "-" ] && continue          # binary; excluded from a line count
     sg_is_excluded_path "$relp" && continue
     total=$(( total + adds + dels ))
-  done < <(git -C "$dir" diff --numstat "$base"...HEAD 2>/dev/null)
-  # Distinguish "clean, zero gated lines" from "git failed": a failed diff
-  # produces no rows AND a nonzero rc; guard by re-checking the range resolves.
-  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
-    printf '%s' "-1"; return
-  fi
+  done <<EOF
+$numstat
+EOF
   printf '%s' "$total"
 }
 
 # --- spec-triad-in-range (C-CRIT-1) + non-template (C-CRIT-2) ----------------
 # Echoes the triad dir (specs/NNN-*/) iff a full spec+plan+tasks triad was
 # ADDED OR MODIFIED within this branch's range AND passes the non-template
-# check. Merely existing on main does NOT count. Empty on failure.
+# check. Merely existing on main does NOT count. Empty with status 0 means no
+# qualifying triad; status 2 means git/grep discovery failed.
 sg_triad_in_range() {
-  local dir="$1" base="$2" changed d
-  changed=$(git -C "$dir" diff --name-only "$base"...HEAD 2>/dev/null | grep -E '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$') || true
-  [ -n "$changed" ] || { printf ''; return; }
+  local dir="$1" base="$2" paths changed d f grep_status complete
+  if ! paths=$(git -C "$dir" diff --name-only "$base"...HEAD 2>/dev/null); then
+    return 2
+  fi
+  if changed=$(printf '%s\n' "$paths" | grep -E '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$' 2>/dev/null); then
+    :
+  else
+    grep_status=$?
+    case "$grep_status" in
+      1) printf ''; return 0 ;;              # no matching in-range triad paths
+      *) return 2 ;;
+    esac
+  fi
   # Group by triad dir; a dir qualifies only if all three files are in-range.
   for d in $(printf '%s\n' "$changed" | sed -E 's#^(specs/[0-9][^/]*)/.*#\1#' | sort -u); do
-    if printf '%s\n' "$changed" | grep -qx "$d/spec.md" \
-      && printf '%s\n' "$changed" | grep -qx "$d/plan.md" \
-      && printf '%s\n' "$changed" | grep -qx "$d/tasks.md"; then
-      if sg_nontemplate_ok "$dir/$d"; then printf '%s' "$d"; return; fi
+    complete=true
+    for f in spec.md plan.md tasks.md; do
+      if printf '%s\n' "$changed" | grep -qx "$d/$f" 2>/dev/null; then
+        :
+      else
+        grep_status=$?
+        case "$grep_status" in
+          1) complete=false; break ;;
+          *) return 2 ;;
+        esac
+      fi
+    done
+    if [ "$complete" = true ] && sg_nontemplate_ok "$dir/$d"; then
+      printf '%s' "$d"; return
     fi
   done
   printf ''
@@ -269,37 +296,6 @@ sg_nontemplate_ok() {
 }
 
 # --- interview artifact (autonomy-tied, spec §0.6 PD6a / C-4c) ---------------
-sg_valid_autonomy_level() {
-  case "${1:-}" in
-    1|2|3|4|5) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-sg_autonomy_frontmatter_value() {
-  local file="$1" key="$2"
-  [ -f "$file" ] || return 0
-  awk -v wanted="$key" '
-    NR == 1 {
-      sub(/\r$/, "")
-      if ($0 != "---") exit
-      in_frontmatter = 1
-      next
-    }
-    in_frontmatter {
-      sub(/\r$/, "")
-      if ($0 == "---") exit
-      line = $0
-      if (line ~ "^[[:space:]]*" wanted ":[[:space:]]*") {
-        sub("^[[:space:]]*" wanted ":[[:space:]]*", "", line)
-        sub(/[[:space:]]*$/, "", line)
-        print line
-        exit
-      }
-    }
-  ' "$file" 2>/dev/null
-}
-
 sg_autonomy_level() {
   local root="$1"
   command -v jq >/dev/null 2>&1 || { printf '3'; return; }
@@ -340,7 +336,11 @@ sg_valid_marker() {
   [ "$m_branch" = "$branch" ] && [ "$m_wt" = "$wt" ] && [ "$m_base" = "$base" ] || return 1
   local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
   if [ "$m_mode" = "emergency" ]; then
-    printf '%s\temergency-override\t%s\tdiff=%s\t%s\n' "$ts" "$branch" "$diff" "$m_reason" >> "$log" 2>/dev/null
+    # SAFETY: An emergency override is valid only after its audit record is appended.
+    if ! printf '%s\temergency-override\t%s\tdiff=%s\t%s\n' \
+      "$ts" "$branch" "$diff" "$m_reason" 2>/dev/null >> "$log"; then
+      return 1
+    fi
     return 0
   fi
   if [ "$diff" -le "$ceiling" ]; then return 0; fi
@@ -396,7 +396,10 @@ EOF
   [ "$diff" -le "$floor" ] && { printf 'pass\tsub-floor(%s<=%s)' "$diff" "$floor"; return; }
 
   # Over the floor: need triad-in-range (+interview) OR a valid marker.
-  local tdir; tdir=$(sg_triad_in_range "$dir" "$base")
+  local tdir
+  if ! tdir=$(sg_triad_in_range "$dir" "$base"); then
+    printf 'advisory\tcannot-discover-spec-triad'; return
+  fi
   if [ -n "$tdir" ]; then
     if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch"; then
       printf 'pass\tspec-triad(%s)+interview' "$tdir"; return

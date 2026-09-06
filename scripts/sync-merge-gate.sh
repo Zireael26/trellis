@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+readonly SYNC_TMPDIR="${TMPDIR:-/tmp}"
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=lib/trellis-home.sh
 . "$SCRIPT_DIR/lib/trellis-home.sh"
@@ -138,8 +140,8 @@ if command -v git >/dev/null 2>&1 &&
   fi
 fi
 
-SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/trellis.merge-registry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
-TARGETS="$(mktemp "${TMPDIR:-/tmp}/trellis.merge-targets.XXXXXX")" || {
+SNAPSHOT="$(mktemp "$SYNC_TMPDIR/trellis.merge-registry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+TARGETS="$(mktemp "$SYNC_TMPDIR/trellis.merge-targets.XXXXXX")" || {
   rm -f "$SNAPSHOT"
   exit "$TRELLIS_EX_UNAVAILABLE"
 }
@@ -271,13 +273,14 @@ row_matches_resolved_root() {
 
 owner_harnesses_json() {
   jq -ce '
-    def attachment_harness($path):
-      if $path == "AGENTS.md" or ($path | startswith(".agents/")) or ($path | startswith(".codex/"))
-      then "codex"
-      elif ($path | startswith(".claude/")) then "claude"
-      elif ($path | startswith(".omp/")) then "omp"
-      else empty end;
-    [.artifacts[] | attachment_harness(.path)] | unique | sort
+    (.artifacts + (.pre_existing // [])) as $owned
+    | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
+    | [$owned[]
+      | if (.path | startswith(".codex/")) then "codex"
+        elif (.path | startswith(".pi/")) then "pi"
+        elif .path | startswith(".claude/") then "claude"
+        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
+        else empty end] | unique | sort
   ' "$1" 2>/dev/null
 }
 
@@ -469,6 +472,9 @@ relink_one() {
         /usr/bin/env -i \
           "HOME=${HOME:-}" \
           "TRELLIS_HOME=$HOME_PATH" \
+          "TMPDIR=$SYNC_TMPDIR" \
+          "TMP=$SYNC_TMPDIR" \
+          "TEMP=$SYNC_TMPDIR" \
           "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
           "LC_ALL=C" \
           "TRELLIS_LIBS_PRELOADED=1" \

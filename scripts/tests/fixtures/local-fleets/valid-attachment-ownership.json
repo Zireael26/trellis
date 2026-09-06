@@ -14,9 +14,9 @@
       "target": "/Users/alex/.trellis/releases/1.0.0-rc.24/payload"
     },
     {
-      "path": ".omp/hooks/pre/trellis.ts",
+      "path": ".codex/hooks/session-context.sh",
       "kind": "symlink",
-      "target": "../../.trellis/runtime/core-rules/omp/hooks/pre/trellis.ts"
+      "target": "../../.trellis/runtime/core-rules/codex/hooks/session-context.sh"
     },
     {
       "path": ".codex/hooks.json",

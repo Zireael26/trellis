@@ -1,6 +1,6 @@
 # model-prompting-deltas — shape the prompt to the model
 
-Per-model prompt guidance for Trellis's two-harness setup: `.claude/` for Claude
+Per-model prompt guidance for Trellis's native harnesses: `.claude/` for Claude
 Code and `.codex/` for the Codex/GPT executor (see `core-rules/inheritance.md`).
 
 This file is the **only** place model-divergent guidance lives. The constitution
@@ -8,9 +8,9 @@ This file is the **only** place model-divergent guidance lives. The constitution
 doctrine — so when a fact is true of one model and false of another, it lands
 here, phrased as a rule an agent can apply *without knowing which model it is*.
 
-Sourced from Anthropic's Claude-5-generation prompting docs, distilled in
+Claude rows are sourced from Anthropic's Claude-5-generation prompting docs, distilled in
 `docs/research/2026-07-25-claude-5-prompting-corpus.md`. Rows without a primary
-source say so.
+source say so. Astra guidance was checked against [OpenAI's model guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra) on 2026-09-05. Model capabilities do not establish a performance ranking for Trellis workloads.
 
 ## Per-model deltas
 
@@ -20,12 +20,12 @@ source say so.
 | **Claude Fable 5 / Mythos 5** | Brief instructions beat enumerations — one short instruction steers a whole behavior class. Give the *reason*, not only the request. | **`high` is the default for most tasks**; `xhigh` only for the most capability-sensitive; `medium`/`low` for routine. Lower Fable tiers often exceed `xhigh` on prior models. At higher effort it over-gathers and over-tidies — pair with the surgical-scope block. | Single turns run for minutes and autonomous runs for hours: check in **asynchronously** via a scheduled job, never by blocking. Dispatches parallel subagents readily and sustains them dependably; long-lived subagents that keep context across subtasks are the cheap shape. Ground every progress claim against a tool result from the same session. When the user is thinking out loud, the deliverable is the assessment — report and stop. **Never instruct it to echo, transcribe, or explain its internal reasoning as response text** — that trips the `reasoning_extraction` refusal class and falls back to Opus 4.8. Adaptive thinking is the only mode. |
 | **Claude Sonnet 5** | *No primary source.* Apply § Cross-model below. | *Unsourced — do not carry an Opus or Fable ladder across without a sweep.* | The generation-wide structural facts hold (`budget_tokens` returns 400; adaptive thinking is the recommended mode); every behavioral delta is a **hypothesis** until the refresh trigger closes it. |
 | **Claude Haiku 4.5** | *No primary source.* Apply § Cross-model below. | *Unsourced.* | Pre-Claude-5 **and pre-4.6**, so the 4.7+ structural facts do **not** carry: it takes `budget_tokens`, not `effort`, and has no adaptive-thinking mode. Behavioral deltas unverified. Reach for it where the task is mechanical and a wrong answer is cheap to catch. |
-| **Codex / GPT executor** (`.codex/` path; operator pin `gpt-5.6-sol`) | Concise, schema-shaped work orders: frozen scope, explicit constraints, the proof obligation, the expected output shape. Prose framing buys nothing here. | The ladder is **operator-set, not model-set** — `docs/codex-routing.md` §3 is authoritative. Use `medium` for mechanical or frozen-scope work with a strong oracle, `high` for moderately complex cross-file work with useful diagnostics, and `xhigh` for weak-oracle, security-sensitive, or consequential work. `max` is retired and unselectable. `ultra` is a separately admitted, justification-gated attended direct-CLI harness mode. Effort is declared per unit at dispatch; an omitted effort is a validation error, never a default. | A runtime-detected capability, never a hard dependency. A selected lane fails visibly and closed; only an explicit caller/operator re-selection may move the unit to the local harness or another provider. Ordinary direct Codex dispatch is unattended; attended `ultra` is the deliberate exception. Put the no-collaboration constraint in every direct work order. Which work goes to which model is `docs/codex-routing.md` §2; this file covers only prompt shape. |
+| **GPT-6 Astra** | State the objective, boundaries, expected evidence, and output style. Make user-request precedence over skill guidance explicit; resolve routine choices and persist through authorized work. Audit conflicting instructions before adding more. | Preserve effective effort during migration; move `none`/`minimal` to `low`. The API documents `low`, `medium`, `high`, `xhigh`, `max`; Trellis's direct-dispatch house band remains §3 of `docs/codex-routing.md`. Host-specific modes require runtime verification. | Can plan, implement, browse, and orchestrate when its host exposes those tools. Specify when delegation helps; reuse agents with related context. Calibrate tests to the change and stop repeating passing checks without a reason. Give concise prose guidance explicitly. Async tools and mid-turn steering require host support, not a prompt-only switch. |
+| **Other Codex / GPT models** | Concise work orders: scope, constraints, proof obligation, expected output. Verify the selected model rather than assuming an operator pin. | The direct-dispatch ladder is operator policy in `docs/codex-routing.md` §3. Preserve workload cost and latency roles; do not replace every worker with the flagship. | A selected lane fails visibly; only explicit re-selection changes it. A direct worker's no-collaboration constraint applies to that worker, not to a user-selected Codex orchestrator. |
 
-Gemini 3 had a row here and no longer does. Trellis supports three native
-harnesses, but this table is model-specific: OMP can host existing provider
-models and therefore does not get a synthetic "OMP model" row. Add a row only
-when an actively routed model has source-backed steering deltas.
+This table is model-specific: pi can host actively routed provider models through
+workflow/subagent surfaces and therefore does not get a synthetic harness row.
+Add a row only when an actively routed model has source-backed steering deltas.
 
 **Where effort posture actually lives.** The Effort column above is a summary for
 readers already in this table. `docs/claude-steering.md` §1 is canonical: it
@@ -44,14 +44,14 @@ Two pieces of official guidance look contradictory:
 - Fable 5: *"separate, fresh-context verifier subagents tend to outperform
   self-critique"* on long-running tasks.
 
-They are not in conflict. The axis is **run length and context freshness**, not
-model preference. Apply it without knowing which model you are:
+For those Claude rows, run length and context freshness reconcile the advice.
+Astra's separate guidance is to scope verification to the change and complete
+required checks, then stop unless new evidence justifies more. Across models:
 
 1. **Short run, one context window.** The work you would be checking is still in
-   your context; re-reading it adds no information. **Write no verification
-   instruction, and spawn no verifier subagent.** Self-verification already
-   happens — instructing it causes over-firing and wasted tokens with no quality
-   gain.
+   your context. Verify directly against the task's acceptance criteria and
+   existing checks. Skip a separate verifier unless independence addresses a
+   concrete risk; avoid repeated generic requests to double-check.
 2. **Long run — hours, many tool calls, or more than one context window.** The
    work has accumulated past what you can hold accurately, and the thing to check
    against is a written spec, not your memory. **Verify at a declared interval

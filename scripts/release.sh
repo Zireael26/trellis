@@ -36,16 +36,32 @@ if [ "$release_bundle_mode" != true ] && [ "${TRELLIS_RELEASE_CLEAN_ENV:-}" != 1
   release_bootstrap_payload="${TRELLIS_VERIFIED_PAYLOAD-}"
   release_bootstrap_version="${TRELLIS_VERIFIED_RELEASE_VERSION-}"
   release_bootstrap_socket="${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}"
+  # The caller's TMPDIR crosses as an UNTRUSTED CANDIDATE under its own name,
+  # never as TMPDIR. Nothing here may call release_entry_gate: that function is
+  # defined further down and this bootstrap runs before it exists.
+  release_bootstrap_scratch="${TMPDIR-}"
   exec /usr/bin/env -i \
     "HOME=$release_bootstrap_home" "TRELLIS_HOME=$release_bootstrap_trellis_home" \
     "TRELLIS_VERIFIED_PAYLOAD=$release_bootstrap_payload" \
     "TRELLIS_VERIFIED_RELEASE_VERSION=$release_bootstrap_version" \
     "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$release_bootstrap_socket" \
+    "TRELLIS_RELEASE_SCRATCH_CANDIDATE=$release_bootstrap_scratch" \
     "TRELLIS_RELEASE_CLEAN_ENV=1" "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     /bin/bash --noprofile --norc "$0" "$@"
 fi
 unset TRELLIS_RELEASE_CLEAN_ENV
 set -u
+
+# Bundle mode has the launcher's in-memory attestation and receives the derived
+# directory as TMPDIR directly. Pathname mode has only the carrier above. Either
+# way TMPDIR stays UNSET until the existing release identity gate has passed and
+# the candidate has been admitted, so an ambient value can never be the answer.
+if [ "${release_bundle_mode:-false}" = true ]; then
+  release_scratch_candidate="${TMPDIR-}"
+else
+  release_scratch_candidate="${TRELLIS_RELEASE_SCRATCH_CANDIDATE-}"
+fi
+unset TMPDIR TRELLIS_RELEASE_SCRATCH_CANDIDATE
 
 RELEASE_VERIFIED_SSH_AUTH_SOCK="${TRELLIS_VERIFIED_SSH_AUTH_SOCK:-}"
 unset SSH_AUTH_SOCK TRELLIS_VERIFIED_SSH_AUTH_SOCK
@@ -82,6 +98,63 @@ release_entry_version_is_safe() {
   esac
 }
 
+release_entry_private_directory() {
+  local path="${1:-}" permissions private_bits listing
+  [ -n "$path" ] && [ ! -L "$path" ] && [ -d "$path" ] && [ -O "$path" ] || return 1
+  case "$(/usr/bin/uname -s)" in
+    Darwin)
+      # Extended attributes can hide the ACL marker behind @. Read ACL rows,
+      # not just the mode suffix; canonical input paths contain no newlines.
+      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
+      case "$listing" in *"
+"*) return 1 ;; esac
+      ;;
+    *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+  esac
+  permissions="${listing%% *}"
+  case "$permissions" in *+*) return 1 ;; esac
+  private_bits="$(/usr/bin/printf '%s' "$permissions" | /usr/bin/awk '{p=substr($0, 1, 10); print substr(p, 5, 6)}')"
+  [ "$private_bits" = "------" ]
+}
+
+# Containment and ownership admission ONLY. A candidate that passes is a real,
+# private, effective-user-owned directory that is a direct `.cmd.*` child of
+# this home's command scratch root. It is NOT proof that the launcher created
+# it and it is NOT an authentication token.
+release_entry_scratch_is_admissible() {
+  local candidate="${1:-}" home="${2:-}" root parent base canonical_root canonical_candidate
+  release_entry_path_is_clean "$candidate" &&
+    release_entry_path_is_clean "$home" || return 1
+  parent="${candidate%/*}"
+  base="${candidate##*/}"
+  case "$base" in .cmd.?*) ;; *) return 1 ;; esac
+  case "${base#.cmd.}" in *[!0-9A-Za-z._-]*) return 1 ;; esac
+  root="$home/state/scratch"
+  [ "$parent" = "$root" ] || return 1
+  release_entry_private_directory "$home" &&
+    release_entry_private_directory "$home/state" &&
+    release_entry_private_directory "$root" &&
+    release_entry_private_directory "$candidate" || return 1
+  canonical_root="$(CDPATH='' cd "$root" && pwd -P)" || return 1
+  [ "$canonical_root" = "$root" ] || return 1
+  canonical_candidate="$(CDPATH='' cd "$candidate" && pwd -P)" || return 1
+  [ "$canonical_candidate" = "$candidate" ]
+}
+
+# Validated once, here, and cached in RELEASE_ADMITTED_TMPDIR: every later Git
+# call reads the cached value instead of re-running these validators.
+RELEASE_ADMITTED_TMPDIR=""
+
+release_admit_command_scratch() {
+  local candidate="${1:-}" home
+  [ -n "$candidate" ] || return 0
+  home="$(CDPATH='' cd "${TRELLIS_HOME:-/}" && pwd -P)" || return 1
+  release_entry_scratch_is_admissible "$candidate" "$home" || return 1
+  RELEASE_ADMITTED_TMPDIR="$candidate"
+  TMPDIR="$candidate"
+  export TMPDIR
+}
+
 release_entry_gate() {
   local home="${TRELLIS_HOME:-}" payload="${TRELLIS_VERIFIED_PAYLOAD:-}"
   local version="${TRELLIS_VERIFIED_RELEASE_VERSION:-}" canonical_home canonical_payload expected
@@ -110,6 +183,16 @@ if [ "$release_bundle_mode" != true ]; then
     exit 2
   }
 fi
+
+# Only now, with the release identity established and before any helper is
+# sourced. An absent candidate leaves TMPDIR unset and says so downstream by
+# its absence; a candidate that is present but outside the private namespace is
+# refused by name rather than silently degraded to the global temp directory.
+release_admit_command_scratch "$release_scratch_candidate" || {
+  printf '%s\n' "trellis release: command scratch directory is not an admissible private Trellis temp directory: $release_scratch_candidate" >&2
+  exit 4
+}
+unset release_scratch_candidate
 
 if [ "$release_bundle_mode" = true ]; then
   for release_bundle_function in \
@@ -156,6 +239,11 @@ release_git() {
   )
   if [ -n "$socket" ]; then
     command+=("SSH_AUTH_SOCK=$socket")
+  fi
+  # Only the already admitted value, never the caller's carrier and never an
+  # arbitrary TMPDIR. Unadmitted means Git gets no TMPDIR at all.
+  if [ -n "$RELEASE_ADMITTED_TMPDIR" ]; then
+    command+=("TMPDIR=$RELEASE_ADMITTED_TMPDIR")
   fi
   "${command[@]}" /usr/bin/git "$@"
 }
@@ -404,13 +492,17 @@ owner_matches_row() {
   local owner="$1" binding="$2" identity="$3" payload="$4" expected actual owner_root
   expected="$(printf '%s\n' "$binding" | jq -cS 'del(.git_common_dir, .checkout_root)')" || return "$TRELLIS_EX_STATE"
   actual="$(jq -cS '
+    (.artifacts + (.pre_existing // [])) as $owned
+    | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
+    |
     def harness($path):
-      if $path == "AGENTS.md" or ($path | startswith(".agents/")) or ($path | startswith(".codex/")) then "codex"
+      if ($path | startswith(".codex/")) then "codex"
+      elif ($path | startswith(".pi/")) then "pi"
       elif $path | startswith(".claude/") then "claude"
-      elif $path | startswith(".omp/") then "omp"
+      elif (($has_pi | not) and ($path == "AGENTS.md" or ($path | startswith(".agents/")))) then "codex"
       else empty end;
     {fleet,project_id,root:.worktree_root,checkout_id,worktree_id,attachment_id,release,
-     harnesses:([.artifacts[] | harness(.path)] | unique | sort)}
+     harnesses:([$owned[] | harness(.path)] | unique | sort)}
   ' "$owner" 2>/dev/null)" || return "$TRELLIS_EX_STATE"
   [ "$actual" = "$expected" ] || return "$TRELLIS_EX_CONFLICT"
   owner_root="$(jq -r '.project_root' "$owner")" || return "$TRELLIS_EX_STATE"
@@ -432,9 +524,20 @@ adoption_verify_owner_base() {
 
 resolve_verified_adoption_target() {
   local home="$1" row="$2" binding root trellis root_identity trellis_identity identity current manifest_project_id project_id checkout worktree owner release payload hook_authority status
+  local identity_rc dead_fleet dead_project dead_checkout
   binding="$(adoption_binding_from_row "$row")" || return "$?"
   root="$(printf '%s\n' "$binding" | jq -r '.root')" || return "$TRELLIS_EX_STATE"
-  identity="$(local_registry_identity_for_root "$root")" || return "$?"
+  if ! identity="$(local_registry_identity_for_root "$root")"; then
+    identity_rc="$?"
+    dead_fleet="$(printf '%s\n' "$binding" | jq -r '.fleet // empty')" || dead_fleet=''
+    dead_project="$(printf '%s\n' "$binding" | jq -r '.project_id // empty')" || dead_project=''
+    dead_checkout="$(printf '%s\n' "$binding" | jq -r '.checkout_id // empty')" || dead_checkout=''
+    [ -n "$dead_fleet" ] || dead_fleet='(unknown fleet)'
+    [ -n "$dead_project" ] || dead_project='(unknown project)'
+    [ -n "$dead_checkout" ] || dead_checkout='(unknown checkout)'
+    release_err "adopt target names a dead registry row: $dead_fleet/$dead_project root $root checkout $dead_checkout"
+    return "$identity_rc"
+  fi
   if ! printf '%s\n' "$identity" | jq -e --argjson binding "$binding" '
     .root == $binding.root
     and .checkout_id == $binding.checkout_id
@@ -600,7 +703,8 @@ replace_owned_file() (
 
 
 hook_payload_matches() {
-  local managed="$1" expected="$2" sidecar mode source manifest previous
+  local managed="$1" expected="$2" root="${3:-}" sidecar mode source manifest previous post_checkout pre_push
+  [ -n "$root" ] || return "$TRELLIS_EX_STATE"
   [ -d "$managed" ] && [ ! -L "$managed" ] || return "$TRELLIS_EX_CONFLICT"
   _attachment_hooks_has_only_state_files "$managed" || return "$TRELLIS_EX_CONFLICT"
   mode="$(_attachment_mode "$managed")" || return "$TRELLIS_EX_UNAVAILABLE"
@@ -614,11 +718,12 @@ hook_payload_matches() {
   _attachment_hooks_pre_push_source_valid "$source" || return "$TRELLIS_EX_CONFLICT"
   previous="$(_attachment_hooks_read_sidecar "$managed/previous-hooks-path" true)" || return "$TRELLIS_EX_CONFLICT"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$expected")" || return "$TRELLIS_EX_STATE"
-  _attachment_hooks_file_matches "$managed/post-checkout" \
-    "$(_attachment_hooks_post_checkout_dispatcher_body "$expected" "$manifest")" 700 ||
-    return "$TRELLIS_EX_CONFLICT"
-  _attachment_hooks_file_matches "$managed/pre-push" \
-    "$(_attachment_hooks_pre_push_dispatcher_body "$expected" "$source" "$manifest")" 700 ||
+  post_checkout="$(_attachment_hooks_post_checkout_dispatcher_body "$expected" "$manifest")" || return "$TRELLIS_EX_CONFLICT"
+  pre_push="$(_attachment_hooks_pre_push_dispatcher_body "$expected" "$source" "$manifest")" || return "$TRELLIS_EX_CONFLICT"
+  [ -n "$post_checkout" ] && [ -n "$pre_push" ] || return "$TRELLIS_EX_CONFLICT"
+  _attachment_hooks_file_matches "$managed/post-checkout" "$post_checkout" 700 || return "$TRELLIS_EX_CONFLICT"
+  _attachment_hooks_file_matches "$managed/pre-push" "$pre_push" 700 || return "$TRELLIS_EX_CONFLICT"
+  _attachment_hooks_verify_passthrough_shims "$managed" "$root" "$previous" ||
     return "$TRELLIS_EX_CONFLICT"
 }
 
@@ -630,8 +735,8 @@ write_hook_state_file() {
 
 
 replace_hook_payload() (
-  local managed="${1:-}" expected="${2:-}" replacement="${3:-}"
-  local hooks_root base temporary='' source previous manifest rc committed=false
+  local managed="${1:-}" expected="${2:-}" replacement="${3:-}" root="${4:-}"
+  local hooks_root base temporary='' source previous manifest rc committed=false expected_shims shim_name shim_body post_checkout pre_push
 
   release_hook_transaction_cleanup() {
     local status="${1:-$?}" rollback=0 temporary_expected=''
@@ -644,11 +749,11 @@ replace_hook_payload() (
     if [ "$committed" != true ] && [ -n "$temporary" ] &&
       [ -d "$temporary" ] && [ ! -L "$temporary" ] &&
       [ -d "$managed" ] && [ ! -L "$managed" ]; then
-      if hook_payload_matches "$managed" "$expected" &&
-        hook_payload_matches "$temporary" "$replacement"; then
+      if hook_payload_matches "$managed" "$expected" "$root" &&
+        hook_payload_matches "$temporary" "$replacement" "$root"; then
         :
-      elif hook_payload_matches "$managed" "$replacement" &&
-        hook_payload_matches "$temporary" "$expected"; then
+      elif hook_payload_matches "$managed" "$replacement" "$root" &&
+        hook_payload_matches "$temporary" "$expected" "$root"; then
         release_store_rename_swap "$temporary" "$managed" || rollback=$?
       else
         rollback="$TRELLIS_EX_CONFLICT"
@@ -663,7 +768,7 @@ replace_hook_payload() (
     if [ -n "$temporary" ] && { [ -e "$temporary" ] || [ -L "$temporary" ]; }; then
       if [ "$rollback" -eq 0 ] &&
         [ -d "$temporary" ] && [ ! -L "$temporary" ] &&
-        hook_payload_matches "$temporary" "$temporary_expected"; then
+        hook_payload_matches "$temporary" "$temporary_expected" "$root"; then
         rm -rf "$temporary" || rollback="$TRELLIS_EX_UNAVAILABLE"
       else
         [ "$rollback" -ne 0 ] || rollback="$TRELLIS_EX_CONFLICT"
@@ -676,34 +781,45 @@ replace_hook_payload() (
   trap 'release_hook_transaction_cleanup "$?"' EXIT
   trap 'exit "$TRELLIS_EX_STATE"' HUP INT TERM
 
-  [ "$#" -eq 3 ] && [ -n "$managed" ] && [ -n "$expected" ] && [ -n "$replacement" ] ||
+  [ "$#" -eq 4 ] && [ -n "$managed" ] && [ -n "$expected" ] && [ -n "$replacement" ] && [ -n "$root" ] ||
     exit "$TRELLIS_EX_USAGE"
-  hook_payload_matches "$managed" "$expected" || exit "$?"
+  hook_payload_matches "$managed" "$expected" "$root" || exit "$?"
   hooks_root="$(dirname "$managed")" || exit "$TRELLIS_EX_STATE"
   base="$(basename "$managed")" || exit "$TRELLIS_EX_STATE"
   [ -d "$hooks_root" ] && [ ! -L "$hooks_root" ] || exit "$TRELLIS_EX_CONFLICT"
   source="$(_attachment_hooks_read_sidecar "$managed/pre-push-source")" || exit "$TRELLIS_EX_CONFLICT"
   previous="$(_attachment_hooks_read_sidecar "$managed/previous-hooks-path" true)" || exit "$TRELLIS_EX_CONFLICT"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$replacement")" || exit "$TRELLIS_EX_STATE"
+  # Validate both replacement programs before allocating or exchanging state.
+  if ! post_checkout="$(_attachment_hooks_post_checkout_dispatcher_body "$replacement" "$manifest")" ||
+     ! pre_push="$(_attachment_hooks_pre_push_dispatcher_body "$replacement" "$source" "$manifest")" ||
+     [ -z "$post_checkout" ] || [ -z "$pre_push" ]; then
+    release_err "managed hook generation failed; current dispatcher was preserved"
+    exit "$TRELLIS_EX_STATE"
+  fi
   temporary="$(mktemp -d "$hooks_root/.${base}.release-adopt.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
   chmod 700 "$temporary" || exit "$TRELLIS_EX_UNAVAILABLE"
-  write_hook_state_file "$temporary/post-checkout" \
-    "$(_attachment_hooks_post_checkout_dispatcher_body "$replacement" "$manifest")" 700 ||
+  write_hook_state_file "$temporary/post-checkout" "$post_checkout" 700 ||
     exit "$?"
-  write_hook_state_file "$temporary/pre-push" \
-    "$(_attachment_hooks_pre_push_dispatcher_body "$replacement" "$source" "$manifest")" 700 ||
+  write_hook_state_file "$temporary/pre-push" "$pre_push" 700 ||
     exit "$?"
   write_hook_state_file "$temporary/previous-hooks-path" "$previous" 600 || exit "$?"
   write_hook_state_file "$temporary/release-payload" "$replacement" 600 || exit "$?"
   write_hook_state_file "$temporary/pre-push-source" "$source" 600 || exit "$?"
+  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous") || exit "$TRELLIS_EX_UNAVAILABLE"
+  while IFS= read -r shim_name; do
+    [ -n "$shim_name" ] || continue
+    shim_body=$(_attachment_hooks_passthrough_shim_body "$shim_name") || exit "$TRELLIS_EX_STATE"
+    write_hook_state_file "$temporary/$shim_name" "$shim_body" 700 || exit "$?"
+  done <<<"$expected_shims"
 
   # Both paths are siblings under $hooks_root, so the release-store primitive
   # performs one same-filesystem exchange and never unlinks core.hooksPath.
   release_store_rename_swap "$temporary" "$managed"
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"
-  hook_payload_matches "$temporary" "$expected" || exit "$?"
-  hook_payload_matches "$managed" "$replacement" || exit "$?"
+  hook_payload_matches "$temporary" "$expected" "$root" || exit "$?"
+  hook_payload_matches "$managed" "$replacement" "$root" || exit "$?"
   committed=true
   rm -rf "$temporary" || exit "$TRELLIS_EX_UNAVAILABLE"
   temporary=''
@@ -746,10 +862,59 @@ adoption_private_render_file_matches() {
   _attachment_mode_matches "$path" "$expected_mode"
 }
 
+# Locates the NEW release template behind one explicit-json render
+# destination and prints its leaf paths, so adoption can report owned keys the
+# new template no longer carries (key-removal is add-only upstream and adopt
+# replays recorded owned values, leaving dropped keys silently in place).
+# Prints `{"found":true,"leaves":[...]}` (leaves as {path,value} entries in
+# the owner record's owned_keys shape) or `{"found":false,"leaves":[]}`
+# when no single explicit-json render entry matches or the template is not a
+# readable JSON object. Total: always exits 0, never fails an adoption. The
+# raw template file is diffed, not the contextually rendered one; rendering
+# substitutes values, and owned-key PATHS are what this reports.
+adoption_new_template_leaves() {
+  local new_payload="$1" relative="$2" manifest templates count template source
+  if [ -z "$new_payload" ] || [ -z "$relative" ]; then
+    printf '%s\n' '{"found":false,"leaves":[]}'
+    return 0
+  fi
+  manifest="$new_payload/core-rules/inheritance-manifest.json"
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+    printf '%s\n' '{"found":false,"leaves":[]}'
+    return 0
+  fi
+  templates="$(jq -c --arg path "$relative" '[.harnesses[]?.render[]? | select(.destination == $path and .merge == "explicit-json") | .template] | unique' "$manifest" 2>/dev/null)" || templates='[]'
+  count="$(printf '%s\n' "$templates" | jq -r 'length' 2>/dev/null)" || count=0
+  if [ "$count" != 1 ]; then
+    printf '%s\n' '{"found":false,"leaves":[]}'
+    return 0
+  fi
+  template="$(printf '%s\n' "$templates" | jq -r '.[0]' 2>/dev/null)" || template=''
+  source="$new_payload/$template"
+  case "$source" in "$new_payload"/*) ;; *) printf '%s\n' '{"found":false,"leaves":[]}'; return 0 ;; esac
+  if [ ! -f "$source" ] || [ -L "$source" ]; then
+    printf '%s\n' '{"found":false,"leaves":[]}'
+    return 0
+  fi
+  if ! jq -e 'type == "object"' "$source" >/dev/null 2>&1; then
+    printf '%s\n' '{"found":false,"leaves":[]}'
+    return 0
+  fi
+  jq -cn --slurpfile template "$source" '
+    def leaves($value; $path):
+      if ($value | type) == "object"
+      then if ($value | length) == 0 then [{path:$path,value:$value}]
+           else [$value | to_entries[] | leaves(.value; $path + [.key])] | add end
+      else [{path:$path,value:$value}] end;
+    {found:true,leaves:leaves($template[0]; [])}
+  ' 2>/dev/null || printf '%s\n' '{"found":false,"leaves":[]}'
+  return 0
+}
+
 adoption_snapshot_render() {
-  local root="$1" render="$2" work="$3" number="$4" index="$5"
+  local root="$1" render="$2" work="$3" number="$4" index="$5" new_payload="${6:-}"
   local relative destination after_mode keys path_identity source candidate source_identity source_hash source_mode
-  local candidate_identity candidate_hash drift
+  local candidate_identity candidate_hash drift template_leaves template_dropped
   relative="$(printf '%s\n' "$render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
   after_mode="$(printf '%s\n' "$render" | jq -r '.after_mode')" || return "$TRELLIS_EX_STATE"
   keys="$(printf '%s\n' "$render" | jq -c '.owned_keys')" || return "$TRELLIS_EX_STATE"
@@ -781,6 +946,23 @@ adoption_snapshot_render() {
   adoption_render_live_matches "$destination" "$source" "$path_identity" "$source_hash" "$source_mode" ||
     return "$TRELLIS_EX_CONFLICT"
   drift="$(attach_detach_json_keys_detail "$source" "$keys")" || return "$TRELLIS_EX_CONFLICT"
+  # Owned keys the new template no longer carries are replayed back into the
+  # candidate below (add-only by design); record them so the adoption summary
+  # can say they were left in place instead of reporting silent no-drift.
+  # An owned path counts as present when it equals a template leaf or is a
+  # strict prefix of one (the template nested a subtree beneath it).
+  template_dropped='[]'
+  if [ -n "$new_payload" ]; then
+    template_leaves="$(adoption_new_template_leaves "$new_payload" "$relative")" || template_leaves='{"found":false,"leaves":[]}'
+    if [ "$(printf '%s\n' "$template_leaves" | jq -r '.found // false' 2>/dev/null)" = true ]; then
+      template_dropped="$(jq -cn --argjson keys "$keys" --argjson template "$template_leaves" '
+        ($template.leaves | map(.path)) as $tpaths
+        | [($keys | map(.path))[]
+           | select(. as $owned
+             | (([$tpaths[] | select(. == $owned or (.[0:($owned | length)] == $owned))] | length) == 0))]
+      ' 2>/dev/null)" || template_dropped='[]'
+    fi
+  fi
 
   jq --argjson keys "$keys" '
     reduce $keys[] as $owned (. ; setpath($owned.path; $owned.value))
@@ -796,10 +978,11 @@ adoption_snapshot_render() {
     --arg source_sha256 "$source_hash" --arg source_mode "$source_mode" \
     --arg candidate "$candidate" --arg candidate_identity "$candidate_identity" \
     --arg candidate_sha256 "$candidate_hash" --arg candidate_mode "$after_mode" --argjson drift "$drift" \
+    --argjson template_dropped "$template_dropped" \
     '{render:$render,path:$path,destination:$destination,path_identity:$path_identity,
       source:$source,source_identity:$source_identity,source_sha256:$source_sha256,source_mode:$source_mode,
       candidate:$candidate,candidate_identity:$candidate_identity,candidate_sha256:$candidate_sha256,
-      candidate_mode:$candidate_mode,drift:$drift}'
+      candidate_mode:$candidate_mode,drift:$drift,template_dropped:$template_dropped}'
 }
 
 adoption_render_plan_matches_source() {
@@ -962,7 +1145,7 @@ preflight_target() {
   owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" || return "$?"
   while IFS= read -r render; do
     index=$((index + 1))
-    render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index")" || return "$?"
+    render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload")" || return "$?"
     renders="$(jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
       return "$TRELLIS_EX_STATE"
   done < <(jq -c '(.renders // [])[]' "$old_owner")
@@ -973,7 +1156,7 @@ preflight_target() {
     true)
       managed="$(jq -r '.git_hooks.managed_hooks_path // empty' "$owner")" || return "$TRELLIS_EX_STATE"
       [ "$managed" = "$home/state/git-hooks/$checkout" ] || return "$TRELLIS_EX_CONFLICT"
-      hook_payload_matches "$managed" "$old_payload" || return "$?"
+      hook_payload_matches "$managed" "$old_payload" "$root" || return "$?"
       source="$(_attachment_hooks_read_sidecar "$managed/pre-push-source")" || return "$TRELLIS_EX_CONFLICT"
       reconcile="$new_payload/scripts/seed-inheritance-symlinks.sh"
       carrier="$new_payload/$source"
@@ -1181,7 +1364,7 @@ rollback_plans() {
 }
 
 apply_group_hooks() {
-  local plans="$1" changed="$2" plan hooks managed old_payload new_payload seen='|'
+  local plans="$1" changed="$2" plan hooks managed old_payload new_payload root seen='|'
   : > "$changed" || return "$TRELLIS_EX_UNAVAILABLE"
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
@@ -1192,23 +1375,25 @@ apply_group_hooks() {
     seen="${seen}${managed}|"
     old_payload="$(printf '%s\n' "$plan" | jq -r '.old_payload')" || return "$TRELLIS_EX_STATE"
     new_payload="$(printf '%s\n' "$plan" | jq -r '.new_payload')" || return "$TRELLIS_EX_STATE"
+    root="$(printf '%s\n' "$plan" | jq -r '.binding.root')" || return "$TRELLIS_EX_STATE"
     active_hook_plan="$plan"
-    replace_hook_payload "$managed" "$old_payload" "$new_payload" || return "$?"
+    replace_hook_payload "$managed" "$old_payload" "$new_payload" "$root" || return "$?"
     printf '%s\n' "$plan" >> "$changed" || return "$TRELLIS_EX_UNAVAILABLE"
     active_hook_plan=''
   done < "$plans"
 }
 
 rollback_hook_plan() {
-  local plan="$1" managed old_payload new_payload
+  local plan="$1" managed old_payload new_payload root
   managed="$(printf '%s\n' "$plan" | jq -r '.managed')" || return "$TRELLIS_EX_STATE"
   old_payload="$(printf '%s\n' "$plan" | jq -r '.old_payload')" || return "$TRELLIS_EX_STATE"
   new_payload="$(printf '%s\n' "$plan" | jq -r '.new_payload')" || return "$TRELLIS_EX_STATE"
-  if hook_payload_matches "$managed" "$old_payload"; then
+  root="$(printf '%s\n' "$plan" | jq -r '.binding.root')" || return "$TRELLIS_EX_STATE"
+  if hook_payload_matches "$managed" "$old_payload" "$root"; then
     return 0
   fi
-  hook_payload_matches "$managed" "$new_payload" || return "$TRELLIS_EX_CONFLICT"
-  replace_hook_payload "$managed" "$new_payload" "$old_payload"
+  hook_payload_matches "$managed" "$new_payload" "$root" || return "$TRELLIS_EX_CONFLICT"
+  replace_hook_payload "$managed" "$new_payload" "$old_payload" "$root"
 }
 
 rollback_group_hooks() {
@@ -1295,10 +1480,39 @@ EOF
   return "$rc"
 )
 
+# Checkout-group uniformity gate for adoption. Every plan in the group must
+# share one old_version and (for hook-managed rows) one managed hooks path.
+# Silent when the group is uniform; on failure each row is named with its
+# target label, old_version and managed value plus a hint, before returning
+# EX_CONFLICT. Purely diagnostic: exit classes are unchanged.
+adopt_group_require_uniform() {
+  local plans="$1" plan row label old_version managed hint_fleet hint_project
+  if jq -se '([.[].old_version] | unique | length) == 1 and ([.[] | select(.hooks == "true") | .managed] | unique | length) <= 1' "$plans" >/dev/null 2>&1; then
+    return 0
+  fi
+  while IFS= read -r plan; do
+    [ -n "$plan" ] || continue
+    row="$(printf '%s\n' "$plan" | jq -c '.row')" || row=''
+    if [ -n "$row" ]; then label="$(target_label "$row" 2>/dev/null)" || label='(unreadable row)'; else label='(unreadable row)'; fi
+    old_version="$(printf '%s\n' "$plan" | jq -r '.old_version // "(unknown version)"')" || old_version='(unreadable plan)'
+    managed="$(printf '%s\n' "$plan" | jq -r '.managed // empty')" || managed=''
+    [ -n "$managed" ] || managed='(unmanaged)'
+    release_err "non-uniform adoption row: $label old_version=$old_version managed=$managed"
+  done < "$plans"
+  hint_fleet="$(jq -r -s '.[0].row.fleet // empty' "$plans" 2>/dev/null)" || hint_fleet=''
+  hint_project="$(jq -r -s '.[0].row.project_id // empty' "$plans" 2>/dev/null)" || hint_project=''
+  if [ -n "$hint_fleet" ] && [ -n "$hint_project" ]; then
+    release_err "hint: adopt the whole checkout group together, or detach every worktree (trellis detach --all-worktrees <root>), or deregister dead rows and retry: trellis registry deregister --fleet $hint_fleet --project $hint_project"
+  else
+    release_err "hint: adopt the whole checkout group together, or detach every worktree (trellis detach --all-worktrees <root>), or deregister dead rows (trellis registry deregister --fleet FLEET --project ID) and retry"
+  fi
+  return "$TRELLIS_EX_CONFLICT"
+}
+
 adopt_group() (
   local home="$1" version="$2" payload="$3" rows="$4" work="$5"
   local plans="$work/plans.jsonl" changed="$work/changed.jsonl" changed_hooks="$work/changed-hooks.jsonl"
-  local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state
+  local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state dropped_key
   local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
 
@@ -1361,7 +1575,7 @@ adopt_group() (
     fi
   done < "$rows"
   [ -s "$plans" ] || return "$TRELLIS_EX_UNAVAILABLE"
-  jq -se '([.[].old_version] | unique | length) == 1 and ([.[] | select(.hooks == "true") | .managed] | unique | length) <= 1' "$plans" >/dev/null || return "$TRELLIS_EX_CONFLICT"
+  adopt_group_require_uniform "$plans" || return "$?"
   : > "$changed" || return "$TRELLIS_EX_UNAVAILABLE"
   : > "$changed_hooks" || return "$TRELLIS_EX_UNAVAILABLE"
 
@@ -1420,6 +1634,10 @@ adopt_group() (
         repair_state="$(printf '%s\n' "$repair" | jq -r '.state')" || return "$TRELLIS_EX_STATE"
         printf 're-rendered owned JSON key: %s %s (%s)\n' "$render_path" "$json_path" "$repair_state"
       done < <(printf '%s\n' "$planned_render" | jq -c '.drift[]')
+      while IFS= read -r dropped_key; do
+        [ -n "$dropped_key" ] || continue
+        printf 'left in place (no longer in template): %s %s\n' "$render_path" "$dropped_key"
+      done < <(printf '%s\n' "$planned_render" | jq -c '(.template_dropped // [])[]')
     done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
     label="$(target_label "$(printf '%s\n' "$plan" | jq -c '.row')")" || return "$TRELLIS_EX_STATE"
     planned_hook_authority="$(printf '%s\n' "$plan" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
@@ -1454,6 +1672,7 @@ select_rows() {
 
 adopt_registry() (
   local version="$1" selector="$2" fleet="$3" project="$4" home release payload inventory selected rejected groups group_rows work row label kind availability status excluded rc=0 one
+  local row_root row_checkout
   home="$(release_home)" || return "$?"
   export TRELLIS_HOME="$home"
   version="$(release_store_normalize_version "$version")" || return "$?"
@@ -1531,7 +1750,9 @@ adopt_registry() (
         release_err "skipping checkout inventory row with no registered worktree: $label"
       fi
     elif [ "$kind" != worktree ] || [ "$availability" != available ] || [ "$status" != active ] || [ "$excluded" = true ]; then
-      release_err "unavailable adoption target remains explicit: $label"
+      row_root="$(printf '%s\n' "$row" | jq -r '.root // "(no recorded root)"')" || return "$TRELLIS_EX_STATE"
+      row_checkout="$(printf '%s\n' "$row" | jq -r '.checkout_id // "(no checkout)"')" || return "$TRELLIS_EX_STATE"
+      release_err "unavailable adoption target remains explicit: $label (root: $row_root, checkout: $row_checkout)"
     fi
   done < "$selected"
 

@@ -32,18 +32,17 @@ rewrite_manifest() {
   mv "$temporary" "$MANIFEST"
 }
 
-@test "plans exactly Claude Code, Codex, and OMP as leaf-owned runtime targets" {
+@test "plans exactly Claude Code and Codex as leaf-owned runtime targets" {
   run_plan
   [ "$status" -eq 0 ]
 
   printf '%s\n' "$output" | jq -e '
     .schema_version == 1
-    and .harnesses == ["claude", "codex", "omp"]
-    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "omp"]
-    and ([.artifacts[] | select(.destination == ".claude/skills" or .destination == ".agents/skills" or .destination == ".omp/skills")] | length) == 0
+    and .harnesses == ["claude", "codex"]
+    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "shared_agents"]
+    and ([.artifacts[] | select(.destination == ".claude/skills" or .destination == ".agents/skills")] | length) == 0
     and ([.artifacts[] | select(.kind == "symlink" and .source_scope == "payload") | (.target | contains(".trellis/runtime/"))] | all(.[]; .))
     and ([.artifacts[] | select(.destination == "AGENTS.md" and .source == "CLAUDE.md" and .source_scope == "project" and .target == "CLAUDE.md" and .fallback_source == "core-rules/CLAUDE.md" and .fallback_source_scope == "payload" and .fallback_target == ".trellis/runtime/core-rules/CLAUDE.md" and .target_policy == "project-if-present-else-payload")] | length) == 1
-    and ([.artifacts[] | select(.destination == ".omp/AGENTS.md" and .source == "CLAUDE.md" and .source_scope == "project" and .target == "../CLAUDE.md" and .fallback_source == "core-rules/CLAUDE.md" and .fallback_source_scope == "payload" and .fallback_target == "../.trellis/runtime/core-rules/CLAUDE.md" and .target_policy == "project-if-present-else-payload")] | length) == 1
     and ([.artifacts[] | select(.destination == ".codex/hooks/lib/spec-gate-core.sh" and .source == "core-rules/hooks/lib/spec-gate-core.sh")] | length) == 1
     and ([.artifacts[] | select(.destination | startswith(".agents/workflows/")) | .destination] | sort) == [
       ".agents/workflows/explore.md",
@@ -52,7 +51,6 @@ rewrite_manifest() {
       ".agents/workflows/primer.md",
       ".agents/workflows/surgical.md"
     ]
-    and ([.artifacts[] | select(.harness == "omp" and .source == "core-rules/omp/hooks/pre/trellis.ts")] | length) == 1
     and ([.artifacts[] | select(.harness == "pi")] | length) == 0
   ' >/dev/null
 }
@@ -87,14 +85,30 @@ rewrite_manifest() {
   ' >/dev/null
 }
 
-@test "legacy three-harness manifests still plan the project surface" {
-  rewrite_manifest 'del(.harnesses.user)'
+@test "legacy two-harness manifests still plan the project surface" {
+  rewrite_manifest '
+    .schema_version = 1
+    | .harnesses.codex.links = (.harnesses.shared_agents.links + .harnesses.codex.links)
+    | .harnesses.codex.render = (.harnesses.shared_agents.render + .harnesses.codex.render)
+    | del(.harnesses.pi, .harnesses.shared_agents, .harnesses.user)
+  '
 
   run_plan
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | jq -e '
-    .harnesses == ["claude", "codex", "omp"]
-    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "omp"]
+    .harnesses == ["claude", "codex"]
+    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex"]
+    and ([.artifacts[] | select(.destination == "AGENTS.md")] | length) == 1
+    and ([.artifacts[] | select(.destination == ".agents/primers/INDEX.md")] | length) == 1
+  ' >/dev/null
+}
+
+@test "operator acceptance may pass the canonical core-rules directory" {
+  run bash "$PLANNER" --payload "$PAYLOAD/core-rules" --harness claude
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["claude"]
+    and all(.artifacts[]; .harness == "claude")
   ' >/dev/null
 }
 
@@ -124,18 +138,16 @@ rewrite_manifest() {
 @test "harness subsets are canonicalized and planning leaves project-native siblings untouched" {
   project_before="$(cat "$PROJECT/.claude/skills/project-only.md")"
 
-  run_plan --harness omp --harness claude --harness omp
+  run_plan --harness codex --harness claude --harness codex
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | jq -e '
-    .harnesses == ["claude", "omp"]
-    and ([.artifacts[].harness] | unique | sort) == ["claude", "omp"]
-    and ([.artifacts[] | select(.harness == "codex")] | length) == 0
+    .harnesses == ["claude", "codex"]
+    and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "shared_agents"]
   ' >/dev/null
 
   [ "$(cat "$PROJECT/.claude/skills/project-only.md")" = "$project_before" ]
   [ "$(cat "$PROJECT/keep.txt")" = "project-owned" ]
   [ ! -e "$PROJECT/.agents" ]
-  [ ! -e "$PROJECT/.omp" ]
   [ ! -e "$PROJECT/.claude/rules" ]
   [ ! -e "$PROJECT/.claude/commands" ]
 }
@@ -255,11 +267,30 @@ rewrite_manifest() {
   [[ "$output" == *"payload is unavailable"* ]] || { echo "$output"; false; }
 }
 
-@test "unknown harnesses including Pi are usage errors" {
+@test "Pi-only and Codex-plus-Pi plans share agent leaves without duplicate destinations" {
   run_plan --harness pi
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"unknown harness: pi"* ]] || { echo "$output"; false; }
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["pi"]
+    and ([.artifacts[].harness] | unique | sort) == ["pi", "shared_agents"]
+    and any(.artifacts[]; .destination == "AGENTS.md")
+    and any(.artifacts[]; .destination | startswith(".pi/"))
+    and (any(.artifacts[]; .destination | startswith(".codex/")) | not)
+    and ([.artifacts[].destination] | length) == ([.artifacts[].destination] | unique | length)
+  ' >/dev/null
 
+  run_plan --harness codex --harness pi
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["codex", "pi"]
+    and ([.artifacts[].harness] | unique | sort) == ["codex", "pi", "shared_agents"]
+    and any(.artifacts[]; .destination | startswith(".codex/"))
+    and any(.artifacts[]; .destination | startswith(".pi/"))
+    and ([.artifacts[].destination] | length) == ([.artifacts[].destination] | unique | length)
+  ' >/dev/null
+}
+
+@test "unknown harnesses are usage errors" {
   run_plan --harness unknown
   [ "$status" -eq 2 ]
   [[ "$output" == *"unknown harness: unknown"* ]] || { echo "$output"; false; }
@@ -327,8 +358,8 @@ rewrite_manifest() {
   mkdir -p "$SANDBOX/user-home"
   export HOME="$SANDBOX/user-home"
   rewrite_manifest '.harnesses.user.links += [
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".OMP/agent/Alias.md", "destination_home": true},
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/AGENT/alias.md", "destination_home": true}
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/agent/Alias.md", "destination_home": true},
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/AGENT/alias.md", "destination_home": true}
   ]'
 
   run_plan --harness user
@@ -338,8 +369,8 @@ rewrite_manifest() {
 
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
   rewrite_manifest '.harnesses.user.links += [
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/AGENT/alias.md", "destination_home": true},
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".OMP/agent/Alias.md", "destination_home": true}
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/AGENT/alias.md", "destination_home": true},
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/agent/Alias.md", "destination_home": true}
   ]'
 
   run_plan --harness user
@@ -351,8 +382,8 @@ rewrite_manifest() {
   mkdir -p "$SANDBOX/user-home"
   export HOME="$SANDBOX/user-home"
   rewrite_manifest '.harnesses.user.links += [
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/agent/\u00c5lias.md", "destination_home": true},
-    {"source": "core-rules/omp/global/RULES.md", "destination": ".omp/agent/A\u030alias.md", "destination_home": true}
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/agent/\u00c5lias.md", "destination_home": true},
+    {"source": "core-rules/CLAUDE.md", "destination": ".claude/agent/A\u030alias.md", "destination_home": true}
   ]'
 
   run_plan --harness user
@@ -410,9 +441,9 @@ rewrite_manifest() {
 }
 
 @test "malformed entry shapes and missing required payload sources fail closed" {
-  rewrite_manifest '.harnesses.omp.links[0].unexpected = true'
+  rewrite_manifest '.harnesses.claude.links[0].unexpected = true'
 
-  run_plan --harness omp
+  run_plan --harness claude
   [ "$status" -eq 4 ]
   [[ "$output" == *"inheritance manifest is malformed or unsafe"* ]] || { echo "$output"; false; }
 

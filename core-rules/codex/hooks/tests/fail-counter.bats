@@ -202,14 +202,20 @@ EOF
   npxdir="$(make_failing_npx_dir)"
   PATH_BACKUP="$PATH"; export PATH="$npxdir:$PATH"
 
-  run bash "$HOOK" <<<"$(make_envelope)"
+  local stderr_file="$BATS_TEST_TMPDIR/typecheck-stderr" stderr
+  if output="$(bash "$HOOK" <<<"$(make_envelope)" 2>"$stderr_file")"; then status=0; else status=$?; fi
+  stderr="$(cat "$stderr_file")"
   [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):")' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):") and contains("error TS1005: synthetic typecheck failure")' >/dev/null
+  [[ "$stderr" == *'checks ran unchanged, no durable evidence recorded (re-run sync-codex-hooks)'* ]] || { echo "$stderr"; false; }
   [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
-  run bash "$HOOK" <<<"$(make_envelope)"
+  stderr_file="$BATS_TEST_TMPDIR/typecheck-second-stderr"
+  if output="$(bash "$HOOK" <<<"$(make_envelope)" 2>"$stderr_file")"; then status=0; else status=$?; fi
+  stderr="$(cat "$stderr_file")"
   [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):")' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):") and contains("error TS1005: synthetic typecheck failure")' >/dev/null
+  [[ "$stderr" == *'checks ran unchanged, no durable evidence recorded (re-run sync-codex-hooks)'* ]] || { echo "$stderr"; false; }
   [[ "$output" == *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   export PATH="$PATH_BACKUP"; rm -rf "$npxdir"

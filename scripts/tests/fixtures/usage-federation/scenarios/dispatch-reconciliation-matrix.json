@@ -22,7 +22,7 @@
         "pane_id": "w1:pA",
         "name": "match-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "fallback_promoted",
@@ -38,7 +38,7 @@
         "pane_id": "w1:pB",
         "name": "fallback-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "mismatch",
@@ -54,7 +54,7 @@
         "pane_id": "w1:pC",
         "name": "mismatch-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "dispatched_unobserved_pending",
@@ -70,7 +70,7 @@
         "pane_id": "w2:pD",
         "name": "unobserved-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "stale_unobserved_at_boundary",
@@ -86,7 +86,7 @@
         "pane_id": "w2:pE",
         "name": "stale-unobserved-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "session_path_bound_never_bound",
@@ -97,12 +97,12 @@
         "unit": null,
         "agent": null,
         "provider": "google-antigravity",
-        "model": "google-antigravity/gemini-3.7-flash:high",
+        "model": "google-antigravity/gemini-3.8-flash:high",
         "effort": "high",
         "pane_id": "w2:pF",
         "name": "path-bound-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       {
         "case": "stale_joined_observation",
@@ -118,7 +118,7 @@
         "pane_id": "w3:pG",
         "name": "stale-joined-dispatch",
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       }
     ],
     "bindings": [
@@ -361,14 +361,38 @@
       }
     ],
     "state_subjects": [
-      {"state": "match", "dispatch_id": "00000000-0000-4000-8000-00000000d001"},
-      {"state": "fallback_promoted", "dispatch_id": "00000000-0000-4000-8000-00000000d002"},
-      {"state": "mismatch", "dispatch_id": "00000000-0000-4000-8000-00000000d003"},
-      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d004"},
-      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d005"},
-      {"state": "dispatched_unobserved", "dispatch_id": "00000000-0000-4000-8000-00000000d006"},
-      {"state": "stale", "dispatch_id": "00000000-0000-4000-8000-00000000d007"},
-      {"state": "unreported_requested", "session_id": "00000000-0000-4000-8000-00000000f001"}
+      {
+        "state": "match",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d001"
+      },
+      {
+        "state": "fallback_promoted",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d002"
+      },
+      {
+        "state": "mismatch",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d003"
+      },
+      {
+        "state": "stale",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d004"
+      },
+      {
+        "state": "stale",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d005"
+      },
+      {
+        "state": "dispatched_unobserved",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d006"
+      },
+      {
+        "state": "stale",
+        "dispatch_id": "00000000-0000-4000-8000-00000000d007"
+      },
+      {
+        "state": "unreported_requested",
+        "session_id": "00000000-0000-4000-8000-00000000f001"
+      }
     ],
     "tie_break_case": {
       "note": "Two same-instant events in session e008; max event_id wins and its linked outcome decides the state. Requested model differs only by effort suffix while persisted fallback is explicitly true, so the authoritative pick must classify fallback_promoted, not mismatch.",
@@ -385,7 +409,7 @@
         "pane_id": null,
         "name": null,
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       "binding": {
         "dispatch_id": "00000000-0000-4000-8000-00000000d008",
@@ -464,7 +488,7 @@
         "pane_id": null,
         "name": null,
         "request_source": "foreman-start",
-        "harness": "omp"
+        "harness": "pi"
       },
       "binding": {
         "dispatch_id": "00000000-0000-4000-8000-00000000d009",

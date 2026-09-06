@@ -91,9 +91,9 @@ PRs authored end-to-end by an agent must include an **Agent review** section con
 
 Self-reviewed agent PRs: **fail**.
 
-## Linear history
+## History preservation
 
-- No merge commits on `main`. Linear history enforced by branch protection.
-- Rebase feature branches onto `main` before opening PR if behind.
+- Preserve PR commits with the merge-commit default above.
+- Reconcile a feature branch with current `main` before merging; preserve published review history.
 - Don't amend published commits without `--force-with-lease` on the feature branch.
 - Never force-push `main`. Blocked at three layers regardless.

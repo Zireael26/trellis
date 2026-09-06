@@ -6,7 +6,7 @@ REGISTRY="$REPO_ROOT/scripts/registry.sh"
 REGISTRY_LIB="$REPO_ROOT/scripts/lib/local-registry.sh"
 
 setup() {
-  SANDBOX="$(mktemp -d)"
+  SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/local-registry.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   TRELLIS_HOME_FIX="$SANDBOX/trellis home"
   mkdir -p "$TRELLIS_HOME_FIX"
@@ -1057,6 +1057,62 @@ STUB
   [ "$(jq --arg root "$sibling" '[.projects["personal/sibling"].checkouts[].worktrees[] | select(.root == $root)] | length' "$TRELLIS_HOME_FIX/registry.json")" -eq 1 ]
 }
 
+@test "harness CAS preserves unrelated and detached inventory rows and exact-after retry is byte-identical" {
+  attached="$SANDBOX/cas-attached"
+  sibling="$SANDBOX/cas-sibling"
+  linked="$SANDBOX/cas-inventory"
+  make_repo "$attached" attached
+  make_repo "$sibling" sibling
+  git -C "$attached" worktree add -q -b inventory "$linked"
+  register_repo personal attached "$linked"
+  register_repo personal sibling "$sibling"
+  run bash -c '. "$1"; local_registry_register_worktree "$2" personal attached "$3" "1.2.3" "[\"claude\",\"codex\"]" "11111111-2222-3333-4444-555555555555" "{}"' \
+    _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$attached"
+  [ "$status" -eq 0 ]
+  checkout="$(jq -r '.projects["personal/attached"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
+  update="$(jq -c '.projects["personal/attached"].checkouts[] | {expected:.,after:(.harnesses = ["codex"])}' "$TRELLIS_HOME_FIX/registry.json")"
+  sibling_before="$(registry_row_json personal/sibling)"
+  inventory_before="$(jq -c '.projects["personal/attached"].checkouts[].worktrees' "$TRELLIS_HOME_FIX/registry.json")"
+  rm -rf "$sibling/.git"
+  run bash -c '. "$1"; local_registry_update_harnesses "$2" personal attached "$3" "$4"' \
+    _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$checkout" "$update"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(registry_row_json personal/sibling)" = "$sibling_before" ]
+  [ "$(jq -c '.projects["personal/attached"].checkouts[].worktrees' "$TRELLIS_HOME_FIX/registry.json")" = "$inventory_before" ]
+  jq -e '.projects["personal/attached"].checkouts[].harnesses == ["codex"]' "$TRELLIS_HOME_FIX/registry.json"
+  before="$(registry_file_sha256)"
+  run bash -c '. "$1"; local_registry_update_harnesses "$2" personal attached "$3" "$4"' \
+    _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$checkout" "$update"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(registry_file_sha256)" = "$before" ]
+  rewrite_registry_json '.projects["personal/attached"].checkouts[].release = "1.2.4"'
+  before="$(registry_file_sha256)"
+  run bash -c '. "$1"; local_registry_update_harnesses "$2" personal attached "$3" "$4"' \
+    _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$checkout" "$update"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"checkout snapshot conflict"* ]]
+  [ "$(registry_file_sha256)" = "$before" ]
+}
+
+@test "harness CAS rejects malformed or non-harness snapshot changes without registry writes" {
+  repo="$SANDBOX/cas-malformed"
+  make_repo "$repo" attached
+  run bash -c '. "$1"; local_registry_register_worktree "$2" personal attached "$3" "1.2.3" "[\"claude\",\"codex\"]" "11111111-2222-3333-4444-555555555555" "{}"' \
+    _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$repo"
+  [ "$status" -eq 0 ]
+  checkout="$(jq -r '.projects["personal/attached"].checkouts | keys[0]' "$TRELLIS_HOME_FIX/registry.json")"
+  update="$(jq -c '.projects["personal/attached"].checkouts[] | {expected:.,after:(.harnesses = ["codex"])}' "$TRELLIS_HOME_FIX/registry.json")"
+  before="$(registry_file_sha256)"
+  for filter in '.after.release = "1.2.4"' '.after.harnesses = []' '.after.harnesses = ["pi"]' \
+    '.after.harnesses = ["codex","codex"]' '.extra = true' '.after.worktrees = {}'; do
+    malformed="$(printf '%s\n' "$update" | jq -c "$filter")"
+    run bash -c '. "$1"; local_registry_update_harnesses "$2" personal attached "$3" "$4"' \
+      _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$checkout" "$malformed"
+    [ "$status" -eq 4 ] || { echo "$filter: $output"; false; }
+    [ "$(registry_file_sha256)" = "$before" ]
+  done
+}
+
 @test "a bound-row write with nothing bound is a usage refusal" {
   repo="$SANDBOX/bound floor clone"
   make_repo "$repo" alpha
@@ -1634,4 +1690,39 @@ EOF
     --metadata-json '{"gptx":{"enabled":true}}'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(jq -r '.projects["personal/away"].metadata.gptx.enabled' "$TRELLIS_HOME_FIX/registry.json")" = true ]
+}
+
+# rc.46 retired the omp harness token: every registry row written before rc.46
+# carries ["claude","codex","omp"], which strict schema-aware validation
+# rejects. Loads drop the retired token with a one-line stderr notice; a
+# read-only command never rewrites the persisted file; the next registry write
+# persists the normalized form.
+@test "legacy omp harness rows list with a one-line drop notice and normalize on write" {
+  configure_fleet personal
+  cp "$REPO_ROOT/scripts/tests/fixtures/local-fleets/legacy-registry-omp-row.json" "$TRELLIS_HOME_FIX/registry.json"
+  chmod 700 "$TRELLIS_HOME_FIX"
+  chmod 600 "$TRELLIS_HOME_FIX/registry.json"
+  # Sanity: the fixture really models a legacy row.
+  [ "$(jq -r '.projects["personal/legacy-omp"].checkouts[].harnesses | join(",")' "$TRELLIS_HOME_FIX/registry.json")" = "claude,codex,omp" ]
+
+  # (a) list succeeds on the legacy row: the absent fixture root classifies
+  # unavailable rather than failing closed with exit 4.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" list --json
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  json_only="$(printf '%s\n' "$output" | grep -v 'dropped retired harness' || true)"
+  [ "$(printf '%s\n' "$json_only" | jq '[.entries[] | select(.project_key == "personal/legacy-omp")] | length')" -eq 1 ]
+  # (b) exactly one drop notice names the single affected checkout row.
+  [ "$(printf '%s\n' "$output" | grep -c 'dropped retired harness "omp" from 1 checkout row(s); rewrite with any registry write')" -eq 1 ] || { echo "$output"; false; }
+  # The listed row already shows the normalized harnesses.
+  [ "$(printf '%s\n' "$json_only" | jq -r '.entries[] | select(.project_key == "personal/legacy-omp") | .harnesses | join(",")')" = "claude,codex" ]
+  # A read-only list leaves the persisted file untouched.
+  [ "$(jq -r '.projects["personal/legacy-omp"].checkouts[].harnesses | join(",")' "$TRELLIS_HOME_FIX/registry.json")" = "claude,codex,omp" ]
+
+  # (c) the cheapest write round-trips the persisted file to the clean form.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REGISTRY" annotate --fleet personal --project legacy-omp \
+    --metadata-json '{"legacy":{"migrated":true}}'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.projects["personal/legacy-omp"].checkouts[].harnesses | join(",")' "$TRELLIS_HOME_FIX/registry.json")" = "claude,codex" ]
+  [ "$(grep -c '"omp"' "$TRELLIS_HOME_FIX/registry.json" || true)" -eq 0 ] || { cat "$TRELLIS_HOME_FIX/registry.json"; false; }
+  [ "$(jq -r '.projects["personal/legacy-omp"].metadata.legacy.migrated' "$TRELLIS_HOME_FIX/registry.json")" = true ]
 }

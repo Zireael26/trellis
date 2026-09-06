@@ -364,6 +364,59 @@ release_store_blob_oid_for_path() {
   git hash-object "$path"
 }
 
+# Batched permission / mode helpers. Per-entry `ls | awk` and `git hash-object`
+# spawns are the verify hot path; these follow the launcher collector so one
+# `xargs ls` and one `git hash-object --stdin-paths` cover the whole tree.
+release_store_permissions_not_writable() {
+  local permissions="$1" write_bits
+  case "$permissions" in
+    *+*) return 1 ;;
+  esac
+  [ "${#permissions}" -ge 10 ] || return 1
+  write_bits="${permissions:2:1}${permissions:5:1}${permissions:8:1}"
+  [ "$write_bits" = "---" ]
+}
+
+release_store_mode_for_permissions() {
+  local permissions="$1" exec_bits
+  [ "${#permissions}" -ge 10 ] || return 1
+  exec_bits="${permissions:3:1}${permissions:6:1}${permissions:9:1}"
+  case "$exec_bits" in
+    ---) printf '100644\n' ;;
+    *) printf '100755\n' ;;
+  esac
+}
+
+# Pair a NUL-separated absolute-path list with a newline-separated path list of
+# the same length and order. ACL '+' is kept on the permission field so the
+# writable-content refusal stays identical to release_store_is_writable_mode.
+release_store_collect_permissions() {
+  local paths_nul="$1" paths="$2" rows="$3" ls_rows="$4" permissions="$5"
+  local path permission extra
+
+  : > "$rows" || return 1
+  [ -s "$paths_nul" ] || return 0
+  LC_ALL=C /usr/bin/xargs -0 /bin/ls -fdl < "$paths_nul" > "$ls_rows" || return 1
+  /usr/bin/awk '{ print $1 }' "$ls_rows" > "$permissions" || return 1
+
+  exec 3< "$permissions" || return 1
+  while IFS= read -r path; do
+    if ! IFS= read -r permission <&3; then
+      exec 3<&-
+      return 1
+    fi
+    printf '%s\t%s\n' "$path" "$permission" >> "$rows" || {
+      exec 3<&-
+      return 1
+    }
+  done < "$paths"
+  if IFS= read -r extra <&3; then
+    exec 3<&-
+    return 1
+  fi
+  exec 3<&-
+}
+
 release_store_make_tree_writable() {
   local root="${1:-}"
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
@@ -581,11 +634,74 @@ release_store_json_valid() {
   ' "$release_json" >/dev/null 2>&1
 }
 
-release_store_verify_path() (
+# Successful verification is memoized for the shell process that performed it
+# and its subshells (call sites capture through `$(...)`, which is why the
+# value is exported rather than plain). Every key is prefixed with that
+# shell's `$$`, so a value inherited by an exec'd child -- which would carry
+# an arbitrarily old success verdict across a fresh process boundary -- can
+# never match and the child re-verifies. Failure is never recorded.
+# Key: canonical release dir, sha256(release.json) from
+# release_store_release_json_sha256_no_follow, plus skip_writable, allow_stage,
+# and expected_version.
+# TOCTOU: equivalent to the existing verify-then-use window. The caller already
+# verifies and then uses the payload; a same-process tamper after a successful
+# verify was already outside that check. The memo is not shared across processes,
+# so a cross-process tamper is still refused on the next invocation.
+: "${_TRELLIS_RELEASE_STORE_VERIFY_MEMO:=}"
+
+release_store_verify_memo_key() {
+  local release_dir="${1:-}" expected_version="${2:-}" skip_writable="${3:-0}" allow_stage="${4:-0}"
+  local canon parent base digest
+  [ -n "$release_dir" ] || return 1
+  [ ! -L "$release_dir" ] && [ -d "$release_dir" ] || return 1
+  canon="$(cd "$release_dir" && pwd -P)" || return 1
+  parent="$(dirname "$canon")"
+  base="$(basename "$canon")"
+  [ -n "$parent" ] && [ -n "$base" ] || return 1
+  digest="$(release_store_release_json_sha256_no_follow "$parent" "$base" 2>/dev/null)" || return 1
+  case "$digest" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#digest}" -eq 64 ] || return 1
+  printf '%s\n' "$$"$'\t'"$canon"$'\t'"$digest"$'\t'"$skip_writable"$'\t'"$allow_stage"$'\t'"$expected_version"
+}
+
+release_store_verify_memo_hit() {
+  local key="${1:-}" line
+  [ -n "$key" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" = "$key" ] && return 0
+  done <<EOF
+${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}
+EOF
+  return 1
+}
+
+release_store_verify_path() {
+  local release_dir="${1:-}" expected_version="${2:-}" skip_writable="${3:-0}" allow_stage="${4:-0}"
+  local key="" rc=0
+  key="$(release_store_verify_memo_key "$release_dir" "$expected_version" "$skip_writable" "$allow_stage")" || key=""
+  if [ -n "$key" ] && release_store_verify_memo_hit "$key"; then
+    return 0
+  fi
+  release_store_verify_path_body "$release_dir" "$expected_version" "$skip_writable" "$allow_stage" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$key" ]; then
+    _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\n'
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+  fi
+  return "$rc"
+}
+
+release_store_verify_path_body() (
   set +e
   local release_dir="${1:-}" expected_version="${2:-}" skip_writable="${3:-0}" allow_stage="${4:-0}"
   local release_json payload_dir version expected_norm tag tmpdir manifest_paths manifest_dirs fs_paths fs_dirs rc=0
   local mode oid path full actual_mode actual_oid dir rel count release_canon payload_canon parent symlink_component entry base link_target
+  local tree_ok=1 tab hash_paths hash_expected hash_actual manifest_rows
+  local file_paths file_paths_nul file_perm_rows file_perm_ls file_perm_raw
+  local link_paths link_paths_nul link_targets link_target_dir link_target_index
+  local dir_paths dir_paths_nul dir_perm_rows dir_perm_ls dir_perm_raw
+  local permission extra link_path_count link_target_count target_file
 
   if ! command -v jq >/dev/null 2>&1; then
     release_store_err "jq is required"
@@ -642,7 +758,13 @@ release_store_verify_path() (
     return 4
   fi
 
-  tmpdir="$(release_store_mktemp_dir "${TMPDIR:-/tmp}/trellis-release-verify.XXXXXX")" || return 5
+  # Match launcher_verify_release_body's canonical store-adjacent scratch.
+  # The launcher drops TMPDIR under `env -i`; this does not disable global /tmp.
+  # The verification sandbox denies that global-temp fallback. Ignore ambient
+  # TMPDIR for direct library callers too, keeping scratch within the store.
+  # A read-only store parent reports unavailable rather than falling back
+  # outside the store.
+  tmpdir="$(release_store_mktemp_dir "${release_canon%/*}/.tmp.$version.verify.XXXXXX")" || return 5
   cleanup_verify() {
     [ -n "${tmpdir:-}" ] && [ -d "$tmpdir" ] && rm -rf "$tmpdir"
   }
@@ -684,58 +806,274 @@ release_store_verify_path() (
     rc=4
   fi
 
-  jq -r '.tree[] | [.mode, .oid, .path] | @tsv' "$release_json" |
-    while IFS='	' read -r mode oid path; do
-      if ! release_store_path_is_safe "$path"; then
-        release_store_err "unsafe manifest path: $path"
-        exit 42
-      fi
-      case "$path" in
-        */*) parent="$payload_canon/${path%/*}" ;;
-        *) parent="$payload_canon" ;;
-      esac
-      if symlink_component="$(release_store_first_symlink_component "$parent")"; then
-        release_store_err "symlinked release payload parent for $path: $symlink_component"
-        exit 42
-      fi
-      full="$payload_canon/$path"
-      if [ ! -e "$full" ] && [ ! -L "$full" ]; then
-        release_store_err "missing release content: $path"
-        exit 42
-      fi
-      actual_mode="$(release_store_mode_for_path "$full")" || {
-        release_store_err "wrong release content type: $path"
-        exit 42
-      }
-      if [ "$actual_mode" != "$mode" ]; then
+  tab="$(printf '\t')"
+  manifest_rows="$tmpdir/manifest.rows"
+  hash_paths="$tmpdir/hash.paths"
+  hash_expected="$tmpdir/hash.expected"
+  hash_actual="$tmpdir/hash.actual"
+  file_paths="$tmpdir/file.paths"
+  file_paths_nul="$tmpdir/file.paths.nul"
+  file_perm_rows="$tmpdir/file.perm.rows"
+  file_perm_ls="$tmpdir/file.perm.ls"
+  file_perm_raw="$tmpdir/file.perm.raw"
+  link_paths="$tmpdir/link.paths"
+  link_paths_nul="$tmpdir/link.paths.nul"
+  link_targets="$tmpdir/link.targets"
+  link_target_dir="$tmpdir/link-targets"
+  jq -r '.tree[] | [.mode, .oid, .path] | @tsv' "$release_json" > "$manifest_rows" || return 4
+  : > "$file_paths"
+  : > "$file_paths_nul"
+  : > "$link_paths"
+  : > "$link_paths_nul"
+  : > "$hash_paths"
+  : > "$hash_expected"
+
+  while IFS="$tab" read -r mode oid path; do
+    if ! release_store_path_is_safe "$path"; then
+      release_store_err "unsafe manifest path: $path"
+      tree_ok=0
+      break
+    fi
+    case "$path" in
+      */*) parent="$payload_canon/${path%/*}" ;;
+      *) parent="$payload_canon" ;;
+    esac
+    if symlink_component="$(release_store_first_symlink_component "$parent")"; then
+      release_store_err "symlinked release payload parent for $path: $symlink_component"
+      tree_ok=0
+      break
+    fi
+    full="$payload_canon/$path"
+    if [ ! -e "$full" ] && [ ! -L "$full" ]; then
+      release_store_err "missing release content: $path"
+      tree_ok=0
+      break
+    fi
+    case "$mode" in
+      120000)
+        if [ -L "$full" ]; then
+          printf '%s\n' "$path" >> "$link_paths"
+          printf '%s\0' "$full" >> "$link_paths_nul"
+        elif [ -f "$full" ]; then
+          actual_mode="$(release_store_mode_for_path "$full")" || actual_mode="100644"
+          release_store_err "wrong mode for $path: expected $mode, found $actual_mode"
+          tree_ok=0
+          break
+        else
+          release_store_err "wrong release content type: $path"
+          tree_ok=0
+          break
+        fi
+        ;;
+      100644|100755)
+        if [ -L "$full" ]; then
+          release_store_err "wrong mode for $path: expected $mode, found 120000"
+          tree_ok=0
+          break
+        fi
+        if [ ! -f "$full" ]; then
+          release_store_err "wrong release content type: $path"
+          tree_ok=0
+          break
+        fi
+        printf '%s\n' "$path" >> "$file_paths"
+        printf '%s\0' "$full" >> "$file_paths_nul"
+        ;;
+      *)
+        actual_mode="$(release_store_mode_for_path "$full" 2>/dev/null)" || actual_mode="unknown"
         release_store_err "wrong mode for $path: expected $mode, found $actual_mode"
-        exit 42
+        tree_ok=0
+        break
+        ;;
+    esac
+  done < "$manifest_rows"
+  if [ "$tree_ok" != "1" ]; then
+    rc=4
+  fi
+
+  if [ "$tree_ok" = "1" ]; then
+    if ! release_store_collect_permissions \
+      "$file_paths_nul" "$file_paths" "$file_perm_rows" "$file_perm_ls" "$file_perm_raw"; then
+      rc=4
+      tree_ok=0
+    fi
+  fi
+
+  if [ "$tree_ok" = "1" ] && [ -s "$link_paths_nul" ]; then
+    LC_ALL=C xargs -0 readlink < "$link_paths_nul" > "$link_targets" || {
+      release_store_err "could not read release symlink"
+      rc=4
+      tree_ok=0
+    }
+    if [ "$tree_ok" = "1" ]; then
+      link_path_count=0
+      while IFS= read -r path; do
+        link_path_count=$((link_path_count + 1))
+      done < "$link_paths"
+      link_target_count=0
+      while IFS= read -r link_target; do
+        link_target_count=$((link_target_count + 1))
+      done < "$link_targets"
+      if [ "$link_path_count" -ne "$link_target_count" ]; then
+        release_store_err "could not read release symlink"
+        rc=4
+        tree_ok=0
       fi
-      if [ "$actual_mode" = "120000" ]; then
-        link_target="$(readlink "$full")" || {
-          release_store_err "could not read release symlink: $path"
-          exit 42
-        }
-        if ! release_store_symlink_target_is_safe "$path" "$link_target"; then
-          release_store_err "unsafe release symlink target: $path"
-          exit 42
-        fi
-      fi
-      actual_oid="$(release_store_blob_oid_for_path "$full")" || {
-        release_store_err "could not hash release content: $path"
-        exit 42
+    fi
+    if [ "$tree_ok" = "1" ]; then
+      mkdir "$link_target_dir" || {
+        rc=5
+        tree_ok=0
       }
-      if [ "$actual_oid" != "$oid" ]; then
-        release_store_err "changed release content: $path"
-        exit 42
+    fi
+  fi
+
+  if [ "$tree_ok" = "1" ]; then
+    exec 3< "$file_perm_rows" || {
+      rc=4
+      tree_ok=0
+    }
+  fi
+  if [ "$tree_ok" = "1" ] && [ -s "$link_paths_nul" ]; then
+    exec 4< "$link_targets" || {
+      exec 3<&-
+      release_store_err "could not read release symlink"
+      rc=4
+      tree_ok=0
+    }
+  fi
+  link_target_index=0
+  if [ "$tree_ok" = "1" ]; then
+    while IFS="$tab" read -r mode oid path; do
+      full="$payload_canon/$path"
+      case "$mode" in
+        120000)
+          if ! IFS= read -r link_target <&4; then
+            exec 3<&-
+            exec 4<&-
+            release_store_err "could not read release symlink: $path"
+            tree_ok=0
+            break
+          fi
+          if ! release_store_symlink_target_is_safe "$path" "$link_target"; then
+            exec 3<&-
+            exec 4<&-
+            release_store_err "unsafe release symlink target: $path"
+            tree_ok=0
+            break
+          fi
+          link_target_index=$((link_target_index + 1))
+          target_file="$link_target_dir/$link_target_index"
+          printf '%s' "$link_target" > "$target_file" || {
+            exec 3<&-
+            exec 4<&-
+            tree_ok=0
+            rc=5
+            break
+          }
+          printf '%s\n' "$target_file" >> "$hash_paths"
+          printf '%s\t%s\t%s\t%s\n' "$path" "$oid" "link" "-" >> "$hash_expected"
+          ;;
+        100644|100755)
+          if ! IFS="$tab" read -r rel permission <&3; then
+            exec 3<&-
+            exec 4<&-
+            release_store_err "wrong release content type: $path"
+            tree_ok=0
+            break
+          fi
+          if [ "$rel" != "$path" ]; then
+            exec 3<&-
+            exec 4<&-
+            release_store_err "wrong release content type: $path"
+            tree_ok=0
+            break
+          fi
+          actual_mode="$(release_store_mode_for_permissions "$permission")" || {
+            exec 3<&-
+            exec 4<&-
+            release_store_err "wrong release content type: $path"
+            tree_ok=0
+            break
+          }
+          if [ "$actual_mode" != "$mode" ]; then
+            exec 3<&-
+            exec 4<&-
+            release_store_err "wrong mode for $path: expected $mode, found $actual_mode"
+            tree_ok=0
+            break
+          fi
+          printf '%s\n' "$full" >> "$hash_paths"
+          printf '%s\t%s\t%s\t%s\n' "$path" "$oid" "file" "$permission" >> "$hash_expected"
+          ;;
+        *)
+          exec 3<&-
+          exec 4<&-
+          tree_ok=0
+          break
+          ;;
+      esac
+    done < "$manifest_rows"
+    exec 3<&-
+    exec 4<&-
+  fi
+  if [ "$tree_ok" != "1" ] && [ "$rc" -eq 0 ]; then
+    rc=4
+  fi
+
+  if [ "$tree_ok" = "1" ] && [ -s "$hash_paths" ]; then
+    git hash-object --no-filters --stdin-paths < "$hash_paths" > "$hash_actual" || {
+      release_store_err "could not hash release content"
+      rc=4
+      tree_ok=0
+    }
+  elif [ "$tree_ok" = "1" ]; then
+    : > "$hash_actual"
+  fi
+
+  if [ "$tree_ok" = "1" ]; then
+    exec 3< "$hash_actual" || {
+      release_store_err "could not hash release content"
+      rc=4
+      tree_ok=0
+    }
+  fi
+  if [ "$tree_ok" = "1" ]; then
+    while IFS="$tab" read -r path oid extra permission; do
+      if ! IFS= read -r actual_oid <&3; then
+        exec 3<&-
+        release_store_err "could not hash release content: $path"
+        tree_ok=0
+        break
       fi
-      if [ "$skip_writable" != "1" ] && [ ! -L "$full" ]; then
-        if ! release_store_is_writable_mode "$full"; then
+      if [ "$actual_oid" != "$oid" ]; then
+        exec 3<&-
+        release_store_err "changed release content: $path"
+        tree_ok=0
+        break
+      fi
+      if [ "$skip_writable" != "1" ] && [ "$extra" = "file" ]; then
+        if ! release_store_permissions_not_writable "$permission"; then
+          exec 3<&-
           release_store_err "writable release content: $path"
-          exit 42
+          tree_ok=0
+          break
         fi
       fi
-    done
+    done < "$hash_expected"
+    if [ "$tree_ok" = "1" ]; then
+      if IFS= read -r extra <&3; then
+        exec 3<&-
+        release_store_err "could not hash release content"
+        tree_ok=0
+      fi
+    fi
+    exec 3<&-
+  fi
+  if [ "$tree_ok" != "1" ] && [ "$rc" -eq 0 ]; then
+    rc=4
+  fi
+
   if [ "$?" -ne 0 ]; then
     rc=4
   fi
@@ -781,14 +1119,30 @@ release_store_verify_path() (
   fi
 
   if [ "$skip_writable" != "1" ]; then
-    find "$release_canon" -type d -print | while IFS= read -r dir; do
-      if ! release_store_is_writable_mode "$dir"; then
-        release_store_err "writable release directory: ${dir#$release_canon/}"
-        exit 42
-      fi
-    done
-    if [ "$?" -ne 0 ]; then
+    dir_paths="$tmpdir/all.dirs"
+    dir_paths_nul="$tmpdir/all.dirs.nul"
+    dir_perm_rows="$tmpdir/dir.perm.rows"
+    dir_perm_ls="$tmpdir/dir.perm.ls"
+    dir_perm_raw="$tmpdir/dir.perm.raw"
+    if ! find "$release_canon" -type d -print > "$dir_paths"; then
       rc=4
+    else
+      : > "$dir_paths_nul"
+      while IFS= read -r dir; do
+        printf '%s\0' "$dir" >> "$dir_paths_nul"
+      done < "$dir_paths"
+      if ! release_store_collect_permissions \
+        "$dir_paths_nul" "$dir_paths" "$dir_perm_rows" "$dir_perm_ls" "$dir_perm_raw"; then
+        rc=4
+      else
+        while IFS="$tab" read -r dir permission; do
+          if ! release_store_permissions_not_writable "$permission"; then
+            release_store_err "writable release directory: ${dir#$release_canon/}"
+            rc=4
+            break
+          fi
+        done < "$dir_perm_rows"
+      fi
     fi
     if ! release_store_is_writable_mode "$release_json"; then
       release_store_err "writable release record: release.json"
@@ -864,6 +1218,128 @@ release_store_verify() {
   return "$rc"
 }
 
+# Pinned copies of `trellis_process_birth_python` and `trellis_process_birth`
+# (scripts/lib/trellis-home.sh — the normative definitions and the reason the
+# Darwin reader exists at all). Byte-identical by contract once the name prefix
+# is applied; scripts/tests/process-birth.bats compares the extracted bodies.
+# This library's header declares that it depends on nothing above
+# semver.sh so it can stand alone before any later library may be sourced;
+# reaching the shared function by sourcing trellis-home.sh would break that,
+# exactly as it does for release_store_snapshot_payload_matches below.
+release_store_process_birth_python() {
+  cat <<'TRELLIS_PROCESS_BIRTH_PY'
+import ctypes
+import sys
+import time
+
+# proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info) fills `struct
+# proc_bsdinfo` (<sys/proc_info.h>) and returns the number of bytes written:
+#
+#   uint32_t pbi_flags, pbi_status, pbi_xstatus, pbi_pid, pbi_ppid,
+#            pbi_uid, pbi_gid, pbi_ruid, pbi_rgid, pbi_svuid, pbi_svgid, rfu_1;
+#   char     pbi_comm[MAXCOMLEN];      /* 16 */
+#   char     pbi_name[2 * MAXCOMLEN];  /* 32 */
+#   uint32_t pbi_nfiles, pbi_pgid, pbi_pjobc, e_tdev, e_tpgid;
+#   int32_t  pbi_nice;
+#   uint64_t pbi_start_tvsec, pbi_start_tvusec;
+#
+# Only pbi_pid (head[3]) and pbi_start_tvsec are read; the rest is layout.
+PROC_PIDTBSDINFO = 3
+ESRCH = 3
+
+
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("head", ctypes.c_uint32 * 12),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("tail", ctypes.c_uint32 * 5),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+if len(sys.argv) != 2 or not sys.argv[1].isdigit():
+    raise SystemExit(2)
+pid = int(sys.argv[1])
+# Reject a non-canonical spelling as well as an out-of-range value: the pid
+# crosses into C as a signed int, and "007" is not the pid any record stored.
+if str(pid) != sys.argv[1] or pid < 1 or pid > 2147483647:
+    raise SystemExit(2)
+
+try:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pidinfo = libproc.proc_pidinfo
+except (OSError, AttributeError):
+    raise SystemExit(1)
+proc_pidinfo.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.POINTER(ProcBsdInfo),
+    ctypes.c_int,
+]
+proc_pidinfo.restype = ctypes.c_int
+
+info = ProcBsdInfo()
+ctypes.set_errno(0)
+written = proc_pidinfo(
+    pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+)
+saved_errno = ctypes.get_errno()
+# A short write is a failure, never a partially trusted record. ESRCH is the
+# only errno that means "gone"; EPERM and an unsupported flavour are
+# indeterminate and must not be reported as death.
+if written != ctypes.sizeof(info):
+    raise SystemExit(3 if saved_errno == ESRCH else 1)
+if info.head[3] != pid:
+    raise SystemExit(1)
+if info.pbi_start_tvsec < 1:
+    raise SystemExit(1)
+try:
+    token = time.strftime(
+        "%a %b %e %H:%M:%S %Y", time.localtime(info.pbi_start_tvsec)
+    )
+except (OSError, OverflowError, ValueError):
+    raise SystemExit(1)
+# `ps -o lstart=` emits exactly 28 columns and a newline; anything else is not
+# the schema every stored owner record was written in.
+if not token or len(token) > 28:
+    raise SystemExit(1)
+sys.stdout.write(token.ljust(28) + "\n")
+TRELLIS_PROCESS_BIRTH_PY
+}
+
+# release_store_process_birth <pid>
+#
+# The process-birth token for PID: `LC_ALL=C ps -p PID -o lstart=` wherever ps
+# runs, and the libproc reader above on Darwin. Both emit the same 28-column
+# localtime string, so the stored `process_birth` schema is unchanged and a
+# record written by either reader compares equal to one read by the other.
+#
+# Status: 0 with the token on stdout, 2 for a malformed or out-of-range pid, 3
+# when the Darwin reader reports ESRCH, 1 for every other failure. Callers must
+# keep mapping EVERY nonzero status to "indeterminate": a birth read that fails
+# after kill(0) reported the process live has not proved it dead and must never
+# authorize cleanup.
+release_store_process_birth() {
+  local pid program
+  pid="${1:-}"
+  case "$pid" in
+    ""|*[!0-9]*|0*) return 2 ;;
+  esac
+  [ "$pid" -le 2147483647 ] || return 2
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    command -v python3 >/dev/null 2>&1 || return 1
+    program="$(release_store_process_birth_python)" || return 1
+    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    return 0
+  fi
+  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  return 0
+}
+
 # An execution snapshot is owned by the long-lived shell that requested it,
 # rather than by the short-lived command-substitution process that creates it.
 # Bash 3.2 keeps $$ bound to that long-lived shell across both subshell forms.
@@ -889,7 +1365,7 @@ release_store_write_snapshot_owner() {
     release_store_err "snapshot owner process id is invalid"
     return 5
   }
-  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || {
+  owner_birth="$(release_store_process_birth "$owner_pid")" || {
     release_store_err "could not determine snapshot owner process birth"
     return 5
   }
@@ -1686,7 +2162,7 @@ release_store_remove_owned_snapshots() {
     ''|*[!0-9]*) return 5 ;;
   esac
   [ "$owner_pid" -gt 0 ] || return 5
-  owner_birth="$(LC_ALL=C ps -p "$owner_pid" -o lstart= 2>/dev/null)" || return 5
+  owner_birth="$(release_store_process_birth "$owner_pid")" || return 5
   [ -n "$owner_birth" ] || return 5
   command -v jq >/dev/null 2>&1 || return 5
   for owner in "$releases/.tmp.$version.exec."*.owner.json; do

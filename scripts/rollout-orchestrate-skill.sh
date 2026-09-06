@@ -281,7 +281,6 @@ rollout_one() {
     case "$harness" in
       claude) expected_destination=".claude/skills/$SKILL" ;;
       codex) expected_destination=".agents/skills/$SKILL" ;;
-      omp) expected_destination=".omp/skills/$SKILL" ;;
       *)
         echo "error (unknown registered harness): $project_key → $harness" >&2
         return "$TRELLIS_EX_STATE"

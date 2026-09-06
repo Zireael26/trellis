@@ -254,7 +254,6 @@ owner_matches_row() {
               or (.path | startswith(".agents/"))
               or (.path | startswith(".codex/")) then "codex"
             elif .path | startswith(".claude/") then "claude"
-            elif .path | startswith(".omp/") then "omp"
             else empty
             end
         ] | unique | sort
@@ -282,13 +281,7 @@ plan_has_process_gate() {
                   and .source == "core-rules/skills/process-gate"
                   and .destination == ".agents/skills/process-gate")]
             | length == 1
-          elif . == "omp" then
-            [$artifacts[]
-              | select(.harness == "omp"
-                  and .kind == "symlink"
-                  and .source == "core-rules/skills/process-gate"
-                  and .destination == ".omp/skills/process-gate")]
-            | length == 1
+
           else false
           end
         )
@@ -392,7 +385,7 @@ rollout_one() {
   while IFS= read -r harness; do
     [ -n "$harness" ] || continue
     case "$harness" in
-      claude|codex|omp) harnesses+=("$harness") ;;
+      claude|codex) harnesses+=("$harness") ;;
       *)
         echo "error (unsupported row harness '$harness'): $key" >&2
         return "$TRELLIS_EX_STATE"

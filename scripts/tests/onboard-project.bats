@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for scripts/onboard-project.sh — the OMP native surface.
+# Tests for scripts/onboard-project.sh — the portable attachment surface.
 #
 # FULLY ISOLATED from the live registry and real projects, in the same shape as
 # doctor-fix.bats / shared-infra.bats: every test stands up its own fixture in
@@ -12,7 +12,7 @@
 #   <sandbox>/trellis.config.json  — trellis_root/projects_root point at the above
 #
 # Why real onboarding is safe here (same reasoning as doctor-fix.bats):
-# onboard reads canonical rules/skills/commands/agents/omp-hooks from
+# onboard reads canonical rules, skills, commands, and agents from
 # $TRELLIS_ROOT (the fixture canonical) and the target PROJECT from
 # $PROJECTS_ROOT, both from the fixture config, so onboard mutates ONLY inside
 # the sandbox. Hook scripts + the Claude settings template are copied from the
@@ -44,9 +44,8 @@ teardown() {
 }
 
 # Lay down the fixture canonical. onboard REQUIRES: canonical CLAUDE.md,
-# skills/, commands/ (+ templates/primer-index-template.md), agents/, and the
-# OMP hooks dir (core-rules/omp/hooks — the .omp/hooks link target). The
-# canonical agents dir is deliberately empty (all legacy custom agents were
+# skills/, commands/ (+ templates/primer-index-template.md), and agents/.
+# The canonical agents dir is deliberately empty (all legacy custom agents were
 # removed; the surface is the live whole-directory link for future
 # harness-neutral agents).
 build_canonical_tree() {
@@ -55,8 +54,7 @@ build_canonical_tree() {
     "$CANON/core-rules/skills/security-gate" \
     "$CANON/core-rules/skills/aeo-gate" \
     "$CANON/core-rules/commands/templates" \
-    "$CANON/core-rules/agents" \
-    "$CANON/core-rules/omp/hooks"
+    "$CANON/core-rules/agents"
   printf '# Parent engineering rules\n' > "$CANON/core-rules/CLAUDE.md"
   printf 'x\n' > "$CANON/core-rules/skills/process-gate/SKILL.md"
   printf 'x\n' > "$CANON/core-rules/skills/security-gate/SKILL.md"
@@ -85,8 +83,8 @@ git_init_canonical_main() {
   )
 }
 
-# Build a real git repo project carrying its own overlay (the .omp/AGENTS.md
-# target). onboard requires $PROJECT/.git.
+# Build a real git repo project carrying its own overlay. Onboard requires
+# $PROJECT/.git.
 build_healthy_project() {
   local hp="$PROJECTS/healthy"
   mkdir -p "$hp"
@@ -109,7 +107,7 @@ EOF
 # rather than a second copy of the schema.
 write_config() {
   portable_config_write "$CFG" "$CANON" "$LOCAL_HOME/config.json" \
-    "$PROJECTS" "$SHARED_INFRA" "${1:-\"claude\",\"omp\"}"
+    "$PROJECTS" "$SHARED_INFRA" "${1:-\"claude\",\"codex\"}"
 }
 
 sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -169,9 +167,9 @@ assert_local_runtime_ignores() {
 # ===========================================================================
 # 1. Cutover (v1.0.0-rc.25): the legacy direct-link writer is REMOVED.
 #
-#    Sections 1–9 of this file used to prove what `--legacy` seeded: the five
-#    OMP links, the managed ignore block, idempotence, never-clobber, broken-
-#    link replacement, live directory links, harness gating, the control-plane
+#    Sections 1–9 of this file used to prove what `--legacy` seeded: managed
+#    links, the ignore block, idempotence, never-clobber, broken-link
+#    replacement, live directory links, harness gating, the control-plane
 #    special case, and obsolete-agent cleanup. None of that code exists any
 #    more, so none of those cases can pass or fail meaningfully. The equivalent
 #    guarantees for the layout that replaced it are proven against the
@@ -194,8 +192,6 @@ assert_project_untouched() {
   [ ! -e "$hp/.claude/rules/trellis.md" ]
   [ ! -L "$hp/.claude/rules/trellis.md" ]
   [ ! -e "$hp/.claude/skills/process-gate" ]
-  [ ! -e "$hp/.omp/AGENTS.md" ]
-  [ ! -L "$hp/.omp/AGENTS.md" ]
   [ ! -e "$hp/.trellis.json" ]
   [ ! -e "$hp/gotchas.md" ]
   if [ -f "$hp/.gitignore" ]; then
@@ -291,7 +287,7 @@ run_portable_onboard() {
   build_portable_onboard_fixture
 
   run_portable_onboard --fleet personal --home "$SANDBOX/home" --release 1.2.3 \
-    --harness claude --harness omp --project-id portable-project "$PORTABLE_PROJECT"
+    --harness claude --harness codex --project-id portable-project "$PORTABLE_PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"created tracked manifest:"* ]] || { echo "$output"; false; }
   jq -e '
@@ -312,7 +308,7 @@ run_portable_onboard() {
   [ "$(sed -n '8p' "$ATTACH_LOG")" = --harness ]
   [ "$(sed -n '9p' "$ATTACH_LOG")" = claude ]
   [ "$(sed -n '10p' "$ATTACH_LOG")" = --harness ]
-  [ "$(sed -n '11p' "$ATTACH_LOG")" = omp ]
+  [ "$(sed -n '11p' "$ATTACH_LOG")" = codex ]
   [ "$(sed -n '12p' "$ATTACH_LOG")" = "$PORTABLE_PROJECT" ]
 }
 

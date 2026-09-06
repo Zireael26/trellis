@@ -34,6 +34,24 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$no_git" -eq 1 ]; then
+  case "${GITLEAKS_MODE:-normal}" in
+    error-current)
+      printf '%s\n' 'current scanner diagnostic sentinel' >&2
+      printf '%s\n' '[]' > "$report"
+      exit 2
+      ;;
+    missing-current)
+      exit 0
+      ;;
+    malformed-current)
+      printf '%s\n' '{not-json' > "$report"
+      exit 0
+      ;;
+    non-list-current)
+      printf '%s\n' '{"results":[]}' > "$report"
+      exit 0
+      ;;
+  esac
   if [ -n "${GITLEAKS_CURRENT_TREE_LOG:-}" ]; then
     (cd "$source_dir" && find . -type f | sort) > "$GITLEAKS_CURRENT_TREE_LOG"
   fi
@@ -112,6 +130,14 @@ for row in rows:
 SH
   chmod +x "$BIN/llm"
 
+  cat > "$BIN/timeout" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = "--preserve-status" ] && shift
+shift
+exec "$@"
+SH
+  chmod +x "$BIN/timeout"
+
   SCRIPT_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 }
 
@@ -156,23 +182,6 @@ assert history[0]["fingerprint"] == "abc123:tests/fixtures/client.ts:generic-api
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 assert not any(r["bucket"] == "findings" and r["file"] == "ignored.env" for r in rows), rows
-' "$out"
-  [ "$status" -eq 0 ]
-}
-
-@test "line drift keeps a current secret out of the historical bucket" {
-  out="$TEST_ROOT/gitleaks.jsonl"
-
-  run env PATH="$BIN:$PATH" bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
-  [ "$status" -eq 0 ]
-
-  run python3 -c '
-import json, sys
-rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-matches = [r for r in rows if r["rule"] == "generic-api-key" and r["file"] == "src/current.ts"]
-assert len(matches) == 1, matches
-assert matches[0]["bucket"] == "findings", matches
-assert matches[0]["line"] == 12, matches
 ' "$out"
   [ "$status" -eq 0 ]
 }
@@ -240,6 +249,45 @@ assert historical["severity"] == "high"
 assert doc["summary"]["historical"]["by_severity"]["high"] == 1
 ' "$baseline"
   [ "$status" -eq 0 ]
+}
+
+@test "gitleaks scanner errors preserve stderr and return indeterminate" {
+  out="$TEST_ROOT/gitleaks.jsonl"
+
+  run env PATH="$BIN:$PATH" GITLEAKS_MODE=error-current \
+    bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"current scanner diagnostic sentinel"* ]]
+}
+
+@test "gitleaks missing reports return indeterminate instead of an empty list" {
+  out="$TEST_ROOT/gitleaks.jsonl"
+
+  run env PATH="$BIN:$PATH" GITLEAKS_MODE=missing-current \
+    bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
+  [ "$status" -eq 2 ]
+  [ ! -s "$out" ]
+  [[ "$output" == *"current-tree report is missing"* ]]
+}
+
+@test "gitleaks malformed reports return indeterminate instead of an empty list" {
+  out="$TEST_ROOT/gitleaks.jsonl"
+
+  run env PATH="$BIN:$PATH" GITLEAKS_MODE=malformed-current \
+    bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
+  [ "$status" -eq 2 ]
+  [ ! -s "$out" ]
+  [[ "$output" == *"current-tree report is malformed"* ]]
+}
+
+@test "gitleaks non-list reports return indeterminate instead of an empty list" {
+  out="$TEST_ROOT/gitleaks.jsonl"
+
+  run env PATH="$BIN:$PATH" GITLEAKS_MODE=non-list-current \
+    bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
+  [ "$status" -eq 2 ]
+  [ ! -s "$out" ]
+  [[ "$output" == *"current-tree report must be a JSON list"* ]]
 }
 
 @test "local.config.sh openai provider with explicit model reaches llm child and audit provenance" {

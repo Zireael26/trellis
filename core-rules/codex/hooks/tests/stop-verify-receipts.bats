@@ -41,6 +41,27 @@ make_dirty_docs() {
   echo "# notes" > "$PROJECT_DIR/NOTES.md"
 }
 
+# Install a git wrapper that fails exactly one plumbing operation while
+# delegating every other invocation to the real binary. This exercises command
+# status handling without a production-only fault-injection hatch.
+install_failing_git() {
+  FAILING_GIT_BIN="$BATS_TEST_TMPDIR/git-bin"
+  REAL_GIT="$(command -v git)"
+  export REAL_GIT
+  mkdir -p "$FAILING_GIT_BIN"
+  cat > "$FAILING_GIT_BIN/git" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "${GIT_FAIL_COMMAND:-}" ]; then
+    printf 'fixture: git %s unavailable\n' "$arg" >&2
+    exit 41
+  fi
+done
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$FAILING_GIT_BIN/git"
+}
+
 # A valid CURRENT-turn receipt string (canonical filled marker). Anchored by the
 # hook's tightened RECEIPT_RE: exit=<digit> and diff=...+<digit>.
 RECEIPT_MARKER='<!-- dod-receipt cmd="node -e require(./app.js)" exit=0 diff="+1/-0 (1 files)" -->'
@@ -103,6 +124,76 @@ write_transcript_stale_receipt() {
 {"type":"user","message":{"role":"user","content":"now do a second change"}}
 {"type":"assistant","message":{"role":"assistant","content":"Made the second change."}}
 EOF
+}
+
+# A stale receipt with no valid user-role line at all. With no current-turn
+# anchor, the hook must reject the transcript instead of scanning from line 1.
+write_transcript_without_user_anchor() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+not-json
+{"type":"assistant","message":{"role":"assistant","content":"Old result. <!-- dod-receipt cmd=\"npm test\" exit=0 diff=\"+3/-0 (1 files)\" --> <!-- follow-ups: none -->"}}
+EOF
+}
+
+@test "project directory cd failure is an explicit block" {
+  seed_todos_none
+  local envelope missing="$BATS_TEST_TMPDIR/does-not-exist"
+  envelope="$(make_envelope NULL NULL)"
+
+  run env CODEX_PROJECT_DIR="$missing" bash "$HOOK" <<<"$envelope"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("project directory:")' >/dev/null
+}
+
+@test "changed-file union blocks when either git source is unreadable" {
+  seed_todos_none
+  make_dirty_code
+  install_failing_git
+
+  local operation
+  for operation in diff ls-files; do
+    run env GIT_FAIL_COMMAND="$operation" PATH="$FAILING_GIT_BIN:$PATH" \
+      bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER <!-- follow-ups: none -->" NULL)"
+    [ "$status" -eq 2 ]
+    printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+    printf '%s' "$output" | jq -e '.reason | startswith("git changed files:")' >/dev/null
+  done
+}
+
+@test "malformed todos.json blocks instead of reading as no open todos" {
+  mkdir -p "$PROJECT_DIR/.codex"
+  printf '%s\n' '{"status":"pending"' > "$PROJECT_DIR/.codex/todos.json"
+
+  run bash "$HOOK" <<<"$(make_envelope NULL NULL)"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("TodoWrite:")' >/dev/null
+  printf '%s' "$output" | jq -r '.reason' | grep -qi 'parse'
+}
+
+@test "git status failure blocks instead of taking the pure-chat shortcut" {
+  seed_todos_none
+  install_failing_git
+
+  run env GIT_FAIL_COMMAND=status PATH="$FAILING_GIT_BIN:$PATH" \
+    bash "$HOOK" <<<"$(make_envelope NULL NULL)"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("git status:")' >/dev/null
+}
+
+@test "anchorless transcript with a stale receipt blocks as transcript-unusable" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript-without-user.jsonl"
+  write_transcript_without_user_anchor "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("transcript-unusable:")' >/dev/null
 }
 
 # =========================================================================

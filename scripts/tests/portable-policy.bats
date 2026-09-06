@@ -26,8 +26,8 @@ _require_ajv2020() {
   fi
 
   if command -v npx >/dev/null 2>&1 \
-    && npx --no-install ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$POLICY" >/dev/null 2>&1; then
-    AJV_COMMAND=(npx --no-install ajv)
+    && npx --no-install --offline --no-update-notifier ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$POLICY" >/dev/null 2>&1; then
+    AJV_COMMAND=(npx --no-install --offline --no-update-notifier ajv)
     return 0
   fi
 

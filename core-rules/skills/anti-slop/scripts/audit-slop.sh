@@ -199,12 +199,9 @@ parse_mypy() {
 # argument list long enough to exceed ARG_MAX fails loudly here instead, which is
 # the honest outcome.
 #
-# The note is written by the CALLER, not here: only the caller knows whether the
-# pattern lane actually ran for that language. A note claiming "degraded to the
-# pattern set" written at the point of failure lied whenever a sibling engine
-# survived — ruff exiting 2 while mypy ran left `py_engine=mypy`, so the pattern
-# fallback was skipped and ruff's rules were simply dropped under a note that said
-# they were covered.
+# Invariant: a native lane that fails (exit >=2) contributes no findings and is
+# discarded; the caller selects the pattern lane for that language and emits
+# the degraded note so it accurately reflects whether fallback ran.
 run_native() {
   local engine="$1" out="$2" rc=0
   shift 2

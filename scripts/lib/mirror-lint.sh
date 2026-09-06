@@ -279,9 +279,18 @@ lint_mirror() {
     -exec grep -HnE -- '/(Users|home)/[[:alnum:]_.-]+/' {} + 2>/dev/null)
 
   # Preserve the historical-record boundary for the retired AntiGravity
-  # harness. The canonical `google-antigravity` OMP provider id remains live
-  # and publishable; remove only that exact token before looking for stale
-  # harness references.
+  # harness. Three tokens name LIVE, publishable things and are stripped before
+  # the stale-reference check: `google-antigravity` (the OMP provider id),
+  # `pi-antigravity` (the pi provider extension package on npm), and the bare
+  # lowercase `antigravity` (the pi provider id, as used in `/login antigravity`
+  # and `--list-models antigravity`). Each is stripped only as a whole token —
+  # adjacent identifier characters still mark it stale.
+  #
+  # Case is the discriminator that makes this safe: the retired harness was
+  # always written `AntiGravity`/`Antigravity` in prose, so anything left after
+  # stripping the three lowercase tokens still fails, including every
+  # capitalised form. Public docs must therefore name the live provider by its
+  # lowercase id rather than in prose caps.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
@@ -291,15 +300,21 @@ lint_mirror() {
         if awk '
           {
             line = $0
-            token = "google-antigravity"
-            while ((pos = index(line, token)) != 0) {
-              before = pos == 1 ? "" : substr(line, pos - 1, 1)
-              after = substr(line, pos + length(token), 1)
-              if (before ~ /[[:alnum:]_-]/ || after ~ /[[:alnum:]_-]/) {
-                stale = 1
-                exit
+            # Longest first: pi-/google- prefixes must be consumed before the
+            # bare id, or the bare-id pass would see their suffix as a match
+            # with an identifier character before it and call it stale.
+            split("google-antigravity pi-antigravity antigravity", allowed, " ")
+            for (i = 1; i <= 3; i++) {
+              token = allowed[i]
+              while ((pos = index(line, token)) != 0) {
+                before = pos == 1 ? "" : substr(line, pos - 1, 1)
+                after = substr(line, pos + length(token), 1)
+                if (before ~ /[[:alnum:]_-]/ || after ~ /[[:alnum:]_-]/) {
+                  stale = 1
+                  exit
+                }
+                line = substr(line, 1, pos - 1) substr(line, pos + length(token))
               }
-              line = substr(line, 1, pos - 1) substr(line, pos + length(token))
             }
             if (index(tolower(line), "antigravity")) {
               stale = 1

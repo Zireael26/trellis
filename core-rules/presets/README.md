@@ -45,7 +45,7 @@ More presets land here over time as different projects' needs surface. Two-proje
 
 3. Run `scripts/rollout-presets.sh <project-name>` (or re-run `onboard-project.sh` on a freshly-onboarded project).
 
-The script seeds `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` as symlinks pointing at `core-rules/presets/<name>.md`. Claude Code and Codex load those links natively; the OMP adapter reads only managed `preset-*.md` links that resolve inside the canonical preset root and injects the same live content on first agent start.
+The script seeds `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` as symlinks pointing at `core-rules/presets/<name>.md`. Claude Code and Codex load those links natively; pi shares the Codex `.agents` surface and reads the same managed `preset-*.md` links.
 
 Remove a preset by deleting its entry from the array and re-running `rollout-presets.sh`. The script removes any preset symlinks no longer declared in the config (idempotent).
 

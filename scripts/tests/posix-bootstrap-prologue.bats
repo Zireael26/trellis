@@ -15,7 +15,7 @@
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
-  WORK="$(mktemp -d)"
+  WORK="$(mktemp -d "$BATS_TEST_TMPDIR/posix-prologue.XXXXXX")"
 }
 
 teardown() {

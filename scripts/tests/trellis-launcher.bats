@@ -6,7 +6,7 @@ LAUNCHER_TEMPLATE="$REPO_ROOT/scripts/trellis-launcher.sh"
 DISPATCHER_TEMPLATE="$REPO_ROOT/scripts/trellis"
 
 setup() {
-  SANDBOX="$(mktemp -d)"
+  SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/trellis-launcher.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/home"
   export TRELLIS_HOME="$SANDBOX/trellis-home"
@@ -36,7 +36,7 @@ teardown() {
     rm -rf "$SOCKET_FIXTURE"
   fi
   [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ] || return 0
-  find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
+  find "$SANDBOX" -depth -type d -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$SANDBOX"
 }
 
@@ -74,7 +74,7 @@ make_bootstrap_release_remote() {
 }
 
 make_release() {
-  local version="$1" fixture="${2:-dispatcher}" manifest file relative mode oid target
+  local version="$1" fixture="${2:-dispatcher}" manifest
   RELEASE_DIR="$TRELLIS_HOME/releases/$version"
   PAYLOAD="$RELEASE_DIR/payload"
   manifest="$SANDBOX/manifest-$version.jsonl"
@@ -90,6 +90,18 @@ make_release() {
 printf '%s\n' "${TRELLIS_ATTACH_CALLER_PATH-__UNSET__}" > "$HOME/trellis-launcher-attach-path.log"
 exit 3
 EOF
+      ;;
+    stdin)
+      cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
+      mkdir -p "$PAYLOAD/core-rules/hooks"
+      cat > "$PAYLOAD/scripts/doctor.sh" <<'EOF'
+#!/bin/bash
+IFS= read -r line
+printf '%s\n' "$line"
+exit 3
+EOF
+      cp "$PAYLOAD/scripts/doctor.sh" "$PAYLOAD/core-rules/hooks/inject-primer-index.sh"
+      chmod 755 "$PAYLOAD/scripts/doctor.sh" "$PAYLOAD/core-rules/hooks/inject-primer-index.sh"
       ;;
     session-context)
       mkdir -p \
@@ -147,6 +159,76 @@ EOF
       chmod 755 "$PAYLOAD/scripts/release.sh" "$PAYLOAD/scripts/upgrade.sh"
       printf '%s\n' "$version" > "$PAYLOAD/core-rules/VERSION"
       ;;
+    scratch-probe)
+      # A payload child that reports the command scratch it was handed and, on
+      # request, mutates it. The mode file is read at run time so one fixture
+      # covers every lifecycle case without a second sealed release.
+      cat > "$PAYLOAD/scripts/trellis" <<EOF
+#!/bin/bash
+mode="\$(cat "$SANDBOX/scratch-probe-mode" 2>/dev/null || printf record)"
+printf '%s\n' "\${TMPDIR-__UNSET__}" > "$SANDBOX/scratch-tmpdir.log"
+if [ -n "\${TMPDIR-}" ] && [ -d "\$TMPDIR" ]; then
+  LC_ALL=C /bin/ls -ld "\$TMPDIR" | /usr/bin/awk '{print substr(\$1, 1, 10)}' > "$SANDBOX/scratch-mode.log"
+fi
+case "\$mode" in
+  record) ;;
+  write)
+    printf 'command temp file\n' > "\$TMPDIR/probe-file"
+    /usr/bin/mktemp "\${TMPDIR:-/tmp}/probe.XXXXXX" > "$SANDBOX/scratch-mktemp.log"
+    ;;
+  child-symlink)
+    /bin/ln -s "$SANDBOX/neighbour-target" "\$TMPDIR/link"
+    ;;
+  replace-directory)
+    /bin/rmdir "\$TMPDIR" && /bin/mkdir "\$TMPDIR" && printf 'replacement\n' > "\$TMPDIR/replacement"
+    ;;
+  replace-parent)
+    printf 'original scratch bytes\n' > "\$TMPDIR/original"
+    /bin/mv "\$TRELLIS_HOME/state/scratch" "\$TRELLIS_HOME/state/scratch-retained" || exit 91
+    /bin/mkdir -m 700 "\$TRELLIS_HOME/state/scratch" "\$TMPDIR" || exit 92
+    printf 'replacement scratch bytes\n' > "\$TMPDIR/replacement"
+    printf 'replacement neighbour bytes\n' > "\$TRELLIS_HOME/state/scratch/neighbour"
+    ;;
+  replace-state-alias)
+    printf 'original scratch bytes\n' > "\$TMPDIR/original"
+    printf 'state sentinel bytes\n' > "\$TRELLIS_HOME/state/sentinel"
+    printf 'neighbour bytes\n' > "\$TRELLIS_HOME/state/scratch/neighbour"
+    /bin/mv "\$TRELLIS_HOME/state" "\$TRELLIS_HOME/state.saved" || exit 91
+    /bin/ln -s state.saved "\$TRELLIS_HOME/state" || exit 92
+    ;;
+  replace-symlink)
+    /bin/rmdir "\$TMPDIR" && /bin/ln -s "$SANDBOX/neighbour-target" "\$TMPDIR"
+    ;;
+  term)
+    kill -TERM "\$PPID"
+    ;;
+esac
+exit "\$(cat "$SANDBOX/scratch-probe-status" 2>/dev/null || printf 0)"
+EOF
+      ;;
+    command-bundle-scratch)
+      # The real release body preloaded under a fixture upgrade body, so the
+      # bundle child reports both the TMPDIR the launcher handed it and the
+      # value release.sh admitted from it.
+      mkdir -p "$PAYLOAD/core-rules"
+      cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
+      cp "$REPO_ROOT/scripts/release.sh" "$PAYLOAD/scripts/release.sh"
+      cp -R "$REPO_ROOT/scripts/lib" "$PAYLOAD/scripts/lib"
+      cat > "$PAYLOAD/scripts/upgrade.sh" <<'EOF'
+#!/bin/sh
+printf 'scratch upgrade wrapper ran\n'
+exit 5
+# -- trellis upgrade body --
+set -u
+trellis_command_bundle_is_verified upgrade "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN:-}" || exit 6
+printf 'bundle-tmpdir=%s\n' "${TMPDIR-__UNSET__}"
+printf 'bundle-admitted=%s\n' "${RELEASE_ADMITTED_TMPDIR-__UNSET__}"
+release_git -c 'alias.trellis-scratch-probe=!printf "git-tmpdir=%s\n" "$TMPDIR"' trellis-scratch-probe || exit 7
+exit 0
+EOF
+      chmod 755 "$PAYLOAD/scripts/release.sh" "$PAYLOAD/scripts/upgrade.sh"
+      printf '%s\n' "$version" > "$PAYLOAD/core-rules/VERSION"
+      ;;
     session-primer)
       mkdir -p "$PAYLOAD/core-rules/hooks"
       cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
@@ -168,22 +250,7 @@ EOF
   printf 'immutable fixture %s\n' "$version" > "$PAYLOAD/README"
   printf 'safe symlink target %s\n' "$version" > "$PAYLOAD/linked target"
   ln -s "linked target" "$PAYLOAD/linked fixture"
-  : > "$manifest"
-  while IFS= read -r file; do
-    relative="${file#$PAYLOAD/}"
-    if [ -L "$file" ]; then
-      mode=120000
-      target="$(readlink "$file")"
-      oid="$(printf '%s' "$target" | git hash-object --stdin)"
-    elif [ -x "$file" ]; then
-      mode=100755
-      oid="$(git hash-object "$file")"
-    else
-      mode=100644
-      oid="$(git hash-object "$file")"
-    fi
-    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" '{path: $path, mode: $mode, oid: $oid}' >> "$manifest"
-  done < <(find "$PAYLOAD" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  python3 "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$PAYLOAD" > "$manifest"
   jq -n --arg version "$version" --slurpfile tree "$manifest" '
     {
       schema_version: 1,
@@ -194,8 +261,8 @@ EOF
       tree: $tree
     }
   ' > "$RELEASE_DIR/release.json"
-  find "$PAYLOAD" -type f -exec chmod a-w {} \;
-  find "$PAYLOAD" -type d -exec chmod a-w {} \;
+  find "$PAYLOAD" -type f -exec chmod a-w {} +
+  find "$PAYLOAD" -type d -exec chmod a-w {} +
   chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
 }
 
@@ -215,6 +282,33 @@ assert_no_execution_snapshot() {
   local leftover
   leftover="$(find "$TRELLIS_HOME/releases" -maxdepth 1 -name '.tmp.*.exec.*' -print 2>&1)"
   [ -z "$leftover" ] || { echo "execution snapshot survived: $leftover"; false; }
+}
+
+# Same shape as assert_no_execution_snapshot: prove the root exists first, so an
+# absent scratch root cannot pass as an empty one.
+assert_no_command_scratch() {
+  [ -d "$TRELLIS_HOME/state/scratch" ] ||
+    { echo "command scratch root is absent, so the emptiness claim is vacuous: $TRELLIS_HOME/state/scratch"; false; }
+  local leftover
+  leftover="$(find "$TRELLIS_HOME/state/scratch" -maxdepth 1 -name '.cmd.*' -print 2>&1)"
+  [ -z "$leftover" ] || { echo "command scratch survived: $leftover"; false; }
+}
+
+run_launcher_with_tmpdir() {
+  local candidate="$1"
+  shift
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TMPDIR="$candidate" "$LAUNCHER" "$@"
+}
+
+# release.sh reached by pathname, with the entry gate satisfied exactly as the
+# installed payload satisfies it, and CANDIDATE offered as the caller's TMPDIR.
+run_release_pathname() {
+  local candidate="$1"
+  shift
+  run env -i "HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" \
+    "TRELLIS_VERIFIED_PAYLOAD=$PAYLOAD" "TRELLIS_VERIFIED_RELEASE_VERSION=1.2.3" \
+    "TMPDIR=$candidate" "PATH=$PATH" \
+    /bin/bash "$PAYLOAD/scripts/release.sh" "$@"
 }
 
 make_poisoned_project_runtime() {
@@ -294,24 +388,46 @@ prepare_dispatcher_fixture() {
   done
 }
 make_agent_socket_fixture() {
+  # The isolated runner binds and closes this inert socket before fencing
+  # network access. Keep aliases and negative controls in our own subtree.
+  if [ -n "${TRELLIS_TEST_SOCKET_PATH:-}" ]; then
+    [ -n "${TRELLIS_TEST_SOCKET_METADATA:-}" ] || return 1
+    SOCKET_CANONICAL="$TRELLIS_TEST_SOCKET_PATH"
+    [ -S "$SOCKET_CANONICAL" ] && [ ! -L "$SOCKET_CANONICAL" ] || return 1
+    [ "${SOCKET_CANONICAL##*/}" = s ] || return 1
+    SOCKET_FIXTURE="$BATS_TEST_TMPDIR/socket-fixture"
+    SOCKET_REAL="$SOCKET_FIXTURE/r"
+    SOCKET_ALIAS="$SOCKET_FIXTURE/a"
+    mkdir -p "$SOCKET_REAL"
+    ln -s "${SOCKET_CANONICAL%/*}" "$SOCKET_ALIAS"
+    return
+  fi
   # A real AF_UNIX socket: the resolver requires -S, so no plain file can stand
   # in.
-  # The physical spelling of /tmp: short enough for the 104-byte sun_path limit
-  # and free of symlinks, so the fixture's own path adds none of its own. It is
-  # resolved rather than written as /private/tmp, which exists only on Darwin —
-  # the hardcoded spelling made this case fail outright on Linux, which is where
-  # CI runs it.
+  # Built inside the runner's own private temp root, resolved physically so the
+  # fixture's path contributes no symlink of its own. A literal /tmp spelling
+  # put it outside that boundary, which an isolated runner refuses outright, and
+  # /private/tmp does not exist on Linux, which is where CI runs this.
+  #
+  # sun_path caps a bound socket at 104 bytes and the root is already deep:
+  # scripts/run-tests.sh hands each shard a `trellis-test-git.XXXXXX` directory
+  # under the ambient temp dir, which is 80 bytes on a stock macOS $TMPDIR. The
+  # leaves are therefore spelled as tersely as the limit demands and named
+  # through variables, so the cases below still read as real-versus-alias.
   local tmp_root
-  tmp_root="$(CDPATH='' cd /tmp && pwd -P)"
-  SOCKET_FIXTURE="$(mktemp -d "$tmp_root/trellis-agent-socket.XXXXXX")"
-  mkdir -p "$SOCKET_FIXTURE/real"
+  tmp_root="$(CDPATH='' cd "${TMPDIR:-/tmp}" && pwd -P)"
+  SOCKET_FIXTURE="$(mktemp -d "$tmp_root/s.XXXXXX")"
+  SOCKET_REAL="$SOCKET_FIXTURE/r"
+  SOCKET_ALIAS="$SOCKET_FIXTURE/a"
+  SOCKET_CANONICAL="$SOCKET_REAL/s"
+  mkdir -p "$SOCKET_REAL"
   /usr/bin/perl -MSocket -e '
     socket(my $sock, PF_UNIX, SOCK_STREAM, 0) or die "socket: $!";
     bind($sock, sockaddr_un($ARGV[0])) or die "bind: $!";
-  ' "$SOCKET_FIXTURE/real/agent.sock"
+  ' "$SOCKET_CANONICAL"
   # The stock macOS spelling reaches the launchd socket through /var, a symlink
   # to /private/var, so an alias directory reproduces the real-world path.
-  ln -s "$SOCKET_FIXTURE/real" "$SOCKET_FIXTURE/alias"
+  ln -s "$SOCKET_REAL" "$SOCKET_ALIAS"
 }
 
 resolve_ssh_auth_sock() {
@@ -328,9 +444,9 @@ launcher_verified_ssh_auth_sock"
 @test "verified SSH_AUTH_SOCK resolves a socket reached through a symlinked directory" {
   local canonical
   make_agent_socket_fixture
-  canonical="$SOCKET_FIXTURE/real/agent.sock"
+  canonical="$SOCKET_CANONICAL"
 
-  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/alias/agent.sock"
+  run resolve_ssh_auth_sock "$SOCKET_ALIAS/s"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = "$canonical" ] || { echo "$output"; false; }
 
@@ -341,22 +457,22 @@ launcher_verified_ssh_auth_sock"
 
 @test "verified SSH_AUTH_SOCK refuses a symlinked socket, a non-socket, and an unclean path" {
   make_agent_socket_fixture
-  ln -s "$SOCKET_FIXTURE/real/agent.sock" "$SOCKET_FIXTURE/real/link.sock"
-  : > "$SOCKET_FIXTURE/real/plain"
+  ln -s "$SOCKET_CANONICAL" "$SOCKET_REAL/link.sock"
+  : > "$SOCKET_REAL/plain"
 
-  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/link.sock"
+  run resolve_ssh_auth_sock "$SOCKET_REAL/link.sock"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -z "$output" ] || { echo "$output"; false; }
 
-  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/plain"
+  run resolve_ssh_auth_sock "$SOCKET_REAL/plain"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -z "$output" ] || { echo "$output"; false; }
 
-  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/../real/agent.sock"
+  run resolve_ssh_auth_sock "$SOCKET_REAL/../r/s"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -z "$output" ] || { echo "$output"; false; }
 
-  run resolve_ssh_auth_sock "$SOCKET_FIXTURE/real/missing.sock"
+  run resolve_ssh_auth_sock "$SOCKET_REAL/missing.sock"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -z "$output" ] || { echo "$output"; false; }
 }
@@ -406,6 +522,93 @@ EOF
     ' trellis-launcher-hostile "$LAUNCHER" "$startup"
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   [ ! -e "$marker" ]
+}
+
+# Extract the actual clean -c program, not a hand-written bootstrap facsimile.
+launcher_clean_prologue() {
+  awk '
+    /^  \/bin\/bash --noprofile --norc -c / { body = 1; next }
+    /^\047 trellis-launcher-bootstrap / { exit }
+    body { print }
+  ' "$LAUNCHER_TEMPLATE"
+}
+
+@test "launcher bootstrap preserves ordinary and hook stdin" {
+  make_release 1.2.3 stdin
+  local route
+  for route in doctor hook; do
+    run /bin/bash -c '
+      printf "%s\n" "caller stdin: spaces and backslash \\" |
+        "$1" "$2" "${@:3}"
+    ' _ "$LAUNCHER" "$route" inject-primer-index claude "$SANDBOX/projects"
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    [ "$output" = 'caller stdin: spaces and backslash \' ]
+    assert_no_execution_snapshot
+  done
+}
+
+@test "launcher bootstrap rejects missing marker and empty body with status 5" {
+  local variant
+  for variant in missing empty; do
+    awk '/^# -- trellis launcher body --$/ { exit } { print }' "$LAUNCHER_TEMPLATE" > "$LAUNCHER"
+    if [ "$variant" = empty ]; then
+      printf '%s\n' '# -- trellis launcher body --' >> "$LAUNCHER"
+    fi
+    run_launcher doctor
+    [ "$status" -eq 5 ] || { echo "$output"; false; }
+    [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]]
+    [ ! -e "$ARGV_LOG" ]
+  done
+}
+
+@test "launcher bootstrap source read failure is checked before evaluation" {
+  local prologue
+  prologue="$(launcher_clean_prologue)"
+  [ -n "$prologue" ]
+  run /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    /bin/bash --noprofile --norc -c "$prologue" trellis-launcher-bootstrap "$SANDBOX/missing-source" doctor
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [[ "$output" == *'awk:'* ]]
+  [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]]
+  [ ! -e "$ARGV_LOG" ]
+}
+
+@test "launcher bootstrap executes a valid body larger than ARG_MAX without argv transport" {
+  make_release 1.2.3
+  python3 - "$LAUNCHER" <<'PY'
+import os
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+with path.open("a") as stream:
+    stream.write("\n# padding\n" * (os.sysconf("SC_ARG_MAX") // 10 + 1))
+PY
+  run_launcher attach --fleet "work fleet" ""
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(cat "$ARGV_LOG")" = "$(printf '%s\n' 4 '<attach>' '<--fleet>' '<work fleet>' '<>')" ]
+  assert_no_execution_snapshot
+}
+
+@test "launcher bootstrap final eval preserves options umask EXIT trap and body status" {
+  local prologue
+  prologue="$(launcher_clean_prologue)"
+  [ "${prologue##*$'\n'}" = 'eval "$launcher_body"' ]
+  cat > "$SANDBOX/probe-source" <<'EOF'
+# -- trellis launcher body --
+case "$-" in *u*) ;; *) exit 91 ;; esac
+case "$-" in *e*|*x*|*v*) exit 92 ;; esac
+[ "$(umask)" = 0077 ] || exit 93
+shopt -q nullglob && exit 94
+[ "$(set -o | awk '$1 == "pipefail" { print $2 }')" = off ] || exit 95
+trap 'printf "exit-status=%s\n" "$?"' EXIT
+false
+printf 'argc=%s first=<%s> second=<%s>\n' "$#" "$1" "$2"
+(exit 42)
+EOF
+  run /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    /bin/bash --noprofile --norc -c "$prologue" trellis-launcher-bootstrap "$SANDBOX/probe-source" 'with space' ''
+  [ "$status" -eq 42 ] || { echo "$output"; false; }
+  [ "$output" = "$(printf '%s\n' 'argc=2 first=<with space> second=<>' 'exit-status=42')" ]
 }
 
 @test "session-context route runs verified data hooks and never poisoned project runtime" {
@@ -598,7 +801,7 @@ EOF
 
   # A release store with no configured release is not corrupt state: it is the
   # pre-active condition, and the launcher's only pre-active route reports it.
-  find "$TRELLIS_HOME/releases/1.2.3" -depth -type d -exec chmod u+w {} \;
+  find "$TRELLIS_HOME/releases/1.2.3" -depth -type d -exec chmod u+w {} +
   rm -rf "$TRELLIS_HOME/releases/1.2.3"
   run_launcher doctor
   [ "$status" -eq 2 ]
@@ -709,6 +912,420 @@ EOF
   [[ "$output" != *'VERSION is required'* ]] || { echo "$output"; false; }
   [ ! -e "$SOURCE_POISON_MARKER" ]
   assert_no_execution_snapshot
+}
+
+@test "launcher derives a private command scratch and hands it to the ordinary payload child" {
+  local observed
+  make_release 1.2.3 scratch-probe
+  printf 'write\n' > "$SANDBOX/scratch-probe-mode"
+
+  run_launcher_with_tmpdir "/hostile ambient tmp" doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  case "$observed" in
+    "$TRELLIS_HOME/state/scratch/.cmd."*) ;;
+    *) echo "observed TMPDIR: $observed"; false ;;
+  esac
+  [ "$(cat "$SANDBOX/scratch-mode.log")" = 'drwx------' ] ||
+    { echo "scratch mode: $(cat "$SANDBOX/scratch-mode.log")"; false; }
+  # The permission field only: macOS appends `@` for extended attributes, which
+  # the launcher's own private-directory check also ignores (it refuses `+`,
+  # an ACL, and reads exactly the ten mode characters).
+  [ "$(LC_ALL=C ls -ld "$TRELLIS_HOME/state" | awk '{print substr($1, 1, 10)}')" = 'drwx------' ]
+  [ "$(LC_ALL=C ls -ld "$TRELLIS_HOME/state/scratch" | awk '{print substr($1, 1, 10)}')" = 'drwx------' ]
+  # A real command temp file allocated through ${TMPDIR:-/tmp}: the hostile
+  # ambient value never reached the child, and the derived one is writable.
+  case "$(cat "$SANDBOX/scratch-mktemp.log")" in
+    "$observed"/probe.??????) ;;
+    *) echo "mktemp landed outside the derived scratch: $(cat "$SANDBOX/scratch-mktemp.log")"; false ;;
+  esac
+  [ ! -e "$observed" ] || { echo "command scratch survived: $observed"; false; }
+  assert_no_command_scratch
+  assert_no_execution_snapshot
+}
+
+@test "command scratch preserves a Trellis home spelled with spaces" {
+  local spaced observed
+  spaced="$SANDBOX/trellis home with spaces"
+  mv "$TRELLIS_HOME" "$spaced"
+  export TRELLIS_HOME="$spaced"
+  make_release 1.2.3 scratch-probe
+
+  run_launcher_with_tmpdir /tmp doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  case "$observed" in
+    "$spaced/state/scratch/.cmd."*) ;;
+    *) echo "observed TMPDIR: $observed"; false ;;
+  esac
+  assert_no_command_scratch
+}
+
+@test "command scratch is removed after a nonzero payload exit without changing the status" {
+  make_release 1.2.3 scratch-probe
+  printf '7\n' > "$SANDBOX/scratch-probe-status"
+
+  run_launcher doctor
+  [ "$status" -eq 7 ] || { echo "status=$status"; echo "$output"; false; }
+  [ ! -e "$(cat "$SANDBOX/scratch-tmpdir.log")" ]
+  assert_no_command_scratch
+}
+
+@test "the existing TERM trap cleans the command scratch and keeps its 143 status" {
+  make_release 1.2.3 scratch-probe
+  # The payload signals its own launcher and returns: the trap is exercised
+  # exactly as a real TERM exercises it, with no sleep and no polling. The
+  # alarm is a hard ceiling on a hang, not the mechanism under test.
+  printf 'term\n' > "$SANDBOX/scratch-probe-mode"
+
+  run /usr/bin/perl -e 'alarm 60; exec @ARGV or die "exec: $!"' \
+    env "HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" "$LAUNCHER" doctor
+  [ "$status" -eq 143 ] || { echo "status=$status"; echo "$output"; false; }
+  [ ! -e "$(cat "$SANDBOX/scratch-tmpdir.log")" ]
+  assert_no_command_scratch
+}
+
+@test "command scratch cleanup refuses a replaced directory and preserves it and its neighbours" {
+  local replaced
+  make_release 1.2.3 scratch-probe
+  run_launcher doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf 'neighbour bytes\n' > "$TRELLIS_HOME/state/scratch/neighbour"
+
+  printf 'replace-directory\n' > "$SANDBOX/scratch-probe-mode"
+  run_launcher doctor
+  [ "$status" -eq 5 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" == *'could not clean command scratch directory'* ]] || { echo "$output"; false; }
+  replaced="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  [ -d "$replaced" ] && [ ! -L "$replaced" ]
+  [ "$(cat "$replaced/replacement")" = replacement ]
+  [ "$(cat "$TRELLIS_HOME/state/scratch/neighbour")" = 'neighbour bytes' ]
+}
+
+@test "command scratch cleanup refuses a replaced parent and preserves both directory trees" {
+  local observed retained expected
+  make_release 1.2.3 scratch-probe
+
+  run_launcher doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$(cat "$SANDBOX/scratch-tmpdir.log")" ]
+  assert_no_command_scratch
+  assert_no_execution_snapshot
+  printf 'original neighbour bytes\n' > "$TRELLIS_HOME/state/scratch/neighbour"
+
+  printf 'replace-parent\n' > "$SANDBOX/scratch-probe-mode"
+  run_launcher doctor
+  [ "$status" -eq 5 ] || { echo "status=$status"; echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  retained="$TRELLIS_HOME/state/scratch-retained/${observed##*/}"
+  expected="$(printf '%s\n' \
+    'trellis: the command scratch root changed since it was recorded' \
+    "trellis: could not clean command scratch directory: $observed")"
+  [ "$output" = "$expected" ] || { echo "parent-identity refusal mismatch: $output"; false; }
+  [ -d "$observed" ] && [ ! -L "$observed" ]
+  [ -d "$retained" ] && [ ! -L "$retained" ]
+  printf 'replacement scratch bytes\n' | cmp - "$observed/replacement"
+  printf 'replacement neighbour bytes\n' | cmp - "$TRELLIS_HOME/state/scratch/neighbour"
+  printf 'original scratch bytes\n' | cmp - "$retained/original"
+  printf 'original neighbour bytes\n' | cmp - "$TRELLIS_HOME/state/scratch-retained/neighbour"
+  assert_no_execution_snapshot
+}
+
+# Extract the actual helper boundaries without sourcing the launcher entrypoint.
+# The emitted Python is executed unchanged, including its imports and arguments.
+prepare_command_scratch_helpers() {
+  python3 -I -c '
+import pathlib, re, subprocess, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+out = pathlib.Path(sys.argv[2])
+functions = re.findall(r"^launcher_(?:command_scratch_[a-z_]+|derive_command_scratch|remove_command_scratch|absolute_path_is_clean|error)\(\) \{\n.*?^\}", source, re.M | re.S)
+assert len(functions) >= 6
+library = out / "scratch-helpers.sh"
+library.write_text("TRELLIS_EX_USAGE=2\nTRELLIS_EX_STATE=4\nTRELLIS_EX_UNAVAILABLE=5\n" + "\n".join(functions))
+for mode in ("create", "remove"):
+    result = subprocess.run(["/bin/bash", "-c", "source \"$1\"; launcher_command_scratch_" + mode + "_program", "bash", str(library)], capture_output=True, text=True, check=True)
+    (out / (mode + ".py")).write_text(result.stdout)
+' "$LAUNCHER_TEMPLATE" "$SANDBOX"
+}
+
+@test "command scratch repair refuses a completed state ancestor alias before cleanup" {
+  local observed retained
+  make_release 1.2.3 scratch-probe
+  printf 'replace-state-alias\n' > "$SANDBOX/scratch-probe-mode"
+  run_launcher doctor
+  [ "$status" -eq 5 ] || { echo "repair mismatch: alias cleanup status=$status $output"; false; }
+  [[ "$output" == *'without following links'* ]] || { echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  retained="$TRELLIS_HOME/state.saved/scratch/${observed##*/}"
+  [ -L "$TRELLIS_HOME/state" ] && [ -d "$retained" ]
+  printf 'original scratch bytes\n' | cmp - "$retained/original"
+  printf 'state sentinel bytes\n' | cmp - "$TRELLIS_HOME/state.saved/sentinel"
+  printf 'neighbour bytes\n' | cmp - "$TRELLIS_HOME/state.saved/scratch/neighbour"
+  assert_no_execution_snapshot
+}
+
+@test "command scratch repair refuses ancestor aliases when opening the canonical home" {
+  prepare_command_scratch_helpers
+  mkdir -m 700 "$SANDBOX/entry" "$SANDBOX/entry/home"
+  run python3 -I "$SANDBOX/create.py" "$SANDBOX/entry/home"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mv "$SANDBOX/entry" "$SANDBOX/entry.saved"
+  ln -s entry.saved "$SANDBOX/entry"
+  printf 'sentinel\n' > "$SANDBOX/entry.saved/sentinel"
+  run python3 -I "$SANDBOX/create.py" "$SANDBOX/entry/home"
+  [ "$status" -eq 4 ] || { echo "repair mismatch: home alias status=$status $output"; false; }
+  [[ "$output" == *'without following links'* ]] || { echo "$output"; false; }
+  printf 'sentinel\n' | cmp - "$SANDBOX/entry.saved/sentinel"
+  [ -L "$SANDBOX/entry" ]
+}
+
+@test "command scratch repair rejects real Darwin ACLs on home state root and new child" {
+  [ "$(uname -s)" = Darwin ] || skip "native Darwin ACL fixture"
+  prepare_command_scratch_helpers
+  run python3 -I -c '
+import os, pathlib, stat, subprocess, sys
+base = pathlib.Path(sys.argv[1])
+program = (base / "create.py").read_text()
+failures = []
+for label in ("home", "state", "root", "child"):
+    home = base / ("acl-" + label)
+    root = home / "state" / "scratch"
+    root.mkdir(parents=True)
+    for p in (home, home / "state", root):
+        p.chmod(0o700)
+    target = {"home": home, "state": home / "state", "root": root}.get(label)
+    if target:
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,search,directory_inherit", str(target)], check=True)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700
+        before = subprocess.run(["/bin/ls", "-lde", str(target)], capture_output=True, text=True, check=True).stdout
+        assert "allow" in before
+        code = program
+    else:
+        # Install a real ACL immediately after mkdir of the new command child,
+        # before the production no-follow open/private check, not on a decoy path.
+        code = """import os, subprocess, sys
+real_mkdir = os.mkdir
+def mkdir(name, mode=0o777, *, dir_fd=None):
+    real_mkdir(name, mode, dir_fd=dir_fd)
+    if str(name).startswith(".cmd."):
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,search,directory_inherit", sys.argv[1] + "/state/scratch/" + name], check=True)
+os.mkdir = mkdir
+""" + program
+    result = subprocess.run([sys.executable, "-I", "-c", code, str(home)], capture_output=True, text=True)
+    print(label, result.returncode, result.stderr, flush=True)
+    if result.returncode != 4 or "has an ACL" not in result.stderr:
+        failures.append(label)
+    if target:
+        after = subprocess.run(["/bin/ls", "-lde", str(target)], capture_output=True, text=True, check=True).stdout
+        assert before.splitlines()[1:] == after.splitlines()[1:], (label, "ACL was repaired")
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700, (label, "mode was repaired")
+assert not failures, "repair mismatch: ACL accepted at " + repr(failures)
+' "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "command scratch repair rejects malformed identities at wrapper and embedded boundaries" {
+  prepare_command_scratch_helpers
+  run python3 -I -c '
+import pathlib, subprocess, sys
+base = pathlib.Path(sys.argv[1])
+home = base / "identity-home"
+home.mkdir(mode=0o700)
+created = subprocess.run([sys.executable, "-I", str(base / "create.py"), str(home)], capture_output=True, text=True, check=True)
+name, child_id, root_id = created.stdout.strip().split("\t")
+root = str(home / "state" / "scratch")
+wrapper = ["/bin/bash", "-c", "source \"$1\"; shift; launcher_remove_command_scratch \"$@\"", "bash", str(base / "scratch-helpers.sh")]
+embedded = [sys.executable, "-I", str(base / "remove.py")]
+for command in (wrapper, embedded):
+    # Both real removal and well-formed missing-child idempotence must work.
+    subprocess.run(command + [root, name, child_id, root_id], check=True)
+failures = []
+for label, command in (("wrapper", wrapper), ("embedded", embedded)):
+    for bad in (":", "1::2", "123", "", "1:", ":2", "١:2", "1:2\n", "-1:2"):
+        for position in (2, 3):
+            args = [root, name, child_id, root_id]
+            args[position] = bad
+            result = subprocess.run(command + args, capture_output=True, text=True)
+            if result.returncode != 2:
+                failures.append((label, bad, position, result.returncode))
+assert not failures, "repair mismatch: malformed cleanup identities " + repr(failures)
+' "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "command scratch distinguishes Darwin ACL inspection errors from absent ACLs" {
+  [ "$(uname -s)" = Darwin ] || skip "native Darwin ACL API"
+  prepare_command_scratch_helpers
+  run python3 -I -c '
+import errno, pathlib, subprocess, sys
+base = pathlib.Path(sys.argv[1])
+home = base / "acl-error-home"
+home.mkdir(mode=0o700)
+program = (base / "create.py").read_text()
+for error in (errno.EBADF, errno.EACCES, errno.EIO, errno.ENOTSUP):
+    prefix = """import ctypes
+native_cdll = ctypes.CDLL
+def load(*args, **kwargs):
+    library = native_cdll(*args, **kwargs)
+    def get_acl(fd, kind):
+        ctypes.set_errno(%d)
+        return None
+    library.acl_get_fd_np = get_acl
+    return library
+ctypes.CDLL = load
+""" % error
+    result = subprocess.run([sys.executable, "-I", "-c", prefix + program, str(home)], capture_output=True, text=True)
+    assert result.returncode == 5 and "could not inspect ACL" in result.stderr, (error, result)
+    assert not (home / "state").exists()
+' "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "command scratch rejects malformed producer identities before publishing its globals" {
+  prepare_command_scratch_helpers
+  run python3 -I -c '
+import pathlib, subprocess, sys
+base = pathlib.Path(sys.argv[1])
+command = ["/bin/bash", "-c", "source \"$1\"; program=$2; launcher_command_scratch_create_program() { printf %s \"$program\"; }; launcher_derive_command_scratch \"$3\"", "bash", str(base / "scratch-helpers.sh")]
+for bad in (":", "1::2", "123", "", "١:2"):
+    for identities in ((bad, "1:2"), ("1:2", bad)):
+        record = ".cmd.a\t" + "\t".join(identities)
+        result = subprocess.run(command + ["print(" + repr(record) + ")", str(base)], capture_output=True, text=True)
+        assert result.returncode == 4, (identities, result)
+' "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "command scratch allows existing nonwritable ancestors when allocation locations are writable" {
+  make_release 1.2.3 scratch-probe
+  mkdir -p "$TRELLIS_HOME/state/scratch"
+  chmod 500 "$TRELLIS_HOME/state"
+  chmod 700 "$TRELLIS_HOME/state/scratch"
+  run_launcher doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_no_command_scratch
+}
+
+@test "command scratch cleanup unlinks a child symlink without following it and refuses a symlinked scratch" {
+  local observed
+  make_release 1.2.3 scratch-probe
+  printf 'target bytes\n' > "$SANDBOX/neighbour-target"
+
+  printf 'child-symlink\n' > "$SANDBOX/scratch-probe-mode"
+  run_launcher doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  [ ! -e "$observed" ] && [ ! -L "$observed" ]
+  [ "$(cat "$SANDBOX/neighbour-target")" = 'target bytes' ]
+  assert_no_command_scratch
+
+  printf 'replace-symlink\n' > "$SANDBOX/scratch-probe-mode"
+  run_launcher doctor
+  [ "$status" -eq 5 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" == *'could not clean command scratch directory'* ]] || { echo "$output"; false; }
+  observed="$(cat "$SANDBOX/scratch-tmpdir.log")"
+  [ -L "$observed" ] || { echo "replacement symlink was removed: $observed"; false; }
+  [ "$(cat "$SANDBOX/neighbour-target")" = 'target bytes' ]
+}
+
+@test "command scratch derivation refuses symlinked, non-private, and unwritable state parents" {
+  make_release 1.2.3 scratch-probe
+  mkdir -p "$SANDBOX/outside-state"
+  ln -s "$SANDBOX/outside-state" "$TRELLIS_HOME/state"
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" == *'command scratch'* ]] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/scratch-tmpdir.log" ] || { echo "the payload child ran anyway"; false; }
+  rm "$TRELLIS_HOME/state"
+
+  mkdir -p "$TRELLIS_HOME/state/scratch"
+  chmod 700 "$TRELLIS_HOME/state"
+  chmod 755 "$TRELLIS_HOME/state/scratch"
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "status=$status"; echo "$output"; false; }
+  [ ! -e "$SANDBOX/scratch-tmpdir.log" ] || { echo "the payload child ran anyway"; false; }
+
+  chmod 500 "$TRELLIS_HOME/state/scratch"
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "status=$status"; echo "$output"; false; }
+  [ ! -e "$SANDBOX/scratch-tmpdir.log" ] || { echo "the payload child ran anyway"; false; }
+
+  rmdir "$TRELLIS_HOME/state/scratch"
+  chmod 500 "$TRELLIS_HOME/state"
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "status=$status"; echo "$output"; false; }
+  [ ! -e "$SANDBOX/scratch-tmpdir.log" ] || { echo "the payload child ran anyway"; false; }
+
+  # Positive control: the same home derives and removes a scratch once its
+  # state parents are private and writable again.
+  chmod 700 "$TRELLIS_HOME/state"
+  run_launcher doctor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  case "$(cat "$SANDBOX/scratch-tmpdir.log")" in
+    "$TRELLIS_HOME/state/scratch/.cmd."*) ;;
+    *) echo "observed TMPDIR: $(cat "$SANDBOX/scratch-tmpdir.log")"; false ;;
+  esac
+  assert_no_command_scratch
+}
+
+@test "the verified command bundle child receives and admits the derived command scratch" {
+  local observed admitted git_tmpdir
+  make_release 1.2.3 command-bundle-scratch
+
+  run_launcher_with_tmpdir "/hostile ambient tmp" upgrade
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"bundle-tmpdir=$TRELLIS_HOME/state/scratch/.cmd."* ]] || { echo "$output"; false; }
+  [[ "$output" == *"bundle-admitted=$TRELLIS_HOME/state/scratch/.cmd."* ]] || { echo "$output"; false; }
+  [[ "$output" != *'scratch upgrade wrapper ran'* ]] || { echo "$output"; false; }
+  observed="$(printf '%s\n' "$output" | sed -n 's/^bundle-tmpdir=//p')"
+  admitted="$(printf '%s\n' "$output" | sed -n 's/^bundle-admitted=//p')"
+  git_tmpdir="$(printf '%s\n' "$output" | sed -n 's/^git-tmpdir=//p')"
+  [ "$admitted" = "$observed" ] || { echo "$output"; false; }
+  [ "$git_tmpdir" = "$observed" ] || { echo "Git TMPDIR mismatch: $output"; false; }
+  assert_no_command_scratch
+}
+
+@test "release pathname execution admits only a private Trellis command scratch candidate" {
+  local scratch hostile
+  make_release 1.2.3 command-bundle
+  mkdir -p "$TRELLIS_HOME/state/scratch"
+  chmod 700 "$TRELLIS_HOME/state" "$TRELLIS_HOME/state/scratch"
+  scratch="$TRELLIS_HOME/state/scratch/.cmd.fixture"
+  mkdir -m 700 "$scratch"
+
+  run_release_pathname "$scratch" adopt 1.2.3 --all
+  [ "$status" -eq 5 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" == *'no registered worktrees matched the requested adoption selector'* ]] ||
+    { echo "$output"; false; }
+
+  # The admitted value is the directory the command actually allocates in:
+  # made unwritable, the same command dies at its first temp allocation.
+  chmod 500 "$scratch"
+  run_release_pathname "$scratch" adopt 1.2.3 --all
+  [ "$status" -eq 5 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" != *'no registered worktrees matched'* ]] ||
+    { echo "the command allocated outside the admitted scratch"; echo "$output"; false; }
+  chmod 700 "$scratch"
+
+  ln -s "$scratch" "$TRELLIS_HOME/state/scratch/.cmd.link"
+  for hostile in \
+    /tmp \
+    "$SANDBOX" \
+    "$TRELLIS_HOME/state/scratch" \
+    "$TRELLIS_HOME/state/scratch/.cmd.missing" \
+    "$TRELLIS_HOME/state/scratch/.cmd.link" \
+    "$TRELLIS_HOME/state/scratch/./.cmd.fixture"; do
+    run_release_pathname "$hostile" adopt 1.2.3 --all
+    [ "$status" -eq 4 ] || { echo "candidate=$hostile status=$status"; echo "$output"; false; }
+    [[ "$output" == *'command scratch directory is not an admissible'* ]] ||
+      { echo "candidate=$hostile"; echo "$output"; false; }
+  done
+
+  # Direct source execution stays refused, admissible candidate or not.
+  run env -i "HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" "PATH=$PATH" "TMPDIR=$scratch" \
+    /bin/bash "$REPO_ROOT/scripts/release.sh" adopt 1.2.3 --all
+  [ "$status" -eq 2 ] || { echo "status=$status"; echo "$output"; false; }
+  [[ "$output" == *'direct source execution is unsupported'* ]] || { echo "$output"; false; }
 }
 
 @test "dispatcher passes grouped routes and preserves legacy route argv and status" {

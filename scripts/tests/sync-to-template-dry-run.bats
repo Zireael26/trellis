@@ -22,7 +22,10 @@ setup() {
 
   mkdir -p \
     "$SOURCE/scripts/lib" "$SOURCE/core-rules/skills/herdr-foreman" \
-    "$SOURCE/core-rules/references" "$SOURCE/docs" "$SOURCE/audits" \
+    "$SOURCE/core-rules/references" "$SOURCE/core-rules/hooks" \
+    "$SOURCE/core-rules/pi/agents" "$SOURCE/core-rules/pi/extensions" \
+    "$SOURCE/core-rules/pi/hooks" "$SOURCE/core-rules/pi/patches/tests" \
+    "$SOURCE/docs" "$SOURCE/audits" \
     "$MIRROR" "$SANDBOX/projects" "$HOME/.local/bin" "$TRELLIS_HOME/releases"
   chmod 700 "$TRELLIS_HOME"
 
@@ -52,6 +55,10 @@ EOF
   ln -s CLAUDE.md "$SOURCE/core-rules/AGENTS.md"
   printf '# Private executable skill fixture\n' > "$SOURCE/core-rules/skills/herdr-foreman/SKILL.md"
   printf '# Public Herdr doctrine fixture\n' > "$SOURCE/core-rules/references/herdr-foreman.md"
+  printf '#!/usr/bin/env bash\n# Portable user session hook fixture\n' \
+    > "$SOURCE/core-rules/hooks/herdr-foreman-session.sh"
+  write_pi_surface_fixture
+  write_inheritance_manifest_fixture "$SOURCE/core-rules/inheritance-manifest.json"
 
   git -C "$SOURCE" init -q
   git -C "$SOURCE" config user.email ci-bats@trellis.test
@@ -83,6 +90,154 @@ teardown() {
   fi
   [ -z "${VICTIM:-}" ] || rm -rf "$VICTIM"
   [ -z "${SOCKET_FIXTURE:-}" ] || rm -rf "$SOCKET_FIXTURE"
+}
+
+# The pi surface splits in two. `core-rules/pi/agents` is the operator's live
+# provider roster and stays private; everything else under `core-rules/pi` is
+# the machinery a mirror user needs to install pi at all and is published. Seed
+# BOTH halves, and seed the private half with content the mirror lint would
+# reject on sight — an operator home path, a receipt path and provider account
+# names — so "the roster did not publish" is proved by bytes that could not have
+# survived publication rather than by an absence that might be vacuous.
+write_pi_surface_fixture() {
+  # Build synthetic private sentinels without embedding a user-home path in
+  # the published test source; generated negative-control bytes stay exact.
+  local roster_path
+  roster_path="$(printf '/%s/%s' Users rosteroperator)"
+  cat > "$SOURCE/core-rules/pi/agents/private-roster-ro.md" <<AGENT
+---
+name: private-roster-ro
+model: private-provider-2/private-model:xhigh
+isolation: off
+---
+Roster pinned from $roster_path/.trellis/state/lane-catalog.json
+Receipt: audits/2026-09-05-private/receipts/roster-probe.json
+AGENT
+  cat > "$SOURCE/core-rules/pi/agents/private-roster-rw.md" <<'AGENT'
+---
+name: private-roster-rw
+model: private-provider-2/private-model:max
+isolation: worktree
+---
+Second private account lane.
+AGENT
+  printf 'export default async function (pi) { return pi; }\n' \
+    > "$SOURCE/core-rules/pi/extensions/trellis.ts"
+  printf '#!/usr/bin/env bash\n# Portable pi hook dispatcher fixture\nexit 0\n' \
+    > "$SOURCE/core-rules/pi/hooks/dispatch.sh"
+  chmod 755 "$SOURCE/core-rules/pi/hooks/dispatch.sh"
+  printf '#!/usr/bin/env bash\n# Portable patch installer fixture\nexit 0\n' \
+    > "$SOURCE/core-rules/pi/patches/apply-fixture-patches.sh"
+  chmod 755 "$SOURCE/core-rules/pi/patches/apply-fixture-patches.sh"
+  printf -- '--- a/fixture.ts\n+++ b/fixture.ts\n' \
+    > "$SOURCE/core-rules/pi/patches/pi-fixture-0.0.1-portable.patch"
+  # A patch bundle and its regression test publish together or the version pin
+  # is unverifiable downstream.
+  printf 'process.exit(0);\n' \
+    > "$SOURCE/core-rules/pi/patches/tests/fixture-patch.test.mjs"
+  printf '# Fixture patch notes\n' > "$SOURCE/core-rules/pi/patches/FIXTURE.md"
+}
+
+# A canonical minimal manifest carrying the two exact private link entries the
+# publisher projects out, plus portable neighbours that must survive untouched.
+write_inheritance_manifest_fixture() {
+  cat > "$1" <<'MANIFEST'
+{
+  "schema_version": 2,
+  "harnesses": {
+    "shared_agents": {
+      "links": [
+        {
+          "source": "core-rules/CLAUDE.md",
+          "destination": ".agents/rules/trellis.md"
+        },
+        {
+          "source_children": "core-rules/pi/agents",
+          "destination_dir": ".agents/agents",
+          "entry_type": "file",
+          "suffix": ".md"
+        },
+        {
+          "source_children": "core-rules/skills",
+          "destination_dir": ".agents/skills",
+          "entry_type": "directory",
+          "required_file": "SKILL.md"
+        }
+      ],
+      "render": []
+    },
+    "pi": {
+      "links": [
+        {
+          "source": "core-rules/pi/extensions/trellis.ts",
+          "destination": ".pi/extensions/trellis.ts"
+        },
+        {
+          "source": "core-rules/pi/hooks/dispatch.sh",
+          "destination": ".pi/hooks/dispatch.sh",
+          "executable": true
+        }
+      ],
+      "render": []
+    },
+    "user": {
+      "links": [
+        {
+          "source": "core-rules/skills/herdr-foreman",
+          "destination": ".claude/skills/herdr-foreman",
+          "destination_home": true
+        },
+        {
+          "source": "core-rules/hooks/herdr-foreman-session.sh",
+          "destination": ".claude/hooks/herdr-foreman-session.sh",
+          "destination_home": true,
+          "executable": true
+        }
+      ],
+      "render": []
+    }
+  }
+}
+MANIFEST
+}
+
+# Rebuild and reseal the immutable release from the CURRENT committed source
+# tree. Tests that need the publisher to run against changed policy must go
+# through this: mutating an already-verified payload behind its release record
+# is exactly the untrusted-input path the whole flow exists to refuse.
+reseal_source_release() {
+  git -C "$SOURCE" add -A
+  git -C "$SOURCE" commit -qm "$1"
+  SOURCE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
+
+  chmod u+w "$RELEASE_DIR" "$RELEASE_DIR/release.json"
+  find "$PAYLOAD" -type f -exec chmod u+w {} \;
+  find "$PAYLOAD" -depth -type d -exec chmod u+w {} \;
+  rm -rf "$PAYLOAD"
+  mkdir -p "$PAYLOAD"
+  git -C "$SOURCE" archive --format=tar "$SOURCE_COMMIT" | tar -x -C "$PAYLOAD"
+  write_release_record
+  find "$PAYLOAD" -type f -exec chmod a-w {} \;
+  find "$PAYLOAD" -type d -exec chmod a-w {} \;
+  chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
+}
+
+# Run the publisher's OWN projection program against an arbitrary manifest.
+# Extracted from `sync-to-template.sh` rather than re-implemented, so the
+# closure proof below exercises the shipped code and cannot drift from it. The
+# emptiness guard is load-bearing: a changed heredoc marker would otherwise
+# hand python an empty program that exits 0 and proves nothing.
+project_manifest_with_publisher_program() {
+  local manifest="$1" program="$SANDBOX/project-manifest.py"
+  awk "/<<'PROJECT_MANIFEST'/ { inside = 1; next }
+       inside && /^PROJECT_MANIFEST\$/ { inside = 0 }
+       inside { print }" \
+    "$REPO_ROOT/scripts/sync-to-template.sh" > "$program"
+  [ -s "$program" ] || {
+    echo 'projection program extraction returned nothing' >&2
+    return 1
+  }
+  python3 -I "$program" "$manifest"
 }
 
 write_machine_config() {
@@ -164,8 +319,18 @@ seed_mirror_agents_link() {
 }
 
 make_agent_socket_fixture() {
-  # A real AF_UNIX socket: the check requires -S, so no plain file can stand
-  # in.
+  # Injected sockets are runner-owned inert pre-fence fixtures. Only our own
+  # Bats subtree holds aliases/negative controls and is removed by teardown.
+  if [ -n "${TRELLIS_TEST_SOCKET_PATH:-}" ]; then
+    [ -n "${TRELLIS_TEST_SOCKET_METADATA:-}" ] || return 1
+    AGENT_SOCKET_CANONICAL="$TRELLIS_TEST_SOCKET_PATH"
+    [ -S "$AGENT_SOCKET_CANONICAL" ] && [ ! -L "$AGENT_SOCKET_CANONICAL" ] || return 1
+    SOCKET_FIXTURE="$BATS_TEST_TMPDIR/socket-fixture"
+    mkdir -p "$SOCKET_FIXTURE/real"
+    ln -s "${AGENT_SOCKET_CANONICAL%/*}" "$SOCKET_FIXTURE/alias"
+    return
+  fi
+  # Ordinary direct runs still bind a real AF_UNIX socket; no stand-in file.
   # The physical spelling of /tmp: short enough for the 104-byte sun_path limit
   # and free of symlinks, so the fixture's own path adds none of its own. It is
   # resolved rather than written as /private/tmp, which exists only on Darwin —
@@ -182,6 +347,7 @@ make_agent_socket_fixture() {
   # The stock macOS spelling reaches the launchd socket through /var, a symlink
   # to /private/var, so an alias directory reproduces the real-world path.
   ln -s "$SOCKET_FIXTURE/real" "$SOCKET_FIXTURE/alias"
+  AGENT_SOCKET_CANONICAL="$SOCKET_FIXTURE/real/agent.sock"
 }
 
 require_verified_ssh_socket() {
@@ -193,11 +359,12 @@ mirror_require_verified_ssh_socket"
 }
 
 @test "push accepts a socket reached through a symlinked directory and refuses a symlinked socket" {
-  local canonical
+  local canonical socket_parent
   make_agent_socket_fixture
-  canonical="$SOCKET_FIXTURE/real/agent.sock"
+  canonical="$AGENT_SOCKET_CANONICAL"
+  socket_parent="${canonical%/*}"
 
-  run require_verified_ssh_socket "$SOCKET_FIXTURE/alias/agent.sock"
+  run require_verified_ssh_socket "$SOCKET_FIXTURE/alias/${canonical##*/}"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = "$canonical" ] || { echo "$output"; false; }
 
@@ -214,7 +381,7 @@ mirror_require_verified_ssh_socket"
   run require_verified_ssh_socket "$SOCKET_FIXTURE/real/plain"
   [ "$status" -eq 5 ] || { echo "$output"; false; }
 
-  run require_verified_ssh_socket "$SOCKET_FIXTURE/real/../real/agent.sock"
+  run require_verified_ssh_socket "$socket_parent/../${socket_parent##*/}/${canonical##*/}"
   [ "$status" -eq 5 ] || { echo "$output"; false; }
 
   run require_verified_ssh_socket ""
@@ -573,4 +740,363 @@ EOF
     [ "$(readlink "$MIRROR/local")" = '../victim' ]
     [ "$(shasum -a 256 "$VICTIM/sentinel" | cut -d ' ' -f 1)" = "$victim_before" ]
   done
+}
+
+@test "the published dependency baseline and remediation ledger stay empty shells" {
+  # Widening the allowlist to carry the pi subtree must not quietly widen what
+  # these two bootstrap files carry. The source fixture seeds each with private
+  # fleet observations; the mirror must receive the deterministic empty shell.
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.toolchains == [] and .packages == [] and .security_floors == [] and .exceptions == []' \
+    "$MIRROR/dependency-baseline.json" >/dev/null
+  jq -e '.source_reports == [] and .findings == []' \
+    "$MIRROR/audits/fleet-remediation-ledger.json" >/dev/null
+  run grep -F 'private' "$MIRROR/dependency-baseline.json"
+  [ "$status" -eq 1 ]
+  run grep -F 'private' "$MIRROR/audits/fleet-remediation-ledger.json"
+  [ "$status" -eq 1 ]
+}
+
+@test "apply publishes the portable pi surface and prunes the private roster" {
+  mkdir -p "$MIRROR/core-rules/pi/agents"
+  printf 'stale private roster leaf\n' > "$MIRROR/core-rules/pi/agents/private-roster-ro.md"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$MIRROR/core-rules/pi/extensions/trellis.ts" ]
+  [ -f "$MIRROR/core-rules/pi/hooks/dispatch.sh" ]
+  [ -x "$MIRROR/core-rules/pi/hooks/dispatch.sh" ]
+  [ -f "$MIRROR/core-rules/pi/patches/apply-fixture-patches.sh" ]
+  [ -f "$MIRROR/core-rules/pi/patches/pi-fixture-0.0.1-portable.patch" ]
+  # Patch and companion test publish together, or the version pin is
+  # unverifiable by whoever installs it.
+  [ -f "$MIRROR/core-rules/pi/patches/tests/fixture-patch.test.mjs" ]
+  [ ! -e "$MIRROR/core-rules/pi/agents" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:core-rules/pi/extensions/trellis.ts)" = \
+    "$(git hash-object --no-filters "$MIRROR/core-rules/pi/extensions/trellis.ts")" ]
+}
+
+@test "the withheld roster's private sentinels never reach the mirror" {
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Each of these is present in the private roster fixture and would have
+  # failed the mirror lint outright had the roster published, so the absence
+  # cannot be vacuous: the same run that asserts them absent also asserts a
+  # clean apply.
+  run grep -rF -- "$(printf '/%s/%s' Users rosteroperator)" "$MIRROR"
+  [ "$status" -eq 1 ]
+  run grep -rF -- 'audits/2026-09-05-private' "$MIRROR"
+  [ "$status" -eq 1 ]
+  run grep -rF -- 'private-provider-2' "$MIRROR"
+  [ "$status" -eq 1 ]
+}
+
+@test "apply projects the staged manifest and leaves the immutable source manifest byte-identical" {
+  payload_before="$(shasum -a 256 "$PAYLOAD/core-rules/inheritance-manifest.json" | cut -d ' ' -f 1)"
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'Projecting staged inheritance manifest'* ]] || { echo "$output"; false; }
+  published="$MIRROR/core-rules/inheritance-manifest.json"
+  [ -f "$published" ]
+
+  # The two private entries are gone.
+  jq -e '[.harnesses.shared_agents.links[] | select(.source_children == "core-rules/pi/agents")] | length == 0' \
+    "$published" >/dev/null
+  jq -e '[.harnesses.user.links[] | select(.source == "core-rules/skills/herdr-foreman")] | length == 0' \
+    "$published" >/dev/null
+
+  # Everything else — key order, harness order, sibling entries, the user link
+  # whose name merely CONTAINS "herdr-foreman" — survives untouched.
+  jq -e '(.harnesses | keys_unsorted) == ["shared_agents", "pi", "user"]' "$published" >/dev/null
+  jq -e '.schema_version == 2' "$published" >/dev/null
+  jq -e '[.harnesses.shared_agents.links[] | .source // .source_children]
+         == ["core-rules/CLAUDE.md", "core-rules/skills"]' "$published" >/dev/null
+  jq -e '[.harnesses.pi.links[] | .source]
+         == ["core-rules/pi/extensions/trellis.ts", "core-rules/pi/hooks/dispatch.sh"]' "$published" >/dev/null
+  jq -e '.harnesses.pi.links[1].executable == true' "$published" >/dev/null
+  jq -e '[.harnesses.user.links[] | .source]
+         == ["core-rules/hooks/herdr-foreman-session.sh"]' "$published" >/dev/null
+  jq -e '.harnesses.user.links[0].destination_home == true' "$published" >/dev/null
+  jq -e '(.harnesses.shared_agents.render | length) == 0' "$published" >/dev/null
+
+  # Stable JSON with a trailing newline, not a stripped one-liner.
+  [ "$(tail -c 1 "$published" | od -An -c | tr -d ' ')" = '\n' ]
+
+  # The verified payload is read-only input and stays exactly as sealed.
+  [ "$(shasum -a 256 "$PAYLOAD/core-rules/inheritance-manifest.json" | cut -d ' ' -f 1)" = "$payload_before" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:core-rules/inheritance-manifest.json)" = \
+    "$(git hash-object --no-filters "$PAYLOAD/core-rules/inheritance-manifest.json")" ]
+}
+
+@test "dry-run leaves the mirror byte-identical and reapply republishes the same bytes" {
+  run_sync --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm published
+  applied_state="$(git -C "$MIRROR" status --porcelain=v1 --untracked-files=all)"
+  applied_tree="$(cd "$MIRROR" && find . -path ./.git -prune -o \( -type f -o -type l \) -print \
+    | LC_ALL=C sort | xargs shasum -a 256)"
+
+  run_sync --dry-run
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
+  [ "$(git -C "$MIRROR" status --porcelain=v1 --untracked-files=all)" = "$applied_state" ]
+  [ "$(cd "$MIRROR" && find . -path ./.git -prune -o \( -type f -o -type l \) -print \
+    | LC_ALL=C sort | xargs shasum -a 256)" = "$applied_tree" ]
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(git -C "$MIRROR" status --porcelain=v1 --untracked-files=all)" = "$applied_state" ]
+  [ "$(cd "$MIRROR" && find . -path ./.git -prune -o \( -type f -o -type l \) -print \
+    | LC_ALL=C sort | xargs shasum -a 256)" = "$applied_tree" ]
+}
+
+@test "projection is a no-op over an already-portable manifest" {
+  write_inheritance_manifest_fixture "$SANDBOX/full-manifest.json"
+  jq '.harnesses.shared_agents.links |= map(select(.source_children != "core-rules/pi/agents"))
+      | .harnesses.user.links |= map(select(.source != "core-rules/skills/herdr-foreman"))' \
+    "$SANDBOX/full-manifest.json" > "$SOURCE/core-rules/inheritance-manifest.json"
+  reseal_source_release 'already-portable manifest'
+  expected="$(shasum -a 256 "$PAYLOAD/core-rules/inheritance-manifest.json" | cut -d ' ' -f 1)"
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/core-rules/inheritance-manifest.json" | cut -d ' ' -f 1)" = "$expected" ]
+}
+
+@test "projection repair refuses numeric boolean aliases without changing staged bytes" {
+  for value in 1 1.0; do
+    write_inheritance_manifest_fixture "$SANDBOX/input.json"
+    # Preserve the numeric spelling: jq serializes 1.0 back to 1.
+    python3 - "$SANDBOX/input.json" "$value" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('"destination_home": true', '"destination_home": ' + sys.argv[2]))
+PY
+    cp "$SANDBOX/input.json" "$SANDBOX/before.json"
+    run project_manifest_with_publisher_program "$SANDBOX/input.json"
+    echo "destination_home=$value raw_exit=$status $output"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *'does not match the withheld shape'* ]]
+    cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
+  done
+}
+
+@test "projection repair refuses misplaced and cross-array private sources under every source key" {
+  for harness in shared_agents user; do
+    for key in source source_children fallback_source; do
+      for mode in misplaced duplicate; do
+        write_inheritance_manifest_fixture "$SANDBOX/input.json"
+        python3 - "$SANDBOX/input.json" "$harness" "$key" "$mode" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+document = json.loads(path.read_text())
+harness, key, mode = sys.argv[2:]
+links = document['harnesses'][harness]['links']
+index = 1 if harness == 'shared_agents' else 0
+entry = links[index].copy()
+source_key = 'source_children' if harness == 'shared_agents' else 'source'
+entry[key] = entry.pop(source_key)
+document['harnesses']['pi']['links'].append(entry)
+if mode == 'misplaced':
+    del links[index]
+path.write_text(json.dumps(document, indent=2) + '\n')
+PY
+        cp "$SANDBOX/input.json" "$SANDBOX/before.json"
+        run project_manifest_with_publisher_program "$SANDBOX/input.json"
+        echo "$harness $key $mode raw_exit=$status $output"
+        [ "$status" -eq 4 ]
+        [[ "$output" == *'misplaced or cross-array private source'* ]]
+        cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
+      done
+    done
+  done
+}
+
+@test "projection repair preserves absent exact and idempotent controls and refuses extra keys" {
+  write_inheritance_manifest_fixture "$SANDBOX/input.json"
+  jq '.harnesses.shared_agents.links |= map(select(.source_children != "core-rules/pi/agents"))
+      | .harnesses.user.links |= map(select(.source != "core-rules/skills/herdr-foreman"))' \
+    "$SANDBOX/input.json" > "$SANDBOX/expected.json"
+  run project_manifest_with_publisher_program "$SANDBOX/input.json"
+  echo "exact raw_exit=$status $output"
+  [ "$status" -eq 0 ]
+  cmp "$SANDBOX/expected.json" "$SANDBOX/input.json"
+  run project_manifest_with_publisher_program "$SANDBOX/input.json"
+  echo "absent/idempotent raw_exit=$status $output"
+  [ "$status" -eq 0 ]
+  cmp "$SANDBOX/expected.json" "$SANDBOX/input.json"
+
+  write_inheritance_manifest_fixture "$SANDBOX/full.json"
+  jq '.harnesses.user.links[0].unexpected = true' "$SANDBOX/full.json" > "$SANDBOX/input.json"
+  cp "$SANDBOX/input.json" "$SANDBOX/before.json"
+  run project_manifest_with_publisher_program "$SANDBOX/input.json"
+  echo "extra-key raw_exit=$status $output"
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'does not match the withheld shape'* ]]
+  cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
+}
+
+@test "coverage repair checks the actual publisher function for valid unknown and symlink directories" {
+  local program="$SANDBOX/coverage.sh" root="$SANDBOX/coverage"
+  awk '/^check_payload_core_rules_coverage\(\) \{/ { inside = 1 }
+       inside { print }
+       inside && /^\}/ { exit }' "$REPO_ROOT/scripts/sync-to-template.sh" > "$program"
+  [ -s "$program" ]
+  cat >> "$program" <<'SH'
+PAYLOAD_ROOT="$1"
+sync_paths=(core-rules/hooks/ core-rules/bare)
+core_rules_no_sync=(private)
+check_payload_core_rules_coverage
+SH
+  mkdir -p "$root/core-rules/"{hooks,bare,private}
+  run bash "$program" "$root"
+  echo "valid raw_exit=$status $output"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  mkdir "$root/core-rules/unknown"
+  run bash "$program" "$root"
+  echo "unknown raw_exit=$status $output"
+  [ "$status" -eq 1 ]
+  [ "$output" = 'core-rules/unknown/' ]
+  rmdir "$root/core-rules/unknown" "$root/core-rules/hooks"
+  ln -s bare "$root/core-rules/hooks"
+  run bash "$program" "$root"
+  echo "symlink raw_exit=$status $output"
+  [ "$status" -eq 1 ]
+  [ "$output" = 'core-rules/hooks/' ]
+}
+
+@test "projection refuses a duplicated private manifest entry instead of guessing" {
+  jq '.harnesses.shared_agents.links += [.harnesses.shared_agents.links[1]]' \
+    "$SOURCE/core-rules/inheritance-manifest.json" > "$SANDBOX/dup-manifest.json"
+  cat "$SANDBOX/dup-manifest.json" > "$SOURCE/core-rules/inheritance-manifest.json"
+  reseal_source_release 'duplicated private manifest entry'
+  printf 'unchanged mirror\n' > "$MIRROR/README.md"
+  before="$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)"
+
+  run_sync --apply
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'names private source core-rules/pi/agents 2 times in shared_agents.links'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *'applied.'* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before" ]
+}
+
+@test "projection refuses a private entry whose destination semantics were altered" {
+  jq '.harnesses.user.links[0].destination = ".claude/skills/renamed-foreman"' \
+    "$SOURCE/core-rules/inheritance-manifest.json" > "$SANDBOX/altered-manifest.json"
+  cat "$SANDBOX/altered-manifest.json" > "$SOURCE/core-rules/inheritance-manifest.json"
+  reseal_source_release 'altered private destination semantics'
+
+  run_sync --apply
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'core-rules/skills/herdr-foreman in user.links does not match the withheld shape'* ]] ||
+    { echo "$output"; false; }
+  [ ! -e "$MIRROR/core-rules/inheritance-manifest.json" ]
+}
+
+@test "private content injected into an included portable pi file fails the mirror lint" {
+  printf 'const root = "/%s/leakoperator/.pi/agent";\nexport default root;\n' Users \
+    > "$SOURCE/core-rules/pi/extensions/trellis.ts"
+  reseal_source_release 'operator path inside a portable pi file'
+  mirror_before="$(git -C "$MIRROR" status --porcelain=v1 --untracked-files=all)"
+
+  run_sync --dry-run
+
+  [ "$status" -eq 4 ]
+  # The STAGE lint fires first, before a simulated mirror is ever built, so the
+  # leak never reaches the destination-shaped check at all. Assert the message
+  # this path actually emits rather than the later `MIRROR LINT FAILED` banner.
+  [[ "$output" == *'staged policy contains forbidden content'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/pi/extensions/trellis.ts: absolute-path leak'* ]] || { echo "$output"; false; }
+  [ "$(git -C "$MIRROR" status --porcelain=v1 --untracked-files=all)" = "$mirror_before" ]
+}
+
+# Portable installability proof, and the only test here that reads the REAL
+# manifest and the REAL exported sources. It runs the publisher's own projection
+# program and then the actual planner — no stubbed responses, no second
+# attachment mechanism. `project_target` resolution stays planner-owned; nothing
+# below asserts on it.
+@test "the projected real manifest closes against the real exported sources for every harness selection" {
+  local export_root="$SANDBOX/real-export" plan
+  mkdir -p "$export_root"
+  rsync -a --links --safe-links \
+    --exclude='core-rules/pi/agents' \
+    --exclude='core-rules/skills/herdr-foreman' \
+    --exclude='core-rules/evals' \
+    --exclude='core-rules/usage-federation' \
+    "$REPO_ROOT/core-rules" "$export_root/"
+
+  # Unprojected, the real manifest cannot close against the exported subset:
+  # this is the failure the projection exists to remove, asserted before the fix
+  # so the passing assertions below are not vacuous.
+  run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness pi
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'required source is missing from immutable payload: core-rules/pi/agents'* ]] ||
+    { echo "$output"; false; }
+  run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness user
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'required source is missing from immutable payload: core-rules/skills/herdr-foreman'* ]] ||
+    { echo "$output"; false; }
+
+  run project_manifest_with_publisher_program "$export_root/core-rules/inheritance-manifest.json"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  for selection in "--harness pi" "--harness codex" "--harness user"; do
+    # shellcheck disable=SC2086  # deliberate word splitting of the selection
+    run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" $selection
+    [ "$status" -eq 0 ] || { echo "$selection"; echo "$output"; false; }
+    [ "$(printf '%s' "$output" | jq '.artifacts | length')" -gt 0 ] || { echo "$selection"; echo "$output"; false; }
+  done
+
+  run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" \
+    --harness claude --harness codex --harness pi
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  plan="$output"
+  [ "$(printf '%s' "$plan" | jq '.artifacts | length')" -gt 0 ]
+  [ "$(printf '%s' "$plan" | jq '[.artifacts[] | select(.destination | test("\\.agents/agents/"))] | length')" -eq 0 ]
+
+  # The user surface keeps its hook and output-style links and its settings
+  # render; only the private skill link is gone.
+  run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness user
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | .destination | sub("^.*/\\.claude/"; ".claude/")] | sort | join(",")')" = \
+    '.claude/hooks/herdr-foreman-session.sh,.claude/output-styles/trellis-orchestration.md,.claude/settings.json' ]
+}
+
+@test "removing a required portable manifest source fails closure at the business boundary" {
+  local export_root="$SANDBOX/incomplete-export"
+  mkdir -p "$export_root"
+  rsync -a --links --safe-links \
+    --exclude='core-rules/pi/agents' \
+    --exclude='core-rules/skills/herdr-foreman' \
+    --exclude='core-rules/evals' \
+    --exclude='core-rules/usage-federation' \
+    "$REPO_ROOT/core-rules" "$export_root/"
+  run project_manifest_with_publisher_program "$export_root/core-rules/inheritance-manifest.json"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  rm -f "$export_root/core-rules/pi/extensions/trellis.ts"
+
+  run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness pi
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'required source is missing from immutable payload: core-rules/pi/extensions/trellis.ts'* ]] ||
+    { echo "$output"; false; }
 }

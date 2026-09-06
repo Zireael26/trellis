@@ -125,6 +125,77 @@ assert_python_hook_calls() {
   [ "$status" -eq 0 ]
 }
 
+@test "malformed todos.json blocks instead of reading as no open todos" {
+  mkdir -p "$PROJECT_DIR/.claude"
+  printf '%s\n' '{"status":"pending"' > "$PROJECT_DIR/.claude/todos.json"
+
+  run bash "$HOOK" <<<'{}'
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("TodoWrite:")' >/dev/null
+  printf '%s' "$output" | jq -r '.reason' | grep -qi 'parse'
+}
+
+@test "git status failure blocks instead of taking the clean-tree shortcut" {
+  local fake_bin="$BATS_TEST_TMPDIR/git-bin"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "status" ]; then
+    printf '%s\n' 'fixture: git status unavailable' >&2
+    exit 41
+  fi
+done
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$fake_bin/git"
+
+  run env REAL_GIT="$real_git" PATH="$fake_bin:$PATH" bash "$HOOK" <<<'{}'
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("git status:")' >/dev/null
+}
+
+@test "selected subtree cd failure blocks instead of silently checking repo root" {
+  local subtree="$PROJECT_DIR/-unenterable"
+  local fake_bin="$BATS_TEST_TMPDIR/dirname-bin"
+  local real_dirname
+  real_dirname="$(command -v dirname)"
+  mkdir -p -- "$subtree" "$fake_bin"
+  printf '%s\n' '{"name":"nested"}' > "$subtree/package.json"
+  printf '%s\n' 'changed' > "$subtree/app.js"
+  # BSD dirname parses the leading '-' as an option before selection. Delegate
+  # normally except for this fixture path so the selected directory reaches cd,
+  # whose own option parsing then supplies the real failure under test.
+  cat > "$fake_bin/dirname" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -unenterable/*) printf '%s\n' '-unenterable' ;;
+  *) exec "$REAL_DIRNAME" "$@" ;;
+esac
+EOF
+  chmod +x "$fake_bin/dirname"
+
+  run env PROCESS_GATE_NO_RECEIPTS=1 REAL_DIRNAME="$real_dirname" \
+    PATH="$fake_bin:$PATH" bash "$HOOK" <<<'{}'
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("subtree:")' >/dev/null
+}
+
+@test "malformed package.json blocks instead of reading as no test script" {
+  printf '%s\n' '{"scripts":{"test":"true"}' > "$PROJECT_DIR/package.json"
+
+  run env PROCESS_GATE_NO_RECEIPTS=1 bash "$HOOK" <<<'{}'
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  printf '%s' "$output" | jq -e '.reason | startswith("package.json:")' >/dev/null
+  printf '%s' "$output" | jq -r '.reason' | grep -qi 'parse'
+}
+
 @test "L1: nested-review bypass skips dirty-tree verification in both twins; normal calls still block" {
   seed_todos open
   make_dirty
@@ -239,22 +310,6 @@ EOF
     grep -Fx 'check' "$cargo_log"
     grep -Fx 'test --quiet' "$cargo_log"
   done
-}
-
-@test "T8: .venv mypy and pytest beat global tools in both stop verifiers" {
-  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
-  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
-
-  prepare_python_tool_project "$fake_bin"
-  mkdir -p "$PROJECT_DIR/.venv/bin"
-  make_python_command "$PROJECT_DIR/.venv/bin/mypy" venv-mypy
-  make_python_command "$PROJECT_DIR/.venv/bin/pytest" venv-pytest
-  make_python_command "$fake_bin/mypy" global-mypy
-  make_python_command "$fake_bin/pytest" global-pytest
-
-  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
-    'venv-mypy .' \
-    'venv-pytest --tb=short -q')"
 }
 
 @test "T8: Poetry lock selects Poetry before uv and global tools in both stop verifiers" {

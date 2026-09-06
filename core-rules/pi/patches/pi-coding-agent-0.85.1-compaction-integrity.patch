@@ -1,0 +1,51 @@
+diff --git a/dist/core/compaction/compaction.js b/dist/core/compaction/compaction.js
+--- a/dist/core/compaction/compaction.js
++++ b/dist/core/compaction/compaction.js
+@@ -434,6 +434,12 @@
+     }
+     if (response.stopReason === "length") {
+         return `${label} failed: generation hit the token cap and the summary is incomplete`;
++    }
++    if (response.stopReason === "aborted") {
++        return `${label} failed: generation was aborted`;
++    }
++    if (!contentText(response.content).trim()) {
++        return `${label} failed: response was empty`;
+     }
+     return undefined;
+ }
+@@ -612,7 +618,7 @@
+     let summary;
+     let summaryUsage;
+     if (isSplitTurn && turnPrefixMessages.length > 0) {
+-        let historyText = "No prior history.";
++        let historyText = previousSummary ?? "No prior history.";
+         let historyUsage;
+         if (messagesToSummarize.length > 0) {
+             const historyResult = await generateSummaryWithUsage(messagesToSummarize, model, settings.reserveTokens, apiKey, headers, signal, customInstructions, previousSummary, thinkingLevel, streamFn, env, retry, callbacks, sessionId);
+diff --git a/dist/core/compaction/utils.js b/dist/core/compaction/utils.js
+--- a/dist/core/compaction/utils.js
++++ b/dist/core/compaction/utils.js
+@@ -80,8 +80,20 @@
+ function truncateForSummary(text, maxChars) {
+     if (text.length <= maxChars)
+         return text;
+-    const truncatedChars = text.length - maxChars;
+-    return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
++    let truncatedChars = text.length - maxChars;
++    let marker;
++    let retainedChars;
++    while (true) {
++        marker = `\n\n[... ${truncatedChars} middle characters truncated ...]\n\n`;
++        retainedChars = maxChars - marker.length;
++        const nextTruncatedChars = text.length - retainedChars;
++        if (nextTruncatedChars === truncatedChars)
++            break;
++        truncatedChars = nextTruncatedChars;
++    }
++    const headChars = Math.ceil(retainedChars / 2);
++    const tailChars = retainedChars - headChars;
++    return `${text.slice(0, headChars)}${marker}${text.slice(-tailChars)}`;
+ }
+ /**
+  * Serialize LLM messages to text for summarization.

@@ -11,9 +11,10 @@
 # by stop-verify's early-exit paths, and cannot break stop-verify's bats
 # (the dedicated-hook core of DL-P5-02 stands).
 #
-# MIRROR DELTA vs the Claude hook: STATE_DIR = ROOT/.codex/.reread-state
-# (not .claude). Everything else is byte-for-behavior identical. stamp-turn
-# touches no file paths, so there is no relative-path delta here.
+# MIRROR DELTA vs the Claude hook: STATE_DIR is ROOT/.pi/.reread-state only
+# when TRELLIS_HARNESS=pi; otherwise it remains ROOT/.codex/.reread-state (not
+# .claude). stamp-turn touches no file paths, so there is no relative-path
+# delta here.
 #
 # WHY stamp on EVERY Stop — the stop_hook_active gate is REMOVED (DL-P5-06,
 # which SUPERSEDES the gate clause of DL-P5-02). stop_hook_active==true is the
@@ -70,7 +71,7 @@ KEY=$(_se_state_key "$TP" "$SID") || exit 0
 # --- resolve root + stamp ---
 ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || exit 0
 [ -n "$ROOT" ] || exit 0
-STATE_DIR="$ROOT/.codex/.reread-state"
+STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
 NOW=$(date +%s 2>/dev/null) || exit 0

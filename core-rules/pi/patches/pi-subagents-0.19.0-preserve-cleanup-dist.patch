@@ -1,0 +1,19 @@
+--- a/dist/worktree.js
++++ b/dist/worktree.js
+@@ -139,13 +139,9 @@
+             path: worktree.path,
+         };
+     }
+-    catch {
+-        // Best effort cleanup on error
+-        try {
+-            await removeWorktree(pi, cwd, worktree.path);
+-        }
+-        catch { /* ignore */ }
+-        return { hasChanges: false };
++    catch (error) {
++        const detail = error instanceof Error ? error.message : String(error);
++        throw new Error(`Failed to clean up agent worktree; work preserved at ${worktree.path}: ${detail}`, { cause: error });
+     }
+ }
+ /**

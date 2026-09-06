@@ -164,6 +164,13 @@ EOF
   mkdir -p "$BATS_TEST_TMPDIR/no-jq-bin"
   ln -s /usr/bin/dirname "$BATS_TEST_TMPDIR/no-jq-bin/dirname"
   ln -s "$(command -v git)" "$BATS_TEST_TMPDIR/no-jq-bin/git"
+  ln -s "$(command -v python3)" "$BATS_TEST_TMPDIR/no-jq-bin/python3"
+  run env PATH="$BATS_TEST_TMPDIR/no-jq-bin" /bin/bash -c '
+    ! command -v jq && python3 --version && git -C "$1" rev-parse --show-toplevel
+  ' _ "$REPO"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Python "* ]]
+  [[ "$output" == *"$REPO"* ]]
   run env PATH="$BATS_TEST_TMPDIR/no-jq-bin" /bin/bash -c 'cd "$1" && /bin/bash "$2"' _ "$REPO" "$HOOK"
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]

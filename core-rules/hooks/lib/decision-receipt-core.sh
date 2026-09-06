@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared forward-only validator for high-autonomy decision receipts.
-# Sourced by the Claude/Codex wrappers and executed through the same canonical
-# Claude hook path by OMP. Bash 3.2 compatible; never writes decisions-log.md.
+# Sourced by the Claude/Codex wrappers. Bash 3.2 compatible; never writes
+# decisions-log.md.
 
 _dr_block() {
   local reason="$1"

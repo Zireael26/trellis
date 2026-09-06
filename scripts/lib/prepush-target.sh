@@ -6,8 +6,7 @@
 # (husky/Node, native core.hooksPath in-repo dir, and per-clone .git/hooks) plus
 # the observed misconfig (hooksPath pointing at .git/hooks while a tracked
 # .githooks/ also exists). Extracting the branchy decision as a pure function is
-# the only sane way to unit-test the misconfig path without git-push machinery
-# (mirrors sync-coverage.sh / sync-coverage.bats).
+# the only sane way to unit-test the misconfig path without git-push machinery.
 #
 # Read/write contract:
 #   READS  — the project's filesystem layout (.husky/, tracked dirs) and its git

@@ -12,6 +12,26 @@ teardown() {
   teardown_project_dir
 }
 
+@test "codex-only attachment loads its manifest-rendered agents primer index" {
+  mkdir -p "$PROJECT_DIR/.agents/primers"
+  printf '%s\n' '- [native](./native.md) — native primer' > "$PROJECT_DIR/.agents/primers/INDEX.md"
+  printf '%s\n' '# Native primer' > "$PROJECT_DIR/.agents/primers/native.md"
+  run env CODEX_PROJECT_DIR="$PROJECT_DIR" bash "$CODEX_HOOKS_DIR/inject-primer-index.sh" <<< '{"source":"startup"}'
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart" and (.hookSpecificOutput.additionalContext | contains("native"))'
+  if grep -q MISSING_FILE <<< "$output"; then false; fi
+}
+
+@test "codex keeps existing shared primer authority when both indices exist" {
+  mkdir -p "$PROJECT_DIR/.agents/primers" "$PROJECT_DIR/.claude/primers"
+  printf '%s\n' '- [native](./native.md)' > "$PROJECT_DIR/.agents/primers/INDEX.md"
+  printf '%s\n' '- [shared](./shared.md)' > "$PROJECT_DIR/.claude/primers/INDEX.md"
+  printf '%s\n' '# Shared primer' > "$PROJECT_DIR/.claude/primers/shared.md"
+  run env CODEX_PROJECT_DIR="$PROJECT_DIR" bash "$CODEX_HOOKS_DIR/inject-primer-index.sh" <<< '{"source":"startup"}'
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.hookSpecificOutput.additionalContext | contains("shared") and (contains("native") | not)'
+}
+
 @test "v031: skips silently when INDEX.md absent" {
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
@@ -231,4 +251,191 @@ EOF
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
   [[ "$output" == *"s — FRESH"* ]]
+}
+
+# --- v032 guards: no-git, rev-list error, multiline comment (both twins) ---
+
+@test "v032: no-git yields UNKNOWN not FRESH (canonical)" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "x" > "$PROJECT_DIR/entry.txt"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<EOF
+- [p1](./p1.md) — primer one
+- [p2](./p2.md) — primer two
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p1.md" <<EOF
+---
+slug: p1
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p2.md" <<EOF
+---
+slug: p2
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-no-git-canonical"
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/git" <<'EOS'
+#!/usr/bin/env bash
+echo "fake git unavailable" >&2
+exit 1
+EOS
+  chmod +x "$FAKE_BIN/git"
+  run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$HOOK\" <<< '{\"source\":\"startup\"}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH in no-git canonical: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN in no-git canonical: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN: $output"; false; }
+  [[ "$output" == *"p2 — UNKNOWN"* || "$output" == *"p2 — INDETERMINATE"* ]] || { echo "p2 not UNKNOWN: $output"; false; }
+}
+
+@test "v032: no-git yields UNKNOWN not FRESH (codex)" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "x" > "$PROJECT_DIR/entry.txt"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<EOF
+- [p1](./p1.md) — primer one
+- [p2](./p2.md) — primer two
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p1.md" <<EOF
+---
+slug: p1
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p2.md" <<EOF
+---
+slug: p2
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  CODEX_HOOK="$CODEX_HOOKS_DIR/inject-primer-index.sh"
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-no-git-codex"
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/git" <<'EOS'
+#!/usr/bin/env bash
+echo "fake git unavailable" >&2
+exit 1
+EOS
+  chmod +x "$FAKE_BIN/git"
+  run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$CODEX_HOOK\" <<< '{\"source\":\"startup\"}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH in no-git codex: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN in no-git codex: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN codex: $output"; false; }
+  [[ "$output" == *"p2 — UNKNOWN"* || "$output" == *"p2 — INDETERMINATE"* ]] || { echo "p2 not UNKNOWN codex: $output"; false; }
+}
+
+@test "v032: rev-list failure yields UNKNOWN not FRESH (canonical)" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "v1" > "$PROJECT_DIR/entry.txt"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<EOF
+- [p1](./p1.md) — primer
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p1.md" <<EOF
+---
+slug: p1
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  REAL_GIT=$(command -v git)
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-revlist-canonical"
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/git" <<EOS
+#!/usr/bin/env bash
+if [[ "\$*" == *"rev-list"* ]]; then
+  echo "simulated rev-list failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "\$@"
+EOS
+  chmod +x "$FAKE_BIN/git"
+  run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$HOOK\" <<< '{\"source\":\"startup\"}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on rev-list error canonical: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on rev-list error canonical: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on rev-list error canonical: $output"; false; }
+}
+
+@test "v032: rev-list failure yields UNKNOWN not FRESH (codex)" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "v1" > "$PROJECT_DIR/entry.txt"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<EOF
+- [p1](./p1.md) — primer
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/p1.md" <<EOF
+---
+slug: p1
+pinned_to: $SHA
+---
+## Entry points
+- \`entry.txt\`
+EOF
+  REAL_GIT=$(command -v git)
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-revlist-codex"
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/git" <<EOS
+#!/usr/bin/env bash
+if [[ "\$*" == *"rev-list"* ]]; then
+  echo "simulated rev-list failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "\$@"
+EOS
+  chmod +x "$FAKE_BIN/git"
+  CODEX_HOOK="$CODEX_HOOKS_DIR/inject-primer-index.sh"
+  run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$CODEX_HOOK\" <<< '{\"source\":\"startup\"}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on rev-list error codex: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on rev-list error codex: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on rev-list error codex: $output"; false; }
+}
+
+@test "v032: codex multiline HTML comment does not produce phantom MISSING_FILE" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  ( cd "$PROJECT_DIR" && git commit -q --allow-empty -m "seed" )
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<'EOF'
+# Primers Index
+<!-- Primer examples:
+- [phantom1](./phantom1.md) — should be ignored
+- [phantom2](./phantom2.md) — also ignored
+-->
+- [real](./real.md) — actual entry
+EOF
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  cat > "$PROJECT_DIR/.claude/primers/real.md" <<EOF
+---
+slug: real
+pinned_to: $SHA
+---
+## Entry points
+- \`real.txt\`
+EOF
+  echo "content" > "$PROJECT_DIR/real.txt"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "add real" )
+  CODEX_HOOK="$CODEX_HOOKS_DIR/inject-primer-index.sh"
+  run bash -c "CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$CODEX_HOOK\" <<< '{\"source\":\"startup\"}'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"real"* ]] || { echo "real missing: $output"; false; }
+  [[ "$output" != *"phantom1"* ]] || { echo "phantom1 incorrectly parsed: $output"; false; }
+  [[ "$output" != *"phantom2"* ]] || { echo "phantom2 incorrectly parsed: $output"; false; }
+  [[ "$output" != *"MISSING_FILE"* ]] || { echo "unexpected MISSING_FILE from phantom: $output"; false; }
 }

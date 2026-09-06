@@ -10,7 +10,7 @@
 # This is a PURE DECISION FUNCTION. It does not emit Claude-Code control blocks
 # and it does not own the exit code: it prints ONE JSON line describing a
 # verdict and the caller decides what to do (verdict "block" → caller's
-# emit_block). It always exits 0 when invoked as a script; the verdict lives
+# block response). It always exits 0 when invoked as a script; the verdict lives
 # in the JSON payload, never in the process exit status.
 #
 # OUTPUT CONTRACT (single line on stdout):
@@ -36,9 +36,8 @@
 #     sourcing. If jq is missing we still emit a hand-built JSON line so the
 #     test layer and the Phase-4 body get a parseable verdict and we fail open.
 #   - PORTABLE TIMEOUT: GNU `timeout` is absent on macOS. We use a perl-alarm
-#     shim (perl present at /usr/bin/perl); if perl is absent we run the probe
-#     without a wall-clock timeout but still bound it with --no-install and a
-#     cheap `--version`. Never use bare `timeout`.
+#     shim. If Perl is absent, the core emits an advisory without starting any
+#     external visual probe. Never use bare `timeout`.
 #   - npx probe uses `--no-install` so it can never trigger a network install.
 #   - The screenshot command is env-overridable (UI_SHOT_CMD) — mirrors the
 #     CODE_REVIEWER_CMD pattern in code-review-subagent.sh — so the test layer
@@ -60,41 +59,49 @@
 
 # run_with_timeout <secs> <cmd...>
 #   Bounded execution via a perl alarm shim (GNU timeout is absent on macOS).
-#   Returns the command's exit status; a fired alarm surfaces as 142.
-#   Fail-open: if perl is absent, run the command without a wall-clock bound
-#   (the callers below also use --no-install / cheap probes to stay bounded).
+#   Returns the command's exit status; a fired alarm surfaces as 142. If Perl
+#   is absent, returns 125 without starting the external command.
 run_with_timeout() {
   local secs="$1"; shift
-  if command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
-    return $?
-  fi
-  "$@"
-  return $?
+  command -v perl >/dev/null 2>&1 || return 125
+  # SAFETY: $secs is the configured external-probe ceiling (20 s default, core-rules/hooks.md § ui-verify decision core); status 142 emits an advisory.
+  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
 }
 
 # ui_changed_files
 #   Echo the UI files (one per line) changed this turn, capped. Unions tracked
 #   changes (`git diff HEAD`) with brand-new untracked files
 #   (`git ls-files --others --exclude-standard`) — a UI gate that watched only
-#   the diff would miss freshly-created .tsx components. Echoes nothing when
-#   git is unavailable / not a worktree. Never errors.
+#   the diff would miss freshly-created .tsx components. Returns 0 with no
+#   output for a valid no-match, 3 for an invalid regex, and 2 for git or output
+#   processing failures.
 ui_changed_files() {
-  command -v git >/dev/null 2>&1 || return 0
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  # `|| true`: grep exits 1 on no-match — without this the pipeline returns
-  # non-zero and a caller running `set -e`/`pipefail` (Phase-4 body) would abort
-  # the function before the skip verdict is emitted. Stay robust to caller flags.
-  {
-    git diff HEAD --name-only 2>/dev/null
-    git ls-files --others --exclude-standard 2>/dev/null
-  } | grep -Ei "$UI_REGEX" | sort -u | head -50 || true
-}
+  local tracked untracked matches sorted grep_status
+  command -v git >/dev/null 2>&1 || return 2
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
+  if ! tracked="$(git diff HEAD --name-only)"; then
+    return 2
+  fi
+  if ! untracked="$(git ls-files --others --exclude-standard)"; then
+    return 2
+  fi
 
-# ui_changed
-#   Predicate: returns 0 (true) iff this turn touched any UI file.
-ui_changed() {
-  [ -n "$(ui_changed_files)" ]
+  if matches="$({
+    [ -z "$tracked" ] || printf '%s\n' "$tracked"
+    [ -z "$untracked" ] || printf '%s\n' "$untracked"
+  } | grep -Ei "$UI_REGEX")"; then
+    if ! sorted="$(printf '%s\n' "$matches" | sort -u)"; then
+      return 2
+    fi
+    if printf '%s\n' "$sorted" | awk 'NR <= 50'; then
+      return 0
+    fi
+    return 2
+  else
+    grep_status=$?
+    [ "$grep_status" -eq 1 ] && return 0
+    return 3
+  fi
 }
 
 # detect_visual_tool
@@ -169,8 +176,22 @@ ui_verify_decision() (
   }
 
   # --- PRESENCE GATE: no UI files changed → not applicable. ---
-  local touched
-  touched="$(ui_changed_files)"
+  local touched touched_status
+  if touched="$(ui_changed_files)"; then
+    :
+  else
+    touched_status=$?
+    if [ "$touched_status" -eq 3 ]; then
+      _uvc_emit advisory \
+        "ui-verify: UI_REGEX is invalid; changed-file detection could not run, so visual verification was skipped." \
+        ""
+    else
+      _uvc_emit advisory \
+        "ui-verify: git changed-file inspection failed in ${project_dir}; visual verification was skipped." \
+        ""
+    fi
+    return 0
+  fi
   if [ -z "$touched" ]; then
     _uvc_emit skip "ui-verify: no UI files changed this turn." ""
     return 0
@@ -178,6 +199,13 @@ ui_verify_decision() (
   # Compact the touched list to a single comma-joined line for reason strings.
   local touched_line
   touched_line="$(printf '%s' "$touched" | tr '\n' ',' | sed 's/,$//')"
+
+  if ! command -v perl >/dev/null 2>&1; then
+    _uvc_emit advisory \
+      "ui-verify: UI files changed (${touched_line}), but bounded visual verification is unavailable (Perl not found). No external visual probe was started; re-verify manually." \
+      ""
+    return 0
+  fi
 
   # --- Probe for a visual tool. ---
   local tool

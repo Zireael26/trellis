@@ -180,10 +180,13 @@ fi
 PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-300}"
 PROCESS_GATE_CHECK_TIMEOUT="${PROCESS_GATE_CHECK_TIMEOUT:-300}"
 
-# Portable hard ceiling for the optional mutation probe. Unlike the main checks'
-# historical timeout path above, this new work must never run unbounded on macOS
-# (where GNU timeout is normally absent). The perl process-group pattern matches
-# the reviewer/propose-rules guards; 125 means no bounded runner is available.
+# Portable hard ceiling for every bounded command in this script -- the main
+# checks and the optional mutation probe alike. GNU `timeout` is normally absent
+# on macOS, so a `command -v timeout` guard with no fallback runs UNBOUNDED
+# there: measured 2026-09-04, two `git push` runs sat in this file's test leg for
+# 3h17m and 3h45m against a half-dead Docker daemon whose client calls never
+# returned. The perl process-group pattern matches the reviewer/propose-rules
+# guards; 125 means no bounded runner is available, 124/142 mean it timed out.
 run_with_timeout() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then
@@ -211,6 +214,20 @@ run_with_timeout() {
   fi
 }
 
+# Which bounded runner this host actually has, resolved once. Empty means none
+# is reachable on this PATH, which is a reportable condition rather than a
+# reason to skip the check -- see run_check.
+if command -v timeout >/dev/null 2>&1; then
+  PG_TIMEOUT_RUNNER=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  PG_TIMEOUT_RUNNER=gtimeout
+elif command -v perl >/dev/null 2>&1; then
+  PG_TIMEOUT_RUNNER=perl
+else
+  PG_TIMEOUT_RUNNER=""
+fi
+pg_unbounded_warned=no
+
 run_check() {
   local label="$1" cmd="$2" limit
   case "$label" in
@@ -231,12 +248,35 @@ run_check() {
 
   local out rc
   set +e
-  if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout "$limit" bash -c "$cmd" 2>&1)"; rc=$?
+  if [ -n "$PG_TIMEOUT_RUNNER" ]; then
+    out="$(run_with_timeout "$limit" bash -c "$cmd" 2>&1)"; rc=$?
   else
+    # No bounded runner reachable on this PATH. Still RUN the check -- refusing
+    # would turn the gate into a silent skip, which is a worse hole than an
+    # unbounded run -- but say so once, so an unbounded wait is never invisible.
     out="$(bash -c "$cmd" 2>&1)"; rc=$?
+    if [ "$pg_unbounded_warned" = no ]; then
+      pg_unbounded_warned=yes
+      findings+=("checks ran UNBOUNDED: no timeout, gtimeout or perl on PATH — a hung command will not be killed")
+      if [ "$worst" = "pass" ]; then
+        worst="warn"
+      fi
+    fi
   fi
   set -e
+
+  # 124 (GNU timeout) and 142 (the perl fallback's SIGALRM path) both mean the
+  # ceiling fired. Say so: "exited 124" reads like a test failure and sends the
+  # operator hunting for a bug that is not there. Only meaningful when a runner
+  # was actually used -- unbounded, those are the command's own exit codes.
+  if [ -n "$PG_TIMEOUT_RUNNER" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; }; then
+    findings+=("$label: \`$cmd\` exceeded ${limit}s and was killed")
+    while IFS= read -r line; do
+      findings+=("    $line")
+    done < <(printf "%s\n" "$out" | tail -n 10)
+    worst="fail"
+    return 0
+  fi
 
   if [ "$rc" -ne 0 ]; then
     findings+=("$label: \`$cmd\` exited $rc")

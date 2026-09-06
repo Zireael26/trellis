@@ -1,0 +1,112 @@
+From 7ba82381a9a7931605ea110d9994e90d8c65ef85 Mon Sep 17 00:00:00 2001
+From: Abhishek Kaushik <abhishek.nexus26@gmail.com>
+Date: Mon, 31 Aug 2026 18:16:59 +0530
+Subject: [PATCH] fix: preserve worktree when cleanup fails
+
+---
+ src/worktree.ts       | 10 ++++++----
+ test/worktree.test.ts | 37 +++++++++++++++++--------------------
+ 2 files changed, 23 insertions(+), 24 deletions(-)
+
+diff --git a/src/worktree.ts b/src/worktree.ts
+index abaec39..1ff4c10 100644
+--- a/src/worktree.ts
++++ b/src/worktree.ts
+@@ -174,10 +174,12 @@ export async function cleanupWorktree(
+       branch: worktree.branch,
+       path: worktree.path,
+     };
+-  } catch {
+-    // Best effort cleanup on error
+-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
+-    return { hasChanges: false };
++  } catch (error) {
++    const detail = error instanceof Error ? error.message : String(error);
++    throw new Error(
++      `Failed to clean up agent worktree; work preserved at ${worktree.path}: ${detail}`,
++      { cause: error },
++    );
+   }
+ }
+ 
+diff --git a/test/worktree.test.ts b/test/worktree.test.ts
+index af9d5c8..f55bed9 100644
+--- a/test/worktree.test.ts
++++ b/test/worktree.test.ts
+@@ -1,5 +1,5 @@
+ import { execFileSync } from "node:child_process";
+-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+@@ -373,11 +373,9 @@ describe("worktree", () => {
+   });
+ });
+ 
+-// cleanupWorktree's outer catch is the only place in the repo where a caught
+-// error can DESTROY user work while reporting success-shaped output: it removes
+-// the worktree and returns `{ hasChanges: false }`, which the manager renders as
+-// "the agent changed nothing". If the commit or branch step fails, the agent's
+-// commits go with the worktree and nobody is told.
++// Cleanup failures must preserve the only copy of the agent's work and reject
++// with its location. Returning `{ hasChanges: false }` is reserved for a
++// legitimately clean or already-removed worktree.
+ describe("cleanupWorktree — failure path", () => {
+   let repoDir: string;
+   let pi: ExtensionAPI;
+@@ -402,38 +400,37 @@ describe("cleanupWorktree — failure path", () => {
+     expect(result.branch).toBeUndefined();
+   });
+ 
+-  it("swallows a git failure inside a still-present worktree and reports no changes", async () => {
+-    // The outer catch. The directory exists — so the existsSync guard above
+-    // does not fire — but git cannot operate in it, which is what a corrupted
+-    // or externally-detached worktree looks like. The agent's work is lost
+-    // either way; what matters is that cleanup does not reject out of the
+-    // manager's settle path and take the whole record down with it.
++  it("preserves the worktree and surfaces a git failure", async () => {
+     const wt = (await createWorktree(pi, repoDir, "corrupt"))!;
+     writeFileSync(join(wt.path, "work.txt"), "agent output");
+     // Break the worktree's link back to the repo.
+     writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
+ 
+-    const result = await cleanupWorktree(pi, repoDir, wt, "corrupted agent");
++    await expect(cleanupWorktree(pi, repoDir, wt, "corrupted agent")).rejects.toThrow(
++      `Failed to clean up agent worktree; work preserved at ${wt.path}`,
++    );
+ 
+-    expect(result.hasChanges).toBe(false);
+-    expect(result.branch).toBeUndefined();
++    expect(existsSync(wt.path)).toBe(true);
++    expect(readFileSync(join(wt.path, "work.txt"), "utf8")).toBe("agent output");
+   });
+ 
+-  it("reports no changes when the preservation commit fails", async () => {
++  it("preserves the worktree and surfaces when the preservation commit fails", async () => {
+     // `git commit` failing resolves with a non-zero code rather than throwing,
+-    // so the outer catch is only reached if the result is inspected.
++    // so this also proves cleanup inspects pi.exec's result.
+     const wt = (await createWorktree(pi, repoDir, "commit-fails"))!;
+     writeFileSync(join(wt.path, "work.txt"), "agent output");
+ 
+-    const result = await cleanupWorktree(
++    await expect(cleanupWorktree(
+       failingPi(args => args[0] === "commit", { code: 1, killed: false }),
+       repoDir,
+       wt,
+       "commit fails",
++    )).rejects.toThrow(
++      `Failed to clean up agent worktree; work preserved at ${wt.path}: boom`,
+     );
+ 
+-    expect(result.hasChanges).toBe(false);
+-    expect(result.branch).toBeUndefined();
++    expect(existsSync(wt.path)).toBe(true);
++    expect(readFileSync(join(wt.path, "work.txt"), "utf8")).toBe("agent output");
+   });
+ 
+   it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", async () => {
+-- 
+2.55.0
+

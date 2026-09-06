@@ -754,15 +754,16 @@ surface_plan_emit_harness() {
 }
 
 surface_plan_validate_manifest() {
-  local manifest="$1" harness require_user=false
+  local manifest="$1" harness require_user=false require_pi=false
 
   for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
     if [ "$harness" = "user" ]; then
       require_user=true
-      break
+    elif [ "$harness" = "pi" ]; then
+      require_pi=true
     fi
   done
-  if ! jq -e --argjson require_user "$require_user" '
+  if ! jq -e --argjson require_user "$require_user" --argjson require_pi "$require_pi" '
     def safe_text:
       if type != "string" then false
       else length > 0
@@ -871,21 +872,28 @@ surface_plan_validate_manifest() {
         and (.links | (type == "array" and all(.[]; valid_link($home))))
         and (.render | (type == "array" and all(.[]; valid_render($home))))
       else false end;
-    if type == "object"
+    .schema_version as $manifest_schema_version
+    | if type == "object"
        and ((keys | sort) == ["harnesses", "schema_version"])
-       and .schema_version == 1
+       and (.schema_version == 1 or .schema_version == 2)
        and (.harnesses | (
          type == "object"
          and (
-           ((keys | sort) == ["claude", "codex", "omp"])
-           or ((keys | sort) == ["claude", "codex", "omp", "user"])
+           (if $manifest_schema_version == 1 then
+              ((keys | sort) == ["claude", "codex"])
+              or ((keys | sort) == ["claude", "codex", "user"])
+            else
+              ((keys | sort) == ["claude", "codex", "pi", "shared_agents"])
+              or ((keys | sort) == ["claude", "codex", "pi", "shared_agents", "user"])
+            end)
          )
          and (if $require_user then has("user") else true end)
+         and (if $require_pi then has("pi") and has("shared_agents") else true end)
        ))
     then
       (.harnesses.claude | valid_harness(false))
       and (.harnesses.codex | valid_harness(false))
-      and (.harnesses.omp | valid_harness(false))
+      and (if .schema_version == 2 then (.harnesses.pi | valid_harness(false)) and (.harnesses.shared_agents | valid_harness(false)) else true end)
       and (if .harnesses | has("user") then (.harnesses.user | valid_harness(true)) else true end)
     else false end
   ' "$manifest" >/dev/null 2>&1; then
@@ -900,13 +908,13 @@ surface_plan_normalize_harnesses() {
   _SURFACE_PLAN_HARNESSES=()
 
   if [ "$#" -eq 0 ]; then
-    _SURFACE_PLAN_HARNESSES=(claude codex omp)
+    _SURFACE_PLAN_HARNESSES=(claude codex)
     return 0
   fi
 
   for requested in "$@"; do
     case "$requested" in
-      claude|codex|omp|user) ;;
+      claude|codex|pi|user) ;;
       *)
         surface_plan_err "unknown harness: ${requested:-<empty>}"
         return "$TRELLIS_EX_USAGE"
@@ -914,7 +922,7 @@ surface_plan_normalize_harnesses() {
     esac
   done
 
-  for canonical in claude codex omp user; do
+  for canonical in claude codex pi user; do
     present=false
     for requested in "$@"; do
       if [ "$requested" = "$canonical" ]; then
@@ -958,7 +966,7 @@ surface_plan_write_json() {
 }
 
 surface_plan_emit() {
-  local payload="${1:-}" payload_root manifest harness
+  local payload="${1:-}" payload_root manifest harness emit_shared=false
   [ "$#" -gt 0 ] && shift
 
   (
@@ -973,9 +981,26 @@ surface_plan_emit() {
     trellis_home_require_jq || return "$?"
     surface_plan_normalize_harnesses "$@" || return "$?"
     payload_root="$(surface_plan_payload_root "$payload")" || return "$?"
+    # Accept either an immutable release payload root or its canonical
+    # core-rules directory. The release/runtime callers pass the former; the
+    # operator-facing acceptance probe passes the latter.
+    if [ "$(basename "$payload_root")" = "core-rules" ] \
+       && [ -f "$payload_root/inheritance-manifest.json" ] \
+       && [ ! -L "$payload_root/inheritance-manifest.json" ]; then
+      payload_root="$(dirname "$payload_root")"
+    fi
     surface_plan_require_source "$payload_root" "core-rules/inheritance-manifest.json" file || return "$?"
     manifest="$payload_root/core-rules/inheritance-manifest.json"
     surface_plan_validate_manifest "$manifest" || return "$?"
+
+    if [ "$(jq -r '.schema_version' "$manifest")" = 2 ]; then
+      for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
+        case "$harness" in codex|pi) emit_shared=true ;; esac
+      done
+      if [ "$emit_shared" = true ]; then
+        surface_plan_emit_harness "$payload_root" "$manifest" shared_agents || return "$?"
+      fi
+    fi
 
     for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
       surface_plan_emit_harness "$payload_root" "$manifest" "$harness" || return "$?"
@@ -987,10 +1012,11 @@ surface_plan_emit() {
 
 surface_plan_usage() {
   cat <<'EOF'
-Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_PATH [--harness claude|codex|omp|user]...
+Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_OR_CORE_RULES_PATH [--harness claude|codex|pi|user]...
 
 Expand the immutable inheritance payload into a deterministic, no-write JSON plan.
-With no --harness selectors, emits Claude Code, Codex, and OMP in canonical order.
+The payload may be the release root or its canonical core-rules directory.
+With no --harness selectors, emits Claude Code and Codex in canonical order.
 EOF
 }
 
@@ -1019,7 +1045,7 @@ surface_plan_main() {
         ;;
       --harness)
         if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-          surface_plan_err "--harness requires claude, codex, omp, or user"
+          surface_plan_err "--harness requires claude, codex, pi, or user"
           return "$TRELLIS_EX_USAGE"
         fi
         harnesses+=("$2")

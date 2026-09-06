@@ -22,7 +22,7 @@
       "oid": "dddddddddddddddddddddddddddddddddddddddd"
     },
     {
-      "path": "core-rules/omp/hooks/pre/trellis.ts",
+      "path": "core-rules/codex/hooks/session-context.sh",
       "mode": "100644",
       "oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }

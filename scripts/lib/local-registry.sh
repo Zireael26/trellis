@@ -44,6 +44,13 @@ fi
 # shellcheck disable=SC2034  # Public constant for sourcing callers, not used inside this lib.
 LOCAL_REGISTRY_SCHEMA_VERSION=1
 
+# Retired harness token dropped by the rc.46 registry migration. Rows written
+# before rc.46 carry this token in checkout harnesses; loads drop it with a
+# one-line stderr notice and the next registry write persists the clean form.
+# This constant is the single source of truth for the token: pass it via
+# jq --arg retired instead of spelling the literal elsewhere in this lib.
+LOCAL_REGISTRY_RETIRED_HARNESS="omp"
+
 local_registry_err() {
   printf 'trellis registry: %s\n' "$*" >&2
 }
@@ -285,13 +292,15 @@ local_registry_normalize_harnesses() {
   local harnesses="${1:-}" normalized
   [ -n "$harnesses" ] || harnesses='[]'
   trellis_home_require_jq || return "$?"
-  normalized="$(printf '%s\n' "$harnesses" | jq -c '
+  # rc.46 migration: the retired token is dropped, never rejected, so writes
+  # against legacy rows succeed. Any other unknown token still errors.
+  normalized="$(printf '%s\n' "$harnesses" | jq -c --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '
     if type != "array" then error("harnesses must be an array")
-    elif all(.[]; . == "claude" or . == "codex" or . == "omp") then unique | sort
+    elif ([.[] | select(. != $retired)] | all(. == "claude" or . == "codex" or . == "pi")) then map(select(. != $retired)) | unique | sort
     else error("unsupported harness")
     end
   ' 2>/dev/null)" || {
-    local_registry_err "harnesses must be JSON array values from claude, codex, omp"
+    local_registry_err "harnesses must be JSON array values from claude, codex, pi"
     return "$TRELLIS_EX_USAGE"
   }
   printf '%s\n' "$normalized"
@@ -365,7 +374,7 @@ local_registry_json_is_valid() {
       and (.root | safe_path) and (.git_common_dir | safe_path)
       and ((has("release") | not) or (.release | version))
       and (.harnesses | type == "array"
-           and all(.[]; . == "claude" or . == "codex" or . == "omp")
+           and all(.[]; . == "claude" or . == "codex" or . == "pi")
            and ((unique | length) == length))
       and (.worktrees | type == "object"
            and all(keys[]; sha256)
@@ -457,6 +466,31 @@ local_registry_require_private_state() {
   fi
 }
 
+# rc.46 migration: drop the retired harness token from every checkout's
+# harnesses array in FILE, which must be an already-copied registry snapshot
+# (never the persisted registry.json). Emits exactly one stderr notice naming
+# the affected checkout-row count when any row carried the token. Invalid JSON
+# is left untouched so the schema-aware validator below reports it as before;
+# only the retired token is ever removed. Unknown tokens still fail validation.
+local_registry_drop_retired_harness_rows() {
+  local file="${1:-}" count tmp
+  trellis_home_require_jq || return "$?"
+  count="$(jq -r --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '[.projects[]?.checkouts[]?.harnesses | select(type == "array" and index($retired))] | length' "$file" 2>/dev/null)" || return 0
+  case "$count" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$count" -gt 0 ] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.migrate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  if ! jq -S --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '(.projects // {}) |= with_entries(.value.checkouts |= with_entries(.value.harnesses |= (if type == "array" then map(select(. != $retired)) else . end)))' "$file" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! cat "$tmp" > "$file"; then
+    rm -f "$tmp"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  rm -f "$tmp"
+  local_registry_err "dropped retired harness \"$LOCAL_REGISTRY_RETIRED_HARNESS\" from $count checkout row(s); rewrite with any registry write"
+}
+
 local_registry_validate_file() {
   local registry_json="${1:-}" schema
   trellis_home_require_jq || return "$?"
@@ -476,7 +510,7 @@ local_registry_validate_file() {
 }
 
 local_registry_load() {
-  local home="${1:-}" output="${2:-}" registry
+  local home="${1:-}" output="${2:-}" registry code validate_err
   [ -n "$output" ] || {
     local_registry_err "load requires an output file"
     return "$TRELLIS_EX_USAGE"
@@ -484,9 +518,31 @@ local_registry_load() {
   home="$(local_registry_home "$home")" || return "$?"
   registry="$(local_registry_path "$home")" || return "$?"
   if [ -e "$registry" ] || [ -L "$registry" ]; then
-    local_registry_validate_file "$registry" || return "$?"
+    if [ -L "$registry" ] || [ ! -f "$registry" ]; then
+      local_registry_err "registry must be a regular file: $registry"
+      return "$TRELLIS_EX_STATE"
+    fi
     local_registry_require_private_state "$registry" || return "$?"
+    # Copy first: a read-only command must never rewrite the persisted file.
+    # The loaded copy carries the rc.46 migration, so the next registry write
+    # built from it persists the normalized form.
     cp "$registry" "$output" || return "$TRELLIS_EX_UNAVAILABLE"
+    local_registry_drop_retired_harness_rows "$output" || return "$?"
+    validate_err="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.validate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    # NOTE: no `!` here: inside an `if ! cmd` branch `$?` is the negated
+    # status (0), not cmd's exit, so capture it in the else branch instead.
+    if local_registry_validate_file "$output" 2>"$validate_err"; then
+      rm -f "$validate_err"
+    else
+      code="$?"
+      if grep -q "schema-aware validation" "$validate_err" 2>/dev/null; then
+        local_registry_err "registry failed schema-aware validation: $registry"
+      else
+        cat "$validate_err" >&2
+      fi
+      rm -f "$validate_err"
+      return "$code"
+    fi
   else
     local_registry_empty_json > "$output" || return "$TRELLIS_EX_UNAVAILABLE"
   fi
@@ -898,14 +954,23 @@ local_registry_validate_available_identities() {
 }
 
 local_registry_read_state() {
-  local home="${1:-}" registry
+  local home="${1:-}" registry tmp rc=0
   home="$(local_registry_home "$home")" || return "$?"
   registry="$(local_registry_path "$home")" || return "$?"
   if [ -e "$registry" ] || [ -L "$registry" ]; then
-    local_registry_validate_file "$registry" || return "$?"
-    local_registry_require_private_state "$registry" || return "$?"
-    local_registry_validate_available_identities "$registry" || return "$?"
-    jq -S . "$registry"
+    # Load migrates the retired token into the temp copy (one stderr notice
+    # when affected) and validates it, so strict readers tolerate legacy rows
+    # without rewriting the persisted file.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.read.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    local_registry_load "$home" "$tmp" || rc="$?"
+    if [ "$rc" -eq 0 ]; then
+      local_registry_validate_available_identities "$tmp" || rc="$?"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      jq -S . "$tmp" || rc="$TRELLIS_EX_STATE"
+    fi
+    rm -f "$tmp"
+    return "$rc"
   else
     local_registry_empty_json | jq -S .
   fi
@@ -914,13 +979,19 @@ local_registry_read_state() {
 # Read persisted registry state for diagnostics without making globally strict
 # identity validation hide independently inspectable rows.
 local_registry_read_diagnostic_state() {
-  local home="${1:-}" registry
+  local home="${1:-}" registry tmp rc=0
   home="$(local_registry_home "$home")" || return "$?"
   registry="$(local_registry_path "$home")" || return "$?"
   if [ -e "$registry" ] || [ -L "$registry" ]; then
-    local_registry_validate_file "$registry" || return "$?"
-    local_registry_require_private_state "$registry" || return "$?"
-    jq -S . "$registry"
+    # Same migrated-load contract as the strict reader: legacy rows validate
+    # after the retired token is dropped into the temp copy, never in place.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.read.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    local_registry_load "$home" "$tmp" || rc="$?"
+    if [ "$rc" -eq 0 ]; then
+      jq -S . "$tmp" || rc="$TRELLIS_EX_STATE"
+    fi
+    rm -f "$tmp"
+    return "$rc"
   else
     local_registry_empty_json | jq -S .
   fi
@@ -1292,6 +1363,69 @@ local_registry_set_metadata() {
   if ! trellis_home_lock_release >/dev/null 2>&1 && [ "$rc" -eq 0 ]; then rc="$TRELLIS_EX_UNAVAILABLE"; fi
   return "$rc"
 }
+
+# Compare-and-swap one checkout snapshot. Only harnesses may change; an exact
+# after snapshot is the recovery receipt for a rename before the phase marker.
+local_registry_update_harnesses() (
+  local home="$1" fleet="$2" project="$3" checkout="$4" update="$5"
+  local key base proposal current expected after bindings worktree rc=0
+  [ "$#" -eq 5 ] || return "$TRELLIS_EX_USAGE"
+  key="$(local_registry_project_key "$fleet" "$project")" || return "$?"
+  printf '%s\n' "$update" | jq -e '
+    type == "object" and (keys | sort) == ["after","expected"]
+    and (.expected | type == "object") and (.after | type == "object")
+    and (.expected | del(.harnesses)) == (.after | del(.harnesses))
+    and (.after.harnesses | length) > 0
+    and (.after.harnesses - .expected.harnesses | length) == 0
+    and (.expected.harnesses - .after.harnesses | length) > 0
+    and ([.expected.worktrees[] | select(has("attachment_id"))] | length) == 1
+  ' >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
+  expected="$(printf '%s\n' "$update" | jq -cS '.expected')" || return "$TRELLIS_EX_STATE"
+  after="$(printf '%s\n' "$update" | jq -cS '.after')" || return "$TRELLIS_EX_STATE"
+  home="$(local_registry_home "$home")" || return "$?"
+  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trap 'trellis_home_lock_release >/dev/null 2>&1' EXIT
+  base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.proposal.XXXXXX")" || { rm -f "$base"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  local_registry_load "$home" "$base" || rc="$?"
+  if [ "$rc" -eq 0 ]; then
+    current="$(jq -cS --arg key "$key" --arg checkout "$checkout" '.projects[$key].checkouts[$checkout]' "$base")" || rc="$TRELLIS_EX_STATE"
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if [ "$current" != "$expected" ] && [ "$current" != "$after" ]; then
+      local_registry_err "checkout snapshot conflict while updating harnesses for $key"
+      rc="$TRELLIS_EX_CONFLICT"
+    else
+      # Validate both snapshots against the full schema without replacing any
+      # other row. Even the idempotent path must reject a malformed expected.
+      for current in "$expected" "$after"; do
+        jq --arg key "$key" --arg checkout "$checkout" --argjson snapshot "$current" \
+          '.projects[$key].checkouts[$checkout] = $snapshot' "$base" > "$proposal" || { rc="$TRELLIS_EX_STATE"; break; }
+        local_registry_validate_file "$proposal" || { rc="$?"; break; }
+      done
+      if [ "$rc" -eq 0 ]; then
+        bindings="$(printf '%s\n' "$after" | jq -c --arg checkout "$checkout" '[.worktrees | keys[] | {checkout_id:$checkout,worktree_id:.}]')" || rc="$TRELLIS_EX_STATE"
+      fi
+      if [ "$rc" -eq 0 ]; then
+        if jq -e --arg key "$key" --arg checkout "$checkout" --argjson after "$after" '.projects[$key].checkouts[$checkout] == $after' "$base" >/dev/null; then
+          while IFS= read -r worktree; do
+            local_registry_validate_bound_row_identity "$(jq -c . "$base")" "$checkout" "$worktree" || { rc="$?"; break; }
+          done < <(printf '%s\n' "$after" | jq -r '.worktrees | keys[]')
+        else
+          jq --arg key "$key" --arg checkout "$checkout" --argjson after "$after" \
+            '.projects[$key].checkouts[$checkout].harnesses = $after.harnesses' "$base" > "$proposal" || rc="$TRELLIS_EX_STATE"
+          if [ "$rc" -eq 0 ]; then
+            local_registry_write_locked_bound_rows "$home" "$proposal" "$bindings" || rc="$?"
+          fi
+        fi
+      fi
+    fi
+  fi
+  rm -f "$base" "$proposal"
+  if ! trellis_home_lock_release >/dev/null 2>&1 && [ "$rc" -eq 0 ]; then rc="$TRELLIS_EX_UNAVAILABLE"; fi
+  trap - EXIT
+  return "$rc"
+)
 
 # Clears only an exact attachment reference. The retained worktree/checkouts
 # remain inventory so a detached checkout can be reattached without discovery.

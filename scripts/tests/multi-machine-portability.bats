@@ -66,6 +66,7 @@ mmp_build_release_source() {
   local repo="$SANDBOX/policy source"
   mkdir -p "$repo/scripts" "$repo/core-rules/githooks"
   cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   chmod 755 "$repo/scripts/attach-project.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
@@ -73,20 +74,43 @@ mmp_build_release_source() {
   chmod 755 "$repo/core-rules/githooks/pre-push"
   printf '# portable fixture policy %s\n' "$MMP_VERSION" > "$repo/core-rules/CLAUDE.md"
   printf '%s\n' "$MMP_VERSION" > "$repo/core-rules/VERSION"
+  # Payload stand-ins for the two harness-owned (non-shared) leaves below.
+  mkdir -p "$repo/core-rules/hooks/lib" "$repo/core-rules/pi/extensions"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/hooks/lib/action-normalize.sh"
+  chmod 755 "$repo/core-rules/hooks/lib/action-normalize.sh"
+  printf 'export const trellis = {};\n' > "$repo/core-rules/pi/extensions/trellis.ts"
+  # Schema 2 is the only shape scripts/lib/surface-plan.sh accepts for the
+  # current harness set: the key set must be exactly claude+codex+pi+
+  # shared_agents, optionally plus user.  `user` is omitted because it is
+  # planned only by the separate `--user` mode, which this suite never
+  # exercises, and the validator demands it only when that harness is selected.
+  #
+  # OMP is retired.  The old `omp` entry's structural role — a second,
+  # non-Claude harness destination — belongs to `shared_agents`, which is where
+  # production owns .agents/rules/trellis.md and which codex and pi both
+  # consume.  Every entry below is copied verbatim from the production
+  # core-rules/inheritance-manifest.json; only the sources are stubbed above.
+  # The `pi` entry gives Pi a distinct, non-shared destination in the plan
+  # shape.  It is fixture structure only: nothing in this suite is evidence
+  # that a native Pi runtime consumes it.
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harnesses": {
     "claude": {
       "links": [{"source": "core-rules/CLAUDE.md", "destination": ".claude/rules/trellis.md"}],
       "render": []
     },
-    "codex": {
+    "shared_agents": {
       "links": [{"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}],
       "render": []
     },
-    "omp": {
-      "links": [{"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}],
+    "codex": {
+      "links": [{"source": "core-rules/hooks/lib/action-normalize.sh", "destination": ".codex/hooks/lib/action-normalize.sh", "executable": true}],
+      "render": []
+    },
+    "pi": {
+      "links": [{"source": "core-rules/pi/extensions/trellis.ts", "destination": ".pi/extensions/trellis.ts"}],
       "render": []
     }
   }

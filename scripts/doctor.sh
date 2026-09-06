@@ -143,8 +143,8 @@ writers it used to delegate to were removed at cutover: onboard-project.sh
 and prints the migration each row needs.
 
 Per project (after diagnosis):
-  [manual] missing/stale rules, skill, command, harness, settings.json, or OMP
-           surface -> reported with the migration that owns the repair:
+  [manual] missing/stale rules, skill, command, harness, or settings.json
+           -> reported with the migration that owns the repair:
              trellis migrate --prepare <project-path>
              trellis attach --fleet NAME <project-path>
            After attach, the portable flow owns every one of those surfaces.
@@ -155,11 +155,8 @@ Per project (after diagnosis):
   [manual] linked worktrees missing inheritance -> reported only. Attach the
            clone; `trellis attach` and scripts/seed-inheritance-symlinks.sh then
            reconcile each worktree from the recorded release.
-  [manual] dead/missing @-import (never auto-edit a user's CLAUDE.md),
-           settings.json .hooks drift (no engine fixes it), the OMP parent
-           import (first @-import in CLAUDE.md — never auto-edited), and
-           canonical OMP manifest/adapter gaps (canonical-side, never
-           auto-applied) -> reported only.
+  [manual] dead/missing @-import (never auto-edit a user's CLAUDE.md) and
+           settings.json .hooks drift (no engine fixes it) -> reported only.
   [info]   version-pin lag, Tier-0 canonical issues -> reported only.
 
 Flag rules: --dry-run requires --fix (plain doctor is already read-only).
@@ -519,8 +516,7 @@ run_tier0 hc_claudemd_budget "$CANON"
 # teeth — silently no-op unless the runtime has [features] hooks = true. Global,
 # no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
 run_tier0 hc_codex_hooks_enabled
-# Codex plugin hook health: node shim + hooks.json PATH patch, re-applied
-# idempotently for installed plugins.
+# Codex plugin hook health: read-only node shim + manifest compatibility check.
 run_tier0 hc_codex_plugin_surface
 
 # Capture only canonical-clone precondition errors for the repair gate. Shared
@@ -572,7 +568,7 @@ else
     for n in "${REGISTRY_NAMES[@]}"; do
       if is_blacklisted "$n"; then
         # Normal fleet scheduling skips blacklisted rows; report them as HELD
-        # (still registered — the OMP rollout covers them too) rather than
+        # (still registered and reportable) rather than
         # silently. An explicit --project still validates (handled above).
         echo "  (held: $n — blacklisted; skipped)"
         continue
@@ -684,45 +680,6 @@ run_project_checks() {
     elif [ "$rc" = "$HC_WARN" ]; then
       add_hint "$name: no @-import fallback in CLAUDE.md — add line: @$CANON/core-rules/CLAUDE.md"
       plan_add PLAN_MANUAL "no @-import fallback in CLAUDE.md — add line: @$CANON/core-rules/CLAUDE.md (never auto-edited)"
-    fi
-  fi
-
-  # --- OMP harness surface (design 2026-08-09) — ERROR-class live-link contract ---
-  # Only evaluated when `omp` is enabled, matching the existing Codex gate.
-  # OMP native discovery stops at the nearest non-empty .omp dir, so a broken
-  # Trellis-owned .omp surface silently yields an unparented OMP session. Five
-  # rows: links (type/target/resolvability), target kinds + canonical realpath
-  # containment, the project CLAUDE.md parent import, canonical manifest
-  # layout/frontmatter, and adapter existence. A broken .omp link is
-  # [auto]-fixable via onboard (rm wrong-target first — never-clobber); the
-  # import/manifest/adapter gaps are canonical/user-owned -> [manual] only.
-  if pg_has_harness omp; then
-    # --- OMP links: symlink type, exact target, resolvability (ERROR) ---
-    if emit "  " hc_omp_symlinks "$proj" "$CANON"; then :; else
-      plan_add_migrate "$name" "$proj" "OMP surface link missing/wrong/dangling under .omp/"
-    fi
-
-    # --- OMP target kinds + canonical realpath containment (ERROR) ---
-    if emit "  " hc_omp_target_kinds "$proj" "$CANON"; then :; else
-      plan_add_migrate "$name" "$proj" "OMP link resolves to a wrong target kind or escapes trellis_root"
-    fi
-
-    # --- OMP parent import (ERROR) — MANUAL-only (never auto-edit CLAUDE.md) ---
-    if emit "  " hc_omp_project_import "$proj" "$CANON"; then :; else
-      add_hint "$name: OMP parent chain broken — the FIRST @-import in $proj/CLAUDE.md must be: @$CANON/core-rules/CLAUDE.md (never auto-edited)"
-      plan_add PLAN_MANUAL "OMP parent import — hand-fix the first @-import in CLAUDE.md to: @$CANON/core-rules/CLAUDE.md (never auto-edited)"
-    fi
-
-    # --- OMP canonical manifests (ERROR) — MANUAL-only (canonical-side) ---
-    if emit "  " hc_omp_manifests "$proj" "$CANON"; then :; else
-      add_hint "$name: canonical OMP manifests fail discovery — fix under $CANON/core-rules: skills <name>/SKILL.md + description, commands *.md + description, agents *.md + name/description frontmatter"
-      plan_add PLAN_MANUAL "canonical OMP manifest violation under $CANON/core-rules — fix SKILL.md/command/agent frontmatter in the canonical clone (never auto-applied)"
-    fi
-
-    # --- OMP adapter existence (ERROR) — MANUAL-only (canonical-side) ---
-    if emit "  " hc_omp_adapter "$proj" "$CANON"; then :; else
-      add_hint "$name: canonical OMP adapter missing — create $CANON/core-rules/omp/hooks/pre/trellis.ts"
-      plan_add PLAN_MANUAL "canonical OMP adapter missing — create core-rules/omp/hooks/pre/trellis.ts in the canonical clone (never auto-applied)"
     fi
   fi
 
@@ -1131,7 +1088,7 @@ Usage: trellis doctor [--home PATH] [--fleet NAME] [--project ID]
 
 Enumerates local registry rows including unavailable paths. Validates the
 report-only user-surface row, immutable releases, exact local attachment
-ownership, local excludes, and manifest-driven Claude/Codex/OMP leaves.
+ownership, local excludes, and manifest-driven Claude/Codex leaves.
 --fix repairs only safe project attachment rows through attach/relink/recover;
 the user-surface row is report-only and prints an attach/relink remedy. It
 never deletes project-owned files or migrates legacy/mixed layouts.
@@ -2248,6 +2205,7 @@ while IFS= read -r row; do
     if [ -n "$payload" ] &&
        run_check '  ' hc_portable_native_surfaces "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then surfaces_ok=true; fi
   fi
+  run_check '  ' hc_harness_capability_observation "$harnesses" "$release_ok" "$owner_state" "$surfaces_ok" || true
   # The owner/native checks validate recorded artifact metadata, but release
   # adoption can advance the runtime manifest without materializing a newly
   # declared discovery leaf.  Inspect the concrete checkout before computing any

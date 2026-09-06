@@ -31,7 +31,7 @@
       ]
     },
     {
-      "provider": "google-antigravity",
+      "provider": "antigravity",
       "limits": [
         {"id": "shared", "amount": {"remainingFraction": 0.9}}
       ]

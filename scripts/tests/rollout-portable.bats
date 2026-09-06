@@ -25,7 +25,7 @@ make_release() {
     "$source/core-rules/templates" \
     "$source/scripts/lib"
   local path
-  for path in attach-project.sh registry.sh release.sh trellis; do
+  for path in attach-project.sh registry.sh release.sh trellis trellis-launcher.sh; do
     cp "$REPO_ROOT/scripts/$path" "$source/scripts/$path"
   done
   for path in \
@@ -64,7 +64,7 @@ SH
     "$source/scripts/seed-inheritance-symlinks.sh"
   cat > "$source/core-rules/inheritance-manifest.json" <<'JSON'
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harnesses": {
     "claude": {
       "links": [
@@ -76,7 +76,8 @@ SH
       ]
     },
     "codex": {"links": [], "render": []},
-    "omp": {"links": [], "render": []}
+    "pi": {"links": [], "render": []},
+    "shared_agents": {"links": [], "render": []}
   }
 }
 JSON
@@ -479,6 +480,49 @@ JSON
   [ -L "$foreign_link" ]
   [ "$(readlink "$foreign_link")" = "$foreign_target" ]
   [ -d "$codex_project/.claude/rules" ]
+}
+
+@test "presets deliver immutable links for a Pi-only row and prune only managed undeclared links" {
+  pi_project="$SANDBOX/pi only/fixture project"
+  make_project_at "$pi_project" personal pi-project 1.2.3 pi
+  [ ! -e "$pi_project/.claude" ]
+  [ ! -L "$pi_project/.claude" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$PRESETS" --yes pi-project
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  preset="$pi_project/.agents/rules/preset-compliance-strict.md"
+  [ -L "$preset" ]
+  [ "$(readlink "$preset")" = "$PAYLOAD/core-rules/presets/compliance-strict.md" ]
+  [ "$(cat "$preset")" = "# fixture strict preset" ]
+  [ ! -e "$pi_project/.claude" ]
+  [ ! -L "$pi_project/.claude" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$PRESETS" --yes pi-project
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$preset")" = "$PAYLOAD/core-rules/presets/compliance-strict.md" ]
+  [ "$(cat "$preset")" = "# fixture strict preset" ]
+
+  stale_link="$pi_project/.agents/rules/preset-experimental-loose.md"
+  foreign_link="$pi_project/.agents/rules/preset-foreign.md"
+  foreign_target="$SANDBOX/foreign preset.md"
+  foreign_file="$pi_project/.agents/rules/preset-local.md"
+  printf 'foreign preset\n' > "$foreign_target"
+  printf 'local preset\n' > "$foreign_file"
+  ln -s "$PAYLOAD/core-rules/presets/experimental-loose.md" "$stale_link"
+  ln -s "$foreign_target" "$foreign_link"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$PRESETS" --yes pi-project
+  [ "$status" -eq 0 ]
+  [ ! -e "$stale_link" ]
+  [ ! -L "$stale_link" ]
+  [ -L "$foreign_link" ]
+  [ "$(readlink "$foreign_link")" = "$foreign_target" ]
+  [ "$(cat "$foreign_link")" = "foreign preset" ]
+  [ ! -L "$foreign_file" ]
+  [ "$(cat "$foreign_file")" = "local preset" ]
+  [ "$(readlink "$preset")" = "$PAYLOAD/core-rules/presets/compliance-strict.md" ]
+  [ ! -e "$pi_project/.claude" ]
+  [ ! -L "$pi_project/.claude" ]
 }
 
 @test "an inherited preloaded-libs marker does not turn attachment relink into a no-op" {

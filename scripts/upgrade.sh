@@ -70,23 +70,13 @@ upgrade_canonical_payload="$(CDPATH= cd "$TRELLIS_VERIFIED_PAYLOAD" && /bin/pwd 
 [ "$upgrade_canonical_payload" = "$upgrade_canonical_home/releases/$TRELLIS_VERIFIED_RELEASE_VERSION/payload" ] &&
   [ "$upgrade_source_dir" = "$upgrade_canonical_payload/scripts" ] ||
   upgrade_bootstrap_reject_source
-upgrade_body="$(/usr/bin/mktemp /tmp/trellis-upgrade.XXXXXX)" || {
+# Keep the already selected wrapper body in memory. This route must work when
+# the immutable release store and ambient temporary directories are read-only.
+upgrade_body="$(/usr/bin/awk "body { print } /^# -- trellis upgrade body --\$/ { body = 1 }" "$upgrade_source_dir/$upgrade_name")" &&
+  [ -n "$upgrade_body" ] || {
   /usr/bin/printf "%s\n" "trellis upgrade: could not prepare trusted bootstrap" >&2
   exit 5
 }
-upgrade_cleanup() {
-  /bin/rm -f "$upgrade_body"
-}
-trap upgrade_cleanup EXIT
-trap "upgrade_cleanup; exit 129" HUP
-trap "upgrade_cleanup; exit 130" INT
-trap "upgrade_cleanup; exit 143" TERM
-if ! /usr/bin/awk "body { print } /^# -- trellis upgrade body --\$/ { body = 1 }" "$upgrade_source_dir/$upgrade_name" > "$upgrade_body" ||
-  ! /bin/test -s "$upgrade_body" ||
-  ! /bin/chmod 600 "$upgrade_body"; then
-  /usr/bin/printf "%s\n" "trellis upgrade: could not prepare trusted bootstrap" >&2
-  exit 5
-fi
 /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=$upgrade_canonical_home" \
   "TRELLIS_VERIFIED_PAYLOAD=$upgrade_canonical_payload" \
@@ -94,7 +84,7 @@ fi
   "TRELLIS_VERIFIED_SSH_AUTH_SOCK=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}" \
   "TRELLIS_UPGRADE_SOURCE_DIR=$upgrade_source_dir" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-  /bin/bash --noprofile --norc "$upgrade_body" "$@"
+  /bin/bash --noprofile --norc -c "$upgrade_body" trellis-upgrade-body "$@"
 upgrade_status=$?
 exit "$upgrade_status"
 ' trellis-upgrade-bootstrap "$0" "$@"

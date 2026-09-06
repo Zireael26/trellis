@@ -1,17 +1,13 @@
 #!/usr/bin/env bats
 
 # T25 contributor-state coverage exercises real scripts against a fresh local
-# clone — including the OMP extension factory, which is the surface the OMP
-# loader itself reaches. Asserting `.omp` is absent proved the clone had no
-# Trellis leaves; it could not prove the harness stays quiet when it loads over
-# one, which is what the "no discovery failure" criterion actually claims.
+# clone. A manifest-only clone has no Trellis leaves and stays inert.
 
 REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 SEED="$REPO_ROOT/scripts/seed-inheritance-symlinks.sh"
 WORKTREE="$REPO_ROOT/scripts/worktree.sh"
 CLAUDE_SESSION_START="$REPO_ROOT/core-rules/hooks/session-context.sh"
 CODEX_SESSION_START="$REPO_ROOT/core-rules/codex/hooks/session-context.sh"
-OMP_EXTENSION="$REPO_ROOT/core-rules/omp/hooks/pre/trellis.ts"
 ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 load helpers/release-fixture
 load helpers/t25-portable
@@ -35,7 +31,6 @@ assert_manifest_clone_stays_inert() {
   t25_path_absent "$T25_PROJECT/.trellis/runtime"
   t25_path_absent "$T25_PROJECT/.claude"
   t25_path_absent "$T25_PROJECT/.agents"
-  t25_path_absent "$T25_PROJECT/.omp"
   [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ]
 }
 
@@ -110,7 +105,6 @@ run_inert_attachment_command() {
     t25_path_absent "$T25_PROJECT/.trellis"
     t25_path_absent "$T25_PROJECT/.claude"
     t25_path_absent "$T25_PROJECT/.agents"
-    t25_path_absent "$T25_PROJECT/.omp"
     [ -z "$(t25_hooks_path_or_unset "$T25_PROJECT")" ]
     [ "$(t25_git_status "$T25_PROJECT")" = "$git_before" ]
   done
@@ -152,31 +146,3 @@ run_inert_attachment_command() {
   assert_manifest_clone_stays_inert "$project_before" "$home_before" "$git_before"
 }
 
-@test "manifest-only clone stays inert when the OMP extension loads over it" {
-  local project_before home_before git_before
-
-  command -v node >/dev/null 2>&1 || skip "node is required to load the OMP extension"
-  t25_node_can_strip_types || skip "this node cannot import a .ts module (type stripping)"
-
-  project_before="$T25_SANDBOX/inert-omp.before"
-  home_before="$T25_SANDBOX/inert-omp-home.before"
-  git_before="$(t25_git_status "$T25_PROJECT")"
-  t25_snapshot_tree "$T25_PROJECT" "$project_before"
-  t25_snapshot_tree "$T25_TRELLIS_HOME" "$home_before"
-
-  t25_path_absent "$T25_PROJECT/.omp"
-
-  # The expected lifecycle set is named here rather than counted, so an adapter
-  # that stops registering handlers cannot pass this probe by having nothing to
-  # iterate — which is exactly how an empty `handlers` map used to print `inert`.
-  run t25_run_omp_extension "$OMP_EXTENSION" "$T25_PROJECT" \
-    "input,tool_call,tool_result,before_agent_start,session_before_compact,session_compact,session_shutdown,session_stop"
-
-  # Every lifecycle handler resolved no runtime, returned nothing, logged
-  # nothing, and never claimed the extension label. A raw clone that made the
-  # adapter throw, warn, or label itself would fail here by name.
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$output" = inert ] || { echo "$output"; false; }
-  t25_no_attachment_warning "$output"
-  assert_manifest_clone_stays_inert "$project_before" "$home_before" "$git_before"
-}

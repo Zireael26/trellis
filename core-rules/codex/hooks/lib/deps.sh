@@ -35,6 +35,20 @@ _se_project_dir() {
   printf '%s' "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 }
 
+# _se_harness_home <root>
+#   - selects the fixed per-harness runtime namespace beneath <root>.
+#   - only the validated enum value TRELLIS_HARNESS=pi selects .pi; unset,
+#     codex, and every other value preserve the existing .codex default.
+#   - callers cannot supply an arbitrary filesystem destination through env.
+_se_harness_home() {
+  local root="$1"
+  if [ "${TRELLIS_HARNESS:-codex}" = "pi" ]; then
+    printf '%s/.pi' "$root"
+  else
+    printf '%s/.codex' "$root"
+  fi
+}
+
 # _se_emit_hook_context <HookEventName> <message>
 #   - emits Codex's current event-specific advisory shape.
 #   - SessionStart/PostToolUse/SubagentStart/UserPromptSubmit context is not a

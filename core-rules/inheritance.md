@@ -20,7 +20,7 @@ release, or attachment/harness state.
 A manifest-only clone is intentionally inert. It has no Trellis-generated
 native links, settings, hooks, exclusion block, registry entry, warning, or
 runtime discovery requirement. Project-owned `CLAUDE.md`, `AGENTS.md`,
-`.claude/`, `.agents/`, `.codex/`, and `.omp/` content remains project-owned
+`.claude/`, `.agents/`, and `.codex/` content remains project-owned
 unless a concrete leaf is recorded by an attachment.
 
 ### Secondary local surface — explicit attachment
@@ -65,8 +65,8 @@ There are no Trellis-managed absolute source links, copied policy trees, or
 parent `@`-imports in the portable layout.
 
 Most managed links reach release content through the relative runtime anchor.
-The two project-context leaves, `AGENTS.md` and `.omp/AGENTS.md`, instead link
-relatively to a regular project `CLAUDE.md` when one exists; otherwise they use
+The project-context leaf `AGENTS.md` instead links
+relatively to a regular project `CLAUDE.md` when one exists; otherwise it uses
 the immutable runtime fallback. Attachment never creates or overwrites the
 project's root `CLAUDE.md` to make that choice possible.
 
@@ -83,8 +83,7 @@ and lifecycle leaves:
 | Harness | Primary context leaves | Secondary manifest leaves and renders |
 |---|---|---|
 | Claude Code | `.claude/rules/trellis.md` | eligible skill directories, command and agent Markdown files, executable hook and hook-library files, `.claude/primers/INDEX.md`, and the optional local settings JSON render |
-| Codex | `AGENTS.md`; `.agents/rules/trellis.md` | eligible skill directories, command and workflow Markdown files, Codex hook and hook-library files, named shared hook-library leaves, `.agents/primers/INDEX.md`, and the optional Codex hook JSON render |
-| Oh My Pi | `.omp/AGENTS.md` | eligible skill directories, command and agent Markdown files, and `.omp/hooks/pre/` TypeScript adapter leaves |
+| Codex | `AGENTS.md`; `.agents/rules/trellis.md` | eligible skill directories, command, pi agent and workflow Markdown files, Codex hook and hook-library files, named shared hook-library leaves, `.agents/primers/INDEX.md`, and the optional Codex hook JSON render |
 
 “Owned” always means an exact expanded leaf, its recorded kind, and its
 recorded target, content hash, and mode where applicable. It never means a
@@ -176,10 +175,9 @@ them. Diagnosis re-derives the same decision from the immutable manifest and
 the checkout instead of trusting the record.
 
 Legacy migration holds the same ownership floor with the weaker evidence it
-has, and each project-context leaf keeps the asymmetry of its own link rule. A
+has, and the project-context leaf keeps the asymmetry of its own link rule. A
 regular-file root `AGENTS.md` is removed only when its bytes match the
-project's own `CLAUDE.md`; `.omp/AGENTS.md` is removed when they match that
-file or an eligible canonical rules source. Any other content is authored:
+project's own `CLAUDE.md`. Any other content is authored:
 migration leaves it in place, does not conflict over it, and names every
 left-alone path, because bytes materialized by a release the run cannot compare
 against are indistinguishable from a project's own document.
@@ -217,7 +215,7 @@ surrounding JSON document.
 Git worktrees share a common directory, so attachment writes one exact managed
 block in `<git-common-dir>/info/exclude`. The block lists only the local runtime
 anchor and the concrete manifest-owned artifacts. It does not own a broad
-`.claude`, `.agents`, `.codex`, `.omp`, or `.trellis` directory and never edits
+`.claude`, `.agents`, `.codex`, or `.trellis` directory and never edits
 the tracked `.gitignore`.
 
 A clone-scoped ownership manager retains that block while any attached worktree

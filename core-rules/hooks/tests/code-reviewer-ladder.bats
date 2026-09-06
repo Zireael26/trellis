@@ -57,6 +57,45 @@ make_envelope() {
   jq -nc --arg d "$1" '{diff: $d, autonomy_level: 3, decisions_log: ""}'
 }
 
+# Run the reviewer while keeping its visible degradation channel separate from
+# the one-line stdout envelope. Sets status/output/stderr.
+run_reviewer() {
+  local input="$1" stderr_file
+  stderr_file="$(mktemp "$BATS_TEST_TMPDIR/reviewer-stderr.XXXXXX")"
+  if output="$(printf '%s' "$input" | bash "$LIB" 2>"$stderr_file")"; then
+    status=0
+  else
+    status=$?
+  fi
+  stderr="$(cat "$stderr_file")"
+  rm -f "$stderr_file"
+}
+
+# Write a reviewer stand-in that records execution before behaving like a hung
+# child. The timeout-runner failure guards must reject it before this body runs.
+make_hanging_reviewer() {
+  local countfile="$1" stub
+  stub="$(mktemp "$BATS_TEST_TMPDIR/hanging-reviewer.XXXXXX")"
+  cat > "$stub" <<EOF
+#!/usr/bin/env bash
+printf x >> "$countfile"
+# SAFETY: 2 s is the test-only uncapped-reviewer stand-in; the timeout setup guard must return before the stand-in starts.
+sleep 2
+EOF
+  chmod +x "$stub"
+  printf '%s' "$stub"
+}
+
+make_perl_free_bindir() {
+  local out src cmd
+  out="$(mktemp -d "$BATS_TEST_TMPDIR/perlfree.XXXXXX")"
+  for cmd in bash sleep; do
+    src="$(command -v "$cmd")"
+    ln -s "$src" "$out/$cmd"
+  done
+  printf '%s' "$out"
+}
+
 # Assert $output is exactly one single-line JSON object with a .findings array.
 # Prefer jq strict validation; fall back to a structural grep when jq is absent
 # (the core itself is jq-optional, so the suite must not hard-require jq here).
@@ -121,30 +160,68 @@ EOF
 # (claude is NOT shadowed away; it runs, emits prose, normalize_findings
 # rejects it, ladder degrades to the deterministic rung on the same input.)
 # =========================================================================
-@test "fail-open: garbage claude output falls through to rung 3, exit 0" {
+@test "fail-open: garbage claude output visibly degrades and falls through to rung 3" {
   stub_path="$(make_claude_stub "printf '%s\\n' 'I am not JSON, just chatty prose.'")"
 
   PATH_BACKUP="$PATH"; export PATH="$stub_path:$PATH"
-  run bash "$LIB" <<<"$SECRET_DIFF"
+  run_reviewer "$SECRET_DIFF"
   export PATH="$PATH_BACKUP"; rm -rf "$stub_path"
 
   [ "$status" -eq 0 ]
   assert_valid_findings
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "degraded" ]
+  [[ "$stderr" == *'code-reviewer: review degraded'* ]] || { echo "$stderr"; false; }
   # Fell through to rung 3 on the secret diff → the critical is recovered.
   [[ "$output" == *'"critical"'* ]] || { echo "$output"; false; }
   [[ "$output" == *"AWS access key"* ]]
 }
 
-@test "fail-open: claude exits non-zero → rung 3, exit 0, valid JSON" {
+@test "fail-open: claude nonzero visibly degrades to rung 3 with valid JSON" {
   stub_path="$(make_claude_stub "exit 7")"
 
   PATH_BACKUP="$PATH"; export PATH="$stub_path:$PATH"
-  run bash "$LIB" <<<"$CLEAN_DIFF"
+  run_reviewer "$CLEAN_DIFF"
   export PATH="$PATH_BACKUP"; rm -rf "$stub_path"
 
   [ "$status" -eq 0 ]
   assert_valid_findings
-  [[ "$output" == '{"findings":[]}' ]]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "degraded" ]
+  [[ "$stderr" == *'code-reviewer: review degraded'* ]] || { echo "$stderr"; false; }
+  [ "$(printf '%s' "$output" | jq -c '.findings')" = '[]' ]
+}
+
+@test "timeout runner: Perl unavailable never starts an uncapped reviewer" {
+  COUNT="$BATS_TEST_TMPDIR/perl-missing.count"; : > "$COUNT"
+  reviewer="$(make_hanging_reviewer "$COUNT")"
+  perlfree="$(make_perl_free_bindir)"
+
+  # SAFETY: 1 s is a test-only ceiling; the missing-Perl setup guard must return before the uncapped-reviewer stand-in starts.
+  run bash -c 'PATH="$2"; source "$1"; run_with_timeout 1 "$3"' _ "$LIB" "$perlfree" "$reviewer"
+
+  [ "$status" -ne 0 ]
+  [ ! -s "$COUNT" ]
+  [[ "$output" == *'code-reviewer: review degraded'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'Perl'* ]] || { echo "$output"; false; }
+}
+
+@test "timeout runner: Perl fork failure never starts an uncapped reviewer" {
+  COUNT="$BATS_TEST_TMPDIR/perl-fork.count"; : > "$COUNT"
+  reviewer="$(make_hanging_reviewer "$COUNT")"
+  perl_hook_dir="$(mktemp -d "$BATS_TEST_TMPDIR/perl-hook.XXXXXX")"
+  cat > "$perl_hook_dir/NoFork.pm" <<'EOF'
+package NoFork;
+sub import { *CORE::GLOBAL::fork = sub { $! = 11; return undef }; }
+1;
+EOF
+
+  # SAFETY: 1 s is a test-only ceiling; the fork-failure setup guard must return before the uncapped-reviewer stand-in starts.
+  PERL5LIB="$perl_hook_dir" PERL5OPT=-MNoFork \
+    run bash -c 'source "$1"; run_with_timeout 1 "$2"' _ "$LIB" "$reviewer"
+
+  [ "$status" -ne 0 ]
+  [ ! -s "$COUNT" ]
+  [[ "$output" == *'code-reviewer: review degraded'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'fork'* ]] || { echo "$output"; false; }
 }
 
 # =========================================================================
@@ -260,6 +337,35 @@ EOF
   # clean diff yields the empty verdict.
   [[ "$output" != *"from-llm-stub"* ]] || { echo "$output"; false; }
   [ "$output" = '{"findings":[]}' ]
+}
+
+# =========================================================================
+# Herdr cross-family path: never fall through to same-family Claude.
+# =========================================================================
+@test "herdr: HERDR_ENV=1 skips the claude rung (no Anthropic fallback)" {
+  local claude_count="$BATS_TEST_TMPDIR/claude.count" pi_count="$BATS_TEST_TMPDIR/pi.count"
+  stub_path="$(make_claude_stub \
+    "printf x >> '$claude_count'; printf '%s\\n' '{\"findings\":[{\"severity\":\"minor\",\"file\":\"a.py\",\"line\":3,\"msg\":\"from-llm-stub\",\"confidence\":0.4}]}'")"
+  printf '#!/usr/bin/env bash\nprintf x >> "%s"\n' "$pi_count" > "$stub_path/pi"
+  chmod +x "$stub_path/pi"
+  local private_home="$BATS_TEST_TMPDIR/herdr-home"
+  mkdir -m 700 "$private_home"
+  [ ! -e "$private_home/.trellis/state/roles-resolved.json" ]
+
+  PATH_BACKUP="$PATH"; export PATH="$stub_path:$PATH"
+  unset CODE_REVIEWER_CMD
+  HOME="$private_home" HERDR_ENV=1 \
+    HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+    run_reviewer "$CLEAN_DIFF"
+  export PATH="$PATH_BACKUP"; rm -rf "$stub_path"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"from-llm-stub"* ]] || { echo "$output"; false; }
+  [ "$output" = '{"findings":[]}' ]
+  assert_valid_findings
+  [ "$stderr" = 'code-reviewer: deciding artifact is unavailable or invalid; deterministic fallback applies' ] || { echo "$stderr"; false; }
+  [ ! -e "$claude_count" ]
+  [ ! -e "$pi_count" ]
 }
 
 # =========================================================================

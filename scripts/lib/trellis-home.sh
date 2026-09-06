@@ -327,6 +327,142 @@ trellis_home_pid_is_live() {
   kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1
 }
 
+# ===========================================================================
+# process birth
+# ===========================================================================
+
+# The Darwin process-birth reader, emitted as data.
+#
+# macOS ships `ps` setgid `kmem`, and a setgid binary does not run under the
+# seatbelt profiles the Claude Code, Codex, and isolated-verification shells
+# use. Every `LC_ALL=C ps -p PID -o lstart=` call site therefore went
+# indeterminate inside them, which is what blocked the launcher owner-cleanup
+# cases in specs/045-three-harness-parity. libproc answers the same question
+# through an ordinary dynamic library, with no privilege and no sandbox
+# exception, and returns the identical token.
+#
+# A consumer that already owns a child-process boundary — the disk-janitor
+# descriptor-relative deletion sink — takes this program as an argument and
+# runs it there as `python3 -I -c PROGRAM PID`. `-I` is load-bearing: it stops
+# a poisoned cwd or PYTHONPATH from shadowing `ctypes` or `time`. The program
+# is data from trusted in-memory release code and is never written to or read
+# from the filesystem, so no call site discovers a mutable source path at
+# runtime.
+trellis_process_birth_python() {
+  cat <<'TRELLIS_PROCESS_BIRTH_PY'
+import ctypes
+import sys
+import time
+
+# proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info) fills `struct
+# proc_bsdinfo` (<sys/proc_info.h>) and returns the number of bytes written:
+#
+#   uint32_t pbi_flags, pbi_status, pbi_xstatus, pbi_pid, pbi_ppid,
+#            pbi_uid, pbi_gid, pbi_ruid, pbi_rgid, pbi_svuid, pbi_svgid, rfu_1;
+#   char     pbi_comm[MAXCOMLEN];      /* 16 */
+#   char     pbi_name[2 * MAXCOMLEN];  /* 32 */
+#   uint32_t pbi_nfiles, pbi_pgid, pbi_pjobc, e_tdev, e_tpgid;
+#   int32_t  pbi_nice;
+#   uint64_t pbi_start_tvsec, pbi_start_tvusec;
+#
+# Only pbi_pid (head[3]) and pbi_start_tvsec are read; the rest is layout.
+PROC_PIDTBSDINFO = 3
+ESRCH = 3
+
+
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("head", ctypes.c_uint32 * 12),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("tail", ctypes.c_uint32 * 5),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+if len(sys.argv) != 2 or not sys.argv[1].isdigit():
+    raise SystemExit(2)
+pid = int(sys.argv[1])
+# Reject a non-canonical spelling as well as an out-of-range value: the pid
+# crosses into C as a signed int, and "007" is not the pid any record stored.
+if str(pid) != sys.argv[1] or pid < 1 or pid > 2147483647:
+    raise SystemExit(2)
+
+try:
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pidinfo = libproc.proc_pidinfo
+except (OSError, AttributeError):
+    raise SystemExit(1)
+proc_pidinfo.argtypes = [
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_uint64,
+    ctypes.POINTER(ProcBsdInfo),
+    ctypes.c_int,
+]
+proc_pidinfo.restype = ctypes.c_int
+
+info = ProcBsdInfo()
+ctypes.set_errno(0)
+written = proc_pidinfo(
+    pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+)
+saved_errno = ctypes.get_errno()
+# A short write is a failure, never a partially trusted record. ESRCH is the
+# only errno that means "gone"; EPERM and an unsupported flavour are
+# indeterminate and must not be reported as death.
+if written != ctypes.sizeof(info):
+    raise SystemExit(3 if saved_errno == ESRCH else 1)
+if info.head[3] != pid:
+    raise SystemExit(1)
+if info.pbi_start_tvsec < 1:
+    raise SystemExit(1)
+try:
+    token = time.strftime(
+        "%a %b %e %H:%M:%S %Y", time.localtime(info.pbi_start_tvsec)
+    )
+except (OSError, OverflowError, ValueError):
+    raise SystemExit(1)
+# `ps -o lstart=` emits exactly 28 columns and a newline; anything else is not
+# the schema every stored owner record was written in.
+if not token or len(token) > 28:
+    raise SystemExit(1)
+sys.stdout.write(token.ljust(28) + "\n")
+TRELLIS_PROCESS_BIRTH_PY
+}
+
+# trellis_process_birth <pid>
+#
+# The process-birth token for PID: `LC_ALL=C ps -p PID -o lstart=` wherever ps
+# runs, and the libproc reader above on Darwin. Both emit the same 28-column
+# localtime string, so the stored `process_birth` schema is unchanged and a
+# record written by either reader compares equal to one read by the other.
+#
+# Status: 0 with the token on stdout, 2 for a malformed or out-of-range pid, 3
+# when the Darwin reader reports ESRCH, 1 for every other failure. Callers must
+# keep mapping EVERY nonzero status to "indeterminate": a birth read that fails
+# after kill(0) reported the process live has not proved it dead and must never
+# authorize cleanup.
+trellis_process_birth() {
+  local pid program
+  pid="${1:-}"
+  case "$pid" in
+    ""|*[!0-9]*|0*) return 2 ;;
+  esac
+  [ "$pid" -le 2147483647 ] || return 2
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    command -v python3 >/dev/null 2>&1 || return 1
+    program="$(trellis_process_birth_python)" || return 1
+    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    return 0
+  fi
+  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  return 0
+}
+
+
 trellis_home_lock_release() {
   local lock_dir pid
   lock_dir="$_TRELLIS_HOME_LOCK_DIR"

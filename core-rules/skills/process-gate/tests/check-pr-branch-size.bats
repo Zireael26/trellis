@@ -60,9 +60,15 @@ write_bulk() {
   [ "$status" -eq 0 ]
 }
 
-@test "branch: 'pi-agent/probe' passes (pi worker branch)" {
-  check_branch "pi-agent/probe"
+@test "branch: 'pi-agent-worker-123' passes (pi worker branch)" {
+  check_branch "pi-agent-worker-123"
   [ "$status" -eq 0 ]
+}
+
+@test "branch: obsolete 'pi-agent/probe' form warns" {
+  check_branch "pi-agent/probe"
+  [ "$status" -eq 2 ]
+  grep -Fq 'does not match <type>/<kebab-slug>' <<<"$output"
 }
 
 @test "branch: 'feat/short-slug' still passes (feature did not shadow feat)" {
@@ -83,6 +89,36 @@ write_bulk() {
 }
 
 # --- PR size / ADR exception ----------------------------------------------
+
+@test "range: invalid range with oversized change fails every Git enumeration closed" {
+  (
+    cd "$PROJECT_DIR"
+    git checkout -q -b feat/invalid-range
+  )
+  write_bulk "$PROJECT_DIR/bulk.txt" 900
+  (
+    cd "$PROJECT_DIR"
+    git add -A && git commit -q -m "feat: bulk"
+  )
+
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=missing-base..HEAD"
+  [ "$status" -eq 1 ]
+  grep -Fq 'unable to enumerate commit subjects for range missing-base..HEAD' <<<"$output"
+  grep -Fq 'unable to compute diff stats for range missing-base..HEAD' <<<"$output"
+  grep -Fq 'unable to enumerate changed files for range missing-base..HEAD' <<<"$output"
+  grep -Fq 'unable to enumerate added files for range missing-base..HEAD' <<<"$output"
+}
+
+@test "branch: running outside a repository fails closed" {
+  local outside_dir
+  outside_dir="$(mktemp -d)"
+
+  run bash -c "cd '$outside_dir' && '$SCRIPT' --range=HEAD~1..HEAD"
+  rm -rf "$outside_dir"
+
+  [ "$status" -eq 1 ]
+  grep -Fq 'unable to determine current branch' <<<"$output"
+}
 
 @test "size: oversized range with no ADR fails" {
   (
