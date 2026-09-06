@@ -2,9 +2,9 @@
 
 > **For the human:** complete [local machine setup](AGENT_SETUP.md) first. Open an agent in the Trellis policy source clone if convenient, but give it the installed launcher path, the existing Git worktree path, the local fleet, the exact installed release version, and permission to create or migrate the project's tracked `.trellis.json`. Then paste everything below the `--- BEGIN PROMPT ---` line.
 >
-> This is local opt-in onboarding. It never adds a project to a tracked central registry, never assumes a common projects root, and never makes a source checkout the project's runtime. It attaches Claude Code, Codex, and OMP from a verified immutable release. A contributor who only clones the project and does not attach it remains inert.
+> This is local opt-in onboarding. It never adds a project to a tracked central registry, never assumes a common projects root, and never makes a source checkout the project's runtime. It attaches Claude Code, Codex, and Pi from a verified immutable release. A contributor who only clones the project and does not attach it remains inert.
 
-For the architecture, migration decision record, and release rollback policy, use the local-fleet documents maintained alongside this runbook: [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
+For the architecture, migration decision record, and release rollback policy, use the local-fleet documents maintained alongside this runbook: [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
 ---
 
@@ -81,7 +81,7 @@ For a project with no legacy Trellis artifacts and no manifest, run portable onb
   --project-id "$PROJECT_ID" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$PROJECT_ROOT"
 ```
 
@@ -98,7 +98,7 @@ For a fresh clone or detached checkout that already contains a valid `.trellis.j
   --release "$RELEASE_VERSION" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$PROJECT_ROOT"
 ```
 
@@ -122,7 +122,7 @@ The command prints both `snapshot: ...` and the exact rollback command. Record t
   --release "$RELEASE_VERSION" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$PROJECT_ROOT"
 ```
 
@@ -189,7 +189,7 @@ To relocate a project checkout, detach before moving it and attach at its new ex
   --release "$RELEASE_VERSION" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$NEW_PROJECT_ROOT"
 ```
 

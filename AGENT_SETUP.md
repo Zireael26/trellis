@@ -2,7 +2,7 @@
 
 This runbook sets up **one machine's local Trellis state**. It is deliberately safe to rehearse in a temporary home, supports personal and work fleets from one policy source clone, and accepts project Git worktrees at arbitrary absolute paths.
 
-It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and migration rationale, link to—not duplicate—the T23 documents: [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
+It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and migration rationale, link to—not duplicate—the T23 documents: [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
 Once a machine is set up, moving it and its attached projects to a later release is a separate runbook: [AGENT_UPGRADE.md](AGENT_UPGRADE.md), executable end to end by an agent on any harness. Section 9 below is the single-project adoption command it wraps.
 
@@ -68,7 +68,7 @@ The source clone is a bootstrap and later local-configuration input only. A succ
 
 A project may track one optional `.trellis.json` manifest. It contains a stable `project_id` and portable policy such as presets or autonomy; it contains no source path, fleet membership, local release path, local registry row, hook state, or runtime link. `core-rules/templates/project.trellis.json.example` in the release payload is the copyable minimum — the same three keys `trellis onboard` writes — and `scripts/lib/trellis.project.schema.json` is what validates it.
 
-Everything behavior-producing is local attachment state: the immutable runtime anchor, native Claude Code/Codex/OMP surfaces, managed local exclusions, attachment ownership, and recovery journals. A contributor who clones only the tracked project—including `.trellis.json`—has an inert ordinary clone: no Trellis installation is required and no Trellis harness behavior is activated.
+Everything behavior-producing is local attachment state: the immutable runtime anchor, native Claude Code/Codex/Pi surfaces, managed local exclusions, attachment ownership, and recovery journals. A contributor who clones only the tracked project—including `.trellis.json`—has an inert ordinary clone: no Trellis installation is required and no Trellis harness behavior is activated.
 
 Do not create absolute `@` imports, direct live source links, copied hooks/settings, or a tracked central registry as a substitute for attachment. Each harness's credentials and trust decisions remain the user's responsibility.
 
@@ -89,7 +89,7 @@ git -C "$PROJECT_ROOT" status --short
   --project-id "$PROJECT_ID" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$PROJECT_ROOT"
 ```
 
@@ -104,7 +104,7 @@ For a clean clone that already has a valid manifest, attach directly with the sa
   --release "$RELEASE_VERSION" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$PROJECT_ROOT"
 ```
 
@@ -142,7 +142,7 @@ A historical registry usually records a portable shorthand path such as `/person
 "$TRELLIS" registry list --home "$TRELLIS_HOME" --fleet "$FLEET"
 ```
 
-The complete import, parity-review, and cutover procedure — including the blacklist pair, the seven-cell row contract, and how a literal `|` is written `\|` in a cell — is [`docs/MIGRATING-LOCAL-FLEETS.md`](docs/MIGRATING-LOCAL-FLEETS.md) §2.
+The complete import, parity-review, and cutover procedure — including the blacklist pair, the seven-cell row contract, and how a literal `|` is written `\|` in a cell — is [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md) §2.
 
 ## 7. Verify local state and the attached project
 
@@ -199,7 +199,7 @@ NEW_SOURCE_ROOT="$(cd "$NEW_SOURCE_ROOT" && pwd -P)"
   --release "$RELEASE_VERSION" \
   --harness claude \
   --harness codex \
-  --harness omp \
+  --harness pi \
   "$NEW_PROJECT_ROOT"
 ```
 
