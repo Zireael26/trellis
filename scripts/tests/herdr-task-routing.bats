@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Fixture-driven coverage for resolve-roles.py's finite task classifier.
 # Every classifier decision uses a checked-in usage response; legacy resolver
-# modes use the same response through a temporary omp shim.
+# modes use the same response through a private Python usage adapter.
 
 bats_require_minimum_version 1.5.0
 
@@ -9,7 +9,6 @@ REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 RESOLVER="$REPO_ROOT/core-rules/skills/herdr-foreman/scripts/resolve-roles.py"
 FIXTURES="$REPO_ROOT/scripts/tests/fixtures/herdr-task-routing"
 PYTHON="$(command -v python3)"
-ORIGINAL_PATH="$PATH"
 
 setup() {
   AVAILABLE="$FIXTURES/available.json"
@@ -17,18 +16,14 @@ setup() {
   DISABLED="$FIXTURES/disabled.json"
   NO_REPORT="$FIXTURES/no-report.json"
   LEGACY_HOME="$BATS_TEST_TMPDIR/home"
-  FAKE_BIN="$BATS_TEST_TMPDIR/bin"
-  mkdir -p "$LEGACY_HOME/.omp/agent" "$FAKE_BIN"
-  cat > "$FAKE_BIN/omp" <<EOF
-#!/bin/sh
-if [ "\$1" = usage ] && [ "\$2" = --json ]; then
-  cat "$AVAILABLE"
-  exit 0
-fi
-printf 'unexpected omp invocation: %s %s\\n' "\$1" "\$2" >&2
-exit 1
-EOF
-  chmod 755 "$FAKE_BIN/omp"
+  FAKE_ADAPTER="$BATS_TEST_TMPDIR/usage-adapter.py"
+  mkdir -p "$LEGACY_HOME/.omp/agent"
+  cat > "$FAKE_ADAPTER" <<'PY'
+import os
+import pathlib
+import sys
+sys.stdout.buffer.write(pathlib.Path(os.environ["FIXTURE_USAGE"]).read_bytes())
+PY
 }
 
 classify_with() {
@@ -39,8 +34,18 @@ classify_with() {
 }
 
 legacy_with_fake_usage() {
-  env HOME="$LEGACY_HOME" PATH="$FAKE_BIN:$ORIGINAL_PATH" \
-    "$PYTHON" "$RESOLVER" "$@"
+  env HOME="$LEGACY_HOME" FIXTURE_USAGE="$AVAILABLE" \
+    "$PYTHON" - "$RESOLVER" "$FAKE_ADAPTER" "$@" <<'PY'
+import importlib.util
+import sys
+resolver, adapter, *args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("rr", resolver)
+rr = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rr)
+rr.OPENUSAGE_ADAPTER = adapter
+sys.argv = [resolver, *args]
+rr.main()
+PY
 }
 
 assert_status() {
@@ -87,10 +92,10 @@ assert_output_contains() {
 @test "every task shape selects its required capability and reasoning effort" {
   local shape expected_agent expected_effort
   for row in \
-    "scan flash high" \
+    "scan gemini high" \
     "mechanical-coding luna max" \
     "bounded-review cheap xhigh" \
-    "deep-work glm-flash-go max" \
+    "deep-work cheap-2 xhigh" \
     "hard-work luna max" \
     "security-review security-reviewer xhigh" \
     "merge-review sol xhigh"; do
@@ -120,15 +125,21 @@ assert_output_contains() {
   fi
 }
 
-@test "Sol is reserved for hard work and is not a bounded-review route" {
+@test "exhausted Codex hard-work falls through to the muse-meta subscription lane" {
   run --separate-stderr classify_with "$EXHAUSTED" hard-work
   assert_status 0
   assert_json
-  assert_field '.chosen_agent' sol
+  assert_field '.chosen_agent' muse-meta
+  assert_field '.provider' meta
+  assert_field '.model' 'meta/muse-spark-1.3-contributor:xhigh'
   assert_field '.reasoning_effort' xhigh
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e 'any(.trail[]; startswith("luna:exhausted:"))' >/dev/null; then
-    printf 'hard-work did not exhaust Luna before selecting Sol:\n%s\n' "$output" >&2
+    printf 'hard-work did not exhaust Luna before selecting muse-meta:\n%s\n' "$output" >&2
+    false
+  fi
+  if ! printf '%s' "$output" | jq -e 'any(.trail[]; . == "muse-meta:unmetered:-")' >/dev/null; then
+    printf 'hard-work did not select reportless muse-meta after Luna exhaustion:\n%s\n' "$output" >&2
     false
   fi
 
@@ -147,7 +158,7 @@ assert_output_contains() {
   assert_field '.requested_agent' cheap
   assert_field '.chosen_agent' cheap
   assert_field '.provider' opencode
-  assert_field '.model' 'opencode/muse-spark-1.2-contributor-free:xhigh'
+  assert_field '.model' 'opencode/muse-spark-1.3-contributor-free:xhigh'
   assert_field '.reasoning_effort' xhigh
   assert_field '.family' meta
   assert_field '.fallback_used' false
@@ -164,20 +175,24 @@ assert_output_contains() {
   assert_field '.trail[0]' 'cheap:disabled:0.0'
 }
 
-@test "exact named glm-flash-go route honors prepaid catalog metadata" {
-  # `glm-flash` (nous-portal) was retired from the roster; `glm-flash-go` is the
+@test "exact named cheap-2 route honors prepaid catalog metadata" {
+  # `glm-flash` (nous-portal) was retired from the roster; `cheap-2` is the
   # surviving prepaid route and carries the same property under test — a declared
   # prepaid agent dispatches on catalog metadata alone, with no usage report.
-  run --separate-stderr classify_with "$NO_REPORT" security-review \
-    --operator-agent glm-flash-go
+  #
+  # The shape is `mechanical-coding`, not `security-review`: `cheap-2` does not
+  # declare the `security-review` capability and must not, so asking for it there
+  # is refused on capability before the prepaid property is ever reached.
+  run --separate-stderr classify_with "$NO_REPORT" mechanical-coding \
+    --operator-agent cheap-2
   assert_status 0
   assert_json
-  assert_field '.requested_agent' glm-flash-go
-  assert_field '.chosen_agent' glm-flash-go
+  assert_field '.requested_agent' cheap-2
+  assert_field '.chosen_agent' cheap-2
   assert_field '.provider' opencode-go-2
-  assert_field '.model' 'opencode-go-2/glm-5.3-flash:max'
-  assert_field '.reasoning_effort' max
-  assert_field '.trail[0]' 'glm-flash-go:prepaid:-'
+  assert_field '.model' 'opencode-go-2/muse-spark-1.3-contributor:xhigh'
+  assert_field '.reasoning_effort' xhigh
+  assert_field '.trail[0]' 'cheap-2:prepaid:-'
   assert_field '.fallback_used' false
   assert_field '.dispatchable' true
 }
@@ -190,7 +205,7 @@ assert_output_contains() {
   assert_field '.provider' opencode
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e '
-    .trail == ["flash:no-report:-", "cheap:prepaid:-"]
+    .trail == ["gemini:no-report:-", "cheap:prepaid:-"]
   ' >/dev/null; then
     printf 'metered no-report route was not refused before unmetered fallback:\n%s\n' \
       "$output" >&2
@@ -215,19 +230,21 @@ assert_output_contains() {
   fi
 }
 
-@test "automatic verdict routes accept a declared prepaid route without a report" {
-  run --separate-stderr classify_with "$NO_REPORT" security-review
+@test "automatic routes accept a declared prepaid route without a report" {
+  # `implementer` is luna -> cheap-2 -> ..., so a metered no-report candidate
+  # refuses first and the prepaid one wins: the property is "prepaid is reached
+  # only after metered routes refuse", not "prepaid can serve a verdict role".
+  run --separate-stderr classify_with "$NO_REPORT" mechanical-coding
   assert_status 0
   assert_json
-  assert_field '.chosen_agent' glm-flash-go
+  assert_field '.chosen_agent' cheap-2
   assert_field '.provider' opencode-go-2
-  assert_field '.model' 'opencode-go-2/glm-5.3-flash:max'
+  assert_field '.model' 'opencode-go-2/muse-spark-1.3-contributor:xhigh'
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e '
     .trail == [
-      "security-reviewer:no-report:-",
-      "sol:no-report:-",
-      "glm-flash-go:prepaid:-"
+      "luna:no-report:-",
+      "cheap-2:prepaid:-"
     ]
   ' >/dev/null; then
     printf 'prepaid no-report route was not selected after metered routes:\n%s\n' \
@@ -262,7 +279,7 @@ assert_output_contains() {
   assert_status 0
   assert_json
   assert_field '.producer_family' meta
-  assert_field '.chosen_agent' flash
+  assert_field '.chosen_agent' gemini
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e 'any(.trail[]; . == "cheap:same-family")' >/dev/null; then
     printf 'producer-family exclusion was absent from trail:\n%s\n' "$output" >&2
@@ -292,13 +309,13 @@ assert_output_contains() {
 }
 
 @test "an exact operator request with the wrong capability is rejected" {
-  run --separate-stderr classify_with "$AVAILABLE" deep-work --operator-agent flash
+  run --separate-stderr classify_with "$AVAILABLE" deep-work --operator-agent gemini
   assert_status 3
   assert_json
-  assert_field '.requested_agent' flash
-  assert_field '.chosen_agent' flash
+  assert_field '.requested_agent' gemini
+  assert_field '.chosen_agent' gemini
   assert_field '.dispatchable' false
-  assert_field '.trail[0]' 'flash:capability-mismatch'
+  assert_field '.trail[0]' 'gemini:capability-mismatch'
 }
 
 @test "automatic compatible-chain exhaustion fails closed" {
@@ -310,7 +327,7 @@ assert_output_contains() {
   if ! printf '%s' "$output" | jq -e '
     (.trail | length == 2)
     and any(.trail[]; startswith("cheap:exhausted:"))
-    and any(.trail[]; startswith("flash:reported:0.1"))
+    and any(.trail[]; startswith("gemini:reported:0.1"))
   ' >/dev/null; then
     printf 'compatible-chain exhaustion receipt was incomplete:\n%s\n' "$output" >&2
     false
@@ -318,7 +335,7 @@ assert_output_contains() {
 }
 
 @test "classification receipt contains route, quota, and runtime fields" {
-  run --separate-stderr classify_with "$AVAILABLE" scan --actual-model google-antigravity/gemini-3.7-flash:high
+  run --separate-stderr classify_with "$AVAILABLE" scan --actual-model antigravity/gemini-3.8-flash:high
   assert_status 0
   assert_json
   if ! printf '%s' "$output" | jq -e '
@@ -333,9 +350,9 @@ assert_output_contains() {
     false
   fi
   assert_field '.usage_source' fixture
-  assert_field '.model' 'google-antigravity/gemini-3.7-flash:high'
+  assert_field '.model' 'antigravity/gemini-3.8-flash:high'
   assert_field '.reasoning_effort' high
-  assert_field '.actual_model' 'google-antigravity/gemini-3.7-flash:high'
+  assert_field '.actual_model' 'antigravity/gemini-3.8-flash:high'
   assert_field '.runtime_match' true
 }
 
@@ -346,6 +363,49 @@ assert_output_contains() {
   assert_field '.usage_source' openusage:live
   assert_field '.roles.implementer.chosen.agent' luna
   [ ! -e "$LEGACY_HOME/.omp/agent/roles-resolved.json" ]
+  [ ! -e "$LEGACY_HOME/.trellis/state/roles-resolved.json" ]
+}
+
+@test "degraded human output leaves independent review unmet without an apex reroute" {
+  run --separate-stderr "$PYTHON" - "$RESOLVER" "$AVAILABLE" "$LEGACY_HOME" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import sys
+
+resolver_path, usage_path, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("rr", resolver_path)
+rr = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rr)
+usage = json.load(open(usage_path))
+rr._load_selected_usage = lambda *args: (usage, "fixture")
+rr.auth_probe_passes = lambda candidate, cache: False
+rr.OUT = os.path.join(home, "roles-resolved.json")
+
+sys.argv = [resolver_path, "--json"]
+with contextlib.redirect_stdout(io.StringIO()) as captured:
+    rr.main()
+receipt = json.loads(captured.getvalue())
+assert receipt["approval_ready"] is False
+assert receipt["degraded_verdict_roles"]
+assert all(role["chosen"] is None for role in receipt["roles"].values())
+assert not os.path.exists(rr.OUT)
+
+sys.argv = [resolver_path]
+with contextlib.redirect_stdout(io.StringIO()) as captured:
+    rr.main()
+output = captured.getvalue()
+assert "DEGRADED" in output and "N-of-3 not met" in output, output
+assert "independent review remains unmet" in output, output
+assert "explicitly select an eligible independent reviewer" in output, output
+assert "to the Claude apex" not in output, output
+assert not os.path.exists(rr.OUT)
+print(output)
+PY
+  assert_status 0
+  assert_output_contains 'independent review remains unmet'
 }
 
 @test "a limitReached provider is refused even at zero threshold" {
@@ -382,7 +442,7 @@ assert any(candidate["agent"] != first["agent"] for candidate in chain[1:])
 print(",".join(candidate["agent"] for candidate in chain))
 PY
   assert_status 0
-  assert_output_contains 'cheap,flash'
+  assert_output_contains 'cheap,gemini'
 }
 
 @test "real noninteractive auth probes refuse matching routes without truncating fallback" {
@@ -396,19 +456,6 @@ spec.loader.exec_module(rr)
 cfg = json.load(open(roles_path))
 
 scout = cfg["roles"]["scout"]
-configured_probe = next(
-    candidate["auth_probe"]
-    for candidate in scout["chain"]
-    if candidate["agent"] == "flash"
-)
-refuter_probe = next(
-    candidate["auth_probe"]
-    for candidate in cfg["roles"]["refuter"]["chain"]
-    if candidate["agent"] == "flash"
-)
-assert configured_probe == ["omp", "token", "google-antigravity"]
-assert refuter_probe == configured_probe
-
 good_probe = [
     sys.executable,
     "-c",
@@ -417,15 +464,17 @@ good_probe = [
 ]
 for role in cfg["roles"].values():
     for candidate in role["chain"]:
-        if "auth_probe" in candidate:
-            candidate["auth_probe"] = good_probe
+        candidate["auth_probe"] = good_probe
+scout["chain"].append({
+    "agent": "cheap-2", "min_remaining": 0.1, "auth_probe": good_probe,
+})
 assert rr.auth_probe_passes(
     {"auth_probe": [sys.executable, "-c", "pass"]}, {}
 ) is False
 
 cfg["agents"]["unauthenticated-google"] = {
     "provider": "google",
-    "model": "google/gemini-3.7-flash:high",
+    "model": "google/gemini-3.8-flash:high",
     "effort": "high",
     "family": "google",
     "capabilities": ["scan"],
@@ -447,7 +496,7 @@ usage = {
         {"provider": "google", "limits": [
             {"amount": {"remainingFraction": 1.0}}
         ]},
-        {"provider": "google-antigravity", "limits": [
+        {"provider": "antigravity", "limits": [
             {"amount": {"remainingFraction": 1.0}}
         ]},
         {"provider": "opencode-go", "limits": [
@@ -457,14 +506,14 @@ usage = {
 }
 roles, _ = rr.resolve(cfg, usage, today="2026-08-22")
 resolved = roles["scout"]
-assert resolved["chosen"]["agent"] == "flash"
+assert resolved["chosen"]["agent"] == "gemini"
 assert rr.misrouted({
-    "provider": "google-antigravity",
-    "model": "google/gemini-3.7-flash:high",
+    "provider": "antigravity",
+    "model": "google/gemini-3.8-flash:high",
 })
 assert [candidate["agent"] for candidate in resolved["trail"]] == [
-    "flash",
-    "cheap",
+    "gemini",
+    "cheap-2",
 ]
 assert all(
     candidate["eligible"] and candidate["reason"] == "eligible"
@@ -482,7 +531,10 @@ assert resolved["refusals"][1]["note"] == "prepaid"
 print(resolved["chosen"]["agent"])
 PY
   assert_status 0
-  assert_output_contains 'flash'
+  assert_output_contains 'gemini'
+  [[ "$output$stderr" != *"credential-value"* ]]
+  [[ "$output$stderr" != *"not-a-credential"* ]]
+  [[ "$output$stderr" != *"diagnostic"* ]]
 }
 
 @test "ad-hoc panels count mapped families and refuse collapsed or unmapped seats" {
@@ -512,7 +564,7 @@ PY
   assert_output_contains 'independent'
 }
 
-@test "hydrated role routes inherit models and auth probes from the central agent catalog" {
+@test "hydrated role routes inherit central agent facts and preserve route auth metadata" {
   run --separate-stderr "$PYTHON" - "$RESOLVER" "$REPO_ROOT/core-rules/skills/herdr-foreman/roles.json" <<'PY'
 import importlib.util, json, sys
 
@@ -521,6 +573,11 @@ spec = importlib.util.spec_from_file_location("rr", resolver_path)
 rr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rr)
 cfg = json.load(open(roles_path))
+probe = [sys.executable, "-c", "print('fixture-credential')"]
+for role_name in ("scout", "refuter"):
+    for candidate in cfg["roles"][role_name]["chain"]:
+        if candidate["agent"] == "gemini":
+            candidate["auth_probe"] = probe
 hydrated = rr.hydrate_catalog(cfg)
 for role in hydrated["roles"].values():
     for candidate in role["chain"]:
@@ -531,12 +588,10 @@ for role in hydrated["roles"].values():
 for role_name in ("scout", "refuter"):
     candidate = next(
         candidate
-        for candidate in cfg["roles"][role_name]["chain"]
-        if candidate["agent"] == "flash"
+        for candidate in hydrated["roles"][role_name]["chain"]
+        if candidate["agent"] == "gemini"
     )
-    assert candidate["auth_probe"] == [
-        "omp", "token", "google-antigravity"
-    ]
+    assert candidate["auth_probe"] == probe
 print("aligned")
 PY
   assert_status 0
@@ -544,7 +599,7 @@ PY
 }
 
 @test "legacy panel mode retains distinct-family output without quota lookup" {
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel flash,cheap
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,cheap
   assert_status 0
   assert_output_contains 'panel: 2 seats -> 2 distinct families'
 }
@@ -655,8 +710,16 @@ with tempfile.TemporaryDirectory() as home:
     assert merge["trail"] == []
     refuter = scoped["roles"]["refuter"]
     assert refuter["required_seats"] == 3
-    assert [seat["agent"] for seat in refuter["seats"]] == ["glm-flash-go", "flash"]
-    assert refuter["chosen"]["agent"] == "glm-flash-go"
+    # Reviewer has consumed meta and security reviewer xai; the declared
+    # cheap -> gemini -> grok refuter chain leaves only the google seat.
+    assert [row["agent"] for row in cfg["roles"]["refuter"]["chain"]] == [
+        "cheap", "gemini", "grok",
+    ]
+    assert [seat["agent"] for seat in refuter["seats"]] == ["gemini"]
+    assert refuter["chosen"]["agent"] == "gemini"
+    assert [(row["agent"], row["reason"]) for row in refuter["refusals"]] == [
+        ("cheap", "verdict-family-in-use"), ("grok", "verdict-family-in-use"),
+    ]
     assert all(
         refuter["chosen"].get(key) == refuter["seats"][0].get(key)
         for key in ("agent", "model", "provider", "remaining", "note")
@@ -790,7 +853,7 @@ with tempfile.TemporaryDirectory() as home:
         else:
             raise AssertionError("quota-flipped deciding pass was accepted")
     deciding = json.loads(deciding_output.getvalue())
-    assert deciding["roles"]["implementer"]["chosen"]["agent"] == "glm-flash-go"
+    assert deciding["roles"]["implementer"]["chosen"]["agent"] == "cheap-2"
     assert deciding["resolution_scope"]["implementer"] == "luna"
     assert deciding["resolution_scope"]["implementer_family"] == "openai"
     assert deciding["resolution_scope"]["verdict_families_distinct"] is False
@@ -927,6 +990,8 @@ import os
 import sys
 import tempfile
 import time
+import contextlib
+import io
 
 resolver_path, roles_path = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("rr", resolver_path)
@@ -949,27 +1014,66 @@ with tempfile.TemporaryDirectory() as home:
         )
         usage, source = rr.load_usage(600, True)
         assert usage is None
-        assert source == "unavailable (ValueError)"
-        roles, degraded = rr.resolve(cfg, usage, today="2026-08-22")
-        assert roles["implementer"]["chosen"] is None
-        assert "implementer" in degraded
+        assert source == "openusage:unavailable (ValueError)"
+        rr.OUT = os.path.join(home, "roles-resolved.json")
+        sys.argv = [resolver_path, "--json", "--fresh"]
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            try:
+                rr.main()
+            except SystemExit as error:
+                assert "refusing to approve a roster" in str(error)
+            else:
+                raise AssertionError("unavailable usage approved a roster")
+        assert captured.getvalue() == ""
+        assert not os.path.exists(rr.OUT)
 
     # A malformed live result may use only a TTL-valid cache, never an old one.
     rr.CACHE = os.path.join(home, "stale", "usage-cache.json")
     os.makedirs(os.path.dirname(rr.CACHE))
     with open(rr.CACHE, "w") as cache:
-        json.dump({"at": time.time() - 601, "usage": {"reports": []}}, cache)
+        json.dump({"sources": {"openusage": {
+            "at": time.time() - 601, "usage": {"reports": []},
+        }}}, cache)
     rr.subprocess.run = lambda *args, **kwargs: Result("null")
     usage, source = rr.load_usage(600, True)
     assert usage is None
-    assert source == "unavailable (ValueError)"
+    assert source == "openusage:unavailable (ValueError)"
+
+    # Untagged and foreign-source caches cannot authorize openusage fallback.
+    for cached in (
+        {"at": time.time(), "usage": {"reports": []}},
+        {"sources": {"omp": {"at": time.time(), "usage": {"reports": []}}}},
+        {"sources": {"openusage": {
+            "source": "omp", "at": time.time(), "usage": {"reports": []},
+        }}},
+    ):
+        with open(rr.CACHE, "w") as cache:
+            json.dump(cached, cache)
+        usage, source = rr.load_usage(600, True)
+        assert usage is None, "foreign or untagged cache admitted"
+        assert source == "openusage:unavailable (ValueError)"
 
     rr.CACHE = os.path.join(home, "valid", "nested", "usage-cache.json")
     rr.subprocess.run = lambda *args, **kwargs: Result('{"reports":[]}')
     usage, source = rr.load_usage(600, True)
     assert usage == {"reports": []}
-    assert source == "live"
+    assert source == "openusage:live"
     assert os.path.isfile(rr.CACHE)
+    cached = json.load(open(rr.CACHE))
+    assert set(cached) == {"sources"}
+    assert set(cached["sources"]) == {"openusage"}
+    assert cached["sources"]["openusage"]["usage"] == usage
+    assert time.time() - cached["sources"]["openusage"]["at"] < 600
+    rr.subprocess.run = lambda *args, **kwargs: Result("null")
+    usage, source = rr.load_usage(600, True)
+    assert usage == {"reports": []}
+    assert source == "openusage:cache-after-live-failure"
+    rr.subprocess.run = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("TTL-valid cache should not invoke adapter")
+    )
+    usage, source = rr.load_usage(600, False)
+    assert usage == {"reports": []}
+    assert source == "openusage:cache"
 
 for malformed in (
     {"reports": {}},
@@ -978,7 +1082,7 @@ for malformed in (
 ):
     roles, _ = rr.resolve(cfg, malformed, today="2026-08-22")
     chosen = roles["implementer"]["chosen"]
-    assert chosen["agent"] == "glm-flash-go"
+    assert chosen["agent"] == "cheap-2"
     assert chosen["remaining"] is None
     assert chosen["note"] == "prepaid"
 print("safe")
@@ -1098,18 +1202,25 @@ assert note == "no-report"
 assert note != "reported"
 
 fraction, note = rr.provider_state(
-    {"reports": [{"provider": "google-antigravity", "limits": []}]},
-    "google-antigravity",
-    "google-antigravity/gemini-3.7-flash:high",
+    {"reports": [{"provider": "antigravity", "limits": []}]},
+    "antigravity",
+    "antigravity/gemini-3.8-flash:high",
 )
 assert fraction is None
 assert note == "no-report"
 
 roles, _ = rr.resolve(cfg, usage, today="2026-08-22")
 chosen = roles["foreman"]["chosen"]
-assert chosen["agent"] == "glm-flash-go"
+# Sol's scoped-away report refuses before the declared prepaid cheap-2.
+assert [row["agent"] for row in cfg["roles"]["foreman"]["chain"][:2]] == [
+    "sol", "cheap-2",
+]
+assert cfg["agents"]["cheap-2"]["metered"] == "prepaid"
+assert chosen["agent"] == "cheap-2"
 assert chosen["remaining"] is None
 assert chosen["note"] == "prepaid"
+assert (roles["foreman"]["refusals"][0]["agent"],
+        roles["foreman"]["refusals"][0]["reason"]) == ("sol", "no-report")
 print("unknown")
 PY
   assert_status 0
@@ -1170,31 +1281,58 @@ spec = importlib.util.spec_from_file_location("rr", resolver_path)
 rr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rr)
 cfg = json.load(open(roles_path))
-good = [sys.executable, "-c", "print('credential-value')"]
-for role in cfg["roles"].values():
+good = [sys.executable, "-c", "import os; assert not os.isatty(0); print('credential-value')"]
+bad = [sys.executable, "-c", "print('failed-credential'); raise SystemExit(1)"]
+# Leave meta and xai available to this panel rather than consuming their
+# families in earlier verdict roles. Every auth call is a local subprocess.
+for role_name, role in cfg["roles"].items():
     for candidate in role["chain"]:
-        if "auth_probe" in candidate:
-            candidate["auth_probe"] = good
-bad = [sys.executable, "-c", "raise SystemExit(1)"]
-flash = next(
+        candidate["auth_probe"] = (
+            bad if role_name in rr.VERDICT_ROLES - {"refuter"} else good
+        )
+gemini = next(
     candidate
     for candidate in cfg["roles"]["refuter"]["chain"]
-    if candidate["agent"] == "flash"
+    if candidate["agent"] == "gemini"
 )
-flash["auth_probe"] = bad
+gemini["auth_probe"] = bad
 usage = json.load(open(usage_path))
 roles, degraded = rr.resolve(cfg, usage, "luna", today="2026-08-22")
 refuter = roles["refuter"]
 assert refuter["required_seats"] == 3
+assert [seat["agent"] for seat in refuter["seats"]] == ["cheap", "grok"], "failed auth admitted or surviving seats lost"
 assert len(refuter["seats"]) < refuter["required_seats"]
+assert [(row["agent"], row["reason"]) for row in refuter["refusals"]] == [
+    ("gemini", "auth-probe-failed"),
+]
 assert "refuter" in degraded
 assert refuter["chosen"]["agent"] == refuter["seats"][0]["agent"]
+assert {cfg["agents"][seat["agent"]]["family"] for seat in refuter["seats"]} == {"meta", "xai"}
+assert rr.family_collapse(cfg, roles, "luna") == []
 assert all(
     seat["eligible"] and seat["reason"] == "eligible"
     for seat in refuter["seats"]
 )
+# Exercise the public receipt too: an incomplete panel cannot approve.
+import contextlib, io, os, tempfile
+with tempfile.TemporaryDirectory() as home:
+    rr.ROLES = os.path.join(home, "roles.json")
+    with open(rr.ROLES, "w") as policy:
+        json.dump(cfg, policy)
+    rr.OUT = os.path.join(home, "roles-resolved.json")
+    rr._load_selected_usage = lambda *args: (usage, "fixture")
+    sys.argv = [resolver_path, "--json"]
+    with contextlib.redirect_stdout(io.StringIO()) as captured:
+        rr.main()
+    receipt = json.loads(captured.getvalue())
+    assert receipt["approval_ready"] is False
+    assert "refuter" in receipt["degraded_verdict_roles"]
+    assert [seat["agent"] for seat in receipt["roles"]["refuter"]["seats"]] == ["cheap", "grok"]
+    assert not os.path.exists(rr.OUT)
 print("degraded")
 PY
   assert_status 0
   assert_output_contains 'degraded'
+  [[ "$output$stderr" != *"credential-value"* ]]
+  [[ "$output$stderr" != *"failed-credential"* ]]
 }

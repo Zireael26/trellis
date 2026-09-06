@@ -9,7 +9,7 @@
 # emits through `_se_emit_hook_context` instead of building the object inline.
 #
 # Contract:
-#   - Reads tool event JSON on stdin, extracts tool_input.file_path.
+#   - Normalizes the event and scans every declared existing mutation target.
 #   - Extension outside the anti-slop pattern set → exit 0 silently.
 #   - Carved-out path (test / generated / migration / vendored / lockfile) →
 #     exit 0 silently.
@@ -63,18 +63,31 @@ _se_require_jq "slop-tripwire"
 # shellcheck source=lib/slop-patterns.sh disable=SC1090
 . "$__st_lib_dir/slop-patterns.sh"
 
-FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty')
+__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || exit 0
+# shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
+. "$__ta_lib"
 
-if [ -z "$FILE_PATH" ]; then
-  exit 0
-fi
+NORMALIZED=$(_ta_normalize_action codex post_action "$INPUT") || exit 0
+[ "$(printf '%s' "$NORMALIZED" | jq -r '.action.family')" = "file_mutation" ] || exit 0
+[ "$(printf '%s' "$NORMALIZED" | jq -r '.result.status')" != "failed" ] || exit 0
+ACTION_CWD=$(printf '%s' "$NORMALIZED" | jq -r '.cwd // empty')
+[ -d "$ACTION_CWD" ] || ACTION_CWD="$(_se_project_dir)"
+
+MSG=""
+SHOWN=0
+TOTAL=0
+
+scan_target() {
+local FILE_PATH="$1" SLOP_LANG FILE_DIR FILE_BASE SLOP_REL_PATH PAIRS FINDINGS idx id lineno
 
 # Extension outside the pattern set: silence, no work.
-SLOP_LANG=$(slop_lang_for_path "$FILE_PATH") || exit 0
+SLOP_LANG=$(slop_lang_for_path "$FILE_PATH") || return 0
 
 FILE_DIR=$(dirname "$FILE_PATH")
 FILE_BASE=$(basename "$FILE_PATH")
-[ -d "$FILE_DIR" ] || exit 0
+[ -d "$FILE_DIR" ] || return 0
 
 # Carve-outs are matched against the REPO-RELATIVE path. The harness hands this
 # hook an absolute one, and the globs match a directory name anywhere in the
@@ -93,7 +106,7 @@ if __ST_PREFIX=$(git -C "$FILE_DIR" rev-parse --show-prefix 2>/dev/null); then
 else
   SLOP_REL_PATH="$FILE_PATH"
 fi
-slop_path_carved_out "$SLOP_REL_PATH" && exit 0
+slop_path_carved_out "$SLOP_REL_PATH" && return 0
 
 # __st_added_lines — prints "<new-file line number>\t<content>" for every added
 # line of the touched file, cheapest source first:
@@ -120,33 +133,45 @@ __st_added_lines() {
   fi
 }
 
-PAIRS=$(mktemp) || exit 0
-trap 'rm -f "$PAIRS"' EXIT
+PAIRS=$(mktemp) || return 0
 
 __st_added_lines > "$PAIRS"
-[ -s "$PAIRS" ] || exit 0
+[ -s "$PAIRS" ] || { rm -f "$PAIRS"; return 0; }
 
 # slop_scan_text is grep-like: status 1 means the added lines are clean.
-FINDINGS=$(cut -f2- "$PAIRS" | slop_scan_text "$SLOP_LANG") || exit 0
-[ -n "$FINDINGS" ] || exit 0
+FINDINGS=$(cut -f2- "$PAIRS" | slop_scan_text "$SLOP_LANG") || { rm -f "$PAIRS"; return 0; }
+[ -n "$FINDINGS" ] || { rm -f "$PAIRS"; return 0; }
 
-TOTAL=$(printf '%s\n' "$FINDINGS" | grep -c '^')
-MSG=""
-SHOWN=0
+TOTAL=$((TOTAL + $(printf '%s\n' "$FINDINGS" | grep -c '^')))
 # Findings carry their index into $PAIRS, not a file line — one sed per shown
 # finding (≤5) turns it back into the real line number.
 while IFS=$'\t' read -r idx id _; do
   [ -n "$idx" ] || continue
+  [ "$SHOWN" -lt 5 ] || continue
   lineno=$(sed -n "${idx}p" "$PAIRS" | cut -f1)
   MSG="${MSG}${MSG:+
 }slop-tripwire: ${id} at ${FILE_PATH}:${lineno}"
   SHOWN=$((SHOWN + 1))
   [ "$SHOWN" -ge 5 ] && break
 done < <(printf '%s\n' "$FINDINGS")
+rm -f "$PAIRS"
+}
+
+while IFS=$'\t' read -r OPERATION SOURCE_PATH DESTINATION; do
+  case "$OPERATION" in
+    delete) continue ;;
+    rename) TARGET_PATH="$DESTINATION" ;;
+    create|update) TARGET_PATH="$SOURCE_PATH" ;;
+    *) continue ;;
+  esac
+  FILE_PATH=$(_ta_resolve_path "$ACTION_CWD" "$TARGET_PATH") || continue
+  [ -f "$FILE_PATH" ] || continue
+  scan_target "$FILE_PATH"
+done < <(_ta_targets_tsv "$NORMALIZED")
 
 if [ "$TOTAL" -gt "$SHOWN" ]; then
   MSG="${MSG} (+$((TOTAL - SHOWN)) more)"
 fi
 
-_se_emit_hook_context "PostToolUse" "${MSG} — evidence doctrine: ${SLOP_DOCTRINE_REF}"
+[ -n "$MSG" ] && _se_emit_hook_context "PostToolUse" "${MSG} — evidence doctrine: ${SLOP_DOCTRINE_REF}"
 exit 0

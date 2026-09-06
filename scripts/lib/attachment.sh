@@ -96,8 +96,11 @@ _attachment_capture_current_pid() {
   esac
 }
 
+# Delegates to the canonical helper (scripts/lib/trellis-home.sh), which
+# attachment.sh already sources. Same token, same "any nonzero is
+# indeterminate" contract for every caller below.
 _attachment_process_birth() {
-  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null
+  trellis_process_birth "$1" 2>/dev/null
 }
 
 _attachment_symlink_matches() {
@@ -227,6 +230,12 @@ _attachment_no_symlink_components() {
   return 0
 }
 
+# Diagnostics for refusals that were previously a bare `return 3`. Always
+# stderr: every caller of these functions captures stdout.
+_attachment_diag() {
+  printf 'trellis: %s\n' "$1" >&2
+}
+
 _attachment_canonical_dir() {
   local value=$1 actual
   _attachment_no_symlink_components "$value" 0 || return 1
@@ -235,9 +244,39 @@ _attachment_canonical_dir() {
   [ "$actual" = "$value" ]
 }
 
+# Prints the first symlinked path prefix of an existing absolute path.
+# Returns 1 when no component is a symlink (or a component is missing — the
+# caller classifies missing entries separately).
+_attachment_toolchain_symlink_component() {
+  local value=$1 rest part current=/
+  rest="${value#/}"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) part="${rest%%/*}"; rest="${rest#*/}" ;;
+      *) part="$rest"; rest="" ;;
+    esac
+    [ -n "$part" ] || return 1
+    if [ "$current" = / ]; then current="/$part"; else current="$current/$part"; fi
+    if [ -L "$current" ]; then printf '%s\n' "$current"; return 0; fi
+    [ -e "$current" ] || return 1
+  done
+  return 1
+}
+
+# Resolves a caller PATH into the recorded toolchain array (stdout JSON).
+# Diagnostics go to stderr so command-substitution capture is unaffected:
+# missing directories are skipped with a warning (R3.3); unsafe entries
+# (empty, relative, controls, not-a-dir, symlink components, non-canonical)
+# refuse the whole PATH with the entry named (R3.2). When the brew anchor
+# exists as a canonical dir and the PATH carries nvm entries, the anchor is
+# normalized ahead of them (R6.2; anchor overridable for tests).
 _attachment_toolchain_path_resolve() {
-  local raw="${1-}" remaining entry actual resolved='[]' more
-  [ -n "$raw" ] || return 1
+  local raw="${1-}" remaining entry actual resolved='[]' more component
+  local anchor first_nvm anchor_index
+  if [ -z "$raw" ]; then
+    printf 'trellis: refusing PATH: empty PATH\n' >&2
+    return 1
+  fi
   remaining="$raw"
   while :; do
     more=0
@@ -245,16 +284,68 @@ _attachment_toolchain_path_resolve() {
       *:*) entry="${remaining%%:*}"; remaining="${remaining#*:}"; more=1 ;;
       *) entry="$remaining"; remaining="" ;;
     esac
-    [ -n "$entry" ] || return 1
-    case "$entry" in /*) ;; *) return 1 ;; esac
-    _attachment_has_controls "$entry" && return 1
-    [ -d "$entry" ] || return 1
-    actual="$(CDPATH='' cd "$entry" && pwd -P)" || return 1
-    _attachment_canonical_dir "$actual" || return 1
-    resolved="$(jq -cn --argjson resolved "$resolved" --arg entry "$actual" \
-      '$resolved + [$entry]')" || return 1
+    case "$entry" in
+      '') printf 'trellis: refusing PATH entry: empty entry\n' >&2; return 1 ;;
+      /*) ;;
+      *) printf 'trellis: refusing PATH entry '\''%s'\'': relative entry\n' "$entry" >&2; return 1 ;;
+    esac
+    if _attachment_has_controls "$entry"; then
+      printf 'trellis: refusing PATH entry '\''%s'\'': contains control characters\n' "$entry" >&2
+      return 1
+    fi
+    if [ ! -d "$entry" ]; then
+      # A missing entry -- and a symlink dangling at any component, which is
+      # the same thing -- contributes nothing to resolution, so it is skipped
+      # rather than fatal (R3.3). A real non-directory is still a refusal.
+      if [ ! -e "$entry" ]; then
+        printf 'trellis: skipping PATH entry '\''%s'\'': missing directory\n' "$entry" >&2
+      else
+        printf 'trellis: refusing PATH entry '\''%s'\'': not a directory\n' "$entry" >&2
+        return 1
+      fi
+    else
+      actual="$(CDPATH='' cd "$entry" && pwd -P 2>/dev/null)" || actual=""
+      if [ -z "$actual" ]; then
+        printf 'trellis: refusing PATH entry '\''%s'\'': unresolvable directory\n' "$entry" >&2
+        return 1
+      fi
+      # A symlinked or trailing-slash entry is CANONICALIZED, not refused: the
+      # stock macOS PATH ships /System/Cryptexes/App/usr/bin (line 2 of
+      # /etc/paths) whose /System/Cryptexes/App component is a symlink, and nvm
+      # ships ~/.nvm/default-node/bin. Refusing those refuses every normal
+      # interactive PATH, which is the very defect R3 set out to remove. What
+      # is recorded is the resolved path, so a later repoint of the link cannot
+      # change an already-captured toolchain.
+      if [ "$actual" != "$entry" ]; then
+        component="$(_attachment_toolchain_symlink_component "$entry" 2>/dev/null)" || component=""
+        [ -n "$component" ] || component="$entry"
+        printf 'trellis: canonicalizing PATH entry '\''%s'\'' to '\''%s'\'' (symlink component '\''%s'\'')\n' "$entry" "$actual" "$component" >&2
+      fi
+      _attachment_canonical_dir "$actual" || {
+        printf 'trellis: refusing PATH entry '\''%s'\'': resolved target is not canonical ('\''%s'\'')\n' "$entry" "$actual" >&2
+        return 1
+      }
+      resolved="$(jq -cn --argjson resolved "$resolved" --arg entry "$actual" \
+        '$resolved + [$entry]')" || return 1
+    fi
     [ "$more" -eq 1 ] || break
   done
+  if [ "$resolved" = '[]' ]; then
+    printf 'trellis: refusing PATH: no usable directory entries\n' >&2
+    return 1
+  fi
+  anchor="${TRELLIS_HOMEBREW_BIN:-/opt/homebrew/bin}"
+  if _attachment_canonical_dir "$anchor" 2>/dev/null; then
+    first_nvm="$(printf '%s\n' "$resolved" | jq -r '[to_entries[] | select(.value | test("(^|/)\\.nvm(/|$)")) | .key] | if length == 0 then empty else min end')" || first_nvm=""
+    if [ -n "$first_nvm" ]; then
+      anchor_index="$(printf '%s\n' "$resolved" | jq -r --arg anchor "$anchor" 'index($anchor) // empty')" || anchor_index=""
+      if [ -z "$anchor_index" ]; then
+        resolved="$(jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" '[$anchor] + $resolved')" || return 1
+      elif [ "$anchor_index" -gt "$first_nvm" ]; then
+        resolved="$(jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" --argjson first "$first_nvm" --argjson at "$anchor_index" '($resolved | del(.[$at])) | .[0:$first] + [$anchor] + .[$first:]')" || return 1
+      fi
+    fi
+  fi
   printf '%s\n' "$resolved"
 }
 
@@ -545,16 +636,186 @@ _attachment_hooks_file_matches() {
 }
 
 _attachment_hooks_has_only_state_files() {
-  local managed=$1 entry base count=0
+  local managed=$1 entry base core=0
   for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     base=${entry##*/}
     case "$base" in
-      post-checkout|pre-push|previous-hooks-path|release-payload|pre-push-source) count=$((count + 1)) ;;
-      *) return 1 ;;
+      post-checkout|pre-push|previous-hooks-path|release-payload|pre-push-source) core=$((core + 1)) ;;
+      *)
+        _attachment_hooks_is_passthrough_name "$base" || return 1
+        ;;
     esac
   done
-  [ "$count" -eq 5 ]
+  [ "$core" -eq 5 ]
+}
+
+# Standard git hook names Trellis passes through (see `man githooks`). Trellis
+# owns post-checkout and pre-push; every other executable hook under
+# previous-hooks-path gets a deterministic shim so project hooks (husky
+# pre-commit, commitlint commit-msg, ...) keep running while core.hooksPath
+# points at the managed dir.
+_attachment_hooks_is_passthrough_name() {
+  case "${1:-}" in
+    applypatch-msg|commit-msg|fsmonitor-watchman|p4-changelist|p4-post-changelist|p4-pre-submit|p4-prepare-changelist|post-applypatch|post-commit|post-index-change|post-merge|post-receive|post-rewrite|post-update|pre-applypatch|pre-auto-gc|pre-commit|pre-merge-commit|pre-rebase|pre-receive|prepare-commit-msg|proc-receive|push-to-checkout|reference-transaction|sendemail-validate|update) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Deterministic pass-through shim for one previous project hook. Mirrors the
+# prior-hook env-delegation contract (PR #358): the caller's PATH, HOME, and
+# TMPDIR are captured before any sanitization and restored for the delegated
+# hook via `env -i`. Trellis control-plane pins (fixed PATH, HOME=/dev/null,
+# GIT_CONFIG_* isolation, TRELLIS_* allowlist) are NOT applied to the project
+# hook. A missing or non-executable previous hook exits 0 so a removed project
+# hook never blocks the git operation.
+_attachment_hooks_passthrough_shim_body() {
+  local name=${1:-} body
+  _attachment_hooks_is_passthrough_name "$name" || return 1
+  body=$(cat <<'SHIM_EOF'
+#!/bin/sh
+# trellis-managed-passthrough: @TRELLIS_HOOK_NAME@
+caller_path=${PATH-}
+caller_home=${HOME-}
+caller_tmpdir=${TMPDIR-}
+shim_path=$0
+if [ "${shim_path#/}" = "$shim_path" ]; then
+  shim_path="$PWD/$shim_path"
+fi
+managed_dir=$(dirname "$shim_path") || exit 0
+managed_dir=$(CDPATH= cd "$managed_dir" && pwd -P) || exit 0
+previous=""
+if [ -f "$managed_dir/previous-hooks-path" ] && [ ! -L "$managed_dir/previous-hooks-path" ]; then
+  count=0
+  line=""
+  candidate=""
+  while IFS= read -r candidate || [ -n "$candidate" ]; do
+    count=$((count + 1))
+    [ "$count" -eq 1 ] || exit 0
+    line="$candidate"
+    candidate=""
+  done < "$managed_dir/previous-hooks-path"
+  [ "$count" -eq 1 ] || exit 0
+  previous="$line"
+fi
+[ -n "$previous" ] || exit 0
+if [ "${previous#/}" != "$previous" ]; then
+  prior_hook="$previous/@TRELLIS_HOOK_NAME@"
+else
+  project_root=$(CDPATH= cd . && pwd -P) || exit 0
+  prior_hook="$project_root/$previous/@TRELLIS_HOOK_NAME@"
+fi
+if [ -n "$prior_hook" ] && { [ -f "$prior_hook" ] || [ -L "$prior_hook" ]; } && [ -x "$prior_hook" ]; then
+  hook_argc=$#
+  line=""
+  git_name=""
+  hook_arg=""
+  hook_index=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      GIT_*=*@TRELLIS_RPAREN@ ;;
+      *@TRELLIS_RPAREN@ continue ;;
+    esac
+    git_name=${line%%=*}
+    case "$git_name" in
+      GIT_*@TRELLIS_RPAREN@ ;;
+      *@TRELLIS_RPAREN@ continue ;;
+    esac
+    case "$git_name" in
+      *[!A-Za-z0-9_]*@TRELLIS_RPAREN@ continue ;;
+    esac
+    set -- "$@" "$line"
+    line=""
+  done <<TRELLIS_GIT_ENV_EOF
+$(/usr/bin/env)
+TRELLIS_GIT_ENV_EOF
+  set -- "$@" "$prior_hook"
+  hook_index=0
+  while [ "$hook_index" -lt "$hook_argc" ]; do
+    hook_arg=$1
+    shift
+    set -- "$@" "$hook_arg"
+    hook_index=$((hook_index + 1))
+  done
+  exec /usr/bin/env -i PATH="$caller_path" HOME="$caller_home" TMPDIR="$caller_tmpdir" TMP="$caller_tmpdir" TEMP="$caller_tmpdir" LC_ALL=C "$@"
+fi
+exit 0
+SHIM_EOF
+) || return 1
+  body=${body//@TRELLIS_RPAREN@/)}
+  body=${body//@TRELLIS_HOOK_NAME@/$name}
+  printf '%s\n' "$body"
+}
+
+# Prints the pass-through shim names implied by the previous hooks dir, one per
+# line, sorted. Relative previous paths resolve against the checkout root. An
+# empty, missing, or unreadable previous dir yields no names; only executable
+# regular hooks are listed (git skips non-executable hooks anyway).
+_attachment_hooks_expected_passthrough_names() {
+  local root=${1:-} previous=${2:-} dir="" entry base
+  [ -n "$previous" ] || return 0
+  case "$previous" in
+    /*) dir="$previous" ;;
+    *)
+      [ -n "$root" ] || return 0
+      dir="$root/$previous"
+      ;;
+  esac
+  [ -d "$dir" ] || return 0
+  for entry in "$dir"/?* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base=${entry##*/}
+    _attachment_hooks_is_passthrough_name "$base" || continue
+    if { [ -f "$entry" ] || [ -L "$entry" ]; } && [ -x "$entry" ]; then
+      printf '%s\n' "$base"
+    fi
+  done | LC_ALL=C sort
+  return 0
+}
+
+# Every pass-through shim present in the managed dir carries deterministic
+# bytes and mode 700. Needs no checkout root: it validates content, not
+# completeness, so detach stays drift-tolerant.
+_attachment_hooks_present_shims_match() {
+  local managed=${1:-} entry base
+  for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base=${entry##*/}
+    case "$base" in
+      post-checkout|pre-push|previous-hooks-path|release-payload|pre-push-source) continue ;;
+    esac
+    _attachment_hooks_is_passthrough_name "$base" || return 3
+    _attachment_hooks_file_matches "$entry" "$(_attachment_hooks_passthrough_shim_body "$base")" 700 || return 3
+  done
+  return 0
+}
+
+# The managed dir holds exactly the shims implied by the previous hooks dir:
+# every expected shim present with deterministic bytes and mode 700, and no
+# shim beyond the expected set.
+_attachment_hooks_verify_passthrough_shims() {
+  local managed=${1:-} root=${2:-} previous=${3:-} expected="" name base entry nl wrapped
+  expected=$(_attachment_hooks_expected_passthrough_names "$root" "$previous") || return 3
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    _attachment_hooks_file_matches "$managed/$name" "$(_attachment_hooks_passthrough_shim_body "$name")" 700 || return 3
+  done <<<"$expected"
+  nl=$(printf '\nx')
+  nl=${nl%x}
+  wrapped="$nl$expected$nl"
+  for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base=${entry##*/}
+    case "$base" in
+      post-checkout|pre-push|previous-hooks-path|release-payload|pre-push-source) continue ;;
+    esac
+    _attachment_hooks_is_passthrough_name "$base" || return 3
+    case "$wrapped" in
+      *"$nl$base$nl"*) ;;
+      *) return 3 ;;
+    esac
+  done
+  return 0
 }
 
 _attachment_hooks_current_path() {
@@ -637,8 +898,62 @@ _attachment_hooks_authority() {
   fi
 }
 
+# This generator's OWN launcher, never the target payload's. The launcher lives
+# beside scripts/lib in the same release tree, so it is oid-verified by the same
+# gate that already lets a foreign generator be sourced. Ordinary sourcing sets
+# _ATTACHMENT_DIR; the preloaded-bundle route deliberately does not, and binds
+# TRELLIS_VERIFIED_PAYLOAD instead. Both spellings resolve to the running
+# implementation — the target payload is never a fallback, because an older
+# foreign release runs its own generator in a clean subprocess and must keep
+# emitting its own bytes.
+_attachment_launcher_source() {
+  local candidate="" directory=""
+  if [ -n "${_ATTACHMENT_DIR:-}" ]; then
+    case "$_ATTACHMENT_DIR" in
+      */scripts/lib) candidate="${_ATTACHMENT_DIR%/lib}/trellis-launcher.sh" ;;
+      *) return 1 ;;
+    esac
+  elif [ -n "${TRELLIS_VERIFIED_PAYLOAD:-}" ]; then
+    case "$TRELLIS_VERIFIED_PAYLOAD" in
+      /*/payload) candidate="$TRELLIS_VERIFIED_PAYLOAD/scripts/trellis-launcher.sh" ;;
+      *) return 1 ;;
+    esac
+  else
+    return 1
+  fi
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  directory="$(CDPATH='' cd "$(dirname "$candidate")" && pwd -P)" || return 1
+  printf '%s\n' "$directory/${candidate##*/}"
+}
+
+# Extract one complete, fixed-name shell function definition verbatim. Refuses
+# a missing, duplicated, truncated or empty definition, and refuses text that
+# does not parse, so a broken emitter can never reach a generated dispatcher.
+# See the EXTRACTION CONTRACT comment in scripts/trellis-launcher.sh.
+_attachment_extract_shell_function() {
+  local file=$1 name=$2 text=""
+  text="$(/usr/bin/awk -v open="$name() {" '
+    $0 == open { opens++; depth = 1 }
+    depth { print }
+    depth && $0 == "}" { depth = 0; closes++ }
+    END { if (opens != 1 || closes != 1 || depth) exit 1 }
+  ' "$file")" || return 1
+  [ -n "$text" ] || return 1
+  printf '%s\n' "$text" | /bin/bash --noprofile --norc -n || return 1
+  printf '%s\n' "$text"
+}
+
+_attachment_command_scratch_emitters() {
+  local launcher="" create="" remove=""
+  launcher="$(_attachment_launcher_source)" || return 1
+  create="$(_attachment_extract_shell_function "$launcher" launcher_command_scratch_create_program)" || return 1
+  remove="$(_attachment_extract_shell_function "$launcher" launcher_command_scratch_remove_program)" || return 1
+  printf '%s\n%s\n' "$create" "$remove"
+}
+
 _attachment_hooks_dispatcher_common_body() {
-  local payload=${1:-} source=${2:-} manifest_sha256=${3:-}
+  local payload=${1:-} source=${2:-} manifest_sha256=${3:-} emitters=""
+  emitters="$(_attachment_command_scratch_emitters)" || return 1
   cat <<'EOF'
 #!/bin/sh
 caller_path=${PATH-}
@@ -647,9 +962,6 @@ caller_tmpdir=${TMPDIR-}
 exec /usr/bin/env -i \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   HOME=/dev/null \
-  TMPDIR=/tmp \
-  TMP=/tmp \
-  TEMP=/tmp \
   LC_ALL=C \
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_CONFIG_GLOBAL=/dev/null \
@@ -672,15 +984,16 @@ eval "$body"
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 HOME=/dev/null
-TMPDIR=/tmp
-TMP=/tmp
-TEMP=/tmp
 LC_ALL=C
 GIT_CONFIG_NOSYSTEM=1
 GIT_CONFIG_GLOBAL=/dev/null
-export PATH HOME TMPDIR TMP TEMP LC_ALL GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+export PATH HOME LC_ALL GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
 export TRELLIS_ALLOW_MAIN_PUSH SECURITY_GATE_SKIP
-readonly PATH HOME TMPDIR TMP TEMP GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+readonly PATH HOME GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+# TMPDIR/TMP/TEMP are deliberately absent until the private command scratch
+# below exists: the outer env -i drops the caller's, and nothing here may
+# allocate a temporary — no here-document, no here-string, no mktemp — before
+# then, because Bash 3.2 spools a here-document through $TMPDIR.
 managed_dispatcher="${TRELLIS_MANAGED_DISPATCHER:?}"
 unset TRELLIS_MANAGED_DISPATCHER
 project_root="$(CDPATH= cd . && pwd -P)" || exit 1
@@ -688,6 +1001,107 @@ cd "$project_root" || exit 1
 managed_dir="$(CDPATH= cd "$(dirname "$managed_dispatcher")" && pwd -P)" || exit 1
 managed_home="$(CDPATH= cd "$managed_dir/../../.." && pwd -P)" || exit 1
 readonly project_root managed_dir managed_home
+# trellis-command-scratch-begin
+EOF
+  printf '%s\n' "$emitters"
+  cat <<'EOF'
+trellis_scratch=""
+trellis_scratch_root=""
+trellis_scratch_name=""
+trellis_scratch_identity=""
+trellis_scratch_root_identity=""
+
+# Mirrors launcher_derive_command_scratch: run the extracted allocator with an
+# isolated interpreter and keep the four recorded values in memory only. There
+# is no sidecar and no second allocator.
+trellis_derive_command_scratch() {
+  local home="$1" python_bin="" program="" record="" rest="" name=""
+  local scratch_identity="" root_identity=""
+  python_bin="$(command -v python3)" || {
+    printf 'trellis managed hook: python3 is required for the private command scratch directory\n' >&2
+    return 1
+  }
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  program="$(launcher_command_scratch_create_program)" || return 1
+  [ -n "$program" ] || return 1
+  record="$(LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return 1
+  case "$record" in
+    *$'\t'*$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  name="${record%%$'\t'*}"
+  rest="${record#*$'\t'}"
+  scratch_identity="${rest%%$'\t'*}"
+  root_identity="${rest#*$'\t'}"
+  case "$name" in .cmd.*) ;; *) return 1 ;; esac
+  case "${name#.cmd.}" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [[ "$scratch_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return 1
+  [[ "$root_identity" =~ ^[0123456789]+:[0123456789]+$ ]] || return 1
+  trellis_scratch_root="$home/state/scratch"
+  trellis_scratch_name="$name"
+  trellis_scratch_identity="$scratch_identity"
+  trellis_scratch_root_identity="$root_identity"
+  trellis_scratch="$trellis_scratch_root/$name"
+}
+
+# Remove exactly the recorded directory, or refuse and name what was retained.
+# Consumed state is cleared first, so the signal path and the EXIT trap that
+# follows it cannot both act on — or both complain about — the same directory.
+# Refusal returns nonzero. The EXIT handler promotes only an otherwise-green
+# command while preserving prior-hook, carrier and signal precedence.
+trellis_cleanup_command_scratch() {
+  local scratch="$trellis_scratch" root="$trellis_scratch_root"
+  local name="$trellis_scratch_name" identity="$trellis_scratch_identity"
+  local root_identity="$trellis_scratch_root_identity"
+  local python_bin="" program=""
+  trellis_scratch=""
+  trellis_scratch_root=""
+  trellis_scratch_name=""
+  trellis_scratch_identity=""
+  trellis_scratch_root_identity=""
+  [ -n "$scratch" ] || return 0
+  if ! python_bin="$(command -v python3)" ||
+    ! program="$(launcher_command_scratch_remove_program)" ||
+    ! LC_ALL=C "$python_bin" -I -c "$program" \
+      "$root" "$name" "$identity" "$root_identity"; then
+    printf 'trellis managed hook: could not clean command scratch directory: %s\n' \
+      "$scratch" >&2
+    return 1
+  fi
+  return 0
+}
+
+trellis_derive_command_scratch "$managed_home" || {
+  printf 'trellis managed hook: could not create a private command scratch directory under %s\n' \
+    "$managed_home" >&2
+  exit 1
+}
+trap 'trellis_exit_status=$?; trap - EXIT; if ! trellis_cleanup_command_scratch; then [ "$trellis_exit_status" -ne 0 ] || trellis_exit_status=1; fi; exit "$trellis_exit_status"' EXIT
+trap 'trellis_cleanup_command_scratch; exit 129' HUP
+trap 'trellis_cleanup_command_scratch; exit 130' INT
+trap 'trellis_cleanup_command_scratch; exit 143' TERM
+TMPDIR="$trellis_scratch"
+TMP="$TMPDIR"
+TEMP="$TMPDIR"
+export TMPDIR TMP TEMP
+readonly TMPDIR TMP TEMP
+# trellis-command-scratch-end
+# trellis-gate-xdg-begin
+# Writable XDG dirs for node toolchains (corepack/pnpm) under managed state,
+# never the real HOME. HOME stays /dev/null for hermeticity (spec 044 R6.1).
+gate_xdg_base="$managed_home/state/gate-xdg"
+gate_xdg_config="$gate_xdg_base/config"
+gate_xdg_cache="$gate_xdg_base/cache"
+gate_umask="$(umask)" || gate_umask=022
+umask 077
+mkdir -p "$gate_xdg_config" "$gate_xdg_cache" "$gate_xdg_cache/node/corepack" 2>/dev/null || true
+umask "$gate_umask"
+chmod 700 "$gate_xdg_base" "$gate_xdg_config" "$gate_xdg_cache" 2>/dev/null || true
+XDG_CONFIG_HOME="$gate_xdg_config"
+XDG_CACHE_HOME="$gate_xdg_cache"
+COREPACK_HOME="$gate_xdg_cache/node/corepack"
+export XDG_CONFIG_HOME XDG_CACHE_HOME COREPACK_HOME
+# trellis-gate-xdg-end
 EOF
   printf 'expected_payload=%q\n' "$payload"
   printf 'expected_pre_push_source=%q\n' "$source"
@@ -992,7 +1406,12 @@ trellis_verify_release() (
     case "$base" in release.json|payload) ;; *) return 1 ;; esac
   done
 
-  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/trellis-release-verify.XXXXXX")" || return 1
+  # Scratch belongs in this invocation's own private command scratch, never in
+  # ambient temp space and no longer beside the sealed release store: TMPDIR is
+  # the readonly directory allocated under the Trellis home above. The trap is
+  # subshell-local — this function is a ( ) body — so it stays independent of
+  # the command scratch cleanup armed for the dispatcher itself.
+  tmpdir="$(mktemp -d "$TMPDIR/verify.$version.XXXXXX")" || return 1
   trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
   manifest_paths="$tmpdir/manifest.paths"
   manifest_dirs="$tmpdir/manifest.dirs"
@@ -1112,12 +1531,15 @@ trellis_run_control_payload() {
   /usr/bin/env -i \
     PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HOME=/dev/null \
-    TMPDIR=/tmp \
-    TMP=/tmp \
-    TEMP=/tmp \
+    TMPDIR="$TMPDIR" \
+    TMP="$TMPDIR" \
+    TEMP="$TMPDIR" \
     LC_ALL=C \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
+    XDG_CONFIG_HOME="$gate_xdg_config" \
+    XDG_CACHE_HOME="$gate_xdg_cache" \
+    COREPACK_HOME="$gate_xdg_cache/node/corepack" \
     TRELLIS_HOME="$managed_home" \
     TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}" \
     SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}" \
@@ -1131,12 +1553,15 @@ trellis_run_gate_payload() {
   /usr/bin/env -i \
     PATH="$toolchain_path" \
     HOME=/dev/null \
-    TMPDIR=/tmp \
-    TMP=/tmp \
-    TEMP=/tmp \
+    TMPDIR="$TMPDIR" \
+    TMP="$TMPDIR" \
+    TEMP="$TMPDIR" \
     LC_ALL=C \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
+    XDG_CONFIG_HOME="$gate_xdg_config" \
+    XDG_CACHE_HOME="$gate_xdg_cache" \
+    COREPACK_HOME="$gate_xdg_cache/node/corepack" \
     TRELLIS_HOME="$managed_home" \
     TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}" \
     SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}" \
@@ -1224,6 +1649,9 @@ _attachment_hooks_dispatcher_body_from_payload() {
     LC_ALL=C \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME-}" \
+    XDG_CACHE_HOME="${XDG_CACHE_HOME-}" \
+    COREPACK_HOME="${COREPACK_HOME-}" \
     TRELLIS_LIBS_PRELOADED=1 \
     "TRELLIS_VERIFIED_PAYLOAD=$payload" \
     /bin/bash --noprofile --norc -c '
@@ -1243,7 +1671,8 @@ esac
 }
 
 _attachment_hooks_post_checkout_dispatcher_body_in_process() {
-  _attachment_hooks_dispatcher_common_body "${1:-}" "" "${2:-}"
+  # A failed common body must not be hidden by the successful cat that follows.
+  _attachment_hooks_dispatcher_common_body "${1:-}" "" "${2:-}" || return "$?"
   cat <<'EOF'
 previous="$(trellis_read_sidecar "$managed_dir/previous-hooks-path" true)" || exit 1
 prior_status=0
@@ -1276,11 +1705,14 @@ EOF
 }
 
 _attachment_hooks_pre_push_dispatcher_body_in_process() {
-  _attachment_hooks_dispatcher_common_body "${1:-}" "${2:-}" "${3:-}"
+  # A failed common body must not be hidden by the successful cat that follows.
+  _attachment_hooks_dispatcher_common_body "${1:-}" "${2:-}" "${3:-}" || return "$?"
   cat <<'EOF'
-refs_file="$(mktemp "${TMPDIR:-/tmp}/trellis-pre-push.XXXXXX")" || exit 1
-chmod 600 "$refs_file" || { rm -f "$refs_file"; exit 1; }
-trap 'rm -f "$refs_file"' EXIT
+# Refs staging lives in the private command scratch, which the EXIT trap armed
+# above removes wholesale. A refs-only EXIT trap here would replace that trap
+# and leak the scratch directory, so there is none.
+refs_file="$(mktemp "$TMPDIR/trellis-pre-push.XXXXXX")" || exit 1
+chmod 600 "$refs_file" || exit 1
 cat > "$refs_file" || exit 1
 previous="$(trellis_read_sidecar "$managed_dir/previous-hooks-path" true)" || exit 1
 prior_status=0
@@ -1318,7 +1750,7 @@ _attachment_hooks_pre_push_dispatcher_body() {
 }
 
 _attachment_hooks_state_owned_matches_data() {
-  local home=$1 owner=$2 checkout managed previous release payload source manifest stored
+  local home=$1 owner=$2 strict=${3:-true} checkout managed previous release payload source manifest stored root post_checkout pre_push
   checkout=$(printf '%s\n' "$owner" | jq -r '.checkout_id') || return 4
   managed=$(printf '%s\n' "$owner" | jq -r '.git_hooks.managed_hooks_path // empty') || return 4
   [ "$managed" = "$home/state/git-hooks/$checkout" ] || return 3
@@ -1345,8 +1777,20 @@ _attachment_hooks_state_owned_matches_data() {
   _attachment_mode_matches "$managed/previous-hooks-path" 600 || return 3
   _attachment_mode_matches "$managed/release-payload" 600 || return 3
   _attachment_mode_matches "$managed/pre-push-source" 600 || return 3
-  _attachment_hooks_file_matches "$managed/post-checkout" "$(_attachment_hooks_post_checkout_dispatcher_body "$payload" "$manifest")" 700 || return 3
-  _attachment_hooks_file_matches "$managed/pre-push" "$(_attachment_hooks_pre_push_dispatcher_body "$payload" "$source" "$manifest")" 700 || return 3
+  post_checkout="$(_attachment_hooks_post_checkout_dispatcher_body "$payload" "$manifest")" || return 3
+  pre_push="$(_attachment_hooks_pre_push_dispatcher_body "$payload" "$source" "$manifest")" || return 3
+  [ -n "$post_checkout" ] && [ -n "$pre_push" ] || return 3
+  _attachment_hooks_file_matches "$managed/post-checkout" "$post_checkout" 700 || return 3
+  _attachment_hooks_file_matches "$managed/pre-push" "$pre_push" 700 || return 3
+  case "$strict" in
+    true)
+      root=$(printf '%s\n' "$owner" | jq -r '.worktree_root') || return 4
+      _attachment_hooks_verify_passthrough_shims "$managed" "$root" "$previous" || return 3
+      ;;
+    *)
+      _attachment_hooks_present_shims_match "$managed" || return 3
+      ;;
+  esac
 }
 
 _attachment_hooks_state_owned_matches() {
@@ -2416,13 +2860,22 @@ _attachment_verify_owner_artifacts() {
   local owner=$1 expected_trellis_home="${2:-}" record root artifact render
   record=$(jq -c . "$owner") || return 3
   _attachment_contextual_render_context_record_valid "$record" "$expected_trellis_home" || return 3
+  # Before _attachment_validate_roots: that is the check that actually refuses a
+  # vanished worktree, and it does so with a bare 3 naming nothing.
+  root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || return 3
+  if [ ! -d "$root" ]; then
+    _attachment_diag "owner record names a worktree root that no longer exists: $root"
+    return 3
+  fi
   _attachment_validate_roots "$record" || return 3
   _attachment_validate_ids "$record" || return 3
   _attachment_render_pairings_valid "$record" || return 3
-  root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || return 3
   while IFS= read -r artifact; do
     _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || return 3
-    _attachment_artifact_exact "$root" "$artifact" || return 3
+    if ! _attachment_artifact_exact "$root" "$artifact"; then
+      _attachment_diag "owned artifact does not match its record: $(printf '%s\n' "$artifact" | jq -r '"\(.path) (recorded \(.kind))"') under $root"
+      return 3
+    fi
   done < <(printf '%s\n' "$record" | jq -c '
     . as $owner
     | (($owner.renders // []) | map(.path)) as $render_paths
@@ -3505,9 +3958,26 @@ _attachment_detach_journal_valid() {
     def transfer:
       type == "object" and exact(["after","expected","owner_path"])
       and (.owner_path | abs) and (.expected | type == "object") and (.after | type == "object");
+    def checkout:
+      type == "object" and exact(["root","git_common_dir","release","harnesses","worktrees"])
+      and (.root | abs) and (.git_common_dir | abs)
+      and (.release | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
+      and (.harnesses | type == "array" and length > 0
+        and all(.[]; . == "claude" or . == "codex" or . == "pi") and (unique | length) == length)
+      and (.worktrees | type == "object" and all(keys[]; sha)
+        and all(.[]; type == "object"
+          and (exact(["root"]) or exact(["root","attachment_id"]))
+          and (.root | abs) and (if has("attachment_id") then (.attachment_id | uuid) else true end)));
+    def registry_update:
+      type == "object" and exact(["expected","after"])
+      and (.expected | checkout) and (.after | checkout)
+      and (.expected | del(.harnesses)) == (.after | del(.harnesses))
+      and (.after.harnesses - .expected.harnesses | length) == 0
+      and (.expected.harnesses - .after.harnesses | length) > 0;
     def external:
       type == "object"
-      and exact(["clear_registry","exclude_action","phase","render_pending","render_phase","renders","restore_hooks","transfer"])
+      and ((del(.registry_update)) | exact(["clear_registry","exclude_action","phase","render_pending","render_phase","renders","restore_hooks","transfer"]))
+      and (if has("registry_update") then (.registry_update == null or (.registry_update | registry_update)) else true end)
       and (.phase | type == "number" and floor == . and . >= 0 and . <= 5)
       and (.transfer == null or (.transfer | transfer))
       and (.renders | type == "array" and all(.[]; rendered) and ((map(.path) | unique | length) == length))
@@ -3534,6 +4004,10 @@ _attachment_detach_journal_valid() {
   original=$(jq -c '.original_owner' "$file") || return 2
   _attachment_detach_owner_data_valid "$original" || return 2
   next=$(jq -c '.next_owner' "$file") || return 2
+  if [ "$next" != null ] && [ "$(jq -r '.external.registry_update == null' "$file")" = true ]; then
+    printf 'trellis attachment: legacy partial detach journal lacks a trusted registry snapshot\n' >&2
+    return 2
+  fi
   [ "$next" = null ] || _attachment_detach_owner_data_valid "$next" || return 2
   transfer=$(jq -c '.external.transfer' "$file") || return 2
   if [ "$transfer" != null ]; then
@@ -3555,8 +4029,26 @@ _attachment_detach_journal_valid() {
               | if $found == null then .ok = false else .cursor = ($found + 1) end
             else . end)
       | .ok;
+    def harness($path):
+      if ($path | startswith(".codex/")) then "codex"
+      elif ($path | startswith(".pi/")) then "pi"
+      elif ($path | startswith(".claude/")) then "claude"
+      elif $path == "AGENTS.md" or ($path | startswith(".agents/")) then "shared_agents"
+      else null end;
+    def harnesses($owner):
+      ($owner.artifacts + ($owner.pre_existing // [])) as $owned
+      | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
+      | [$owned[] | harness(.path)
+         | if . == "shared_agents" then (if $has_pi then empty else "codex" end)
+           elif . == null then empty else . end] | unique | sort;
+    def keep($path; $remaining):
+      harness($path) as $h
+      | ($h != null and ($remaining | index($h)) != null)
+        or ($h == "shared_agents" and any($remaining[]; . == "codex" or . == "pi"));
     . as $journal
     | .external as $external
+    | ($external.registry_update // null) as $update
+    | (if $next == null then [] else harnesses($next) end) as $remaining
     | (if $next == null then [] else $next.artifacts end) as $next_artifacts
     | (if $next == null then [] else ($next.renders // []) end) as $next_renders
     | ($external.renders | map(.path)) as $render_paths
@@ -3567,7 +4059,13 @@ _attachment_detach_journal_valid() {
     and ($journal.checkout_id == $original.checkout_id)
     and ($journal.worktree_id == $original.worktree_id)
     and (if $next == null then true
-         else ($next | del(.artifacts,.render_context,.renders)) == ($original | del(.artifacts,.render_context,.renders))
+         else ($next | del(.artifacts,.render_context,.renders,.pre_existing)) == ($original | del(.artifacts,.render_context,.renders,.pre_existing))
+           and ($next | has("pre_existing")) == ($original | has("pre_existing"))
+           and ($next.pre_existing // []) == [($original.pre_existing // [])[] | select(keep(.path; $remaining))]
+           and [$next_artifacts[] | select(.kind != "parent")]
+             == [$original.artifacts[] | select(.kind != "parent")
+                 | select(.path == ".trellis/runtime" or keep(.path; $remaining))]
+           and $next_renders == [($original.renders // [])[] | select(keep(.path; $remaining))]
            and (if any($next_renders[]; .path == ".claude/settings.local.json" or .path == ".codex/hooks.json")
                 then $next.render_context == $original.render_context
                 else ($next.render_context // null) == null
@@ -3630,6 +4128,15 @@ _attachment_detach_journal_valid() {
     and (if $external.exclude_action == "none" then $external.transfer == null else true end)
     and (if $external.restore_hooks then $original.git_hooks.enabled == true else true end)
     and ($external.clear_registry == ($next == null))
+    and (if $next == null then $update == null
+         else $update != null and $external.exclude_action == "none" and $external.restore_hooks == false
+           and ($update.expected.harnesses | sort) == harnesses($original)
+           and ($update.after.harnesses | sort) == $remaining
+           and $update.expected.release == $original.release
+           and $update.expected.git_common_dir == $original.exclude.git_common_dir
+           and ([$update.expected.worktrees | to_entries[] | select(.value | has("attachment_id"))]
+             == [{key:$original.worktree_id,value:{root:$original.worktree_root,attachment_id:$original.attachment_id}}])
+         end)
     and (if $external.transfer == null then true
          else $external.transfer.expected.fleet == $original.fleet
            and $external.transfer.expected.project_id == $original.project_id

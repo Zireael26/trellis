@@ -2,7 +2,7 @@
 
 Evidence-doctrine pattern set for Java projects: casts that assert a type without
 proving it, annotations that claim safety without supplying it, boundaries that widen
-to `Object` and narrow again. Doctrine lives in `references/anti-slop.md`.
+to `Object` and narrow again. Doctrine lives in `core-rules/references/anti-slop.md`.
 
 **Live, pattern-layer only.** Unlike Go and Rust — whose profiles ship dormant — this
 one is live and counted: `SLOP_LANGS` includes `java`, and `audit-slop.sh` /
@@ -10,7 +10,7 @@ one is live and counted: `SLOP_LANGS` includes `java`, and `audit-slop.sh` /
 
 | File | Owns | Lane |
 |---|---|---|
-| rows in `hooks/lib/slop-patterns.sh` (`java)` case) | every pattern | `slop-tripwire` (turn-time), `audit-slop.sh` (repo), `check-slop.sh` (diff) |
+| rows in `core-rules/hooks/lib/slop-patterns.sh` (`java)` case) | every pattern | `slop-tripwire` (turn-time), `audit-slop.sh` (repo), `check-slop.sh` (diff) |
 | `fixtures/{red,green}.java` | the profile's self-test | § Self-test |
 
 ## Why no native engine

@@ -22,6 +22,9 @@ prepare_managed_home() {
   local fake_dispatcher="$fake_managed_dir/pre-push"
   mkdir -p "$fake_managed_dir"
   mkdir -p "$ROOT/managed_home"
+  # The embedded command scratch allocator validates the Trellis home and its
+  # state directory as private before it will allocate anything.
+  chmod 700 "$ROOT/managed_home" "$ROOT/managed_home/state"
   : > "$fake_dispatcher"
   export TRELLIS_MANAGED_DISPATCHER="$fake_dispatcher"
   eval "$BODY"
@@ -196,6 +199,7 @@ prepare_path_stage_fixture() {
   PATH_POST_DISPATCHER="$managed/post-checkout"
   PATH_PRE_DISPATCHER="$managed/pre-push"
   mkdir -p "$managed" "$(dirname "$owner")"
+  chmod 700 "$managed_home" "$managed_home/state"
 
   cat > "$PATH_RECORDED_B/trellis-fixture-path-tool" <<'SH'
 #!/bin/sh
@@ -446,6 +450,7 @@ SH
     fake_managed_dir="$ROOT/managed_home/state/git-hooks/test-id"
     fake_dispatcher="$fake_managed_dir/pre-push"
     mkdir -p "$fake_managed_dir"
+    chmod 700 "$ROOT/managed_home" "$ROOT/managed_home/state"
     : > "$fake_dispatcher"
     export TRELLIS_MANAGED_DISPATCHER="$fake_dispatcher"
     export HOME=/tmp/hostile
@@ -588,4 +593,414 @@ EOS
     printf '%s\n' "$output"
     false
   fi
+}
+
+# --- private command scratch -------------------------------------------------
+#
+# The managed dispatcher allocates its own mode-0700 scratch under
+# <managed_home>/state/scratch and points TMPDIR/TMP/TEMP at it, using the
+# allocator extracted verbatim from scripts/trellis-launcher.sh at generation
+# time. These cases pin the extraction parity, the allocation locations, the
+# refusal paths and the exit precedence.
+
+extract_shell_function() {
+  /usr/bin/awk -v open="$2() {" '
+    $0 == open { opens++; depth = 1 }
+    depth { print }
+    depth && $0 == "}" { depth = 0; closes++ }
+    END { if (opens != 1 || closes != 1 || depth) exit 1 }
+  ' "$1"
+}
+
+# A payload-shaped copy of the running generator and its sibling launcher, so
+# the preloaded-bundle generation context can be exercised without attaching.
+prepare_fake_payload() {
+  local root="$ROOT/$1"
+  FAKE_PAYLOAD="$root/payload"
+  mkdir -p "$FAKE_PAYLOAD/scripts/lib"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
+  cp "$REPO_ROOT/scripts/lib/attachment.sh" "$FAKE_PAYLOAD/scripts/lib/attachment.sh"
+}
+
+generate_in_preloaded_context() {
+  env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    HOME=/dev/null \
+    LC_ALL=C \
+    TRELLIS_LIBS_PRELOADED=1 \
+    "TRELLIS_VERIFIED_PAYLOAD=$FAKE_PAYLOAD" \
+    /bin/bash --noprofile --norc -c '
+      set -u
+      . "$1" || exit 1
+      "$2" "$3" core-rules/githooks/pre-push \
+        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    ' preloaded-generation \
+    "$FAKE_PAYLOAD/scripts/lib/attachment.sh" "$1" "$FAKE_PAYLOAD"
+}
+
+# A full pre-push/post-checkout fixture whose carrier, control payload and prior
+# hook all report the environment they actually received.
+prepare_scratch_fixture() {
+  local carrier_body="${SCRATCH_CARRIER_BODY:-exit 0}" prior_exit="${SCRATCH_PRIOR_EXIT:-0}"
+  local managed_home="$ROOT/scratch-managed-home"
+  local release="$managed_home/releases/1.2.3"
+  local payload="$release/payload"
+  local prior_hooks="$ROOT/scratch-prior-hooks"
+  local managed common checkout worktree owner carrier seed carrier_oid seed_oid manifest
+
+  SCRATCH_MANAGED_HOME="$managed_home"
+  SCRATCH_RELEASES="$managed_home/releases"
+  SCRATCH_ROOT_DIR="$managed_home/state/scratch"
+  SCRATCH_PROJECT="$ROOT/scratch-project"
+  SCRATCH_REFS="$ROOT/scratch-refs"
+  SCRATCH_CALLER_HOME="$ROOT/scratch-caller-home"
+  SCRATCH_CALLER_TMP="$ROOT/scratch-caller-tmp"
+  SCRATCH_WITNESS="$ROOT/scratch-witness"
+
+  mkdir -p "$payload/core-rules/githooks" "$payload/scripts" "$prior_hooks" \
+    "$SCRATCH_PROJECT" "$SCRATCH_CALLER_HOME" "$SCRATCH_CALLER_TMP" "$SCRATCH_WITNESS"
+  git init -q "$SCRATCH_PROJECT"
+  common="$(git -C "$SCRATCH_PROJECT" rev-parse --git-common-dir)" || return 1
+  case "$common" in /*) ;; *) common="$SCRATCH_PROJECT/$common" ;; esac
+  common="$(CDPATH= cd "$common" && pwd -P)" || return 1
+  checkout="$(_attachment_hash_text "$common")" || return 1
+  worktree="$(_attachment_hash_text "$SCRATCH_PROJECT")" || return 1
+  managed="$managed_home/state/git-hooks/$checkout"
+  owner="$managed_home/state/attachments/$checkout/$worktree.json"
+  SCRATCH_PRE_DISPATCHER="$managed/pre-push"
+  SCRATCH_POST_DISPATCHER="$managed/post-checkout"
+  mkdir -p "$managed" "$(dirname "$owner")"
+  chmod 700 "$managed_home" "$managed_home/state"
+
+  cat > "$prior_hooks/pre-push" <<PRIOR
+#!/bin/bash
+{
+  printf 'PRIOR_TMPDIR=%s\n' "\${TMPDIR-__UNSET__}"
+  printf 'PRIOR_TMP=%s\n' "\${TMP-__UNSET__}"
+  printf 'PRIOR_TEMP=%s\n' "\${TEMP-__UNSET__}"
+  printf 'PRIOR_HOME=%s\n' "\${HOME-__UNSET__}"
+  printf 'PRIOR_PATH=%s\n' "\${PATH-__UNSET__}"
+} > "$SCRATCH_WITNESS/prior.txt"
+exit $prior_exit
+PRIOR
+  chmod 700 "$prior_hooks/pre-push"
+
+  carrier="$payload/core-rules/githooks/pre-push"
+  cat > "$carrier" <<CARRIER
+#!/bin/bash
+set -u
+{
+  printf 'CARRIER_TMPDIR=%s\n' "\${TMPDIR-__UNSET__}"
+  printf 'CARRIER_TMP=%s\n' "\${TMP-__UNSET__}"
+  printf 'CARRIER_TEMP=%s\n' "\${TEMP-__UNSET__}"
+  allocation="\$(mktemp "\$TMPDIR/carrier.XXXXXX")" && printf 'CARRIER_ALLOCATION=%s\n' "\$allocation"
+} > "$SCRATCH_WITNESS/carrier.txt"
+$carrier_body
+CARRIER
+  seed="$payload/scripts/seed-inheritance-symlinks.sh"
+  cat > "$seed" <<CONTROL
+#!/bin/bash
+set -u
+{
+  printf 'CONTROL_TMPDIR=%s\n' "\${TMPDIR-__UNSET__}"
+  allocation="\$(mktemp "\$TMPDIR/control.XXXXXX")" && printf 'CONTROL_ALLOCATION=%s\n' "\$allocation"
+} > "$SCRATCH_WITNESS/control.txt"
+exit 0
+CONTROL
+  chmod 700 "$carrier" "$seed"
+  carrier_oid="$(git hash-object "$carrier")" || return 1
+  seed_oid="$(git hash-object "$seed")" || return 1
+  jq -n --arg carrier_oid "$carrier_oid" --arg seed_oid "$seed_oid" '
+    {
+      schema_version:1, version:"1.2.3", tag:"v1.2.3",
+      commit:"0000000000000000000000000000000000000000", remote:"fixture",
+      tree:[
+        {path:"core-rules/githooks/pre-push",mode:"100755",oid:$carrier_oid},
+        {path:"scripts/seed-inheritance-symlinks.sh",mode:"100755",oid:$seed_oid}
+      ]
+    }' > "$release/release.json"
+  chmod 600 "$release/release.json"
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
+
+  printf '%s\n' "$(_attachment_hooks_pre_push_dispatcher_body \
+    "$payload" "core-rules/githooks/pre-push" "$manifest")" > "$SCRATCH_PRE_DISPATCHER"
+  printf '%s\n' "$(_attachment_hooks_post_checkout_dispatcher_body \
+    "$payload" "$manifest")" > "$SCRATCH_POST_DISPATCHER"
+  printf '%s\n' "$prior_hooks" > "$managed/previous-hooks-path"
+  printf '%s\n' "$payload" > "$managed/release-payload"
+  printf '%s\n' 'core-rules/githooks/pre-push' > "$managed/pre-push-source"
+  chmod 700 "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_POST_DISPATCHER"
+  chmod 600 "$managed/previous-hooks-path" "$managed/release-payload" "$managed/pre-push-source"
+
+  jq -n \
+    --arg checkout "$checkout" --arg worktree "$worktree" \
+    --arg root "$SCRATCH_PROJECT" --arg payload "$payload" \
+    --arg managed "$managed" --arg prior "$prior_hooks" '
+    {
+      schema_version:1, status:"committed", fleet:"personal",
+      project_id:"scratch-fixture", checkout_id:$checkout, worktree_id:$worktree,
+      attachment_id:"00000000-0000-0000-0000-000000000003",
+      project_root:$root, worktree_root:$root, release:"1.2.3",
+      toolchain_path:["/usr/bin","/bin"],
+      artifacts:[{path:".trellis/runtime",kind:"symlink",target:$payload}],
+      git_hooks:{
+        enabled:true, managed_hooks_path:$managed, previous_hooks_path:$prior,
+        pre_push_source:"core-rules/githooks/pre-push"
+      }
+    }' > "$owner"
+  chmod 600 "$owner"
+  _attachment_owner_json_valid "$owner" || return 1
+  chmod 400 "$release/release.json"
+  find "$payload" -type f -exec chmod 500 {} \;
+  find "$payload" -type d -exec chmod 500 {} \;
+  chmod 500 "$release"
+  printf '%s\n' 'refs/heads/main deadbeef refs/heads/main abcdef' > "$SCRATCH_REFS"
+}
+
+run_scratch_pre_push() {
+  run env \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "HOME=$SCRATCH_CALLER_HOME" \
+    "TMPDIR=${1:-$SCRATCH_CALLER_TMP}" \
+    "TMP=${1:-$SCRATCH_CALLER_TMP}" \
+    "TEMP=${1:-$SCRATCH_CALLER_TMP}" \
+    /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$SCRATCH_PROJECT" "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_REFS"
+}
+
+@test "generated dispatcher embeds the launcher command scratch emitters byte-exactly" {
+  printf '%s\n' "$DISPATCHER_TEXT" > "$ROOT/body.txt"
+  for name in launcher_command_scratch_create_program launcher_command_scratch_remove_program; do
+    extract_shell_function "$REPO_ROOT/scripts/trellis-launcher.sh" "$name" > "$ROOT/$name.launcher"
+    extract_shell_function "$ROOT/body.txt" "$name" > "$ROOT/$name.body"
+    [ -s "$ROOT/$name.launcher" ] || { echo "empty launcher extraction: $name"; false; }
+    [ -s "$ROOT/$name.body" ] || { echo "empty dispatcher extraction: $name"; false; }
+    diff -u "$ROOT/$name.launcher" "$ROOT/$name.body" || false
+  done
+  # The dispatcher must call them, not merely carry them.
+  printf '%s\n' "$DISPATCHER_TEXT" | grep -F '$(launcher_command_scratch_create_program)' >/dev/null
+  printf '%s\n' "$DISPATCHER_TEXT" | grep -F '$(launcher_command_scratch_remove_program)' >/dev/null
+}
+
+@test "generated bootstrap leaves temp variables absent until private scratch exists" {
+  clean_bootstrap="$(printf '%s\n' "$DISPATCHER_TEXT" | sed -n '1,/^# trellis-command-scratch-begin$/p')"
+  printf '%s\n' "$clean_bootstrap" | grep -Fx '# trellis-command-scratch-begin' >/dev/null
+  if printf '%s\n' "$clean_bootstrap" | grep -E '^[[:space:]]*(TMPDIR|TMP|TEMP)=' >/dev/null; then
+    echo 'generated clean bootstrap assigned a temp variable before private scratch allocation'
+    printf '%s\n' "$clean_bootstrap"
+    false
+  fi
+}
+
+@test "generated verifier allocates only through readonly private TMPDIR" {
+  readonly_count="$(printf '%s\n' "$BODY" | grep -Fxc 'readonly TMPDIR TMP TEMP' || true)"
+  verifier_count="$(printf '%s\n' "$BODY" | grep -Fxc '  tmpdir="$(mktemp -d "$TMPDIR/verify.$version.XXXXXX")" || return 1' || true)"
+  [ "$readonly_count" -eq 1 ] || { echo "readonly TMPDIR declaration count=$readonly_count"; false; }
+  [ "$verifier_count" -eq 1 ] || { echo "private verifier template count=$verifier_count"; false; }
+}
+
+@test "generated pre-push refs allocate only through readonly private TMPDIR" {
+  readonly_count="$(printf '%s\n' "$PRE_PUSH_TEXT" | grep -Fxc 'readonly TMPDIR TMP TEMP' || true)"
+  refs_count="$(printf '%s\n' "$PRE_PUSH_TEXT" | grep -Fxc 'refs_file="$(mktemp "$TMPDIR/trellis-pre-push.XXXXXX")" || exit 1' || true)"
+  [ "$readonly_count" -eq 1 ] || { echo "readonly TMPDIR declaration count=$readonly_count"; false; }
+  [ "$refs_count" -eq 1 ] || { echo "private refs template count=$refs_count"; false; }
+}
+
+@test "preloaded generation context embeds the same emitters as ordinary sourcing" {
+  prepare_fake_payload preloaded-ok
+  run generate_in_preloaded_context _attachment_hooks_dispatcher_common_body
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" > "$ROOT/preloaded-body.txt"
+  for name in launcher_command_scratch_create_program launcher_command_scratch_remove_program; do
+    extract_shell_function "$REPO_ROOT/scripts/trellis-launcher.sh" "$name" > "$ROOT/$name.launcher"
+    extract_shell_function "$ROOT/preloaded-body.txt" "$name" > "$ROOT/$name.preloaded"
+    [ -s "$ROOT/$name.preloaded" ] || { echo "empty preloaded extraction: $name"; false; }
+    diff -u "$ROOT/$name.launcher" "$ROOT/$name.preloaded" || false
+  done
+}
+
+@test "a launcher missing an emitter refuses generation in both wrapper functions" {
+  prepare_fake_payload preloaded-broken
+  chmod u+w "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
+  python3 - "$FAKE_PAYLOAD/scripts/trellis-launcher.sh" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+start = text.index("launcher_command_scratch_remove_program() {")
+end = text.index("\n}\n", start) + len("\n}\n")
+open(path, "w").write(text[:start] + text[end:])
+PY
+  ! grep -q '^launcher_command_scratch_remove_program() {$' "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
+  grep -q '^launcher_command_scratch_create_program() {$' "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
+  for entry in _attachment_hooks_dispatcher_common_body \
+    _attachment_hooks_pre_push_dispatcher_body_in_process \
+    _attachment_hooks_post_checkout_dispatcher_body_in_process; do
+    run generate_in_preloaded_context "$entry"
+    [ "$status" -ne 0 ] || { echo "generation unexpectedly succeeded: $entry"; printf '%s\n' "$output"; false; }
+    [ -z "$output" ] || { echo "refusal still emitted a dispatcher body: $entry"; printf '%s\n' "$output"; false; }
+  done
+}
+
+@test "managed execution ignores a hostile ambient TMPDIR and allocates under the private scratch" {
+  SCRATCH_CARRIER_BODY='exit 0' prepare_scratch_fixture
+  run_scratch_pre_push /nonexistent/hostile-tmpdir
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+
+  carrier_tmpdir="$(sed -n 's/^CARRIER_TMPDIR=//p' "$SCRATCH_WITNESS/carrier.txt")"
+  carrier_alloc="$(sed -n 's/^CARRIER_ALLOCATION=//p' "$SCRATCH_WITNESS/carrier.txt")"
+  [ -n "$carrier_tmpdir" ] || { cat "$SCRATCH_WITNESS/carrier.txt"; false; }
+  case "$carrier_tmpdir" in
+    "$SCRATCH_ROOT_DIR"/.cmd.*) ;;
+    *) echo "carrier TMPDIR outside the private scratch: $carrier_tmpdir"; false ;;
+  esac
+  grep -Fx "CARRIER_TMP=$carrier_tmpdir" "$SCRATCH_WITNESS/carrier.txt" >/dev/null
+  grep -Fx "CARRIER_TEMP=$carrier_tmpdir" "$SCRATCH_WITNESS/carrier.txt" >/dev/null
+  case "$carrier_alloc" in
+    "$carrier_tmpdir"/carrier.*) ;;
+    *) echo "carrier allocation outside the private scratch: $carrier_alloc"; false ;;
+  esac
+
+  # The prior hook keeps its original ambient environment, hostile TMPDIR included.
+  grep -Fx "PRIOR_TMPDIR=/nonexistent/hostile-tmpdir" "$SCRATCH_WITNESS/prior.txt" >/dev/null
+  grep -Fx "PRIOR_TMP=/nonexistent/hostile-tmpdir" "$SCRATCH_WITNESS/prior.txt" >/dev/null
+  grep -Fx "PRIOR_HOME=$SCRATCH_CALLER_HOME" "$SCRATCH_WITNESS/prior.txt" >/dev/null
+
+  # Nothing was staged beside the sealed release store, and the scratch is gone.
+  found="$(find "$SCRATCH_RELEASES" -maxdepth 1 -name '.tmp.*' -print)"
+  [ -z "$found" ] || { echo "release-adjacent verifier scratch survived: $found"; false; }
+  [ -d "$SCRATCH_ROOT_DIR" ] || { echo "private scratch root was not created"; false; }
+  leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
+  [ ! -e "$carrier_alloc" ] || { echo "carrier allocation survived cleanup"; false; }
+}
+
+@test "control-plane stage receives the private scratch as TMPDIR" {
+  SCRATCH_CARRIER_BODY='exit 0' prepare_scratch_fixture
+  run env \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "HOME=$SCRATCH_CALLER_HOME" \
+    "TMPDIR=/nonexistent/hostile-tmpdir" \
+    /bin/bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$SCRATCH_PROJECT" "$SCRATCH_POST_DISPATCHER"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  control_tmpdir="$(sed -n 's/^CONTROL_TMPDIR=//p' "$SCRATCH_WITNESS/control.txt")"
+  case "$control_tmpdir" in
+    "$SCRATCH_ROOT_DIR"/.cmd.*) ;;
+    *) echo "control TMPDIR outside the private scratch: $control_tmpdir"; cat "$SCRATCH_WITNESS/control.txt"; false ;;
+  esac
+  leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
+}
+
+@test "prior hook failure still wins over a green carrier and the scratch is cleaned" {
+  SCRATCH_PRIOR_EXIT=3 SCRATCH_CARRIER_BODY='exit 0' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 3 ] || { echo "status=$status"; printf '%s\n' "$output"; false; }
+  [ -f "$SCRATCH_WITNESS/carrier.txt" ] || { echo "carrier did not run"; false; }
+  leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
+}
+
+@test "carrier failure propagates and the scratch is cleaned" {
+  SCRATCH_CARRIER_BODY='exit 9' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 9 ] || { echo "status=$status"; printf '%s\n' "$output"; false; }
+  leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
+}
+
+@test "SIGTERM cleans the scratch and exits 143" {
+  SCRATCH_CARRIER_BODY='kill -TERM "$PPID"
+exit 0' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 143 ] || { echo "status=$status"; printf '%s\n' "$output"; false; }
+  leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
+}
+
+@test "a replaced scratch refuses cleanup, names the retained path and keeps the neighbour" {
+  SCRATCH_CARRIER_BODY='scratch_root="$(dirname "$TMPDIR")"
+mkdir -p "$scratch_root/neighbour-witness"
+rm -rf "$TMPDIR"
+mkdir "$TMPDIR"
+: > "$TMPDIR/replacement-witness"
+exit 7' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 7 ] || { echo "status=$status"; printf '%s\n' "$output"; false; }
+  carrier_tmpdir="$(sed -n 's/^CARRIER_TMPDIR=//p' "$SCRATCH_WITNESS/carrier.txt")"
+  printf '%s\n' "$output" | grep -F "could not clean command scratch directory: $carrier_tmpdir" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  [ -f "$carrier_tmpdir/replacement-witness" ] || { echo "replacement was destroyed"; false; }
+  [ -d "$SCRATCH_ROOT_DIR/neighbour-witness" ] || { echo "neighbour was destroyed"; false; }
+}
+
+@test "a replaced scratch makes a green carrier fail while retaining replacement and neighbour" {
+  SCRATCH_CARRIER_BODY='scratch_root="$(dirname "$TMPDIR")"
+mkdir -p "$scratch_root/neighbour-witness"
+rm -rf "$TMPDIR"
+mkdir "$TMPDIR"
+: > "$TMPDIR/replacement-witness"
+exit 0' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -ne 0 ] || { echo "status=$status"; printf '%s\n' "$output"; false; }
+  carrier_tmpdir="$(sed -n 's/^CARRIER_TMPDIR=//p' "$SCRATCH_WITNESS/carrier.txt")"
+  printf '%s\n' "$output" | grep -F "could not clean command scratch directory: $carrier_tmpdir" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  [ -f "$carrier_tmpdir/replacement-witness" ] || { echo "replacement was destroyed"; false; }
+  [ -d "$SCRATCH_ROOT_DIR/neighbour-witness" ] || { echo "neighbour was destroyed"; false; }
+}
+
+@test "an unsafe managed home mode refuses before the managed payload runs" {
+  SCRATCH_CARRIER_BODY='exit 0' prepare_scratch_fixture
+  chmod 755 "$SCRATCH_MANAGED_HOME"
+  run_scratch_pre_push
+  [ "$status" -ne 0 ]
+  [ ! -f "$SCRATCH_WITNESS/carrier.txt" ] || { echo "carrier ran despite an unsafe managed home"; false; }
+  printf '%s\n' "$output" | grep -F "private command scratch directory" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  [ ! -d "$SCRATCH_ROOT_DIR" ] || { echo "scratch root created under an unsafe home"; false; }
+}
+
+@test "a symlinked scratch root refuses before the managed payload runs" {
+  SCRATCH_CARRIER_BODY='exit 0' prepare_scratch_fixture
+  mkdir -p "$ROOT/scratch-symlink-target"
+  ln -s "$ROOT/scratch-symlink-target" "$SCRATCH_ROOT_DIR"
+  run_scratch_pre_push
+  [ "$status" -ne 0 ]
+  [ ! -f "$SCRATCH_WITNESS/carrier.txt" ] || { echo "carrier ran despite a symlinked scratch root"; false; }
+  leftovers="$(find "$ROOT/scratch-symlink-target" -mindepth 1 -print)"
+  [ -z "$leftovers" ] || { echo "allocation followed the symlink: $leftovers"; false; }
+}
+
+@test "an older foreign generator still emits its own scratch-less body" {
+  local root="$ROOT/foreign-old"
+  local payload="$root/payload"
+  mkdir -p "$payload/scripts/lib"
+  cat > "$payload/scripts/lib/attachment.sh" <<'OLD'
+#!/usr/bin/env bash
+_attachment_hooks_pre_push_dispatcher_body() {
+  printf 'OLD_FOREIGN_BODY payload=%s source=%s manifest=%s\n' "${1:-}" "${2:-}" "${3:-}"
+}
+_attachment_hooks_post_checkout_dispatcher_body() {
+  printf 'OLD_FOREIGN_BODY payload=%s manifest=%s\n' "${1:-}" "${2:-}"
+}
+OLD
+  run _attachment_hooks_pre_push_dispatcher_body "$payload" core-rules/githooks/pre-push "$MANIFEST"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F "OLD_FOREIGN_BODY payload=$payload" >/dev/null
+  if printf '%s\n' "$output" | grep -q "launcher_command_scratch_create_program"; then
+    echo "the new generator overwrote an older release's recorded policy"
+    printf '%s\n' "$output"
+    false
+  fi
+}
+
+@test "a provisional payload without a bundled generator uses the running implementation" {
+  local payload="$ROOT/provisional/payload"
+  mkdir -p "$payload"
+  [ ! -e "$payload/scripts/lib/attachment.sh" ]
+  run _attachment_hooks_pre_push_dispatcher_body "$payload" core-rules/githooks/pre-push "$MANIFEST"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F "launcher_command_scratch_create_program() {" >/dev/null
+  printf '%s\n' "$output" | grep -F "launcher_command_scratch_remove_program() {" >/dev/null
 }

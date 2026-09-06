@@ -1,6 +1,6 @@
 ---
 name: spec
-description: Turn a vague product or engineering request into a written feature specification with problem statement, success criteria, non-goals, and constraints. Use BEFORE writing any code when the request meets at least one of (a) three or more acceptance criteria, (b) touches more than two files of net-new behaviour, (c) is cross-cutting or load-bearing. Output is `specs/<NNN>-<slug>/spec.md` on a `feature/<slug>` branch. The skill never writes implementation code — that is the `plan` skill's job, downstream.
+description: Turn a vague product or engineering request into a written feature specification with problem statement, success criteria, non-goals, and constraints. Use BEFORE writing any code when the request meets at least one of (a) three or more acceptance criteria, (b) touches more than two files of net-new behaviour, (c) is cross-cutting or load-bearing. Output is `specs/<NNN>-<slug>/spec.md` on a `feature/<slug>` branch. The skill never writes implementation code — neither does `plan`; both produce documents, and `execute` is what implements.
 ---
 
 # spec
@@ -24,7 +24,7 @@ The spec is the load-bearing input to the `plan` skill (technical design) and th
 - Single-file additions where the design is one paragraph. Document inline; don't spawn a spec.
 - Operational tasks (add a script, bump a dep, update a config). The diff IS the spec.
 
-If you're unsure, ask the operator: "Should I spec this first or jump straight to implementation?" Don't unilaterally spawn a `specs/` directory.
+Where the call is genuinely close and the answer would change what gets built, ask: "Should I spec this first or jump straight to implementation?" Where the operator has already asked for a spec, or `mandatory_pipeline` settles it above the floor, that is the answer — proceed rather than re-asking. Don't unilaterally spawn a `specs/` directory for work nobody scoped as feature-scale.
 
 ## How to use
 
@@ -38,7 +38,7 @@ If you're unsure, ask the operator: "Should I spec this first or jump straight t
    - Copies `references/spec-template.md` to `specs/NNN-<slug>/spec.md`.
    - Prints the file path for the operator (or `$EDITOR` if set + interactive).
 3. **Fill in the template.** If `specs/<NNN>-<slug>/clarify.md` exists from a prior `clarify` invocation, read it first — operator's voice in clarify is the authoritative input to the spec; quote from it where helpful, don't drift from it. Sections, in order: Problem statement, Users + scenario, Success criteria (testable), Non-goals, Constraints, Open questions, Risks, Out of scope (intentional). At each status flip (DECIDED/SHIPPED), append/refresh a trailing `## Follow-ups` table (`# | priority | item | disposition | status`) per the follow-ups convention (core-rules/CLAUDE.md, Definition of done). The skill must complete every section; "TBD" is acceptable for items the operator cannot pin down yet, but the section header stays.
-4. **Stop after writing.** Do not start coding. Do not invoke the `plan` skill in the same turn unless the operator asks. The spec is reviewed before the plan begins.
+4. **Stop after writing — this skill's output is the spec, and only the spec.** Do not start coding; implementation is `execute`'s, several steps downstream. Whether the *turn* continues into `plan` is a separate question answered by the authorization already in force: review the spec you just wrote, then continue if the caller is authorized for the pipeline, or stop and hand back if they asked for the spec alone or for a review point here. What is never right is running on to `plan` with the spec unread, or halting an authorized pipeline to re-ask for permission already given.
 
 ## Remediation — adding a spec to work already in progress
 
@@ -64,7 +64,7 @@ That's the entire deliverable for this skill. Implementation, schema, file layou
 - **Problem statement first, solution last.** If the spec opens with "implement X using Y", you've skipped what.
 - **Success criteria are testable.** "Faster checkout" is not a criterion. "p95 checkout-to-confirmation latency drops below 600ms on staging fixtures" is.
 - **Non-goals are explicit.** Most spec bloat comes from creep. Spell out what this feature is NOT solving.
-- **Open questions are surfaced, not papered over.** If you don't know whether the cron runs nightly or hourly, write "Open question: cadence?" Don't pick silently.
+- **Open questions are surfaced, not papered over.** A question whose answer would change the spec and that nothing on hand settles goes in §6 as an open question — "Open question: cadence?" — never picked silently. One you *can* settle from the request, `clarify.md`, `gotchas.md`, or existing authorization is settled and recorded as a decision, not parked as theatre.
 - **Specs are reviewable in 5 minutes.** If yours runs longer than two screens, you're conflating spec with plan.
 - **The spec is the clearest artifact, which is not always prose.** `spec.md` stays the entry point and the two-screen rule binds *it*. But a success criterion is often stated best as something executable: a failing test that must go green, a fixture file plus its expected output, a rubric a reviewer or a judge agent scores against, or an HTML mockup of the surface being specified. Put those in `specs/<NNN>-<slug>/` beside `spec.md` and reference them from §3 Success criteria by path. An attached artifact does not count against the two screens — it is what keeps `spec.md` short.
 
@@ -81,7 +81,7 @@ That's the entire deliverable for this skill. Implementation, schema, file layou
 
 - **Read-only against the rest of the repo.** The skill creates one directory (`specs/<NNN>-<slug>/`) and copies one template into it. It does not edit existing code, configs, or docs.
 - **Branch handling is mandatory.** Default mode must start on a clean `main`/`master` and creates `feature/<slug>`; `--no-branch` is the branch-preserving remediation mode.
-- **Never overwrites.** If `specs/<NNN>-<slug>/spec.md` already exists, the script aborts. The operator picks a new slug or removes the existing one explicitly.
+- **Scaffolding never overwrites.** `new-feature.sh` aborts if `specs/<NNN>-<slug>/spec.md` already exists — that safeguard is unconditional and is not to be worked around; for a genuinely new feature the operator picks a different slug. Revising an existing spec is a different operation and does not go through the scaffold at all: when a revision is authorized, edit `spec.md` in place, changing the sections the revision touches and leaving the rest — including follow-ups, decisions and attributions — intact. Never delete and recreate the artifact, and never ask the operator to delete it so the scaffold can re-run.
 
 ## Sensible failure modes
 

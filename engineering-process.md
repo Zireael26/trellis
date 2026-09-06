@@ -43,7 +43,7 @@ procedures are [docs/UPGRADING.md](docs/UPGRADING.md) and
 
 Trellis supplies a compact parent policy, process skills, deterministic hooks,
 and release tooling to projects that explicitly opt in on a particular machine.
-It supports Claude Code, Codex, and OMP as first-class native harnesses.
+It supports Claude Code, Codex, and Pi as first-class native harnesses.
 
 The old model made a source checkout's current files and machine inventory part
 of every project's runtime. That model was path-bound, mutable, and unsafe across
@@ -100,7 +100,8 @@ and explicit attachment are the recovery mechanisms.
    branch switch, source relocation, or publication worktree cannot change an
    attached project's effective rules.
 4. **Manifest-driven native surfaces.** One release-owned inheritance manifest
-   describes all Claude Code, Codex, and OMP leaves. Attach, detach, doctor,
+   describes all Claude Code, Codex, and Pi leaves, plus the `.agents` leaves
+   Codex and Pi share. Attach, detach, doctor,
    and worktree repair expand the same plan rather than maintaining separate
    hand-written surface lists.
 5. **Ownership before mutation.** Attachment preflights every destination,
@@ -218,7 +219,7 @@ runtime anchor, local hook setting, or any machine-specific value.
 
 A contributor who clones only the tracked repository sees ordinary project
 files. The manifest does not create rules links, settings, hooks, exclusions,
-or an OMP surface. If Trellis is absent, all three harnesses must continue with
+or a Pi surface. If Trellis is absent, all three harnesses must continue with
 no Trellis warning, injection, or discovery failure.
 
 ### 4.2 Local attachment is the only activation path
@@ -269,7 +270,7 @@ reconciliation. It describes managed leaf sources and destinations for:
 |---|---|
 | **Claude Code** | Parent-rule, skill, command, and lifecycle leaves plus explicit local settings integration where declared by the manifest. |
 | **Codex** | Native agent/rule, skill, command/workflow, and lifecycle leaves described by the same release manifest. |
-| **OMP** | Native adapter, context, skills, commands, and reserved-agent leaves without replacing project-owned OMP configuration. |
+| **Pi** | Its own managed extension and hook-dispatch bridge under `.pi/`, plus the shared `.agents` rule, skill, command/workflow, and agent leaves it discovers alongside Codex — without replacing project-owned Pi configuration. |
 
 The selected release—not the source checkout—is the source for every managed
 leaf. Leaves point relatively through `.trellis/runtime`, so adoption swaps one
@@ -328,10 +329,10 @@ The canonical commands are intentionally narrow:
 
 ```sh
 trellis attach [--fleet NAME] [--release VERSION] \
-  [--harness claude|codex|omp]... PATH
+  [--harness claude|codex|pi]... PATH
 trellis relink [--fleet NAME] PATH
 trellis recover PATH
-trellis detach [--harness claude|codex|omp]... [--all-worktrees] PATH
+trellis detach [--harness claude|codex|pi]... [--all-worktrees] PATH
 ```
 
 `relink` repairs an existing owned immutable anchor and local dispatcher; it
@@ -847,7 +848,8 @@ runtime health signal, because no attached project resolves through it.
 Five skills take a vague request through structured questioning, formal
 specification, technical design, work breakdown, and a coherence check. They are
 release-owned under `core-rules/skills/`, and an attached project receives them
-as manifest-owned leaves in its native Claude Code, Codex, and OMP surfaces.
+as manifest-owned leaves in its native Claude Code surface and in the shared
+`.agents` surface Codex and Pi both discover.
 
 - `clarify` — front-step question pass. Use before `spec` when the request is
   vague, contradictory, or leaves any of the five canonical intent dimensions
@@ -899,13 +901,14 @@ the repo root, and keeping it out of the index stops it shifting a task's diff
 stat. Delete it before a worktree is reaped, and after harvesting its entries
 into the PR description and `gotchas.md`.
 
-**Stopping points.** Each artifact is meant to be reviewed before the next is
-generated. When the operator is present, stop after each skill returns. When
-running unattended, chain the mechanical transitions rather than parking the
-work overnight, and pause only where the work genuinely requires the operator: a
-destructive or irreversible action, a real scope change, or an answer only they
-can give. The `spec`→`plan` transition is not mechanical — a plan that settles
-an architectural question surfaces inline even at L5.
+**Stopping points.** Review each artifact before dependent work. Existing
+authorization and the effective autonomy level determine who answers unresolved
+questions, not whether the operator is present. Continue already-authorized
+transitions; an explicit plan-only request still ends with the plan. Pause for
+consequential unresolved input or actions beyond authorization, retaining all
+review gates and destructive-action safeguards. The `spec`→`plan` transition is
+not mechanical — a plan that settles an architectural question surfaces inline
+even at L5. See `core-rules/autonomy.md` for consultation rules.
 
 Artifacts live at `<project-root>/specs/<NNN>-<slug>/` and stay in git as
 historical record after the feature ships.
@@ -923,10 +926,20 @@ by listing names in its portable `.trellis.json`:
 { "presets": ["compliance-strict"] }
 ```
 
-Attachment expands the declared presets as manifest-owned leaves in the native
-Claude Code and Codex rule surfaces; the OMP adapter injects the same released
-content. Rules are **additive, not last-wins**: all three harnesses add the
-enabled preset content to the prompt, and there is no engine-level override.
+Preset delivery is a separate operator step, not part of attachment: the
+inheritance manifest declares no preset leaf group and `attach` expands none.
+`scripts/rollout-presets.sh` reads each row's declared array and installs
+release-pinned `preset-<name>.md` links into `.claude/rules/` for rows selecting
+`claude`, and `.agents/rules/` for rows selecting `codex` or `pi`, pruning links
+for presets a project no longer declares.
+
+The policy is **additive, not last-wins**: enabled preset content adds to the
+prompt and there is no engine-level override. What is *delivered* to a surface
+is not the same claim as what a harness is *observed to load*; verify native
+loading separately for each harness. The Pi extension's own policy read targets
+`.agents/rules/trellis.md` specifically and carries no preset loader. Delivery
+of shared preset links does not prove Pi's native loading of them; retain the
+native-loading verification gap for T5.
 "Priority" means which layer's voice an agent defers to when prose conflicts —
 parent rules, then presets, then the project's own `CLAUDE.md` — not which file
 silently overwrites another. In practice a preset extends the parent or states

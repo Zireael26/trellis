@@ -74,20 +74,18 @@ done < <(pg_diff_files "$RANGE")
 
 # Pattern scan over added lines.
 #
-# Build the lookup table once (file<TAB>lineno<TAB>content per added line)
-# via a single awk pass over the unified diff. Each pattern hit then resolves
-# its location with a single tab-delimited content-column lookup. Replaces
-# the previous O(N×M) per-hit awk re-walk of the full diff.
+# Invariant: added-line lookup is built in one awk pass (file<TAB>lineno<TAB>content);
+# each pattern hit resolves its location via a single tab-delimited content-column lookup.
+# See secrets tests for file:line locator coverage.
+# SAFETY: the first form creates the required private file where template-free mktemp is supported; BSD mktemp requires the -t fallback.
 LOOKUP="$(mktemp 2>/dev/null || mktemp -t check-secrets)"
 # Preserve $? so the trap does not mask a non-zero exit from the script body.
 # shellcheck disable=SC2154  # `rc` is assigned inside the trap, which shellcheck cannot see
 trap 'rc=$?; rm -f "$LOOKUP"; exit "$rc"' EXIT
 
-# A FAILED diff and an empty diff are different facts. Discarding stderr and
-# `|| true` made them identical: an unresolvable range or a misrouted repository
-# produced an empty LOOKUP, the pattern scan below was skipped entirely, and the
-# gate reported `Secrets: pass` having scanned nothing. Note `git -C`/GIT_DIR
-# routing makes misdirection real, not hypothetical. Capture the status first.
+# Invariant: diff failure must never be reported as an empty clean scan; unresolvable
+# range or misrouted repository aborts with a preflight failure. Capture exit status before lookup.
+# SAFETY: the first form creates the required private file where template-free mktemp is supported; BSD mktemp requires the -t fallback.
 _cs_diff_err="$(mktemp 2>/dev/null || mktemp -t check-secrets-err)"
 # `if !` rather than a bare call: under `set -e` a failing git aborts the script
 # before the diagnostic below can run, which fails closed but says nothing.
@@ -105,14 +103,28 @@ if [ "$_cs_diff_rc" -ne 0 ]; then
 fi
 rm -f "$_cs_diff_err"
 
-git diff --no-color --unified=0 "$RANGE" 2>/dev/null \
+_cs_lookup_pipeline_rc=0
+git diff --no-color --unified=0 "$RANGE" \
   | awk 'BEGIN{file=""; line=0} \
       /^\+\+\+ b\// {file=substr($0,7); next} \
       /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; next} \
       /^\+/ && !/^\+\+\+/ {printf "%s\t%d\t%s\n", file, line, substr($0,2); line++}' \
-  > "$LOOKUP" || true
+  > "$LOOKUP" || _cs_lookup_pipeline_rc=$?
+if [ "$_cs_lookup_pipeline_rc" -ne 0 ]; then
+  printf 'check-secrets: could not build the added-line lookup for range %s (pipeline exit %s) — refusing to report a verdict\n' \
+    "$RANGE" "$_cs_lookup_pipeline_rc" >&2
+  pg_log fail "Secrets (range=$RANGE): lookup failed; scan did not run"
+  exit 1
+fi
 
-added_lines="$(awk -F'\t' '{print "+"$3}' "$LOOKUP" 2>/dev/null || true)"
+_cs_lookup_parse_rc=0
+added_lines="$(awk -F'\t' '{print "+"$3}' "$LOOKUP")" || _cs_lookup_parse_rc=$?
+if [ "$_cs_lookup_parse_rc" -ne 0 ]; then
+  printf 'check-secrets: could not parse the added-line lookup for range %s (awk exit %s) — refusing to report a verdict\n' \
+    "$RANGE" "$_cs_lookup_parse_rc" >&2
+  pg_log fail "Secrets (range=$RANGE): lookup parse failed; scan did not run"
+  exit 1
+fi
 
 if [ -n "$added_lines" ]; then
   while IFS='|' read -r name regex; do

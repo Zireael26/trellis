@@ -75,16 +75,13 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 # Lay down the canonical inheritance surface (rules file, skills, commands,
-# empty OMP agents dir + hook adapter, registry with one active "healthy"
-# project, empty blacklist). The skills/commands manifests carry OMP discovery
-# frontmatter (hc_omp_manifests requires it), the agents dir holds only a
-# .gitkeep (the GPTX-era custom agents were removed — empty is healthy), and
-# the OMP adapter stub exists (hc_omp_adapter requires it) — a healthy
-# canonical is OMP-healthy too. Does NOT git init — branch/clean state is set
+# empty agents dir, registry with one active "healthy" project, and empty
+# blacklist). The agents dir holds only a .gitkeep. Does NOT git init — branch
+# and clean state are set
 # per test by the helpers below.
 build_canonical_tree() {
   mkdir -p "$CANON/core-rules/skills" "$CANON/core-rules/commands" \
-    "$CANON/core-rules/agents" "$CANON/core-rules/omp/hooks/pre"
+    "$CANON/core-rules/agents"
   # A healthy canonical carries the dod-receipt grammar anchor (Tier-0
   # hc_receipt_grammar_present greps for the literal `dod-receipt`).
   printf '# Parent engineering rules\n\n<!-- dod-receipt cmd= exit=0 diff= -->\n' \
@@ -99,11 +96,8 @@ build_canonical_tree() {
     printf -- '---\ndescription: fixture command %s\n---\n\nx\n' \
       "$c" > "$CANON/core-rules/commands/$c.md"
   done
-  # The canonical agents dir is EMPTY (the GPTX-era custom agents were removed;
-  # only .gitkeep remains) — an empty .omp/agents target is healthy.
+  # The canonical agents dir is empty; only .gitkeep remains.
   printf '' > "$CANON/core-rules/agents/.gitkeep"
-  printf 'export const trellisAdapter = () => ({});\n' \
-    > "$CANON/core-rules/omp/hooks/pre/trellis.ts"
   cat > "$CANON/registry.md" <<EOF
 # Project registry
 
@@ -162,10 +156,10 @@ git_init_canonical_main() {
 }
 
 # Write the fixture trellis.config.json. $1 (optional) = space-separated
-# harness list as a JSON array body; defaults to Claude + OMP so Codex parity
-# checks stay silent while the OMP contract remains active.
+# harness list as a JSON array body; defaults to the Claude baseline. Tests
+# that exercise Codex parity enable it explicitly.
 write_config() {
-  local harnesses_json="${1:-\"claude\",\"omp\"}"
+  local harnesses_json="${1:-\"claude\"}"
   local shared_root="${2:-}"
   local shared_line=""
   if [ -n "$shared_root" ]; then
@@ -195,7 +189,7 @@ build_portable_doctor_home() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis"
   chmod 755 "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis"
   chmod 700 "$PORTABLE_HOME"
-  printf '{"schema_version":2,"harnesses":["claude","codex","omp"]}\n' \
+  printf '{"schema_version":2,"harnesses":["claude","codex"]}\n' \
     > "$PORTABLE_SOURCE/trellis.config.json"
   cat > "$PORTABLE_HOME/config.json" <<EOF
 {"schema_version":1,"source_root":"$PORTABLE_SOURCE","release_remote":"$PORTABLE_SOURCE","active_cli_release":"1.2.3","default_fleet":"personal","fleets":{"personal":{"discovery_roots":["$SANDBOX"]}}}
@@ -213,7 +207,7 @@ EOF
 }
 
 build_portable_release() {
-  local version="${1:-1.2.3}" manifest file relative mode oid target command_name hook
+  local version="${1:-1.2.3}" manifest command_name hook
   PORTABLE_RELEASE_DIR="$PORTABLE_HOME/releases/$version"
   PORTABLE_RELEASE_PAYLOAD="$PORTABLE_RELEASE_DIR/payload"
   manifest="$SANDBOX/portable-release-$version.jsonl"
@@ -224,24 +218,20 @@ build_portable_release() {
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/githooks" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/lib" \
-    "$PORTABLE_RELEASE_PAYLOAD/core-rules/omp/hooks/pre" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-output-styles" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/presets"
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/inheritance-manifest.json"
+  cp -R "$REPO_ROOT/core-rules/pi" "$PORTABLE_RELEASE_PAYLOAD/core-rules/pi"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/codex-hooks.local.json"
-  cp "$REPO_ROOT/core-rules/templates/omp-project-policy.yml" \
-    "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/omp-project-policy.yml"
   cp "$REPO_ROOT/core-rules/templates/claude-user-settings.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-user-settings.json"
   cp "$REPO_ROOT/core-rules/templates/claude-output-styles/trellis-orchestration.md" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-output-styles/trellis-orchestration.md"
-  cp -R "$REPO_ROOT/core-rules/omp/global" \
-    "$PORTABLE_RELEASE_PAYLOAD/core-rules/omp/"
   cp -R "$REPO_ROOT/core-rules/skills/herdr-foreman" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/"
   cp "$REPO_ROOT/core-rules/hooks/herdr-foreman-session.sh" \
@@ -249,6 +239,7 @@ build_portable_release() {
   mkdir -p "$PORTABLE_RELEASE_PAYLOAD/scripts"
   cp "$REPO_ROOT/scripts/attach-project.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$PORTABLE_RELEASE_PAYLOAD/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$PORTABLE_RELEASE_PAYLOAD/scripts/lib"
   cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/scripts/seed-inheritance-symlinks.sh"
@@ -257,7 +248,7 @@ build_portable_release() {
   chmod 755 "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/scripts/seed-inheritance-symlinks.sh"
   cat > "$PORTABLE_RELEASE_PAYLOAD/trellis.config.json" <<'EOF'
-{"schema_version":2,"maintainer_name":"Fixture","github_user":"fixture","harnesses":["claude","codex","omp"],"autonomy_default":2}
+{"schema_version":2,"maintainer_name":"Fixture","github_user":"fixture","harnesses":["claude","codex"],"autonomy_default":2}
 EOF
   printf '%s\n' "$version" > "$PORTABLE_RELEASE_PAYLOAD/core-rules/VERSION"
   if [ -n "${PORTABLE_STRICT_PRESET_CONTENT:-}" ]; then
@@ -292,10 +283,15 @@ EOF
   # here: surface-plan treats a declared source as mandatory and exits 4 on the
   # first one missing, which fails prepare_portable_attachment for the whole suite.
   # This builder copies a hand-picked set, so a new manifest entry lands here too.
-  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core omp-reviewer slop-patterns spec-gate-core ui-verify-core; do
+  for hook in fixture aeo-gate-warn code-reviewer decision-receipt-core slop-patterns spec-gate-core ui-verify-core verification-receipt action-normalize; do
     printf '#!/usr/bin/env bash\nexit 0\n' \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"
     chmod 755 "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$hook.sh"
+  done
+  # Shared task and verification primitives are explicit manifest link sources.
+  # Keep this minimal payload complete before its immutable tree is sealed.
+  for primitive in task-context.sh task-state.py verification-bash.py; do
+    cp "$REPO_ROOT/core-rules/hooks/lib/$primitive" "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$primitive" || return 1
   done
   printf '#!/usr/bin/env bash\nexit 0\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/fixture.sh"
@@ -303,25 +299,7 @@ EOF
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/lib/fixture.sh"
   chmod 755 "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/fixture.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/codex/hooks/lib/fixture.sh"
-  printf 'export const fixture = true;\n' \
-    > "$PORTABLE_RELEASE_PAYLOAD/core-rules/omp/hooks/pre/fixture.ts"
-  : > "$manifest"
-  while IFS= read -r file; do
-    relative="${file#"$PORTABLE_RELEASE_PAYLOAD"/}"
-    if [ -L "$file" ]; then
-      mode=120000
-      target="$(readlink "$file")"
-      oid="$(printf '%s' "$target" | git hash-object --stdin)"
-    elif [ -x "$file" ]; then
-      mode=100755
-      oid="$(git hash-object "$file")"
-    else
-      mode=100644
-      oid="$(git hash-object "$file")"
-    fi
-    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
-      '{path: $path, mode: $mode, oid: $oid}' >> "$manifest"
-  done < <(find "$PORTABLE_RELEASE_PAYLOAD" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  python3 "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$PORTABLE_RELEASE_PAYLOAD" > "$manifest"
   jq -n --arg version "$version" --slurpfile tree "$manifest" '
     {
       schema_version: 1,
@@ -332,8 +310,8 @@ EOF
       tree: $tree
     }
   ' > "$PORTABLE_RELEASE_DIR/release.json"
-  find "$PORTABLE_RELEASE_PAYLOAD" -type f -exec chmod a-w {} \;
-  find "$PORTABLE_RELEASE_PAYLOAD" -type d -exec chmod a-w {} \;
+  find "$PORTABLE_RELEASE_PAYLOAD" -type f -exec chmod a-w {} +
+  find "$PORTABLE_RELEASE_PAYLOAD" -type d -exec chmod a-w {} +
   chmod a-w "$PORTABLE_RELEASE_DIR/release.json" "$PORTABLE_RELEASE_DIR"
 }
 
@@ -342,12 +320,13 @@ copy_portable_older_release() {
   local release="$PORTABLE_HOME/releases/1.2.2"
   local payload="$release/payload"
   local manifest="$SANDBOX/portable-release-1.2.2.jsonl"
-  local file relative mode oid target
 
   cp -R "$base" "$release"
   chmod -R u+w "$release"
   mkdir -p "$payload/scripts/lib"
   cp "$REPO_ROOT/scripts/lib/attachment.sh" "$payload/scripts/lib/attachment.sh"
+  # The copied generator extracts command-scratch programs from its own launcher.
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$payload/scripts/trellis-launcher.sh"
   sed \
     -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
     -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
@@ -356,23 +335,7 @@ copy_portable_older_release() {
   mv "$payload/scripts/lib/attachment.sh.tmp" "$payload/scripts/lib/attachment.sh"
   printf '1.2.2\n' > "$payload/core-rules/VERSION"
 
-  : > "$manifest"
-  while IFS= read -r file; do
-    relative="${file#"$payload"/}"
-    if [ -L "$file" ]; then
-      mode=120000
-      target="$(readlink "$file")"
-      oid="$(printf '%s' "$target" | git hash-object --stdin)"
-    elif [ -x "$file" ]; then
-      mode=100755
-      oid="$(git hash-object "$file")"
-    else
-      mode=100644
-      oid="$(git hash-object "$file")"
-    fi
-    jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
-      '{path:$path,mode:$mode,oid:$oid}' >> "$manifest"
-  done < <(find "$payload" \( -type f -o -type l \) -print | LC_ALL=C sort)
+  python3 "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$manifest"
   jq -n --arg version 1.2.2 --slurpfile tree "$manifest" '{
     schema_version:1,
     version:$version,
@@ -381,8 +344,8 @@ copy_portable_older_release() {
     remote:"fixture://copied-older-release",
     tree:$tree
   }' > "$release/release.json"
-  find "$payload" -type f -exec chmod a-w {} \;
-  find "$payload" -type d -exec chmod a-w {} \;
+  find "$payload" -type f -exec chmod a-w {} +
+  find "$payload" -type d -exec chmod a-w {} +
   chmod a-w "$release/release.json" "$release"
 }
 
@@ -544,7 +507,7 @@ prepare_portable_attachment() {
   run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
       --fleet personal --release "$release" \
-      --harness claude --harness codex --harness omp "$PORTABLE_PROJECT"
+      --harness claude --harness codex "$PORTABLE_PROJECT"
   if [ "$status" -ne 0 ]; then
     printf 'prepare_portable_attachment failed (exit %s):\n%s\n' "$status" "$output" >&2
     return "$status"
@@ -588,16 +551,15 @@ build_shared_infra_fixture() {
 }
 
 # Build a fully healthy "healthy" project: good rules symlink, canonical
-# @-import, full skills + commands sets, a .claude/settings.json (so the
+# @-import, full skills + commands sets, and a .claude/settings.json (so the
 # settings-wiring check does not WARN; with no canonical template present the
-# wiring check then skips -> OK), and the five OMP surface links (design
-# 2026-08-09) so the OMP checks are green in every healthy-path test.
+# wiring check then skips -> OK).
 # $1 (optional) = project name; defaults to "healthy". A named second project is
 # what makes --project scoping falsifiable (see the scoping test below).
 build_healthy_project() {
   local name="${1:-healthy}"
   local hp="$PROJECTS/$name"
-  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands" "$hp/.omp"
+  mkdir -p "$hp/.claude/rules" "$hp/.claude/skills" "$hp/.claude/commands"
   ln -s "$CANON/core-rules/CLAUDE.md" "$hp/.claude/rules/trellis.md"
   local s c
   for s in $CANON_SKILLS; do
@@ -611,12 +573,6 @@ build_healthy_project() {
 
 @$CANON/core-rules/CLAUDE.md
 EOF
-  # OMP surface: the five exact live links in the shared contract.
-  ln -s "$hp/CLAUDE.md" "$hp/.omp/AGENTS.md"
-  ln -s "$CANON/core-rules/skills" "$hp/.omp/skills"
-  ln -s "$CANON/core-rules/commands" "$hp/.omp/commands"
-  ln -s "$CANON/core-rules/agents" "$hp/.omp/agents"
-  ln -s "$CANON/core-rules/omp/hooks" "$hp/.omp/hooks"
   printf '{ "hooks": {} }\n' > "$hp/.claude/settings.json"
   # A healthy project has its pre-push wired to process-gate's run-all.sh so
   # hc_prepush_wired_runall passes. (No review hook + no tracked UI files keep
@@ -674,6 +630,51 @@ make_no_playwright_path() {
 # ===========================================================================
 # Tier 0
 # ===========================================================================
+
+@test "fixture manifest matches Git for content executable modes and symlinks without traversing targets" {
+  run python3 - "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$SANDBOX" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+helper, sandbox = Path(sys.argv[1]), Path(sys.argv[2])
+root = sandbox / "manifest oracle"
+root.mkdir()
+(root / "empty").write_bytes(b"")
+(root / "space and\nnewline").write_bytes(b"binary\x00bytes\xff\n")
+(root / "executable").write_text("#!/bin/sh\nexit 0\n")
+(root / "executable").chmod(0o755)
+(root / "nested").mkdir()
+(root / "nested" / "unicode-π").write_text("payload\n")
+outside = sandbox / "outside"
+outside.mkdir()
+(outside / "must-not-be-traversed").write_text("sentinel")
+(root / "directory link").symlink_to(outside, target_is_directory=True)
+(root / "dangling link").symlink_to("absent\n")
+(root / "file link").symlink_to("empty")
+subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+subprocess.run(["git", "-C", str(root), "config", "core.filemode", "true"], check=True)
+subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+index = subprocess.check_output(["git", "-C", str(root), "ls-files", "--stage", "-z"])
+expected = []
+for record in index.split(b"\0"):
+    if record:
+        metadata, path = record.split(b"\t", 1)
+        mode, oid, stage = metadata.split()
+        expected.append({"path": os.fsdecode(path), "mode": mode.decode(), "oid": oid.decode()})
+# The release fixture has no .git: remove only this oracle's own Git metadata.
+import shutil
+shutil.rmtree(root / ".git")
+actual = [json.loads(line) for line in subprocess.check_output([sys.executable, str(helper), str(root)], text=True).splitlines()]
+assert actual == sorted(expected, key=lambda row: os.fsencode(row["path"])), (actual, expected)
+assert len(actual) == 7
+assert not any("must-not-be-traversed" in row["path"] for row in actual)
+assert (outside / "must-not-be-traversed").read_text() == "sentinel"
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
 
 @test "isolation: doctor reports the FIXTURE canonical path, never the live clone" {
   build_canonical_tree
@@ -964,29 +965,6 @@ make_no_playwright_path() {
   [[ "$output" == *"/Users/helios/"* ]] || { echo "$output"; false; }
 }
 
-@test "Tier-1: missing @-import => Claude WARN but OMP parent-chain ERROR (exit non-zero)" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  # CLAUDE.md present but with no canonical @-import line at all. The Claude
-  # surface degrades to WARN (hc_import_resolves: symlink-only fallback), but
-  # OMP installs no RULES.md and has no symlinked rules file — the AGENTS.md
-  # @-import is the ONLY channel for parent rules, so the missing import is an
-  # OMP inheritance break (hc_omp_project_import ERROR, non-zero exit).
-  printf '# Healthy project\n\nNo import here.\n' > "$PROJECTS/healthy/CLAUDE.md"
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  # Claude row: degraded-not-broken (⚠ WARN), rules symlink still resolves.
-  [[ "$output" == *"⚠ import:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ rules: trellis.md resolves to canonical"* ]] || { echo "$output"; false; }
-  # OMP row: the missing import is an ERROR — OMP would inherit no parent rules.
-  [[ "$output" == *"✗ omp-import:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"no @-import"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✗ inheritance is broken"* ]] || { echo "$output"; false; }
-}
-
 @test "Tier-1: dead/cross-machine @-import => ERROR + non-zero exit, rules symlink still ✓" {
   build_canonical_tree
   git_init_canonical_main
@@ -1004,8 +982,6 @@ make_no_playwright_path() {
   [[ "$output" == *"✗ import:"* ]] || { echo "$output"; false; }
   # Reports the dead cross-machine target it found.
   [[ "$output" == *"/Users/helios/"* ]] || { echo "$output"; false; }
-  # The OMP parent chain is broken by the same dead import (ERROR row).
-  [[ "$output" == *"✗ omp-import:"* ]] || { echo "$output"; false; }
   # Load-bearing: the rules symlink is GREEN, proving the non-zero exit comes
   # from the import ERROR, not a broken symlink.
   [[ "$output" == *"✓ rules: trellis.md resolves to canonical"* ]] || { echo "$output"; false; }
@@ -1344,294 +1320,6 @@ make_no_playwright_path() {
     && [[ "$output" == *"past the attention cliff"* ]]
 }
 
-# ===========================================================================
-# OMP surface (design 2026-08-09) — Tier-1 live-link contract. All ERROR-class:
-# OMP native discovery stops at the nearest non-empty .omp dir, so any broken
-# Trellis-owned .omp path silently yields an unparented OMP session.
-# ===========================================================================
-
-@test "OMP: fully healthy OMP surface => all ✓ and exit 0" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  run_doctor
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"✓ omp: all 5 surface links resolve to exact canonical targets"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ omp: target kinds correct and canonical links stay under trellis_root"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ omp-import: first @-import → canonical core-rules/CLAUDE.md"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ omp-manifests: canonical skill/command/agent manifests satisfy OMP discovery"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ omp-adapter: canonical adapter present"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: disabled harness imposes no .omp or canonical OMP dependency" {
-  build_canonical_tree
-  rm -rf "$CANON/core-rules/agents" "$CANON/core-rules/omp"
-  git_init_canonical_main
-  build_healthy_project
-  rm -rf "$PROJECTS/healthy/.omp"
-  write_config '"claude"'
-
-  run_doctor
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"omp:"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"omp-import:"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"omp-manifests:"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"omp-adapter:"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: missing .omp/AGENTS.md => ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  rm -f "$PROJECTS/healthy/.omp/AGENTS.md"
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp: .omp/AGENTS.md missing"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: dangling .omp/skills symlink => ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  rm -f "$PROJECTS/healthy/.omp/skills"
-  ln -s "$CANON/core-rules/skills-does-not-exist" "$PROJECTS/healthy/.omp/skills"
-  [ ! -e "$PROJECTS/healthy/.omp/skills" ]  # precondition: truly dangling
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp: .omp/skills →"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"dangling"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: wrong-target .omp/agents link => ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  # Repoint at a dead cross-machine path (incident #1 shape).
-  rm -f "$PROJECTS/healthy/.omp/agents"
-  ln -s "/Users/helios/claude/se-core-template/core-rules/agents" \
-        "$PROJECTS/healthy/.omp/agents"
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp: .omp/agents →"* ]] || { echo "$output"; false; }
-  # Reports the wrong/stale target it found.
-  [[ "$output" == *"/Users/helios/"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: .omp/skills replaced by a regular file (not a symlink) => ERROR" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  rm -f "$PROJECTS/healthy/.omp/skills"
-  printf 'not a link\n' > "$PROJECTS/healthy/.omp/skills"
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp: .omp/skills exists but is not a symlink"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: wrong target kind (dir link resolving to a regular file) => ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  # Replace the canonical hooks DIRECTORY with a regular FILE at the same path,
-  # then re-commit so the canonical stays clean: .omp/hooks still has the exact
-  # literal target (link row stays ✓) but resolves to a non-directory — only
-  # the target-kind half of the contract can catch this.
-  rm -rf "$CANON/core-rules/omp/hooks"
-  printf 'not a dir\n' > "$CANON/core-rules/omp/hooks"
-  ( cd "$CANON" && git add -A && git commit -q -m "hooks path becomes a file" )
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✓ omp: all 5 surface links resolve to exact canonical targets"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✗ omp: .omp/hooks resolves to a non-directory target"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: realpath containment — canonical link resolving OUTSIDE trellis_root => ERROR" {
-  build_canonical_tree
-  # Redirect core-rules/skills out of the canonical root BEFORE the git init so
-  # the committed tree is clean: the .omp/skills link still reads
-  # <canon>/core-rules/skills (exact target ✓) but its realpath escapes
-  # trellis_root — only the containment half of the contract can catch this.
-  mkdir -p "$SANDBOX/elsewhere/skills/process-gate"
-  printf -- '---\ndescription: elsewhere skill\n---\n\nx\n' \
-    > "$SANDBOX/elsewhere/skills/process-gate/SKILL.md"
-  mv "$CANON/core-rules/skills" "$CANON/core-rules/skills.orig"
-  ln -s "$SANDBOX/elsewhere/skills" "$CANON/core-rules/skills"
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  # Load-bearing: the exact-target row is GREEN — the ERROR comes from the
-  # containment check, not from re-detecting a wrong target.
-  [[ "$output" == *"✓ omp: all 5 surface links resolve to exact canonical targets"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✗ omp: .omp/skills resolves to"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"OUTSIDE the canonical root"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: first @-import is NOT canonical => ERROR even when a later import is" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  # A project-local import FIRST, the canonical one second. The Claude-side
-  # check (hc_import_resolves) scans every import and is satisfied; the OMP
-  # check requires the FIRST import to be canonical (OMP resolves imports
-  # top-down and the design pins "whose first import resolves canonical").
-  printf '# Healthy project\n\n@docs/strategy.md\n@%s/core-rules/CLAUDE.md\n' \
-    "$CANON" > "$PROJECTS/healthy/CLAUDE.md"
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✓ import: @-import matches canonical"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✗ omp-import:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"docs/strategy.md"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: skill dir missing SKILL.md => manifest ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  rm -f "$CANON/core-rules/skills/analyze/SKILL.md"
-  # Re-commit so the canonical stays clean (else Tier-0 dirty would mask the
-  # manifest row). The Claude-side skill LINK still resolves (dir remains).
-  ( cd "$CANON" && git add -A && git commit -q -m "break skill manifest" )
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp-manifests:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"analyze"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ skills: full canonical set resolves"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: command without description frontmatter => manifest ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  printf 'no frontmatter\n' > "$CANON/core-rules/commands/primer.md"
-  ( cd "$CANON" && git add -A && git commit -q -m "strip command description" )
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp-manifests:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"primer"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: legacy .md agent still discoverable in canonical agents dir => manifest ERROR" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  # The custom fable/opus/codex/lane agents are GPTX-era and removed; any
-  # discoverable *.md left behind is a legacy agent OMP would load (first-win
-  # by name) and must be purged. Empty (only .gitkeep) is the healthy state.
-  printf '# legacy agent\n' > "$CANON/core-rules/agents/legacy-agent.md"
-  ( cd "$CANON" && git add -A && git commit -q -m "legacy agent resurfaces" )
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp-manifests:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"agents:legacy-agent.md"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: canonical adapter missing => ERROR + non-zero exit" {
-  build_canonical_tree
-  git_init_canonical_main
-  build_healthy_project
-  write_config
-  rm -f "$CANON/core-rules/omp/hooks/pre/trellis.ts"
-  ( cd "$CANON" && git add -A && git commit -q -m "drop adapter" )
-
-  run_doctor
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"✗ omp-adapter: canonical adapter"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"missing"* ]] || { echo "$output"; false; }
-  # The .omp/hooks LINK itself still resolves to the (empty) hooks dir — the
-  # adapter row is the isolated failure.
-  [[ "$output" == *"✓ omp: all 5 surface links resolve to exact canonical targets"* ]] || { echo "$output"; false; }
-}
-
-@test "OMP: canonical control-plane project — .omp/AGENTS.md → core-rules/CLAUDE.md, no parent import" {
-  build_canonical_tree
-  # The canonical clone carries its own ignored .claude/.omp/.husky surfaces
-  # (managed-ignore pattern); commit the ignore so the tree stays clean while
-  # those surfaces are untracked.
-  printf '.claude/\n.omp/\n.husky/\n' > "$CANON/.gitignore"
-  git_init_canonical_main
-  # Register the canonical clone itself as a control-plane project. The
-  # canonical root has no CLAUDE.md (build_canonical_tree writes only
-  # core-rules/CLAUDE.md), so the OMP contract expects .omp/AGENTS.md to link
-  # the parent rules file directly and skips the parent-import check.
-  cat > "$CANON/registry.md" <<EOF
-# Project registry
-
-## Active projects
-
-| Project | Path | Class | Notes |
-|---|---|---|---|
-| trellis | \`/trellis\` | control-plane | canonical clone itself |
-| healthy | \`/personal/healthy\` | app | fixture |
-
----
-EOF
-  ( cd "$CANON" && git add registry.md && git commit -q -m "register control-plane" )
-  # $PROJECTS/trellis IS the canonical clone (realpath-equal) — the shape
-  # doctor resolves for a control-plane registry row.
-  ln -s "$CANON" "$PROJECTS/trellis"
-  local cp="$PROJECTS/trellis"
-  # Seed the canonical's own inheritance surfaces (ignored -> tree stays clean).
-  mkdir -p "$cp/.claude/rules" "$cp/.claude/skills" "$cp/.claude/commands" \
-    "$cp/.omp" "$cp/.husky"
-  ln -s "$CANON/core-rules/CLAUDE.md" "$cp/.claude/rules/trellis.md"
-  local s c
-
-  for s in $CANON_SKILLS; do
-    ln -s "$CANON/core-rules/skills/$s" "$cp/.claude/skills/$s"
-  done
-  for c in $CANON_COMMANDS; do
-    ln -s "$CANON/core-rules/commands/$c.md" "$cp/.claude/commands/$c.md"
-  done
-  printf '{ "hooks": {} }\n' > "$cp/.claude/settings.json"
-  printf '#!/usr/bin/env sh\nbash .claude/skills/process-gate/scripts/run-all.sh --mode=merge\n' \
-    > "$cp/.husky/pre-push"
-  # OMP control-plane surface: AGENTS.md links the parent rules FILE.
-  ln -s "$CANON/core-rules/CLAUDE.md" "$cp/.omp/AGENTS.md"
-  ln -s "$CANON/core-rules/skills" "$cp/.omp/skills"
-  ln -s "$CANON/core-rules/commands" "$cp/.omp/commands"
-  ln -s "$CANON/core-rules/agents" "$cp/.omp/agents"
-  ln -s "$CANON/core-rules/omp/hooks" "$cp/.omp/hooks"
-  build_healthy_project
-  write_config
-
-  run_doctor
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # The control-plane project's .omp/AGENTS.md links the parent rules FILE...
-  [ "$(readlink "$cp/.omp/AGENTS.md")" = "$CANON/core-rules/CLAUDE.md" ]
-  # ...and passes without a parent-import row (there is no parent above it).
-  [[ "$output" == *"✓ omp: all 5 surface links resolve to exact canonical targets"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"✓ omp-import: canonical control-plane project"* ]] || { echo "$output"; false; }
-  # The ordinary healthy project still requires its own CLAUDE.md import.
-  [[ "$output" == *"✓ omp-import: first @-import → canonical core-rules/CLAUDE.md"* ]] || { echo "$output"; false; }
-}
-
-# ===========================================================================
-# Portable local-registry doctor (Spec 036 T15)
-# ===========================================================================
-# The reducer's output is the command exit code doctor must use after folding
-# all check results; keep this regression independent of fixture construction.
 @test "portable summary exit reducer never returns zero for errors" {
   run bash -c '
     . "$1"
@@ -1729,7 +1417,7 @@ EOF
   [ -f "$journal" ] && [ -f "$owner" ]
   [ "$(shasum -a 256 "$journal" | awk '{print $1}')" = "$journal_before" ]
   [ "$(shasum -a 256 "$owner" | awk '{print $1}')" = "$owner_before" ]
-  [ -L "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md" ]
+  [ -L "$PORTABLE_ACCOUNT_HOME/.claude/skills/herdr-foreman" ]
 }
 
 @test "portable doctor rejects an unrelated parent claim without deleting the directory" {
@@ -1825,12 +1513,12 @@ EOF
   prepare_portable_user_attachment
   project_owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
   project_owner_before="$(shasum -a 256 "$project_owner" | awk '{print $1}')"
-  project_agents_target="$(readlink "$PORTABLE_PROJECT/.omp/AGENTS.md")"
+  project_agents_target="$(readlink "$PORTABLE_PROJECT/.agents/rules/trellis.md")"
 
   run_portable_doctor --project portable-fixture
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  jq '.outputStyle = "drifted"' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json" \
+  jq '.workflowSizeGuideline = "drifted"' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json" \
     > "$PORTABLE_ACCOUNT_HOME/.claude/settings.json.next"
   mv "$PORTABLE_ACCOUNT_HOME/.claude/settings.json.next" "$PORTABLE_ACCOUNT_HOME/.claude/settings.json"
   chmod 600 "$PORTABLE_ACCOUNT_HOME/.claude/settings.json"
@@ -1844,14 +1532,14 @@ EOF
   [[ "$output" == *"✓ attachment ownership: exact committed owner, owned artifacts, and managed hooks match"* ]] ||
     { echo "$output"; false; }
   [ "$(shasum -a 256 "$project_owner" | awk '{print $1}')" = "$project_owner_before" ]
-  [ "$(readlink "$PORTABLE_PROJECT/.omp/AGENTS.md")" = "$project_agents_target" ]
-  [ "$(jq -r '.outputStyle' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json")" = "drifted" ]
+  [ "$(readlink "$PORTABLE_PROJECT/.agents/rules/trellis.md")" = "$project_agents_target" ]
+  [ "$(jq -r '.workflowSizeGuideline' "$PORTABLE_ACCOUNT_HOME/.claude/settings.json")" = "drifted" ]
 }
 
 @test "portable doctor reports a missing owned user leaf" {
   build_portable_doctor_home
   prepare_portable_user_attachment
-  rm "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md"
+  rm "$PORTABLE_ACCOUNT_HOME/.claude/output-styles/trellis-orchestration.md"
 
   run_portable_doctor
 
@@ -1859,7 +1547,7 @@ EOF
   [[ "$output" == *"✗ user surface: a Trellis-owned leaf is missing, modified, has the wrong mode or target, or conflicts with an unowned artifact"* ]] ||
     { echo "$output"; false; }
   [ "$(grep -c 'user surface:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
-  [ ! -e "$PORTABLE_ACCOUNT_HOME/.omp/agent/AGENTS.md" ]
+  [ ! -e "$PORTABLE_ACCOUNT_HOME/.claude/output-styles/trellis-orchestration.md" ]
 }
 
 @test "portable --home --project overrides an inherited legacy config" {
@@ -2000,7 +1688,7 @@ EOF
   worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
   cat > "$PORTABLE_HOME/registry.json" <<EOF
-{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex","omp"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
+{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
 EOF
   chmod 600 "$PORTABLE_HOME/registry.json"
 
@@ -2028,7 +1716,7 @@ EOF
   worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
   cat > "$PORTABLE_HOME/registry.json" <<EOF
-{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex","omp"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
+{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
 EOF
   chmod 600 "$PORTABLE_HOME/registry.json"
 
@@ -2056,7 +1744,7 @@ EOF
   worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
   cat > "$PORTABLE_HOME/registry.json" <<EOF
-{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex","omp"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
+{"schema_version":1,"projects":{"personal/portable-fixture":{"fleet":"personal","project_id":"portable-fixture","status":"active","metadata":{},"checkouts":{"$checkout_id":{"root":"$PORTABLE_PROJECT","git_common_dir":"$common","release":"1.2.3","harnesses":["claude","codex"],"worktrees":{"$worktree_id":{"root":"$PORTABLE_PROJECT"}}}}}},"discovery_ignores":{}}
 EOF
   chmod 600 "$PORTABLE_HOME/registry.json"
 
@@ -2197,7 +1885,7 @@ EOF
   run_portable_doctor --project portable-fixture
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"native surfaces: claude, codex, omp match the immutable Claude/Codex/OMP manifest"* ]] ||
+  [[ "$output" == *"native surfaces: claude, codex match the selected immutable harness manifest"* ]] ||
     { echo "$output"; false; }
   [ "$(jq -c '.permissions.deny' "$rendered")" = '["Read(./legacy/**)"]' ]
 }
@@ -2249,24 +1937,6 @@ EOF
   [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$previous" ]
 }
 
-
-@test "portable doctor reports drift in the owned OMP project policy" {
-  build_portable_doctor_home
-  prepare_portable_attachment
-
-  run_portable_doctor --project portable-fixture
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
-  printf '\n# deliberate project policy drift\n' >> "$PORTABLE_PROJECT/.omp/config.yml"
-  run_portable_doctor --project portable-fixture
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  [[ "$output" == *"attachment ownership: a Trellis-owned artifact is missing, modified, or escapes its recorded state"* ]] ||
-    { echo "$output"; false; }
-  [[ "$output" == *"layout: corrupt — local attachment ownership is conflict, not repairable automatically"* ]] ||
-    { echo "$output"; false; }
-  grep -qF '# deliberate project policy drift' "$PORTABLE_PROJECT/.omp/config.yml"
-}
 
 @test "portable doctor reports when Husky reclaims core.hooksPath without repairing it" {
   local current diagnostic current_display root_display expected_display
@@ -2695,7 +2365,7 @@ copy_show_config_into() {
 @test "portable show-config rejects an owned native artifact that drifts" {
   build_portable_doctor_home
   prepare_portable_attachment
-  rm "$PORTABLE_PROJECT/.omp/AGENTS.md"
+  rm "$PORTABLE_PROJECT/.agents/rules/trellis.md"
 
   run_portable_show_config
 
@@ -2734,7 +2404,7 @@ copy_show_config_into() {
   [[ "$output" != *"valid strict local attachment"* ]] || { echo "$output"; false; }
 
   jq --arg checkout "$PORTABLE_CHECKOUT_ID" '
-    .projects["personal/portable-fixture"].checkouts[$checkout].harnesses = ["claude", "codex", "omp"]
+    .projects["personal/portable-fixture"].checkouts[$checkout].harnesses = ["claude", "codex"]
   ' "$PORTABLE_HOME/registry.json" > "$PORTABLE_HOME/registry.json.next"
   mv "$PORTABLE_HOME/registry.json.next" "$PORTABLE_HOME/registry.json"
   chmod 600 "$PORTABLE_HOME/registry.json"

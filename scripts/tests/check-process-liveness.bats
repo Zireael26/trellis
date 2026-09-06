@@ -106,6 +106,14 @@ GOOD
   while IFS= read -r file; do
     case "$file" in
       notes/*|*/tests/*|*/fixtures/*) continue ;;
+      # Historical record, not live behavior. The lessons log and the dated
+      # design records quote the rejected probe in order to condemn it; audit
+      # evidence, receipts, and captured runner output preserve what a past run
+      # actually executed. Rewriting either to satisfy a source scan would
+      # falsify the record, so they are out of scope for it. Every executing
+      # surface — scripts, hooks, skills, commands, workflows, and the pasteable
+      # runbooks — stays in scope.
+      gotchas.md|audits/*|docs/specs/*|receipts/*|*/receipts/*|*.log|*.jsonl) continue ;;
     esac
     found="$(grep -nE "$UNSAFE_RE" "$REPO_ROOT/$file" 2>/dev/null || true)"
     [ -z "$found" ] || hits="${hits}${file}:${found}"$'\n'

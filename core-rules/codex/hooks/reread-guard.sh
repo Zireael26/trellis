@@ -12,9 +12,9 @@
 # warns, BLOCK. The block fires at EVERY autonomy level — the slider tunes only
 # how many warns precede it (never zero). Locked decision #2.
 #
-# MIRROR DELTAS vs the Claude hook (everything else is byte-for-behavior
-# identical):
-#   (a) STATE_DIR = ROOT/.codex/.reread-state  (not .claude).
+# MIRROR DELTAS vs the Claude hook:
+#   (a) STATE_DIR is ROOT/.pi/.reread-state only when TRELLIS_HARNESS=pi;
+#       otherwise it remains ROOT/.codex/.reread-state (not .claude).
 #   (b) BLOCK rides the Codex convention: {"decision":"block","reason":...} on
 #       stdout + exit 2 (NOT the Claude permissionDecision JSON). Confirmed
 #       against the sibling block-destructive.sh / code-review-subagent.sh.
@@ -38,7 +38,8 @@
 #
 # State contract (identical across reread-guard / track-read / stamp-turn):
 #   ROOT      = _se_repo_root "$(_se_project_dir)"   (canonical, worktree-aware)
-#   STATE_DIR = ROOT/.codex/.reread-state            (runtime artifact, never committed)
+#   STATE_DIR = $(_se_harness_home "$ROOT")/.reread-state
+#               (runtime artifact, never committed)
 #   KEY       = _se_state_key transcript_path session_id  (16 hex; session_id
 #               PRIMARY, transcript_path FALLBACK, "default" last — DL-P5-09)
 #   <KEY>.epoch     last GENUINE turn-end epoch (absent → 0); written ONLY by stamp-turn
@@ -68,9 +69,24 @@ __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
-# --- target file ---
-T=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
-[ -n "$T" ] || exit 0   # empty target → permit (fail-open)
+__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+[ -f "$__ta_lib" ] || { echo "reread-guard: missing action normalizer — permitting" >&2; exit 0; }
+# shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
+. "$__ta_lib"
+
+NORMALIZED=$(_ta_normalize_action codex pre_action "$INPUT") || exit 0
+[ "$(printf '%s' "$NORMALIZED" | jq -r '.action.family')" = "file_mutation" ] || exit 0
+ACTION_CWD=$(printf '%s' "$NORMALIZED" | jq -r '.cwd // empty')
+[ -d "$ACTION_CWD" ] || ACTION_CWD="$(_se_project_dir)"
+if [ "$(printf '%s' "$NORMALIZED" | jq -r '.action.target_coverage')" != "complete" ]; then
+  DIAGNOSTIC=$(printf '%s' "$NORMALIZED" | jq -r '.action.diagnostics[0] // "mutation targets are unavailable"')
+  echo "reread-guard: incomplete native mutation envelope — $DIAGNOSTIC; checking declared targets only" >&2
+fi
+
+guard_target() {
+local T="$1"
+[ -n "$T" ] || return 0   # empty target → permit (fail-open)
 
 # DELTA (c): Codex may pass a relative file_path; resolve against the project
 # dir EARLY, then lexically normalize so the new-file test, the IN_SET test and
@@ -78,7 +94,7 @@ T=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
 # passes absolute (this branch is a no-op there).
 case "$T" in
   /*) ;;
-  *) T="$(_se_project_dir)/$T" ;;
+  *) T="$ACTION_CWD/$T" ;;
 esac
 
 # FIX-5 (DL-P5-10): a target containing a TAB or NEWLINE cannot be safely matched
@@ -96,14 +112,14 @@ nl='
 case "$T" in
   *"$tab"*|*"$nl"*)
     echo "reread-guard: target contains a TAB/NEWLINE — cannot match safely, permitting (fail-open)" >&2
-    exit 0 ;;
+    return 0 ;;
 esac
 
 # FIX-4 (DL-P5-10): lexically normalize so the spelling here MATCHES track-read's
 # stored spelling (./foo ≡ foo ≡ a/../foo). No-op for Claude's absolute paths;
 # this fixes the Codex relative-path IN_SET self-block.
 T=$(_se_normpath "$T")
-[ -n "$T" ] || exit 0
+[ -n "$T" ] || return 0
 
 # --- override escape: logged, never silent ---
 if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
@@ -115,7 +131,7 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
   SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SID=""
   KEY=$(_se_state_key "$TP" "$SID") || KEY=""
   if [ -n "$ROOT" ] && [ -n "$KEY" ]; then
-    STATE_DIR="$ROOT/.codex/.reread-state"
+    STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
     if mkdir -p "$STATE_DIR" 2>/dev/null; then
       now=$(date +%s 2>/dev/null) || now=0
       printf '%s\t%s\n' "$now" "OVERRIDE:$T" >> "$STATE_DIR/$KEY.warns.tsv" 2>/dev/null \
@@ -126,23 +142,23 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
   else
     echo "reread-guard: TRELLIS_REREAD_OVERRIDE=1 logged-escape for $T" >&2
   fi
-  exit 0
+  return 0
 fi
 
 # --- derive the shared state key (DL-P5-09: one helper, zero inline copies) ---
-TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || exit 0
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || exit 0
-KEY=$(_se_state_key "$TP" "$SID") || exit 0
-[ -n "$KEY" ] || exit 0   # key derivation failed → permit (fail-open)
+TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || return 0
+SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || return 0
+KEY=$(_se_state_key "$TP" "$SID") || return 0
+[ -n "$KEY" ] || return 0   # key derivation failed → permit (fail-open)
 
 # --- resolve state; any failure → PERMIT (fail-open) ---
-ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || exit 0
-[ -n "$ROOT" ] || exit 0
-STATE_DIR="$ROOT/.codex/.reread-state"
+ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || return 0
+[ -n "$ROOT" ] || return 0
+STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
 
 # new-file test: a path that does not exist on disk is EXEMPT (a Write that
 # creates it). track-read records it after the Write succeeds. Permit silently.
-[ -e "$T" ] || exit 0
+[ -e "$T" ] || return 0
 
 # turn_epoch = contents of <KEY>.epoch, or 0 if absent/unreadable/non-numeric.
 TURN_EPOCH=0
@@ -164,7 +180,7 @@ if [ -f "$READS_FILE" ]; then
     BEGIN { found=1 }
     $2 == ENVIRON["T"] && ($1+0) >= (ENVIRON["TURN_EPOCH"]+0) { found=0; exit }
     END { exit found }
-  ' "$READS_FILE" 2>/dev/null && exit 0
+  ' "$READS_FILE" 2>/dev/null && return 0
 fi
 
 # --- T exists, NOT in the known-set: resolve autonomy, apply warn budget ---
@@ -200,10 +216,18 @@ if [ "$WARN_COUNT" -lt "$BUDGET" ]; then
   fi
   N=$((WARN_COUNT + 1))
   echo "reread-guard: about to edit $T not Read this turn (warn $N/$BUDGET). Read it first, or export TRELLIS_REREAD_OVERRIDE=1. Repeated FAILED stale edits will BLOCK." >&2
-  exit 0
+  return 0
 fi
 
 # BLOCK: budget exhausted. Emit the Codex block convention; exit 2.
 REASON="reread-guard: BLOCKED edit of $T — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override."
 jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
 exit 2
+}
+
+while IFS=$'\t' read -r OPERATION SOURCE_PATH _DESTINATION; do
+  case "$OPERATION" in
+    create|update|delete|rename) guard_target "$SOURCE_PATH" ;;
+  esac
+done < <(_ta_targets_tsv "$NORMALIZED")
+exit 0

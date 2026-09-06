@@ -97,7 +97,7 @@ EOF
   [ "$(git -C "$T14_PROJECT" config --local --get core.hooksPath)" = "$managed" ]
 
   T14_WORKTREE="$T14_SANDBOX/lifecycle linked worktree"
-  git -C "$T14_PROJECT" worktree add -qb t14-lifecycle "$T14_WORKTREE"
+  git -C "$T14_PROJECT" worktree add -q -b t14-lifecycle "$T14_WORKTREE"
   t14_attach "$T14_WORKTREE"
   [ "$?" -eq 0 ]
   [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
@@ -119,7 +119,7 @@ EOF
   [ "$?" -eq 0 ]
   managed="$(dispatcher_path)"
   T14_WORKTREE="$T14_SANDBOX/hostile dispatcher linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -qb t14-hostile-dispatcher "$T14_WORKTREE"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-hostile-dispatcher "$T14_WORKTREE"
 
   marker="$T14_SANDBOX/hostile dispatcher ran"
   hostile_bin="$T14_SANDBOX/hostile bin"
@@ -166,4 +166,88 @@ EOF
   [ -L "$T14_WORKTREE/.trellis/runtime" ]
   [ "$(readlink "$T14_WORKTREE/.trellis/runtime")" = "$TRELLIS_HOME/releases/$T14_RELEASE/payload" ]
   [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
+}
+
+install_broken_generator_release() {
+  local kind="$1" repo="$T14_SANDBOX/release source"
+  T14_RELEASE=1.2.4
+  printf '%s\n' "$T14_RELEASE" > "$repo/core-rules/VERSION"
+  case "$kind" in
+    failure) rm "$repo/scripts/trellis-launcher.sh" ;;
+    empty)
+      cat > "$repo/scripts/lib/attachment.sh" <<'GENERATOR'
+_attachment_hooks_post_checkout_dispatcher_body() { return 0; }
+_attachment_hooks_pre_push_dispatcher_body() { return 0; }
+GENERATOR
+      ;;
+    *) return 1 ;;
+  esac
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm 'fixture malformed generator'
+  git -C "$repo" tag -a "v$T14_RELEASE" -m 'fixture malformed generator'
+  TRELLIS_HOME="$TRELLIS_HOME" bash -c \
+    '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
+    t14-broken-generator "$REPO_ROOT/scripts/lib/release-store.sh" "$T14_RELEASE" "$repo"
+}
+
+assert_broken_generator_attach_is_recoverable() {
+  local marker="$T14_SANDBOX/preserved prior" before owner managed
+  write_prior_hook "$T14_PROJECT/.git/hooks" "$marker" 23
+  before="$(t14_sha256_text "$(cat "$T14_PROJECT/.git/hooks/post-checkout")")"
+
+  run t14_attach
+  [ "$status" -eq 4 ] || { echo "attach status=$status"; echo "$output"; false; }
+  [[ "$output" == *'managed hook generation failed'* ]] || { echo "$output"; false; }
+  [ "$(t14_sha256_text "$(cat "$T14_PROJECT/.git/hooks/post-checkout")")" = "$before" ]
+  [ -x "$T14_PROJECT/.git/hooks/post-checkout" ]
+  [ ! -e "$T14_PROJECT/.trellis/runtime" ] && [ ! -L "$T14_PROJECT/.trellis/runtime" ]
+  [ ! -e "$marker.args" ] && [ ! -e "$marker.stdin" ]
+  run git -C "$T14_PROJECT" config --local --get core.hooksPath
+  [ "$status" -eq 1 ]
+  [ -z "$(find "$TRELLIS_HOME/state/git-hooks" -type f -print 2>/dev/null)" ]
+  # The established transaction commits ownership before installing hooks.
+  # Keep that incomplete record visible and exercise the explicit recovery
+  # instruction from detach before checking that it restores the prior hook.
+  run t14_owner_for_root "$T14_PROJECT"
+  [ "$status" -eq 0 ] && [ -f "$output" ]
+  owner="$output"
+  jq -e --arg release "$T14_RELEASE" '.release == $release and .git_hooks.enabled == true' "$owner"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  run t14_detach
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *'refusing detach: core.hooksPath is'* ]]
+  [[ "$output" == *'config core.hooksPath'* ]]
+  git -C "$T14_PROJECT" config core.hooksPath "$managed"
+  run t14_detach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run t14_owner_for_root "$T14_PROJECT"
+  [ "$status" -eq 1 ]
+  [ "$(t14_sha256_text "$(cat "$T14_PROJECT/.git/hooks/post-checkout")")" = "$before" ]
+}
+
+@test "failed release hook generation refuses attach without publishing empty hooks" {
+  install_broken_generator_release failure
+  assert_broken_generator_attach_is_recoverable
+}
+
+@test "empty successful release hook generation refuses attach without publishing empty hooks" {
+  install_broken_generator_release empty
+  assert_broken_generator_attach_is_recoverable
+}
+
+@test "owned-state verification refuses blank hooks when the pinned generator becomes unavailable" {
+  local owner managed launcher
+  t14_attach
+  owner="$(t14_owner_for_root "$T14_PROJECT")"
+  managed="$(dispatcher_path)"
+  launcher="$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/trellis-launcher.sh"
+  # Simulate corrupt state produced by the old unchecked generator path.
+  chmod u+w "$(dirname "$launcher")"
+  rm "$launcher"
+  printf '\n' > "$managed/post-checkout"
+  printf '\n' > "$managed/pre-push"
+
+  run bash -c '. "$1"; _attachment_hooks_state_owned_matches_data "$2" "$(cat "$3")"' \
+    t14-owned-state "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$owner"
+  [ "$status" -eq 3 ] || { echo "ownership status=$status"; echo "$output"; false; }
 }

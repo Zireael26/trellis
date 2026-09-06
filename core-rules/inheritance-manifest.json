@@ -1,0 +1,317 @@
+{
+  "schema_version": 2,
+  "harnesses": {
+    "claude": {
+      "links": [
+        {
+          "source": "core-rules/CLAUDE.md",
+          "destination": ".claude/rules/trellis.md"
+        },
+        {
+          "source_children": "core-rules/skills",
+          "destination_dir": ".claude/skills",
+          "entry_type": "directory",
+          "required_file": "SKILL.md"
+        },
+        {
+          "source_children": "core-rules/commands",
+          "destination_dir": ".claude/commands",
+          "entry_type": "file",
+          "suffix": ".md"
+        },
+        {
+          "source_children": "core-rules/agents",
+          "destination_dir": ".claude/agents",
+          "entry_type": "file",
+          "suffix": ".md"
+        },
+        {
+          "source_children": "core-rules/hooks",
+          "destination_dir": ".claude/hooks",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source_children": "core-rules/hooks/lib",
+          "destination_dir": ".claude/hooks/lib",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/task-state.py",
+          "destination": ".claude/hooks/lib/task-state.py",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/verification-bash.py",
+          "destination": ".claude/hooks/lib/verification-bash.py",
+          "executable": true
+        }
+      ],
+      "render": [
+        {
+          "template": "core-rules/commands/templates/primer-index-template.md",
+          "destination": ".claude/primers/INDEX.md",
+          "merge": "replace",
+          "mode": "0644",
+          "required": true,
+          "render_if_absent": true
+        },
+        {
+          "template": "core-rules/templates/claude-settings.local.json",
+          "destination": ".claude/settings.local.json",
+          "merge": "explicit-json",
+          "mode": "0600",
+          "required": false
+        }
+      ]
+    },
+    "shared_agents": {
+      "links": [
+        {
+          "project_target": "CLAUDE.md",
+          "fallback_source": "core-rules/CLAUDE.md",
+          "destination": "AGENTS.md"
+        },
+        {
+          "source": "core-rules/CLAUDE.md",
+          "destination": ".agents/rules/trellis.md"
+        },
+        {
+          "source_children": "core-rules/skills",
+          "destination_dir": ".agents/skills",
+          "entry_type": "directory",
+          "required_file": "SKILL.md"
+        },
+        {
+          "source_children": "core-rules/commands",
+          "destination_dir": ".agents/commands",
+          "entry_type": "file",
+          "suffix": ".md"
+        },
+        {
+          "source": "core-rules/commands/primer.md",
+          "destination": ".agents/workflows/primer.md"
+        },
+        {
+          "source": "core-rules/commands/primer-refresh.md",
+          "destination": ".agents/workflows/primer-refresh.md"
+        },
+        {
+          "source": "core-rules/commands/primer-check.md",
+          "destination": ".agents/workflows/primer-check.md"
+        },
+        {
+          "source": "core-rules/commands/explore.md",
+          "destination": ".agents/workflows/explore.md"
+        },
+        {
+          "source": "core-rules/commands/surgical.md",
+          "destination": ".agents/workflows/surgical.md"
+        }
+      ],
+      "render": [
+        {
+          "template": "core-rules/commands/templates/primer-index-template.md",
+          "destination": ".agents/primers/INDEX.md",
+          "merge": "replace",
+          "mode": "0644",
+          "required": true,
+          "render_if_absent": true
+        }
+      ]
+    },
+    "codex": {
+      "links": [
+        {
+          "source_children": "core-rules/codex/hooks",
+          "destination_dir": ".codex/hooks",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source_children": "core-rules/codex/hooks/lib",
+          "destination_dir": ".codex/hooks/lib",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/aeo-gate-warn.sh",
+          "destination": ".codex/hooks/lib/aeo-gate-warn.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/code-reviewer.sh",
+          "destination": ".codex/hooks/lib/code-reviewer.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/decision-receipt-core.sh",
+          "destination": ".codex/hooks/lib/decision-receipt-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/slop-patterns.sh",
+          "destination": ".codex/hooks/lib/slop-patterns.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/spec-gate-core.sh",
+          "destination": ".codex/hooks/lib/spec-gate-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/ui-verify-core.sh",
+          "destination": ".codex/hooks/lib/ui-verify-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/verification-receipt.sh",
+          "destination": ".codex/hooks/lib/verification-receipt.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/action-normalize.sh",
+          "destination": ".codex/hooks/lib/action-normalize.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/task-context.sh",
+          "destination": ".codex/hooks/lib/task-context.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/task-state.py",
+          "destination": ".codex/hooks/lib/task-state.py",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/verification-bash.py",
+          "destination": ".codex/hooks/lib/verification-bash.py",
+          "executable": true
+        }
+      ],
+      "render": [
+        {
+          "template": "core-rules/templates/codex-hooks.local.json",
+          "destination": ".codex/hooks.json",
+          "merge": "explicit-json",
+          "mode": "0600",
+          "required": false
+        }
+      ]
+    },
+    "pi": {
+      "links": [
+        {
+          "source": "core-rules/pi/extensions/trellis.ts",
+          "destination": ".pi/extensions/trellis.ts"
+        },
+        {
+          "source": "core-rules/pi/hooks/dispatch.sh",
+          "destination": ".pi/hooks/dispatch.sh",
+          "executable": true
+        },
+        {
+          "source_children": "core-rules/codex/hooks",
+          "destination_dir": ".pi/hooks",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source_children": "core-rules/codex/hooks/lib",
+          "destination_dir": ".pi/hooks/lib",
+          "entry_type": "file",
+          "suffix": ".sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/aeo-gate-warn.sh",
+          "destination": ".pi/hooks/lib/aeo-gate-warn.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/code-reviewer.sh",
+          "destination": ".pi/hooks/lib/code-reviewer.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/decision-receipt-core.sh",
+          "destination": ".pi/hooks/lib/decision-receipt-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/slop-patterns.sh",
+          "destination": ".pi/hooks/lib/slop-patterns.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/spec-gate-core.sh",
+          "destination": ".pi/hooks/lib/spec-gate-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/ui-verify-core.sh",
+          "destination": ".pi/hooks/lib/ui-verify-core.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/verification-receipt.sh",
+          "destination": ".pi/hooks/lib/verification-receipt.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/action-normalize.sh",
+          "destination": ".pi/hooks/lib/action-normalize.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/task-context.sh",
+          "destination": ".pi/hooks/lib/task-context.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/task-state.py",
+          "destination": ".pi/hooks/lib/task-state.py",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/verification-bash.py",
+          "destination": ".pi/hooks/lib/verification-bash.py",
+          "executable": true
+        }
+      ],
+      "render": []
+    },
+    "user": {
+      "links": [
+        {
+          "source": "core-rules/hooks/herdr-foreman-session.sh",
+          "destination": ".claude/hooks/herdr-foreman-session.sh",
+          "destination_home": true,
+          "executable": true
+        },
+        {
+          "source": "core-rules/templates/claude-output-styles/trellis-orchestration.md",
+          "destination": ".claude/output-styles/trellis-orchestration.md",
+          "destination_home": true
+        }
+      ],
+      "render": [
+        {
+          "template": "core-rules/templates/claude-user-settings.json",
+          "destination": ".claude/settings.json",
+          "destination_home": true,
+          "merge": "explicit-json",
+          "mode": "0600",
+          "required": true
+        }
+      ]
+    }
+  }
+}

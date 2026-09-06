@@ -1172,10 +1172,11 @@ dj_release_staging_sidecar_bytes() {
 #   2 malformed/unreadable/indeterminate owner (fail closed)
 #
 # A valid owner record is intentionally checked with only kill(2), through
-# Python so ESRCH is distinguishable from EPERM, and
-# `LC_ALL=C ps -p PID -o lstart=`. We never inspect argv or any command-line
-# text, so PID reuse is rejected by the birth token rather than guessed from a
-# process name.
+# Python so ESRCH is distinguishable from EPERM, and the shared process-birth
+# reader (`trellis_process_birth`, scripts/lib/trellis-home.sh) — ps on
+# platforms that can run it, libproc on Darwin, one token either way. We never
+# inspect argv or any command-line text, so PID reuse is rejected by the birth
+# token rather than guessed from a process name.
 dj_release_staging_owner_state() {
   local snapshot="${1:-}" owner owner_json pid recorded_birth current_birth process_state python_bin
   [ "$#" -eq 1 ] || { printf 'owner record malformed or unreadable'; return 2; }
@@ -1222,10 +1223,14 @@ dj_release_staging_owner_state() {
     printf 'owner record malformed or unreadable'
     return 2
   }
-  command -v ps >/dev/null 2>&1 || {
-    printf 'owner liveness could not be determined (ps unavailable)'
-    return 2
-  }
+  # Darwin reads the birth token through libproc, so ps is required only on
+  # the platforms whose reader still shells out to it.
+  if [ "$(uname -s 2>/dev/null)" != Darwin ]; then
+    command -v ps >/dev/null 2>&1 || {
+      printf 'owner liveness could not be determined (ps unavailable)'
+      return 2
+    }
+  fi
   command -v python3 >/dev/null 2>&1 || {
     printf 'owner liveness could not be determined (python3 unavailable)'
     return 2
@@ -1263,7 +1268,7 @@ PY
       return 2
       ;;
   esac
-  if ! current_birth="$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)"; then
+  if ! current_birth="$(trellis_process_birth "$pid")"; then
     printf 'owner liveness could not be determined (pid %s)' "$pid"
     return 2
   fi
@@ -1300,8 +1305,10 @@ dj_remove_release_staging_safely() {
     echo "dj_remove_release_staging_safely: python3 with descriptor-relative filesystem APIs is required" >&2
     return 1
   }
+  # The Darwin birth reader travels as an argument, not as a file or an
+  # import: this sink must not read an operator- or project-owned path.
   python3 - "$releases" "$snapshot" "$version" "$ttl_days" \
-    "$expected_device" "$expected_inode" <<'PY'
+    "$expected_device" "$expected_inode" "$(trellis_process_birth_python)" <<'PY'
 import errno
 import json
 import math
@@ -1315,6 +1322,7 @@ import time
 releases, snapshot, version = sys.argv[1:4]
 ttl_days = int(sys.argv[4])
 expected_identity = (int(sys.argv[5]), int(sys.argv[6]))
+birth_program = sys.argv[7]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 if not O_DIRECTORY or not O_NOFOLLOW:
@@ -1487,9 +1495,17 @@ def read_owner(root_fd, owner_name):
         fail("owner process liveness could not be determined")
     env = os.environ.copy()
     env["LC_ALL"] = "C"
+    # Darwin's ps is setgid and does not run under a seatbelt; the libproc
+    # reader handed to us as data does, and emits the same token. `-I` keeps a
+    # poisoned cwd or PYTHONPATH from shadowing ctypes or time.
+    if sys.platform == "darwin":
+        birth_argv = [sys.executable, "-I", "-c", birth_program, str(pid)]
+    else:
+        birth_argv = ["ps", "-p", str(pid), "-o", "lstart="]
     try:
         result = subprocess.Popen(
-            ["ps", "-p", str(pid), "-o", "lstart="],
+            birth_argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=env,

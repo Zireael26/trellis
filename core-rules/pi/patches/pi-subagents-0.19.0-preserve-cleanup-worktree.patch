@@ -1,0 +1,21 @@
+diff --git a/src/worktree.ts b/src/worktree.ts
+index abaec39..1ff4c10 100644
+--- a/src/worktree.ts
++++ b/src/worktree.ts
+@@ -174,10 +174,12 @@ export async function cleanupWorktree(
+       branch: worktree.branch,
+       path: worktree.path,
+     };
+-  } catch {
+-    // Best effort cleanup on error
+-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
+-    return { hasChanges: false };
++  } catch (error) {
++    const detail = error instanceof Error ? error.message : String(error);
++    throw new Error(
++      `Failed to clean up agent worktree; work preserved at ${worktree.path}: ${detail}`,
++      { cause: error },
++    );
+   }
+ }
+ 

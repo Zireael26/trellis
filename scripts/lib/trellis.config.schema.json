@@ -46,7 +46,10 @@
       "type": "array",
       "minItems": 1,
       "items": {
-        "enum": ["claude", "codex", "omp"]
+        "enum": [
+          "claude",
+          "codex"
+        ]
       },
       "uniqueItems": true
     },
@@ -54,7 +57,7 @@
     "fleet": false,
     "installed_release": false,
     "presets": {
-      "description": "Optional. List of preset rule-layers to load on top of the parent rules. Each entry must match a file under core-rules/presets/<name>.md. Symlinks land at <project>/.claude/rules/preset-<name>.md and <project>/.agents/rules/preset-<name>.md (under Codex). Order is preserved — later entries compose on top of earlier ones.",
+      "description": "Optional. List of preset rule-layers to load on top of the parent rules. Each entry must match a file under core-rules/presets/<name>.md. Symlinks land at <project>/.claude/rules/preset-<name>.md and <project>/.agents/rules/preset-<name>.md (under Codex). Order is preserved \u2014 later entries compose on top of earlier ones.",
       "type": "array",
       "items": {
         "type": "string",
@@ -129,14 +132,20 @@
       "additionalProperties": true
     },
     "sed_flavor": {
-      "enum": ["auto", "gnu", "bsd"]
+      "enum": [
+        "auto",
+        "gnu",
+        "bsd"
+      ]
     },
     "approved_mcps": {
-      "description": "Optional. Allowlist of MCP server names sanctioned for use across registered projects. Today this is documentation only — projects MAY connect MCPs not listed here. An operator audit may warn when a project's .mcp.json references an unapproved server. Names match the server name as exposed to the harness (e.g., the prefix before '__' in mcp__<server>__<tool>). Examples: 'operator-scheduler', 'computer-use', 'claude-in-chrome', 'Vercel', 'Cloudflare', 'obsidian'.",
+      "description": "Optional. Allowlist of MCP server names sanctioned for use across registered projects. Today this is documentation only \u2014 projects MAY connect MCPs not listed here. An operator audit may warn when a project's .mcp.json references an unapproved server. Names match the server name as exposed to the harness (e.g., the prefix before '__' in mcp__<server>__<tool>). Examples: 'operator-scheduler', 'computer-use', 'claude-in-chrome', 'Vercel', 'Cloudflare', 'obsidian'.",
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -147,7 +156,10 @@
           },
           "scope": {
             "description": "'fleet' = enabled across all registered projects; 'per-project' = only where the project explicitly opts in.",
-            "enum": ["fleet", "per-project"]
+            "enum": [
+              "fleet",
+              "per-project"
+            ]
           }
         },
         "additionalProperties": true
@@ -155,7 +167,7 @@
       "uniqueItems": true
     },
     "autonomy_default": {
-      "description": "Optional. Fleet default autonomy level (integer 1–5) used by every session under this clone unless overridden. 1=pedagogical, 2=cautious, 3=standard (default), 4=initiative, 5=autonomous. Project-local <project>/.trellis.config.json may override with its own 'autonomy' field. Presets may clamp via 'autonomy_ceiling'.",
+      "description": "Optional. Fleet default autonomy level (integer 1\u20135) used by every session under this clone unless overridden. 1=pedagogical, 2=cautious, 3=standard (default), 4=initiative, 5=autonomous. Project-local <project>/.trellis.config.json may override with its own 'autonomy' field. Presets may clamp via 'autonomy_ceiling'.",
       "type": "integer",
       "minimum": 1,
       "maximum": 5
@@ -167,8 +179,14 @@
       "maximum": 5
     },
     "package_manager": {
-      "description": "Optional. Default JS package manager for hooks and gates that run project scripts (pre-push, stop-verify, process-gate). 'auto' (the default when unset) = detect from lockfile: pnpm-lock.yaml→pnpm, bun.lock(b)→bun, yarn.lock→yarn, package-lock.json→npm. An explicit value (pnpm|npm|bun|yarn) forces that manager regardless of lockfile. Project-local <project>/.trellis.config.json may override with its own 'package_manager'. With the key unset, resolution is byte-identical to pre-config Trellis (pure lockfile detection) — this key is purely additive.",
-      "enum": ["auto", "pnpm", "npm", "bun", "yarn"]
+      "description": "Optional. Default JS package manager for hooks and gates that run project scripts (pre-push, stop-verify, process-gate). 'auto' (the default when unset) = detect from lockfile: pnpm-lock.yaml\u2192pnpm, bun.lock(b)\u2192bun, yarn.lock\u2192yarn, package-lock.json\u2192npm. An explicit value (pnpm|npm|bun|yarn) forces that manager regardless of lockfile. Project-local <project>/.trellis.config.json may override with its own 'package_manager'. With the key unset, resolution is byte-identical to pre-config Trellis (pure lockfile detection) \u2014 this key is purely additive.",
+      "enum": [
+        "auto",
+        "pnpm",
+        "npm",
+        "bun",
+        "yarn"
+      ]
     },
     "conductor": {
       "description": "Optional. Fleet conductor autonomy controls. Every key is optional. auto_execute_top_n defaults to 0, preserving rank/auto-spec-only behavior; a positive value permits only that many reviewed-ready safe items from the same run to execute to [HOLD] PRs. The conductor never merges.",
@@ -183,7 +201,7 @@
       "additionalProperties": true
     },
     "disk_janitor": {
-      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; release_staging_ttl_days 1; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []; reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; worktree_count_ceiling 25; worktree_total_gb_ceiling 80). Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "description": "Optional. Tuning for `trellis disk-janitor`. Every key is optional; the orchestrator fills per-key defaults when the key or the whole object is absent (enabled true; cache_ttl_days 14; release_staging_ttl_days 1; worktree_stale_days 30; free_space_floor_gb 30; cache_ceiling_gb 20; skip_projects []; reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; worktree_count_ceiling 25; worktree_total_gb_ceiling 80). Absence of the object is byte-identical to the defaults \u2014 this key is purely additive.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -216,7 +234,7 @@
           "minimum": 0
         },
         "reap_pushed_worktrees": {
-          "description": "Layer 2 predicate switch. Default true: a linked worktree auto-reaps when it is porcelain-clean AND recoverable (branch merged via gh OR pushed to origin with the local tip not ahead) AND carries no gitignored secret — age-independent, which is what reclaims the unmerged-but-pushed fan-out flood. Set false to restore the legacy 4-gate predicate (non-main AND stale AND clean(allowlist) AND merged) verbatim.",
+          "description": "Layer 2 predicate switch. Default true: a linked worktree auto-reaps when it is porcelain-clean AND recoverable (branch merged via gh OR pushed to origin with the local tip not ahead) AND carries no gitignored secret \u2014 age-independent, which is what reclaims the unmerged-but-pushed fan-out flood. Set false to restore the legacy 4-gate predicate (non-main AND stale AND clean(allowlist) AND merged) verbatim.",
           "type": "boolean"
         },
         "ephemeral_tmp_ttl_days": {
@@ -247,7 +265,7 @@
       "additionalProperties": true
     },
     "loop_safety": {
-      "description": "Optional. Instance baseline for the loop-safety contract (core-rules/loop-safety.md). Every Trellis loop declares and honors three ceilings and halts on ANY one. Every key is optional; absence of a key or of the whole object falls back to the documented built-in fallback constants identical to these baselines (max_iterations 100; no_progress_iterations 3; budget_ceiling_usd 1000; usd_per_mtok 25.00). The optional codex_usd_per_mtok has no baseline constant: absent, cross-harness Codex spend is attributed at usd_per_mtok (backward compatible). Resolution, most specific wins: per-loop `safety` override → project-local <project>/.trellis.config.json.loop_safety → this central block → built-in fallback constants. Absence of the object is byte-identical to the defaults — this key is purely additive.",
+      "description": "Optional. Instance baseline for the loop-safety contract (core-rules/loop-safety.md). Every Trellis loop declares and honors three ceilings and halts on ANY one. Every key is optional; absence of a key or of the whole object falls back to the documented built-in fallback constants identical to these baselines (max_iterations 100; no_progress_iterations 3; budget_ceiling_usd 1000; usd_per_mtok 25.00). The optional codex_usd_per_mtok has no baseline constant: absent, cross-harness Codex spend is attributed at usd_per_mtok (backward compatible). Resolution, most specific wins: per-loop `safety` override \u2192 project-local <project>/.trellis.config.json.loop_safety \u2192 this central block \u2192 built-in fallback constants. Absence of the object is byte-identical to the defaults \u2014 this key is purely additive.",
       "type": "object",
       "properties": {
         "max_iterations": {
@@ -271,7 +289,7 @@
           "minimum": 0
         },
         "codex_usd_per_mtok": {
-          "description": "Optional. US dollars per million output tokens for the GPT-5.x / Codex model, used by cross-harness loops so Codex-unit spend is attributed at the Codex rate rather than the Opus rate when mapping budget_ceiling_usd onto the engine's token budget. Absent → Codex spend falls back to usd_per_mtok (backward compatible). Note: Codex's per-task cost win is mostly ~3-4x fewer tokens, not a lower per-MTok rate; set this to Codex's real output price, not a fudge factor.",
+          "description": "Optional. US dollars per million output tokens for the GPT-5.x / Codex model, used by cross-harness loops so Codex-unit spend is attributed at the Codex rate rather than the Opus rate when mapping budget_ceiling_usd onto the engine's token budget. Absent \u2192 Codex spend falls back to usd_per_mtok (backward compatible). Note: Codex's per-task cost win is mostly ~3-4x fewer tokens, not a lower per-MTok rate; set this to Codex's real output price, not a fudge factor.",
           "type": "number",
           "minimum": 0
         }
@@ -279,11 +297,11 @@
       "additionalProperties": true
     },
     "mandatory_pipeline": {
-      "description": "Optional. The mandatory feature-pipeline gate (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff vs the protected merge-base (excluding tests/docs/specs/audits/lockfiles/generated/operational paths) exceeds spec_required_diff_lines cannot be pushed unless ONE of three routes is satisfied: a spec triad added on THIS branch (+ an interview artifact), a size-capped `/surgical` declaration (net gated diff ≤ surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push — a pure function of git/filesystem state, so it is equal on Claude and Codex by construction — with a Stop-hook early-warning. Every key is optional; absence of the object, or enabled:false, is byte-identical to prior behavior (default OFF). A present-but-malformed block fails CLOSED (an opted-in project must not be silently disabled by a typo). Resolution, most specific wins: project-local <project>/.trellis.config.json.mandatory_pipeline → this central block → built-in (off, floor 80, ceiling 400).",
+      "description": "Optional. The mandatory feature-pipeline gate (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff vs the protected merge-base (excluding tests/docs/specs/audits/lockfiles/generated/operational paths) exceeds spec_required_diff_lines cannot be pushed unless ONE of three routes is satisfied: a spec triad added on THIS branch (+ an interview artifact), a size-capped `/surgical` declaration (net gated diff \u2264 surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push \u2014 a pure function of git/filesystem state, so it is equal on Claude and Codex by construction \u2014 with a Stop-hook early-warning. Every key is optional; absence of the object, or enabled:false, is byte-identical to prior behavior (default OFF). A present-but-malformed block fails CLOSED (an opted-in project must not be silently disabled by a typo). Resolution, most specific wins: project-local <project>/.trellis.config.json.mandatory_pipeline \u2192 this central block \u2192 built-in (off, floor 80, ceiling 400).",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Master switch for the mandatory-pipeline gate. Default false — absence or false is byte-identical to pre-006 behavior.",
+          "description": "Master switch for the mandatory-pipeline gate. Default false \u2014 absence or false is byte-identical to pre-006 behavior.",
           "type": "boolean"
         },
         "spec_required_diff_lines": {
@@ -292,7 +310,7 @@
           "minimum": 1
         },
         "surgical_max_diff_lines": {
-          "description": "Surgical ceiling: a `/surgical` declaration is honored only while the net gated diff stays at or below this many lines. Grow past it and the marker is invalid — the gate re-blocks and audit-logs an `oversized-surgical` line; use `/surgical --emergency` for genuine over-cap urgency. Default 400.",
+          "description": "Surgical ceiling: a `/surgical` declaration is honored only while the net gated diff stays at or below this many lines. Grow past it and the marker is invalid \u2014 the gate re-blocks and audit-logs an `oversized-surgical` line; use `/surgical --emergency` for genuine over-cap urgency. Default 400.",
           "type": "integer",
           "minimum": 1
         }
@@ -358,10 +376,18 @@
                 "const": true
               }
             },
-            "required": ["enabled"]
+            "required": [
+              "enabled"
+            ]
           },
           "then": {
-            "required": ["project", "url", "marker_file", "marker", "baseline"]
+            "required": [
+              "project",
+              "url",
+              "marker_file",
+              "marker",
+              "baseline"
+            ]
           }
         }
       ],

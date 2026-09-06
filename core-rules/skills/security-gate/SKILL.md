@@ -1,6 +1,6 @@
 ---
 name: security-gate
-description: Security scanner for any registered Trellis project. All three modes ship: project-wide baseline, per-PR diff, and chained-exploit red-team reasoning. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer.
+description: 'Security scanner for any registered Trellis project. All three modes ship: project-wide baseline, per-PR diff, and chained-exploit red-team reasoning. Composes OSS engines (Semgrep, OSV-scanner, Gitleaks) under a provider-neutral LLM triage layer.'
 ---
 
 # security-gate

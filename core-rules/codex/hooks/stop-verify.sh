@@ -28,8 +28,9 @@
 # Dependencies: jq (required). Toolchains are detected; absence → skip that step.
 #
 # Todo state: read from $CODEX_PROJECT_DIR/.codex/todos.json when present,
-# falling back to the Claude Code location for shared projects. If missing or
-# unparseable, we pass that step. Override via TODOS_FILE.
+# falling back to the Claude Code location for shared projects. A missing file
+# means no persisted todos; a present but malformed file blocks because its open
+# tasks cannot be determined. Override via TODOS_FILE.
 #
 # Subtree scoping: when every changed file in this turn sits under a single
 # subdirectory that carries its own manifest (package.json, go.mod,
@@ -66,6 +67,41 @@ __se_pm_lib="$(dirname "${BASH_SOURCE[0]}")/lib/pm.sh"
 # shellcheck source=lib/pm.sh disable=SC1090
 [ -f "$__se_pm_lib" ] && . "$__se_pm_lib"
 
+# Optional: durable executed-verification receipts (spec 045 T6). This records
+# what actually ran; it NEVER skips, shortens, or reuses a check. If the shared
+# library is absent the fallback below runs the SAME command with the SAME
+# capture and the SAME exit status and says so on stderr — visible degradation,
+# never a bypass and never a false green.
+__se_vr_dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+case "$__se_vr_dir" in
+  */core-rules/codex/hooks) __se_vr_lib="$__se_vr_dir/../../hooks/lib/verification-receipt.sh" ;;
+  *) __se_vr_lib="$__se_vr_dir/lib/verification-receipt.sh" ;;
+esac
+if [ -f "$__se_vr_lib" ]; then
+  # shellcheck source=lib/verification-receipt.sh disable=SC1090,SC1091
+  . "$__se_vr_lib"
+  _VR_HARNESS="${TRELLIS_HARNESS:-codex}"
+else
+  _VR_OUTPUT=""
+  _VR_STATUS=0
+  __se_vr_warned=0
+  _vr_run() {
+    local form="$2"
+    shift 2
+    if [ "$form" = "shell" ]; then
+      _VR_OUTPUT="$(eval "$1" 2>&1)"
+    else
+      _VR_OUTPUT="$("$@" 2>&1)"
+    fi
+    _VR_STATUS=$?
+    if [ "$__se_vr_warned" = "0" ]; then
+      __se_vr_warned=1
+      printf 'stop-verify: missing sibling lib at %s — checks ran unchanged, no durable evidence recorded (re-run sync-codex-hooks)\n' "$__se_vr_lib" >&2
+    fi
+    return "$_VR_STATUS"
+  }
+fi
+
 # --- Guard 1: stop_hook_active ---
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
@@ -73,7 +109,11 @@ if [ "$STOP_ACTIVE" = "true" ]; then
 fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
-cd "$PROJECT_DIR" 2>/dev/null || exit 0
+if ! cd "$PROJECT_DIR" 2>/dev/null; then
+  jq -nc --arg dir "$PROJECT_DIR" \
+    '{decision: "block", reason: ("project directory: could not enter configured project directory: " + $dir)}'
+  exit 2
+fi
 
 # Fail-counter state: absolute under the canonical project root (NOT a subtree —
 # emit_block fires both before and after the subtree cd). Codex path: .codex/.
@@ -93,9 +133,19 @@ STATE_FILE="${PROJECT_DIR}/.codex/.fail-counter"
 # turn read as non-doc. Exact path only — a genuine .codex/ edit still needs a
 # receipt.
 _se_changed_files() {
-  { git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
-    git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
-    | grep -vxF '.codex/.fail-counter' \
+  local tracked untracked
+
+  # Capture each half separately: piping the union through sort must not turn a
+  # failed git read into a successful empty set.
+  if ! tracked=$(git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null); then
+    return 1
+  fi
+  if ! untracked=$(git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null); then
+    return 1
+  fi
+
+  printf '%s\n%s\n' "$tracked" "$untracked" \
+    | awk 'NF && $0 != ".codex/.fail-counter"' \
     | sort -u
 }
 
@@ -108,8 +158,14 @@ emit_block() {
   # emit_block fires before or after the subtree cd. cksum is POSIX-portable
   # (macOS has no sha256sum); we key off the set of changed paths, not contents.
   # GIT-DERIVED ONLY — never the (NullableString) payload/transcript.
-  local fileset_hash prevhash prevcount count
-  fileset_hash=$(_se_changed_files | cksum | awk '{print $1}')
+  local fileset fileset_hash prevhash prevcount count
+  if fileset=$(_se_changed_files); then
+    fileset_hash=$(printf '%s' "$fileset" | cksum | awk '{print $1}')
+  else
+    # The original failure still blocks; this stable sentinel prevents the
+    # counter's own bookkeeping from reinterpreting unreadable as an empty set.
+    fileset_hash="git-unreadable"
+  fi
   prevhash=""
   prevcount=0
   if [ -f "$STATE_FILE" ]; then
@@ -141,7 +197,8 @@ _se_find_subtree() {
   command -v git >/dev/null 2>&1 || return 0
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
 
-  local file dir found common=""
+  local file dir found common="" changed_files
+  changed_files=$(_se_changed_files) || return 1
 
   while IFS= read -r file; do
     [ -z "$file" ] && continue
@@ -164,10 +221,7 @@ _se_find_subtree() {
     elif [ "$common" != "$found" ]; then
       return 0
     fi
-  done < <(
-    { git diff --name-only HEAD 2>/dev/null; \
-      git ls-files --others --exclude-standard 2>/dev/null; } | sort -u
-  )
+  done <<< "$changed_files"
 
   printf '%s' "$common"
 }
@@ -183,12 +237,16 @@ if [ -z "${TODOS_FILE:-}" ]; then
   fi
 fi
 if [ -f "$TODOS_FILE" ]; then
-  # Grab any pending/in_progress task content. If jq errors, we silently pass.
-  OPEN_TODOS=$(jq -r '
+  # Parse before slicing so jq's status cannot be hidden by the head pipeline.
+  if ! OPEN_TODOS=$(jq -r '
     [.. | objects | select(.status? == "in_progress" or .status? == "pending")]
     | map("- [\(.status)] \(.content // .task // "?")")
     | .[]
-  ' "$TODOS_FILE" 2>/dev/null | head -20)
+  ' "$TODOS_FILE" 2>&1); then
+    emit_block "TodoWrite" "could not parse todos file ${TODOS_FILE}:
+${OPEN_TODOS}"
+  fi
+  OPEN_TODOS=$(printf '%s\n' "$OPEN_TODOS" | head -20)
 
   if [ -n "$OPEN_TODOS" ]; then
     emit_block "TodoWrite" "open tasks remain — complete, defer with reason, or abandon with reason:
@@ -203,7 +261,11 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   # Porcelain output is empty iff worktree matches HEAD (no staged, unstaged, or untracked changes).
   # NOTE: earlier versions used `grep -c '^' || echo 0` here — that doubles output to "0\n0"
   # when empty (grep -c prints 0 AND exits non-zero), breaking the numeric test.
-  if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+  if ! WORKTREE_STATUS=$(git status --porcelain 2>&1); then
+    emit_block "git status" "could not inspect worktree changes:
+${WORKTREE_STATUS}"
+  fi
+  if [ -z "$WORKTREE_STATUS" ]; then
     # Nothing changed this turn → treat as pure chat and skip checks.
     exit 0
   fi
@@ -213,9 +275,13 @@ fi
 # manifest, run scoped checks there instead of repo-root. Opt-out:
 # PROCESS_GATE_FORCE_ROOT=1.
 if [ "${PROCESS_GATE_FORCE_ROOT:-0}" != "1" ]; then
-  SUBTREE="$(_se_find_subtree)"
+  if ! SUBTREE="$(_se_find_subtree)"; then
+    emit_block "git changed files" "could not inspect both tracked and untracked changes"
+  fi
   if [ -n "$SUBTREE" ] && [ -d "$SUBTREE" ]; then
-    cd "$SUBTREE" 2>/dev/null || true
+    if ! cd "$SUBTREE" 2>/dev/null; then
+      emit_block "subtree" "could not enter selected verification subtree: ${SUBTREE}"
+    fi
   fi
 fi
 
@@ -241,8 +307,9 @@ _se_resolve_python_tool() {
 # TypeScript
 if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(npx --no-install tsc --noEmit 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.tsc argv npx --no-install tsc --noEmit
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (tsc)" "$SLICED"
   fi
@@ -258,8 +325,9 @@ if [ -n "$MYPY_CMD" ]; then
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$(eval "$MYPY_CMD ." 2>&1)
-    if [ $? -ne 0 ]; then
+    _vr_run typecheck.mypy shell "$MYPY_CMD ."
+    OUT="$_VR_OUTPUT"
+    if [ "$_VR_STATUS" -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "typecheck (mypy)" "$SLICED"
     fi
@@ -269,8 +337,9 @@ fi
 # Rust
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(cargo check 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.cargo-check argv cargo check
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (cargo check)" "$SLICED"
   fi
@@ -279,8 +348,9 @@ fi
 # Go
 if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(go vet ./... 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.go-vet argv go vet ./...
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (go vet)" "$SLICED"
   fi
@@ -293,8 +363,9 @@ if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
   if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$(npx --no-install eslint . --quiet 2>&1)
-    if [ $? -ne 0 ]; then
+    _vr_run lint.eslint argv npx --no-install eslint . --quiet
+    OUT="$_VR_OUTPUT"
+    if [ "$_VR_STATUS" -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "lint (eslint)" "$SLICED"
     fi
@@ -304,8 +375,9 @@ fi
 # ruff
 if command -v ruff >/dev/null 2>&1 && { [ -f "pyproject.toml" ] || [ -f "ruff.toml" ] || [ -f ".ruff.toml" ]; }; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(ruff check . 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.ruff argv ruff check .
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (ruff)" "$SLICED"
   fi
@@ -314,8 +386,9 @@ fi
 # clippy
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(cargo clippy --quiet --message-format=short -- -D warnings 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.clippy argv cargo clippy --quiet --message-format=short -- -D warnings
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (clippy)" "$SLICED"
   fi
@@ -324,8 +397,9 @@ fi
 # golangci-lint
 if [ -f "go.mod" ] && command -v golangci-lint >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(golangci-lint run 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.golangci-lint argv golangci-lint run
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (golangci-lint)" "$SLICED"
   fi
@@ -344,7 +418,10 @@ fi
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
 TEST_CMD=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
-  HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>/dev/null)
+  if ! HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>&1); then
+    emit_block "package.json" "could not parse package.json while detecting the test script:
+${HAS_TEST}"
+  fi
   if [ -n "$HAS_TEST" ] && [ "$HAS_TEST" != "echo \"Error: no test specified\" && exit 1" ]; then
     if command -v trellis_resolve_pm >/dev/null 2>&1; then
       _PM="$(trellis_resolve_pm "$PROJECT_DIR")"
@@ -366,8 +443,9 @@ fi
 
 if [ -n "$TEST_CMD" ]; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(eval "$TEST_CMD" 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run test shell "$TEST_CMD"
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     # Tests: last 30 lines (stack traces / assertions land at the end).
     SLICED=$(printf '%s' "$OUT" | tail -30)
     emit_block "test (${TEST_CMD})" "$SLICED"
@@ -391,7 +469,11 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
   # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
   # logic, but over the diff-UNION-untracked set (a turn that only Writes new
   # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
-  NONDOC_COUNT=$(_se_changed_files \
+  if ! CHANGED_FILES=$(_se_changed_files); then
+    emit_block "git changed files" "could not inspect both tracked and untracked changes"
+  fi
+  NONDOC_COUNT=$(printf '%s\n' "$CHANGED_FILES" \
+    | grep -v '^$' \
     | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
     | awk 'END{print NR}')
   if [ "$NONDOC_COUNT" != "0" ]; then
@@ -427,14 +509,20 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
     # Turn-scoping line index, computed ONCE for both the receipt scan below
     # and the follow-ups scan on the pass path. Turn-scoping (load-bearing): a
     # receipt from a PRIOR turn must not satisfy THIS turn. The transcript is
-    # JSONL. Emit one role per input line (1:1 map, robust to malformed lines
-    # via fromjson? // "null"), find the LAST user-role line, and search ONLY
-    # lines after it. No user line → scope whole file. Same technique as the
-    # Claude hook / save-context-log.sh.
+    # JSONL. Emit one role per input line (malformed lines map to "null"), find
+    # the LAST user-role line, and search ONLY lines after it. An existing
+    # transcript without that anchor is unusable; scanning its whole history
+    # would allow a stale receipt to satisfy the current turn.
     LAST_USER=""
     if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
-        | grep -n '^user$' | tail -1 | cut -d: -f1)
+      if ! TRANSCRIPT_ROLES=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>&1); then
+        emit_block "transcript-unusable" "could not parse transcript roles from ${TRANSCRIPT}"
+      fi
+      LAST_USER=$(printf '%s\n' "$TRANSCRIPT_ROLES" \
+        | awk '$0 == "user" { last = NR } END { if (last) print last }')
+      if [ -z "$LAST_USER" ]; then
+        emit_block "transcript-unusable" "no valid current user anchor in ${TRANSCRIPT}"
+      fi
     fi
 
     # Source (a): last_assistant_message.
@@ -444,7 +532,7 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
 
     # Source (b): turn-scoped transcript parse.
     if [ "$RECEIPT_FOUND" = "0" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | grep -Eq "$RECEIPT_RE"; then
+      if awk -v n="$LAST_USER" 'NR>n' "$TRANSCRIPT" | grep -Eq "$RECEIPT_RE"; then
         RECEIPT_FOUND=1
       fi
     fi
@@ -466,7 +554,7 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
         FOLLOWUPS_FOUND=1
       fi
       if [ "$FOLLOWUPS_FOUND" = "0" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-        if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+        if awk -v n="$LAST_USER" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
           FOLLOWUPS_FOUND=1
         fi
       fi

@@ -1,0 +1,25 @@
+{
+  "schema": "openusage.limits.v1",
+  "providers": {
+    "codex": {
+      "resources": {
+        "weekly": {"kind": "consumption", "limit": 100, "remaining": 60},
+        "spark": {"kind": "consumption", "limit": 100, "remaining": 20}
+      },
+      "expiresAt": "2026-09-03T01:00:00Z"
+    },
+    "antigravity": {
+      "resources": {
+        "geminiWeekly": {"kind": "consumption", "limit": 200, "remaining": 150}
+      },
+      "expiresAt": "2026-09-03T02:00:00Z"
+    },
+    "copilot": {
+      "resources": {
+        "chat": {"kind": "consumption", "limit": 50, "remaining": 50}
+      },
+      "expiresAt": "2026-09-03T03:00:00Z"
+    }
+  },
+  "errors": []
+}

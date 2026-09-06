@@ -10,11 +10,9 @@
 #   - Dispatches a code-review subagent against the diff; findings are advisory.
 #   - Blocks only on severity=critical returned by the subagent.
 #   - Budget: 60s soft cap.
-#   - OMP (TRELLIS_OMP=1): the reviewer ladder routes through
-#     lib/omp-reviewer.sh — operator override → TRELLIS_OMP_REVIEW_CMD → live
-#     non-Anthropic `omp -p` role-resolver route. The Claude/Codex `claude -p`
-#     rung 2 is never entered from an OMP stop; when no OMP route resolves, the
-#     lib degrades and the deterministic rung decides the verdict.
+#   - Cross-family review (inside Herdr) is owned by lib/code-reviewer.sh:
+#     operator override → validated pi one-shot → deterministic fallback.
+#     Same-family Claude is never the Herdr reviewer route.
 #
 # Dependencies: jq (required), git (required for diff / skipped otherwise).
 #
@@ -225,47 +223,79 @@ REVIEW_PAYLOAD=$(jq -nc \
 # rung-1 `exec` AND the rung-2 `claude`), so the child's own top-of-hook guard
 # still trips — recursion is prevented without disabling rung 2. No outer
 # `timeout` — the ladder bounds rung 2 internally via its perl-alarm shim.
-# NB: no `2>/dev/null` here. lib/code-reviewer.sh deliberately leaves the rung-2
-# `claude` stderr unsuppressed so a failing reviewer is visible; silencing fd 2
-# on the caller side would re-introduce that documented mistake. stdout (the one
-# findings line) is what we capture. `|| true` so a nonzero ladder never aborts.
+# NB: no `2>/dev/null` here. lib/code-reviewer.sh deliberately leaves LLM-rung
+# stderr unsuppressed so a failing reviewer is visible; silencing fd 2 on the
+# caller side would hide the degradation. stdout (the one findings line)
+# is captured and validated before it can authorize an idempotency marker.
 #
-# OMP no-Anthropic guarantee (hooks.md: OMP owns its stop event): under OMP
-# (TRELLIS_OMP=1, exported by core-rules/omp/hooks/pre/trellis.ts) the ladder
-# goes to lib/omp-reviewer.sh instead — operator override →
-# TRELLIS_OMP_REVIEW_CMD → live non-Anthropic `omp -p` role-resolver route — so
-# the Claude/Codex `claude -p` rung 2 is unreachable from an OMP stop. Same
-# stdin contract, same one-findings-line output, same fail-open behavior.
-if [ "${TRELLIS_OMP:-}" = "1" ]; then
-  REVIEWER_LIB="$HOOK_DIR/lib/omp-reviewer.sh"
-else
-  REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
+# Cross-family review is inside the canonical ladder: a current Herdr deciding
+# artifact selects a pi one-shot; there is no Anthropic fallback on that path.
+REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
+if [ ! -f "$REVIEWER_LIB" ]; then
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer library unavailable; this diff will be retried on the next Stop' >&2
+  exit 0
 fi
-FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$REVIEWER_LIB" || true)
 
-if [ -n "$FINDINGS" ]; then
-  CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -10)
-  if [ -n "$CRITICAL" ]; then
-    REASON="Code review flagged critical issues — resolve or explicitly defer:
+REVIEWER_STATUS=0
+if FINDINGS=$(printf '%s' "$REVIEW_PAYLOAD" | bash "$REVIEWER_LIB"); then
+  :
+else
+  REVIEWER_STATUS=$?
+fi
+if [ "$REVIEWER_STATUS" -ne 0 ]; then
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer command failed; this diff will be retried on the next Stop' >&2
+  exit 0
+fi
+
+# Parse exactly one JSON object. `fromjson?` turns malformed reviewer text into
+# an empty result without leaking parser internals; the caller emits one bounded,
+# stable degradation below. A missing status is the legacy completed envelope.
+if VALIDATED_FINDINGS=$(printf '%s' "$FINDINGS" | jq -Rces '
+    fromjson?
+    | select(type == "object")
+    | select(.findings | type == "array")
+    | select(all(.findings[]; type == "object"
+        and (.severity | type == "string")
+        and (.file | type == "string")
+        and (.msg | type == "string")))
+    | select((has("status") | not) or .status == "completed" or .status == "degraded")
+  '); then
+  :
+else
+  printf '%s\n' 'code-review-subagent: review degraded: reviewer returned a malformed findings envelope; this diff will be retried on the next Stop' >&2
+  exit 0
+fi
+FINDINGS="$VALIDATED_FINDINGS"
+COMPLETION_STATUS=$(printf '%s' "$FINDINGS" | jq -r '.status // "completed"')
+
+CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' | head -10)
+if [ -n "$CRITICAL" ]; then
+  REASON="Code review flagged critical issues — resolve or explicitly defer:
 ${CRITICAL}"
-    jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
-    # Block path: do NOT touch the marker — a blocked turn must re-review the
-    # corrected diff (which will hash differently anyway).
-    exit 2
-  fi
+  jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
+  # Block path: do NOT touch the marker — a blocked turn must re-review the
+  # corrected diff (which will hash differently anyway).
+  exit 2
+fi
 
-  # Advisory findings → additionalContext (shown to Claude, not blocking).
-  ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' 2>/dev/null | head -30)
-  if [ -n "$ADVISORY" ]; then
-    jq -nc --arg ctx "<review>
+# Advisory findings → additionalContext (shown to Claude, not blocking).
+ADVISORY=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | "- [\(.severity)] \(.file):\(.line // "?") \(.msg)"' | head -30)
+if [ -n "$ADVISORY" ]; then
+  jq -nc --arg ctx "<review>
 ${ADVISORY}
 </review>" '{additionalContext: $ctx}'
-  fi
 fi
 
-# Review completed (clean or advisory) — record the idempotency marker so the
-# execute-body review does not re-charge the LLM for this exact diff this turn.
-mkdir -p "$REPO_ROOT/.claude" 2>/dev/null || true
-: > "$MARKER" 2>/dev/null || true
+# Only a validated completed review authorizes the idempotency marker. A
+# degraded deterministic fallback remains advisory and is retried next Stop.
+if [ "$COMPLETION_STATUS" != "completed" ]; then
+  exit 0
+fi
+if ! mkdir -p "$REPO_ROOT/.claude"; then
+  exit 0
+fi
+if ! : > "$MARKER"; then
+  exit 0
+fi
 
 exit 0

@@ -1,7 +1,7 @@
 ---
 name: orchestrate
-description: Harness-neutral playbook for multi-stage work that decomposes into independent units — fan-out, verify-heavy, decompose-then-synthesize, rank-the-best, or generate-then-filter. Use when a task is too large or too parallel for one linear pass. Capability-gated: if your harness exposes a tool that spawns and coordinates subagents, it runs a recipe (or scaffolds one); otherwise it degrades to running the same stages by hand. Carries the pattern catalog and the reusable recipe library.
-argument-hint: [recipe name | "new" to scaffold from template | a task to decompose]
+description: 'Harness-neutral playbook for multi-stage work that decomposes into independent units — fan-out, verify-heavy, decompose-then-synthesize, rank-the-best, or generate-then-filter. Use when a task is too large or too parallel for one linear pass. Capability-gated: if your harness exposes a tool that spawns and coordinates subagents, it runs a recipe (or scaffolds one); otherwise it degrades to running the same stages by hand. Carries the pattern catalog and the reusable recipe library.'
+argument-hint: '[recipe name | "new" to scaffold from template | a task to decompose]'
 ---
 
 # orchestrate
@@ -20,9 +20,10 @@ Loaded identically whether surfaced from `.claude/skills/orchestrate/` or
 
 ## When to use
 
-- A task decomposes into ≥2 independent units that can run in parallel — the
-  parallel-dispatch triggers under *Context management* in `CLAUDE.md` are met
-  (≥2 independent searches/analyses, >5 files, or an edit-heavy turn).
+- A task decomposes into ≥2 coherent bounded units that can run independently,
+  and the delegation triggers under *Context management* in `CLAUDE.md` are met —
+  a wide investigation, an audit spanning subsystems, or a search of unpredictable
+  breadth. A unit count is not itself a trigger, and neither is a target list.
 - The work is verify-heavy: each unit produces something that must be independently
   checked (built, typechecked, reviewed) before it counts.
 - You need to **rank** or **pick the best** of many candidates at a scale one
@@ -64,17 +65,23 @@ change, and self-deactivate where the tool is absent.
    directly, or author a new one from `recipes/template.wf.js`. The recipe encodes
    the decompose → fan-out → verify → synthesize stages and returns structured
    verdicts the caller acts on.
-2. **No workflow tool, but can spawn subagents.** Execute the recipe's stages
-   **sequentially by dispatching subagents**, following the spec in this SKILL.md and
+2. **No workflow tool, but can spawn subagents.** Execute the recipe's stages **by
+   dispatching subagents**, following the spec in this SKILL.md and
    `recipes/MANIFEST.md`. The `.wf.js` doubles as a **readable spec**: its
    `export const meta` block (name, description, `phases:[{title, detail}]`) and its
-   per-agent prompt strings are plain text — read them and dispatch a subagent per
-   stage with that prompt, collecting the same structured verdict by hand. You lose
-   the engine's parallelism barrier but keep the full discipline.
+   per-agent prompt strings are plain text — read them and dispatch with that prompt,
+   collecting the same structured verdict by hand. Use whatever parallelism the
+   harness actually supports: run a stage's independent units together, and serialize
+   only where a declared dependency or the recipe's own wave cap says to. You lose the
+   engine's barrier — hold the stage boundary yourself — but keep the full discipline.
 3. **No subagents either.** Do the work **inline**, preserving the
    decompose → verify → synthesize discipline. Decompose the task on paper, do each
    unit, independently check each one, and synthesize — sequentially, in one context,
-   but never collapsing verify into generate.
+   but never collapsing verify into generate. Inline deterministic checks (build,
+   typecheck, suite) are not independent model review: where a stage requires one and
+   no independent reviewer can be dispatched, that requirement stays **unmet and
+   visible** in the verdict. Reviewing your own diff in the producing context does not
+   satisfy it.
 
 This degrades at **both** levels: the spec is the same prose at every tier; only the
 mechanism that carries it changes (engine → subagents → your own hands).
@@ -207,8 +214,10 @@ wall-clock speed comes from **topology, not effort**. Two bright lines hold
 regardless of topology: never dispatch the same work order to more than one leg
 (no duplicate work), and keep generic Workflow units on one agent type per unit
 shape so receipts and prefix caches stay uniform. Trellis ships no custom
-executor-agent definitions; deliberate direct Codex CLI dispatch is the
-supported executor route (see `docs/codex-routing.md`), and the fire-and-forget
+executor-agent definitions; deliberate direct Codex CLI dispatch is **one**
+supported executor route (see `docs/codex-routing.md`), not the only possible
+executor — the leg comes from the live classifier or an explicit operator
+selection, either of which may resolve elsewhere. The fire-and-forget
 rescue path is never a producing Workflow node — a backgrounded result breaks
 `parallel()`/`pipeline()` barriers. Patterns, guardrails, and receipt contracts:
 [`references/speed-doctrine.md`](references/speed-doctrine.md).
@@ -232,7 +241,7 @@ resolved safety budget into the larger run. Log pilot cost so the full run's
 recurring loop, each mapped to machinery Trellis already ships:
 
 1. **Detect** — an operator-owned recurring task checks for incoming work (a conductor can rank the backlog; audits surface findings).
-2. **Triage** — fan out one agent per item; classify and route.
+2. **Triage** — classify and route the detected items, fanning out over coherent bounded groups at the concurrency the harness supports; one agent per item only where the items genuinely share no context.
 3. **Resolve** — worktree-isolated agents work each item in parallel (`isolation: "worktree"`); `drift-holdpr` is this stage for mechanical drift.
 4. **Review** — an adversarial judge checks each fix before it counts (the `code-review-subagent` floor; the **skeptical evaluator** below for builds that exceed solo-model reliability).
 5. **Respond** — open a **HOLD PR** / update the channel; **never merge** (the Component-D merge bright-line holds at every stage).

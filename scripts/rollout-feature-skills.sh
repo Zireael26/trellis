@@ -246,7 +246,7 @@ EOF
   fi
   for harness in "${row_harnesses[@]}"; do
     case "$harness" in
-      claude|codex|omp) ;;
+      claude|codex) ;;
       *)
         printf 'error (active worktree row has invalid harness): %s → %s (%s)\n' "$project_key" "$root" "$harness" >&2
         return "$TRELLIS_EX_STATE"
@@ -282,7 +282,6 @@ EOF
     case "$harness" in
       claude) expected_destination=".claude/skills" ;;
       codex) expected_destination=".agents/skills" ;;
-      omp) expected_destination=".omp/skills" ;;
     esac
     for skill in "${FEATURE_SKILLS[@]}"; do
       expected_source="core-rules/skills/$skill"

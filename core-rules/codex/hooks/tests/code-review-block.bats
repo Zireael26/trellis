@@ -64,7 +64,7 @@ make_claudeless_bindir() {
   out="$(mktemp -d "$BATS_TEST_TMPDIR/clbin.XXXXXX")"
   for cmd in bash sh test [ echo printf grep sed awk gawk cat head tail mktemp \
              date git basename dirname readlink id stat rm mv cp mkdir rmdir \
-             tr cut sort uniq wc env jq perl shasum cksum touch ls find xargs; do
+             tr cut sort uniq wc env jq perl python3 shasum cksum touch ls find xargs; do
     local src
     src="$(command -v "$cmd" 2>/dev/null)"
     # Only link a resolvable ABSOLUTE path. A bare name (shell builtin/alias, or
@@ -215,6 +215,19 @@ make_capture_reviewer() {
   printf '%s' "$reviewer"
 }
 
+make_override_reviewer() {
+  local body="$1" countfile="$2" reviewer
+  reviewer="$(mktemp "$BATS_TEST_TMPDIR/override-reviewer.XXXXXX")"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'cat >/dev/null'
+    printf 'printf x >> %s\n' "$(_shq "$countfile")"
+    printf '%s\n' "$body"
+  } > "$reviewer"
+  chmod +x "$reviewer"
+  printf '%s' "$reviewer"
+}
+
 # Single-quote-escape a path for safe embedding in a generated stub.
 _shq() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
@@ -332,18 +345,72 @@ setup() {
   [[ "$output" != *'"decision":"block"'* ]]
 }
 
+@test "degraded: nonzero reviewer leaves no marker and retries the same diff" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/nonzero-retry.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'exit 7' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+
+  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.codex" ] ||
+    [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "degraded: malformed reviewer envelope leaves no marker and retries the same diff" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/malformed-retry.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "not-json"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+
+  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.codex" ] ||
+    [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "degraded: explicit degraded status leaves no marker and retries the same diff" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/explicit-degraded.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"degraded\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  run_hook
+  [ "$status" -eq 0 ]
+
+  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.codex" ] ||
+    [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
 # =========================================================================
 # 4b. Fail-open (empty findings): a clean triggering diff (no secret/debugger)
 # runs the REAL rung-3, which returns {"findings":[]} → exit 0, no block, no
 # advisory context.
 # =========================================================================
-@test "fail-open: real core empty findings (clean diff) → exit 0, no block, no advisory" {
+@test "completed: legacy real-core findings-only envelope writes a marker" {
   setup_triggering_repo_clean
 
   run_hook
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" != *'systemMessage'* ]]
+  marker_count=$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
+  [ "$marker_count" -eq 1 ]
 }
 
 # =========================================================================
@@ -390,7 +457,7 @@ setup() {
   setup_triggering_repo
   CLAUDE_COUNT="$BATS_TEST_TMPDIR/idem.count"; : > "$CLAUDE_COUNT"
   EXTRA_BINDIR="$(make_fake_claude_bindir \
-    'printf "%s\n" "{\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
     "$CLAUDE_COUNT")"
   cat > "$EXTRA_BINDIR/shasum" <<'EOF'
 #!/usr/bin/env bash

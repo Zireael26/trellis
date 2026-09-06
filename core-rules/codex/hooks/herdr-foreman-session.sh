@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# SessionStart: when running inside Herdr, resolve OMP role chains from live quota
+# SessionStart: when running inside Herdr, resolve pi role chains from live quota
 # and inject them so Claude auto-adopts the herdr-foreman skill for multi-unit work.
 [ "${HERDR_ENV:-}" = 1 ] || exit 0
 if [ -z "${HERDR_WORKSPACE_ID:-}" ] || [ -z "${HERDR_PANE_ID:-}" ]; then
-  echo "DEGRADED: inside Herdr but the current workspace or pane identity is unavailable; deciding OMP roles were not resolved. Do not substitute silently."
+  echo "DEGRADED: inside Herdr but the current workspace or pane identity is unavailable; deciding roles were not resolved. Do not substitute silently."
   exit 0
 fi
-command -v omp >/dev/null 2>&1 || { echo "DEGRADED: inside Herdr but omp is not on PATH; foreman and resolver roles are unavailable. Do not substitute silently."; exit 0; }
+command -v pi >/dev/null 2>&1 || { echo "DEGRADED: inside Herdr but pi is not on PATH; foreman and resolver roles are unavailable. Do not substitute silently."; exit 0; }
 
 # Claude gives this hook 60 seconds. Resolver internals have defensive longer
 # limits, so each pass gets a 20-second outer wall-clock cap that kills the
@@ -68,8 +68,9 @@ PY
 }
 
 # The resolver expands "~" from HOME. TRELLIS_HOME is the canonical fallback
-# when a minimal SessionStart environment has no HOME; otherwise keep OMP state
-# in the normal user HOME, not in Trellis' machine-state directory.
+# when a minimal SessionStart environment has no HOME; otherwise keep resolver
+# state in the normal user HOME (~/.trellis/state), not nested under a different
+# machine-state directory.
 STATE_HOME="${HOME:-${TRELLIS_HOME:-}}"
 if [ -z "$STATE_HOME" ]; then
   echo "DEGRADED: no HOME or TRELLIS_HOME for resolver state; implementer and deciding review roles were not resolved. Select an implementer and run the resolver manually; do not substitute silently."
@@ -77,9 +78,9 @@ if [ -z "$STATE_HOME" ]; then
 fi
 HOME="$STATE_HOME"
 export HOME
-STATE_PARENT="$STATE_HOME/.omp/agent"
+STATE_PARENT="$STATE_HOME/.trellis/state"
 if ! (umask 077 && mkdir -p "$STATE_PARENT") 2>/dev/null ||
-   ! chmod 700 "$STATE_HOME/.omp" "$STATE_PARENT" 2>/dev/null; then
+   ! chmod 700 "$STATE_PARENT" 2>/dev/null; then
   echo "DEGRADED: could not create a private resolver state parent at $STATE_PARENT; implementer and deciding review roles were not resolved. Do not substitute silently."
   exit 0
 fi
@@ -158,7 +159,7 @@ if [ "$?" -eq 0 ]; then
   FOREMEN="$(printf '%s\n' "$FOREMEN_RAW" | python3 -c '
 import json,sys
 try:
-    a=[x for x in json.load(sys.stdin)["result"]["agents"] if x["agent"]=="omp"]
+    a=[x for x in json.load(sys.stdin)["result"]["agents"] if x["agent"]=="pi"]
     print(", ".join("%s(%s,%s)" % (x["pane_id"], x["agent_status"], x["cwd"].rsplit("/",1)[-1]) for x in a) or "none")
 except Exception:
     print("unknown")')"
@@ -166,7 +167,7 @@ else
   FOREMEN="unknown"
 fi
 echo "## herdr-foreman (auto)"
-echo "Inside Herdr (pane ${HERDR_PANE_ID:-?}, workspace ${HERDR_WORKSPACE_ID:-?}). For any multi-unit task, follow skill \`herdr-foreman\`: Claude = apex (briefs, git, receipts), OMP foreman pane = eval driver, workers chosen by quota. Existing OMP panes: ${FOREMEN}"
+echo "Inside Herdr (pane ${HERDR_PANE_ID:-?}, workspace ${HERDR_WORKSPACE_ID:-?}). For any multi-unit task, follow skill \`herdr-foreman\`: Claude = apex (briefs, git, receipts), pi foreman pane = workflow/subagent driver, workers chosen by quota. Existing pi panes: ${FOREMEN}"
 
 # Two passes: the first is discovery-only and learns the resolved implementer.
 # The deciding pass supplies that exact identity, then both the resolver and

@@ -67,6 +67,16 @@ assert_missing_tool_notice() {
   assert_missing_tool_notice wiki-skill-suggest git
 }
 
+@test "missing jq or git degrades visibly in Codex wiki-skill-suggest" {
+  run_hook_without jq "$CODEX_HOOKS_DIR/wiki-skill-suggest.sh" '{}'
+  [ "$status" -eq 0 ]
+  assert_missing_tool_notice wiki-skill-suggest jq
+
+  run_hook_without git "$CODEX_HOOKS_DIR/wiki-skill-suggest.sh" '{}'
+  [ "$status" -eq 0 ]
+  assert_missing_tool_notice wiki-skill-suggest git
+}
+
 @test "missing git degrades visibly in primer-capture-nudge" {
   run_hook_without git "$HOOKS_DIR/primer-capture-nudge.sh" '{}'
 

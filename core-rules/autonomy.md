@@ -2,6 +2,8 @@
 
 The autonomy slider controls **who answers Trellis's interactive gates** — user or agent — at each gate-hit. All gates and quality controls fire at every level; level only determines *who decides*. Default L3 = current Trellis behavior.
 
+Consultation entries below are defaults for decisions the user has not already resolved or authorized. Explicit task instructions take precedence over skill workflow guidance, within host permissions. Carry existing authorization across phases and turns; do not ask for it again. A skill's "approve", "interview", or "wait" step uses this resolution rather than introducing an independent gate. Record consequential decisions at the active level and retain all required verification and safety controls.
+
 ## Level matrix
 
 | Level | Name | Pre-action consultation | Post-action surfacing |

@@ -28,7 +28,7 @@ TP="/tmp/reread-guard-bats-transcript.jsonl"
 setup() {
   # Real project root with a git repo so _se_repo_root resolves cleanly.
   PROJECT_DIR="$(mktemp -d)"
-  ( cd "$PROJECT_DIR" && git init -q && git commit --allow-empty -q -m init )
+  ( cd "$PROJECT_DIR" && git init -q && git config user.email "ci-bats@trellis.test" && git config user.name "Trellis CI" && git commit --allow-empty -q -m init )
   unset CODEX_PROJECT_DIR RUNTIME_DIR TRELLIS_ROOT
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   STATE_DIR="$PROJECT_DIR/.claude/.reread-state"

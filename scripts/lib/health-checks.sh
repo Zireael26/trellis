@@ -465,7 +465,6 @@ hc_commands_symlinks() {
 # Harness-conditional parity, checked per enabled harness. The caller passes
 # ONE harness name and invokes once per enabled harness.
 #   codex       -> AGENTS.md, .agents/rules, .agents/skills, .agents/workflows, .codex/hooks
-#   omp         -> .omp/AGENTS.md, .omp/skills, .omp/commands, .omp/agents, .omp/hooks
 #   claude      -> nothing extra (Claude is the baseline surface)
 # WARN if any required artifact for that enabled harness is missing.
 hc_harness_artifacts() {
@@ -478,13 +477,6 @@ hc_harness_artifacts() {
       [ -e "$proj/.agents/skills" ]    || missing="$missing .agents/skills"
       [ -e "$proj/.agents/workflows" ] || missing="$missing .agents/workflows"
       [ -e "$proj/.codex/hooks" ]      || missing="$missing .codex/hooks"
-      ;;
-    omp)
-      [ -e "$proj/.omp/AGENTS.md" ] || missing="$missing .omp/AGENTS.md"
-      [ -e "$proj/.omp/skills" ]    || missing="$missing .omp/skills"
-      [ -e "$proj/.omp/commands" ]  || missing="$missing .omp/commands"
-      [ -e "$proj/.omp/agents" ]    || missing="$missing .omp/agents"
-      [ -e "$proj/.omp/hooks" ]     || missing="$missing .omp/hooks"
       ;;
     claude)
       echo "harness[$harness]: baseline surface (no extra artifacts)"
@@ -642,16 +634,15 @@ EOF
 # nothing and repairs nothing, which is exactly the split the cutover draws.
 #
 # Enumeration matches the mirror it replaces: symlinks at depth <= 2 under
-# .claude/.agents/.omp whose resolved destination is inside the canonical clone,
-# plus the control-plane root AGENTS.md link, plus .omp/AGENTS.md — which points
-# at the checkout's OWN CLAUDE.md and must therefore resolve to the WORKTREE's
-# copy, never the main checkout's. Comparison is by RESOLVED destination, so an
+# .claude/.agents whose resolved destination is inside the canonical clone,
+# plus the control-plane root AGENTS.md link. Comparison is by RESOLVED
+# destination, so an
 # absolute link and an equivalent relative one are both correct; a missing link,
 # a non-symlink, and a link to somewhere else are all offences.
 hc_worktree_links_ok() {
   local main="$1" wt="$2" canon="$3" dir link relpath resolved dest
   command -v python3 >/dev/null 2>&1 || return 0
-  for dir in "$main/.claude" "$main/.agents" "$main/.omp"; do
+  for dir in "$main/.claude" "$main/.agents"; do
     [ -d "$dir" ] || continue
     while IFS= read -r link; do
       [ -n "$link" ] || continue
@@ -674,11 +665,6 @@ hc_worktree_links_ok() {
         [ "$(hc_realpath "$wt/AGENTS.md")" = "$resolved" ] || return 1
         ;;
     esac
-  fi
-  if [ -L "$main/.omp/AGENTS.md" ] && [ -f "$main/CLAUDE.md" ] &&
-     [ "$(hc_realpath "$main/.omp/AGENTS.md")" = "$(hc_realpath "$main/CLAUDE.md")" ]; then
-    [ -L "$wt/.omp/AGENTS.md" ] || return 1
-    [ "$(hc_realpath "$wt/.omp/AGENTS.md")" = "$(hc_realpath "$wt/CLAUDE.md")" ] || return 1
   fi
   return 0
 }
@@ -819,268 +805,6 @@ hc_version_pin_lag() {
 }
 
 # ===========================================================================
-# OMP SURFACE (design 2026-08-09 — full Trellis inheritance into Oh My Pi).
-# ERROR-class Tier-1 checks. OMP native discovery stops at the nearest
-# non-empty ancestor `.omp` directory even when required files are absent, so a
-# partial/dangling/wrong/non-symlink Trellis-owned `.omp` surface silently
-# yields an unparented OMP session — the same incident-#1 class as a broken
-# .claude/rules link. Links use the configured absolute or relative style:
-#   .omp/AGENTS.md -> <project>/CLAUDE.md
-#   .omp/skills    -> <canonical>/core-rules/skills
-#   .omp/commands  -> <canonical>/core-rules/commands
-#   .omp/agents    -> <canonical>/core-rules/agents
-#   .omp/hooks     -> <canonical>/core-rules/omp/hooks
-# Whole-directory links are deliberate (new canonical skills/commands/agents/
-# adapters appear without re-running onboarding), so the manifest checks
-# validate the RESOLVED canonical contents, not a snapshot list.
-# ===========================================================================
-
-# Expected literal target for an OMP surface path. Prints the expected absolute
-# target, or empty for an unknown path. Helper shared by hc_omp_symlinks and
-# doctor.sh's --fix rm re-walk (bash 3.2: no arrays of pairs).
-#
-# Canonical control-plane exception (steered 2026-08-09): when the checked
-# project IS the canonical clone itself (realpath-equal to trellis_root) and
-# the canonical root carries no CLAUDE.md, the project overlay IS the parent
-# rules file — .omp/AGENTS.md links <trellis_root>/core-rules/CLAUDE.md and no
-# parent import applies (see hc_omp_project_import). Ordinary projects always
-# link their own <project>/CLAUDE.md.
-hc_omp_expected_target() {
-  local proj="$1" canon="$2" p="$3" target=""
-  case "$p" in
-    AGENTS.md)
-      local proj_real canon_real
-      proj_real="$(cd "$proj" 2>/dev/null && pwd -P || printf '%s' "$proj")"
-      canon_real="$(cd "$canon" 2>/dev/null && pwd -P || printf '%s' "$canon")"
-      if [ "$proj_real" = "$canon_real" ] && [ ! -f "$canon/CLAUDE.md" ]; then
-        target="$canon/core-rules/CLAUDE.md"
-      else
-        target="$proj/CLAUDE.md"
-      fi
-      ;;
-    skills)    target="$canon/core-rules/skills" ;;
-    commands)  target="$canon/core-rules/commands" ;;
-    agents)    target="$canon/core-rules/agents" ;;
-    hooks)     target="$canon/core-rules/omp/hooks" ;;
-  esac
-  if [ "${SYMLINK_STYLE:-absolute}" = "relative" ] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$target" "$proj/.omp" <<'PY'
-import os
-import sys
-print(os.path.relpath(sys.argv[1], sys.argv[2]), end="")
-PY
-  else
-    printf '%s' "$target"
-  fi
-}
-
-# hc_omp_symlinks <project> <canonical>
-# ERROR if any of the five OMP surface paths is missing, not a symlink,
-# wrong-target, or dangling. The literal readlink target must equal the
-# expected absolute path (machine-local, generated from the configured
-# trellis_root / project root) — a stale cross-machine target is exactly
-# incident #1's shape. First failure wins; the message names the path.
-hc_omp_symlinks() {
-  local proj="$1" canon="$2"
-  local p link expected target
-  for p in AGENTS.md skills commands agents hooks; do
-    link="$proj/.omp/$p"
-    expected="$(hc_omp_expected_target "$proj" "$canon" "$p")"
-    if [ ! -L "$link" ]; then
-      if [ -e "$link" ]; then
-        echo "omp: .omp/$p exists but is not a symlink — OMP reads a policy copy, not the live Trellis link"
-      else
-        echo "omp: .omp/$p missing — OMP session has no Trellis surface"
-      fi
-      return "$HC_ERROR"
-    fi
-    target="$(readlink "$link")"
-    if [ "$target" != "$expected" ]; then
-      echo "omp: .omp/$p → '$target' (expected '$expected') — stale/wrong target"
-      return "$HC_ERROR"
-    fi
-    if [ ! -e "$link" ]; then
-      echo "omp: .omp/$p → '$target' is a dangling symlink"
-      return "$HC_ERROR"
-    fi
-  done
-  echo "omp: all 5 surface links resolve to exact canonical targets"
-  return "$HC_OK"
-}
-
-# hc_omp_target_kinds <project> <canonical>
-# ERROR if a resolved OMP link is the wrong target kind (AGENTS.md must be a
-# regular file; the four canonical links must be directories) or if a canonical
-# link's REALPATH escapes the canonical root — the containment half of the
-# contract (e.g. a `core-rules/skills` that is itself a symlink out of
-# trellis_root passes the literal-target check but must still fail here).
-hc_omp_target_kinds() {
-  local proj="$1" canon="$2"
-  local p link canon_real target_real
-  for p in AGENTS.md skills commands agents hooks; do
-    link="$proj/.omp/$p"
-    [ -L "$link" ] || continue  # missing/wrong/dangling handled by hc_omp_symlinks
-    if [ "$p" = "AGENTS.md" ]; then
-      if [ ! -f "$link" ]; then
-        echo "omp: .omp/AGENTS.md resolves to a non-file target — OMP overlay must be a file"
-        return "$HC_ERROR"
-      fi
-      continue
-    fi
-    if [ ! -d "$link" ]; then
-      echo "omp: .omp/$p resolves to a non-directory target — canonical directory link must be a directory"
-      return "$HC_ERROR"
-    fi
-    # Canonical realpath containment: the RESOLVED target must stay under the
-    # canonical root's own realpath. `cd && pwd -P` normalizes /var vs
-    # /private/var so the two spellings cannot diverge.
-    canon_real="$(cd "$canon" && pwd -P 2>/dev/null || printf '%s' "$canon")"
-    target_real="$(cd "$link" && pwd -P 2>/dev/null || printf '%s' "$link")"
-    case "$target_real" in
-      "$canon_real"/*) ;;
-      *)
-        echo "omp: .omp/$p resolves to '$target_real' OUTSIDE the canonical root '$canon_real' — links must stay under trellis_root"
-        return "$HC_ERROR"
-        ;;
-    esac
-  done
-  echo "omp: target kinds correct and canonical links stay under trellis_root"
-  return "$HC_OK"
-}
-
-# hc_omp_project_import <project> <canonical>
-# ERROR-class OMP parent-import check. .omp/AGENTS.md resolves the project's
-# CLAUDE.md (validated by hc_omp_symlinks); that file must carry the canonical
-# @-import as its FIRST import, resolving to <canonical>/core-rules/CLAUDE.md.
-# OMP installs no RULES.md and has no symlinked rules file — the AGENTS.md
-# @-import is the ONLY channel for parent rules, so a missing or wrong first
-# import is an inheritance break (ERROR), not a degraded warning.
-#
-# Canonical control-plane exception: when the checked project IS the canonical
-# clone (realpath-equal) and the canonical root has no CLAUDE.md, .omp/AGENTS.md
-# IS the parent rules file — there is no parent above it to import, so the
-# check passes without inspecting an import line.
-hc_omp_project_import() {
-  local proj="$1" canon="$2"
-  local proj_real canon_real
-  proj_real="$(cd "$proj" 2>/dev/null && pwd -P || printf '%s' "$proj")"
-  canon_real="$(cd "$canon" 2>/dev/null && pwd -P || printf '%s' "$canon")"
-  if [ "$proj_real" = "$canon_real" ] && [ ! -f "$canon/CLAUDE.md" ]; then
-    echo "omp-import: canonical control-plane project — .omp/AGENTS.md IS core-rules/CLAUDE.md (no parent import applies)"
-    return "$HC_OK"
-  fi
-  local claudemd="$proj/CLAUDE.md"
-  local expected="$canon/core-rules/CLAUDE.md"
-  if [ ! -f "$claudemd" ]; then
-    echo "omp-import: project CLAUDE.md (target of .omp/AGENTS.md) missing — OMP session has no overlay at all"
-    return "$HC_ERROR"
-  fi
-  # First @-import line (leading whitespace allowed), mirroring the
-  # hc_import_resolves extraction but restricting to the FIRST match.
-  local first_import path
-  first_import="$(grep -E '^[[:space:]]*@' "$claudemd" 2>/dev/null | head -n 1)"
-  if [ -z "$first_import" ]; then
-    echo "omp-import: no @-import in project CLAUDE.md — OMP session inherits NO parent rules (AGENTS.md is the only channel)"
-    return "$HC_ERROR"
-  fi
-  # Strip leading whitespace and the leading @; trim trailing whitespace.
-  path="${first_import#"${first_import%%[![:space:]]*}"}"
-  path="${path#@}"
-  path="${path%"${path##*[![:space:]]}"}"
-  if [ "$path" = "$expected" ]; then
-    echo "omp-import: first @-import → canonical core-rules/CLAUDE.md"
-    return "$HC_OK"
-  fi
-  echo "omp-import: first @-import → '$path' (expected '$expected') — OMP parent chain broken"
-  return "$HC_ERROR"
-}
-
-# hc_omp_manifests <project> <canonical>
-# ERROR if the RESOLVED canonical manifest layout fails OMP discovery:
-#   skills   — one-level <skills-root>/<name>/SKILL.md entries, each with a
-#              `description:` frontmatter key; a missing SKILL.md or a
-#              description-less one silently vanishes from discovery.
-#   commands — .omp/commands/*.md, each with a `description:` frontmatter key.
-#   agents   — the canonical agents dir is being EMPTIED (the custom
-#              fable/opus/codex/lane agents are GPTX-era and removed; only a
-#              .gitkeep remains). An EMPTY agents target is healthy; ANY
-#              discoverable *.md is an ERROR — a legacy agent that would still
-#              be discovered by OMP (first-win by name) and must be removed.
-# Non-.md entries under commands/agents (e.g. templates/) are ignored by OMP
-# discovery and are not flagged. Reads the canonical dirs directly: the links
-# were already exact-target-validated, so the resolved dirs ARE these. The
-# <project> arg is part of the standard Tier-1 signature but unused here.
-hc_omp_manifests() {
-  local canon="$2"
-  local entry bad=""
-  if [ -d "$canon/core-rules/skills" ]; then
-    for entry in "$canon/core-rules/skills"/*; do
-      [ -e "$entry" ] || continue
-      if [ ! -d "$entry" ]; then
-        bad="$bad skills:$(basename "$entry")"
-        continue
-      fi
-      if [ ! -f "$entry/SKILL.md" ]; then
-        bad="$bad skills:$(basename "$entry")/SKILL.md"
-        continue
-      fi
-      if ! grep -qE '^description:' "$entry/SKILL.md" 2>/dev/null; then
-        bad="$bad skills:$(basename "$entry")/SKILL.md"
-      fi
-    done
-  else
-    bad="$bad skills-dir-missing"
-  fi
-  if [ -d "$canon/core-rules/commands" ]; then
-    for entry in "$canon/core-rules/commands"/*.md; do
-      [ -e "$entry" ] || continue
-      if ! grep -qE '^description:' "$entry" 2>/dev/null; then
-        bad="$bad commands:$(basename "$entry")"
-      fi
-    done
-  else
-    bad="$bad commands-dir-missing"
-  fi
-  if [ -d "$canon/core-rules/agents" ]; then
-    for entry in "$canon/core-rules/agents"/*.md; do
-      [ -e "$entry" ] || continue
-      bad="$bad agents:$(basename "$entry")"
-    done
-  else
-    bad="$bad agents-dir-missing"
-  fi
-  if [ -n "$bad" ]; then
-    echo "omp-manifests: OMP discovery broken —${bad# }"
-    return "$HC_ERROR"
-  fi
-  echo "omp-manifests: canonical skill/command/agent manifests satisfy OMP discovery"
-  return "$HC_OK"
-}
-
-# hc_omp_adapter <project> <canonical>
-# ERROR if the canonical OMP hook adapter is absent. .omp/hooks resolves to
-# <canonical>/core-rules/omp/hooks (validated by hc_omp_symlinks); the adapter
-# factory must exist at pre/trellis.ts. STATIC existence check only — doctor
-# NEVER invokes node/tsx/omp to load it (read-only contract; loadability is the
-# rollout's smoke test, not doctor's). The <project> arg is part of the
-# standard Tier-1 signature but unused here.
-hc_omp_adapter() {
-  local canon="$2"
-  local adapter="$canon/core-rules/omp/hooks/pre/trellis.ts"
-  if [ ! -f "$adapter" ]; then
-    echo "omp-adapter: canonical adapter $adapter missing — OMP hooks surface unlinked"
-    return "$HC_ERROR"
-  fi
-  echo "omp-adapter: canonical adapter present (pre/trellis.ts)"
-  return "$HC_OK"
-}
-
-# Canonical one-line fix for an unscoped Turbo `.next/**` outputs glob. SINGLE
-# SOURCE OF TRUTH for the hint string — disk-janitor-lib.sh's dj_turbo_fix_hint
-# echoes the SAME text; keep the two byte-identical. The fleet incident (148 GB
-# in 2 days, 2026-06-02) was an unscoped `.next/**` that tarred `.next/cache/`
-# (Next's incremental cache) + `.next/dev/` into every Turbo cache entry. The
-# fix scopes the glob with both negations.
 hc_turbo_fix_hint() {
   printf '%s' 'in turbo.json, add "!.next/cache/**" and "!.next/dev/**" after ".next/**" in the task'"'"'s outputs (e.g. ["...", ".next/**", "!.next/cache/**", "!.next/dev/**"]) — keeps Next'"'"'s incremental + dev caches out of the Turbo cache'
 }
@@ -1333,44 +1057,55 @@ hc_claudemd_budget() {
   return "$HC_OK"
 }
 
-# Codex runtime hooks-enabled check (spec 006, PD8 / C-2c). The Codex spec-gate
-# and every Codex Stop/PreToolUse hook only fire when the Codex runtime has hooks
-# turned on in $CODEX_HOME/config.toml ([features] hooks = true). If Codex is an
-# enabled harness but that switch is off (or the CLI/config is absent), the whole
-# cross-harness enforcement mechanism silently no-ops on Codex — the exact failure
-# the parity work exists to prevent. WARN, report-only. No project arg: reads the
-# central HARNESSES + the per-machine Codex config.
+# Codex config-intent observation, not a native activation or enforcement probe.
+# Only recognize a single boolean hooks declaration in the exact [features] table;
+# this narrow line scanner is not a TOML validator. Defaults and runtime state are
+# unknown. No project arg: reads HARNESSES + per-machine config, never invokes Codex.
 hc_codex_hooks_enabled() {
   if ! pg_has_harness codex 2>/dev/null; then
     echo "codex-runtime: n/a (codex not an enabled harness)"
     return "$HC_OK"
   fi
   if ! command -v codex >/dev/null 2>&1; then
-    echo "codex-runtime: codex harness enabled but the codex CLI is not installed — Codex hooks (incl. spec-gate) cannot run"
+    echo "codex-runtime: cannot invoke codex CLI (not found on PATH); native activation unverified"
     return "$HC_WARN"
   fi
   local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
-  if [ ! -f "$cfg" ]; then
-    echo "codex-runtime: $cfg absent — [features] hooks unset; Codex spec-gate + Stop/PreToolUse hooks will NOT run"
+  if [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; then
+    echo "codex-runtime: $cfg absent; configured intent unknown; native activation unverified"
+    return "$HC_INFO"
+  fi
+  if [ ! -f "$cfg" ] || [ ! -r "$cfg" ]; then
+    echo "codex-runtime: cannot read $cfg; configured intent unknown; native activation unverified"
     return "$HC_WARN"
   fi
-  # true iff a `hooks = true` line appears inside the [features] table.
-  if awk '
-      /^[[:space:]]*\[features\][[:space:]]*$/ { in_f=1; next }
-      /^[[:space:]]*\[/                        { in_f=0 }
-      in_f && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true/ { found=1 }
-      END { exit(found?0:1) }
-    ' "$cfg"; then
-    echo "codex-runtime: [features] hooks = true (Codex hooks active)"
-    return "$HC_OK"
+  local intent
+  if ! intent="$(awk '
+      /^[[:space:]]*\[features\][[:space:]]*(#.*)?$/ { in_f=1; tables++; next }
+      /^[[:space:]]*\[/ { in_f=0 }
+      in_f && /^[[:space:]]*hooks[[:space:]]*=/ {
+        declarations++
+        if ($0 ~ /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$/) value="true"
+        else if ($0 ~ /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*false[[:space:]]*(#.*)?$/) value="false"
+        else value="unknown"
+      }
+      END { print (tables == 1 && declarations == 1 ? value : "unknown") }
+    ' "$cfg" 2>/dev/null)"; then
+    echo "codex-runtime: failed to read $cfg; configured intent unknown; native activation unverified"
+    return "$HC_WARN"
   fi
-  echo "codex-runtime: [features] hooks not enabled in $cfg — the Codex spec-gate + every Codex Stop/PreToolUse hook silently NO-OPS (fix: set [features] hooks = true)"
-  return "$HC_WARN"
+  case "$intent" in
+    true|false)
+      echo "codex-runtime: configured intent: [features] hooks = $intent; native activation unverified"
+      [ "$intent" = false ] && return "$HC_WARN"
+      ;;
+    *) echo "codex-runtime: configured intent unknown (unset, unrecognized or ambiguous declaration in $cfg); native activation unverified" ;;
+  esac
+  return "$HC_INFO"
 }
 
-# WARN-class, global: guard Codex plugin hook runtime setup. A plugin update can
-# remove the hooks.json node/PATH prefix; the check script repairs it
-# idempotently. Delegates to check-codex-plugin-surface.sh.
+# WARN-class, global and read-only: inspect companion plugin hook compatibility.
+# Repair is an explicit operator action, never a side effect of doctor.
 hc_codex_plugin_surface() {
   local script="$SCRIPT_DIR/check-codex-plugin-surface.sh"
   if [ ! -x "$script" ]; then
@@ -1379,14 +1114,10 @@ hc_codex_plugin_surface() {
   fi
   local out
   if out="$(bash "$script" 2>&1)"; then
-    if printf '%s' "$out" | grep -q 'RE-APPLIED\|refreshed'; then
-      echo "codex-plugin-surface: drift auto-repaired — $(printf '%s' "$out" | grep -E 'RE-APPLIED|refreshed' | head -2 | tr '\n' '; ')"
-    else
-      echo "codex-plugin-surface: hooks PATH/setup present"
-    fi
+    printf '%s\n' "$out"
     return "$HC_OK"
   fi
-  echo "codex-plugin-surface: DRIFT needing a human — $(printf '%s' "$out" | grep -E 'CHANGED|manually|cannot' | head -2 | tr '\n' '; ')"
+  printf 'codex-plugin-surface: WARN — %s\n' "$out"
   return "$HC_WARN"
 }
 
@@ -1397,6 +1128,23 @@ hc_codex_plugin_surface() {
 # immutable installed payloads, and attachment ownership.  They never infer a
 # checkout from tracked policy or accept mutable source-checkout runtime paths.
 # ===========================================================================
+
+# Registry harnesses are already validated by the caller. Structural evidence
+# establishes installation only; no native runtime evidence is consumed here.
+hc_harness_capability_observation() {
+  local harnesses="$1" release_ok="$2" owner_state="$3" surfaces_ok="$4"
+  local installation=unverified harness
+  if [ "$release_ok" = true ] && [ "$owner_state" = attached ] && [ "$surfaces_ok" = true ]; then
+    installation=verified
+  fi
+  while IFS= read -r harness; do
+    printf 'harness-capability: %s installation=%s; native-loaded=unknown; native-exercised=unknown\n' "$harness" "$installation"
+    if [ "$harness" = pi ]; then
+      printf '%s\n' 'harness-capability: pi hard Stop=unsupported; settled/post-action=advisory; portable post-compaction recovery=unsupported'
+    fi
+  done < <(printf '%s\n' "$harnesses" | jq -r '.[]')
+  return "$HC_INFO"
+}
 
 hc_portable_sha256_file() {
   local path="$1" output
@@ -1675,7 +1423,7 @@ hc_portable_payload_surface_plan() (
   local harness
   for harness in "$@"; do
     case "$harness" in
-      claude|codex|omp|user) ;;
+      claude|codex|pi|user) ;;
       *) return 1 ;;
     esac
     harness_args+=(--harness "$harness")
@@ -1713,7 +1461,7 @@ hc_portable_normalize_harnesses() {
   local raw="${1:-}" normalized
   normalized="$(printf '%s\n' "$raw" | jq -cS '
     if type == "array" and length > 0
-       and all(.[]; . == "claude" or . == "codex" or . == "omp")
+       and all(.[]; . == "claude" or . == "codex" or . == "pi")
     then unique | sort
     else error("invalid harness set")
     end
@@ -2221,7 +1969,11 @@ hc_portable_managed_hooks() {
         HC_PORTABLE_HOOK_STATE="corrupt"
         return 1
       }
-    candidate_enabled="$(jq -r '.git_hooks.enabled // empty' "$candidate")" || return 1
+    # NOT `.git_hooks.enabled // empty`: jq's `//` treats `false` as absent, so a
+    # non-hook-owning worktree -- the exact case this scan exists to bless --
+    # collapsed to empty and fell through to `corrupt`. Every secondary worktree
+    # in a multi-worktree checkout reported a phantom ownership error.
+    candidate_enabled="$(hc_json_bool "$(jq -c '.git_hooks // {}' "$candidate")" enabled)" || return 1
     case "$candidate_enabled" in
       false) continue ;;
       true) ;;
@@ -2284,7 +2036,7 @@ hc_portable_hooks_path() {
     fi
     current_display="$(hc_diagnostic_escape "$current")" || return "$HC_ERROR"
     root_display="$(hc_diagnostic_escape "$root")" || return "$HC_ERROR"
-    echo "git hook authority: core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display"
+    echo "git hook authority: core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display (likely cause: \`husky\` \`prepare\` after a package install resets core.hooksPath)"
     return "$HC_ERROR"
   fi
   if [ "$status" -ne 0 ]; then
@@ -2454,6 +2206,17 @@ hc_portable_owner() {
   return "$HC_OK"
 }
 
+# jq's `//` treats `false` as absent, so `.flag // empty` yields "" for a
+# boolean that is legitimately false. Both shared-checkout checks below read a
+# flag that is false on every worktree that does not own the shared resource --
+# the exact rows they exist to bless -- so the collapse turned them corrupt.
+# Prints "true"/"false" when the field is a present boolean, "" otherwise.
+hc_json_bool() {
+  jq -r --arg field "$2" '
+    if (.[$field] | type) == "boolean" then (.[$field] | tostring) else "" end
+  ' <<<"$1"
+}
+
 HC_PORTABLE_EXCLUDE_STATE=""
 hc_portable_exclude_parse() {
   local file="$1" block_file="$2" rc
@@ -2580,7 +2343,7 @@ hc_portable_excludes() (
   before64="$(printf '%s\n' "$exclude" | jq -r '.before_base64 // empty')" || before64=""
   block64="$(printf '%s\n' "$exclude" | jq -r '.managed_block_base64 // empty')" || block64=""
   block_hash="$(printf '%s\n' "$exclude" | jq -r '.managed_block_sha256 // empty')" || block_hash=""
-  managed_by_attachment="$(printf '%s\n' "$exclude" | jq -r '.managed_by_attachment // empty')" || managed_by_attachment=""
+  managed_by_attachment="$(hc_json_bool "$exclude" managed_by_attachment)" || managed_by_attachment=""
   if [ -z "$path" ] || [ -z "$common" ] || [ -z "$expected_hash" ] || [ -z "$expected64" ] ||
      [ -z "$before_hash" ] || [ -z "$block_hash" ]; then
     HC_PORTABLE_EXCLUDE_STATE="corrupt"
@@ -2922,10 +2685,13 @@ hc_portable_native_surfaces() (
     return "$HC_ERROR"
   fi
   owner_harnesses="$(jq -cS '
-    [(.artifacts + (.pre_existing // []))[]
-      | if .path == "AGENTS.md" or (.path | startswith(".agents/")) or (.path | startswith(".codex/")) then "codex"
-        elif .path | startswith(".claude/") then "claude"
-        elif .path | startswith(".omp/") then "omp"
+    (.artifacts + (.pre_existing // [])) as $leaves
+    | (any($leaves[]; .path | startswith(".pi/"))) as $has_pi
+    | [$leaves[]
+      | if (.path | startswith(".codex/")) then "codex"
+        elif (.path | startswith(".pi/")) then "pi"
+        elif (.path | startswith(".claude/")) then "claude"
+        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
         else empty end] | unique | sort
   ' "$owner" 2>/dev/null)" || owner_harnesses=""
   if [ "$owner_harnesses" != "$normalized_registry" ]; then
@@ -2986,7 +2752,7 @@ hc_portable_native_surfaces() (
   fi
   # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
   HC_PORTABLE_SURFACE_STATE="ok"
-  echo "native surfaces: $(printf '%s\n' "$normalized_registry" | jq -r 'join(", ")') match the immutable Claude/Codex/OMP manifest"
+  echo "native surfaces: $(printf '%s\n' "$normalized_registry" | jq -r 'join(", ")') match the selected immutable harness manifest"
   return "$HC_OK"
 )
 
@@ -3035,7 +2801,7 @@ health_checks_missing_leaves() (
       return "$HC_ERROR"
     }
   else
-    normalized='["claude","codex","omp"]'
+    normalized='["claude","codex"]'
   fi
   while IFS= read -r harness; do
     [ -n "$harness" ] && harnesses+=("$harness")

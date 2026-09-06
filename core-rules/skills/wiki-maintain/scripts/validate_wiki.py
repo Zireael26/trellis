@@ -21,17 +21,25 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 from typing import Any, Iterable, Iterator, Sequence
 from urllib.parse import unquote, urlsplit
 
+fcntl: ModuleType | None
 try:
-    import fcntl
-except ImportError:  # pragma: no cover - only relevant on platforms without flock
-    fcntl = None  # type: ignore[assignment]
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - SAFETY: _wiki_lock rejects None before wiki access.
+    fcntl = None
+else:
+    fcntl = _fcntl
 
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PROVENANCE_RE = re.compile(
+    r"^- ([0-9]{4}-[0-9]{2}-[0-9]{2}) (refine|reactivate) "
+    r"prior=sha256:([0-9a-f]{64}) — (\S.*)$"
+)
 SOURCE_RE = re.compile(r"^gotchas\.md#[A-Za-z0-9][A-Za-z0-9._:-]*$")
 LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)(?:\s+\"[^\"\n]*\")?\)")
 INDEX_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
@@ -116,6 +124,9 @@ class PatternPage:
     status_line_index: int
     gotcha_targets: tuple[str, ...]
     broken_links: tuple[str, ...]
+    sha256: str
+    provenance: tuple[str, ...]
+    substantive_content: str
 
 
 @dataclass
@@ -155,9 +166,9 @@ def _safe_root(raw: str) -> Path:
 @contextmanager
 def _wiki_lock(root: Path, *, exclusive: bool) -> Iterator[None]:
     """Coordinate wiki readers and the status writer without creating lock files."""
-    if fcntl is None:
-        yield
-        return
+    fcntl_binding = fcntl
+    if fcntl_binding is None:
+        raise ContractMalformed("lock", "wiki locking is unavailable")
 
     wiki = root / "wiki"
     lock_path = wiki if wiki.is_dir() and not wiki.is_symlink() else root
@@ -173,15 +184,15 @@ def _wiki_lock(root: Path, *, exclusive: bool) -> Iterator[None]:
         raise ContractMalformed("lock", "wiki lock cannot be opened") from exc
     try:
         try:
-            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            fcntl.flock(descriptor, operation)
+            operation = fcntl_binding.LOCK_EX if exclusive else fcntl_binding.LOCK_SH
+            fcntl_binding.flock(descriptor, operation)
         except OSError as exc:
             raise ContractMalformed("lock", "wiki lock cannot be acquired") from exc
         try:
             yield
         finally:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                fcntl_binding.flock(descriptor, fcntl_binding.LOCK_UN)
             except OSError:
                 pass
     finally:
@@ -523,7 +534,7 @@ def _parse_index(root: Path, errors: list[dict[str, str]]) -> tuple[str | None, 
         errors.append(_issue("missing-index", "wiki/index.md", "index is missing or not a regular file"))
         return None, {}
     try:
-        text = index_path.read_text(encoding="utf-8")
+        text = index_path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         errors.append(_issue("unreadable-index", "wiki/index.md", "index is not readable UTF-8"))
         return None, {}
@@ -621,7 +632,8 @@ def _parse_pattern(
 ) -> PatternPage | None:
     rel = _relative(path, root)
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         errors.append(_issue("unreadable-pattern", rel, "pattern is not readable UTF-8"))
         return None
@@ -668,7 +680,7 @@ def _parse_pattern(
         errors.append(_issue("pattern-title", rel, "pattern must contain exactly one matching title"))
 
     ranges, duplicates = _section_ranges(body)
-    for duplicate in sorted(set(duplicates) & set(REQUIRED_SECTIONS)):
+    for duplicate in sorted(set(duplicates) & (set(REQUIRED_SECTIONS) | {"Provenance"})):
         errors.append(_issue("duplicate-section", rel, f"required section is duplicated: {duplicate}"))
     required_positions: list[int] = []
     for section in REQUIRED_SECTIONS:
@@ -682,6 +694,39 @@ def _parse_pattern(
             errors.append(_issue("empty-section", rel, f"required section is empty: {section}"))
     if required_positions != sorted(required_positions):
         errors.append(_issue("section-order", rel, "required sections are out of order"))
+
+    provenance: list[str] = []
+    provenance_range = ranges.get("Provenance")
+    content_end = len(body)
+    if provenance_range is not None:
+        start, end = provenance_range
+        content_end = start - 1
+        if any(position >= start for position in required_positions) or end != len(body):
+            errors.append(_issue("provenance-order", rel, "Provenance must follow the mandatory sections and be last"))
+        raw_body = text.splitlines(keepends=True)[closing + 1 :]
+        previous_date = ""
+        for line in raw_body[start:end]:
+            if not line.strip():
+                continue
+            provenance.append(line)
+            record = PROVENANCE_RE.fullmatch(line.rstrip("\r\n"))
+            if record is None:
+                errors.append(_issue("provenance-record", rel, "provenance record has invalid syntax"))
+                continue
+            recorded_date = record[1]
+            try:
+                date.fromisoformat(recorded_date)
+            except ValueError:
+                errors.append(_issue("provenance-date", rel, "provenance date is not a real calendar date"))
+            if recorded_date < previous_date:
+                errors.append(_issue("provenance-date", rel, "provenance dates must not decrease"))
+            previous_date = recorded_date
+    substantive_content = re.sub(
+        r"\s+", "", "\n".join(
+            line for line in body[:content_end]
+            if line.strip() and not HEADING_RE.fullmatch(line.strip())
+        )
+    )
 
     gotcha_targets: list[str] = []
     history_targets: list[str] = []
@@ -725,6 +770,9 @@ def _parse_pattern(
         status_line_index=field_lines["status"],
         gotcha_targets=tuple(sorted(set(gotcha_targets))),
         broken_links=tuple(sorted(set(broken_links))),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        provenance=tuple(provenance),
+        substantive_content=substantive_content,
     )
 
 
@@ -832,6 +880,8 @@ def _replace_line(text: str, line_index: int, replacement: str) -> str:
         ending = "\r\n"
     elif lines[line_index].endswith("\n"):
         ending = "\n"
+    elif lines[line_index].endswith("\r"):
+        ending = "\r"
     lines[line_index] = replacement + ending
     return "".join(lines)
 
@@ -873,6 +923,9 @@ def _atomic_batch_write(updates: dict[Path, str]) -> None:
     staged: dict[Path, Path] = {}
     originals: dict[Path, bytes] = {}
     replaced: list[Path] = []
+    failure: BaseException | None = None
+    rollback_errors: list[tuple[Path, OSError]] = []
+    cleanup_errors: list[tuple[Path, OSError]] = []
     try:
         for target, text in updates.items():
             if not _is_plain_file(target):
@@ -897,6 +950,7 @@ def _atomic_batch_write(updates: dict[Path, str]) -> None:
             os.replace(temporary, target)
             replaced.append(target)
     except BaseException as exc:
+        failure = exc
         for target in reversed(replaced):
             try:
                 descriptor, temporary_name = tempfile.mkstemp(
@@ -909,15 +963,31 @@ def _atomic_batch_write(updates: dict[Path, str]) -> None:
                     os.fsync(handle.fileno())
                 os.chmod(temporary, stat.S_IMODE(target.stat().st_mode))
                 os.replace(temporary, target)
-            except OSError:
-                pass
-        raise ContractMalformed("write", "stale status update could not be completed") from exc
+            except OSError as rollback_error:
+                rollback_errors.append((target, rollback_error))
     finally:
-        for temporary in staged.values():
+        for target, temporary in staged.items():
             try:
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_error:
+                cleanup_errors.append((target, cleanup_error))
+
+    if failure is None and not cleanup_errors:
+        return
+
+    details = ["stale status update could not be completed"]
+    if rollback_errors:
+        failures = ", ".join(
+            f"{target.name}: {error}" for target, error in rollback_errors
+        )
+        details.append(f"rollback failed for {failures}")
+    if cleanup_errors:
+        failures = ", ".join(
+            f"{target.name}: {error}" for target, error in cleanup_errors
+        )
+        details.append(f"temporary cleanup failed for {failures}")
+    cause = failure if failure is not None else cleanup_errors[0][1]
+    raise ContractMalformed("write", "; ".join(details)) from cause
 
 
 def _run_mark_stale(root_arg: str) -> int:
@@ -1207,6 +1277,63 @@ def _classify_change(
             pattern_summary,
         )
 
+    for slug in sorted(changed_pages):
+        old_records = before.patterns[slug].provenance
+        if after.patterns[slug].provenance[: len(old_records)] != old_records:
+            return _change_rejection(
+                changed_paths,
+                [_issue("provenance-history", f"wiki/patterns/{slug}.md", "existing provenance records must be preserved byte-for-byte in order")],
+                pattern_summary,
+            )
+
+    # A single-page refinement or stale reactivation appends one byte-bound record.
+    if not created and len(changed_pages) == 1:
+        slug = next(iter(changed_pages))
+        old_page, new_page = before.patterns[slug], after.patterns[slug]
+        statuses = (old_page.status, new_page.status)
+        transition = {("active", "active"): "refine", ("stale", "active"): "reactivate"}.get(statuses)
+        rel = f"wiki/patterns/{slug}.md"
+        if transition is not None and set(changed_paths) == {"wiki/index.md", rel}:
+            added = new_page.provenance[len(old_page.provenance) :]
+            prior_sha256 = old_page.sha256
+            if len(added) != 1:
+                return _change_rejection(changed_paths, [_issue("provenance-append", rel, "transition requires exactly one appended provenance record")], pattern_summary)
+            record = PROVENANCE_RE.fullmatch(added[0].rstrip("\r\n"))
+            # Structural validation above has already parsed every record.
+            assert record is not None
+            if record[2] != transition or record[3] != prior_sha256:
+                return _change_rejection(changed_paths, [_issue("provenance-prior", rel, "record action and prior digest must match the actual before page")], pattern_summary)
+            rows_ok = _rows_compatible(
+                before, after, touched={slug}, status_changes=status_changes,
+                strict_status_only=False,
+            )
+            assert before.index_text is not None and after.index_text is not None
+            old_lines = before.index_text.splitlines(keepends=True)
+            new_lines = after.index_text.splitlines(keepends=True)
+            old_row = old_lines.pop(before.rows[slug].line_index)
+            new_row = new_lines.pop(after.rows[slug].line_index)
+            before_other = [
+                error for error in before.semantic_errors
+                if transition != "reactivate" or error["code"] != "stale-resolved" or error["path"] != rel
+            ]
+            if (
+                rows_ok and old_row != new_row and old_lines == new_lines
+                and not before_other and not after.semantic_errors
+                and (transition == "reactivate" or old_page.substantive_content != new_page.substantive_content)
+            ):
+                return (
+                    {
+                        "command": "check-change",
+                        "verdict": "allowed",
+                        "transition": transition,
+                        "changed_paths": changed_paths,
+                        "patterns": pattern_summary,
+                        "provenance": {"slug": slug, "prior_sha256": prior_sha256, "after_sha256": new_page.sha256},
+                        "errors": [],
+                    },
+                    0,
+                )
+
     # Creation adds exactly one active, fully valid page and changes no existing page.
     if len(created) == 1 and not status_changes and not changed_pages:
         if all(after.patterns[slug].status == "active" for slug in created):
@@ -1333,7 +1460,7 @@ def _classify_change(
         _issue(
             "unsupported-transition",
             "wiki",
-            "diff is not create, merge-with-retirement, retire-superseded, or mark-stale",
+            "diff is not create, refine, reactivate, merge-with-retirement, retire-superseded, or mark-stale",
         )
     )
     return _change_rejection(changed_paths, errors, pattern_summary)
@@ -1434,7 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         return 2
-    except Exception:
+    except (OSError, UnicodeError, json.JSONDecodeError):
         _emit(
             {
                 "command": command,

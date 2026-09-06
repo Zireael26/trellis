@@ -209,12 +209,14 @@ prepare_managed_hooks() {
 
 prepare_older_managed_hooks() {
   local managed payload release old_lib old_lib_tmp old_oid manifest
+  local old_launcher launcher_oid
   local legacy_post legacy_pre
   managed="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID"
   payload="$TRELLIS_HOME/releases/$RELEASE/payload"
   release="${payload%/payload}"
   old_lib="$payload/scripts/lib/attachment.sh"
   old_lib_tmp="${old_lib}.tmp"
+  old_launcher="$payload/scripts/trellis-launcher.sh"
   mkdir -p "$(dirname "$old_lib")"
   cp "$BATS_TEST_DIRNAME/../lib/attachment.sh" "$old_lib" || return 1
   sed \
@@ -224,9 +226,28 @@ prepare_older_managed_hooks() {
     "$old_lib" > "$old_lib_tmp" || return 1
   mv "$old_lib_tmp" "$old_lib" || return 1
   chmod 755 "$old_lib" || return 1
+  # Prove the ageing transformation is historical and not a silent no-op: the
+  # current generator carries the bypass-marker passthrough, the aged one must
+  # not. A no-op sed would leave a copy of the current payload here and make the
+  # authentic-old half of this case vacuous.
+  grep -q 'TRELLIS_ALLOW_MAIN_PUSH' "$BATS_TEST_DIRNAME/../lib/attachment.sh" || return 1
+  ! grep -q 'TRELLIS_ALLOW_MAIN_PUSH' "$old_lib" || return 1
+  # A payload generator resolves its command-scratch emitters through its OWN
+  # payload: _attachment_launcher_source binds TRELLIS_VERIFIED_PAYLOAD to
+  # <payload>/scripts/trellis-launcher.sh, from which
+  # _attachment_command_scratch_emitters extracts the two
+  # launcher_command_scratch_*_program definitions verbatim. An old payload that
+  # declares the generator must therefore also ship the launcher it extracts
+  # from; without it the emitters return 1 and the generator emits nothing.
+  cp "$BATS_TEST_DIRNAME/../trellis-launcher.sh" "$old_launcher" || return 1
+  chmod 755 "$old_launcher" || return 1
   old_oid="$(git hash-object "$old_lib")" || return 1
-  rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" \
-    '.tree += [{path:"scripts/lib/attachment.sh",mode:"100755",oid:$oid}]' || return 1
+  launcher_oid="$(git hash-object "$old_launcher")" || return 1
+  # One rewrite: the manifest hash below covers release.json, so both declared
+  # payload files must be in it before the manifest is taken.
+  rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" --arg launcher "$launcher_oid" \
+    '.tree += [{path:"scripts/lib/attachment.sh",mode:"100755",oid:$oid},
+               {path:"scripts/trellis-launcher.sh",mode:"100755",oid:$launcher}]' || return 1
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
   legacy_post="$(
     TRELLIS_LIBS_PRELOADED=1 /bin/bash --noprofile --norc -c '
@@ -344,6 +365,16 @@ teardown() {
 
   [ "$older_post" != "$current_post" ]
   [ "$older_pre" != "$current_pre" ]
+  # Authentic OLD, not merely different bytes: the aged payload generator really
+  # produced a complete dispatcher, and it is the historical shape (no
+  # bypass-marker passthrough) while the current generator emits one.
+  printf '%s\n' "$older_post" | grep -qx '# trellis-managed-dispatcher-body'
+  printf '%s\n' "$older_pre" | grep -qx '# trellis-managed-dispatcher-body'
+  # Counted, not `! grep`: bash errexit never fires on a `!`-inverted command,
+  # so a negated grep here would assert nothing.
+  [ "$(printf '%s\n' "$current_post" | grep -c 'TRELLIS_ALLOW_MAIN_PUSH')" -gt 0 ]
+  [ "$(printf '%s\n' "$older_post" | grep -c 'TRELLIS_ALLOW_MAIN_PUSH')" -eq 0 ]
+  [ "$(printf '%s\n' "$older_pre" | grep -c 'TRELLIS_ALLOW_MAIN_PUSH')" -eq 0 ]
   run attachment_verify "$TRELLIS_HOME" "$OWNER"
   [ "$status" -eq 0 ]
 

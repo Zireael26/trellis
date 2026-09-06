@@ -15,7 +15,7 @@
         "observed_at": "2026-08-23T12:40:00Z",
         "models": [
           {
-            "id": "deepseek-v4-flash"
+            "id": "nvidia/synthetic-model-000"
           },
           {
             "id": "nvidia/synthetic-model-001"
@@ -540,7 +540,7 @@
           "object": "list",
           "data": [
             {
-              "id": "deepseek-v4-flash",
+              "id": "nvidia/synthetic-model-000",
               "object": "model",
               "owned_by": "nvidia"
             },
@@ -1059,13 +1059,13 @@
         "collection": "passive_only",
         "records": [
           {
-            "outcome_id": "nvidia-deepseek-v4-flash-410-001",
+            "outcome_id": "nvidia-nvidia/synthetic-model-000-410-001",
             "kind": "serving_outcome",
             "observed_at": "2026-08-23T12:40:00Z",
             "source_id": "nvidia-passive-serving-outcomes",
             "lane_id": "nvidia",
             "route": "nvidia",
-            "model": "deepseek-v4-flash",
+            "model": "nvidia/synthetic-model-000",
             "status": "disabled",
             "http_status": 410,
             "reason_code": "model_gone",
@@ -1099,7 +1099,7 @@
         "models": [
           {
             "route": "nvidia",
-            "model": "deepseek-v4-flash",
+            "model": "nvidia/synthetic-model-000",
             "serving": {
               "status": "disabled",
               "observed_at": "2026-08-23T12:40:00Z",

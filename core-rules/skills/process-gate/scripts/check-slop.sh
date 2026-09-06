@@ -37,12 +37,9 @@ RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
 
 # --- posture ---------------------------------------------------------------
-# Resolved FIRST, before the pattern lib is even looked for: a project that has
-# not opted in renders `n/a` whatever the harness state is. Resolving the lib
-# first inverted that — every project whose `hooks/lib` had not been synced yet
-# (which is all of them until the rollout lands, and permanently for a codex-only
-# attachment) warned, and one warn flips the whole process-gate verdict to NEEDS
-# CHANGES on a gate the project never declared.
+# Invariant: posture is resolved before pattern-lib lookup; off/undeclared renders `n/a`
+# regardless of harness state. Governing rule: spec 037 acceptance — see
+# check-slop.bats "no pattern lib + posture off/undeclared: still n/a, never a warn".
 # One jq pass classifies the declaration: `off:`, `ok:<posture>`, or
 # `malformed:<what>`. An unreadable or non-object file is malformed; a missing
 # key at any level is simply undeclared.

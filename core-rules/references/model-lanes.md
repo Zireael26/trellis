@@ -22,12 +22,14 @@ Routing is explicit and ordered:
    first-party even if the rest of its name resembles a foreign convention.
 3. Route to the foreign lane only when the normalized name matches an
    operator-configured foreign name or prefix.
-4. Route an empty, malformed, or unknown model name to the first-party lane.
+4. An omitted optional foreign selector leaves routing off and preserves the
+   selected native model. An explicitly requested empty, malformed, or unknown
+   model name is an error, not permission to select the first-party model.
 
 The precedence is load-bearing. Foreign matching must never steal a
 first-party name because of a suffix, whitespace, or a Unicode look-alike.
-Unknown model names therefore mean "foreign routing is off," not "try the
-foreign lane and see."
+An explicit unknown model must fail visibly, never mean "try another provider
+and see." Optional routing being off does not erase an explicit selection.
 
 ## Capability gate
 
@@ -60,19 +62,17 @@ errors, and timeouts all resolve to unavailable.
 An explicitly re-selected lane preserves the unit contract. The router never rewrites
 the requested model or chooses a replacement provider.
 
-## Why unknown resolves to OFF
+## Omission is not an unknown selection
 
-There are two distinct unknowns:
-
-- An **unknown model name** resolves to the first-party lane, so foreign
-  routing is off for that request.
+- An **omitted optional foreign selector** disables that optional routing;
+  it does not choose a different native model.
+- An **explicit unknown model name** is a selection error and refuses dispatch.
 - An **unknown lane state** resolves to `available: false`, so dispatch to the
-  foreign lane is off until a positive probe proves it healthy.
+  selected lane is off until a positive probe proves it healthy.
 
-Both defaults prevent accidental foreign dispatch. Treating an unknown state
-as available converts a broken probe into a fail-open gate; treating an
-unknown model as foreign lets a typo or naming collision change providers.
-Neither is acceptable at a system boundary.
+Treating unknown state as available turns a broken probe into a fail-open gate.
+Treating a typo as permission for either foreign or first-party dispatch silently
+changes the requested route. Neither is acceptable at a system boundary.
 
 ## Explicit re-selection before a first-party rerun
 
@@ -83,8 +83,9 @@ caller must:
 1. state that the foreign lane was unavailable and include the receipt reason;
 2. preserve `task_prompt`, `target_cwd`, scope, constraints, proof, expected
    output, and any explicitly requested model-independent settings;
-3. submit that identical work order to a first-party Claude agent, or execute it
-   inline when no delegation mechanism exists; and
+3. submit that identical work order through the explicitly selected native model
+   and host, or execute it inline on that same selected model when no delegation
+   mechanism exists; and
 4. run the original verification before reporting completion.
 
 Do not ask the router to substitute silently. Do not widen the unit during an
@@ -92,8 +93,8 @@ explicitly selected rerun. Do not report the unavailable attempt as success.
 
 ## Herdr foreman lane
 
-Inside Herdr (`HERDR_ENV=1`) a multi-unit task may run through an OMP foreman pane
-whose workers are chosen per role from live quota. Topology, the cross-family rule,
+Inside Herdr (`HERDR_ENV=1`) a multi-unit task may run through a pi foreman workflow
+whose subagents are chosen per role from live quota. Topology, the cross-family rule,
 and commit-at-phase-boundary obligations: `core-rules/references/herdr-foreman.md`.
 
 ## Precedent and deliberate limits

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# Tests for run-all.sh — the Phase 7a aggregator changes:
-#   - 8-gate parallel arrays (idx 0-7) + dual indexed render loops.
+# Tests for run-all.sh — nine-gate mode contract:
+#   - 9-gate parallel arrays (idx 0-8) + dual indexed render loops.
 #   - --mode=push|merge (DL-P7-02) PR-shape downgrade: at push a FAIL in
 #     {0 PR hygiene, 4 Docs discipline, 7 Analyze} -> WARN; the always-hard
 #     gates {1 Secrets, 2 Bypass markers, 3 Tests, 6 Security} NEVER downgrade.

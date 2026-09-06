@@ -19,9 +19,9 @@
 #
 # Dependencies: jq (required). Toolchains are detected; absence → skip that step.
 #
-# Todo state: read from $CLAUDE_PROJECT_DIR/.claude/todos.json. If missing or
-# unparseable, we pass that step (don't block). This matches Claude Code's
-# current persistence location; if that location changes, override via
+# Todo state: read from $CLAUDE_PROJECT_DIR/.claude/todos.json. A missing file
+# means no persisted todos; a present but malformed file blocks because its open
+# tasks cannot be determined. Override the current persistence location via
 # project `.claude/hooks/config.sh` exporting TODOS_FILE.
 #
 # Base: github.com/iamfakeguru/claude-md (MIT). Extensions vs upstream:
@@ -52,6 +52,37 @@ _se_require_jq "stop-verify"
 __se_pm_lib="$(dirname "${BASH_SOURCE[0]}")/lib/pm.sh"
 # shellcheck source=lib/pm.sh disable=SC1090
 [ -f "$__se_pm_lib" ] && . "$__se_pm_lib"
+
+# Optional: durable executed-verification receipts (spec 045 T6). This records
+# what actually ran; it NEVER skips, shortens, or reuses a check. If the shared
+# library is absent the fallback below runs the SAME command with the SAME
+# capture and the SAME exit status and says so on stderr — visible degradation,
+# never a bypass and never a false green.
+__se_vr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/verification-receipt.sh"
+if [ -f "$__se_vr_lib" ]; then
+  # shellcheck source=lib/verification-receipt.sh disable=SC1090,SC1091
+  . "$__se_vr_lib"
+  _VR_HARNESS=claude
+else
+  _VR_OUTPUT=""
+  _VR_STATUS=0
+  __se_vr_warned=0
+  _vr_run() {
+    local form="$2"
+    shift 2
+    if [ "$form" = "shell" ]; then
+      _VR_OUTPUT="$(eval "$1" 2>&1)"
+    else
+      _VR_OUTPUT="$("$@" 2>&1)"
+    fi
+    _VR_STATUS=$?
+    if [ "$__se_vr_warned" = "0" ]; then
+      __se_vr_warned=1
+      printf 'stop-verify: missing sibling lib at %s — checks ran unchanged, no durable evidence recorded (re-run sync-hooks)\n' "$__se_vr_lib" >&2
+    fi
+    return "$_VR_STATUS"
+  }
+fi
 
 # --- Guard 1: stop_hook_active ---
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
@@ -163,12 +194,16 @@ _se_find_subtree() {
 # still hold). ---
 TODOS_FILE="${TODOS_FILE:-${PROJECT_DIR}/.claude/todos.json}"
 if [ -f "$TODOS_FILE" ]; then
-  # Grab any pending/in_progress task content. If jq errors, we silently pass.
-  OPEN_TODOS=$(jq -r '
+  # Parse before slicing so jq's status cannot be hidden by the head pipeline.
+  if ! OPEN_TODOS=$(jq -r '
     [.. | objects | select(.status? == "in_progress" or .status? == "pending")]
     | map("- [\(.status)] \(.content // .task // "?")")
     | .[]
-  ' "$TODOS_FILE" 2>/dev/null | head -20)
+  ' "$TODOS_FILE" 2>&1); then
+    emit_block "TodoWrite" "could not parse todos file ${TODOS_FILE}:
+${OPEN_TODOS}"
+  fi
+  OPEN_TODOS=$(printf '%s\n' "$OPEN_TODOS" | head -20)
 
   if [ -n "$OPEN_TODOS" ]; then
     emit_block "TodoWrite" "open tasks remain — complete, defer with reason, or abandon with reason:
@@ -183,7 +218,11 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   # Porcelain output is empty iff worktree matches HEAD (no staged, unstaged, or untracked changes).
   # NOTE: earlier versions used `grep -c '^' || echo 0` here — that doubles output to "0\n0"
   # when empty (grep -c prints 0 AND exits non-zero), breaking the numeric test.
-  if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+  if ! WORKTREE_STATUS=$(git status --porcelain 2>&1); then
+    emit_block "git status" "could not inspect worktree changes:
+${WORKTREE_STATUS}"
+  fi
+  if [ -z "$WORKTREE_STATUS" ]; then
     # Nothing changed this turn → treat as pure chat and skip checks.
     exit 0
   fi
@@ -195,7 +234,9 @@ fi
 if [ "${PROCESS_GATE_FORCE_ROOT:-0}" != "1" ]; then
   SUBTREE="$(_se_find_subtree)"
   if [ -n "$SUBTREE" ] && [ -d "$SUBTREE" ]; then
-    cd "$SUBTREE" 2>/dev/null || true
+    if ! cd "$SUBTREE" 2>/dev/null; then
+      emit_block "subtree" "could not enter selected verification subtree: ${SUBTREE}"
+    fi
   fi
 fi
 
@@ -221,8 +262,9 @@ _se_resolve_python_tool() {
 # TypeScript
 if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(npx --no-install tsc --noEmit 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.tsc argv npx --no-install tsc --noEmit
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (tsc)" "$SLICED"
   fi
@@ -238,8 +280,9 @@ if [ -n "$MYPY_CMD" ]; then
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$(eval "$MYPY_CMD ." 2>&1)
-    if [ $? -ne 0 ]; then
+    _vr_run typecheck.mypy shell "$MYPY_CMD ."
+    OUT="$_VR_OUTPUT"
+    if [ "$_VR_STATUS" -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "typecheck (mypy)" "$SLICED"
     fi
@@ -249,8 +292,9 @@ fi
 # Rust
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(cargo check 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.cargo-check argv cargo check
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (cargo check)" "$SLICED"
   fi
@@ -259,8 +303,9 @@ fi
 # Go
 if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(go vet ./... 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run typecheck.go-vet argv go vet ./...
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "typecheck (go vet)" "$SLICED"
   fi
@@ -273,8 +318,9 @@ if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
   if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    OUT=$(npx --no-install eslint . --quiet 2>&1)
-    if [ $? -ne 0 ]; then
+    _vr_run lint.eslint argv npx --no-install eslint . --quiet
+    OUT="$_VR_OUTPUT"
+    if [ "$_VR_STATUS" -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
       emit_block "lint (eslint)" "$SLICED"
     fi
@@ -284,8 +330,9 @@ fi
 # ruff
 if command -v ruff >/dev/null 2>&1 && { [ -f "pyproject.toml" ] || [ -f "ruff.toml" ] || [ -f ".ruff.toml" ]; }; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(ruff check . 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.ruff argv ruff check .
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (ruff)" "$SLICED"
   fi
@@ -294,8 +341,9 @@ fi
 # clippy
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(cargo clippy --quiet --message-format=short -- -D warnings 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.clippy argv cargo clippy --quiet --message-format=short -- -D warnings
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (clippy)" "$SLICED"
   fi
@@ -304,8 +352,9 @@ fi
 # golangci-lint
 if [ -f "go.mod" ] && command -v golangci-lint >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(golangci-lint run 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run lint.golangci-lint argv golangci-lint run
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     SLICED=$(printf '%s' "$OUT" | head -30)
     emit_block "lint (golangci-lint)" "$SLICED"
   fi
@@ -324,7 +373,10 @@ fi
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
 TEST_CMD=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
-  HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>/dev/null)
+  if ! HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>&1); then
+    emit_block "package.json" "could not parse package.json while detecting the test script:
+${HAS_TEST}"
+  fi
   if [ -n "$HAS_TEST" ] && [ "$HAS_TEST" != "echo \"Error: no test specified\" && exit 1" ]; then
     if command -v trellis_resolve_pm >/dev/null 2>&1; then
       _PM="$(trellis_resolve_pm "$PROJECT_DIR")"
@@ -346,8 +398,9 @@ fi
 
 if [ -n "$TEST_CMD" ]; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  OUT=$(eval "$TEST_CMD" 2>&1)
-  if [ $? -ne 0 ]; then
+  _vr_run test shell "$TEST_CMD"
+  OUT="$_VR_OUTPUT"
+  if [ "$_VR_STATUS" -ne 0 ]; then
     # Tests: last 30 lines (stack traces / assertions land at the end).
     SLICED=$(printf '%s' "$OUT" | tail -30)
     emit_block "test (${TEST_CMD})" "$SLICED"

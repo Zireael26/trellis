@@ -13,6 +13,472 @@ setup() {
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wiki-skill-promotion.XXXXXX")"
   PROJECT="$TEST_ROOT/project"
   cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  EVIDENCE_TOOL="$TEST_ROOT/evidence-tool.py"
+  cat > "$EVIDENCE_TOOL" <<'EOF_EVIDENCE_TOOL'
+#!/usr/bin/env python3
+"""Test-side producer of version 2 cohort evaluation evidence.
+
+Deliberately independent of validate_proposal.py: it re-implements the SCHEMA.md
+tree-digest and canonical-JSON grammar, so a disagreement between producer and
+verifier surfaces as a test failure instead of a shared bug.
+"""
+
+import hashlib
+import json
+import shutil
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+EVAL_ID = 1
+TASK_ID = "verified-deploy-order"
+TASK_BYTES = b"# held-out task\nVerify the recorded dispatcher path, then verify it again.\n"
+POLICY_BYTES = b"common non-treatment execution policy\n"
+GRADER_CONFIG_BYTES = b"grader rubric configuration\n"
+SETTINGS = {"max_output_tokens": 4096, "streaming": True, "temperature": "0.0"}
+HARNESS = "claude"
+HARNESS_VERSION = "1.0.0-rc.54"
+OWNED_SUBDIRECTORIES = ("candidate", "tasks", "provenance", "runs")
+
+
+def sha_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def tree_digest(directory):
+    entries = []
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise SystemExit("snapshot must not contain a symlink: %s" % path)
+        if path.is_dir():
+            continue
+        relative = path.relative_to(directory).as_posix().encode("utf-8")
+        mode = path.lstat().st_mode
+        flag = b"1" if mode & 0o111 else b"0"
+        entries.append((relative, flag + b"\0" + sha_bytes(path.read_bytes()).encode("ascii")))
+    if not entries:
+        raise SystemExit("snapshot is empty: %s" % directory)
+    entries.sort(key=lambda item: item[0])
+    payload = b"".join(name + b"\0" + rest + b"\n" for name, rest in entries)
+    return sha_bytes(payload)
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def relative(project, path):
+    return path.resolve().relative_to(project.resolve()).as_posix()
+
+
+def cohort_of(executor_route, grader_route, task_digest, repetitions, seed):
+    return {
+        "tasks": [{"eval_id": EVAL_ID, "task_id": TASK_ID, "snapshot_sha256": task_digest}],
+        "executor": {
+            "route": executor_route,
+            "harness": HARNESS,
+            "harness_version": HARNESS_VERSION,
+            "settings": SETTINGS,
+            "common_policy_sha256": sha_bytes(POLICY_BYTES),
+        },
+        "grader": {"route": grader_route, "config_sha256": sha_bytes(GRADER_CONFIG_BYTES)},
+        "repetitions": repetitions,
+        "seed": seed,
+    }
+
+
+def synthetic_benchmark(skill, score, baseline, timestamp):
+    return {
+        "metadata": {
+            "skill_name": skill,
+            "timestamp": timestamp,
+            "evals_run": [EVAL_ID],
+            "runs_per_configuration": 1,
+        },
+        "runs": [
+            {
+                "eval_id": EVAL_ID,
+                "eval_name": TASK_ID,
+                "configuration": "with_skill",
+                "run_number": 1,
+                "result": {"pass_rate": float(score), "passed": 1, "failed": 0, "total": 1},
+                "expectations": [],
+                "notes": [],
+            },
+            {
+                "eval_id": EVAL_ID,
+                "eval_name": TASK_ID,
+                "configuration": "without_skill",
+                "run_number": 1,
+                "result": {"pass_rate": float(baseline), "passed": 0, "failed": 1, "total": 1},
+                "expectations": [],
+                "notes": [],
+            },
+        ],
+        "run_summary": {
+            "with_skill": {"pass_rate": {"mean": float(score)}},
+            "without_skill": {"pass_rate": {"mean": float(baseline)}},
+        },
+        "notes": [],
+    }
+
+
+def build_evaluation(
+    project,
+    run_dir,
+    candidate_source,
+    benchmark_path,
+    patterns,
+    executor_route,
+    grader_route,
+    seed="unseeded",
+    repetitions=None,
+):
+    """Materialize one run directory and return its evaluation object."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in OWNED_SUBDIRECTORIES:
+        owned = run_dir / name
+        if owned.exists():
+            shutil.rmtree(owned)
+
+    snapshot = run_dir / "candidate"
+    shutil.copytree(candidate_source, snapshot)
+    candidate_sha256 = tree_digest(snapshot)
+
+    task_dir = run_dir / "tasks" / str(EVAL_ID)
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.md").write_bytes(TASK_BYTES)
+    task_digest = tree_digest(task_dir)
+
+    benchmark = json.loads(benchmark_path.read_text())
+    if repetitions is None:
+        repetitions = benchmark["metadata"]["runs_per_configuration"]
+    cohort = cohort_of(executor_route, grader_route, task_digest, repetitions, seed)
+    cohort_id = sha_bytes(canonical(cohort))
+    benchmark["metadata"]["trellis_evaluation"] = {
+        "cohort_id": cohort_id,
+        "candidate_sha256": candidate_sha256,
+        "run_dir": relative(project, run_dir),
+    }
+    benchmark_path.write_text(json.dumps(benchmark, indent=2) + "\n")
+    exact = json.loads(benchmark_path.read_text(), parse_float=Decimal)
+
+    runs_dir = run_dir / "runs"
+    runs_dir.mkdir(parents=True)
+    artifacts = []
+    for run in exact["runs"]:
+        eval_id, configuration, run_number = run["eval_id"], run["configuration"], run["run_number"]
+        stem = "%s-%s-%s" % (eval_id, configuration, run_number)
+        output = runs_dir / (stem + ".out")
+        output.write_bytes(("raw native transcript for %s\n" % stem).encode("utf-8"))
+        grade_output = runs_dir / (stem + ".grade.txt")
+        grade_output.write_bytes(("raw grader evidence for %s\n" % stem).encode("utf-8"))
+        run_receipt = {
+            "schema_version": 1,
+            "eval_id": eval_id,
+            "configuration": configuration,
+            "run_number": run_number,
+            "status": "executed",
+            "exit_code": 0,
+            "native_session_id": "native-session-%s" % stem,
+            "observed_executor": cohort["executor"],
+            "treatment_sha256": candidate_sha256 if configuration == "with_skill" else None,
+            "output": {
+                "path": relative(project, output),
+                "sha256": sha_bytes(output.read_bytes()),
+            },
+            "grade": {
+                "route": grader_route,
+                "config_sha256": cohort["grader"]["config_sha256"],
+                "pass_rate": str(run["result"]["pass_rate"]),
+                "output": {
+                    "path": relative(project, grade_output),
+                    "sha256": sha_bytes(grade_output.read_bytes()),
+                },
+            },
+        }
+        receipt_path = runs_dir / (stem + ".json")
+        receipt_path.write_text(json.dumps(run_receipt, indent=2, sort_keys=True) + "\n")
+        artifacts.append(
+            {
+                "eval_id": eval_id,
+                "configuration": configuration,
+                "run_number": run_number,
+                "path": relative(project, receipt_path),
+                "sha256": sha_bytes(receipt_path.read_bytes()),
+            }
+        )
+
+    provenance_dir = run_dir / "provenance"
+    provenance_dir.mkdir(parents=True)
+    provenance = []
+    for slug in patterns:
+        source = project / "wiki" / "patterns" / (slug + ".md")
+        target = provenance_dir / (slug + ".md")
+        shutil.copyfile(source, target)
+        provenance.append(
+            {
+                "pattern": slug,
+                "path": relative(project, target),
+                "sha256": sha_bytes(target.read_bytes()),
+            }
+        )
+
+    return {
+        "cohort": cohort,
+        "cohort_id": cohort_id,
+        "candidate_sha256": candidate_sha256,
+        "candidate_snapshot": relative(project, snapshot),
+        "task_snapshots": [{"eval_id": EVAL_ID, "path": relative(project, task_dir)}],
+        "provenance": provenance,
+        "benchmark": {
+            "path": relative(project, benchmark_path),
+            "sha256": sha_bytes(benchmark_path.read_bytes()),
+        },
+        "run_dir": relative(project, run_dir),
+        "artifacts": artifacts,
+        "incumbents": [],
+    }
+
+
+def historical_candidate(destination, marker):
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "SKILL.md").write_text(
+        "---\nname: one-skill\n---\n\n# one-skill\n\nHistorical accepted revision %s.\n" % marker
+    )
+    (destination / "PURPOSE.md").write_text(
+        "# Purpose\n\n## Motivating patterns\n\n- [valid](../../../wiki/patterns/valid.md)\n"
+    )
+    return destination
+
+
+def cmd_current(argv):
+    project = Path(argv[0]).resolve()
+    candidate = project / argv[1]
+    benchmark_path = Path(argv[2]).resolve()
+    receipt_path = Path(argv[3])
+    patterns = [slug for slug in argv[4].split(",") if slug]
+    receipt = json.loads(receipt_path.read_text())
+    evaluation = build_evaluation(
+        project,
+        benchmark_path.parent,
+        candidate,
+        benchmark_path,
+        patterns,
+        receipt["runner_model"]["evaluator"],
+        receipt["runner_model"]["judge"],
+    )
+    receipt["schema_version"] = 2
+    receipt["evaluation"] = evaluation
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def append_row(project, date, sha, score, best_before, verdict, sidecar_relative):
+    pull = "https://github.com/example/project/pull/%d" % (int(sha[0], 16) + 100)
+    pr = pull if verdict in {"accepted", "rejected"} else "not-opened"
+    row = (
+        "| {date} | one-skill | diff={base}..{head}; patterns=valid; new-evidence=none "
+        "| {score} | {best} | {verdict} | {pr} | [run receipt]({relative}) |\n"
+    ).format(
+        date=date,
+        base="0" * 40,
+        head=sha,
+        score=score,
+        best=best_before,
+        verdict=verdict,
+        pr=pr,
+        relative=sidecar_relative,
+    )
+    with (project / "wiki" / "skill-impact.md").open("a") as handle:
+        handle.write(row)
+
+
+def base_receipt(sha, score, best_before, verdict, date):
+    return {
+        "skill": "one-skill",
+        "proposal_sha": sha,
+        "eval_cmd": "python3 -m scripts.aggregate_benchmark benchmarks/history --skill-name one-skill",
+        "score": score,
+        "best_before": best_before,
+        "baseline": "0.60",
+        "verdict": verdict,
+        "run_at": date + "T12:00:00Z",
+        "runner_model": {
+            "proposer": "gpt::openai/gpt-5.6",
+            "evaluator": "gemini::google/gemini-3.1-pro",
+            "judge": "gemini::google/gemini-3.1-pro",
+        },
+    }
+
+
+def cmd_history(argv):
+    project = Path(argv[0]).resolve()
+    sha, score, best_before, verdict = argv[1:5]
+    seed = argv[5] if len(argv) > 5 and argv[5] else "unseeded"
+    marker = argv[6] if len(argv) > 6 and argv[6] else sha[:12]
+    date = "2026-08-28"
+    run_dir = project / "benchmarks" / ("history-" + sha[:12])
+    source = historical_candidate(run_dir / "source", marker)
+    benchmark_path = run_dir / "benchmark.json"
+    benchmark_path.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_path.write_text(
+        json.dumps(synthetic_benchmark("one-skill", score, "0.60", date + "T11:55:00Z"), indent=2) + "\n"
+    )
+    receipt = base_receipt(sha, score, best_before, verdict, date)
+    evaluation = build_evaluation(
+        project,
+        run_dir,
+        source,
+        benchmark_path,
+        ["valid"],
+        receipt["runner_model"]["evaluator"],
+        receipt["runner_model"]["judge"],
+        seed=seed,
+    )
+    receipt["schema_version"] = 2
+    receipt["evaluation"] = evaluation
+    sidecar_relative = "skill-impact/one-skill/%s-%s.json" % (date, sha[:12])
+    sidecar = project / "wiki" / sidecar_relative
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    append_row(project, date, sha, score, best_before, verdict, sidecar_relative)
+
+
+def cmd_legacy_history(argv):
+    project = Path(argv[0]).resolve()
+    sha, score, best_before, verdict = argv[1:5]
+    date = "2026-08-28"
+    receipt = base_receipt(sha, score, best_before, verdict, date)
+    sidecar_relative = "skill-impact/one-skill/%s-%s.json" % (date, sha[:12])
+    sidecar = project / "wiki" / sidecar_relative
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    append_row(project, date, sha, score, best_before, verdict, sidecar_relative)
+
+
+def accepted_sidecar_for(project, sha):
+    ledger = (project / "wiki" / "skill-impact.md").read_text()
+    for line in ledger.splitlines():
+        if (".." + sha) in line and "| accepted |" in line:
+            start = line.rindex("](") + 2
+            return project / "wiki" / line[start : line.rindex(")")]
+    raise SystemExit("no accepted row for %s" % sha)
+
+
+def cmd_incumbent(argv):
+    project = Path(argv[0]).resolve()
+    receipt_path = Path(argv[1])
+    accepted_sha, score = argv[2], argv[3]
+    reuse_run_dir = argv[4] if len(argv) > 4 else ""
+    receipt = json.loads(receipt_path.read_text())
+    cohort = receipt["evaluation"]["cohort"]
+    sidecar = accepted_sidecar_for(project, accepted_sha)
+    accepted = json.loads(sidecar.read_text())
+    run_dir = project / "benchmarks" / (reuse_run_dir or ("reeval-" + accepted_sha[:12]))
+    if reuse_run_dir and (run_dir / "candidate").exists():
+        evaluation = json.loads((run_dir / "evaluation.json").read_text())
+    else:
+        source = run_dir / "source"
+        if source.exists():
+            shutil.rmtree(source)
+        shutil.copytree(project / accepted["evaluation"]["candidate_snapshot"], source)
+        benchmark_path = run_dir / "benchmark.json"
+        benchmark_path.parent.mkdir(parents=True, exist_ok=True)
+        benchmark_path.write_text(
+            json.dumps(synthetic_benchmark("one-skill", score, "0.60", "2026-08-29T11:57:00Z"), indent=2) + "\n"
+        )
+        evaluation = build_evaluation(
+            project,
+            run_dir,
+            source,
+            benchmark_path,
+            ["valid"],
+            cohort["executor"]["route"],
+            cohort["grader"]["route"],
+            seed=cohort["seed"],
+            repetitions=cohort["repetitions"],
+        )
+        evaluation.pop("incumbents")
+        (run_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2) + "\n")
+    receipt["evaluation"]["incumbents"].append(
+        {
+            "proposal_sha": accepted_sha,
+            "accepted_receipt_sha256": sha_bytes(sidecar.read_bytes()),
+            "evaluation": evaluation,
+        }
+    )
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def cmd_resync(argv):
+    """Recompute cohort_id after a deliberate cohort mutation."""
+    receipt_path = Path(argv[0])
+    receipt = json.loads(receipt_path.read_text())
+    evaluation = receipt["evaluation"]
+    evaluation["cohort_id"] = sha_bytes(canonical(evaluation["cohort"]))
+    if len(argv) > 1 and argv[1] == "--benchmark":
+        project = Path(argv[2]).resolve()
+        benchmark_path = project / evaluation["benchmark"]["path"]
+        benchmark = json.loads(benchmark_path.read_text())
+        benchmark["metadata"]["trellis_evaluation"]["cohort_id"] = evaluation["cohort_id"]
+        benchmark_path.write_text(json.dumps(benchmark, indent=2) + "\n")
+        evaluation["benchmark"]["sha256"] = sha_bytes(benchmark_path.read_bytes())
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def cmd_rehash_artifact(argv):
+    """Re-point one artifact digest at its current bytes after a run mutation."""
+    project = Path(argv[0]).resolve()
+    receipt_path = Path(argv[1])
+    receipt = json.loads(receipt_path.read_text())
+    for artifact in receipt["evaluation"]["artifacts"]:
+        artifact["sha256"] = sha_bytes((project / artifact["path"]).read_bytes())
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def cmd_two_rep(argv):
+    """A two-repetition benchmark whose with_skill runs differ but mean 0.9."""
+    path = Path(argv[0])
+    document = synthetic_benchmark("one-skill", "0.90", "0.60", "2026-08-29T11:58:00Z")
+    document["metadata"]["runs_per_configuration"] = 2
+    runs = []
+    for configuration, rates in (("with_skill", ["1.0", "0.8"]), ("without_skill", ["0.6", "0.6"])):
+        for index, rate in enumerate(rates, start=1):
+            runs.append(
+                {
+                    "eval_id": EVAL_ID,
+                    "eval_name": TASK_ID,
+                    "configuration": configuration,
+                    "run_number": index,
+                    "result": {"pass_rate": float(rate), "passed": 1, "failed": 0, "total": 1},
+                    "expectations": [],
+                    "notes": [],
+                }
+            )
+    document["runs"] = runs
+    path.write_text(json.dumps(document, indent=2) + "\n")
+
+
+def cmd_legacy_receipt(argv):
+    path = Path(argv[0])
+    sha, score, best_before, verdict = argv[1:5]
+    path.write_text(json.dumps(base_receipt(sha, score, best_before, verdict, "2026-08-28"), indent=2) + "\n")
+
+
+COMMANDS = {
+    "current": cmd_current,
+    "two-rep": cmd_two_rep,
+    "legacy-receipt": cmd_legacy_receipt,
+    "history": cmd_history,
+    "legacy-history": cmd_legacy_history,
+    "incumbent": cmd_incumbent,
+    "resync": cmd_resync,
+    "rehash-artifact": cmd_rehash_artifact,
+}
+
+if __name__ == "__main__":
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+EOF_EVIDENCE_TOOL
 }
 
 teardown() {
@@ -217,6 +683,7 @@ prepare_proposal() {
   PATTERNS="valid"
   PROCESS_RECEIPT="$PROCESS_FIXTURES/pass.txt"
   write_proposal_diff
+  build_evaluation
 }
 
 proposal_check() {
@@ -285,49 +752,64 @@ PY
 }
 
 
+# Version 2 history: a full same-cohort accepted receipt with its own retained
+# run directory, so the comparator can revalidate the evidence it binds.
 append_history_receipt() {
-  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  python3 "$EVIDENCE_TOOL" history "$@"
+}
+
+# Deliberate legacy fixture: an unversioned nine-field receipt with no
+# verifiable candidate-content binding.
+append_legacy_history_receipt() {
+  python3 "$EVIDENCE_TOOL" legacy-history "$@"
+}
+
+build_evaluation() {
+  python3 "$EVIDENCE_TOOL" current "$PROJECT" "$CANDIDATE_REL" "$BENCHMARK" "$RECEIPT" "$PATTERNS"
+}
+
+add_incumbent() {
+  python3 "$EVIDENCE_TOOL" incumbent "$PROJECT" "$RECEIPT" "$@"
+}
+
+resync_cohort() {
+  python3 "$EVIDENCE_TOOL" resync "$RECEIPT" "$@"
+}
+
+rehash_artifacts() {
+  python3 "$EVIDENCE_TOOL" rehash-artifact "$PROJECT" "$RECEIPT"
+}
+
+receipt_edit() {
+  python3 - "$RECEIPT" "$1" <<'PY'
 import json
 import pathlib
 import sys
 
-root = pathlib.Path(sys.argv[1])
-sha, score, best_before, verdict = sys.argv[2:]
-date = "2026-08-28"
-relative = pathlib.Path("skill-impact") / "one-skill" / (date + "-" + sha[:12] + ".json")
-sidecar = root / "wiki" / relative
-sidecar.parent.mkdir(parents=True, exist_ok=True)
-receipt = {
-    "skill": "one-skill",
-    "proposal_sha": sha,
-    "eval_cmd": "python3 -m scripts.aggregate_benchmark benchmarks/history --skill-name one-skill",
-    "score": score,
-    "best_before": best_before,
-    "baseline": "0.60",
-    "verdict": verdict,
-    "run_at": date + "T12:00:00Z",
-    "runner_model": {
-        "proposer": "gpt::openai/gpt-5.6",
-        "evaluator": "gemini::google/gemini-3.1-pro",
-        "judge": "gemini::google/gemini-3.1-pro",
-    },
-}
-sidecar.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-pr = "https://github.com/example/project/pull/" + str(int(sha[0], 16) + 100) if verdict in {"accepted", "rejected"} else "not-opened"
-row = "| {date} | one-skill | diff={base}..{head}; patterns=valid; new-evidence=none | {score} | {best} | {verdict} | {pr} | [run receipt]({relative}) |\n".format(
-    date=date,
-    base="0" * 40,
-    head=sha,
-    score=score,
-    best=best_before,
-    verdict=verdict,
-    pr=pr,
-    relative=relative.as_posix(),
-)
-ledger = root / "wiki" / "skill-impact.md"
-with ledger.open("a") as handle:
-    handle.write(row)
+path = pathlib.Path(sys.argv[1])
+document = json.loads(path.read_text())
+exec(sys.argv[2], {"json": json}, {"doc": document})
+path.write_text(json.dumps(document, indent=2) + "\n")
 PY
+}
+
+run_receipt_edit() {
+  python3 - "$PROJECT" "$RECEIPT" "$1" "$2" <<'PY'
+import json
+import pathlib
+import sys
+
+project, receipt_path, configuration, code = sys.argv[1:]
+receipt = json.loads(pathlib.Path(receipt_path).read_text())
+for artifact in receipt["evaluation"]["artifacts"]:
+    if artifact["configuration"] != configuration:
+        continue
+    path = pathlib.Path(project) / artifact["path"]
+    document = json.loads(path.read_text())
+    exec(code, {"json": json}, {"doc": document})
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+PY
+  rehash_artifacts
 }
 
 init_git_project() {
@@ -509,6 +991,150 @@ PY
   [ "$(tree_digest "$PROJECT/core-rules/skills")" = "$skill_before" ]
 }
 
+@test "mark-stale preserves LF CRLF and CR bytes except intended status and date edits" {
+  local ending candidate
+  for ending in LF CRLF CR; do
+    candidate="$TEST_ROOT/$ending"
+    cp -R "$PROJECT" "$candidate"
+    python3 - "$candidate" "$ending" <<'PY'
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+ending = {"LF": b"\n", "CRLF": b"\r\n", "CR": b"\r"}[sys.argv[2]]
+for path in [root / "wiki/index.md", *sorted((root / "wiki/patterns").glob("*.md"))]:
+    path.write_bytes(ending.join(path.read_bytes().splitlines()) + ending)
+PY
+    cp -R "$candidate" "$TEST_ROOT/$ending-before"
+    run python3 "$WIKI_VALIDATOR" mark-stale --root "$candidate"
+    [ "$status" -eq 0 ]
+    assert_json "j['verdict'] == 'valid' and j['changed_paths'] == ['wiki/index.md', 'wiki/patterns/broken-context.md']"
+    run python3 "$WIKI_VALIDATOR" check --root "$candidate"
+    [ "$status" -eq 0 ]
+    assert_json "j['verdict'] == 'valid'"
+    python3 - "$TEST_ROOT/$ending-before" "$candidate" <<'PY'
+from datetime import date
+import pathlib
+import sys
+before, after = map(pathlib.Path, sys.argv[1:])
+old_files = {p.relative_to(before): p.read_bytes() for p in before.rglob("*") if p.is_file()}
+new_files = {p.relative_to(after): p.read_bytes() for p in after.rglob("*") if p.is_file()}
+expected = dict(old_files)
+page = pathlib.Path("wiki/patterns/broken-context.md")
+expected[page] = expected[page].replace(b"status: active", b"status: stale", 1)
+index = pathlib.Path("wiki/index.md")
+rows = expected[index].splitlines(keepends=True)
+for position, row in enumerate(rows):
+    if row.startswith(b"| [broken-context]"):
+        cells = row.split(b"|")
+        cells[2] = cells[2].replace(b"active", b"stale")
+        old_date = cells[4].strip()
+        cells[4] = cells[4].replace(old_date, max(old_date, date.today().isoformat().encode()))
+        rows[position] = b"|".join(cells)
+expected[index] = b"".join(rows)
+assert new_files == expected, [str(p) for p in expected if new_files.get(p) != expected[p]]
+PY
+  done
+}
+
+@test "mark-stale fails closed when fcntl is unavailable" {
+  local command wiki_before
+  wiki_before="$(tree_digest "$PROJECT/wiki")"
+  for command in check mark-stale; do
+    run python3 - "$WIKI_VALIDATOR" "$PROJECT" "$command" <<'PY'
+import builtins
+import runpy
+import sys
+
+validator, root, command = sys.argv[1:]
+real_import = builtins.__import__
+
+
+def blocked_import(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ImportError("fcntl blocked by test")
+    return real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = blocked_import
+sys.argv = [validator, command, "--root", root]
+runpy.run_path(validator, run_name="__main__")
+PY
+    [ "$status" -ne 0 ]
+    assert_json "j['verdict'] == 'malformed' and j['errors'][0]['code'] == 'lock'"
+    [ "$(tree_digest "$PROJECT/wiki")" = "$wiki_before" ]
+  done
+}
+
+@test "mark-stale reports rollback and temporary cleanup failures" {
+  run python3 - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+validator, root = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("validate_wiki_failure_test", validator)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+real_replace = module.os.replace
+real_unlink = pathlib.Path.unlink
+
+
+def injected_replace(source, target):
+    source_path = pathlib.Path(source)
+    target_path = pathlib.Path(target)
+    if source_path.suffix == ".rollback":
+        raise OSError("sentinel restore failure")
+    if source_path.suffix == ".tmp" and target_path.name == "index.md":
+        raise OSError("sentinel replace failure")
+    return real_replace(source, target)
+
+
+def injected_unlink(path, *args, **kwargs):
+    if path.suffix == ".tmp" and path.exists():
+        raise OSError("sentinel cleanup failure")
+    return real_unlink(path, *args, **kwargs)
+
+
+module.os.replace = injected_replace
+pathlib.Path.unlink = injected_unlink
+raise SystemExit(module.main(["mark-stale", "--root", root]))
+PY
+  [ "$status" -ne 0 ]
+  local expected
+  expected="j['verdict'] == 'malformed' and 'rollback failed' in j['errors'][0]['message']"
+  expected+=" and 'sentinel restore failure' in j['errors'][0]['message']"
+  expected+=" and 'temporary cleanup failed' in j['errors'][0]['message']"
+  expected+=" and 'sentinel cleanup failure' in j['errors'][0]['message']"
+  assert_json "$expected"
+}
+
+@test "unexpected RuntimeError is not relabelled as malformed input" {
+  run python3 - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
+import importlib.util
+import sys
+
+validator, root = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("validate_wiki_runtime_test", validator)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+
+def fail_with_sentinel(_root):
+    raise RuntimeError("sentinel runtime failure")
+
+
+module._run_check = fail_with_sentinel
+raise SystemExit(module.main(["check", "--root", root]))
+PY
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sentinel runtime failure"* ]]
+  [[ "$output" != *"input could not be safely validated"* ]]
+}
+
 @test "wiki validator rejects the forbidden logs layer" {
   make_valid_wiki "$PROJECT"
   printf '%s\n' '# Forbidden wiki log' > "$PROJECT/wiki/logs.md"
@@ -626,7 +1252,174 @@ PY
   done
 }
 
-@test "impact record creates one exact eight-column row and linked nine-field receipt" {
+t8_transition_cases() {
+  python3 - "$WIKI_VALIDATOR" "$PROJECT" "$TEST_ROOT" "$@" <<'PY'
+import hashlib
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+
+validator, project, scratch = sys.argv[1:4]
+page_rel = "wiki/patterns/valid.md"
+historical = "- 2026-08-20 refine prior=sha256:" + "a" * 64 + " — Recorded reassessment.\n"
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def snapshot(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+def status(root, slug, old, new):
+    page = root / ("wiki/patterns/" + slug + ".md")
+    page.write_bytes(page.read_bytes().replace(("status: " + old).encode(), ("status: " + new).encode(), 1))
+    index = root / "wiki/index.md"
+    index.write_text(index.read_text().replace("patterns/" + slug + ".md) | " + old, "patterns/" + slug + ".md) | " + new))
+
+for case in sys.argv[4:]:
+    before = pathlib.Path(scratch) / (case + "-before")
+    after = pathlib.Path(scratch) / (case + "-after")
+    shutil.copytree(project, before)
+    page = before / page_rel
+    index = before / "wiki/index.md"
+    index.write_text("\n".join(line for line in index.read_text().splitlines() if "broken-context" not in line) + "\n")
+    (before / "wiki/patterns/broken-context.md").unlink()
+    history_cases = {"history-append", "history-rewrite", "history-remove", "history-normalize", "merge-preserve", "merge-rewrite", "merge-remove", "date-order"}
+    if case in history_cases:
+        page.write_bytes(page.read_bytes() + b"\n## Provenance\n" + historical.encode())
+    if case.startswith("merge-") or case in {"other-row", "other-page", "unrelated-stale"}:
+        second = before / "wiki/patterns/second.md"
+        second.write_text(page.read_text().split("\n## Provenance")[0].replace("slug: valid", "slug: second").replace("# Pattern: valid", "# Pattern: second"))
+        index.write_text(index.read_text() + "| [second](patterns/second.md) | active | [gotchas.md#managed-dispatcher-drift](../gotchas.md#managed-dispatcher-drift) | 2026-08-20 |\n")
+    reactivate = case in {"reactivate-restored", "reactivate-repaired", "reactivate-unresolved", "unrelated-stale", "retired-active", "source-repair"}
+    if reactivate:
+        status(before, "valid", "active", "retired" if case == "retired-active" else "stale")
+        if case in {"reactivate-repaired", "reactivate-unresolved", "source-repair"}:
+            page.write_text(page.read_text().replace("context-log.md#session-2026-08-20", "context-log.md#missing"))
+        if case == "unrelated-stale":
+            status(before, "second", "active", "stale")
+    if case in {"crlf", "crlf-normalized", "history-normalize"}:
+        page.write_bytes(page.read_bytes().replace(b"\n", b"\r\n"))
+    shutil.copytree(before, after)
+    new_page = after / page_rel
+    new_index = after / "wiki/index.md"
+    action = "reactivate" if reactivate else "refine"
+    prior = digest(page)
+    if case == "wrong-hash":
+        prior = "0" * 64
+    if case == "crlf-normalized":
+        prior = hashlib.sha256(page.read_text().encode()).hexdigest()
+        assert prior != digest(page)
+    if reactivate:
+        status(after, "valid", "retired" if case == "retired-active" else "stale", "active")
+        if case == "reactivate-repaired":
+            new_page.write_text(new_page.read_text().replace("context-log.md#missing", "context-log.md#session-2026-08-20"))
+        if case == "source-repair":
+            with (after / "context-log.md").open("a") as handle:
+                handle.write("\n## missing\nSeparately forbidden source repair.\n")
+    elif case not in {"no-op", "provenance-only", "whitespace-only", "heading-only"}:
+        new_page.write_bytes(new_page.read_bytes().replace(b"## Working path", b"## Working path\nInspect the recorded dispatcher again after installation."))
+    if case == "whitespace-only":
+        new_page.write_bytes(new_page.read_bytes().replace(b"Preconditions:", b"  Preconditions:   "))
+    if case == "heading-only":
+        new_page.write_bytes(new_page.read_bytes().replace(b"## Working path", b"## Working path\n### Reassessment"))
+    if case in {"history-rewrite", "merge-rewrite"}:
+        new_page.write_bytes(new_page.read_bytes().replace(b"Recorded reassessment.", b"Rewritten reassessment."))
+    if case in {"history-remove", "merge-remove"}:
+        new_page.write_bytes(new_page.read_bytes().split(b"\n## Provenance")[0] + b"\n")
+    if case == "history-normalize":
+        new_page.write_text(new_page.read_text())
+    if case != "no-op" and not case.startswith("merge-"):
+        when = "2026-08-30"
+        if case == "invalid-date":
+            when = "2026-02-30"
+        if case == "date-order":
+            when = "2026-08-19"
+        if case == "wrong-action":
+            action = "reactivate"
+        record = f"- {when} {action} prior=sha256:{prior} — Evidence-backed fixture correction.\n"
+        if case == "empty-reason":
+            record = record.replace("Evidence-backed fixture correction.", "  ")
+        prefix = "\n## Provenance\n" if b"## Provenance" not in new_page.read_bytes() or case == "duplicate-section" else ""
+        with new_page.open("ab") as handle:
+            handle.write((prefix + record).encode())
+            if case == "duplicate-section":
+                handle.write(("\n## Provenance\n" + record).encode())
+            if case == "extra-record":
+                handle.write(record.encode())
+    if case != "no-op":
+        new_index.write_text(new_index.read_text().replace("2026-08-20", "2026-08-30", 1))
+    if case == "date-decrease":
+        new_index.write_text(new_index.read_text().replace("2026-08-30", "2026-08-19", 1))
+    if case == "index-unchanged":
+        new_index.write_bytes(index.read_bytes())
+    if case == "other-row":
+        new_index.write_text(new_index.read_text().replace("| [second]", "|  [second]"))
+    if case == "other-page":
+        with (after / "wiki/patterns/second.md").open("a") as handle:
+            handle.write("\nUnrelated prose.\n")
+    if case == "unresolved-after":
+        new_page.write_bytes(new_page.read_bytes().replace(b"context-log.md#session-2026-08-20", b"context-log.md#missing"))
+    if case == "forbidden-gotcha":
+        with (after / "gotchas.md").open("a") as handle:
+            handle.write("\nForbidden evidence edit.\n")
+    if case.startswith("merge-"):
+        status(after, "second", "active", "retired")
+    expected = case in {"refine", "crlf", "history-append", "reactivate-restored", "reactivate-repaired", "merge-preserve"}
+    old_snapshot, new_snapshot = snapshot(before), snapshot(after)
+    result = subprocess.run([sys.executable, validator, "check-change", "--before", str(before), "--after", str(after)], capture_output=True, text=True)
+    report = json.loads(result.stdout)
+    assert result.returncode == (0 if expected else 1), (case, result.returncode, report, result.stderr)
+    assert snapshot(before) == old_snapshot and snapshot(after) == new_snapshot, case
+    if expected:
+        transition = "merge-with-retirement" if case.startswith("merge-") else action
+        assert report["verdict"] == "allowed" and report["transition"] == transition, (case, report)
+        if not case.startswith("merge-"):
+            assert report["changed_paths"] == ["wiki/index.md", page_rel], report
+            assert report["provenance"] == {"slug": "valid", "prior_sha256": digest(page), "after_sha256": digest(new_page)}, report
+    elif case in {"forbidden-gotcha", "source-repair"}:
+        assert any(error["code"] == "forbidden-path" for error in report["errors"]), report
+    print(case + ": " + ("allowed" if expected else "rejected"))
+PY
+}
+
+@test "T8 refinement active meaningful change and retained history" {
+  run t8_transition_cases refine history-append
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement raw digest rejects fabricated and normalized CRLF identity with positive controls" {
+  run t8_transition_cases refine crlf wrong-hash crlf-normalized
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement reactivation permits selected restored or repaired evidence only" {
+  run t8_transition_cases reactivate-restored reactivate-repaired reactivate-unresolved unrelated-stale retired-active source-repair
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement rejects no-op provenance whitespace and headings only" {
+  run t8_transition_cases no-op provenance-only whitespace-only heading-only
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement rejects malformed provenance grammar dates order and duplicate sections" {
+  run t8_transition_cases invalid-date date-order duplicate-section wrong-action empty-reason extra-record
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement preserves historical record bytes including merge survivors" {
+  run t8_transition_cases merge-preserve merge-rewrite merge-remove history-rewrite history-remove history-normalize
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T8 refinement enforces exact two paths own row date and clean evidence" {
+  run t8_transition_cases date-decrease index-unchanged other-row other-page unresolved-after forbidden-gotcha
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "impact record creates one exact eight-column row and linked v2 receipt" {
   prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
   run proposal_record not-opened
   [ "$status" -eq 0 ]
@@ -646,7 +1439,10 @@ assert len(rows[0].strip("|").split("|")) == 8
 link = re.search(r"\((skill-impact/one-skill/2026-08-29-2{12}\.json)\)", rows[0])
 assert link, rows[0]
 receipt = json.loads((root / "wiki" / link.group(1)).read_text())
-assert set(receipt) == {"skill", "proposal_sha", "eval_cmd", "score", "best_before", "baseline", "verdict", "run_at", "runner_model"}
+assert set(receipt) >= {"skill", "proposal_sha", "eval_cmd", "score", "best_before", "baseline", "verdict", "run_at", "runner_model"}
+assert set(receipt) == {"schema_version", "skill", "proposal_sha", "eval_cmd", "score", "best_before", "baseline", "verdict", "run_at", "runner_model", "evaluation"}
+assert receipt["schema_version"] == 2
+assert set(receipt["evaluation"]) == {"cohort", "cohort_id", "candidate_sha256", "candidate_snapshot", "task_snapshots", "provenance", "benchmark", "run_dir", "artifacts", "incumbents"}
 assert set(receipt["runner_model"]) == {"proposer", "evaluator", "judge"}
 assert receipt["proposal_sha"] == "2" * 40 and receipt["verdict"] == "eval-passed"
 diff_ref = [cell.strip() for cell in rows[0].strip("|").split("|")][2]
@@ -894,6 +1690,7 @@ PY
   cp "$EVAL_FIXTURES/benchmark-equal.json" "$BENCHMARK"
   set_receipt_fields "$RECEIPT" "$TEST_ROOT/equal-receipt.json" score 0.60 best_before 0.60 baseline 0.60
   RECEIPT="$TEST_ROOT/equal-receipt.json"
+  build_evaluation
   run proposal_check
   [ "$status" -eq 1 ]
   assert_json "j['status'] != 'EVAL-PASSED'"
@@ -915,12 +1712,14 @@ PY
 
   cp "$EVAL_FIXTURES/receipt-same-family.json" "$RECEIPT"
   write_proposal_diff
+  build_evaluation
   run proposal_check
   [ "$status" -eq 1 ]
 
   cp "$EVAL_FIXTURES/receipt-pass.json" "$RECEIPT"
   set_runner_models "$RECEIPT" "gpt::openai/gpt-5.6" "gemini::google/gemini-3.1-pro" "gpt::openai/gpt-5.6"
   write_proposal_diff
+  build_evaluation
   run proposal_check
   [ "$status" -eq 1 ]
 
@@ -963,6 +1762,7 @@ PY
   CANDIDATE_REL="project-skills/one-skill"
   SKILL_ROOT="project-skills"
   write_proposal_diff "project-skills/one-skill/SKILL.md" "project-skills/one-skill/PURPOSE.md"
+  build_evaluation
   run proposal_check
   [ "$status" -eq 0 ]
 }
@@ -1279,6 +2079,530 @@ ledger = (root / "wiki" / "skill-impact.md").read_text()
 assert "[valid](patterns/valid.md)" in index
 link = re.search(r"\((skill-impact/one-skill/2026-08-20-[^)]+\.json)\)", ledger).group(1)
 assert json.loads((root / "wiki" / link).read_text())["verdict"] == "rejected"
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 cohort version 2 evidence promotes a valid baseline and refuses unversioned or unknown receipts" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['status'] == 'EVAL-PASSED'"
+  run proposal_record not-opened
+  [ "$status" -eq 0 ]
+  run python3 - "$PROJECT" "$RECEIPT" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+root, receipt_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+ledger = (root / "wiki" / "skill-impact.md").read_text()
+link = re.search(r"\((skill-impact/one-skill/[^)]+\.json)\)", ledger).group(1)
+sidecar = json.loads((root / "wiki" / link).read_text())
+supplied = json.loads(receipt_path.read_text())
+assert sidecar["schema_version"] == 2, sidecar
+assert sidecar["evaluation"] == supplied["evaluation"], "record discarded version 2 evaluation keys"
+assert list(sidecar) == [
+    "schema_version", "skill", "proposal_sha", "eval_cmd", "score",
+    "best_before", "baseline", "verdict", "run_at", "runner_model", "evaluation",
+], list(sidecar)
+PY
+  [ "$status" -eq 0 ]
+
+  local variant
+  for variant in unversioned unknown-version extra-key; do
+    PROJECT="$TEST_ROOT/version-$variant"
+    cp -R "$PROJECT_FIXTURE" "$PROJECT"
+    prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+    case "$variant" in
+      unversioned) receipt_edit 'doc.pop("schema_version"); doc.pop("evaluation")' ;;
+      unknown-version) receipt_edit 'doc["schema_version"] = 3' ;;
+      extra-key) receipt_edit 'doc["extra_key"] = "no"' ;;
+    esac
+    run proposal_check
+    if [ "$variant" = unversioned ]; then
+      [ "$status" -eq 1 ]
+      assert_json "j['status'] == 'NOT-READY'"
+    else
+      [ "$status" -eq 2 ]
+      assert_json "j['status'] == 'MALFORMED'"
+    fi
+  done
+}
+
+@test "T8 cohort refuses every single mutated cohort dimension" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local pristine="$TEST_ROOT/pristine-cohort.json"
+  cp "$RECEIPT" "$pristine"
+  local mutation
+  for mutation in \
+    'doc["evaluation"]["cohort"]["tasks"][0]["snapshot_sha256"] = "f" * 64' \
+    'doc["evaluation"]["cohort"]["tasks"][0]["task_id"] = "substituted-task"' \
+    'doc["evaluation"]["cohort"]["tasks"][0]["eval_id"] = 2' \
+    'doc["evaluation"]["cohort"]["executor"]["route"] = "gemini::google/gemini-3.1-flash"' \
+    'doc["evaluation"]["cohort"]["executor"]["harness"] = "codex"' \
+    'doc["evaluation"]["cohort"]["executor"]["harness_version"] = "0.0.1"' \
+    'doc["evaluation"]["cohort"]["executor"]["settings"]["temperature"] = "0.7"' \
+    'doc["evaluation"]["cohort"]["executor"]["common_policy_sha256"] = "a" * 64' \
+    'doc["evaluation"]["cohort"]["grader"]["route"] = "gemini::google/gemini-3.1-flash"' \
+    'doc["evaluation"]["cohort"]["grader"]["config_sha256"] = "b" * 64' \
+    'doc["evaluation"]["cohort"]["repetitions"] = 2' \
+    'doc["evaluation"]["cohort"]["seed"] = "fabricated-seed-7"'; do
+    cp "$pristine" "$RECEIPT"
+    receipt_edit "$mutation"
+    resync_cohort
+    run proposal_check
+    [ "$status" -ne 0 ] || { echo "cohort mutation was accepted: $mutation"; false; }
+  done
+
+  cp "$pristine" "$RECEIPT"
+  receipt_edit 'doc["evaluation"]["cohort"]["seed"] = "fabricated-seed-7"'
+  run proposal_check
+  [ "$status" -eq 2 ]
+  assert_json "'canonical digest' in j['error']"
+
+  cp "$pristine" "$RECEIPT"
+  run proposal_check
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 cohort binds executor grader and repetition identities beyond the cohort digest" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local pristine="$TEST_ROOT/pristine-binding.json"
+  cp "$RECEIPT" "$pristine"
+  local case_name mutation
+  for case_name in executor-route grader-route harness-version grader-config repetitions; do
+    cp "$pristine" "$RECEIPT"
+    case "$case_name" in
+      executor-route) mutation='doc["evaluation"]["cohort"]["executor"]["route"] = "gemini::google/gemini-3.1-flash"' ;;
+      grader-route) mutation='doc["evaluation"]["cohort"]["grader"]["route"] = "gemini::google/gemini-3.1-flash"' ;;
+      harness-version) mutation='doc["evaluation"]["cohort"]["executor"]["harness_version"] = "0.0.1"' ;;
+      grader-config) mutation='doc["evaluation"]["cohort"]["grader"]["config_sha256"] = "b" * 64' ;;
+      repetitions) mutation='doc["evaluation"]["cohort"]["repetitions"] = 2' ;;
+    esac
+    receipt_edit "$mutation"
+    resync_cohort --benchmark "$PROJECT"
+    run proposal_check
+    [ "$status" -ne 0 ] || { echo "binding mutation was accepted: $case_name"; false; }
+  done
+  cp "$pristine" "$RECEIPT"
+  build_evaluation
+  run proposal_check
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 cohort refuses incomplete duplicated or out-of-cohort run identities" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local pristine="$TEST_ROOT/pristine-artifacts.json"
+  cp "$RECEIPT" "$pristine"
+  local mutation
+  for mutation in \
+    'doc["evaluation"]["artifacts"].pop()' \
+    'doc["evaluation"]["artifacts"][1] = dict(doc["evaluation"]["artifacts"][0])' \
+    'doc["evaluation"]["artifacts"].append(dict(doc["evaluation"]["artifacts"][0]))' \
+    'doc["evaluation"]["artifacts"][1]["eval_id"] = 2' \
+    'doc["evaluation"]["artifacts"][1]["run_number"] = 2' \
+    'doc["evaluation"]["artifacts"][1]["configuration"] = "with_skill"'; do
+    cp "$pristine" "$RECEIPT"
+    receipt_edit "$mutation"
+    run proposal_check
+    [ "$status" -ne 0 ] || { echo "artifact mutation was accepted: $mutation"; false; }
+  done
+  cp "$pristine" "$RECEIPT"
+  run proposal_check
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 cohort refuses changed task candidate native grader or provenance bytes" {
+  local case_name run_dir
+  for case_name in task-snapshot candidate-snapshot live-candidate native-output grader-output run-receipt provenance; do
+    PROJECT="$TEST_ROOT/bytes-$case_name"
+    cp -R "$PROJECT_FIXTURE" "$PROJECT"
+    prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+    run_dir="$PROJECT/benchmarks/2026-08-29T115500Z"
+    run proposal_check
+    [ "$status" -eq 0 ]
+    case "$case_name" in
+      task-snapshot) printf '%s\n' 'substituted task' >> "$run_dir/tasks/1/task.md" ;;
+      candidate-snapshot) printf '%s\n' 'substituted treatment' >> "$run_dir/candidate/SKILL.md" ;;
+      live-candidate) printf '%s\n' 'post-run candidate edit' >> "$PROJECT/core-rules/skills/one-skill/SKILL.md" ;;
+      native-output) printf '%s\n' 'rewritten transcript' >> "$run_dir/runs/1-with_skill-1.out" ;;
+      grader-output) printf '%s\n' 'rewritten grading evidence' >> "$run_dir/runs/1-with_skill-1.grade.txt" ;;
+      run-receipt) printf '%s\n' ' ' >> "$run_dir/runs/1-with_skill-1.json" ;;
+      provenance) printf '%s\n' 'rewritten pattern snapshot' >> "$run_dir/provenance/valid.md" ;;
+    esac
+    run proposal_check
+    [ "$status" -eq 1 ] || { echo "$case_name gave status $status: $output"; false; }
+    assert_json "j['status'] == 'NOT-READY'"
+  done
+}
+
+@test "T8 cohort refuses a per-run score mismatch behind an agreeing aggregate" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  python3 "$EVIDENCE_TOOL" two-rep "$BENCHMARK"
+  build_evaluation
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['score'] == '0.90'"
+
+  python3 - "$PROJECT" "$RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+project, receipt_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+receipt = json.loads(receipt_path.read_text())
+paths = [
+    project / artifact["path"]
+    for artifact in receipt["evaluation"]["artifacts"]
+    if artifact["configuration"] == "with_skill"
+]
+assert len(paths) == 2, paths
+first, second = (json.loads(path.read_text()) for path in paths)
+assert first["grade"]["pass_rate"] != second["grade"]["pass_rate"]
+first["grade"]["pass_rate"], second["grade"]["pass_rate"] = (
+    second["grade"]["pass_rate"],
+    first["grade"]["pass_rate"],
+)
+for path, document in zip(paths, (first, second)):
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+PY
+  rehash_artifacts
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "'pass_rate' in j['error']"
+}
+
+@test "T8 cohort refuses unavailable failed or mislabelled native runs" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local case_name
+  for case_name in unavailable failed nonzero-exit missing-treatment leaked-treatment foreign-executor; do
+    build_evaluation
+    case "$case_name" in
+      unavailable) run_receipt_edit with_skill 'doc["status"] = "unavailable"' ;;
+      failed) run_receipt_edit with_skill 'doc["status"] = "failed"' ;;
+      nonzero-exit) run_receipt_edit with_skill 'doc["exit_code"] = 1' ;;
+      missing-treatment) run_receipt_edit with_skill 'doc["treatment_sha256"] = None' ;;
+      leaked-treatment) run_receipt_edit without_skill 'doc["treatment_sha256"] = "a" * 64' ;;
+      foreign-executor) run_receipt_edit with_skill 'doc["observed_executor"]["harness"] = "codex"' ;;
+    esac
+    run proposal_check
+    [ "$status" -eq 1 ] || { echo "$case_name gave status $status: $output"; false; }
+    assert_json "j['status'] == 'NOT-READY'"
+  done
+  build_evaluation
+  run proposal_check
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 cohort refuses unsafe evidence paths and symlinked run evidence" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local pristine="$TEST_ROOT/pristine-paths.json"
+  cp "$RECEIPT" "$pristine"
+  local mutation
+  for mutation in \
+    'doc["evaluation"]["candidate_snapshot"] = "/etc"' \
+    'doc["evaluation"]["candidate_snapshot"] = "../outside"' \
+    'doc["evaluation"]["candidate_snapshot"] = "wiki"' \
+    'doc["evaluation"]["artifacts"][0]["path"] = "wiki/index.md"' \
+    'doc["evaluation"]["run_dir"] = "../outside"'; do
+    cp "$pristine" "$RECEIPT"
+    receipt_edit "$mutation"
+    run proposal_check
+    [ "$status" -eq 2 ] || { echo "path mutation gave status $status: $mutation"; false; }
+  done
+
+  cp "$pristine" "$RECEIPT"
+  local run_dir="$PROJECT/benchmarks/2026-08-29T115500Z"
+  local outside="$TEST_ROOT/outside-evidence"
+  local outside_before
+  mkdir -p "$outside"
+  printf '%s\n' 'outside sentinel' > "$outside/sentinel"
+  outside_before="$(tree_digest "$outside")"
+  local link_case
+  for link_case in snapshot output; do
+    rm -rf "$run_dir/candidate"
+    build_evaluation
+    case "$link_case" in
+      snapshot)
+        rm -rf "$run_dir/candidate"
+        ln -s "$outside" "$run_dir/candidate"
+        ;;
+      output)
+        rm -f "$run_dir/runs/1-with_skill-1.out"
+        ln -s "$outside/sentinel" "$run_dir/runs/1-with_skill-1.out"
+        ;;
+    esac
+    run proposal_check
+    [ "$status" -eq 2 ] || { echo "$link_case symlink gave status $status: $output"; false; }
+    [ "$(tree_digest "$outside")" = "$outside_before" ]
+  done
+}
+
+@test "T8 evidence paths permit unique per-run paths with identical raw and grading bytes" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  python3 - "$PROJECT" "$RECEIPT" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+project, receipt_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+receipt = json.loads(receipt_path.read_text())
+paths = set()
+for artifact in receipt["evaluation"]["artifacts"]:
+    path = project / artifact["path"]
+    run = json.loads(path.read_text())
+    for ref in (run["output"], run["grade"]["output"]):
+        assert ref["path"] not in paths
+        paths.add(ref["path"])
+        (project / ref["path"]).write_bytes(b"identical evidence bytes\n")
+        ref["sha256"] = hashlib.sha256(b"identical evidence bytes\n").hexdigest()
+    path.write_text(json.dumps(run, indent=2) + "\n")
+assert len(paths) == 2 * len(receipt["evaluation"]["artifacts"])
+PY
+  rehash_artifacts
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['status'] == 'EVAL-PASSED'"
+}
+
+@test "T8 evidence paths reject raw and grader reuse across roles and runs" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local variant
+  for variant in raw-grade cross-run-raw cross-run-grade benchmark provenance artifact candidate task run-dir; do
+    build_evaluation
+    python3 - "$PROJECT" "$RECEIPT" "$variant" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+project, receipt_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+variant = sys.argv[3]
+receipt = json.loads(receipt_path.read_text())
+evaluation = receipt["evaluation"]
+artifacts = evaluation["artifacts"]
+first_path, second_path = (project / artifact["path"] for artifact in artifacts[:2])
+first, second = (json.loads(path.read_text()) for path in (first_path, second_path))
+if variant == "raw-grade":
+    first["grade"]["output"] = dict(first["output"])
+elif variant == "cross-run-raw":
+    second["output"] = dict(first["output"])
+elif variant == "cross-run-grade":
+    second["grade"]["output"] = dict(first["grade"]["output"])
+else:
+    target = {
+        "benchmark": evaluation["benchmark"]["path"],
+        "provenance": evaluation["provenance"][0]["path"],
+        "artifact": artifacts[1]["path"],
+        "candidate": evaluation["candidate_snapshot"],
+        "task": evaluation["task_snapshots"][0]["path"],
+        "run-dir": evaluation["run_dir"],
+    }[variant]
+    first["output"] = {
+        "path": target,
+        "sha256": hashlib.sha256((project / target).read_bytes()).hexdigest()
+        if (project / target).is_file() else "0" * 64,
+    }
+# Keep the referenced second artifact's bytes stable for the artifact-role case.
+first_path.write_text(json.dumps(first, indent=2) + "\n")
+if variant.startswith("cross-run-"):
+    second_path.write_text(json.dumps(second, indent=2) + "\n")
+PY
+    rehash_artifacts
+    run proposal_check
+    [ "$status" -eq 2 ] || { echo "$variant gave status $status: $output"; false; }
+    assert_json "j['status'] == 'MALFORMED' and 'duplicate' in j['error']"
+  done
+}
+
+@test "T8 evidence paths reject snapshots equal to run_dir before digest validation" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  local variant
+  for variant in candidate task; do
+    build_evaluation
+    case "$variant" in
+      candidate) receipt_edit 'doc["evaluation"]["candidate_snapshot"] = doc["evaluation"]["run_dir"]' ;;
+      task) receipt_edit 'doc["evaluation"]["task_snapshots"][0]["path"] = doc["evaluation"]["run_dir"]' ;;
+    esac
+    run proposal_check
+    [ "$status" -eq 2 ] || { echo "$variant gave status $status: $output"; false; }
+    assert_json "j['status'] == 'MALFORMED' and 'duplicate' in j['error']"
+  done
+}
+
+@test "T8 comparator covers every accepted version and refuses uncovered or legacy history" {
+  local same="4$(printf '%039d' 0)"
+  local other="5$(printf '%039d' 0)"
+  local legacy="6$(printf '%039d' 0)"
+
+  PROJECT="$TEST_ROOT/cover-same"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_history_receipt "$PROJECT" "$same" 0.80 0.60 accepted
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/cover-same.json" best_before 0.80
+  RECEIPT="$TEST_ROOT/cover-same.json"
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['best_before'] == '0.80'"
+
+  PROJECT="$TEST_ROOT/cover-mixed"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_history_receipt "$PROJECT" "$same" 0.80 0.60 accepted
+  append_history_receipt "$PROJECT" "$other" 0.95 0.60 accepted seeded-run-42
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/cover-mixed.json" best_before 0.80
+  RECEIPT="$TEST_ROOT/cover-mixed.json"
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "'different cohort' in j['error'] and '$other' in j['error']"
+
+  add_incumbent "$other" 0.85
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/cover-mixed-covered.json" best_before 0.85
+  RECEIPT="$TEST_ROOT/cover-mixed-covered.json"
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['best_before'] == '0.85'"
+
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/cover-mixed-old.json" best_before 0.95
+  RECEIPT="$TEST_ROOT/cover-mixed-old.json"
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "j['status'] == 'NOT-READY'"
+
+  RECEIPT="$TEST_ROOT/cover-mixed-covered.json"
+  receipt_edit 'doc["evaluation"]["incumbents"][0]["proposal_sha"] = "d" * 40'
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "'does not refer to an accepted proposal' in j['error']"
+
+  PROJECT="$TEST_ROOT/cover-legacy"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_legacy_history_receipt "$PROJECT" "$legacy" 0.70 0.60 accepted
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/cover-legacy.json" best_before 0.70
+  RECEIPT="$TEST_ROOT/cover-legacy.json"
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "'legacy version 1' in j['error'] and '$legacy' in j['error']"
+}
+
+@test "T8 comparator binds accepted sidecar bytes and reuses shared candidate evidence" {
+  local first="7$(printf '%039d' 0)"
+  local second="8$(printf '%039d' 0)"
+
+  PROJECT="$TEST_ROOT/incumbent-binding"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_history_receipt "$PROJECT" "$first" 0.80 0.60 accepted seeded-run-42
+  add_incumbent "$first" 0.85
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/incumbent-bound.json" best_before 0.85
+  RECEIPT="$TEST_ROOT/incumbent-bound.json"
+  run proposal_check
+  [ "$status" -eq 0 ]
+
+  local bound="$TEST_ROOT/incumbent-bound.json"
+  cp "$bound" "$TEST_ROOT/incumbent-broken.json"
+  RECEIPT="$TEST_ROOT/incumbent-broken.json"
+  receipt_edit 'doc["evaluation"]["incumbents"][0]["accepted_receipt_sha256"] = "c" * 64'
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "'accepted sidecar bytes' in j['error']"
+
+  RECEIPT="$bound"
+  append_history_receipt "$PROJECT" "$second" 0.80 0.60 accepted seeded-run-42
+  add_incumbent "$second" 0.85
+  cp "$RECEIPT" "$TEST_ROOT/incumbent-swapped.json"
+  RECEIPT="$TEST_ROOT/incumbent-swapped.json"
+  receipt_edit 'doc["evaluation"]["incumbents"][0]["proposal_sha"], doc["evaluation"]["incumbents"][1]["proposal_sha"] = doc["evaluation"]["incumbents"][1]["proposal_sha"], doc["evaluation"]["incumbents"][0]["proposal_sha"]'
+  run proposal_check
+  [ "$status" -eq 1 ]
+  assert_json "j['status'] == 'NOT-READY'"
+
+  PROJECT="$TEST_ROOT/incumbent-shared"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_history_receipt "$PROJECT" "$first" 0.80 0.60 accepted seeded-run-42 shared-bytes
+  append_history_receipt "$PROJECT" "$second" 0.75 0.60 accepted seeded-run-42 shared-bytes
+  add_incumbent "$first" 0.85 shared-reeval
+  add_incumbent "$second" 0.85 shared-reeval
+  set_receipt_fields "$RECEIPT" "$TEST_ROOT/incumbent-shared.json" best_before 0.85
+  RECEIPT="$TEST_ROOT/incumbent-shared.json"
+  run proposal_check
+  [ "$status" -eq 0 ]
+  assert_json "j['best_before'] == '0.85'"
+  run python3 - "$RECEIPT" <<'PY'
+import json
+import pathlib
+import sys
+
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+incumbents = receipt["evaluation"]["incumbents"]
+assert len(incumbents) == 2, incumbents
+assert incumbents[0]["proposal_sha"] != incumbents[1]["proposal_sha"]
+assert incumbents[0]["accepted_receipt_sha256"] != incumbents[1]["accepted_receipt_sha256"]
+assert incumbents[0]["evaluation"]["run_dir"] == incumbents[1]["evaluation"]["run_dir"]
+assert incumbents[0]["evaluation"] == incumbents[1]["evaluation"]
+assert "incumbents" not in incumbents[0]["evaluation"]
+PY
+  [ "$status" -eq 0 ]
+}
+
+@test "T8 finalization preserves the whole evaluation and refuses legacy acceptance" {
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  run proposal_record not-opened
+  [ "$status" -eq 0 ]
+  local sidecar="$PROJECT/wiki/skill-impact/one-skill/2026-08-29-222222222222.json"
+  local accepted="$TEST_ROOT/finalize-accepted.json"
+  set_receipt_fields "$RECEIPT" "$accepted" verdict accepted
+  local before_evaluation
+  before_evaluation="$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1]))["evaluation"],sort_keys=True).encode()).hexdigest())' "$sidecar")"
+  RECEIPT="$accepted"
+  run proposal_record https://github.com/example/project/pull/456
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1]))["evaluation"],sort_keys=True).encode()).hexdigest())' "$sidecar")" = "$before_evaluation" ]
+  run python3 - "$sidecar" <<'PY'
+import json
+import pathlib
+import sys
+
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert receipt["verdict"] == "accepted"
+assert receipt["schema_version"] == 2
+assert receipt["evaluation"]["cohort"]["seed"] == "unseeded"
+assert receipt["evaluation"]["artifacts"], receipt
+PY
+  [ "$status" -eq 0 ]
+
+  local legacy="9$(printf '%039d' 0)"
+  PROJECT="$TEST_ROOT/legacy-finalization"
+  cp -R "$PROJECT_FIXTURE" "$PROJECT"
+  prepare_proposal "$PROJECT" "$EVAL_FIXTURES/receipt-pass.json" empty
+  append_legacy_history_receipt "$PROJECT" "$legacy" 0.90 0.60 eval-passed
+  RECEIPT="$TEST_ROOT/legacy-accepted.json"
+  python3 "$EVIDENCE_TOOL" legacy-receipt "$RECEIPT" "$legacy" 0.90 0.60 accepted
+  write_proposal_diff
+  run proposal_record https://github.com/example/project/pull/456
+  [ "$status" -eq 1 ]
+  assert_json "'legacy version 1' in j['error']"
+
+  RECEIPT="$TEST_ROOT/legacy-rejected.json"
+  python3 "$EVIDENCE_TOOL" legacy-receipt "$RECEIPT" "$legacy" 0.90 0.60 rejected
+  write_proposal_diff
+  run proposal_record https://github.com/example/project/pull/456
+  [ "$status" -eq 0 ]
+  assert_json "j['verdict'] == 'rejected'"
+  run python3 - "$PROJECT" "$legacy" <<'PY'
+import json
+import pathlib
+import sys
+
+root, sha = pathlib.Path(sys.argv[1]), sys.argv[2]
+sidecar = json.loads((root / "wiki" / "skill-impact" / "one-skill" / ("2026-08-28-" + sha[:12] + ".json")).read_text())
+assert "schema_version" not in sidecar, "legacy rejection must stay version 1"
+assert sidecar["verdict"] == "rejected"
 PY
   [ "$status" -eq 0 ]
 }

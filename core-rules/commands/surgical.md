@@ -1,6 +1,6 @@
 ---
 description: Declare the current branch's change size-capped and spec-exempt, so the mandatory-pipeline gate lets the push through. --emergency for urgent over-cap work.
-argument-hint: "<why this needs no spec>"  |  --emergency "<why>"
+argument-hint: '"<why this needs no spec>"  |  --emergency "<why>"'
 ---
 
 # Surgical: $ARGUMENTS

@@ -1,6 +1,6 @@
 ---
 name: wiki-maintain
-description: Explicit, project-local maintenance for the evidence-backed wiki pattern catalog. Use only when the operator explicitly asks to qualify a gotcha or create, merge and retire, explicitly retire, or stale-mark a wiki pattern. Patch-edits only wiki/index.md and wiki/patterns/*.md, proves the change with the read-only validator, and never creates or edits skills, gotchas, impact records, hooks, release payloads, or user-global paths.
+description: Explicit, project-local maintenance for the evidence-backed wiki pattern catalog. Use only when the operator explicitly asks to qualify a gotcha or create, refine, reactivate, merge and retire, explicitly retire, or stale-mark a wiki pattern. Patch-edits only wiki/index.md and wiki/patterns/*.md, proves the change with the read-only validator, and never creates or edits skills, gotchas, impact records, hooks, release payloads, or user-global paths.
 ---
 
 # wiki-maintain
@@ -39,7 +39,7 @@ edit, delete, rename, retire, or promote:
 - hooks, session-context paths, templates, manifests, configuration, protected
   refs, immutable release payloads, user-global skill paths, or fleet state
 
-Do not run Git or GitHub mutation commands. Do not create a branch, commit, push,
+Do not invoke Git, GitHub, or network commands. Do not create a branch, commit, push,
 open or merge a PR, publish, synchronize, or land a candidate. Do not invoke
 `skill-creator` or the wiki-fed proposer. Human merge remains the only promotion
 transition.
@@ -71,13 +71,18 @@ warning.
 before this invocation. Establish it before the first edit through the invoking
 workflow. Never point both arguments at the same mutable tree, and never invent a
 passing before tree after editing. If no trustworthy before root is available,
-stop before writing: the required change-scope proof cannot be produced.
+stop before writing: the required change-scope proof cannot be produced. Preserve
+exact prior page bytes, including CRLF line endings, and compute SHA-256 from
+those bytes rather than newline-normalized text.
 
 ## Qualification
 
 Qualification is required before a create or a merge that incorporates a new
-gotcha. It is not required merely to mark broken evidence stale or to retire an
-already fully subsumed page.
+gotcha, and before a refinement or reactivation introduces new operational
+claims. A correction or reassessment must be supported by resolving evidence and
+independent review; restored links alone do not qualify new claims. Qualification
+is not required merely to mark broken evidence stale or to retire an already
+fully subsumed page.
 
 1. Read the source gotcha and its cited local history. Do not mine the wiki at
    session start or scan unrelated records.
@@ -132,10 +137,27 @@ result, and verification. Evidence contains:
 Write only claims supported by those records. Do not invent prose to fill a
 required section. Pattern text must contain no secret values.
 
+An optional single `## Provenance` section follows all five mandatory sections
+and is last. Every nonblank line has one of these exact forms:
+
+```text
+- YYYY-MM-DD refine prior=sha256:<64 lowercase hex> — <nonempty reason>
+- YYYY-MM-DD reactivate prior=sha256:<64 lowercase hex> — <nonempty reason>
+```
+
+Use real calendar dates in nondecreasing order. Retain all existing records in
+order, byte-for-byte, including their line endings; merges must preserve the
+survivor's history too. Refinement and reactivation append exactly one record,
+whose action matches the transition and whose prior digest binds the actual
+before-page bytes. Explain the evidence-backed correction or reassessment in
+the reason; links may be included. Existing pages without provenance remain
+valid. Syntax and hashes establish provenance, not incident authenticity or the
+truth of prose; qualification and independent review remain necessary.
+
 ## Choose exactly one transition
 
 Inspect `wiki/index.md` and only the linked relevant pages, then select one of the
-four transitions accepted by `check-change`. If none fits, make no edit.
+six transitions accepted by `check-change`. If none fits, make no edit.
 
 ### Create
 
@@ -143,6 +165,28 @@ Create one new `active` pattern page and its matching index row. First rule out
 an overlapping active page: update and consolidate rather than creating a
 second authority. Do not create a production page from synthetic or
 nonqualifying evidence.
+
+### Refine
+
+Refine exactly one existing active page, keeping it active, and actually update
+only its own index row with a nondecreasing date. The changed paths must be
+exactly that page and `wiki/index.md`; preserve unrelated rows byte-for-byte.
+Both before and after must be structurally and semantically clean. Make a
+substantive prose or evidence change outside Provenance and append one `refine`
+record. Frontmatter, headings, whitespace, provenance-only and index timestamp
+changes do not establish a refinement. This check is not a semantic truth
+detector: meaningful claims still require evidence and review.
+
+### Reactivate
+
+Reactivate exactly one stale page to active and update only its own index row
+with a nondecreasing date, preserving its source cell. Never reactivate a retired
+page. The same exact two-path boundary applies. Append one `reactivate` record
+with an explicit evidence-backed reason. After must be fully clean; before may
+have only the selected page's `stale-resolved` error, when a separately
+authorized earlier operation already restored its source. A repaired evidence
+link and status/provenance change may suffice; refinement's substantive-content
+requirement does not apply. Never repair gotchas or history within this diff.
 
 ### Merge with superseded retirement
 
@@ -194,15 +238,18 @@ After patching:
    families if it reports a schema, link, status, duplicate-slug, or secret
    failure.
 2. Run read-only `check-change --before "$BEFORE_ROOT" --after "$PROJECT_ROOT"`.
-   It must identify the intended create, merge-with-retirement, explicit
-   superseded-retirement, or stale transition and report no changed path outside
+   It must identify the intended create, refine, reactivate,
+   merge-with-retirement, explicit superseded-retirement, or stale transition
+   and report no changed path outside
    `wiki/index.md` and `wiki/patterns/*.md`.
 3. If either command remains nonzero, restore only this run's allowed-path edits
    and report that maintenance did not complete. Never fix a failure by touching
    a forbidden path or weakening the evidence.
 4. Report the transition, qualification predicate or `not applicable`, exact
    changed paths, both validator exits and JSON verdicts, and any residual broken
-   evidence. State explicitly that no skill was authored or promoted.
+   evidence. For refine/reactivate, include the report's provenance slug and
+   actual before/after SHA-256 digests. State explicitly that no skill was
+   authored or promoted.
 
 Do not write this report to the repository. `wiki/logs.md` is forbidden; existing
 decision history and pull-request review remain the history surfaces.

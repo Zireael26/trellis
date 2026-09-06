@@ -39,7 +39,9 @@
 
 set -uo pipefail
 
-ROOT="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+RUN_TESTS_DIR="${BASH_SOURCE[0]%/*}"
+[ "$RUN_TESTS_DIR" != "${BASH_SOURCE[0]}" ] || RUN_TESTS_DIR=.
+ROOT="$(CDPATH='' cd "$RUN_TESTS_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
 # shellcheck source=scripts/lib/test-suites.sh
@@ -88,13 +90,78 @@ fi
 # Clearing fixes the normal fixture path; the wrapper is the fail-loud backstop
 # for a bad cd, empty path, upward discovery, or a test that reintroduces GIT_DIR.
 install_test_git_fence() {
-  local temp_parent fence_root fence_name real_git real_mktemp
+  local temp_parent fence_root fence_name launcher_dir real_git real_mktemp real_python
+  local static_git="$ROOT/scripts/tests/helpers/git-fence/git"
+  local static_mktemp="$ROOT/scripts/tests/helpers/git-fence/mktemp"
+
+  # Recognize generated launchers only to reject them as delegates. Their body
+  # is never parsed as authority: Git and mktemp pins retain the existing
+  # inherited-delegate behavior; Python is resolved only through caller PATH.
+  is_generated_test_fence_launcher() {
+    local candidate="$1" line count=0
+    [ -f "$candidate" ] && [ -r "$candidate" ] || return 1
+    while [ "$count" -lt 4 ] && IFS= read -r line; do
+      [ "$line" = "# trellis-test-fence-launcher-v1" ] && return 0
+      count=$((count + 1))
+    done < "$candidate"
+    return 1
+  }
+
+  # Resolve every executable while PATH still names the caller's toolchain.
+  # In particular, never allocate the new root through an inherited wrapper.
+  real_git="${TRELLIS_TEST_REAL_GIT:-}"
+  [ -n "$real_git" ] || real_git="$(command -v git 2>/dev/null || printf '')"
+  case "$real_git" in /*) ;; *) real_git="" ;; esac
+  if [ -z "$real_git" ] || [ ! -x "$real_git" ] ||
+     [ "$real_git" = "$static_git" ] || is_generated_test_fence_launcher "$real_git"; then
+    printf 'run-tests: could not resolve the real Git executable\n' >&2
+    return 1
+  fi
+
+  real_mktemp="${TRELLIS_TEST_REAL_MKTEMP:-}"
+  [ -n "$real_mktemp" ] || real_mktemp="$(command -v mktemp 2>/dev/null || printf '')"
+  case "$real_mktemp" in /*) ;; *) real_mktemp="" ;; esac
+  if [ -z "$real_mktemp" ] || [ ! -x "$real_mktemp" ] ||
+     [ "$real_mktemp" = "$static_mktemp" ] || is_generated_test_fence_launcher "$real_mktemp"; then
+    printf 'run-tests: could not resolve the real mktemp executable\n' >&2
+    return 1
+  fi
+
+  # An inbound Python pin must never execute during installer admission.
+  real_python="$(command -v python3 2>/dev/null || printf '')"
+  case "$real_python" in /*) ;; *) real_python="" ;; esac
+  if [ -z "$real_python" ] || [ ! -x "$real_python" ]; then
+    printf 'run-tests: could not resolve the Python executable\n' >&2
+    return 1
+  fi
+
+  # Canonical paths make aliases of either checked-in helper ineligible as a
+  # delegate and freeze symlink targets before launchers are written.
+  real_python="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python")" || return 1
+  real_git="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_git")" || return 1
+  real_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_mktemp")" || return 1
+  static_git="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_git")" || return 1
+  static_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_mktemp")" || return 1
+  if [ ! -x "$real_python" ]; then
+    printf 'run-tests: could not resolve the Python executable\n' >&2
+    return 1
+  fi
+  if [ ! -x "$real_git" ] || [ "$real_git" = "$static_git" ] ||
+     is_generated_test_fence_launcher "$real_git"; then
+    printf 'run-tests: could not resolve the real Git executable\n' >&2
+    return 1
+  fi
+  if [ ! -x "$real_mktemp" ] || [ "$real_mktemp" = "$static_mktemp" ] ||
+     is_generated_test_fence_launcher "$real_mktemp"; then
+    printf 'run-tests: could not resolve the real mktemp executable\n' >&2
+    return 1
+  fi
 
   temp_parent="$(CDPATH='' cd "${TMPDIR:-/tmp}" && pwd -P)" || {
     printf 'run-tests: could not resolve the temporary directory\n' >&2
     return 1
   }
-  fence_root="$(mktemp -d "$temp_parent/trellis-test-git.XXXXXX")" || {
+  fence_root="$("$real_mktemp" -d "$temp_parent/trellis-test-git.XXXXXX")" || {
     printf 'run-tests: could not create the Git mutation fence root\n' >&2
     return 1
   }
@@ -105,28 +172,7 @@ install_test_git_fence() {
     *) printf 'run-tests: unsafe Git fence root name: %s\n' "$fence_root" >&2; return 1 ;;
   esac
 
-  # A nested runner inherits the already-resolved real binary even though its
-  # PATH begins with this wrapper. A top-level runner resolves Git before
-  # changing PATH. Never accept the wrapper itself as the delegate.
-  real_git="${TRELLIS_TEST_REAL_GIT:-}"
-  if [ -z "$real_git" ]; then
-    real_git="$(command -v git 2>/dev/null || printf '')"
-  fi
-  if [ -z "$real_git" ] || [ ! -x "$real_git" ] ||
-     [ "$real_git" = "$ROOT/scripts/tests/helpers/git-fence/git" ]; then
-    printf 'run-tests: could not resolve the real Git executable\n' >&2
-    return 1
-  fi
-  real_mktemp="${TRELLIS_TEST_REAL_MKTEMP:-}"
-  if [ -z "$real_mktemp" ]; then
-    real_mktemp="$(command -v mktemp 2>/dev/null || printf '')"
-  fi
-  if [ -z "$real_mktemp" ] || [ ! -x "$real_mktemp" ] ||
-     [ "$real_mktemp" = "$ROOT/scripts/tests/helpers/git-fence/mktemp" ]; then
-    printf 'run-tests: could not resolve the real mktemp executable\n' >&2
-    return 1
-  fi
-
+  chmod 700 "$fence_root"
   cat > "$fence_root/global.gitconfig" <<'EOF'
 [user]
   name = Trellis Test Fixture
@@ -136,13 +182,41 @@ install_test_git_fence() {
 [tag]
   gpgSign = false
 EOF
-  chmod 700 "$fence_root"
   chmod 600 "$fence_root/global.gitconfig"
+
+  launcher_dir="$fence_root/bin"
+  mkdir "$launcher_dir" || return 1
+  chmod 700 "$launcher_dir"
+  {
+    printf '#!/bin/bash\n# trellis-test-fence-launcher-v1\n'
+    printf 'TRELLIS_TEST_GIT_FENCE_ROOT=%q\n' "$fence_root"
+    printf 'TRELLIS_TEST_REAL_GIT=%q\n' "$real_git"
+    printf 'TRELLIS_TEST_REAL_MKTEMP=%q\n' "$real_mktemp"
+    printf 'TRELLIS_TEST_REAL_PYTHON=%q\n' "$real_python"
+    printf 'export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP TRELLIS_TEST_REAL_PYTHON\n'
+    printf 'exec /bin/bash %q "$@"\n' "$static_git"
+  } > "$launcher_dir/git"
+  {
+    printf '#!/bin/bash\n# trellis-test-fence-launcher-v1\n'
+    printf 'TRELLIS_TEST_GIT_FENCE_ROOT=%q\n' "$fence_root"
+    printf 'TRELLIS_TEST_REAL_GIT=%q\n' "$real_git"
+    printf 'TRELLIS_TEST_REAL_MKTEMP=%q\n' "$real_mktemp"
+    printf 'TRELLIS_TEST_REAL_PYTHON=%q\n' "$real_python"
+    printf 'export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP TRELLIS_TEST_REAL_PYTHON\n'
+    printf 'exec /bin/bash %q "$@"\n' "$static_mktemp"
+  } > "$launcher_dir/mktemp"
+  chmod 700 "$launcher_dir/git" "$launcher_dir/mktemp"
+  if [ ! -f "$launcher_dir/git" ] || [ -L "$launcher_dir/git" ] || [ ! -x "$launcher_dir/git" ] ||
+     [ ! -f "$launcher_dir/mktemp" ] || [ -L "$launcher_dir/mktemp" ] || [ ! -x "$launcher_dir/mktemp" ]; then
+    printf 'run-tests: could not create private Git fence launchers\n' >&2
+    return 1
+  fi
 
   TRELLIS_TEST_GIT_FENCE_PARENT="$temp_parent"
   TRELLIS_TEST_GIT_FENCE_ROOT="$fence_root"
   TRELLIS_TEST_REAL_GIT="$real_git"
   TRELLIS_TEST_REAL_MKTEMP="$real_mktemp"
+  TRELLIS_TEST_REAL_PYTHON="$real_python"
   # Bats derives BATS_RUN_TMPDIR, BATS_SUITE_TMPDIR, and BATS_TEST_TMPDIR
   # from TMPDIR. Point it at this shard's distinct fence root so every Bats
   # fixture is inside the security boundary by construction.
@@ -150,8 +224,9 @@ EOF
   GIT_CONFIG_GLOBAL="$fence_root/global.gitconfig"
   GIT_CONFIG_NOSYSTEM=1
   GIT_OPTIONAL_LOCKS=0
-  PATH="$ROOT/scripts/tests/helpers/git-fence:$PATH"
-  export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP TMPDIR
+  PATH="$launcher_dir:$PATH"
+  export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP
+  export TRELLIS_TEST_REAL_PYTHON TMPDIR
   export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_OPTIONAL_LOCKS PATH
 
   # The argument to rm is deliberately a validated basename, never an absolute
@@ -186,6 +261,16 @@ if [ "$LIST" -eq 0 ] && [ "$PLAN" -eq 0 ]; then
     [ -n "$git_config_var" ] && unset "$git_config_var"
   done < <(compgen -A variable GIT_CONFIG_VALUE_ || true)
   install_test_git_fence || exit 1
+
+  # These suites require caller-owned evidence roots outside the source tree.
+  # Bind defaults inside this shard's fresh Git fence, after installation so
+  # --list and --plan stay side-effect-free. Explicit diagnostic bindings win.
+  TRELLIS_CONFORMANCE_TEST_ROOT="${TRELLIS_CONFORMANCE_TEST_ROOT:-$TMPDIR/harness-conformance-evidence}"
+  TRELLIS_T9_TEST_ROOT="${TRELLIS_T9_TEST_ROOT:-$TMPDIR/skill-eval-pi-evidence}"
+  # The packer tests use an unmodified, licensed upstream fixture by default;
+  # a diagnostic may still exercise an explicitly selected installed version.
+  AGGREGATE_SCRIPT="${AGGREGATE_SCRIPT:-$ROOT/scripts/tests/fixtures/skill-eval-v2/aggregate_benchmark.py}"
+  export TRELLIS_CONFORMANCE_TEST_ROOT TRELLIS_T9_TEST_ROOT AGGREGATE_SCRIPT
 
   # A direct run must never rewrite the checked-in stage weights table at
   # scripts/tests/stage-weights.tsv. Callers that need a durable receipt can
@@ -404,6 +489,7 @@ if [ "$QUICK" -eq 0 ]; then
   stage "hooks (claude + codex)" bats core-rules/hooks/tests/ core-rules/codex/hooks/tests/
   stage "skill gates" bats core-rules/skills/*/tests/
   stage "recipe routing lint" bash scripts/lint-recipe-routing.sh
+  stage "Herdr panel layout" python3 core-rules/skills/herdr-foreman/tests/test_panel_layout.py
 
   # One stage per suite: a failure names the suite that caused it, and the exit
   # code stays an honest count of failing suites.
@@ -411,7 +497,16 @@ if [ "$QUICK" -eq 0 ]; then
     [ -n "$suite" ] || continue
     # posix-bootstrap-prologue already ran above as part of the quick slice.
     [ "$suite" = "posix-bootstrap-prologue" ] && continue
-    stage "bats scripts/tests/$suite.bats" bats "scripts/tests/$suite.bats"
+    case "$suite" in
+      rollout-hooks|sync-hooks-settings|doctor|t6-phase-a-integration|detach-project|pi-attachment|release-store|setup-runbooks|attach-project|disk-janitor-apply)
+        # These suites allocate all mutable fixtures per test. Keep the outer
+        # four-shard bound; Bats uses two internal semaphore slots per file.
+        # Disabling cross-file parallelism avoids a GNU parallel dependency.
+        stage "bats scripts/tests/$suite.bats" bats --jobs 2 \
+          --no-parallelize-across-files "scripts/tests/$suite.bats"
+        ;;
+      *) stage "bats scripts/tests/$suite.bats" bats "scripts/tests/$suite.bats" ;;
+    esac
   done < <(test_suites_for "$SCOPE")
 fi
 

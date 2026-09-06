@@ -19,7 +19,7 @@ Collect these paths and values before starting. All paths consumed by `validate_
 | candidate | The one existing candidate directory, beneath the configured tracked project-local skill root. |
 | patterns | Comma-separated selected pattern slugs. |
 | benchmark | A real standard `skill-creator` aggregate `benchmark.json`, never a self-report or Phase 1–4 fixture presented as a real run. |
-| receipt | Machine receipt JSON for this candidate and benchmark. |
+| receipt | Machine receipt JSON for this candidate and benchmark. A new evaluated proposal requires the `schema_version: 2` form carrying the `evaluation` cohort evidence object. |
 | process-gate receipt | Text receipt proving exit `0` and `Overall: MERGEABLE` for the proposal range. The process that supplies it, not this skill or the validator, runs the gate. |
 | proposal diff | JSON file containing the PR-wide set of repository-relative changed paths. The validator uses the complete set to enforce one-skill atomicity. |
 | qualification | JSON qualification decision for the selected evidence. It must prove a qualifying recurrence or complete repeatable path. |
@@ -90,11 +90,12 @@ The returned proposal must be atomic across the whole PR:
 
 The complete repository-relative changed-path set goes in `--proposal-diff`. A candidate-directory-only listing is insufficient because atomicity is PR-wide.
 
-Accept only the standard aggregated `benchmark.json` produced by the real `skill-creator` benchmark flow. The candidate score is `run_summary.with_skill.pass_rate.mean`. The comparison is exact decimal arithmetic:
+Accept only the standard aggregated `benchmark.json` produced by the real `skill-creator` benchmark flow. The candidate score is `run_summary.with_skill.pass_rate.mean`. The comparison is exact decimal arithmetic over **every** accepted version of the skill, not merely the most convenient one:
 
-1. If accepted sidecars exist for the skill, `best_before` is their greatest recorded `score`; exclude `eval-passed`, `rejected`, and `failed` sidecars.
-2. Otherwise, `best_before` is the same benchmark's `run_summary.without_skill.pass_rate.mean`.
-3. Require `score > best_before`; equality and regression fail.
+1. If no accepted sidecar exists for the skill, `best_before` is the same benchmark's `run_summary.without_skill.pass_rate.mean`.
+2. Otherwise every accepted row must be covered, and `best_before` is the maximum of the covered scores. An accepted v2 sidecar measured in the same cohort is covered by revalidating its own bound evidence; one measured in another cohort is covered only by a bound same-cohort re-evaluation in `evaluation.incumbents`, whose re-evaluated score is the one used.
+3. Any uncovered accepted row is NOT-READY. An accepted v1 sidecar is NOT-READY with a migration-required reason: it has no verifiable candidate-content binding, so it is historical data rather than a comparable incumbent. Never compare against the incomparable old number, and never fall back to the baseline to route around an uncovered row.
+4. Require `score > best_before`; equality and regression fail. Exclude `eval-passed`, `rejected`, and `failed` sidecars from the comparison entirely.
 
 ### 4. Require the exact machine sidecar
 
@@ -104,10 +105,11 @@ The sidecar path is:
 wiki/skill-impact/<skill>/<YYYY-MM-DD>-<short-sha>.json
 ```
 
-It has exactly these nine top-level fields and no others:
+A new evaluated proposal is version 2: the nine historical fields plus `schema_version: 2` and one `evaluation` object, and no others. `core-rules/evals/SCHEMA.md` is the canonical grammar for `evaluation` — its exact nested fields, the tree-digest and canonical-JSON encodings, the run-directory path rules, and the terminal raw run receipt. Read it before producing or reviewing evidence.
 
 ```json
 {
+  "schema_version": 2,
   "skill": "<skill>",
   "proposal_sha": "<proposal-sha>",
   "eval_cmd": "<exact-skill-creator-command>",
@@ -120,13 +122,24 @@ It has exactly these nine top-level fields and no others:
     "proposer": "<family>::<provider/model>",
     "evaluator": "<family>::<provider/model>",
     "judge": "<family>::<provider/model>"
-  }
+  },
+  "evaluation": { "...": "see core-rules/evals/SCHEMA.md" }
 }
 ```
 
+Existing unversioned nine-field receipts remain valid v1 history. Any other shape — a different `schema_version`, a missing key, an extra key — is malformed, not a legacy fallback. There is no new v1 promotion.
+
 `runner_model` contains exactly the three string keys shown. Every route uses canonical `<family>::<provider/model>` grammar. Compare the family prefix before `::`: evaluator and judge must each differ from proposer. Evaluator and judge may use the same family or the same full route as each other.
 
-The sidecar must match the candidate skill, proposal SHA, benchmark values, exact evaluation command, and ledger row. A new proposal has exactly one eight-column ledger row and one linked sidecar. Finalization moves that same row and sidecar only forward: `eval-passed` to `accepted` after human merge or to `rejected` after human rejection, and `not-opened` to an HTTPS PR URL. Never delete history, add a second row for the same proposal, move a terminal verdict backward, or use rejection to roll back wiki evidence.
+The sidecar must match the candidate skill, proposal SHA, benchmark values, exact evaluation command, and ledger row. A new proposal has exactly one eight-column ledger row and one linked sidecar. Finalization moves that same row and sidecar only forward: `eval-passed` to `accepted` after human merge or to `rejected` after human rejection, and `not-opened` to an HTTPS PR URL. Finalization preserves every field except `verdict`, including `schema_version` and the whole `evaluation` object. A legacy v1 row may still be finalized to `rejected` or have its PR advanced; it may never be newly `accepted`. Never delete history, add a second row for the same proposal, move a terminal verdict backward, or use rejection to roll back wiki evidence.
+
+### Three outcomes that are not each other
+
+Keep these separate in every report; conflating them is how an unmeasured proposal acquires a score.
+
+- **A historical score** is a number recorded by an earlier run. It stays in the ledger and stays true of that run. It is not automatically comparable to this one.
+- **NOT-READY** means the evidence needed for a comparison is absent, unbound, or incomparable — a missing artifact, a cohort mismatch with no bound re-evaluation, a legacy v1 incumbent, a run receipt reporting an unavailable, failed, or incomplete execution. Nothing was measured against the gate. Do not record a row, do not substitute zero, and do not fall back to the baseline.
+- **A `failed` evaluation** is a real measured outcome: the runs actually executed, and a genuine improvement, runner-family, or process gate failed. Only that may be recorded as `failed`. Missing execution evidence never becomes a failed row.
 
 ### 5. Validate the supplied artifacts
 
@@ -178,7 +191,7 @@ Emit this block only after `check` exits `0`. Fill every field; do not omit a fi
 - Purpose backlinks: <validated exact set>
 - Proposal diff: <JSON manifest path; PR-wide one-skill atomicity passed>
 - Benchmark: <benchmark path>
-- Score gate: <score> > <best_before> (<greatest accepted|same-run no-skill>)
+- Score gate: <score> > <best_before> (<max covered accepted|same-run no-skill>)
 - Runner models: proposer=<route>; evaluator=<route>; judge=<route>
 - Process gate: MERGEABLE (<receipt path>)
 - Ledger row: <exact row for the authorized record step>

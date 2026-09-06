@@ -40,6 +40,8 @@ setup_editheavy_repo() {
   (
     cd "$PROJECT_DIR" || exit 1
     git init -q
+    git config user.email "ci-bats@trellis.test"
+    git config user.name "Trellis CI"
     git commit --allow-empty -q -m init
     printf 'def alpha():\n    return 1\n' > alpha.py
     printf 'def beta():\n    return 2\n'  > beta.py
@@ -56,6 +58,8 @@ setup_below_threshold_repo() {
   (
     cd "$PROJECT_DIR" || exit 1
     git init -q
+    git config user.email "ci-bats@trellis.test"
+    git config user.name "Trellis CI"
     git commit --allow-empty -q -m init
     printf 'a=1\nb=2\nc=3\nd=4\ne=5\nf=6\ng=7\nh=8\ni=9\nj=10\n' > only.py
     git add -A
@@ -124,6 +128,23 @@ claude_call_count() {
   wc -c < "$f" | tr -d ' '
 }
 
+# Build a minimal command PATH that intentionally has no perl. The proposal
+# command remains discoverable through the optional first directory argument.
+make_no_perl_path() {
+  local extra="${1:-}" out command_name source_path
+  out="$(mktemp -d "$BATS_TMPDIR/propose-no-perl.XXXXXX")"
+  for command_name in awk bash cat date dirname env git grep jq mktemp mv python3 rm sed sort tail tr wc; do
+    if source_path="$(command -v "$command_name" 2>/dev/null)"; then
+      ln -s "$source_path" "$out/$command_name"
+    fi
+  done
+  if [ -n "$extra" ]; then
+    printf '%s:%s' "$extra" "$out"
+  else
+    printf '%s' "$out"
+  fi
+}
+
 
 # A linked worktree proves that L5 writes shared records at the canonical root,
 # rather than into the ephemeral worktree where the Stop hook happened to run.
@@ -139,7 +160,7 @@ setup_l5_worktree_repo() {
   printf 'fixture\n' > "$CANONICAL_ROOT/README.md"
   git -C "$CANONICAL_ROOT" add .
   git -C "$CANONICAL_ROOT" commit -qm init
-  git -C "$CANONICAL_ROOT" worktree add -qb propose-l5 "$WORKTREE"
+  git -C "$CANONICAL_ROOT" worktree add -q -b propose-l5 "$WORKTREE"
   (
     cd "$WORKTREE" || exit 1
     printf 'def alpha():\n    return 1\n' > alpha.py
@@ -244,7 +265,8 @@ install_fail_decision_and_restore_mv() {
 }
 # Run the hook with a Stop payload on stdin (default '{}' — not stop_hook_active).
 run_hook() {
-  local payload="${1:-\{\}}"
+  local payload='{}'
+  if [ "$#" -gt 0 ]; then payload="$1"; fi
   run_with_stderr "$HOOK" "$payload"
 }
 
@@ -295,6 +317,25 @@ run_hook() {
   [ "$(cat "$ENVF")" = "1" ]
 }
 
+@test "timeout: missing Perl skips the canonical proposal with one visible degradation" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  COUNT="$BATS_TEST_TMPDIR/proposal-no-perl.count"; : > "$COUNT"
+  FAKE_PATH="$(install_fake_claude "$COUNT")"
+  FAKE_BIN="${FAKE_PATH%%:*}"
+  NO_PERL_PATH="$(make_no_perl_path "$FAKE_BIN")"
+  PATH_BACKUP="$PATH"
+  export PATH="$NO_PERL_PATH"
+  run_hook
+  export PATH="$PATH_BACKUP"
+
+  [ "$status" -eq 0 ]
+  [ "$(claude_call_count "$COUNT")" -eq 0 ]
+  [[ "$stderr" == *"propose-rules"*"Perl"* ]]
+  [ "$(printf '%s' "$stderr" | grep -Fc 'Perl')" -eq 1 ]
+  rm -rf "$FAKE_BIN" "${NO_PERL_PATH#*:}"
+}
+
 # =========================================================================
 # (c) Edit-heavy gate: a tiny diff (1 file, ~10 lines) is below MIN_FILES=3 AND
 # below MIN_LINES=200, so the edit-heavy gate exits 0 — even with a transcript
@@ -334,6 +375,74 @@ run_hook() {
 # prove canonical-root targeting, effective-level gating, secret suppression,
 # duplicate suppression, and staged no-partial-write behavior.
 # =========================================================================
+@test "C locale: L5 accepts hyphen and complete em dash headings" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  export LC_ALL=C
+  printf '%s\n' '{"autonomy":5}' > "$PROJECT_DIR/.trellis.json"
+  setup_safe_candidate
+  COUNT="$BATS_TEST_TMPDIR/locale.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  local delimiter
+  for delimiter in '-' '—'; do
+    rm -f "$PROJECT_DIR/gotchas.md" "$PROJECT_DIR/decisions-log.md"
+    printf '## 2026-08-23 %s Locale heading\n**Pattern:** A heading uses a supported delimiter.\n**Why it matters:** Locale must not change persistence.\n**Rule:** Accept complete supported heading tokens.\n' "$delimiter" > "$CANDIDATE"
+    run_hook
+    [ "$status" -eq 0 ] || return 1
+    [ -z "$stderr" ] || return 1
+    [[ "$output" == *"auto-appended the candidate"* ]] || return 1
+    grep -Fqx "## 2026-08-23 $delimiter Locale heading" "$PROJECT_DIR/gotchas.md" || return 1
+    grep -Fq 'propose-rules auto-appended a surfaced gotcha' "$PROJECT_DIR/decisions-log.md" || return 1
+  done
+  [ "$(claude_call_count "$COUNT")" -eq 2 ]
+}
+
+@test "C locale: L5 rejects unsupported delimiters and malformed required fields" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  export LC_ALL=C
+  printf '%s\n' '{"autonomy":5}' > "$PROJECT_DIR/.trellis.json"
+  setup_safe_candidate
+  COUNT="$BATS_TEST_TMPDIR/locale-rejected.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  local variant heading pattern why rule
+  for variant in endash letter date title pattern why rule; do
+    heading='## 2026-08-23 — Locale heading'
+    pattern='A heading must have required fields.'
+    why='Malformed proposals must remain advisory.'
+    rule='Reject malformed proposals.'
+    case "$variant" in
+      endash) heading='## 2026-08-23 – Locale heading' ;;
+      letter) heading='## 2026-08-23 x Locale heading' ;;
+      date) heading='## 2026-8-23 — Locale heading' ;;
+      title) heading='## 2026-08-23 —' ;;
+      pattern) pattern='' ;;
+      why) why='' ;;
+      rule) rule='' ;;
+    esac
+    printf '%s\n**Pattern:** %s\n**Why it matters:** %s\n**Rule:** %s\n' "$heading" "$pattern" "$why" "$rule" > "$CANDIDATE"
+    run_hook
+    [ "$status" -eq 0 ] || return 1
+    [ -z "$stderr" ] || return 1
+    [[ "$output" == *"did not match the required gotcha format"* ]] || return 1
+    [ ! -e "$PROJECT_DIR/gotchas.md" ] || return 1
+    [ ! -e "$PROJECT_DIR/decisions-log.md" ] || return 1
+  done
+  [ "$(claude_call_count "$COUNT")" -eq 7 ]
+}
+
+@test "Stop payload: an explicit active guard is preserved" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  COUNT="$BATS_TEST_TMPDIR/active.count"; : > "$COUNT"
+  PATH="$(install_fake_claude "$COUNT")"
+  run_hook '{"stop_hook_active":true}'
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ -z "$output" ]
+  [ "$(claude_call_count "$COUNT")" -eq 0 ]
+}
+
 @test "L5: writes and logs only at canonical root, then suppresses duplicates" {
   setup_l5_worktree_repo
   setup_transcript_with_signal

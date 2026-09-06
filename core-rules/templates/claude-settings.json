@@ -1,42 +1,6 @@
 {
   "permissions": {
-    "deny": [
-      "Read(./node_modules/**)",
-      "Read(./**/node_modules/**)",
-      "Read(./.next/**)",
-      "Read(./**/.next/**)",
-      "Read(./dist/**)",
-      "Read(./**/dist/**)",
-      "Read(./build/**)",
-      "Read(./**/build/**)",
-      "Read(./out/**)",
-      "Read(./**/out/**)",
-      "Read(./target/**)",
-      "Read(./**/target/**)",
-      "Read(./vendor/**)",
-      "Read(./**/vendor/**)",
-      "Read(./.venv/**)",
-      "Read(./venv/**)",
-      "Read(./**/__pycache__/**)",
-      "Read(./.pytest_cache/**)",
-      "Read(./.mypy_cache/**)",
-      "Read(./.ruff_cache/**)",
-      "Read(./coverage/**)",
-      "Read(./.coverage)",
-      "Read(./.turbo/**)",
-      "Read(./.cache/**)",
-      "Read(./.parcel-cache/**)",
-      "Read(./Library/**)",
-      "Read(./Temp/**)",
-      "Read(./pnpm-lock.yaml)",
-      "Read(./package-lock.json)",
-      "Read(./yarn.lock)",
-      "Read(./go.sum)",
-      "Read(./Cargo.lock)",
-      "Read(./poetry.lock)",
-      "Read(./uv.lock)",
-      "Read(./Pipfile.lock)"
-    ]
+    "deny": []
   },
   "hooks": {
     "PreToolUse": [

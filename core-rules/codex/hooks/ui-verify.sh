@@ -48,11 +48,14 @@ PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 
 # Source optional project-level hook config (UI_PORT, UI_PATH, UI_REGEX, …) with
 # auto-export on, so any UI_* it sets propagate into the core subprocess below.
-# Codex config wins over the Claude fallback when both are present.
-if [ -f "${PROJECT_DIR}/.codex/hooks/config.sh" ]; then
+# The Pi bridge selects .pi with the fixed TRELLIS_HARNESS=pi enum; all other
+# values retain the Codex namespace. This cannot redirect config loading to an
+# arbitrary env-provided path. Harness config wins over the Claude fallback.
+HARNESS_HOME="$(_se_harness_home "$PROJECT_DIR")"
+if [ -f "${HARNESS_HOME}/hooks/config.sh" ]; then
   set -a
   # shellcheck disable=SC1091
-  . "${PROJECT_DIR}/.codex/hooks/config.sh"
+  . "${HARNESS_HOME}/hooks/config.sh"
   set +a
 elif [ -f "${PROJECT_DIR}/.claude/hooks/config.sh" ]; then
   set -a
@@ -60,12 +63,6 @@ elif [ -f "${PROJECT_DIR}/.claude/hooks/config.sh" ]; then
   . "${PROJECT_DIR}/.claude/hooks/config.sh"
   set +a
 fi
-
-emit_block() {
-  local reason="$1"
-  jq -nc --arg reason "UI-visible change requires visual verification. $reason" '{decision: "block", reason: $reason}'
-  exit 2
-}
 
 # --- Delegate to the decision core. ---
 # The core ignores stdin; redirect from /dev/null so it never blocks on a tty.
@@ -97,7 +94,8 @@ case "$VERDICT" in
     exit 0
     ;;
   block)
-    emit_block "$REASON"
+    jq -nc --arg reason "UI-visible change requires visual verification. $REASON" '{decision: "block", reason: $reason}'
+    exit 2
     ;;
   *)
     # Unknown verdict → fail-open.

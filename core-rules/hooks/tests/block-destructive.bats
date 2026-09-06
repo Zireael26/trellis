@@ -8,6 +8,7 @@
 load helpers
 
 HOOK="$HOOKS_DIR/block-destructive.sh"
+CODEX_HOOK="$CODEX_HOOKS_DIR/block-destructive.sh"
 
 # Helper: run with a Bash tool envelope carrying $1 as the command.
 run_with_cmd() {
@@ -15,6 +16,13 @@ run_with_cmd() {
   local input
   input="$(jq -nc --arg c "$cmd" '{tool_input: {command: $c}}')"
   printf '%s' "$input" | bash "$HOOK"
+}
+
+run_codex_with_cmd() {
+  local cmd="$1"
+  local input
+  input="$(jq -nc --arg c "$cmd" '{tool_input: {command: $c}}')"
+  printf '%s' "$input" | bash "$CODEX_HOOK"
 }
 
 # --- P1.1 rm-rf rule (D3 semantics: any absolute path or .. outside cwd) ---
@@ -111,6 +119,65 @@ run_with_cmd() {
   [[ "$out" == *deny* ]]
 }
 
+@test "git-reset: bare --hard is denied by both Claude and Codex hooks" {
+  out="$(run_with_cmd 'git reset --hard')"
+  [[ "$out" == *deny* ]]
+
+  set +e
+  out="$(run_codex_with_cmd 'git reset --hard')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ]
+  [[ "$out" == *'"decision":"block"'* ]]
+}
+
+@test "git-reset: Claude denies HEAD with suffix options" {
+  for suffix in '--quiet' '--'; do
+    run run_with_cmd "git reset --hard HEAD $suffix"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *deny* ]]
+  done
+}
+
+@test "git-reset: Codex denies HEAD with suffix options" {
+  for suffix in '--quiet' '--'; do
+    run run_codex_with_cmd "git reset --hard HEAD $suffix"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'"decision":"block"'* ]]
+  done
+}
+
+@test "git-reset: both hooks retain target and command boundaries" {
+  for cmd in 'git reset --hard HEAD' 'git reset --hard HEAD~2 --quiet' 'git reset --hard origin/main --' 'git reset --hard; git status'; do
+    run run_with_cmd "$cmd"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *deny* ]]
+    run run_codex_with_cmd "$cmd"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *'"decision":"block"'* ]]
+  done
+  for cmd in 'git reset --soft HEAD' 'git reset --harder HEAD' 'git reset --hard HEADnotes --quiet' 'git reset --hard feature/topic'; do
+    run run_with_cmd "$cmd"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run run_codex_with_cmd "$cmd"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+
+@test "git-reset: similarly prefixed option remains outside the --hard rule" {
+  out="$(run_with_cmd 'git reset --harder')"
+  [[ "$out" != *deny* ]]
+
+  set +e
+  out="$(run_codex_with_cmd 'git reset --harder')"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ]
+  [ -z "$out" ]
+}
+
 @test "P1.2: blocks unbounded DELETE shielded by an unrelated WHERE (audit M7)" {
   out="$(run_with_cmd 'SELECT * FROM audit WHERE id=1; DELETE FROM users;')"
   [[ "$out" == *deny* ]]
@@ -177,4 +244,43 @@ run_with_cmd() {
   rm -rf "$jq_free_path"
   [ "$status" -eq 0 ]
   [[ "$stderr" == *"TRELLIS_NO_JQ_DEGRADE=1"* ]]
+}
+
+# --- **/secrets/** reads: GCP/k8s resource identifiers are not file reads -----
+# Upstreamed from the affected consumer 2026-09-04. GCP and Kubernetes resource names carry
+# a literal "secrets/" segment, so the unnarrowed rule denied every pipeline that
+# merely POST-PROCESSED gcloud/kubectl output. Nothing is read from disk there.
+
+@test "secrets-path: allows grep over a gcloud resource identifier in output" {
+  out="$(run_with_cmd 'gcloud secrets versions access latest --secret=x | grep projects/12345/secrets/db-password')"
+  [[ "$out" != *deny* ]] || { echo "$out"; false; }
+}
+
+@test "secrets-path: allows sed over a kubernetes resource identifier in output" {
+  out="$(run_with_cmd 'kubectl get secret -o name | sed -n "s#namespaces/prod/secrets/api-key##p"')"
+  [[ "$out" != *deny* ]] || { echo "$out"; false; }
+}
+
+@test "secrets-path: allows awk over a gcloud resource identifier in output" {
+  out="$(run_with_cmd 'gcloud secrets list --format=json | awk "/projects\/998877\/secrets\/token/ {print}"')"
+  [[ "$out" != *deny* ]] || { echo "$out"; false; }
+}
+
+# The narrowing must not hollow out the rule: a real read of a file under a
+# secrets/ directory is still a hard deny, including one whose path happens to
+# contain a projects/ or namespaces/ segment elsewhere.
+
+@test "secrets-path: still denies a real cat of a file under a secrets dir" {
+  out="$(run_with_cmd 'cat config/secrets/production.yml')"
+  [[ "$out" == *deny* ]] || { echo "$out"; false; }
+}
+
+@test "secrets-path: still denies a real grep of a file under a secrets dir" {
+  out="$(run_with_cmd 'grep -r api_key ./secrets/')"
+  [[ "$out" == *deny* ]] || { echo "$out"; false; }
+}
+
+@test "secrets-path: still denies a read under a secrets dir nested in a projects path" {
+  out="$(run_with_cmd 'cat /Users/me/projects/app/secrets/creds.json')"
+  [[ "$out" == *deny* ]] || { echo "$out"; false; }
 }

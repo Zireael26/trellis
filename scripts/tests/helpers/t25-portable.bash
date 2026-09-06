@@ -174,7 +174,8 @@ t25_inert_env() (
 t25_make_immutable_release() {
   local version="${1:-$T25_RELEASE}" repo="$T25_SANDBOX/release source"
 
-  mkdir -p "$repo/scripts" "$repo/core-rules/templates" "$repo/core-rules/githooks"
+  mkdir -p "$repo/scripts" "$repo/core-rules/templates" "$repo/core-rules/githooks" \
+    "$repo/core-rules/codex/hooks" "$repo/core-rules/pi/hooks"
   cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
   chmod 755 "$repo/scripts/seed-inheritance-symlinks.sh"
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
@@ -187,12 +188,26 @@ t25_make_immutable_release() {
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
     "$repo/core-rules/templates/codex-hooks.local.json"
-  cp "$REPO_ROOT/core-rules/templates/omp-project-policy.yml" \
-    "$repo/core-rules/templates/omp-project-policy.yml"
-  printf '# fixture OMP preamble\n' > "$repo/core-rules/templates/omp-preamble.md"
+  # Codex- and Pi-private hook sources, mirroring the `core-rules/codex/hooks`
+  # and `core-rules/pi/hooks` planes the real manifest declares.  They exist so
+  # each native harness owns a leaf that is NOT the shared `.agents` leaf.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/codex/hooks/fixture-hook.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/pi/hooks/dispatch.sh"
+  chmod 755 "$repo/core-rules/codex/hooks/fixture-hook.sh" "$repo/core-rules/pi/hooks/dispatch.sh"
+  # FIXTURE-ONLY. The shipped manifest gives Pi no render at all, so there is no
+  # release-owned `replace` destination outside `.claude`/`.agents` to exercise
+  # the collision, drift-refusal and rollback paths with. This template is a
+  # test input, NOT a claim that a native Pi CLI reads `.pi/fixture-policy.md`.
+  printf '# fixture Pi policy\n' > "$repo/core-rules/templates/pi-fixture-policy.md"
+  # Schema 2 fixes the harness key set at claude, shared_agents, codex, pi and an
+  # OPTIONAL user (scripts/lib/surface-plan.sh `surface_plan_validate_manifest`).
+  # `user` is omitted: its leaves are `destination_home` HOME-scoped, `--harness
+  # user` is rejected for a project attach (`attach_normalize_harnesses`), and
+  # every assertion in the suites that load this helper is project-relative, so
+  # a `user` block would add destinations no project attach can ever plan.
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harnesses": {
     "claude": {
       "links": [
@@ -202,21 +217,26 @@ t25_make_immutable_release() {
         {"template": "core-rules/templates/claude-settings.local.json", "destination": ".claude/settings.local.json", "merge": "explicit-json", "mode": "0600", "required": true}
       ]
     },
-    "codex": {
+    "shared_agents": {
       "links": [
         {"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}
+      ],
+      "render": []
+    },
+    "codex": {
+      "links": [
+        {"source": "core-rules/codex/hooks/fixture-hook.sh", "destination": ".codex/hooks/fixture-hook.sh", "executable": true}
       ],
       "render": [
         {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": true}
       ]
     },
-    "omp": {
+    "pi": {
       "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
+        {"source": "core-rules/pi/hooks/dispatch.sh", "destination": ".pi/hooks/dispatch.sh", "executable": true}
       ],
       "render": [
-        {"template": "core-rules/templates/omp-preamble.md", "destination": ".omp/PREAMBLE.md", "merge": "replace", "mode": "0644", "required": true},
-        {"template": "core-rules/templates/omp-project-policy.yml", "destination": ".omp/config.yml", "merge": "replace", "mode": "0644", "required": false}
+        {"template": "core-rules/templates/pi-fixture-policy.md", "destination": ".pi/fixture-policy.md", "merge": "replace", "mode": "0644", "required": true}
       ]
     }
   }
@@ -234,20 +254,24 @@ t25_make_attachment_project() {
     "$T25_PROJECT/.claude" \
     "$T25_PROJECT/.agents" \
     "$T25_PROJECT/.codex" \
-    "$T25_PROJECT/.omp" \
+    "$T25_PROJECT/.pi" \
     "$T25_PROJECT/.project-hooks"
   t25_git init -q "$T25_PROJECT"
   t25_git -C "$T25_PROJECT" config user.email fixture@example.invalid
   t25_git -C "$T25_PROJECT" config user.name 'T25 Fixture'
   t25_git -C "$T25_PROJECT" config commit.gpgsign false
 
+  # The PROJECT manifest is versioned independently of the inheritance manifest
+  # and production pins it: `local_registry_manifest_project_id` requires
+  # `.schema_version == 1` and scripts/lib/trellis.project.schema.json declares
+  # `"schema_version": {"const": 1}`.  A schema 2 `.trellis.json` is refused, so
+  # this stays 1 even though the release manifest above is schema 2.
   printf '{"schema_version":1,"project_id":"t25-fixture-project"}\n' > "$T25_PROJECT/.trellis.json"
   printf 'fixture project\n' > "$T25_PROJECT/README.md"
   cat > "$T25_PROJECT/.gitignore" <<'EOF'
 .trellis/
 .claude/rules/
 .agents/rules/
-.omp/AGENTS.md
 .claude/settings.local.json
 .codex/hooks.json
 EOF
@@ -266,21 +290,21 @@ JSON
 }
 JSON
   printf 'claude native sibling\n' > "$T25_PROJECT/.claude/project-native.md"
-  printf 'codex native sibling\n' > "$T25_PROJECT/.agents/project-native.md"
+  printf 'shared agents native sibling\n' > "$T25_PROJECT/.agents/project-native.md"
   printf 'codex config sibling\n' > "$T25_PROJECT/.codex/project-native.txt"
-  printf 'omp native sibling\n' > "$T25_PROJECT/.omp/project-native.md"
+  printf 'pi native sibling\n' > "$T25_PROJECT/.pi/project-native.md"
   cat > "$T25_PROJECT/.project-hooks/post-checkout" <<'EOF'
 #!/usr/bin/env bash
 printf 'project post-checkout\n' >&2
 EOF
   chmod 640 "$T25_PROJECT/.claude/settings.local.json" "$T25_PROJECT/.codex/hooks.json"
   chmod 640 "$T25_PROJECT/.claude/project-native.md" "$T25_PROJECT/.agents/project-native.md" \
-    "$T25_PROJECT/.codex/project-native.txt" "$T25_PROJECT/.omp/project-native.md"
+    "$T25_PROJECT/.codex/project-native.txt" "$T25_PROJECT/.pi/project-native.md"
   chmod 700 "$T25_PROJECT/.project-hooks/post-checkout"
 
   t25_git -C "$T25_PROJECT" add .trellis.json README.md .gitignore \
     .claude/project-native.md .agents/project-native.md .codex/project-native.txt \
-    .omp/project-native.md .project-hooks/post-checkout
+    .pi/project-native.md .project-hooks/post-checkout
   t25_git -C "$T25_PROJECT" -c core.hooksPath=/dev/null commit -qm 'fixture project'
 
   T25_EXCLUDE="$T25_PROJECT/.git/info/exclude"
@@ -368,17 +392,42 @@ t25_setup_inert_fixture() {
   t25_make_manifest_only_clone
 }
 
+# `--harness` selectors for the harnesses the INSTALLED release manifest declares,
+# into the T25_HARNESS_FLAGS array (Bash 3.2 has no namerefs).
+#
+# Only claude, codex and pi are selectable: `surface_plan_normalize_harnesses`
+# rejects anything else, `attach_normalize_harnesses` additionally refuses `user`
+# for a project attach, and `shared_agents` has no selector at all — attach emits
+# that plane implicitly whenever codex or pi is selected. Without Pi, emit no
+# flags so schema 1 fixtures exercise attach's original claude+codex default.
+# With Pi, explicitly select the declared claude/codex/pi harnesses.
+t25_harness_flags() {
+  local harness harnesses
+  T25_HARNESS_FLAGS=()
+  harnesses="$(jq -r '.harnesses | if has("pi") then keys_unsorted[] | select(. == "claude" or . == "codex" or . == "pi") else empty end' "$T25_MANIFEST")" || return 1
+  while IFS= read -r harness; do
+    [ -n "$harness" ] || continue
+    T25_HARNESS_FLAGS+=(--harness "$harness")
+  done <<EOF
+$harnesses
+EOF
+}
+
 t25_attach() {
+  t25_harness_flags || return 1
   t25_attachment_env bash "$REPO_ROOT/scripts/attach-project.sh" attach \
-    --home "$T25_TRELLIS_HOME" --fleet personal --release "$T25_RELEASE" "$T25_PROJECT"
+    --home "$T25_TRELLIS_HOME" --fleet personal --release "$T25_RELEASE" \
+    "${T25_HARNESS_FLAGS[@]+"${T25_HARNESS_FLAGS[@]}"}" "$T25_PROJECT"
 }
 
 t25_attach_with_fault() {
   local phase="$1"
 
+  t25_harness_flags || return 1
   t25_attachment_env env ATTACHMENT_FAULT_PHASE="$phase" \
     bash "$REPO_ROOT/scripts/attach-project.sh" attach \
-      --home "$T25_TRELLIS_HOME" --fleet personal --release "$T25_RELEASE" "$T25_PROJECT"
+      --home "$T25_TRELLIS_HOME" --fleet personal --release "$T25_RELEASE" \
+      "${T25_HARNESS_FLAGS[@]+"${T25_HARNESS_FLAGS[@]}"}" "$T25_PROJECT"
 }
 
 t25_detach() {
@@ -467,85 +516,6 @@ t25_run_session_start() (
   cd "$project" || return 1
   printf '%s\n' '{"hook_event_name":"SessionStart","source":"startup"}' | \
     t25_inert_env bash "$hook"
-)
-
-# Drive the real OMP extension factory over a project directory, the way
-# `t25_run_session_start` drives the real Claude/Codex SessionStart hooks. The
-# factory is the loader's entry point, so this is the same surface OMP itself
-# reaches. Every registered lifecycle handler is dispatched with the project as
-# `ctx.cwd`; on a raw clone each must resolve no runtime, return `undefined`,
-# log nothing, and never set the extension label. Prints `inert` and exits 0 in
-# that case, or the offending lines and exit 1 otherwise.
-#
-# The driver runs with the project as its working directory: Node resolves
-# package configuration upward from the CWD, so running it from the Trellis
-# checkout would make an unrelated repository's `package.json` decide whether
-# the module loads at all.
-# The OMP adapter is TypeScript with erasable syntax only, so plain Node runs it
-# through type stripping — but only from 22.18/23 onward without a flag. Probing
-# the capability beats comparing version numbers: the runtime either imports a
-# `.ts` module or it does not.
-t25_node_can_strip_types() {
-  local probe="$T25_SANDBOX/strip-types-probe"
-  mkdir -p "$probe" || return 1
-  printf 'export const ok: number = 1;\n' > "$probe/m.ts" || return 1
-  printf 'import { ok } from "./m.ts";\nif (ok !== 1) process.exit(1);\n' > "$probe/m.mjs" || return 1
-  (cd "$probe" && node ./m.mjs) >/dev/null 2>&1
-}
-
-# t25_run_omp_extension <module> <project> <expected-handler-csv>
-#
-# The expected handler list is required, not decorative. Without it the probe
-# was vacuous: `mod.default(pi)` registering nothing left `handlers` empty, the
-# `for` loop never ran, `problems` stayed empty and the driver printed `inert`.
-# An adapter refactor that stopped registering handlers — the single failure
-# mode most likely to kill the whole extension — would have turned this probe
-# GREEN. The set is compared exactly, so a dropped or renamed lifecycle event is
-# a red rather than a silent narrowing.
-t25_run_omp_extension() (
-  local module="$1" project="$2" expected="$3" driver="$T25_SANDBOX/omp-extension-probe.mjs"
-
-  cat > "$driver" <<'JS'
-const [modulePath, projectDir, expectedCsv] = process.argv.slice(2);
-const mod = await import(modulePath);
-const problems = [];
-const handlers = new Map();
-const pi = {
-  logger: {
-    warn: (...a) => problems.push("logger.warn: " + a.join(" ")),
-    error: (...a) => problems.push("logger.error: " + a.join(" ")),
-  },
-  setLabel: (label) => problems.push("setLabel: " + label),
-  sendMessage: (message) => problems.push("sendMessage: " + JSON.stringify(message)),
-  on: (name, fn) => handlers.set(name, fn),
-};
-mod.default(pi);
-const expected = expectedCsv.split(",").filter(Boolean).sort();
-const registered = [...handlers.keys()].sort();
-if (registered.join(",") !== expected.join(",")) {
-  problems.push(
-    "handlers registered [" + registered.join(",") + "] != expected [" + expected.join(",") + "]",
-  );
-}
-const ctx = { cwd: projectDir };
-for (const [name, fn] of handlers) {
-  let result;
-  try {
-    result = await fn({}, ctx);
-  } catch (err) {
-    problems.push(name + " threw: " + (err && err.message));
-    continue;
-  }
-  if (result !== undefined) problems.push(name + " returned " + JSON.stringify(result));
-}
-if (problems.length) {
-  console.log(problems.join("\n"));
-  process.exit(1);
-}
-console.log("inert");
-JS
-  cd "$project" || return 1
-  t25_inert_env node "$driver" "$module" "$project" "$expected"
 )
 
 t25_no_attachment_warning() {

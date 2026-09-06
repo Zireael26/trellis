@@ -19,10 +19,6 @@
 #     gotchas.md and logs the action in canonical-root decisions-log.md; L1–L4
 #     remain advisory-only.
 #   - Budget: 30s soft cap (perl-alarm shim — bare `timeout` is a no-op on macOS).
-#   - OMP (TRELLIS_OMP=1): the Claude-family `claude -p` proposal rung is
-#     policy-unreachable; exit 0 unless TRELLIS_OMP_REVIEW_CMD or
-#     CODE_REVIEWER_CMD supplies an explicit non-Anthropic replacement, which is
-#     then invoked instead with the same prompt on stdin.
 #
 # Cost note: this hook calls a subagent and reads the session transcript. Both
 # cost tokens; the edit-heavy + correction-signal gates bound it to turns where a
@@ -44,8 +40,8 @@ set -u
 #   reaches only the direct child, so a grandchild (e.g. claude's Node
 #   descendants + a long HTTP request) would otherwise keep the captured pipe
 #   open past the deadline. Exits 142 on timeout; propagates the command's own
-#   exit status otherwise. If perl is absent we run the command WITHOUT a
-#   wall-clock cap and rely on the caller's --max-turns 1 to bound it.
+#   exit status otherwise. If Perl is absent we emit an advisory degradation
+#   and skip the external proposal command instead of running it uncapped.
 # ---------------------------------------------------------------------------
 run_with_timeout() {
   local secs="$1"; shift
@@ -58,15 +54,18 @@ run_with_timeout() {
       if ($pid == 0) { POSIX::setsid(); exec @ARGV or POSIX::_exit(127); }
       $SIG{ALRM} = sub {
         kill("TERM", -$pid); select(undef, undef, undef, 0.3);
-        kill("KILL", -$pid); waitpid($pid, 0); exit(142);
+        kill("KILL", -$pid); waitpid($pid, 0);
+        exit(142);
       };
+      # SAFETY: 30 s is the documented proposal budget (core-rules/hooks.md § propose-rules Budget); status 142 takes the advisory no-proposal path.
       alarm $secs;
       waitpid($pid, 0);
       my $st = $?;
       exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
     ' "$secs" "$@"
   else
-    "$@"
+    printf '%s\n' 'propose-rules: Perl is unavailable; skipped the proposal command rather than running without a wall-clock cap (advisory degradation).' >&2
+    return 1
   fi
 }
 
@@ -91,7 +90,7 @@ _pr_candidate_is_well_formed() {
   case "$candidate" in
     *$'\r'*) return 1 ;;
   esac
-  printf '%s\n' "$candidate" | grep -qE '^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][[:space:]]+[-—][[:space:]]+.+$' || return 1
+  printf '%s\n' "$candidate" | grep -qE '^## [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][[:space:]]+(-|—)[[:space:]]+.+$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Pattern:\*\*[[:space:]]*[^[:space:]].*$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Why it matters:\*\*[[:space:]]*[^[:space:]].*$' || return 1
   printf '%s\n' "$candidate" | grep -qE '^\*\*Rule:\*\*[[:space:]]*[^[:space:]].*$'
@@ -335,27 +334,10 @@ case "$TAIL" in
     ;;
 esac
 
-# --- OMP no-Anthropic guarantee (hooks.md: OMP owns its stop event) ---------
-# This hook's only action is a Claude-family `claude -p` proposal rung; under
-# OMP (TRELLIS_OMP=1, exported by core-rules/omp/hooks/pre/trellis.ts) that
-# default is unreachable by policy. Skip unless the operator supplies an
-# explicit non-Anthropic replacement command via TRELLIS_OMP_REVIEW_CMD or
-# CODE_REVIEWER_CMD — then the proposal prompt is piped to THAT command and
-# its stdout is treated exactly like the Claude child's.
-if [ "${TRELLIS_OMP:-}" = "1" ]; then
-  if [ -n "${TRELLIS_OMP_REVIEW_CMD:-}" ] && command -v "${TRELLIS_OMP_REVIEW_CMD}" >/dev/null 2>&1; then
-    PROPOSAL_CMD=("${TRELLIS_OMP_REVIEW_CMD}")
-  elif [ -n "${CODE_REVIEWER_CMD:-}" ] && command -v "${CODE_REVIEWER_CMD}" >/dev/null 2>&1; then
-    PROPOSAL_CMD=("${CODE_REVIEWER_CMD}")
-  else
-    exit 0
-  fi
-else
-  if ! command -v claude >/dev/null 2>&1; then
-    exit 0
-  fi
-  PROPOSAL_CMD=(claude -p --max-turns 1 --output-format text --tools Read)
+if ! command -v claude >/dev/null 2>&1; then
+  exit 0
 fi
+PROPOSAL_CMD=(claude -p --max-turns 1 --output-format text --tools Read)
 
 GOTCHAS="$REPO_ROOT/gotchas.md"
 [ -f "$GOTCHAS" ] || GOTCHAS="/dev/null"
@@ -391,21 +373,19 @@ slip-up is not a pattern).'
 # sentinel and bails, while the parent run proceeds. run_with_timeout (the
 # perl-alarm shim) replaces the bare `timeout 30`, which is a NO-OP on macOS.
 #
-# The child command comes from PROPOSAL_CMD above: the canonical `claude -p …`
-# on Claude Code/Codex, or an explicit operator-supplied non-Anthropic command
-# under OMP. The transcript tail is untrusted content on every path — the
-# Claude/Codex shape runs with ZERO host tools (`--tools Read` makes the
-# available set EXCLUSIVE, so a prompt-injected transcript cannot induce a host
-# tool_use regardless of permissions.defaultMode; a denylist would be incomplete
-# because the default set includes ToolSearch + agent-spawn tools). Input is
-# piped on stdin, so `--tools Read` can be the last claude arg with no positional
-# to eat.
+# The child command is the canonical `claude -p …` one-shot. The transcript tail
+# is untrusted content — the Claude/Codex shape runs with ZERO host tools
+# (`--tools Read` makes the available set EXCLUSIVE, so a prompt-injected
+# transcript cannot induce a host tool_use regardless of permissions.defaultMode;
+# a denylist would be incomplete because the default set includes ToolSearch +
+# agent-spawn tools). Input is piped on stdin, so `--tools Read` can be the last
+# claude arg with no positional to eat.
 OUT="$( export TRELLIS_REVIEW_IN_PROGRESS=1; {
   printf '%s\n\n--- TRANSCRIPT TAIL ---\n' "$PROMPT"
   tail -300 "$TRANSCRIPT" 2>/dev/null
   printf '\n--- GOTCHAS.MD ---\n'
   cat "$GOTCHAS" 2>/dev/null
-} | run_with_timeout 30 "${PROPOSAL_CMD[@]}" 2>/dev/null )"
+} | run_with_timeout 30 "${PROPOSAL_CMD[@]}" )"
 
 # Empty or NONE → no proposal.
 case "$OUT" in

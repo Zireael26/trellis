@@ -12,7 +12,7 @@
 # Base: github.com/iamfakeguru/claude-md (MIT). Extensions vs upstream:
 #   - DELETE FROM ... without a WHERE clause now triggers.
 #   - **/secrets/** glob on any reader is blocked.
-#   - git reset --hard HEAD / HEAD~N / origin/* all covered.
+#   - git reset --hard with no target, HEAD / HEAD~N / origin/* all covered.
 
 set -u
 
@@ -53,9 +53,9 @@ if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+push([[:space:]]+[^[:space:
   exit 0
 fi
 
-# --- git reset --hard HEAD | HEAD~N | origin/* ---
-if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+reset[[:space:]]+--hard[[:space:]]+(HEAD(~[0-9]+)?|origin/[^[:space:]]+)'; then
-  emit_deny "Blocked git reset --hard on HEAD/HEAD~N/origin/* — run manually if intentional."
+# --- git reset --hard [HEAD | HEAD~N | origin/*] ---
+if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+reset[[:space:]]+--hard([[:space:]]+(HEAD(~[0-9]+)?|origin/[^[:space:];&|]+)([[:space:];&|]|$)|[[:space:]]*([;&|]|$))'; then
+  emit_deny "Blocked git reset --hard without a target or on HEAD/HEAD~N/origin/* — run manually if intentional."
   exit 0
 fi
 
@@ -114,7 +114,23 @@ if printf '%s' "$COMMAND" | grep -qE '(curl|wget)[[:space:]][^;&|]*([$]\(|`)[[:s
 fi
 
 # --- **/secrets/** reads via any reader (still a hard deny) ---
-if printf '%s' "$COMMAND" | grep -qE '(^|[[:space:]|;&(])(cat|less|head|tail|more|source|\.|grep|sed|awk|bat)[[:space:]]+[^|;&]*/secrets/'; then
+# GCP and Kubernetes resource identifiers embed a literal "secrets/" segment --
+# projects/<num>/secrets/<name>, namespaces/<ns>/secrets/<name>. Those appear as
+# ARGUMENTS to grep/sed/awk when processing `gcloud`/`kubectl` OUTPUT, where no
+# file is read, and the unnarrowed rule denied every such command. Written and
+# proven project-side on the affected consumer 2026-09-03, upstreamed 2026-09-04.
+#
+# Two guards keep the narrowing from hollowing out the rule, both added when the
+# upstreamed form was found to allow a real read of
+# /Users/<me>/projects/<app>/secrets/creds.json:
+#   1. the command must actually invoke gcloud or kubectl, and
+#   2. the identifier must start at a token boundary, so a filesystem path with
+#      a "/projects/" or "/namespaces/" segment in it is never stripped.
+SECRETS_SCAN="$COMMAND"
+if printf '%s' "$COMMAND" | grep -qE '(^|[[:space:]|;&(])(gcloud|kubectl)[[:space:]]'; then
+  SECRETS_SCAN=$(printf '%s' "$COMMAND" | sed -E 's#(^|[^A-Za-z0-9_./~-])(projects|namespaces)/[A-Za-z0-9_.-]+/secrets/#\1\2/<id>/SECRETSRESOURCE/#g')
+fi
+if printf '%s' "$SECRETS_SCAN" | grep -qE '(^|[[:space:]|;&(])(cat|less|head|tail|more|source|\.|grep|sed|awk|bat)[[:space:]]+[^|;&]*/secrets/'; then
   emit_deny "Blocked read under **/secrets/** — credentials must not be exposed to the agent."
   exit 0
 fi

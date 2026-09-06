@@ -112,18 +112,61 @@ fi
 echo "[pre-push] Trellis verification starting (mode=$MODE)..."
 
 # --- process-gate merge gate ---
-# Locate run-all.sh: .claude first, .agents fallback. Invoked via `bash`, so a
-# missing exec bit is irrelevant — test for a regular file (-f), not -x.
+# Keep the installed project-local paths first. A source-repository worktree can
+# then use the tracked skill copy. An attached-project worktree has no tracked
+# copy, so its final fallback derives the main checkout from the shared Git
+# COMMON dir. `--git-common-dir` is load-bearing here: unlike `--git-dir`, it
+# returns the same common directory from every linked worktree.
 RUNALL=""
-if [ -f .claude/skills/process-gate/scripts/run-all.sh ]; then
-  RUNALL=.claude/skills/process-gate/scripts/run-all.sh
-elif [ -f .agents/skills/process-gate/scripts/run-all.sh ]; then
-  RUNALL=.agents/skills/process-gate/scripts/run-all.sh
+RUNALL_MISSES=""
+
+try_runall() {
+  candidate="$1"
+  if [ -f "$candidate" ]; then
+    RUNALL="$candidate"
+    return
+  fi
+
+  skill_dir=${candidate%/scripts/run-all.sh}
+  if [ -L "$skill_dir" ] && [ ! -e "$skill_dir" ]; then
+    miss="process-gate skill symlink target is unavailable"
+  elif [ -L "$candidate" ] && [ ! -e "$candidate" ]; then
+    miss="broken runner symlink"
+  elif [ -e "$candidate" ]; then
+    miss="exists but is not a regular file"
+  else
+    miss="not found"
+  fi
+  RUNALL_MISSES="${RUNALL_MISSES}  - ${candidate}: ${miss}
+"
+}
+
+try_runall "$PROJECT_ROOT/.claude/skills/process-gate/scripts/run-all.sh"
+[ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/.agents/skills/process-gate/scripts/run-all.sh"
+[ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/core-rules/skills/process-gate/scripts/run-all.sh"
+
+if [ -z "$RUNALL" ]; then
+  GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || printf '')
+  if [ -n "$GIT_COMMON_DIR" ]; then
+    case "$GIT_COMMON_DIR" in
+      /*) ;;
+      *) GIT_COMMON_DIR="$PROJECT_ROOT/$GIT_COMMON_DIR" ;;
+    esac
+    MAIN_CHECKOUT=$(dirname "$GIT_COMMON_DIR")
+    try_runall "$MAIN_CHECKOUT/.claude/skills/process-gate/scripts/run-all.sh"
+    [ -n "$RUNALL" ] || try_runall "$MAIN_CHECKOUT/.agents/skills/process-gate/scripts/run-all.sh"
+  else
+    RUNALL_MISSES="${RUNALL_MISSES}  - <main-checkout>/.claude/skills/process-gate/scripts/run-all.sh: git rev-parse --git-common-dir failed
+"
+    RUNALL_MISSES="${RUNALL_MISSES}  - <main-checkout>/.agents/skills/process-gate/scripts/run-all.sh: git rev-parse --git-common-dir failed
+"
+  fi
 fi
 
 if [ -z "$RUNALL" ]; then
-  echo "[pre-push] process-gate not installed — skipping (run scripts/onboard-project.sh to install)"
-  exit 0
+  echo "[pre-push] process-gate runner not found; refusing push because the gate produced no safety verdict. Candidates tried:" >&2
+  printf '%s' "$RUNALL_MISSES" >&2
+  exit 1
 fi
 
 # Build args without arrays: --mode always, --range only when derived.

@@ -3,7 +3,7 @@
 # effect to the attachment transaction.
 #
 # Tracked footprint: exactly `<project>/.trellis.json`, created only when
-# absent. Everything else — native Claude Code, Codex, and OMP surfaces, the
+# absent. Everything else — native Claude Code and Codex surfaces, the
 # managed `.git/info/exclude` block, local settings, and the clone-local hook
 # dispatcher — is machine-local state owned by `scripts/attach-project.sh` and
 # recorded under `TRELLIS_HOME`. A contributor who never attaches sees only the
@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 portable_usage() {
   cat <<'EOF'
 usage: onboard-project.sh --fleet NAME [--home PATH] [--release VERSION]
-       [--harness claude|codex|omp]... [--project-id ID] <project-path>
+       [--harness claude|codex]... [--project-id ID] <project-path>
 EOF
 }
 
@@ -85,11 +85,6 @@ portable_legacy_surface() {
     ".agents/commands/explore.md"
     ".agents/commands/autonomy.md"
     ".agents/commands/surgical.md"
-    ".omp/AGENTS.md"
-    ".omp/skills"
-    ".omp/commands"
-    ".omp/agents"
-    ".omp/hooks"
     "AGENTS.md"
   )
 
@@ -201,7 +196,7 @@ portable_onboard() (
         release="$2"; shift 2 ;;
       --harness)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --harness requires NAME\n' >&2; portable_usage >&2; return 2; }
-        case "$2" in claude|codex|omp) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
+        case "$2" in claude|codex) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
         harnesses+=("$2"); shift 2 ;;
       --project-id)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --project-id requires ID\n' >&2; portable_usage >&2; return 2; }

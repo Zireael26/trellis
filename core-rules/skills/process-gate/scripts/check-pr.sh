@@ -15,19 +15,19 @@ worst="pass"
 findings=()
 
 # --- Branch name -----------------------------------------------------------
-branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-if [ "$branch" = "HEAD" ] || [ -z "$branch" ]; then
+branch=""
+if ! branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"; then
+  findings+=("branch: unable to determine current branch")
+  worst="fail"
+elif [ "$branch" = "HEAD" ] || [ -z "$branch" ]; then
   pg_log info "detached HEAD; skipping branch-name check"
 elif [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
   pg_log info "on $branch; branch-name check is N/A"
 else
-  # `feature` is in the list because the spec/plan/tasks skills *mandate*
-  # `feature/<slug>` (spec/SKILL.md:37,58,83; plan/SKILL.md:28; tasks/SKILL.md:26).
-  # Without it every branch produced by the canonical pipeline failed this gate.
-  # pi-agent branches are the one hyphen-separated form: @tintinweb/pi-subagents
-  # hardcodes `pi-agent-${agentId}` (worktree.js:70) and takes no name argument,
-  # so requiring `pi-agent/<slug>` would reject every worker branch pi produces.
-  if ! printf "%s" "$branch" | grep -qE '^(pi-agent-[a-z0-9][a-z0-9-]*|(codex|pi-agent|feature|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*)$'; then
+  # Invariant: allowed branches are `pi-agent-*` (producer @tintinweb/pi-subagents worktree.js:70)
+  # and `<type>/<kebab-slug>` where type ∈ {codex, feature, feat, fix, chore, docs, refactor, test, perf, build, ci, revert}.
+  # Producer contract: spec/SKILL.md:37,58,83; plan/SKILL.md:28; tasks/SKILL.md:26 mandate `feature/<slug>`.
+  if ! printf "%s" "$branch" | grep -qE '^(pi-agent-[a-z0-9][a-z0-9-]*|(codex|feature|feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9][a-z0-9-]*)$'; then
     findings+=("branch:$branch — does not match <type>/<kebab-slug>")
     [ "$worst" = "pass" ] && worst="warn"
   fi
@@ -35,18 +35,22 @@ fi
 
 # --- Commit messages -------------------------------------------------------
 declare -a bad_subjects=()
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  # Conventional Commits: type(scope)?(!)? : subject  -> first line
-  # `pi-agent` joins `codex` as a harness-authored type: @tintinweb/pi-subagents
-  # writes `pi-agent: <description>` itself (index.js) and takes no template, so
-  # without it every worker branch fails on its own commit subject.
-  if ! printf "%s" "$line" | grep -qE '^(pi-agent|codex|feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
-    bad_subjects+=("$line")
-  elif [ "${#line}" -gt 72 ]; then
-    bad_subjects+=("$line  (>72 chars)")
-  fi
-done < <(git log --format='%s' "$RANGE" 2>/dev/null)
+commit_subjects=""
+if ! commit_subjects="$(git log --format='%s' "$RANGE" 2>/dev/null)"; then
+  findings+=("commit-subject: unable to enumerate commit subjects for range $RANGE")
+  worst="fail"
+else
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # Invariant: harness-authored subjects `pi-agent: <description>` (@tintinweb/pi-subagents index.js)
+    # and `codex: <description>` are valid types alongside conventional-commit types.
+    if ! printf "%s" "$line" | grep -qE '^(pi-agent|codex|feat|fix|refactor|chore|docs|style|test|perf|build|ci|revert)(\([a-z0-9.-]+\))?!?: .{1,}$'; then
+      bad_subjects+=("$line")
+    elif [ "${#line}" -gt 72 ]; then
+      bad_subjects+=("$line  (>72 chars)")
+    fi
+  done <<< "$commit_subjects"
+fi
 
 if [ "${#bad_subjects[@]}" -gt 0 ]; then
   for s in "${bad_subjects[@]}"; do findings+=("commit-subject: $s"); done
@@ -59,32 +63,57 @@ size_hard="${PROCESS_GATE_PR_SIZE_HARD:-800}"
 adr_dir="${PROCESS_GATE_ADR_DIR:-docs/adr}"
 pr_size_adr_file=""
 
-read -r adds dels < <(pg_diff_stats "$RANGE")
+diff_stats=""
+if ! diff_stats="$(git diff --shortstat "$RANGE" 2>/dev/null)"; then
+  findings+=("pr-size: unable to compute diff stats for range $RANGE")
+  worst="fail"
+  adds=0
+  dels=0
+else
+  adds=0
+  dels=0
+  if [[ "$diff_stats" =~ ([0-9]+)[[:space:]]insertion ]]; then
+    adds="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$diff_stats" =~ ([0-9]+)[[:space:]]deletion ]]; then
+    dels="${BASH_REMATCH[1]}"
+  fi
+fi
 total=$((adds + dels))
 
 # Subtract lockfile/generated lines.
 lock_lines=0
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  if pg_is_lockfile "$f"; then
-    lstat="$(git diff --numstat "$RANGE" -- "$f" | awk '{print $1+$2}')"
-    lock_lines=$((lock_lines + ${lstat:-0}))
-  fi
-done < <(pg_diff_files "$RANGE")
+changed_files=""
+if ! changed_files="$(pg_diff_files "$RANGE")"; then
+  findings+=("pr-size: unable to enumerate changed files for range $RANGE")
+  worst="fail"
+else
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if pg_is_lockfile "$f"; then
+      lstat="$(git diff --numstat "$RANGE" -- "$f" | awk '{print $1+$2}')"
+      lock_lines=$((lock_lines + ${lstat:-0}))
+    fi
+  done <<< "$changed_files"
+fi
 
 countable=$((total - lock_lines))
 
-# The ADR exception requires an ADR *authored by this change* — `references/pr-hygiene.md`
-# says the ADR must "name the oversized change and explain why splitting it would make
-# review or rollback less clear". Only an ADR **added** in the range can do that; an
-# existing ADR the diff merely brushed cannot, and accepting one made the hard cap
-# disarmable by any incidental edit under docs/adr.
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  case "$f" in
-    "$adr_dir"/*.md) pr_size_adr_file="$f"; break ;;
-  esac
-done < <(git diff --name-only --diff-filter=A "$RANGE" 2>/dev/null)
+# Invariant: hard-cap exemption requires an ADR *added* in the range (references/pr-hygiene.md
+# must name the oversized change and explain why splitting harms clarity). Existing ADRs
+# do not qualify; the oversized change remains a warn requiring reviewer ack even with the ADR.
+added_files=""
+if ! added_files="$(git diff --name-only --diff-filter=A "$RANGE" 2>/dev/null)"; then
+  findings+=("pr-size: unable to enumerate added files for range $RANGE")
+  worst="fail"
+else
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      "$adr_dir"/*.md) pr_size_adr_file="$f"; break ;;
+    esac
+  done <<< "$added_files"
+fi
 
 if [ "$countable" -gt "$size_hard" ]; then
   if [ -n "$pr_size_adr_file" ]; then

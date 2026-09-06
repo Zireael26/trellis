@@ -9,6 +9,7 @@ Git, subprocess, network, release, or user-global integration.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ EXIT_MALFORMED = 2
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$")
 ROUTE_RE = re.compile(
     r"^(?P<family>[a-z0-9][a-z0-9._-]*)::"
@@ -74,7 +76,7 @@ LEDGER_PREFIX = (
     LEDGER_HEADER,
     LEDGER_DIVIDER,
 )
-RECEIPT_FIELD_ORDER = (
+RECEIPT_V1_FIELD_ORDER = (
     "skill",
     "proposal_sha",
     "eval_cmd",
@@ -85,9 +87,61 @@ RECEIPT_FIELD_ORDER = (
     "run_at",
     "runner_model",
 )
-RECEIPT_FIELDS = frozenset(RECEIPT_FIELD_ORDER)
+RECEIPT_V1_FIELDS = frozenset(RECEIPT_V1_FIELD_ORDER)
+RECEIPT_V2_FIELD_ORDER = ("schema_version", *RECEIPT_V1_FIELD_ORDER, "evaluation")
+RECEIPT_V2_FIELDS = frozenset(RECEIPT_V2_FIELD_ORDER)
+RECEIPT_SCHEMA_VERSION = 2
 RUNNER_FIELD_ORDER = ("proposer", "evaluator", "judge")
 RUNNER_FIELDS = frozenset(RUNNER_FIELD_ORDER)
+EVALUATION_FIELDS = frozenset(
+    {
+        "cohort",
+        "cohort_id",
+        "candidate_sha256",
+        "candidate_snapshot",
+        "task_snapshots",
+        "provenance",
+        "benchmark",
+        "run_dir",
+        "artifacts",
+        "incumbents",
+    }
+)
+NESTED_EVALUATION_FIELDS = EVALUATION_FIELDS - {"incumbents"}
+COHORT_FIELDS = frozenset({"tasks", "executor", "grader", "repetitions", "seed"})
+COHORT_TASK_FIELDS = frozenset({"eval_id", "task_id", "snapshot_sha256"})
+EXECUTOR_FIELDS = frozenset(
+    {"route", "harness", "harness_version", "settings", "common_policy_sha256"}
+)
+GRADER_FIELDS = frozenset({"route", "config_sha256"})
+TASK_SNAPSHOT_FIELDS = frozenset({"eval_id", "path"})
+PROVENANCE_FIELDS = frozenset({"pattern", "path", "sha256"})
+FILE_REF_FIELDS = frozenset({"path", "sha256"})
+ARTIFACT_FIELDS = frozenset(
+    {"eval_id", "configuration", "run_number", "path", "sha256"}
+)
+INCUMBENT_FIELDS = frozenset({"proposal_sha", "accepted_receipt_sha256", "evaluation"})
+RUN_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "eval_id",
+        "configuration",
+        "run_number",
+        "status",
+        "exit_code",
+        "native_session_id",
+        "observed_executor",
+        "treatment_sha256",
+        "output",
+        "grade",
+    }
+)
+GRADE_FIELDS = frozenset({"route", "config_sha256", "pass_rate", "output"})
+RUN_RECEIPT_SCHEMA_VERSION = 1
+EXECUTED_STATUS = "executed"
+HARNESSES = frozenset({"claude", "codex", "pi"})
+CONFIGURATIONS = ("with_skill", "without_skill")
+TRELLIS_EVALUATION_FIELDS = frozenset({"cohort_id", "candidate_sha256", "run_dir"})
 QUALIFICATION_FIELDS = {
     "schema_version",
     "source",
@@ -135,14 +189,105 @@ class ProposalDiff:
 
 
 @dataclass(frozen=True)
+class BenchmarkRun:
+    eval_id: int
+    configuration: str
+    run_number: int
+    pass_rate: Decimal
+
+
+@dataclass(frozen=True)
 class Benchmark:
     score: Decimal
     baseline: Decimal
+    metadata: dict[str, Any]
+    runs: tuple[BenchmarkRun, ...]
+    evals_run: tuple[int, ...]
+    runs_per_configuration: int
+
+
+@dataclass(frozen=True)
+class FileRef:
+    path: PurePosixPath
+    sha256: str
+
+
+@dataclass(frozen=True)
+class CohortTask:
+    eval_id: int
+    task_id: str
+    snapshot_sha256: str
+
+
+@dataclass(frozen=True)
+class Executor:
+    raw: dict[str, Any]
+    route: str
+    harness: str
+    harness_version: str
+    common_policy_sha256: str
+
+
+@dataclass(frozen=True)
+class Grader:
+    route: str
+    config_sha256: str
+
+
+@dataclass(frozen=True)
+class Cohort:
+    raw: dict[str, Any]
+    cohort_id: str
+    tasks: tuple[CohortTask, ...]
+    executor: Executor
+    grader: Grader
+    repetitions: int
+    seed: str
+
+
+@dataclass(frozen=True)
+class RunArtifact:
+    eval_id: int
+    configuration: str
+    run_number: int
+    path: PurePosixPath
+    sha256: str
+
+
+@dataclass(frozen=True)
+class Incumbent:
+    proposal_sha: str
+    accepted_receipt_sha256: str
+    evaluation: Evaluation
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    raw: dict[str, Any]
+    cohort: Cohort
+    cohort_id: str
+    candidate_sha256: str
+    candidate_snapshot: PurePosixPath
+    task_snapshots: tuple[tuple[int, PurePosixPath], ...]
+    provenance: tuple[tuple[str, PurePosixPath, str], ...]
+    benchmark: FileRef
+    run_dir: PurePosixPath
+    artifacts: tuple[RunArtifact, ...]
+    incumbents: tuple[Incumbent, ...]
+
+
+@dataclass(frozen=True)
+class EvidenceBase:
+    root: Path
+    run_dir_relative: PurePosixPath
+    run_dir: Path
 
 
 @dataclass(frozen=True)
 class Receipt:
     raw: dict[str, Any]
+    schema_version: int
+    evaluation: Evaluation | None
     skill: str
     proposal_sha: str
     eval_cmd: str
@@ -196,6 +341,7 @@ class Ledger:
 class PreEvaluationProposal:
     root: Path
     skill: str
+    candidate: Path
     patterns: tuple[str, ...]
     new_evidence: tuple[str, ...]
     proposal_diff: ProposalDiff
@@ -205,10 +351,12 @@ class PreEvaluationProposal:
 class StaticProposal:
     root: Path
     skill: str
+    candidate: Path
     patterns: tuple[str, ...]
     new_evidence: tuple[str, ...]
     proposal_diff: ProposalDiff
     benchmark: Benchmark
+    benchmark_relative: PurePosixPath
     receipt: Receipt
     process_gate_path: Path
 
@@ -815,6 +963,365 @@ def parse_rfc3339_utc(value: Any, label: str) -> tuple[str, str]:
     return text, match.group("date")
 
 
+def require_route(value: Any, label: str) -> str:
+    route = require_plain_string(value, label)
+    if ROUTE_RE.fullmatch(route) is None:
+        fail(f"{label} must use canonical <family>::<provider/model> grammar")
+    return route
+
+
+def require_positive_int(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        fail(f"{label} must be a positive integer")
+    return value
+
+
+def require_sha256(value: Any, label: str) -> str:
+    text = require_plain_string(value, label)
+    if not SHA256_RE.fullmatch(text):
+        fail(f"{label} must be 64 lowercase hexadecimal characters")
+    return text
+
+
+def require_hashable_json(value: Any, label: str, depth: int = 0) -> None:
+    """Reject anything the canonical hashing grammar cannot encode stably."""
+    if depth > 32:
+        fail(f"{label} nests too deeply for canonical hashing")
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, str):
+        require_plain_string(value, label, allow_empty=True)
+        return
+    if isinstance(value, Decimal):
+        fail(f"{label} must not carry a floating JSON number; encode decimals as strings")
+    if isinstance(value, int):
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value, start=1):
+            require_hashable_json(item, f"{label} #{index}", depth + 1)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            require_plain_string(key, f"{label} key")
+            require_hashable_json(item, f"{label}.{key}", depth + 1)
+        return
+    fail(f"{label} contains a value the canonical hashing grammar does not accept")
+
+
+def canonical_json_bytes(value: Any, label: str) -> bytes:
+    require_hashable_json(value, label)
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_sha256(path: Path, label: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    except OSError as error:
+        fail(f"could not hash {label}: {error}")
+    return digest.hexdigest()
+
+
+def tree_digest(directory: Path, label: str) -> str:
+    """Digest a snapshot directory under the exact SCHEMA.md grammar."""
+    entries: list[tuple[bytes, bytes]] = []
+    stack = [directory]
+    while stack:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir())
+        except OSError as error:
+            fail(f"could not read {label}: {error}")
+        for child in children:
+            try:
+                mode = child.lstat().st_mode
+            except OSError as error:
+                fail(f"could not inspect {label}: {error}")
+            if stat.S_ISLNK(mode):
+                fail(f"{label} must not contain a symlink")
+            if stat.S_ISDIR(mode):
+                stack.append(child)
+                continue
+            if not stat.S_ISREG(mode):
+                fail(f"{label} must contain only regular files")
+            relative = child.relative_to(directory).as_posix()
+            require_plain_string(relative, f"{label} entry path")
+            executable = b"1" if mode & 0o111 else b"0"
+            entries.append(
+                (
+                    relative.encode("utf-8"),
+                    executable + b"\0" + file_sha256(child, label).encode("ascii"),
+                )
+            )
+    if not entries:
+        fail(f"{label} must contain at least one regular file")
+    entries.sort(key=lambda item: item[0])
+    payload = b"".join(name + b"\0" + rest + b"\n" for name, rest in entries)
+    return sha256_hex(payload)
+
+
+def evidence_directory(base: EvidenceBase, relative: PurePosixPath, label: str) -> Path:
+    path = base.root.joinpath(*relative.parts)
+    if relative_to_or_none(path, base.run_dir) is None:
+        fail(f"{label} must be below the evaluation run directory")
+    return existing_evidence_path(base.root, path, relative, label, directory=True)
+
+
+def evidence_file(base: EvidenceBase, relative: PurePosixPath, label: str) -> Path:
+    path = base.root.joinpath(*relative.parts)
+    if relative_to_or_none(path, base.run_dir) is None:
+        fail(f"{label} must be below the evaluation run directory")
+    return existing_evidence_path(base.root, path, relative, label, directory=False)
+
+
+def existing_evidence_path(
+    root: Path,
+    path: Path,
+    relative: PurePosixPath,
+    label: str,
+    *,
+    directory: bool,
+) -> Path:
+    if path.is_symlink():
+        fail(f"{label} must not be a symlink: {relative}")
+    if not path.exists():
+        raise NotReadyError(f"{label} is missing from the run evidence: {relative}")
+    if directory:
+        if not path.is_dir():
+            fail(f"{label} must be a real directory: {relative}")
+    elif not path.is_file():
+        fail(f"{label} must be a regular file: {relative}")
+    ensure_no_symlink_below(root, path, label)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        fail(f"could not resolve {label}: {error}")
+    if resolved != path or relative_to_or_none(resolved, root) is None:
+        fail(f"{label} must resolve beneath the project root")
+    return path
+
+
+def evaluation_run_directory(root: Path, relative: PurePosixPath, label: str) -> Path:
+    path = root.joinpath(*relative.parts)
+    return existing_evidence_path(root, path, relative, label, directory=True)
+
+
+def parse_file_ref(value: Any, label: str) -> FileRef:
+    if not isinstance(value, dict) or set(value) != FILE_REF_FIELDS:
+        fail(f"{label} must contain exactly path and sha256")
+    return FileRef(
+        path=safe_repo_path(value["path"], f"{label} path"),
+        sha256=require_sha256(value["sha256"], f"{label} sha256"),
+    )
+
+
+def parse_cohort(value: Any, label: str) -> Cohort:
+    if not isinstance(value, dict) or set(value) != COHORT_FIELDS:
+        fail(f"{label} must contain exactly tasks, executor, grader, repetitions, and seed")
+    tasks_value = value["tasks"]
+    if not isinstance(tasks_value, list) or not tasks_value:
+        fail(f"{label} tasks must be a nonempty array")
+    tasks: list[CohortTask] = []
+    seen_eval_ids: set[int] = set()
+    seen_task_ids: set[str] = set()
+    for index, item in enumerate(tasks_value, start=1):
+        if not isinstance(item, dict) or set(item) != COHORT_TASK_FIELDS:
+            fail(f"{label} task #{index} must contain exactly eval_id, task_id, and snapshot_sha256")
+        eval_id = require_positive_int(item["eval_id"], f"{label} task #{index} eval_id")
+        task_id = require_plain_string(item["task_id"], f"{label} task #{index} task_id")
+        snapshot = require_sha256(item["snapshot_sha256"], f"{label} task #{index} snapshot_sha256")
+        if eval_id in seen_eval_ids or task_id in seen_task_ids:
+            fail(f"{label} tasks must carry unique eval_id and task_id values")
+        seen_eval_ids.add(eval_id)
+        seen_task_ids.add(task_id)
+        tasks.append(CohortTask(eval_id=eval_id, task_id=task_id, snapshot_sha256=snapshot))
+
+    executor_value = value["executor"]
+    if not isinstance(executor_value, dict) or set(executor_value) != EXECUTOR_FIELDS:
+        fail(f"{label} executor must contain exactly route, harness, harness_version, settings, and common_policy_sha256")
+    harness = require_plain_string(executor_value["harness"], f"{label} executor harness")
+    if harness not in HARNESSES:
+        fail(f"{label} executor harness must be claude, codex, or pi")
+    require_hashable_json(executor_value["settings"], f"{label} executor settings")
+    executor = Executor(
+        raw=executor_value,
+        route=require_route(executor_value["route"], f"{label} executor route"),
+        harness=harness,
+        harness_version=require_plain_string(
+            executor_value["harness_version"], f"{label} executor harness_version"
+        ),
+        common_policy_sha256=require_sha256(
+            executor_value["common_policy_sha256"], f"{label} executor common_policy_sha256"
+        ),
+    )
+
+    grader_value = value["grader"]
+    if not isinstance(grader_value, dict) or set(grader_value) != GRADER_FIELDS:
+        fail(f"{label} grader must contain exactly route and config_sha256")
+    grader = Grader(
+        route=require_route(grader_value["route"], f"{label} grader route"),
+        config_sha256=require_sha256(grader_value["config_sha256"], f"{label} grader config_sha256"),
+    )
+
+    repetitions = require_positive_int(value["repetitions"], f"{label} repetitions")
+    seed = require_plain_string(value["seed"], f"{label} seed")
+    return Cohort(
+        raw=value,
+        cohort_id=sha256_hex(canonical_json_bytes(value, label)),
+        tasks=tuple(tasks),
+        executor=executor,
+        grader=grader,
+        repetitions=repetitions,
+        seed=seed,
+    )
+
+
+def parse_evaluation(value: Any, label: str, *, nested: bool = False) -> Evaluation:
+    expected = NESTED_EVALUATION_FIELDS if nested else EVALUATION_FIELDS
+    if not isinstance(value, dict) or set(value) != expected:
+        fail(f"{label} must contain exactly the version 2 evaluation fields")
+    require_hashable_json(value, label)
+    cohort = parse_cohort(value["cohort"], f"{label} cohort")
+    cohort_id = require_sha256(value["cohort_id"], f"{label} cohort_id")
+    if cohort_id != cohort.cohort_id:
+        fail(f"{label} cohort_id is not the canonical digest of its own cohort")
+    candidate_sha256 = require_sha256(value["candidate_sha256"], f"{label} candidate_sha256")
+    run_dir = safe_repo_path(value["run_dir"], f"{label} run_dir")
+    candidate_snapshot = safe_repo_path(value["candidate_snapshot"], f"{label} candidate_snapshot")
+
+    snapshots_value = value["task_snapshots"]
+    if not isinstance(snapshots_value, list) or len(snapshots_value) != len(cohort.tasks):
+        fail(f"{label} task_snapshots must carry exactly one entry per cohort task")
+    task_snapshots: list[tuple[int, PurePosixPath]] = []
+    snapshot_ids: set[int] = set()
+    directory_paths: set[str] = {str(candidate_snapshot)}
+    for index, item in enumerate(snapshots_value, start=1):
+        if not isinstance(item, dict) or set(item) != TASK_SNAPSHOT_FIELDS:
+            fail(f"{label} task_snapshot #{index} must contain exactly eval_id and path")
+        eval_id = require_positive_int(item["eval_id"], f"{label} task_snapshot #{index} eval_id")
+        path = safe_repo_path(item["path"], f"{label} task_snapshot #{index} path")
+        if eval_id in snapshot_ids:
+            fail(f"{label} task_snapshots must not repeat an eval_id")
+        if str(path) in directory_paths:
+            fail(f"{label} snapshot directories must not be duplicated")
+        snapshot_ids.add(eval_id)
+        directory_paths.add(str(path))
+        task_snapshots.append((eval_id, path))
+    if snapshot_ids != {task.eval_id for task in cohort.tasks}:
+        fail(f"{label} task_snapshots do not map the cohort task identities")
+
+    provenance_value = value["provenance"]
+    if not isinstance(provenance_value, list) or not provenance_value:
+        fail(f"{label} provenance must be a nonempty array")
+    provenance: list[tuple[str, PurePosixPath, str]] = []
+    file_paths: set[str] = set()
+    seen_patterns: set[str] = set()
+    for index, item in enumerate(provenance_value, start=1):
+        if not isinstance(item, dict) or set(item) != PROVENANCE_FIELDS:
+            fail(f"{label} provenance #{index} must contain exactly pattern, path, and sha256")
+        pattern = require_plain_string(item["pattern"], f"{label} provenance #{index} pattern")
+        if not SLUG_RE.fullmatch(pattern):
+            fail(f"{label} provenance #{index} pattern must be a lower-case slug")
+        path = safe_repo_path(item["path"], f"{label} provenance #{index} path")
+        digest = require_sha256(item["sha256"], f"{label} provenance #{index} sha256")
+        if pattern in seen_patterns or str(path) in file_paths:
+            fail(f"{label} provenance must not repeat a pattern or an evidence path")
+        seen_patterns.add(pattern)
+        file_paths.add(str(path))
+        provenance.append((pattern, path, digest))
+
+    benchmark = parse_file_ref(value["benchmark"], f"{label} benchmark")
+    if str(benchmark.path) in file_paths:
+        fail(f"{label} benchmark path duplicates another evidence path")
+    file_paths.add(str(benchmark.path))
+
+    artifacts_value = value["artifacts"]
+    expected_artifacts = len(cohort.tasks) * cohort.repetitions * len(CONFIGURATIONS)
+    if not isinstance(artifacts_value, list) or len(artifacts_value) != expected_artifacts:
+        raise NotReadyError(
+            f"{label} artifacts must cover the complete task by repetition by configuration product"
+        )
+    artifacts: list[RunArtifact] = []
+    identities: set[tuple[int, str, int]] = set()
+    for index, item in enumerate(artifacts_value, start=1):
+        if not isinstance(item, dict) or set(item) != ARTIFACT_FIELDS:
+            fail(f"{label} artifact #{index} must contain exactly eval_id, configuration, run_number, path, and sha256")
+        eval_id = require_positive_int(item["eval_id"], f"{label} artifact #{index} eval_id")
+        configuration = require_plain_string(item["configuration"], f"{label} artifact #{index} configuration")
+        run_number = require_positive_int(item["run_number"], f"{label} artifact #{index} run_number")
+        path = safe_repo_path(item["path"], f"{label} artifact #{index} path")
+        digest = require_sha256(item["sha256"], f"{label} artifact #{index} sha256")
+        if eval_id not in snapshot_ids or configuration not in CONFIGURATIONS or run_number > cohort.repetitions:
+            fail(f"{label} artifact #{index} is outside the declared cohort run identities")
+        identity = (eval_id, configuration, run_number)
+        if identity in identities:
+            raise NotReadyError(f"{label} artifacts repeat run identity {identity}")
+        if str(path) in file_paths:
+            fail(f"{label} artifacts must not duplicate an evidence path")
+        identities.add(identity)
+        file_paths.add(str(path))
+        artifacts.append(
+            RunArtifact(
+                eval_id=eval_id,
+                configuration=configuration,
+                run_number=run_number,
+                path=path,
+                sha256=digest,
+            )
+        )
+    if len(identities) != expected_artifacts:
+        raise NotReadyError(f"{label} artifacts do not cover every declared run identity")
+
+    incumbents: list[Incumbent] = []
+    if not nested:
+        incumbents_value = value["incumbents"]
+        if not isinstance(incumbents_value, list):
+            fail(f"{label} incumbents must be an array")
+        seen_shas: set[str] = set()
+        for index, item in enumerate(incumbents_value, start=1):
+            if not isinstance(item, dict) or set(item) != INCUMBENT_FIELDS:
+                fail(f"{label} incumbent #{index} must contain exactly proposal_sha, accepted_receipt_sha256, and evaluation")
+            proposal_sha = require_plain_string(item["proposal_sha"], f"{label} incumbent #{index} proposal_sha")
+            if not SHA_RE.fullmatch(proposal_sha):
+                fail(f"{label} incumbent #{index} proposal_sha must be 40 lowercase hexadecimal characters")
+            if proposal_sha in seen_shas:
+                fail(f"{label} incumbents must not repeat a proposal_sha")
+            seen_shas.add(proposal_sha)
+            incumbents.append(
+                Incumbent(
+                    proposal_sha=proposal_sha,
+                    accepted_receipt_sha256=require_sha256(
+                        item["accepted_receipt_sha256"], f"{label} incumbent #{index} accepted_receipt_sha256"
+                    ),
+                    evaluation=parse_evaluation(
+                        item["evaluation"], f"{label} incumbent #{index} evaluation", nested=True
+                    ),
+                )
+            )
+
+    return Evaluation(
+        raw=value,
+        cohort=cohort,
+        cohort_id=cohort_id,
+        candidate_sha256=candidate_sha256,
+        candidate_snapshot=candidate_snapshot,
+        task_snapshots=tuple(task_snapshots),
+        provenance=tuple(provenance),
+        benchmark=benchmark,
+        run_dir=run_dir,
+        artifacts=tuple(artifacts),
+        incumbents=tuple(incumbents),
+    )
+
+
 def parse_benchmark(path: Path, skill: str) -> Benchmark:
     value = load_json(path, "benchmark")
     if not isinstance(value, dict) or set(value) != BENCHMARK_TOP_LEVEL_FIELDS:
@@ -847,6 +1354,7 @@ def parse_benchmark(path: Path, skill: str) -> Benchmark:
         fail("benchmark runs do not match evals_run and runs_per_configuration")
     rates: dict[str, list[Decimal]] = {"with_skill": [], "without_skill": []}
     identities: set[tuple[int, str, int]] = set()
+    parsed_runs: list[BenchmarkRun] = []
     for run_index, run in enumerate(runs, start=1):
         if not isinstance(run, dict):
             fail(f"benchmark run #{run_index} must be an object")
@@ -873,6 +1381,14 @@ def parse_benchmark(path: Path, skill: str) -> Benchmark:
         rate = decimal_from_json_number(result["pass_rate"], f"benchmark run #{run_index} pass_rate")
         require_pass_rate(rate, f"benchmark run #{run_index} pass_rate")
         rates[configuration].append(rate)
+        parsed_runs.append(
+            BenchmarkRun(
+                eval_id=eval_id,
+                configuration=configuration,
+                run_number=run_number,
+                pass_rate=rate,
+            )
+        )
     summary = value["run_summary"]
     if not isinstance(summary, dict):
         fail("benchmark run_summary must be an object")
@@ -893,12 +1409,27 @@ def parse_benchmark(path: Path, skill: str) -> Benchmark:
     return Benchmark(
         score=means["with_skill"],
         baseline=means["without_skill"],
+        metadata=metadata,
+        runs=tuple(parsed_runs),
+        evals_run=tuple(evals_run),
+        runs_per_configuration=runs_per_configuration,
     )
 
 
 def parse_receipt_value(value: Any, label: str = "machine receipt") -> Receipt:
-    if not isinstance(value, dict) or set(value) != RECEIPT_FIELDS:
-        fail(f"{label} must contain exactly the nine receipt fields")
+    if not isinstance(value, dict):
+        fail(f"{label} must be a JSON object")
+    if "schema_version" in value:
+        version = value["schema_version"]
+        if isinstance(version, bool) or version != RECEIPT_SCHEMA_VERSION:
+            fail(f"{label} declares an unsupported schema_version")
+        if set(value) != RECEIPT_V2_FIELDS:
+            fail(f"{label} must contain exactly the eleven version 2 receipt fields")
+        schema_version = RECEIPT_SCHEMA_VERSION
+    else:
+        if set(value) != RECEIPT_V1_FIELDS:
+            fail(f"{label} must contain exactly the nine receipt fields")
+        schema_version = 1
     skill = require_plain_string(value["skill"], f"{label} skill")
     if not SLUG_RE.fullmatch(skill):
         fail(f"{label} skill must be a lower-case slug")
@@ -931,8 +1462,15 @@ def parse_receipt_value(value: Any, label: str = "machine receipt") -> Receipt:
         families["evaluator"] != families["proposer"]
         and families["judge"] != families["proposer"]
     )
+    evaluation = (
+        parse_evaluation(value["evaluation"], f"{label} evaluation")
+        if schema_version == RECEIPT_SCHEMA_VERSION
+        else None
+    )
     return Receipt(
         raw=value,
+        schema_version=schema_version,
+        evaluation=evaluation,
         skill=skill,
         proposal_sha=proposal_sha,
         eval_cmd=eval_cmd,
@@ -1163,14 +1701,296 @@ def validate_history_integrity(root: Path, ledger: Ledger) -> dict[str, tuple[Le
     return by_sha
 
 
-def greatest_accepted_score(root: Path, ledger: Ledger, skill: str) -> Decimal | None:
+def validate_run_artifact(
+    base: EvidenceBase,
+    evaluation: Evaluation,
+    artifact: RunArtifact,
+    benchmark_rate: Decimal,
+    label: str,
+    seen_paths: set[PurePosixPath],
+) -> None:
+    """Verify one terminal raw run receipt and its bound native evidence."""
+    path = evidence_file(base, artifact.path, f"{label} run receipt")
+    if file_sha256(path, f"{label} run receipt") != artifact.sha256:
+        raise NotReadyError(f"{label} run receipt bytes do not match their recorded digest: {artifact.path}")
+    value = load_json(path, f"{label} run receipt")
+    if not isinstance(value, dict) or set(value) != RUN_RECEIPT_FIELDS:
+        fail(f"{label} run receipt must contain exactly the eleven terminal run fields")
+    require_hashable_json(value, f"{label} run receipt")
+    version = value["schema_version"]
+    if isinstance(version, bool) or version != RUN_RECEIPT_SCHEMA_VERSION:
+        fail(f"{label} run receipt declares an unsupported schema_version")
+    if (
+        value["eval_id"] != artifact.eval_id
+        or isinstance(value["eval_id"], bool)
+        or value["configuration"] != artifact.configuration
+        or value["run_number"] != artifact.run_number
+        or isinstance(value["run_number"], bool)
+    ):
+        fail(f"{label} run receipt identity disagrees with its artifact reference")
+    status = require_plain_string(value["status"], f"{label} run receipt status")
+    if status != EXECUTED_STATUS:
+        raise NotReadyError(
+            f"{label} run {artifact.eval_id}/{artifact.configuration}/{artifact.run_number} "
+            f"reports status {status!r} and cannot count as a scored success"
+        )
+    exit_code = value["exit_code"]
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        fail(f"{label} run receipt exit_code must be an integer")
+    if exit_code != 0:
+        raise NotReadyError(
+            f"{label} run {artifact.eval_id}/{artifact.configuration}/{artifact.run_number} "
+            f"exited {exit_code} and cannot count as a scored success"
+        )
+    require_plain_string(value["native_session_id"], f"{label} run receipt native_session_id")
+    if value["observed_executor"] != evaluation.cohort.executor.raw:
+        raise NotReadyError(
+            f"{label} run {artifact.eval_id}/{artifact.configuration}/{artifact.run_number} "
+            "observed a different executor than the cohort declares"
+        )
+    treatment = value["treatment_sha256"]
+    if artifact.configuration == "with_skill":
+        if treatment != evaluation.candidate_sha256:
+            raise NotReadyError(
+                f"{label} with_skill run {artifact.eval_id}/{artifact.run_number} "
+                "did not load the evaluated candidate treatment"
+            )
+    elif treatment is not None:
+        raise NotReadyError(
+            f"{label} without_skill run {artifact.eval_id}/{artifact.run_number} "
+            "must record a null treatment"
+        )
+    output = parse_file_ref(value["output"], f"{label} run receipt output")
+    if output.path in seen_paths:
+        fail(f"{label} run output duplicates an evaluation evidence path")
+    seen_paths.add(output.path)
+    require_nonempty_evidence_file(base, output, f"{label} run output")
+
+    grade = value["grade"]
+    if not isinstance(grade, dict) or set(grade) != GRADE_FIELDS:
+        fail(f"{label} run receipt grade must contain exactly route, config_sha256, pass_rate, and output")
+    if require_route(grade["route"], f"{label} run receipt grade route") != evaluation.cohort.grader.route:
+        raise NotReadyError(f"{label} run receipt grade route is not the cohort grader route")
+    if require_sha256(grade["config_sha256"], f"{label} run receipt grade config_sha256") != evaluation.cohort.grader.config_sha256:
+        raise NotReadyError(f"{label} run receipt grade configuration is not the cohort grader configuration")
+    _pass_text, pass_rate = decimal_from_string(grade["pass_rate"], f"{label} run receipt grade pass_rate")
+    require_pass_rate(pass_rate, f"{label} run receipt grade pass_rate")
+    if pass_rate != benchmark_rate:
+        raise NotReadyError(
+            f"{label} run {artifact.eval_id}/{artifact.configuration}/{artifact.run_number} "
+            "grade pass_rate disagrees with its benchmark run"
+        )
+    grade_output = parse_file_ref(grade["output"], f"{label} run receipt grade output")
+    if grade_output.path in seen_paths:
+        fail(f"{label} grading evidence duplicates an evaluation evidence path")
+    seen_paths.add(grade_output.path)
+    require_nonempty_evidence_file(base, grade_output, f"{label} grading evidence")
+
+
+def require_nonempty_evidence_file(base: EvidenceBase, ref: FileRef, label: str) -> None:
+    path = evidence_file(base, ref.path, label)
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        fail(f"could not inspect {label}: {error}")
+    if size == 0:
+        raise NotReadyError(f"{label} must be nonempty raw evidence: {ref.path}")
+    if file_sha256(path, label) != ref.sha256:
+        raise NotReadyError(f"{label} bytes do not match their recorded digest: {ref.path}")
+
+
+def bind_evaluation(
+    root: Path,
+    evaluation: Evaluation,
+    skill: str,
+    label: str,
+    *,
+    expected_patterns: tuple[str, ...],
+    expected_benchmark_relative: PurePosixPath | None = None,
+    expected_candidate_dir: Path | None = None,
+) -> Benchmark:
+    """Revalidate one evaluation object against the evidence it binds on disk."""
+    run_dir = evaluation_run_directory(root, evaluation.run_dir, f"{label} run_dir")
+    base = EvidenceBase(root=root, run_dir_relative=evaluation.run_dir, run_dir=run_dir)
+    seen_paths = {evaluation.run_dir}
+    for relative in (
+        evaluation.candidate_snapshot,
+        *(path for _eval_id, path in evaluation.task_snapshots),
+        *(path for _pattern, path, _digest in evaluation.provenance),
+        evaluation.benchmark.path,
+        *(artifact.path for artifact in evaluation.artifacts),
+    ):
+        if relative in seen_paths:
+            fail(f"{label} duplicates an evaluation evidence path: {relative}")
+        seen_paths.add(relative)
+
+    snapshot = evidence_directory(base, evaluation.candidate_snapshot, f"{label} candidate snapshot")
+    if tree_digest(snapshot, f"{label} candidate snapshot") != evaluation.candidate_sha256:
+        raise NotReadyError(f"{label} candidate snapshot does not digest to candidate_sha256")
+    if expected_candidate_dir is not None:
+        if tree_digest(expected_candidate_dir, f"{label} proposed candidate") != evaluation.candidate_sha256:
+            raise NotReadyError(f"{label} candidate_sha256 is not the current proposed candidate tree digest")
+
+    task_digests = {task.eval_id: task.snapshot_sha256 for task in evaluation.cohort.tasks}
+    for eval_id, relative in evaluation.task_snapshots:
+        directory = evidence_directory(base, relative, f"{label} task snapshot {eval_id}")
+        if tree_digest(directory, f"{label} task snapshot {eval_id}") != task_digests[eval_id]:
+            raise NotReadyError(f"{label} task snapshot {eval_id} does not digest to its cohort task identity")
+
+    if tuple(sorted(pattern for pattern, _path, _digest in evaluation.provenance)) != tuple(sorted(expected_patterns)):
+        raise NotReadyError(f"{label} provenance patterns are not the exact selected pattern set")
+    for pattern, relative, digest in evaluation.provenance:
+        path = evidence_file(base, relative, f"{label} provenance {pattern}")
+        if file_sha256(path, f"{label} provenance {pattern}") != digest:
+            raise NotReadyError(f"{label} provenance snapshot for {pattern} does not match its recorded digest")
+
+    benchmark_path = evidence_file(base, evaluation.benchmark.path, f"{label} benchmark")
+    if expected_benchmark_relative is not None and evaluation.benchmark.path != expected_benchmark_relative:
+        raise NotReadyError(f"{label} benchmark path is not the evaluated candidate's benchmark path")
+    if file_sha256(benchmark_path, f"{label} benchmark") != evaluation.benchmark.sha256:
+        raise NotReadyError(f"{label} benchmark bytes do not match their recorded digest")
+    benchmark = parse_benchmark(benchmark_path, skill)
+
+    trellis = benchmark.metadata.get("trellis_evaluation")
+    if not isinstance(trellis, dict) or set(trellis) != TRELLIS_EVALUATION_FIELDS:
+        fail(f"{label} benchmark metadata must carry an exact trellis_evaluation cohort_id, candidate_sha256, and run_dir")
+    if (
+        trellis["cohort_id"] != evaluation.cohort_id
+        or trellis["candidate_sha256"] != evaluation.candidate_sha256
+        or trellis["run_dir"] != str(evaluation.run_dir)
+    ):
+        raise NotReadyError(f"{label} benchmark metadata does not bind this cohort, candidate, and run directory")
+
+    if set(benchmark.evals_run) != set(task_digests) or benchmark.runs_per_configuration != evaluation.cohort.repetitions:
+        raise NotReadyError(f"{label} benchmark run shape does not match the declared cohort")
+    rates = {
+        (run.eval_id, run.configuration, run.run_number): run.pass_rate for run in benchmark.runs
+    }
+    identities = {
+        (artifact.eval_id, artifact.configuration, artifact.run_number)
+        for artifact in evaluation.artifacts
+    }
+    if identities != set(rates):
+        raise NotReadyError(f"{label} artifacts do not cover exactly the benchmark run identities")
+    for artifact in evaluation.artifacts:
+        validate_run_artifact(
+            base,
+            evaluation,
+            artifact,
+            rates[(artifact.eval_id, artifact.configuration, artifact.run_number)],
+            label,
+            seen_paths,
+        )
+    return benchmark
+
+
+def validate_evaluation_evidence(proposal: StaticProposal) -> None:
+    """Require a version 2 receipt and revalidate every artifact it binds."""
+    receipt = proposal.receipt
+    if receipt.schema_version != RECEIPT_SCHEMA_VERSION or receipt.evaluation is None:
+        raise NotReadyError(
+            "a new evaluated proposal requires a schema_version 2 receipt carrying cohort evaluation evidence"
+        )
+    evaluation = receipt.evaluation
+    if evaluation.cohort.executor.route != receipt.runner_model["evaluator"]:
+        raise NotReadyError("cohort executor route does not match the receipt evaluator route")
+    if evaluation.cohort.grader.route != receipt.runner_model["judge"]:
+        raise NotReadyError("cohort grader route does not match the receipt judge route")
+    bound = bind_evaluation(
+        proposal.root,
+        evaluation,
+        proposal.skill,
+        "receipt evaluation",
+        expected_patterns=proposal.patterns,
+        expected_benchmark_relative=proposal.benchmark_relative,
+        expected_candidate_dir=proposal.candidate,
+    )
+    if bound.score != proposal.benchmark.score or bound.baseline != proposal.benchmark.baseline:
+        raise NotReadyError("receipt evaluation benchmark does not agree with the supplied benchmark")
+
+
+def sidecar_bytes_digest(root: Path, row: LedgerRow) -> str:
+    path = receipt_path_for_row(root, row)
+    ensure_regular_file_below(root, path, f"linked receipt {row.receipt_target}")
+    return file_sha256(path, f"linked receipt {row.receipt_target}")
+
+
+def validate_incumbent(
+    root: Path,
+    proposal: StaticProposal,
+    row: LedgerRow,
+    accepted: Receipt,
+    incumbent: Incumbent,
+) -> Decimal:
+    """Bind one fresh same-cohort re-evaluation to an accepted proposal."""
+    label = f"incumbent re-evaluation {incumbent.proposal_sha}"
+    if incumbent.accepted_receipt_sha256 != sidecar_bytes_digest(root, row):
+        raise NotReadyError(f"{label} does not bind the exact accepted sidecar bytes")
+    assert accepted.evaluation is not None
+    if incumbent.evaluation.candidate_sha256 != accepted.evaluation.candidate_sha256:
+        raise NotReadyError(f"{label} does not re-evaluate the accepted candidate content")
+    assert proposal.receipt.evaluation is not None
+    if incumbent.evaluation.cohort_id != proposal.receipt.evaluation.cohort_id:
+        raise NotReadyError(f"{label} was not measured in the candidate cohort")
+    benchmark = bind_evaluation(
+        root,
+        incumbent.evaluation,
+        row.skill,
+        label,
+        expected_patterns=row.patterns,
+    )
+    return benchmark.score
+
+
+def applicable_best_before(root: Path, ledger: Ledger, proposal: StaticProposal) -> Decimal:
+    """Cover every accepted version of the skill or refuse as NOT-READY."""
+    evaluation = proposal.receipt.evaluation
+    if evaluation is None:
+        raise NotReadyError("a comparable proposal requires a schema_version 2 evaluation")
+    accepted_rows = [
+        row for row in ledger.rows if row.skill == proposal.skill and row.verdict == "accepted"
+    ]
+    incumbents = {entry.proposal_sha: entry for entry in evaluation.incumbents}
+    accepted_shas = {row.diff_head for row in accepted_rows}
+    for sha in incumbents:
+        if sha not in accepted_shas:
+            raise NotReadyError(
+                f"incumbent re-evaluation {sha} does not refer to an accepted proposal for this skill"
+            )
+    if not accepted_rows:
+        return proposal.benchmark.baseline
+
     scores: list[Decimal] = []
-    for row in ledger.rows:
-        if row.skill == skill and row.verdict == "accepted":
-            receipt = validate_row_sidecar(root, row, required=True)
-            assert receipt is not None
-            scores.append(receipt.score)
-    return max(scores) if scores else None
+    for row in accepted_rows:
+        accepted = validate_row_sidecar(root, row, required=True)
+        assert accepted is not None
+        if accepted.schema_version != RECEIPT_SCHEMA_VERSION or accepted.evaluation is None:
+            raise NotReadyError(
+                f"accepted proposal {accepted.proposal_sha} is a legacy version 1 receipt with no "
+                "verifiable candidate-content binding; a content-bound re-evaluation is required"
+            )
+        incumbent = incumbents.get(accepted.proposal_sha)
+        if incumbent is not None:
+            scores.append(validate_incumbent(root, proposal, row, accepted, incumbent))
+            continue
+        if accepted.evaluation.cohort_id != evaluation.cohort_id:
+            raise NotReadyError(
+                f"accepted proposal {accepted.proposal_sha} was measured in a different cohort and "
+                "carries no bound same-cohort re-evaluation"
+            )
+        bound = bind_evaluation(
+            root,
+            accepted.evaluation,
+            row.skill,
+            f"accepted proposal {accepted.proposal_sha}",
+            expected_patterns=row.patterns,
+        )
+        if bound.score != accepted.score:
+            raise NotReadyError(
+                f"accepted proposal {accepted.proposal_sha} score disagrees with its bound benchmark"
+            )
+        scores.append(accepted.score)
+    return max(scores)
 
 
 def matching_rejected_rows(ledger: Ledger, patterns: tuple[str, ...]) -> list[LedgerRow]:
@@ -1206,11 +2026,6 @@ def validate_benchmark_receipt_match(proposal: StaticProposal) -> None:
         raise NotReadyError("machine receipt baseline does not match benchmark without-skill mean")
 
 
-def applicable_best_before(root: Path, ledger: Ledger, proposal: StaticProposal) -> Decimal:
-    accepted = greatest_accepted_score(root, ledger, proposal.skill)
-    return accepted if accepted is not None else proposal.benchmark.baseline
-
-
 def validate_eval_passed_gate(root: Path, ledger: Ledger, proposal: StaticProposal) -> Decimal:
     if not proposal.receipt.runner_families_separated:
         raise NotReadyError("evaluator and judge runner families must each differ from the proposer family")
@@ -1242,6 +2057,7 @@ def build_pre_evaluation_proposal(args: argparse.Namespace) -> PreEvaluationProp
     return PreEvaluationProposal(
         root=root,
         skill=skill,
+        candidate=candidate,
         patterns=patterns,
         new_evidence=new_evidence,
         proposal_diff=proposal_diff,
@@ -1253,15 +2069,25 @@ def build_static_proposal(
     pre_evaluation: PreEvaluationProposal | None = None,
 ) -> StaticProposal:
     pre = pre_evaluation if pre_evaluation is not None else build_pre_evaluation_proposal(args)
-    benchmark = parse_benchmark(Path(args.benchmark), pre.skill)
+    benchmark_path = Path(args.benchmark)
+    benchmark = parse_benchmark(benchmark_path, pre.skill)
+    try:
+        resolved_benchmark = benchmark_path.resolve(strict=True)
+    except OSError as error:
+        fail(f"could not resolve the benchmark path: {error}")
+    benchmark_relative = relative_to_or_none(resolved_benchmark, pre.root)
+    if benchmark_relative is None:
+        raise NotReadyError("the benchmark must be a project-local path beneath the project root")
     receipt = parse_receipt(Path(args.receipt))
     proposal = StaticProposal(
         root=pre.root,
         skill=pre.skill,
+        candidate=pre.candidate,
         patterns=pre.patterns,
         new_evidence=pre.new_evidence,
         proposal_diff=pre.proposal_diff,
         benchmark=benchmark,
+        benchmark_relative=PurePosixPath(benchmark_relative.as_posix()),
         receipt=receipt,
         process_gate_path=Path(args.process_gate_receipt),
     )
@@ -1277,6 +2103,7 @@ def check_proposal(args: argparse.Namespace) -> dict[str, Any]:
     history = validate_history_integrity(proposal.root, ledger)
     if proposal.receipt.proposal_sha in history:
         raise NotReadyError("proposal SHA is already recorded")
+    validate_evaluation_evidence(proposal)
     validate_eval_passed_gate(proposal.root, ledger, proposal)
     return {
         "status": "EVAL-PASSED",
@@ -1617,7 +2444,12 @@ def write_new_sidecar(root: Path, receipt: Receipt) -> Iterator[TextIO]:
 
 
 def receipt_json_text(receipt: Receipt) -> str:
-    value = {field: receipt.raw[field] for field in RECEIPT_FIELD_ORDER}
+    order = (
+        RECEIPT_V2_FIELD_ORDER
+        if receipt.schema_version == RECEIPT_SCHEMA_VERSION
+        else RECEIPT_V1_FIELD_ORDER
+    )
+    value = {field: receipt.raw[field] for field in order}
     value["runner_model"] = {
         role: receipt.runner_model[role] for role in RUNNER_FIELD_ORDER
     }
@@ -1625,7 +2457,9 @@ def receipt_json_text(receipt: Receipt) -> str:
 
 
 def immutable_receipt_fields_match(existing: Receipt, incoming: Receipt) -> bool:
-    for field in RECEIPT_FIELDS - {"verdict"}:
+    if set(existing.raw) != set(incoming.raw):
+        return False
+    for field in set(existing.raw) - {"verdict"}:
         if existing.raw[field] != incoming.raw[field]:
             return False
     return True
@@ -1652,6 +2486,7 @@ def record_new(
 ) -> dict[str, Any]:
     enforce_rejected_set_rule(ledger, proposal.patterns, proposal.new_evidence)
     # The caller validated the complete locked history before dispatching here.
+    validate_evaluation_evidence(proposal)
     if proposal.receipt.verdict == "eval-passed":
         validate_eval_passed_gate(proposal.root, ledger, proposal)
     elif proposal.receipt.verdict == "failed":
@@ -1744,6 +2579,11 @@ def record_existing(
     if not verdict_changed and not pr_changed:
         raise NotReadyError("duplicate record operation would make no forward transition")
     if new_verdict == "accepted":
+        if existing_receipt.schema_version != RECEIPT_SCHEMA_VERSION:
+            raise NotReadyError(
+                "a legacy version 1 proposal cannot be newly accepted; it requires a version 2 "
+                "cohort re-evaluation before it can become a comparable incumbent"
+            )
         if not PR_URL_RE.fullmatch(pr):
             raise NotReadyError("accepted finalization requires an HTTPS pull-request URL")
         validate_process_gate(proposal.process_gate_path)
@@ -1861,7 +2701,7 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate", required=True, help="candidate skill directory")
     parser.add_argument("--patterns", required=True, help="comma-separated motivating pattern slugs")
     parser.add_argument("--benchmark", required=True, help="standard skill-creator benchmark.json")
-    parser.add_argument("--receipt", required=True, help="exact nine-field machine receipt JSON")
+    parser.add_argument("--receipt", required=True, help="machine receipt JSON (legacy nine-field v1 history or new evaluated v2)")
     parser.add_argument("--process-gate-receipt", required=True, help="merge-mode process-gate receipt")
     parser.add_argument("--proposal-diff", required=True, help="PR-wide changed-path JSON manifest")
     parser.add_argument("--qualification", required=True, help="wiki qualification decision JSON")

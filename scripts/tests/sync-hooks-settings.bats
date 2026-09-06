@@ -50,11 +50,15 @@ bootstrap_release_admin() {
   chmod 755 "$HOME/.local/bin/trellis"
   cp "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$REPO/scripts/attach-project.sh" \
     "$bootstrap/scripts/"
+  cp "$REPO/scripts/trellis-launcher.sh" "$bootstrap/scripts/trellis-launcher.sh"
   cp -R "$REPO/scripts/lib" "$bootstrap/scripts/lib"
   cat >> "$bootstrap/scripts/attach-project.sh" <<'SH'
 
 if [ "${1:-}" = relink ]; then
   printf '%s\n' "$@" > "$TRELLIS_HOME/test-relink-arguments"
+  printf '%s' "${TMPDIR-}" > "$TRELLIS_HOME/test-relink-temp-tmpdir"
+  printf '%s' "${TMP-}" > "$TRELLIS_HOME/test-relink-temp-tmp"
+  printf '%s' "${TEMP-}" > "$TRELLIS_HOME/test-relink-temp-temp"
   if [ -f "$TRELLIS_HOME/test-relink-child-diagnostic" ]; then
     cat "$TRELLIS_HOME/test-relink-child-diagnostic" >&2
     exit 5
@@ -110,6 +114,7 @@ build_installed_release() {
   cp -R "$REPO/core-rules/codex/hooks/lib" "$SOURCE/core-rules/codex/hooks/"
   cp "$REPO/scripts/attach-project.sh" "$REPO/scripts/seed-inheritance-symlinks.sh" \
     "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$SOURCE/scripts/"
+  cp "$REPO/scripts/trellis-launcher.sh" "$SOURCE/scripts/trellis-launcher.sh"
   cp -R "$REPO/scripts/lib" "$SOURCE/scripts/lib"
   chmod 755 "$SOURCE/core-rules/githooks/pre-push" \
     "$SOURCE/core-rules/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"*.sh \
@@ -140,8 +145,7 @@ build_installed_release() {
       "render": [
         {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": false}
       ]
-    },
-    "omp": {"links": [], "render": []}
+    }
   }
 }
 JSON
@@ -202,6 +206,22 @@ capture_relink_arguments() {
   rm -f "$RELINK_ARGS"
 }
 
+capture_relink_environment() {
+  SELECTED_TMPDIR="$SANDBOX/relink child temp with spaces"
+  mkdir -p "$SELECTED_TMPDIR"
+  chmod 700 "$SELECTED_TMPDIR"
+  RELINK_TEMP_PREFIX="$HOME_PATH/test-relink-temp"
+  rm -f "$RELINK_TEMP_PREFIX-tmpdir" "$RELINK_TEMP_PREFIX-tmp" "$RELINK_TEMP_PREFIX-temp"
+}
+
+assert_relink_temp_triplet() {
+  local expected="$SANDBOX/expected relink temp value"
+  printf '%s' "$SELECTED_TMPDIR" > "$expected"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-tmpdir"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-tmp"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-temp"
+}
+
 install_snapshot_probe() {
   local library="$MOVED_RUNNER/scripts/lib/release-store.sh"
   local real_library="$MOVED_RUNNER/scripts/lib/release-store.real.sh"
@@ -225,6 +245,9 @@ release_store_snapshot_verified_release() {
     /usr/bin/env -i \
       "HOME=${HOME:-}" \
       "TRELLIS_HOME=${TRELLIS_HOME:-}" \
+      "TMPDIR=${TMPDIR:-/tmp}" \
+      "TMP=${TMPDIR:-/tmp}" \
+      "TEMP=${TMPDIR:-/tmp}" \
       "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
       /bin/bash --noprofile --norc -c '
         . "$1"
@@ -293,7 +316,6 @@ assert_complete_relink_binding() {
      | if .path == "AGENTS.md" or (.path | startswith(".agents/")) or (.path | startswith(".codex/"))
        then "codex"
        elif (.path | startswith(".claude/")) then "claude"
-       elif (.path | startswith(".omp/")) then "omp"
        else empty
        end]
     | unique | sort
@@ -528,6 +550,32 @@ create_release_missing_attachment() {
   [ -L "$PROJECT/.trellis/runtime" ]
 }
 
+@test "Claude and Codex sync propagate the selected temporary directory into real relink" {
+  prepare_fixture
+  capture_relink_environment
+  rm "$PROJECT/.trellis/runtime"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TMPDIR="$SELECTED_TMPDIR" TMP="$SANDBOX/unselected TMP" TEMP="$SANDBOX/unselected TEMP" \
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF 'attachment relinked' <<<"$output"
+  assert_relink_temp_triplet
+  [ -L "$PROJECT/.trellis/runtime" ]
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$HOME_PATH/releases/$VERSION/payload" ]
+
+  rm "$PROJECT/.trellis/runtime"
+  capture_relink_environment
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TMPDIR="$SELECTED_TMPDIR" TMP="$SANDBOX/unselected TMP" TEMP="$SANDBOX/unselected TEMP" \
+    bash "$MOVED_RUNNER/scripts/sync-codex-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF 'attachment relinked' <<<"$output"
+  assert_relink_temp_triplet
+  [ -L "$PROJECT/.trellis/runtime" ]
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$HOME_PATH/releases/$VERSION/payload" ]
+}
+
 @test "symlinked attachment owner is a state error before reconciliation" {
   prepare_fixture
   rm "$OWNER"
@@ -551,6 +599,44 @@ create_release_missing_attachment() {
   escaped_root="$(LC_ALL=C printf '%q' "$UNAVAILABLE_ROOT")"
   grep -qF "$escaped_root" <<<"$output"
   [ ! -e "$UNAVAILABLE_ROOT" ]
+}
+
+@test "both sync owner projections preserve Pi native and legacy harness attribution with strict conflicts" {
+  local script functions owner paths expected
+  owner="$SANDBOX/projection-owner.json"
+  functions="$SANDBOX/owner-functions.sh"
+  for script in sync-hooks.sh sync-merge-gate.sh; do
+    # Extract the actual definition without executing the synchronizer CLI.
+    sed -n '/^owner_harnesses_json() {$/,/^}$/p' "$REPO/scripts/$script" > "$functions"
+    [ -s "$functions" ]
+    while IFS='|' read -r paths expected; do
+      printf '%s\n' "$paths" > "$owner"
+      run bash -c '. "$1"; owner_harnesses_json "$2"' _ "$functions" "$owner"
+      [ "$status" -eq 0 ] || { echo "$script: $output"; false; }
+      [ "$output" = "$expected" ] || { echo "$script: $paths => $output, expected $expected"; false; }
+    done <<'JSON'
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"},{"path":".pi/extensions/trellis.ts"}]}|["pi"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"},{"path":".claude/hooks/check.sh"},{"path":".codex/hooks/check.sh"},{"path":".pi/extensions/trellis.ts"}]}|["claude","codex","pi"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"}]}|["codex"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"}],"pre_existing":[{"path":".pi/extensions/trellis.ts"}]}|["pi"]
+{"artifacts":[],"pre_existing":[{"path":".claude/hooks/check.sh"},{"path":".codex/hooks/check.sh"},{"path":".pi/extensions/trellis.ts"}]}|["claude","codex","pi"]
+JSON
+  done
+
+  prepare_fixture
+  remove_codex_owner_artifacts
+  local owner_before registry_before
+  owner_before="$(shasum -a 256 "$OWNER")"
+  registry_before="$(shasum -a 256 "$HOME_PATH/registry.json")"
+  for script in sync-hooks.sh sync-merge-gate.sh; do
+    run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
+      bash "$REPO/scripts/$script" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+    [ "$status" -eq 3 ] || { echo "$script: $output"; false; }
+    grep -qF 'owner record conflicts with strict registry' <<<"$output"
+    [ "$(shasum -a 256 "$OWNER")" = "$owner_before" ]
+    [ "$(shasum -a 256 "$HOME_PATH/registry.json")" = "$registry_before" ]
+    [ -L "$PROJECT/.trellis/runtime" ]
+  done
 }
 
 @test "owner harness divergence is a strict conflict before attachment mutation" {

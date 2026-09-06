@@ -82,6 +82,7 @@ shell_assignment() {
   local name="${1:-}" value="${2:-}" quoted=""
   case "$name" in
     TRELLIS_AEO_RUNNER|TRELLIS_AEO_GATE|TRELLIS_AEO_TARGETS|TRELLIS_AEO_REGISTRY|TRELLIS_AEO_BLACKLIST|TRELLIS_TASK_ROOT|OUTPUT) ;;
+    TRELLIS_HOME|TRELLIS_LANE_RUNNER|TRELLIS_LANE_CACHE) ;;
     *)
       materialize_error "unknown trusted shell assignment name: $name"
       return "$TRELLIS_EX_STATE"
@@ -91,16 +92,27 @@ shell_assignment() {
   printf '%s=%s\n' "$name" "$quoted"
 }
 
+# Templates are tracked 100644 and stay 100644: callers that omit the mode get
+# that strictness unchanged. The lane collector is tracked 100755, so it names
+# its own exact expected blob mode rather than being silently normalised to 644
+# or matched against whatever mode the manifest happens to carry.
 release_manifest_blob_oid() {
-  local release_json="${1:-}" relative_path="${2:-}" oid=""
+  local release_json="${1:-}" relative_path="${2:-}" expected_mode="${3:-100644}" oid=""
 
+  case "$expected_mode" in
+    100644|100755) ;;
+    *)
+      materialize_error "release asset identity requires a known regular blob mode: $expected_mode"
+      return "$TRELLIS_EX_STATE"
+      ;;
+  esac
   if [ -L "$release_json" ] || [ ! -f "$release_json" ] || ! release_store_path_is_safe "$relative_path"; then
     materialize_error "release asset identity requires a regular release manifest and safe relative path"
     return "$TRELLIS_EX_STATE"
   fi
-  oid="$(jq -er --arg path "$relative_path" '
+  oid="$(jq -er --arg path "$relative_path" --arg mode "$expected_mode" '
     [ .tree[]
-      | select(.path == $path and .mode == "100644")
+      | select(.path == $path and .mode == $mode)
       | .oid
     ] as $oids
     | if (
@@ -355,6 +367,11 @@ capture_registry_snapshot() {
     chmod 600 "$snapshot_registry" 2>/dev/null || rc="$TRELLIS_EX_UNAVAILABLE"
   fi
   if [ "$rc" -eq 0 ]; then
+    # rc.46 migration: the snapshot is a disposable copy, so drop the retired
+    # token in place before the strict validation below.
+    local_registry_drop_retired_harness_rows "$snapshot_registry" || rc="$?"
+  fi
+  if [ "$rc" -eq 0 ]; then
     local_registry_validate_file "$snapshot_registry" || rc="$?"
   fi
   if [ "$rc" -eq 0 ]; then
@@ -430,7 +447,7 @@ canonicalize_registry_snapshot() {
       );
     def harnesses:
       type == "array"
-      and all(.[]; type == "string" and (. == "claude" or . == "codex" or . == "omp"));
+      and all(.[]; type == "string" and (. == "claude" or . == "codex"));
     def safe_text:
       type == "string" and length > 0 and (test("[[:cntrl:]]") | not);
     def safe_date:
@@ -526,9 +543,55 @@ canonicalize_registry_snapshot() {
   chmod 600 "$output" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
 }
 
+# The one cache the lane collector maintains outside the task output root, and
+# the atomic temporary siblings it replaces from. Both are derived from the
+# selected home this run validated, never from an ambient HOME or a default
+# store path, and both are named in the lane-freshness manifest so the prompt
+# can refuse a rendered path the materializer did not authorize.
+lane_cache_path() {
+  printf '%s/state/lane-availability.json\n' "${1:-}"
+}
+
+# `scripts/lane-freshness.py` calls `tempfile.mkstemp(prefix=".lane-availability.")`,
+# so the authorized sibling prefix carries the trailing dot. Without it the
+# prompt would refuse the very siblings the collector actually creates.
+lane_cache_temporary_prefix() {
+  printf '%s/state/.lane-availability.\n' "${1:-}"
+}
+
+# The lane task renders an invocation of the released collector. A release that
+# does not carry it, or carries bytes its own pinned manifest does not vouch
+# for, cannot produce a usable run: refuse before anything is published rather
+# than publishing `ready` with a runner path that does not resolve. The runner
+# is executed by the task, never here.
+LANE_RUNNER_RELATIVE_PATH="scripts/lane-freshness.py"
+LANE_RUNNER_BLOB_MODE="100755"
+
+verify_lane_release_runner() {
+  local release_payload="${1:-}" release_manifest="${2:-}"
+  local source="" expected_oid="" actual_oid=""
+
+  source="$release_payload/$LANE_RUNNER_RELATIVE_PATH"
+  if [ -L "$source" ] || [ ! -f "$source" ]; then
+    materialize_error "verified active release does not provide required asset: $LANE_RUNNER_RELATIVE_PATH"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  expected_oid="$(release_manifest_blob_oid "$release_manifest" "$LANE_RUNNER_RELATIVE_PATH" \
+    "$LANE_RUNNER_BLOB_MODE")" || return "$?"
+  actual_oid="$(release_store_blob_oid_for_path "$source")" || {
+    materialize_error "could not identify verified release asset: $LANE_RUNNER_RELATIVE_PATH"
+    return "$TRELLIS_EX_STATE"
+  }
+  if [ "$actual_oid" != "$expected_oid" ]; then
+    materialize_error "verified release asset differs from its manifest: $LANE_RUNNER_RELATIVE_PATH"
+    return "$TRELLIS_EX_STATE"
+  fi
+}
+
 render_template() {
   local source="${1:-}" destination="${2:-}" task_root="${3:-}" snapshot_path="${4:-}"
-  local fleet="${5:-}" release_payload="${6:-}" output_root="${7:-}" environment=""
+  local fleet="${5:-}" release_payload="${6:-}" output_root="${7:-}" home="${8:-}"
+  local environment="" lane_environment=""
 
   if [ -L "$source" ] || [ ! -f "$source" ]; then
     materialize_error "release template must be a regular file: $source"
@@ -551,13 +614,20 @@ render_template() {
     shell_assignment TRELLIS_AEO_BLACKLIST "$task_root/blacklist.md" &&
     shell_assignment TRELLIS_TASK_ROOT "$task_root"
   )" || return "$TRELLIS_EX_UNAVAILABLE"
+  lane_environment="$(
+    shell_assignment TRELLIS_HOME "$home" &&
+    shell_assignment TRELLIS_TASK_ROOT "$task_root" &&
+    shell_assignment TRELLIS_LANE_RUNNER "$release_payload/scripts/lane-freshness.py" &&
+    shell_assignment TRELLIS_LANE_CACHE "$(lane_cache_path "$home")"
+  )" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  if ! python3 - "$source" "$destination" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" "$environment" <<'PY'
+  if ! python3 - "$source" "$destination" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" "$environment" "$lane_environment" <<'PY'
 import os
 import stat
 import sys
 
-source, destination, task_root, snapshot_path, fleet, release_payload, output_root, environment = sys.argv[1:]
+(source, destination, task_root, snapshot_path, fleet, release_payload, output_root,
+ environment, lane_environment) = sys.argv[1:]
 
 try:
     source_stat = os.lstat(source)
@@ -575,6 +645,7 @@ try:
         b"RELEASE_PAYLOAD": os.fsencode(release_payload),
         b"OUTPUT_ROOT": os.fsencode(output_root),
         b"AEO_ENVIRONMENT": os.fsencode(environment),
+        b"LANE_ENVIRONMENT": os.fsencode(lane_environment),
     }
     rendered = []
     cursor = 0
@@ -619,7 +690,7 @@ PY
 # materialize a useful local task state.
 task_requires_checkout() {
   case "${1:-}" in
-    audit-report-rollup|conductor|registry-blacklist-health) return 1 ;;
+    audit-report-rollup|conductor|lane-freshness|registry-blacklist-health) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -1042,7 +1113,7 @@ materialize_conductor_backlog() {
         )
         and (
           if has("engine") then
-            (.engine == "claude" or .engine == "codex" or .engine == "omp")
+            (.engine == "claude" or .engine == "codex")
           else true end
         )
         and (
@@ -1128,7 +1199,7 @@ cmd_materialize() {
   local release_dir="" release_payload="" release_commit="" release_manifest="" release_manifest_sha256="" stage=""
   local tasks_dir="" fleet_dir="" task_root="" output_root="" snapshot_path="" errors_file=""
   local tasks_dir_real="" fleet_dir_real="" fleet_dir_identity="" stage_identity="" task_lock_held=false
-  local canonical_snapshot="" excluded_unavailable="[]" excluded_rows="[]" requires_checkout=false
+  local canonical_snapshot="" excluded_unavailable="[]" excluded_rows="[]" requires_checkout=false lane_cache=null
   local entry_count=0 unavailable_count=0 eligible_count=0 nonexcluded_count=0
   local detached_only_count=0 conductor_backlog=false conductor_auto_execute_top_n=0 registry_state_errors=0
   local snapshot_sha256="" planned_errors="[]" manifest_status="ready" detail=""
@@ -1257,11 +1328,14 @@ cmd_materialize() {
   # store verification only rejects a changed or corrupt installed release.
   verify_pinned_release_manifest "$release_dir" "$release_version" "$release_manifest" "$release_manifest_sha256" || return "$?"
   verify_staged_release_asset "$release_manifest" "scheduled-tasks/$task/prompt.md" "$stage/.release-assets/prompt.md" || return "$?"
-  render_template "$stage/.release-assets/prompt.md" "$stage/prompt.md" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" || return "$?"
+  render_template "$stage/.release-assets/prompt.md" "$stage/prompt.md" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" "$home" || return "$?"
   verify_staged_release_asset "$release_manifest" "scheduled-tasks/$task/targets.md" "$stage/.release-assets/targets.md" || return "$?"
-  render_template "$stage/.release-assets/targets.md" "$stage/targets.md" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" || return "$?"
+  render_template "$stage/.release-assets/targets.md" "$stage/targets.md" "$task_root" "$snapshot_path" "$fleet" "$release_payload" "$output_root" "$home" || return "$?"
   if [ "$task" = "dep-major-upgrade-watch" ]; then
     verify_staged_release_asset "$release_manifest" "scheduled-tasks/$task/watchlist.md" "$stage/watchlist.md" || return "$?"
+  fi
+  if [ "$task" = "lane-freshness" ]; then
+    verify_lane_release_runner "$release_payload" "$release_manifest" || return "$?"
   fi
   if [ -L "$stage/.release-assets" ] || [ ! -d "$stage/.release-assets" ] || ! rm -rf "$stage/.release-assets"; then
     materialize_error "could not remove private release asset staging directory"
@@ -1322,6 +1396,15 @@ EOF
   else
     AEO_COMPATIBILITY="not-applicable"
   fi
+  # Only this task may write outside its output root, and only to the collector
+  # cache and the atomic temporary siblings it replaces from. No other task
+  # receives an external cache-write authorization.
+  if [ "$task" = "lane-freshness" ]; then
+    lane_cache="$(jq -nS \
+      --arg path "$(lane_cache_path "$home")" \
+      --arg temporary_prefix "$(lane_cache_temporary_prefix "$home")" \
+      '{path: $path, temporary_prefix: $temporary_prefix}')" || return "$TRELLIS_EX_STATE"
+  fi
   entry_count="$(jq -r '.entries | length' "$stage/snapshot.json")" || return "$TRELLIS_EX_STATE"
   # `unavailable` counts only absent roots. A row that failed identity
   # validation is unusable for a different reason and is counted separately, so
@@ -1352,7 +1435,8 @@ EOF
     --argjson unavailable_projects "$excluded_unavailable" \
     --argjson excluded_rows "$excluded_rows" \
     --argjson planned_errors "$planned_errors" \
-    '{
+    --argjson lane_cache "$lane_cache" \
+    '({
       schema_version: 1,
       fleet: $fleet,
       task: $task,
@@ -1401,7 +1485,7 @@ EOF
         planned_errors: $planned_errors
       },
       aeo_compatibility: $aeo_compatibility
-    }' > "$stage/manifest.json"; then
+    } + if $lane_cache == null then {} else { lane_cache: $lane_cache } end)' > "$stage/manifest.json"; then
     return "$TRELLIS_EX_STATE"
   fi
   chmod 600 "$stage/manifest.json" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"

@@ -48,7 +48,7 @@ write_policy() {
       schema_version: 2,
       maintainer_name: $maintainer,
       github_user: $github_user,
-      harnesses: ["claude", "codex", "omp"],
+      harnesses: ["claude", "codex"],
       template: {remote: "https://example.invalid/trellis.git", branch: "main"},
       trellis_version: "1.2.3",
       sed_flavor: "auto"
@@ -102,7 +102,6 @@ run_loader() {
         printf "release=%s\\n" "$TRELLIS_ACTIVE_RELEASE"
         printf "fleet=%s\\n" "$TRELLIS_FLEET_NAME"
         printf "harnesses=%s\\n" "${HARNESSES[*]}"
-        pg_has_harness omp && printf "has_omp=yes\\n"
         printf "maintainer=%s\\n" "$MAINTAINER_NAME"
         printf "template=%s@%s\\n" "$TEMPLATE_REMOTE" "$TEMPLATE_BRANCH"
         printf "sed=%s\\n" "$SED_FLAVOR"
@@ -131,7 +130,6 @@ run_loader() {
         printf "release=%s\\n" "$TRELLIS_ACTIVE_RELEASE"
         printf "fleet=%s\\n" "$TRELLIS_FLEET_NAME"
         printf "harnesses=%s\\n" "${HARNESSES[*]}"
-        pg_has_harness omp && printf "has_omp=yes\\n"
         printf "maintainer=%s\\n" "$MAINTAINER_NAME"
         printf "template=%s@%s\\n" "$TEMPLATE_REMOTE" "$TEMPLATE_BRANCH"
         printf "sed=%s\\n" "$SED_FLAVOR"
@@ -170,6 +168,92 @@ run_loader_without_ajv() {
     ' _ "$LOADER"
 }
 
+run_loader_with_ajv_probe() {
+  local compile_status validate_status direct_status
+  compile_status="$1"
+  validate_status="$2"
+  direct_status="${3:-127}"
+  PROBE_LOG="$SANDBOX/ajv-probe.log"
+  : > "$PROBE_LOG"
+
+  run env \
+    HOME="$HOME_DIR" \
+    TRELLIS_HOME="$TRELLIS_HOME_DIR" \
+    TRELLIS_CONFIG="$POLICY" \
+    PROBE_LOG="$PROBE_LOG" \
+    COMPILE_STATUS="$compile_status" \
+    VALIDATE_STATUS="$validate_status" \
+    DIRECT_STATUS="$direct_status" \
+    bash -c '
+      ajv() {
+        [ "$DIRECT_STATUS" -ne 127 ] || return 127
+        printf "ajv %s\n" "$*" >> "$PROBE_LOG"
+        return "$DIRECT_STATUS"
+      }
+      npx() {
+        printf "npx %s\n" "$*" >> "$PROBE_LOG"
+        [ "$1" = --no-install ] && [ "$2" = --offline ] &&
+          [ "$3" = --no-update-notifier ] || return 96
+        shift 3
+        [ "$1" = ajv ] || return 97
+        case "$2" in
+          compile) return "$COMPILE_STATUS" ;;
+          validate) return "$VALIDATE_STATUS" ;;
+          *) return 98 ;;
+        esac
+      }
+      . "$1"
+      exit "$?"
+    ' _ "$LOADER"
+}
+
+@test "offline npx compile unavailable accepts valid policy through fallback" {
+  run_loader_with_ajv_probe 1 99
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json" ]
+}
+
+@test "offline npx compile unavailable rejects invalid policy through fallback" {
+  jq '.package_manager = "not-a-supported-package-manager"' "$POLICY" > "$POLICY.tmp"
+  mv "$POLICY.tmp" "$POLICY"
+
+  run_loader_with_ajv_probe 1 0
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"portable policy failed schema validation"* ]]
+  [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json" ]
+}
+
+@test "offline npx compiles then validates valid policy" {
+  run_loader_with_ajv_probe 0 0
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json
+npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json -d $POLICY" ]
+}
+
+@test "offline npx validation rejection never falls through to jq acceptance" {
+  # presets is schema-validated but not consumed by the compatibility fallback.
+  jq '.presets = "not-an-array"' "$POLICY" > "$POLICY.tmp"
+  mv "$POLICY.tmp" "$POLICY"
+
+  run_loader_with_ajv_probe 0 1
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"portable policy failed schema validation"* ]]
+  [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json
+npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json -d $POLICY" ]
+}
+
+@test "injected direct AJV remains preferred over offline npx" {
+  run_loader_with_ajv_probe 99 99 0
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$PROBE_LOG")" = "ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json
+ajv validate --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json -d $POLICY" ]
+}
+
 @test "loads portable policy and separate validated local state" {
   run_loader "$POLICY"
 
@@ -179,8 +263,7 @@ run_loader_without_ajv() {
   [[ "$output" == *"source=$POLICY_ROOT"* ]] || { echo "$output"; false; }
   [[ "$output" == *"release=1.2.3"* ]] || { echo "$output"; false; }
   [[ "$output" == *"fleet=personal"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"harnesses=claude codex omp"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"has_omp=yes"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"harnesses=claude codex"* ]] || { echo "$output"; false; }
   [[ "$output" == *"maintainer=Portable Maintainer"* ]] || { echo "$output"; false; }
   [[ "$output" == *"template=https://example.invalid/trellis.git@main"* ]] || { echo "$output"; false; }
   [[ "$output" == *"sed=auto"* ]] || { echo "$output"; false; }
@@ -406,7 +489,7 @@ EOF
        -s "$ROOT/scripts/lib/trellis.config.schema.json" >/dev/null 2>&1; then
     :
   elif command -v npx >/dev/null 2>&1 &&
-       npx --no-install ajv compile --spec=draft2020 --strict=false \
+       npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false \
          -s "$ROOT/scripts/lib/trellis.config.schema.json" >/dev/null 2>&1; then
     :
   else

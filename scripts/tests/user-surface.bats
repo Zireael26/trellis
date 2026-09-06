@@ -94,23 +94,15 @@ copy_user_release_runtime() {
 }
 
 make_user_release() {
-  local version="$1" include_new="${2:-false}" include_rules="${3:-true}" agents_kind="${4:-symlink}"
-  local include_second_render="${5:-false}" repo
-  case "$agents_kind" in
-    file|symlink) ;;
-    *) return 1 ;;
-  esac
+  local version="$1" include_second_render="${5:-false}" repo
   repo="$SANDBOX/release source $version"
 
-  mkdir -p "$repo/core-rules/omp/global" "$repo/core-rules/templates"
+  mkdir -p "$repo/core-rules/templates"
   copy_user_release_runtime "$repo"
 
   printf '%s\n' "$version" > "$repo/core-rules/VERSION"
-  printf 'fixture user AGENTS for release %s\n' "$version" > "$repo/core-rules/omp/global/AGENTS.md"
-  printf 'fixture user RULES for release %s\n' "$version" > "$repo/core-rules/omp/global/RULES.md"
-  if [ "$include_new" = true ]; then
-    printf 'new fixture user leaf from release %s\n' "$version" > "$repo/core-rules/omp/global/new-leaf.md"
-  fi
+  printf 'fixture user output style for release %s\n' "$version" \
+    > "$repo/core-rules/templates/claude-user-output-style.md"
   jq -n --arg release "$version" '{
     managed: {release: $release, policy: "fixture"},
     hooks: {
@@ -131,30 +123,17 @@ make_user_release() {
   jq -n --arg release "$version" '{managed: {codex_release: $release}}' \
     > "$repo/core-rules/templates/codex-user-settings.json"
 
-  jq -n --arg agents_kind "$agents_kind" --argjson include_new "$include_new" \
-    --argjson include_rules "$include_rules" --argjson include_second_render "$include_second_render" '{
+  jq -n --argjson include_second_render "$include_second_render" '{
     schema_version: 1,
     harnesses: {
       claude: {links: [], render: []},
       codex: {links: [], render: []},
-      omp: {links: [], render: []},
       user: {
-        links: (
-          (if $agents_kind == "symlink" then [
-            {source: "core-rules/omp/global/AGENTS.md", destination: ".omp/agent/AGENTS.md", destination_home: true}
-          ] else [] end)
-          + (if $include_rules then [
-            {source: "core-rules/omp/global/RULES.md", destination: ".omp/agent/RULES.md", destination_home: true}
-          ] else [] end)
-          + (if $include_new then [
-            {source: "core-rules/omp/global/new-leaf.md", destination: ".omp/agent/new-leaf.md", destination_home: true}
-          ] else [] end)
-        ),
+        links: [
+          {source: "core-rules/templates/claude-user-output-style.md", destination: ".claude/output-styles/fixture.md", destination_home: true}
+        ],
         render: (
-          (if $agents_kind == "file" then [
-            {template: "core-rules/omp/global/AGENTS.md", destination: ".omp/agent/AGENTS.md", destination_home: true, merge: "replace", mode: "0600", required: true}
-          ] else [] end)
-          + [
+          [
             {template: "core-rules/templates/claude-user-settings.json", destination: ".claude/settings.json", destination_home: true, merge: "explicit-json", mode: "0600", required: true}
           ]
           + (if $include_second_render then [
@@ -169,17 +148,12 @@ make_user_release() {
 }
 
 make_full_user_release() {
-  local version="$1" changed="${2:-false}" repo
+  local version="$1" repo
   repo="$SANDBOX/full release source $version"
   mkdir -p "$repo"
   cp -R "$REPO_ROOT/core-rules" "$repo/"
   copy_user_release_runtime "$repo"
   printf '%s\n' "$version" > "$repo/core-rules/VERSION"
-  if [ "$changed" = true ]; then
-    rm "$repo/core-rules/omp/global/agents/cheap.md"
-    printf 'fixture added agent for release %s\n' "$version" \
-      > "$repo/core-rules/omp/global/agents/fixture-added.md"
-  fi
   release_fixture_install "$HOME" "$TRELLIS_HOME" "$version" "$repo"
 }
 
@@ -239,10 +213,6 @@ teardown() {
   user_attach
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ -L "$HOME/.omp/agent/RULES.md" ]
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ "$(readlink "$HOME/.omp/agent/RULES.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/RULES.md" ]
   jq -e '
     .operator.theme == "dark" and
     .operator.keep == true and
@@ -261,7 +231,6 @@ teardown() {
     .surface == "user" and
     .status == "committed" and
     .home_paths == [$home] and
-    ([.artifacts[] | select(.destination == ($home + "/.omp/agent/AGENTS.md") and .kind == "symlink")] | length) == 1 and
     ([.renders[] | select(.destination == ($home + "/.claude/settings.json") and .merge == "explicit-json")] | length) == 1
   ' "$owner" >/dev/null
 }
@@ -289,9 +258,21 @@ teardown() {
   [ "$(sed -n '4p' "$style")" = "keep-coding-instructions: true" ]
   [ "$(sed -n '5p' "$style")" = "---" ]
   style_body="$(cat "$style")"
-  directive="Standing orchestration rule: when a request lists 2+ independent targets (files, projects, skills, questions), dispatch one concurrent Agent per target after shared discovery, rather than processing the targets inline. If concurrency is impossible, state why."
-  if [[ "$style_body" != *"$directive"* ]]; then
-    echo "missing orchestration directive"
+  # Business contract, not wording: the style defers scheduling to the shared
+  # parent delegation policy and names where that policy lives, so a reader has
+  # one authority to consult rather than two that can drift apart.
+  if [[ "$style_body" != *"CLAUDE.md"* || "$style_body" != *"Context management"* ]]; then
+    echo "style does not point at the shared delegation policy"
+    false
+  fi
+  # ...and it must not restate an independent scheduling authority of its own:
+  # no standalone per-target/per-item dispatch mandate, and no count-based trigger.
+  if [[ "$style_body" =~ (o|O)ne[[:space:]]+([A-Za-z-]+[[:space:]]+)?[Aa]gent[[:space:]]+per[[:space:]]+(target|item|file|unit|project|skill|question) ]]; then
+    echo "style still carries an independent one-agent-per-target scheduling rule"
+    false
+  fi
+  if [[ "$style_body" =~ [0-9]+\+?[[:space:]]+([a-z-]+[[:space:]]+)?(targets|units|items|files|projects) ]]; then
+    echo "style still carries a count-based dispatch trigger"
     false
   fi
   if [[ "$style_body" != *"single linear unit stays inline"*
@@ -306,7 +287,11 @@ teardown() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -L "$HOME/.claude/output-styles/trellis-orchestration.md" ]
   [ "$(readlink "$HOME/.claude/output-styles/trellis-orchestration.md")" = "$style" ]
-  jq -e '.outputStyle == "Trellis Orchestration"' "$settings" >/dev/null
+  # The template ships the output-style file but must NOT set outputStyle:
+  # it is an operator preference, and declaring it makes attach --user collide
+  # with any operator who chose a different style.
+  jq -e 'has("outputStyle") | not' "$settings" >/dev/null
+  jq -e '.workflowSizeGuideline == "large"' "$settings" >/dev/null
 
   owner="$(user_owner_path)"
   jq -e --arg destination "$HOME/.claude/output-styles/trellis-orchestration.md" '
@@ -320,36 +305,12 @@ teardown() {
   owner="$(user_owner_path)"
   first_owner_hash="$(sha256_file "$owner")"
   first_settings_hash="$(sha256_file "$HOME/.claude/settings.json")"
-  first_agents_target="$(readlink "$HOME/.omp/agent/AGENTS.md")"
-  first_rules_target="$(readlink "$HOME/.omp/agent/RULES.md")"
 
   user_attach
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(sha256_file "$owner")" = "$first_owner_hash" ]
   [ "$(sha256_file "$HOME/.claude/settings.json")" = "$first_settings_hash" ]
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$first_agents_target" ]
-  [ "$(readlink "$HOME/.omp/agent/RULES.md")" = "$first_rules_target" ]
-}
-
-@test "attach --user refuses an exact desired leaf when its committed owner is absent" {
-  user_attach
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  owner="$(user_owner_path)"
-  exact_target="$(readlink "$HOME/.omp/agent/AGENTS.md")"
-  exact_hash="$(sha256_file "$HOME/.omp/agent/AGENTS.md")"
-  rm "$owner" "$HOME/.claude/settings.json" "$HOME/.omp/agent/RULES.md"
-
-  user_attach
-
-  [ "$status" -eq 3 ]
-  assert_output_has "$output" "$HOME/.omp/agent/AGENTS.md"
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$exact_target" ]
-  [ "$(sha256_file "$HOME/.omp/agent/AGENTS.md")" = "$exact_hash" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
 }
 
 @test "project selector usage rejection happens before HOME-state mutation and accepts -- as delimiter" {
@@ -366,25 +327,6 @@ teardown() {
   [ ! -L "$unused_home" ]
 }
 
-
-@test "attach --user refuses an unowned destination with exit 3 and its absolute path" {
-  mkdir -p "$HOME/.omp/agent"
-  printf 'operator-owned AGENTS\n' > "$HOME/.omp/agent/AGENTS.md"
-  before="$(sha256_file "$HOME/.omp/agent/AGENTS.md")"
-  settings_before="$(sha256_file "$HOME/.claude/settings.json")"
-
-  user_attach
-
-  [ "$status" -eq 3 ]
-  assert_output_has "$output" "$HOME/.omp/agent/AGENTS.md"
-  [ "$(sha256_file "$HOME/.omp/agent/AGENTS.md")" = "$before" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
-  owner="$(user_owner_path)"
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-}
 
 @test "attach --user explicit-json merge preserves operator keys" {
   operator_before="$(jq -cS '.operator' "$HOME/.claude/settings.json")"
@@ -405,23 +347,6 @@ teardown() {
   [ "$(file_mode "$HOME/.claude/settings.json")" = 600 ]
 }
 
-@test "attach --user rejects a destination whose parent escapes HOME" {
-  outside="$SANDBOX/outside user destination"
-  mkdir -p "$outside"
-  ln -s "$outside" "$HOME/.omp"
-
-  user_attach
-
-  [ "$status" -eq 4 ]
-  assert_output_has "$output" "HOME"
-  assert_output_has "$output" "escapes"
-  [ ! -e "$outside/agent/AGENTS.md" ]
-  [ ! -e "$outside/agent/RULES.md" ]
-  owner="$(user_owner_path)"
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-}
-
 @test "detach --user removes owned leaves and restores the exact pre-attach render" {
   before_hash="$(sha256_file "$HOME/.claude/settings.json")"
   before_mode="$(file_mode "$HOME/.claude/settings.json")"
@@ -431,10 +356,6 @@ teardown() {
   user_detach
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
   [ "$(sha256_file "$HOME/.claude/settings.json")" = "$before_hash" ]
   [ "$(file_mode "$HOME/.claude/settings.json")" = "$before_mode" ]
   owner="$(user_owner_path)"
@@ -464,87 +385,6 @@ teardown() {
     (.hooks.SessionStart | not) and
     (.managed | not)
   ' "$HOME/.claude/settings.json" >/dev/null
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -e "$(user_owner_path)" ]
-}
-
-@test "relink --user adopts a replacement release and materializes its new leaf" {
-  user_attach
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  make_user_release 2.0.0 true false
-
-  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ -L "$HOME/.omp/agent/new-leaf.md" ]
-  [ "$(readlink "$HOME/.omp/agent/new-leaf.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/new-leaf.md" ]
-  jq -e '
-    .operator.theme == "dark" and
-    .operator.keep == true and
-    .managed.release == "2.0.0" and
-    .hooks.PreToolUse[0].hooks[0].command == "operator-owned pre-tool hook" and
-    .hooks.SessionStart[0].hooks[0].command == "fixture Trellis SessionStart" and
-    (.hooks | keys) == ["PreToolUse", "SessionStart"]
-  ' "$HOME/.claude/settings.json" >/dev/null
-  jq -e --arg home "$HOME" '
-    .surface == "user" and .status == "committed" and .release == "2.0.0" and
-    ([.artifacts[] | select(.destination == ($home + "/.omp/agent/new-leaf.md") and .kind == "symlink")] | length) == 1
-  ' "$(user_owner_path)" >/dev/null
-}
-
-@test "installed full user payload relinks expanded file and directory leaves and detaches cleanly" {
-  make_full_user_release 3.0.0 false
-  mkdir -p "$HOME/.omp/agent/skills"
-  cp -R "$TRELLIS_HOME/releases/3.0.0/payload/core-rules/omp/global/skills/eval-workflow" \
-    "$HOME/.omp/agent/skills/eval-workflow"
-
-  run "$USER_CLI" attach --user --adopt-identical --home "$TRELLIS_HOME" --release 3.0.0
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  assert_output_has "$output" "cannot safely adopt a directory"
-  [ -f "$HOME/.omp/agent/skills/eval-workflow/SKILL.md" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  chmod -R u+w "$HOME/.omp/agent/skills/eval-workflow"
-  rm -rf "$HOME/.omp/agent/skills/eval-workflow"
-  rmdir "$HOME/.omp/agent/skills" "$HOME/.omp/agent" "$HOME/.omp"
-
-  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 3.0.0
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ -L "$HOME/.omp/agent/agents/cheap.md" ]
-  [ -L "$HOME/.omp/agent/skills/eval-workflow" ]
-  [ -L "$HOME/.claude/skills/herdr-foreman" ]
-  [ -L "$HOME/.claude/hooks/herdr-foreman-session.sh" ]
-  [ "$(readlink "$HOME/.omp/agent/skills/eval-workflow")" = "$TRELLIS_HOME/releases/3.0.0/payload/core-rules/omp/global/skills/eval-workflow" ]
-  [ "$(readlink "$HOME/.claude/skills/herdr-foreman")" = "$TRELLIS_HOME/releases/3.0.0/payload/core-rules/skills/herdr-foreman" ]
-
-  make_full_user_release 4.0.0 true
-  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 4.0.0
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$HOME/.omp/agent/agents/cheap.md" ]
-  [ ! -L "$HOME/.omp/agent/agents/cheap.md" ]
-  [ -L "$HOME/.omp/agent/agents/fixture-added.md" ]
-  [ "$(readlink "$HOME/.omp/agent/agents/fixture-added.md")" = "$TRELLIS_HOME/releases/4.0.0/payload/core-rules/omp/global/agents/fixture-added.md" ]
-  [ "$(readlink "$HOME/.omp/agent/skills/eval-workflow")" = "$TRELLIS_HOME/releases/4.0.0/payload/core-rules/omp/global/skills/eval-workflow" ]
-  [ "$(readlink "$HOME/.claude/skills/herdr-foreman")" = "$TRELLIS_HOME/releases/4.0.0/payload/core-rules/skills/herdr-foreman" ]
-  [ "$(readlink "$HOME/.claude/hooks/herdr-foreman-session.sh")" = "$TRELLIS_HOME/releases/4.0.0/payload/core-rules/hooks/herdr-foreman-session.sh" ]
-  jq -e '.release == "4.0.0"' "$(user_owner_path)" >/dev/null
-
-  user_detach
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$HOME/.omp" ]
-  [ ! -L "$HOME/.omp" ]
-  [ ! -e "$HOME/.claude/skills" ]
-  [ ! -e "$HOME/.claude/hooks" ]
   [ ! -e "$(user_owner_path)" ]
 }
 
@@ -563,12 +403,6 @@ teardown() {
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   jq -e '.active_cli_release == "2.0.0"' "$TRELLIS_HOME/config.json" >/dev/null
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ -L "$HOME/.omp/agent/new-leaf.md" ]
-  [ "$(readlink "$HOME/.omp/agent/new-leaf.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/new-leaf.md" ]
   jq -e '.managed.release == "2.0.0"' "$HOME/.claude/settings.json" >/dev/null
   owner="$(user_owner_path)"
   jq -e '.surface == "user" and .status == "committed" and .release == "2.0.0"' "$owner" >/dev/null
@@ -592,12 +426,6 @@ teardown() {
   owner="$(user_owner_path)"
   [ ! -e "$owner" ]
   [ ! -L "$owner" ]
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ ! -e "$HOME/.omp/agent/new-leaf.md" ]
-  [ ! -L "$HOME/.omp/agent/new-leaf.md" ]
 }
 
 @test "configure --release restores config and the old user surface when relink fails" {
@@ -623,10 +451,6 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$(sha256_file "$owner")" = "$owner_before" ]
   jq -e '.surface == "user" and .status == "committed" and .release == "1.0.0"' "$owner" >/dev/null
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ "$(readlink "$HOME/.omp/agent/RULES.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/RULES.md" ]
-  [ ! -e "$HOME/.omp/agent/new-leaf.md" ]
-  [ ! -L "$HOME/.omp/agent/new-leaf.md" ]
   [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
 }
 
@@ -647,8 +471,6 @@ teardown() {
   jq -e '.active_cli_release == "2.0.0"' "$TRELLIS_HOME/config.json" >/dev/null
   owner="$(user_owner_path)"
   jq -e '.surface == "user" and .status == "committed" and .release == "2.0.0"' "$owner" >/dev/null
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ -L "$HOME/.omp/agent/new-leaf.md" ]
   [ ! -e "$(user_attach_journal_path)" ]
   [ ! -L "$(user_attach_journal_path)" ]
   [ ! -e "$(user_detach_journal_path)" ]
@@ -678,9 +500,6 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$(sha256_file "$owner")" = "$owner_before" ]
   [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-  [ "$(readlink "$HOME/.omp/agent/RULES.md")" = "$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/RULES.md" ]
-  [ ! -e "$HOME/.omp/agent/new-leaf.md" ]
   [ ! -e "$(user_attach_journal_path)" ]
   [ ! -e "$(user_detach_journal_path)" ]
 }
@@ -749,44 +568,17 @@ teardown() {
   [ ! -L "$missing_tmp" ]
 }
 
-@test "configure recovers an owner-absent pending user journal before deciding attachment state" {
-  local configure_source
-  configure_source="$(make_configure_source)"
-  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
-    attach --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$(user_attach_journal_path)" ]
-  [ ! -e "$(user_owner_path)" ]
-  make_user_release 2.0.0 true false
-
-  run "$USER_CLI" configure \
-    --source "$configure_source" \
-    --home "$TRELLIS_HOME" \
-    --release 2.0.0 \
-    --no-install-launcher
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$(user_attach_journal_path)" ]
-  [ ! -e "$(user_detach_journal_path)" ]
-  jq -e '.active_cli_release == "2.0.0"' "$TRELLIS_HOME/config.json" >/dev/null
-  jq -e '.release == "2.0.0"' "$(user_owner_path)" >/dev/null
-  [ "$(readlink "$HOME/.omp/agent/AGENTS.md")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/omp/global/AGENTS.md" ]
-}
-
 @test "attach --user retry recovers an interrupted transaction" {
   run env ATTACHMENT_FAULT_PHASE=owner-published "$(installed_attach "$USER_RELEASE")" \
     attach --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
   [ "$status" -eq 5 ] || { echo "$output"; false; }
   [ -f "$(user_attach_journal_path)" ]
   [ -f "$(user_owner_path)" ]
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ -L "$HOME/.omp/agent/RULES.md" ]
   user_attach
   [ ! -e "$(user_attach_journal_path)" ]
   [ ! -L "$(user_attach_journal_path)" ]
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$HOME/.omp/agent/AGENTS.md" ]
   [ -f "$(user_owner_path)" ]
   jq -e '.surface == "user" and .status == "committed" and .release == "1.0.0"' \
     "$(user_owner_path)" >/dev/null
@@ -810,8 +602,6 @@ teardown() {
   [ ! -L "$(user_attach_journal_path)" ]
   [ ! -e "$(user_owner_path)" ]
   [ ! -L "$(user_owner_path)" ]
-  [ ! -e "$HOME/.omp" ]
-  [ ! -L "$HOME/.omp" ]
   ! compgen -G "$HOME/.claude/.settings.json.user-attachment-stage-*" >/dev/null
 
   user_attach
@@ -822,865 +612,6 @@ teardown() {
   [ "$(sha256_file "$settings")" = "$before_hash" ]
   [ "$(file_mode "$settings")" = "$before_mode" ]
   [ "$(base64 < "$settings" | tr -d '\n')" = "$before_base64" ]
-}
-
-@test "attach --user preserves a phase>0 replacement conflict for correction and retry" {
-  local release=2.0.0 agents settings codex_settings journal stage
-  local settings_before_hash settings_before_mode settings_before_base64
-  local codex_before_hash codex_before_mode codex_before_base64
-  local settings_managed_hash settings_managed_base64 settings_managed_mode settings_unknown_base64 settings_unknown_mode
-
-  make_user_release "$release" false false file true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  settings="$HOME/.claude/settings.json"
-  codex_settings="$HOME/.codex/settings.json"
-  journal="$(user_attach_journal_path)"
-  mkdir -p "$(dirname "$agents")" "$(dirname "$codex_settings")"
-  cat > "$codex_settings" <<'JSON'
-{
-  "operator": {
-    "keep": "codex"
-  }
-}
-JSON
-  chmod 640 "$codex_settings"
-  settings_before_hash="$(sha256_file "$settings")"
-  settings_before_mode="$(file_mode "$settings")"
-  settings_before_base64="$(base64 < "$settings" | tr -d '\n')"
-  codex_before_hash="$(sha256_file "$codex_settings")"
-  codex_before_mode="$(file_mode "$codex_settings")"
-  codex_before_base64="$(base64 < "$codex_settings" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  jq -e --arg agents "$agents" --arg settings "$settings" --arg codex "$codex_settings" '
-    .phase == 1 and .pending == null
-      and (.artifacts | length) == 3
-      and .artifacts[0].destination == $settings and (.artifacts[0] | has("replace"))
-      and .artifacts[1].destination == $codex and (.artifacts[1] | has("replace"))
-      and .artifacts[2].destination == $agents
-  ' "$journal" >/dev/null
-  settings_managed_hash="$(sha256_file "$settings")"
-  settings_managed_base64="$(base64 < "$settings" | tr -d '\n')"
-  settings_managed_mode="$(file_mode "$settings")"
-  [ "$settings_managed_mode" = 600 ]
-  printf '{\n  "operator": {\n    "manual": "unknown"\n  }\n}\n' > "$settings"
-  chmod 640 "$settings"
-  settings_unknown_base64="$(base64 < "$settings" | tr -d '\n')"
-  settings_unknown_mode="$(file_mode "$settings")"
-
-  run env ATTACHMENT_FAULT_PHASE=user-replace-staged "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  assert_output_has "$output" "managed file $settings no longer has its pinned filesystem identity"
-  assert_output_has "$output" "Unknown bytes were preserved"
-  assert_output_has "$output" "user attachment recovery remedy:"
-  assert_output_has "$output" "then rerun: trellis attach --user --home"
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_unknown_base64" ]
-  [ "$(file_mode "$settings")" = "$settings_unknown_mode" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ -f "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  jq -e --arg settings "$settings" --arg codex "$codex_settings" '
-    .phase == 1 and .pending != null
-      and .pending.artifact.destination == $codex
-      and .pending.destination_identity == null
-      and (.pending.staging_identity | type == "string" and length > 0)
-      and (.identities | length) == 1
-      and .artifacts[0].destination == $settings
-  ' "$journal" >/dev/null
-  stage="$(jq -r '.pending.staging_path' "$journal")"
-  [ -f "$stage" ]
-  [ ! -L "$stage" ]
-
-  if ! printf '%s' "$settings_managed_base64" | base64 -D > "$settings" 2>/dev/null; then
-    printf '%s' "$settings_managed_base64" | base64 -d > "$settings"
-  fi
-  chmod "$settings_managed_mode" "$settings"
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_managed_base64" ]
-  [ "$(file_mode "$settings")" = "$settings_managed_mode" ]
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$stage" ]
-  [ ! -L "$stage" ]
-  [ -f "$(user_owner_path)" ]
-  jq -e --arg release "$release" '.release == $release' "$(user_owner_path)" >/dev/null
-
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-}
-
-@test "attach --user rollback durably records reverse progress before a lower conflict" {
-  local release=2.0.0 agents settings codex_settings journal lower_identity
-  local settings_before_hash settings_before_mode settings_before_base64
-  local codex_before_hash codex_before_mode codex_before_base64
-  local settings_managed_hash settings_managed_mode settings_managed_base64
-  local settings_unknown_hash settings_unknown_mode settings_unknown_base64
-
-  make_user_release "$release" false false file true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  settings="$HOME/.claude/settings.json"
-  codex_settings="$HOME/.codex/settings.json"
-  journal="$(user_attach_journal_path)"
-  mkdir -p "$(dirname "$agents")" "$(dirname "$codex_settings")"
-  cat > "$codex_settings" <<'JSON'
-{
-  "operator": {
-    "keep": "codex"
-  }
-}
-JSON
-  chmod 640 "$codex_settings"
-  settings_before_hash="$(sha256_file "$settings")"
-  settings_before_mode="$(file_mode "$settings")"
-  settings_before_base64="$(base64 < "$settings" | tr -d '\n')"
-  codex_before_hash="$(sha256_file "$codex_settings")"
-  codex_before_mode="$(file_mode "$codex_settings")"
-  codex_before_base64="$(base64 < "$codex_settings" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=2 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  lower_identity="$(jq -r '.identities[0]' "$journal")"
-  settings_managed_hash="$(sha256_file "$settings")"
-  settings_managed_mode="$(file_mode "$settings")"
-  settings_managed_base64="$(base64 < "$settings" | tr -d '\n')"
-  [ "$(file_identity "$settings")" = "$lower_identity" ]
-
-  run env ATTACHMENT_FAULT_PHASE=user-rollback-1 HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  jq -e --arg lower "$lower_identity" --arg settings "$settings" --arg codex "$codex_settings" '
-    .phase == 1 and .pending == null
-      and .applied == .artifacts[0:1]
-      and .identities == [$lower]
-      and .artifacts[0].destination == $settings
-      and .artifacts[1].destination == $codex
-  ' "$journal" >/dev/null
-  [ "$(file_identity "$settings")" = "$lower_identity" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-
-  printf '{\n  "operator": {\n    "manual": "unknown"\n  }\n}\n' > "$settings"
-  chmod 640 "$settings"
-  settings_unknown_hash="$(sha256_file "$settings")"
-  settings_unknown_mode="$(file_mode "$settings")"
-  settings_unknown_base64="$(base64 < "$settings" | tr -d '\n')"
-  [ "$(file_identity "$settings")" = "$lower_identity" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  assert_output_has "$output" \
-    "managed file $settings no longer has its pinned filesystem identity/content"
-  assert_output_has "$output" \
-    "Unknown bytes were preserved; restore the journaled regular-file snapshot instead."
-  assert_output_has "$output" "trellis: user attachment recovery remedy: rm -f --"
-  [ -f "$journal" ]
-  jq -e --arg lower "$lower_identity" '
-    .phase == 1 and .pending == null and .identities == [$lower]
-  ' "$journal" >/dev/null
-  [ "$(sha256_file "$settings")" = "$settings_unknown_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_unknown_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_unknown_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-
-  if ! printf '%s' "$settings_managed_base64" | base64 -D > "$settings" 2>/dev/null; then
-    printf '%s' "$settings_managed_base64" | base64 -d > "$settings"
-  fi
-  chmod "$settings_managed_mode" "$settings"
-  [ "$(file_identity "$settings")" = "$lower_identity" ]
-  [ "$(sha256_file "$settings")" = "$settings_managed_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_managed_mode" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$(user_owner_path)" ]
-
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-}
-
-@test "attach --user rollback persists pending undo progress across recovery faults" {
-  local release=2.0.0 journal script pending_index destination stage pending_identity phase_before
-  local unknown_hash unknown_mode
-
-  make_user_release "$release" true false
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  mkdir -p "$HOME/.omp/agent"
-
-  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  phase_before="$(jq -r '.phase' "$journal")"
-  pending_index="$(jq -r '
-    .phase as $phase
-    | [range($phase; (.artifacts | length)) as $index
-       | select(.artifacts[$index].kind == "symlink"
-         and ((.artifacts[$index] | has("replace")) | not))
-       | $index][0] // empty
-  ' "$journal")"
-  [ -n "$pending_index" ] || { cat "$journal"; false; }
-
-  run env ATTACHMENT_FAULT_PHASE=user-pending-finalize HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c '
-      source "$1"
-      artifact=$(jq -c --argjson index "$4" ".artifacts[\$index]" "$3") || exit $?
-      destination=$(printf "%s\n" "$artifact" | jq -r ".destination") || exit $?
-      stage=$(_attachment_user_stage_candidate "$destination" "$(jq -r ".attachment_id" "$3")") || exit $?
-      _attachment_user_set_pending "$3" "$artifact" "$stage" || exit $?
-      _attachment_user_publish_pending "$2" "$3"
-    ' _ "$script" "$TRELLIS_HOME" "$journal" "$pending_index"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  destination="$(jq -r '.pending.artifact.destination' "$journal")"
-  stage="$(jq -r '.pending.staging_path' "$journal")"
-  pending_identity="$(jq -r '.pending.destination_identity' "$journal")"
-  jq -e --argjson index "$pending_index" '
-    .pending.artifact == .artifacts[$index]
-      and (.pending.destination_identity | type == "string" and length > 0)
-      and .pending.rollback_state == null
-  ' "$journal" >/dev/null
-  [ -L "$destination" ]
-  [ ! -e "$stage" ]
-  [ ! -L "$stage" ]
-
-  run env ATTACHMENT_FAULT_PHASE=user-rollback-pending-destination HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ ! -e "$destination" ]
-  [ ! -L "$destination" ]
-  [ -L "$stage" ]
-  [ "$(file_identity "$stage")" = "$pending_identity" ]
-  jq -e --arg identity "$pending_identity" '
-    .pending.rollback_state == "destination"
-      and .pending.destination_identity == $identity
-      and .pending.staging_identity == $identity
-  ' "$journal" >/dev/null
-  printf 'operator-owned pending destination\n' > "$destination"
-  chmod 640 "$destination"
-  unknown_hash="$(sha256_file "$destination")"
-  unknown_mode="$(file_mode "$destination")"
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$destination")" = "$unknown_hash" ]
-  [ "$(file_mode "$destination")" = "$unknown_mode" ]
-  [ -L "$stage" ]
-  [ "$(file_identity "$stage")" = "$pending_identity" ]
-  jq -e --arg identity "$pending_identity" '
-    .pending.rollback_state == "destination"
-      and .pending.destination_identity == $identity
-      and .pending.staging_identity == $identity
-  ' "$journal" >/dev/null
-  rm "$destination"
-
-
-  run env ATTACHMENT_FAULT_PHASE=user-rollback-pending HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e --argjson phase "$phase_before" '.pending == null and .phase == $phase' "$journal" >/dev/null
-  [ ! -e "$destination" ]
-  [ ! -L "$destination" ]
-  [ ! -e "$stage" ]
-  [ ! -L "$stage" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  [ ! -e "$stage" ]
-  [ ! -L "$stage" ]
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$(user_owner_path)" ]
-
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  [ ! -e "$destination" ]
-  [ ! -L "$destination" ]
-}
-
-@test "attach --user rollback converges an applied replace after restore before progress" {
-  local release=2.0.0 agents settings codex_settings journal script
-  local settings_before_hash settings_before_mode settings_before_base64
-  local codex_before_hash codex_before_mode codex_before_base64
-
-  make_user_release "$release" false false file true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  settings="$HOME/.claude/settings.json"
-  codex_settings="$HOME/.codex/settings.json"
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  mkdir -p "$(dirname "$agents")" "$(dirname "$codex_settings")"
-  cat > "$codex_settings" <<'JSON'
-{
-  "operator": {
-    "keep": "codex"
-  }
-}
-JSON
-  chmod 640 "$codex_settings"
-  settings_before_hash="$(sha256_file "$settings")"
-  settings_before_mode="$(file_mode "$settings")"
-  settings_before_base64="$(base64 < "$settings" | tr -d '\n')"
-  codex_before_hash="$(sha256_file "$codex_settings")"
-  codex_before_mode="$(file_mode "$codex_settings")"
-  codex_before_base64="$(base64 < "$codex_settings" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=2 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e --arg codex "$codex_settings" '
-    .phase == 2 and .pending == null
-      and .artifacts[1].destination == $codex
-      and (.artifacts[1] | has("replace"))
-  ' "$journal" >/dev/null
-
-  run env ATTACHMENT_FAULT_PHASE=user-rollback-replace-restored HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e '
-    .phase == 2 and .pending == null
-      and .applied == .artifacts[0:2]
-      and (.identities | length) == 2
-  ' "$journal" >/dev/null
-  [ -f "$codex_settings" ]
-  [ ! -L "$codex_settings" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  ! compgen -G "$HOME/.claude/.settings.json.user-attachment-stage-*" >/dev/null
-  ! compgen -G "$HOME/.codex/.settings.json.user-attachment-stage-*" >/dev/null
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-}
-
-@test "attach --user rollback converges a pending replace after restore before progress" {
-  local release=2.0.0 agents settings codex_settings journal script
-  local settings_before_hash settings_before_mode settings_before_base64
-  local codex_before_hash codex_before_mode codex_before_base64
-
-  make_user_release "$release" false false file true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  settings="$HOME/.claude/settings.json"
-  codex_settings="$HOME/.codex/settings.json"
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  mkdir -p "$(dirname "$agents")" "$(dirname "$codex_settings")"
-  cat > "$codex_settings" <<'JSON'
-{
-  "operator": {
-    "keep": "codex"
-  }
-}
-JSON
-  chmod 640 "$codex_settings"
-  settings_before_hash="$(sha256_file "$settings")"
-  settings_before_mode="$(file_mode "$settings")"
-  settings_before_base64="$(base64 < "$settings" | tr -d '\n')"
-  codex_before_hash="$(sha256_file "$codex_settings")"
-  codex_before_mode="$(file_mode "$codex_settings")"
-  codex_before_base64="$(base64 < "$codex_settings" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-
-  run env ATTACHMENT_FAULT_PHASE=user-pending-finalize HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c '
-      source "$1"
-      artifact=$(jq -c ".artifacts[1]" "$3") || exit $?
-      destination=$(printf "%s\n" "$artifact" | jq -r ".destination") || exit $?
-      stage=$(_attachment_user_stage_candidate "$destination" "$(jq -r ".attachment_id" "$3")") || exit $?
-      _attachment_user_set_pending "$3" "$artifact" "$stage" || exit $?
-      _attachment_user_publish_pending "$2" "$3"
-    ' _ "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e --arg codex "$codex_settings" '
-    .phase == 1 and .pending != null
-      and .pending.artifact == .artifacts[1]
-      and .pending.artifact.destination == $codex
-      and (.pending.destination_identity | type == "string" and length > 0)
-      and .pending.rollback_state == null
-  ' "$journal" >/dev/null
-
-  run env ATTACHMENT_FAULT_PHASE=user-rollback-replace-restored HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e --arg codex "$codex_settings" '
-    .phase == 1 and .pending != null
-      and .pending.artifact.destination == $codex
-      and (.pending.destination_identity | type == "string" and length > 0)
-      and .pending.rollback_state == null
-  ' "$journal" >/dev/null
-  [ -f "$codex_settings" ]
-  [ ! -L "$codex_settings" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  ! compgen -G "$HOME/.claude/.settings.json.user-attachment-stage-*" >/dev/null
-  ! compgen -G "$HOME/.codex/.settings.json.user-attachment-stage-*" >/dev/null
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-}
-
-@test "attach --user rollback restores a deleted managed symlink replacement" {
-  local release=2.0.0 agents target journal script owner
-  local before_hash before_mode before_base64
-
-  make_user_release "$release" false true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  target="$TRELLIS_HOME/releases/$release/payload/core-rules/omp/global/AGENTS.md"
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  owner="$(user_owner_path)"
-  mkdir -p "$(dirname "$agents")"
-  cp "$target" "$agents"
-  chmod "$(file_mode "$target")" "$agents"
-  before_hash="$(sha256_file "$agents")"
-  before_mode="$(file_mode "$agents")"
-  before_base64="$(base64 < "$agents" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=owner-published "$(installed_attach "$release")" \
-    attach --user --adopt-identical --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  [ -f "$owner" ]
-  [ -L "$agents" ]
-  rm "$owner" "$agents"
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"user attachment recovery remedy:"* ]]
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-  [ -f "$agents" ]
-  [ ! -L "$agents" ]
-  [ "$(sha256_file "$agents")" = "$before_hash" ]
-  [ "$(file_mode "$agents")" = "$before_mode" ]
-  [ "$(base64 < "$agents" | tr -d '\n')" = "$before_base64" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  ! compgen -G "$HOME/.omp/agent/.AGENTS.md.user-attachment-stage-*" >/dev/null
-
-  run "$(installed_attach "$release")" attach --user --adopt-identical --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$agents")" = "$before_hash" ]
-  [ "$(file_mode "$agents")" = "$before_mode" ]
-  [ "$(base64 < "$agents" | tr -d '\n')" = "$before_base64" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-}
-
-@test "attach --user rollback repair handles a regular-file replacement drift" {
-  local release=2.0.0 agents settings codex_settings journal script repair
-  local settings_before_hash settings_before_mode settings_before_base64
-  local codex_before_hash codex_before_mode codex_before_base64
-  local unknown_hash unknown_mode unknown_base64
-
-  make_user_release "$release" false false file true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  settings="$HOME/.claude/settings.json"
-  codex_settings="$HOME/.codex/settings.json"
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  mkdir -p "$(dirname "$agents")" "$(dirname "$codex_settings")"
-  cat > "$codex_settings" <<'JSON'
-{
-  "operator": {
-    "keep": "codex"
-  }
-}
-JSON
-  chmod 640 "$codex_settings"
-  settings_before_hash="$(sha256_file "$settings")"
-  settings_before_mode="$(file_mode "$settings")"
-  settings_before_base64="$(base64 < "$settings" | tr -d '\n')"
-  codex_before_hash="$(sha256_file "$codex_settings")"
-  codex_before_mode="$(file_mode "$codex_settings")"
-  codex_before_base64="$(base64 < "$codex_settings" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$release")" \
-    attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  jq -e --arg settings "$settings" '
-    .phase == 1 and .pending == null
-      and .artifacts[0].destination == $settings
-      and .artifacts[0].kind == "file"
-      and (.artifacts[0] | has("replace"))
-  ' "$journal" >/dev/null
-  printf 'operator-owned regular-file drift\n' > "$settings"
-  chmod 640 "$settings"
-  unknown_hash="$(sha256_file "$settings")"
-  unknown_mode="$(file_mode "$settings")"
-  unknown_base64="$(base64 < "$settings" | tr -d '\n')"
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  assert_output_has "$output" "managed file $settings no longer has its pinned filesystem identity"
-  repair="$(printf '%s\n' "$output" | sed -n 's/^trellis: user attachment recovery remedy: //p')"
-  [ -n "$repair" ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$unknown_hash" ]
-  [ "$(file_mode "$settings")" = "$unknown_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$unknown_base64" ]
-
-  run bash -c "$repair"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$settings" ]
-  [ ! -L "$settings" ]
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-
-  run "$(installed_attach "$release")" attach --user --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run "$(installed_attach "$release")" detach --user --home "$TRELLIS_HOME"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$settings_before_hash" ]
-  [ "$(file_mode "$settings")" = "$settings_before_mode" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$settings_before_base64" ]
-  [ "$(sha256_file "$codex_settings")" = "$codex_before_hash" ]
-  [ "$(file_mode "$codex_settings")" = "$codex_before_mode" ]
-  [ "$(base64 < "$codex_settings" | tr -d '\n')" = "$codex_before_base64" ]
-  [ ! -e "$agents" ]
-  [ ! -L "$agents" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-}
-
-@test "attach --user rollback emits an executable repair for a drifted symlink replacement" {
-  local release=2.0.0 agents target journal script owner repair
-  local before_hash before_mode before_base64
-
-  make_user_release "$release" false true
-  agents="$HOME/.omp/agent/AGENTS.md"
-  target="$TRELLIS_HOME/releases/$release/payload/core-rules/omp/global/AGENTS.md"
-  journal="$(user_attach_journal_path)"
-  script="$TRELLIS_HOME/releases/$release/payload/scripts/lib/attachment.sh"
-  owner="$(user_owner_path)"
-  mkdir -p "$(dirname "$agents")"
-  cp "$target" "$agents"
-  chmod "$(file_mode "$target")" "$agents"
-  before_hash="$(sha256_file "$agents")"
-  before_mode="$(file_mode "$agents")"
-  before_base64="$(base64 < "$agents" | tr -d '\n')"
-
-  run env ATTACHMENT_FAULT_PHASE=owner-published "$(installed_attach "$release")" \
-    attach --user --adopt-identical --home "$TRELLIS_HOME" --release "$release"
-
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [ -f "$journal" ]
-  [ -f "$owner" ]
-  [ -L "$agents" ]
-  jq -e --arg agents "$agents" '
-    any(.artifacts[]; .destination == $agents and .kind == "symlink" and has("replace"))
-  ' "$journal" >/dev/null
-  rm "$owner" "$agents"
-  ln -s "$target" "$agents"
-  [ "$(readlink "$agents")" = "$target" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  assert_output_has "$output" "managed symlink $agents no longer has its pinned filesystem identity"
-  repair="$(printf '%s\n' "$output" | sed -n 's/^trellis: user attachment recovery remedy: //p')"
-  [ -n "$repair" ] || { echo "$output"; false; }
-
-  run bash -c "$repair"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$agents" ]
-  [ ! -L "$agents" ]
-  [ "$(sha256_file "$agents")" = "$before_hash" ]
-  [ "$(file_mode "$agents")" = "$before_mode" ]
-  [ "$(base64 < "$agents" | tr -d '\n')" = "$before_base64" ]
-
-  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_LIBS_PRELOADED=0 \
-    bash -c 'source "$1"; attachment_user_rollback "$2" "$3"' _ \
-    "$script" "$TRELLIS_HOME" "$journal"
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$journal" ]
-  [ ! -L "$journal" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-  [ -f "$agents" ]
-  [ ! -L "$agents" ]
-  [ "$(sha256_file "$agents")" = "$before_hash" ]
-  [ "$(file_mode "$agents")" = "$before_mode" ]
-}
-
-@test "attach --user --adopt-identical rejects a byte-identical regular leaf with the wrong mode" {
-  local destination target target_mode wrong_mode settings_before
-  destination="$HOME/.omp/agent/AGENTS.md"
-  target="$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md"
-  target_mode="$(file_mode "$target")"
-  if [ "$target_mode" = 600 ]; then wrong_mode=644; else wrong_mode=600; fi
-  mkdir -p "$(dirname "$destination")"
-  cp "$target" "$destination"
-  chmod "$wrong_mode" "$destination"
-  settings_before="$(sha256_file "$HOME/.claude/settings.json")"
-
-  user_attach_adopt_identical
-
-  [ "$status" -eq 3 ]
-  assert_output_has "$output" "$destination"
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  [ "$(file_mode "$destination")" = "$wrong_mode" ]
-  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
-  [ ! -e "$(user_owner_path)" ]
-}
-
-@test "attach --user --adopt-identical promotes an identical regular leaf and detach restores it exactly" {
-  destination="$HOME/.omp/agent/AGENTS.md"
-  target="$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md"
-  mkdir -p "$(dirname "$destination")"
-  cp "$target" "$destination"
-  target_mode="$(file_mode "$target")"
-  before_mode="0$target_mode"
-  chmod "$target_mode" "$destination"
-  before_hash="$(sha256_file "$destination")"
-  before_base64="$(base64 < "$destination" | tr -d '\n')"
-  settings_before="$(sha256_file "$HOME/.claude/settings.json")"
-
-  user_attach
-
-  [ "$status" -eq 3 ]
-  assert_output_has "$output" "$destination"
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  [ "$(file_mode "$destination")" = "$(file_mode "$target")" ]
-  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ ! -e "$(user_owner_path)" ]
-  [ ! -L "$(user_owner_path)" ]
-
-  user_attach_adopt_identical
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$destination" ]
-  [ "$(readlink "$destination")" = "$target" ]
-  owner="$(user_owner_path)"
-  jq -e --arg destination "$destination" --arg bytes "$before_base64" \
-    --arg sha "$before_hash" --arg mode "$before_mode" '
-    [.artifacts[] | select(.destination == $destination and .kind == "symlink")] as $artifacts
-    | ($artifacts | length) == 1
-      and (($artifacts[0] | has("replace")) | not)
-      and (($artifacts[0].restore | keys) == ["before_base64", "before_mode", "before_sha256"])
-      and $artifacts[0].restore.before_base64 == $bytes
-      and $artifacts[0].restore.before_sha256 == $sha
-      and $artifacts[0].restore.before_mode == $mode
-  ' "$owner" >/dev/null
-
-  user_detach
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  [ "$(sha256_file "$destination")" = "$before_hash" ]
-  [ "$(file_mode "$destination")" = "$target_mode" ]
-  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
 }
 
 @test "attach --user --adopt-identical adopts equal JSON leaves and restores operator bytes and mode" {
@@ -1697,10 +628,6 @@ JSON
   [ "$(sha256_file "$settings")" = "$before_hash" ]
   [ "$(file_mode "$settings")" = 640 ]
   [ "$(base64 < "$settings" | tr -d '\n')" = "$before_base64" ]
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
   [ ! -e "$(user_owner_path)" ]
   [ ! -L "$(user_owner_path)" ]
 
@@ -1737,10 +664,6 @@ JSON
   [ "$(sha256_file "$settings")" = "$before_hash" ]
   [ "$(base64 < "$settings" | tr -d '\n')" = "$before_base64" ]
   [ "$(file_mode "$settings")" = 640 ]
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
   [ ! -e "$owner" ]
   [ ! -L "$owner" ]
 }
@@ -1786,116 +709,7 @@ JSON
   [ "$(sha256_file "$settings")" = "$before_hash" ]
   [ "$(base64 < "$settings" | tr -d '\n')" = "$before_base64" ]
   [ "$(file_mode "$settings")" = 640 ]
-  [ ! -e "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -L "$HOME/.omp/agent/AGENTS.md" ]
-  [ ! -e "$HOME/.omp/agent/RULES.md" ]
-  [ ! -L "$HOME/.omp/agent/RULES.md" ]
   [ ! -e "$(user_owner_path)" ]
   [ ! -L "$(user_owner_path)" ]
 }
 
-@test "relink --user rejects a symlink restore carried onto a file release" {
-  local destination target owner owner_before owner_tmp
-  destination="$HOME/.omp/agent/AGENTS.md"
-
-  user_attach
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$destination" ]
-  target="$(readlink "$destination")"
-  owner="$(user_owner_path)"
-  owner_tmp="$owner.tmp"
-  jq --arg destination "$destination" --arg target "$target" '
-    .artifacts |= map(
-      if .destination == $destination then .restore = {before_target:$target} else . end
-    )
-  ' "$owner" > "$owner_tmp"
-  mv "$owner_tmp" "$owner"
-  chmod 600 "$owner"
-  owner_before="$(sha256_file "$owner")"
-  jq -e --arg destination "$destination" --arg target "$target" '
-    [.artifacts[] | select(.destination == $destination)] as $artifacts
-    | ($artifacts | length) == 1
-      and $artifacts[0].kind == "symlink"
-      and (($artifacts[0].restore | keys) == ["before_target"])
-      and $artifacts[0].restore.before_target == $target
-  ' "$owner" >/dev/null
-  make_user_release 2.0.0 false true file
-
-  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  [ -L "$destination" ]
-  [ "$(readlink "$destination")" = "$target" ]
-  [ "$(sha256_file "$owner")" = "$owner_before" ]
-  [ ! -e "$(user_attach_journal_path)" ]
-  [ ! -L "$(user_attach_journal_path)" ]
-  [ ! -e "$(user_detach_journal_path)" ]
-  [ ! -L "$(user_detach_journal_path)" ]
-
-  user_detach
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -L "$destination" ]
-  [ "$(readlink "$destination")" = "$target" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-}
-
-@test "relink --user rejects a file restore carried onto a symlink release" {
-  local destination target before_hash before_mode before_base64 owner owner_before managed_hash
-  destination="$HOME/.omp/agent/AGENTS.md"
-  target="$TRELLIS_HOME/releases/1.0.0/payload/core-rules/omp/global/AGENTS.md"
-  mkdir -p "$(dirname "$destination")"
-  cp "$target" "$destination"
-  chmod "$(file_mode "$target")" "$destination"
-  before_hash="$(sha256_file "$destination")"
-  before_mode="0$(file_mode "$destination")"
-  before_base64="$(base64 < "$destination" | tr -d '\n')"
-
-  user_attach_adopt_identical
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  make_user_release 2.0.0 false true file
-
-  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  owner="$(user_owner_path)"
-  jq -e --arg destination "$destination" --arg bytes "$before_base64" \
-    --arg sha "$before_hash" --arg mode "$before_mode" '
-    [.artifacts[] | select(.destination == $destination)] as $artifacts
-    | ($artifacts | length) == 1
-      and $artifacts[0].kind == "file"
-      and (($artifacts[0].restore | keys) == ["before_base64", "before_mode", "before_sha256"])
-      and $artifacts[0].restore.before_base64 == $bytes
-      and $artifacts[0].restore.before_sha256 == $sha
-      and $artifacts[0].restore.before_mode == $mode
-  ' "$owner" >/dev/null
-  owner_before="$(sha256_file "$owner")"
-  managed_hash="$(sha256_file "$destination")"
-  make_user_release 3.0.0 false true symlink
-
-  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 3.0.0
-
-  [ "$status" -eq 3 ] || { echo "$output"; false; }
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  [ "$(sha256_file "$destination")" = "$managed_hash" ]
-  [ "$(sha256_file "$owner")" = "$owner_before" ]
-  [ ! -e "$(user_attach_journal_path)" ]
-  [ ! -L "$(user_attach_journal_path)" ]
-  [ ! -e "$(user_detach_journal_path)" ]
-  [ ! -L "$(user_detach_journal_path)" ]
-
-  user_detach
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$destination" ]
-  [ ! -L "$destination" ]
-  [ "$(sha256_file "$destination")" = "$before_hash" ]
-  [ "$(file_mode "$destination")" = "${before_mode#0}" ]
-  [ "$(base64 < "$destination" | tr -d '\n')" = "$before_base64" ]
-  [ ! -e "$owner" ]
-  [ ! -L "$owner" ]
-}

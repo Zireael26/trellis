@@ -19,6 +19,8 @@ trap 'rm -rf "$WORK"' EXIT
 
 RAW_CURRENT="$WORK/current.json"
 RAW_HISTORY="$WORK/history.json"
+CURRENT_ERR="$WORK/current.err"
+HISTORY_ERR="$WORK/history.err"
 CURRENT_SOURCE="$PROJECT_DIR"
 
 CONFIG_ARGS=()
@@ -60,7 +62,7 @@ gitleaks detect \
   --redact \
   --no-banner \
   "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" \
-  >/dev/null 2>&1 || CURRENT_RC=$?
+  >/dev/null 2>"$CURRENT_ERR" || CURRENT_RC=$?
 
 HISTORY_RC=0
 gitleaks detect \
@@ -70,12 +72,44 @@ gitleaks detect \
   --redact \
   --no-banner \
   "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" \
-  >/dev/null 2>&1 || HISTORY_RC=$?
+  >/dev/null 2>"$HISTORY_ERR" || HISTORY_RC=$?
 
-[ -f "$RAW_CURRENT" ] || printf '[]\n' > "$RAW_CURRENT"
-[ -f "$RAW_HISTORY" ] || printf '[]\n' > "$RAW_HISTORY"
+if [ -s "$CURRENT_ERR" ]; then
+  echo "warn: gitleaks current-tree scanner stderr:" >&2
+  cat "$CURRENT_ERR" >&2
+fi
+if [ -s "$HISTORY_ERR" ]; then
+  echo "warn: gitleaks history scanner stderr:" >&2
+  cat "$HISTORY_ERR" >&2
+fi
 
-python3 - "$RAW_CURRENT" "$RAW_HISTORY" "$CURRENT_SOURCE" >"$OUT" <<'PY'
+STATUS=0
+case "$CURRENT_RC" in
+  0|1) ;;
+  *) echo "warn: gitleaks current-tree scan failed (rc=$CURRENT_RC)" >&2; STATUS=2 ;;
+esac
+case "$HISTORY_RC" in
+  0|1) ;;
+  *) echo "warn: gitleaks history scan failed (rc=$HISTORY_RC)" >&2; STATUS=2 ;;
+esac
+
+REPORTS_PRESENT=1
+if [ ! -f "$RAW_CURRENT" ]; then
+  echo "warn: gitleaks current-tree report is missing" >&2
+  REPORTS_PRESENT=0
+fi
+if [ ! -f "$RAW_HISTORY" ]; then
+  echo "warn: gitleaks history report is missing" >&2
+  REPORTS_PRESENT=0
+fi
+if [ "$REPORTS_PRESENT" -eq 0 ]; then
+  : > "$OUT"
+  exit 2
+fi
+
+NORMALIZED="$WORK/normalized.jsonl"
+NORMALIZE_RC=0
+python3 - "$RAW_CURRENT" "$RAW_HISTORY" "$CURRENT_SOURCE" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
 import hashlib
 import json
 import os
@@ -84,13 +118,21 @@ import sys
 current_path, history_path, current_root = sys.argv[1:]
 
 
-def load(path):
+def load(path, label):
     try:
         with open(path) as fh:
             data = json.load(fh)
-    except Exception:
-        return []
-    return data if isinstance(data, list) else []
+    # SAFETY: Scanner reports are untrusted I/O; read or parse exceptions make the stage indeterminate.
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"warn: gitleaks {label} report is malformed: {error}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(data, list):
+        print(f"warn: gitleaks {label} report must be a JSON list", file=sys.stderr)
+        raise SystemExit(2)
+    if not all(isinstance(leak, dict) for leak in data):
+        print(f"warn: gitleaks {label} report contains a non-object finding", file=sys.stderr)
+        raise SystemExit(2)
+    return data
 
 
 def normalized_path(value, root=None):
@@ -137,7 +179,9 @@ def normalize(leak, bucket, root=None):
     }
 
 
-current = [normalize(leak, "findings", current_root) for leak in load(current_path)]
+current_leaks = load(current_path, "current-tree")
+history_leaks = load(history_path, "history")
+current = [normalize(leak, "findings", current_root) for leak in current_leaks]
 # Git-mode reports the line at the introducing commit while --no-git reports
 # today's line. Suppress history by rule+file so line drift cannot double-bucket
 # a secret that is still present in the current tree.
@@ -145,7 +189,7 @@ current_identities = {(f["rule"], f["file"]) for f in current}
 
 seen = set()
 historical = []
-for leak in load(history_path):
+for leak in history_leaks:
     finding = normalize(leak, "historical_findings")
     identity = (finding["rule"], finding["file"])
     if identity in current_identities or finding["fingerprint"] in seen:
@@ -157,13 +201,9 @@ for finding in current + historical:
     print(json.dumps(finding, ensure_ascii=False))
 PY
 
-STATUS=0
-case "$CURRENT_RC" in
-  0|1) ;;
-  *) echo "warn: gitleaks current-tree scan failed (rc=$CURRENT_RC)" >&2; STATUS=2 ;;
-esac
-case "$HISTORY_RC" in
-  0|1) ;;
-  *) echo "warn: gitleaks history scan failed (rc=$HISTORY_RC)" >&2; STATUS=2 ;;
-esac
+if [ "$NORMALIZE_RC" -ne 0 ]; then
+  : > "$OUT"
+  exit 2
+fi
+mv "$NORMALIZED" "$OUT"
 exit "$STATUS"

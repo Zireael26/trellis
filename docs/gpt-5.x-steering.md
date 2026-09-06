@@ -1,46 +1,48 @@
-# GPT-5.x prompting — steering reference
+# Codex model guidance — Astra and existing GPT workers
 
-Source: the Trellis process-enforcement design (`docs/specs/2026-06-02-trellis-process-enforcement-design.md`, §4 cross-harness framing) — the levers pinned there, not model recall. This doc deliberately covers **only** the levers the design pinned for the GPT-5.x / Codex harness; it does not enumerate the model's full API surface. Where the exact configuration surface is not verifiable from the design, the lever is described as steering **intent** rather than a concrete flag, parameter name, or value — inventing those for a published, fleet-wide doc is the one failure mode this artifact must not have.
+This filename is retained for existing links. Model-specific deltas live in
+`core-rules/references/model-prompting-deltas.md`; direct-dispatch effort policy
+lives in `docs/codex-routing.md`. This guide replaces the older GPT-5.x assumption
+that Codex is only a secondary executor. The user-selected main agent owns
+planning and synthesis, whether hosted by Codex, Claude Code, or pi.
 
-GPT-5.x is Trellis's secondary harness (Codex). The spine — hooks, the autonomy slider, the context-log/primer system, the merge gates — is model-agnostic and already steers every harness identically. This doc carries only the genuine per-harness reporting/affordance deltas (verbosity, plan tracking, progress cadence). The load-bearing rules live in `core-rules/CLAUDE.md`, `core-rules/autonomy.md`, and the hooks — this is the why and the spare parts for the GPT-5.x deltas.
+## Working with Astra
 
-**Reasoning effort and cross-model routing are NOT restated here — they are governed by `docs/codex-routing.md`.** In brief: effort is governed by the dispatch-time ladder in `docs/codex-routing.md §3` — an operating band plus exception tiers, with effort declared explicitly per unit at dispatch, never defaulted — and the reasoning-heavy stages (planning, spec, architecture, the `analyze` gate, synthesis) route to **Claude**, not to a Codex effort-lift. The earlier "raise Codex effort from a medium baseline at plan/analyze" framing was retired in RC.5: it implied a medium baseline that contradicted the then-current routing.
+OpenAI's [Astra model guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra)
+was checked on 2026-09-05. It highlights sensitivity to conflicting skill
+instructions, excess clarification and testing, verbose output, and a need to
+specify useful delegation. Trellis applies that advice through its shared rules:
 
----
+- Let explicit user instructions resolve workflow choices; carry authorization
+  forward, and identify the exact rule if a skill still requires a pause.
+- State objective, scope, evidence, and output expectations. Keep instructions
+  concise and use progressive disclosure for specialist procedures.
+- Delegate substantial independent work when the host supports it and the work
+  benefits. Group related units; preserve selected models and provider failures.
+- Run checks appropriate to the change and all required gates. Repeat only when
+  the artifact changes or evidence leaves an unresolved concern.
 
-## 1. Verbosity — low, calibrated to task
+Treat these as behavior guidance, not a measured improvement on Trellis tasks.
+Retain the existing worker roles until representative comparisons justify a change.
 
-Keep verbosity low: short on lookups and confirmations, longer only on genuinely open-ended analysis. This maps to the same Trellis surface Opus uses — `core-rules/CLAUDE.md` "Communication" ("Terse responses. No trailing prose summaries") — so no rule change is needed; the GPT-5.x default is steered to honor the existing house voice rather than narrate.
+## Host capabilities
 
-The intent, for a project whose harness exposes a verbosity control or for a `CLAUDE.md` reminder:
+Use the tools actually present. Batch independent reads; serialize dependent
+changes. Maintain task state through available plan tools or the task artifact.
+Give short progress updates during sustained work, following the host's cadence;
+report changed findings rather than narrating commands. Do not require absent
+legacy names such as `multi_tool_use.parallel` or `TodoWrite`.
 
-```text
-Keep responses concise and low-verbosity. Skip non-essential preamble and trailing summaries. Match length to task complexity — terse on lookups and confirmations, expansive only on open-ended analysis.
-```
+Native async tools, mid-turn steering, and cache-preserving effort updates need
+host implementation. A prompt or hook cannot enable an unsupported API feature.
+Trellis currently integrates existing harnesses; it should not add a Responses
+client merely to duplicate facilities already supplied by them.
 
-## 2. Plan tracking and parallel tool use — `update_plan` + `multi_tool_use.parallel`
+## API migration boundary
 
-Two named GPT-5.x affordances map onto the dispatch and state-tracking behavior Trellis already expects:
-
-- **`update_plan`** — keep the working plan current as tasks complete. This is the GPT-5.x-native counterpart to the `execute` loop's checkbox-tick discipline (`core-rules/skills/execute/`): the plan is the live state, ticked as each unit lands, not a stale snapshot. Use it so the agent's tracked plan and the on-disk plan/tasks file stay in step across a long run.
-- **`multi_tool_use.parallel`** — issue independent tool calls together. This honors `core-rules/CLAUDE.md` "Context management", which already directs batching independent reads/searches/analyses rather than serializing them. The reusable snippet (shared with `docs/claude-steering.md §3`):
-
-  ```text
-  If you intend to call multiple tools and there are no dependencies between the tool calls, make all of the independent tool calls in parallel. For example, when reading 3 files, run 3 tool calls in parallel. However, if some tool calls depend on previous calls to inform dependent values, do NOT call them in parallel — call them sequentially. Never use placeholders or guess missing parameters in tool calls.
-  ```
-
-Use `update_plan` and `multi_tool_use.parallel` by their GPT-5.x names where the harness provides them; the underlying discipline (live plan, batched independent calls) is what the Trellis surfaces already require of every harness.
-
-## 3. Progress floor — surface progress on a cadence
-
-This is the one genuine GPT-5.x delta the design sanctions. Both harnesses now scope progress reporting by **attendedness** — see `docs/claude-steering.md §2`, which asks for no narration scaffolding on attended turns and a readable re-grounding message at the end of a long unattended run. The GPT-5.x delta is the *cadence*: the design pins a **progress floor** — surface progress on a regular cadence during a long autonomous run, roughly every **6 steps** or **10 tool calls**, whichever comes first — rather than relying on the model to pace its own updates, so a multi-step run stays legible to the operator and to the context-log/primer system rather than going dark for a long stretch.
-
-This is a per-harness delta, not an override of the spine: it changes only the GPT-5.x reporting cadence, nothing about what work gets done or which gates fire. The intent:
-
-```text
-On a long autonomous run, surface a brief progress update on a regular cadence — roughly every 6 steps or every 10 tool calls, whichever comes first — so the run stays legible. Keep each update short (current step, what's next); this is a floor, not an invitation to narrate every action.
-```
-
----
-
-This doc covers only the design-pinned GPT-5.x reporting/affordance levers above. It intentionally does not catalog or reject other features — the spine in `core-rules/` already steers GPT-5.x identically to every other harness, and reasoning effort / routing lives in `docs/codex-routing.md`. If a future design revision pins another GPT-5.x-specific lever, it lands here next to these, sourced to the design rather than to model recall.
+If a Trellis component starts making direct Astra API requests, verify the
+[model's current API contract](https://developers.openai.com/api/docs/models/gpt-6-astra)
+and the migration section of the guide before changing it. Tool calling requires
+Responses; retain compatible effort, map `none`/`minimal` to `low`, and remove
+unsupported sampling/logprob options. API effort and host-only modes are separate
+surfaces. No direct API client, model pin, or fleet runtime is changed by this guide.

@@ -57,6 +57,7 @@ setup() {
   # Defensive: a stray Claude precedence in the env would point _se_project_dir
   # at the wrong root and break the relative-path cases.
   unset CLAUDE_PROJECT_DIR
+  unset TRELLIS_HARNESS
   STATE_DIR="$PROJECT_DIR/.codex/.reread-state"
   KEY="$(printf '%s' "$TP" | shasum -a 256 | awk '{print $1}' | cut -c1-16)"
   mkdir -p "$STATE_DIR"
@@ -168,6 +169,49 @@ warn_rows() {
   [ -z "$output" ]
   [ -z "$stderr" ]
   [ ! -f "$STATE_DIR/$KEY.warns.tsv" ]   # exempt path records nothing
+}
+
+@test "legacy Write overwrite: existing unread target warns then blocks, while a new target remains exempt" {
+  set_turn_epoch 1000
+  existing="$PROJECT_DIR/write-overwrite.txt"; echo "old" > "$existing"
+  new_target="$PROJECT_DIR/write-new.txt"
+  existing_event="$(jq -nc --arg tp "$TP" --arg t "$existing" \
+    '{transcript_path:$tp,tool_name:"Write",tool_input:{file_path:$t}}')"
+  new_event="$(jq -nc --arg tp "$TP" --arg t "$new_target" \
+    '{transcript_path:$tp,tool_name:"Write",tool_input:{file_path:$t}}')"
+
+  run_with_stderr "$GUARD" "$new_event"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$stderr" ]
+
+  run_with_stderr "$GUARD" "$existing_event"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
+  run_with_stderr "$GUARD" "$existing_event"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
+  run_with_stderr "$GUARD" "$existing_event"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]]
+}
+
+@test "native Add File cannot bypass reread protection when its declared target already exists" {
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/native-add-existing.txt"; echo "old" > "$f"
+  command=$'*** Begin Patch\n*** Add File: native-add-existing.txt\n+replacement\n*** End Patch'
+  event="$(jq -nc --arg tp "$TP" --arg cwd "$PROJECT_DIR" --arg command "$command" \
+    '{transcript_path:$tp,cwd:$cwd,tool_name:"apply_patch",tool_input:{command:$command}}')"
+
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"warn 1/2"* ]] || { echo "$stderr"; false; }
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]]
 }
 
 # =============================================================================
@@ -387,6 +431,36 @@ warn_rows() {
   stems="$(ls "$STATE_DIR" | sed 's/\.[^.]*$//; s/\.reads$//; s/\.warns$//' | sort -u)"
   [ "$(printf '%s\n' "$stems" | grep -c .)" -eq 1 ]
   [ "$stems" = "$KEY" ]
+}
+
+@test "Pi namespace: stamp, read tracking, and guard use only .pi state" {
+  rm -rf "$PROJECT_DIR/.codex"
+  export TRELLIS_HARNESS=pi
+  PI_STATE_DIR="$PROJECT_DIR/.pi/.reread-state"
+
+  run_with_stderr "$STAMP" "$(jq -nc --arg tp "$TP" '{transcript_path: $tp, stop_hook_active: false}')"
+  [ "$status" -eq 0 ]
+  [ -f "$PI_STATE_DIR/$KEY.epoch" ]
+
+  f="$PROJECT_DIR/pi-known.txt"; printf 'body\n' > "$f"
+  run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
+    '{transcript_path: $tp, tool_name: "Read", tool_input: {file_path: $t}, tool_response: "body"}')"
+  [ "$status" -eq 0 ]
+  grep -F -- "$f" "$PI_STATE_DIR/$KEY.reads.tsv"
+
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$stderr" ]
+  [ ! -e "$PROJECT_DIR/.codex" ]
+}
+
+@test "harness selector: arbitrary values cannot redirect state outside .codex" {
+  export TRELLIS_HARNESS='../escape'
+  run_with_stderr "$STAMP" "$(jq -nc --arg tp "$TP" '{transcript_path: $tp, stop_hook_active: false}')"
+  [ "$status" -eq 0 ]
+  [ -f "$STATE_DIR/$KEY.epoch" ]
+  [ ! -e "$PROJECT_DIR/escape" ]
 }
 
 # =============================================================================

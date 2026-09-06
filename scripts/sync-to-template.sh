@@ -17,6 +17,8 @@ mirror_bootstrap_trellis_home=${TRELLIS_HOME-}
 mirror_bootstrap_payload=${TRELLIS_VERIFIED_PAYLOAD-}
 mirror_bootstrap_release_version=${TRELLIS_VERIFIED_RELEASE_VERSION-}
 mirror_bootstrap_ssh_auth_sock=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}
+# Carry ambient TMPDIR only as untrusted data until containment admission.
+mirror_bootstrap_scratch=${TMPDIR-}
 # shellcheck disable=SC2093  # nothing after this exec runs in the outer shell:
 # the trusted body below the marker is read as DATA by the re-exec'd bootstrap.
 exec /usr/bin/env -i \
@@ -24,6 +26,7 @@ exec /usr/bin/env -i \
   "TRELLIS_VERIFIED_PAYLOAD=$mirror_bootstrap_payload" \
   "TRELLIS_VERIFIED_RELEASE_VERSION=$mirror_bootstrap_release_version" \
   "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$mirror_bootstrap_ssh_auth_sock" \
+  "TRELLIS_MIRROR_SCRATCH_CANDIDATE=$mirror_bootstrap_scratch" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
   /bin/bash --noprofile --norc -c '
 set -u
@@ -96,26 +99,64 @@ mirror_canonical_payload="$(CDPATH= cd "$TRELLIS_VERIFIED_PAYLOAD" && /bin/pwd -
 mirror_bootstrap_payload_matches "$mirror_canonical_home" "$mirror_canonical_payload" "$TRELLIS_VERIFIED_RELEASE_VERSION" &&
   [ "$mirror_source_dir" = "$mirror_canonical_payload/scripts" ] ||
   mirror_bootstrap_reject_source
-mirror_body="$(/usr/bin/mktemp /tmp/trellis-mirror.XXXXXX)" || {
-  /usr/bin/printf "%s\n" "trellis mirror: could not prepare trusted bootstrap" >&2
-  exit 5
+# No library is sourced yet. Keep this containment predicate equivalent to
+# release_entry_private_directory/release_entry_scratch_is_admissible.
+# Admission proves private ownership and containment, NOT launcher authentication.
+mirror_bootstrap_private_directory() {
+  local path="${1:-}" permissions private_bits listing
+  [ -n "$path" ] && [ ! -L "$path" ] && [ -d "$path" ] && [ -O "$path" ] || return 1
+  case "$(/usr/bin/uname -s)" in
+    Darwin)
+      # Extended attributes can hide the ACL marker behind @. Read ACL rows,
+      # not just the mode suffix; canonical input paths contain no newlines.
+      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
+      case "$listing" in *"
+"*) return 1 ;; esac
+      ;;
+    *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+  esac
+  permissions="${listing%% *}"
+  case "$permissions" in *+*) return 1 ;; esac
+  private_bits="$(/usr/bin/printf "%s" "$permissions" | /usr/bin/awk "{p=substr(\$0, 1, 10); print substr(p, 5, 6)}")"
+  [ "$private_bits" = "------" ]
 }
-if ! /usr/bin/awk "body { print } /^# -- trellis mirror body --\$/ { body = 1 }" "$mirror_source_dir/$mirror_source_name" > "$mirror_body" ||
-  ! /bin/test -s "$mirror_body" ||
-  ! /bin/chmod 600 "$mirror_body"; then
-  /bin/rm -f "$mirror_body"
+mirror_bootstrap_scratch_is_admissible() {
+  local candidate="${1:-}" home="${2:-}" root parent base canonical_root canonical_candidate
+  mirror_bootstrap_clean_absolute_path "$candidate" &&
+    mirror_bootstrap_clean_absolute_path "$home" || return 1
+  parent="${candidate%/*}"
+  base="${candidate##*/}"
+  case "$base" in .cmd.?*) ;; *) return 1 ;; esac
+  case "${base#.cmd.}" in *[!0-9A-Za-z._-]*) return 1 ;; esac
+  root="$home/state/scratch"
+  [ "$parent" = "$root" ] || return 1
+  mirror_bootstrap_private_directory "$home" &&
+    mirror_bootstrap_private_directory "$home/state" &&
+    mirror_bootstrap_private_directory "$root" &&
+    mirror_bootstrap_private_directory "$candidate" || return 1
+  canonical_root="$(CDPATH= cd "$root" && /bin/pwd -P)" || return 1
+  [ "$canonical_root" = "$root" ] || return 1
+  canonical_candidate="$(CDPATH= cd "$candidate" && /bin/pwd -P)" || return 1
+  [ "$canonical_candidate" = "$candidate" ]
+}
+mirror_bootstrap_scratch_is_admissible "${TRELLIS_MIRROR_SCRATCH_CANDIDATE:-}" "$mirror_canonical_home" || {
+  /usr/bin/printf "%s\n" "trellis mirror: command scratch directory is missing or not an admissible private Trellis temp directory" >&2
+  exit 4
+}
+export TMPDIR="$TRELLIS_MIRROR_SCRATCH_CANDIDATE"
+unset TRELLIS_MIRROR_SCRATCH_CANDIDATE
+export TRELLIS_HOME="$mirror_canonical_home"
+export TRELLIS_VERIFIED_PAYLOAD="$mirror_canonical_payload"
+export TRELLIS_MIRROR_SOURCE_DIR="$mirror_source_dir"
+# Capture must finish successfully before any body command runs. This shell is
+# already clean; builtin eval avoids a global tempfile and preserves caller stdin.
+if ! mirror_body="$(/usr/bin/awk "body { print } /^# -- trellis mirror body --\$/ { body = 1 }" "$mirror_source_dir/$mirror_source_name")" ||
+  [ -z "$mirror_body" ]; then
   /usr/bin/printf "%s\n" "trellis mirror: could not prepare trusted bootstrap" >&2
   exit 5
 fi
-exec /usr/bin/env -i \
-  "HOME=${HOME-}" "TRELLIS_HOME=$mirror_canonical_home" \
-  "TRELLIS_VERIFIED_PAYLOAD=$mirror_canonical_payload" \
-  "TRELLIS_VERIFIED_RELEASE_VERSION=${TRELLIS_VERIFIED_RELEASE_VERSION-}" \
-  "TRELLIS_VERIFIED_SSH_AUTH_SOCK=${TRELLIS_VERIFIED_SSH_AUTH_SOCK-}" \
-  "TRELLIS_MIRROR_SOURCE_DIR=$mirror_source_dir" \
-  "TRELLIS_MIRROR_BODY=$mirror_body" \
-  "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-  /bin/bash --noprofile --norc "$mirror_body" "$@"
+# Keep eval last: the body owns exit status and traps, with set -u and umask 077.
+eval "$mirror_body"
 ' trellis-mirror-bootstrap "$0" "$@"
 
 # -- trellis mirror body --
@@ -126,15 +167,6 @@ exec /usr/bin/env -i \
 # executed or sourced: its mutable bytes are not an input to publication.
 
 set -euo pipefail
-MIRROR_BODY_PATH="${TRELLIS_MIRROR_BODY:-}"
-unset TRELLIS_MIRROR_BODY
-mirror_cleanup_body() {
-  [ -z "$MIRROR_BODY_PATH" ] || /bin/rm -f "$MIRROR_BODY_PATH"
-}
-trap 'mirror_cleanup_body' EXIT
-trap 'mirror_cleanup_body; exit 129' HUP
-trap 'mirror_cleanup_body; exit 130' INT
-trap 'mirror_cleanup_body; exit 143' TERM
 unset BASH_ENV ENV CDPATH
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
@@ -415,6 +447,7 @@ sync_paths=(
   'engineering-process.md'
   'AGENT_SETUP.md'
   'AGENT_ONBOARD_PROJECT.md'
+  'AGENT_PI_SETUP.md'
   'CHANGELOG.md'
   'dependency-baseline.json'
   'audits/fleet-remediation-ledger.json'
@@ -422,9 +455,14 @@ sync_paths=(
   'core-rules/CLAUDE.md'
   'core-rules/AGENTS.md'
   'core-rules/agents/'
-  'core-rules/omp/'
   'core-rules/VERSION'
   'core-rules/codex/'
+  # The portable pi surface: extension, hook dispatcher, version-pinned patch
+  # bundle and its tests. `core-rules/pi/agents` is carved back out below --
+  # only the roster is private, and the rest of the subtree is the machinery a
+  # mirror user needs to install pi at all.
+  'core-rules/pi/'
+  'core-rules/inheritance-manifest.json'
   'core-rules/hooks.md'
   'core-rules/inheritance.md'
   'core-rules/deferred.md'
@@ -465,13 +503,16 @@ sync_paths=(
 core_rules_no_sync=(
   'evals'
   'skills/herdr-foreman'
-  # Both name this operator's LIVE provider routes -- the same reason
-  # `core-rules/templates/omp-project-policy.yml` is excluded below. `pi/agents`
-  # pins models per agent (including `opencode-go-2`, a second private account),
+  # Both name this operator's LIVE provider routes. `pi/agents` pins models per
+  # agent (including `opencode-go-2`, a second private account),
   # and `usage-federation/lane-catalog.json` enumerates `google-antigravity`,
   # `nous-portal` and `xai-oauth`. Neither carries a secret; both carry the
   # roster, which is what this list is for.
-  'pi'
+  #
+  # The withheld unit is the roster directory, not the whole pi subtree: the
+  # extension, hook dispatcher and patch bundle above it state no provider at
+  # all, and withholding them made the public setup recipe unfollowable.
+  'pi/agents'
   'usage-federation'
 )
 
@@ -491,13 +532,6 @@ payload_no_publish=(
   'scripts/lib/usage_federation'
   # Its test suite names the same provider modules, so it is withheld with it.
   'scripts/tests/usage-federation.bats'
-  # The OMP project policy template carries this operator's model roster --
-  # `agentModelOverrides` naming live provider routes including `google-antigravity`.
-  # `core-rules/templates/` is published for its policy value; this one file inside it
-  # is operator-specific, which is exactly what this list is for. Excluded rather than
-  # renamed: `google-antigravity` is the LIVE provider id, and renaming it to satisfy
-  # the lint re-introduces the flash misroute fixed on 2026-08-23.
-  'core-rules/templates/omp-project-policy.yml'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -512,7 +546,7 @@ payload_no_publish=(
 delist_prune=(
   'scripts/lib/usage_federation'
   'scripts/tests/usage-federation.bats'
-  'core-rules/pi'
+  'core-rules/pi/agents'
   'core-rules/usage-federation'
   'docs/antigravity-steering.md'
   'docs/gpt-5.5-steering.md'
@@ -531,7 +565,6 @@ delist_prune=(
   'blacklist.md'
   'recon.md'
   'docs/adr/2026-08-07-fleet-hosting-substrate-policy.md'
-  'core-rules/templates/omp-project-policy.yml'
   'AGENT_ONBOARD_GPTX.md'
   'docs/gptx.md'
   'docs/gptx-security.md'
@@ -549,9 +582,8 @@ safe_prune_path() {
 preflight_payload_no_publish_prunes() {
   # The `payload_no_publish` header states that every entry must also appear in
   # `delist_prune`, or an already-published copy is never deleted. Nothing enforced it
-  # -- the invariant lived in a comment, and a comment does not fail a build. Added
-  # 2026-08-24 after satisfying the pairing BY HAND for the OMP policy template, which
-  # is precisely how the next entry would have skipped it silently.
+  # -- the invariant lived in a comment, and a comment does not fail a build. Keep
+  # the executable pairing check so the next entry cannot skip its prune silently.
   local path prune found
   for path in "${payload_no_publish[@]}"; do
     safe_prune_path "$path" || {
@@ -940,7 +972,7 @@ check_payload_core_rules_coverage() {
   local dir name path private rc=0
   for dir in "$PAYLOAD_ROOT"/core-rules/*/; do
     [ -d "$dir" ] || continue
-    [ ! -L "$dir" ] || {
+    [ ! -L "${dir%/}" ] || {
       printf '%s\n' "${dir#"$PAYLOAD_ROOT"/}"
       rc=1
       continue
@@ -1024,7 +1056,7 @@ stage_verified_payload() {
       printf 'trellis mirror: unsafe private core-rules path: %s\n' "$path" >&2
       return 4
     }
-    rm -rf "$stage/core-rules/$path" || return 5
+    rm -rf "${stage:?}/core-rules/${path:?}" || return 5
   done
   # Drop the named exclusions a wholesale directory entry pulled in. These are
   # exact relative paths, never globs, so nothing outside the list can be removed
@@ -1035,8 +1067,134 @@ stage_verified_payload() {
     case "$path" in
       /*|*..*) printf 'trellis mirror: unsafe no-publish path: %s\n' "$path" >&2; return 4 ;;
     esac
-    rm -rf "$stage/$path" || return 5
+    rm -rf "${stage:?}/${path:?}" || return 5
   done
+}
+
+# Project the STAGED inheritance manifest into the one a mirror user can
+# actually satisfy. The verified payload's manifest is read-only input and stays
+# byte-identical; only the disposable stage is rewritten.
+#
+# Two of its link entries name sources the positive allowlist deliberately
+# withholds -- `core-rules/pi/agents` (the provider roster) and
+# `core-rules/skills/herdr-foreman` (the executable skill that encodes it). A
+# published manifest that still declared them would hand every mirror user a
+# planner that fails closed on `required source is missing from immutable
+# payload` for a source they can never obtain.
+#
+# This is emphatically NOT "drop entries whose source is absent". A dangling
+# source the allowlist did not intend to withhold is a real publication defect,
+# and `ref_integrity_check` plus the closure tests exist to catch it; a blanket
+# filter here would swallow exactly that signal. So each private entry is
+# matched by its full declared shape and removed only then. Adding a key to
+# either entry in `core-rules/inheritance-manifest.json` is therefore a
+# two-place edit -- the manifest and the expectations below -- which is the same
+# deliberate cost the `delist_prune` pairing already charges.
+#
+# `python3` rather than `jq`: the mirror body runs under `env -i` with
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin, the same restricted PATH the stable
+# launcher already depends on python3 from. Round-tripping through
+# `json.dumps(indent=2)` reproduces this repository's manifest byte-for-byte,
+# so the projection's only diff is the removals.
+project_staged_inheritance_manifest() {
+  local manifest="$stage/core-rules/inheritance-manifest.json"
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || {
+    printf 'trellis mirror: staged inheritance manifest is not a regular file\n' >&2
+    return 4
+  }
+  python3 -I - "$manifest" <<'PROJECT_MANIFEST' || return 4
+import json
+import sys
+
+# (harness, full expected entry shape). The source string is read back out of
+# the shape, so the identity predicate and the shape check cannot drift.
+PRIVATE_ENTRIES = (
+    (
+        "shared_agents",
+        {
+            "source_children": "core-rules/pi/agents",
+            "destination_dir": ".agents/agents",
+            "entry_type": "file",
+            "suffix": ".md",
+        },
+    ),
+    (
+        "user",
+        {
+            "source": "core-rules/skills/herdr-foreman",
+            "destination": ".claude/skills/herdr-foreman",
+            "destination_home": True,
+        },
+    ),
+)
+SOURCE_KEYS = ("source", "source_children", "fallback_source")
+
+
+def refuse(message):
+    sys.stderr.write("trellis mirror: %s\n" % message)
+    raise SystemExit(4)
+
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except ValueError as error:
+    refuse("staged inheritance manifest is not valid JSON: %s" % error)
+
+if not isinstance(document, dict) or document.get("schema_version") != 2:
+    refuse("staged inheritance manifest is not schema_version 2")
+
+harnesses = document.get("harnesses")
+if not isinstance(harnesses, dict):
+    refuse("staged inheritance manifest has no harnesses object")
+
+for name, section in harnesses.items():
+    if not isinstance(section, dict) or not isinstance(section.get("links"), list):
+        refuse("staged inheritance manifest has no %s.links array" % name)
+
+for harness, expected in PRIVATE_ENTRIES:
+    section = harnesses.get(harness)
+    if not isinstance(section, dict):
+        refuse("staged inheritance manifest has no %s harness object" % harness)
+    links = section.get("links")
+    if not isinstance(links, list):
+        refuse("staged inheritance manifest has no %s.links array" % harness)
+
+    private_source = next(
+        expected[key] for key in SOURCE_KEYS if key in expected
+    )
+    matched = [
+        (name, index, entry)
+        for name, candidate in harnesses.items()
+        for index, entry in enumerate(candidate["links"])
+        if isinstance(entry, dict)
+        and any(entry.get(key) == private_source for key in SOURCE_KEYS)
+    ]
+    # Absent is the already-portable input: projection is idempotent over its
+    # own output, so a re-published mirror is not a second, different manifest.
+    if not matched:
+        continue
+    if any(name != harness for name, _, _ in matched):
+        refuse("staged inheritance manifest has misplaced or cross-array private source %s" % private_source)
+    if len(matched) > 1:
+        refuse(
+            "staged inheritance manifest names private source %s %d times in %s.links"
+            % (private_source, len(matched), harness)
+        )
+    _, index, entry = matched[0]
+    if (entry.keys() != expected.keys()
+            or any(type(entry[key]) is not type(value) or entry[key] != value
+                   for key, value in expected.items())):
+        refuse(
+            "staged inheritance manifest entry for private source %s in %s.links "
+            "does not match the withheld shape" % (private_source, harness)
+        )
+    del links[index]
+
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+PROJECT_MANIFEST
 }
 
 printf '==> Checking private core-rules prune pairing\n'
@@ -1077,6 +1235,9 @@ stage="$(CDPATH='' cd -P -- "$stage_tmp" && pwd -P)" || {
 trap 'rm -rf "$stage"' EXIT INT TERM
 printf '==> Staging portable policy from verified commit %s\n' "$SOURCE_COMMIT"
 stage_verified_payload || exit "$?"
+
+printf '==> Projecting staged inheritance manifest\n'
+project_staged_inheritance_manifest || exit "$?"
 
 printf '==> Checking staged markdown references\n'
 ref_integrity_check "$stage" || exit 4

@@ -92,7 +92,7 @@ const AGENT_FAMILIES = {
   sol: 'openai', luna: 'openai', terra: 'openai', 'code-reviewer': 'openai',
   grok: 'xai', 'security-reviewer': 'xai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
-  cheap: 'meta', flash: 'google', deepseek: 'deepseek',
+  cheap: 'meta', flash: 'google',
 }
 function familyOf(agent) {
   if (typeof agent !== 'string') return null

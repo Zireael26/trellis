@@ -12,7 +12,6 @@
 #
 # Base: github.com/iamfakeguru/claude-md (MIT). Spec alignment:
 #   - Explicit 100,000-char threshold per our hooks.md.
-#   - Kept upstream's low-result-count grep heuristic as a bonus signal.
 
 set -u
 
@@ -24,8 +23,6 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
 _se_require_jq "truncation-check"
-
-TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 
 # Normalize tool_response to a string regardless of shape.
 TOOL_RESPONSE=$(printf '%s' "$INPUT" | jq -r '
@@ -51,16 +48,6 @@ RESP_LEN=${#TOOL_RESPONSE}
 if [ "$RESP_LEN" -ge 100000 ]; then
   emit_advisory "Result is large (${RESP_LEN} chars, ≥100K). Narrow the scope or read specific files/ranges instead of scanning broadly."
   exit 0
-fi
-
-# 3) Bonus heuristic (upstream): grep returning ~0 results for a specific pattern.
-if [ "$TOOL_NAME" = "Grep" ]; then
-  RESULT_COUNT=$(printf '%s\n' "$TOOL_RESPONSE" | grep -c '^' 2>/dev/null || echo 0)
-  PATTERN=$(printf '%s' "$INPUT" | jq -r '.tool_input.pattern // empty')
-  if [ -n "$PATTERN" ] && [ "$RESULT_COUNT" -lt 5 ]; then
-    emit_advisory "Low result count (${RESULT_COUNT}) for pattern '${PATTERN}'. If you expected more, the result may have been filtered; try a broader pattern or a different path."
-    exit 0
-  fi
 fi
 
 exit 0

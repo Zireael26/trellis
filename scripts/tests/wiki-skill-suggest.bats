@@ -212,17 +212,36 @@ snapshot_project() {
   done
 }
 
-@test "missing jq, missing Git, and malformed envelopes are silent exit zero" {
-  local no_jq="$SANDBOX/no-jq" no_git="$SANDBOX/no-git" hook input
-  mkdir -p "$no_jq" "$no_git"
-  link_tool "$no_jq" git
-  link_tool "$no_git" jq
+assert_missing_dependency() {
+  local missing="$1" available="$2" hook input
+  local tool_path="$SANDBOX/no-$missing"
+  mkdir -p "$tool_path"
+  link_tool "$tool_path" "$available"
   input="$(event_for file_path "$PROJECT/gotchas.md")"
-
   for hook in "$CLAUDE_HOOK" "$CODEX_HOOK"; do
-    assert_silent_case "$hook" "$input" "$no_jq"
-    assert_silent_case "$hook" "$input" "$no_git"
-    assert_silent_case "$hook" "$input" "$PATH" "$SANDBOX/missing-root"
+    snapshot_project "$PROJECT" "$SANDBOX/before.snapshot"
+    run --separate-stderr invoke_hook "$hook" "$input" "$tool_path"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "${#stderr_lines[@]}" -eq 1 ]
+    [ "$stderr" = "wiki-skill-suggest: $missing not found; degrading to no-op" ]
+    snapshot_project "$PROJECT" "$SANDBOX/after.snapshot"
+    cmp -s "$SANDBOX/before.snapshot" "$SANDBOX/after.snapshot"
+  done
+}
+
+@test "missing jq emits exactly one stderr degradation per twin and leaves project unchanged" {
+  assert_missing_dependency jq git
+}
+
+@test "missing Git emits exactly one stderr degradation per twin and leaves project unchanged" {
+  assert_missing_dependency git jq
+}
+
+@test "missing root and malformed envelopes are silent exit zero" {
+  local hook input
+  for hook in "$CLAUDE_HOOK" "$CODEX_HOOK"; do
+    assert_silent_case "$hook" "$(event_for file_path "$PROJECT/gotchas.md")" "$PATH" "$SANDBOX/missing-root"
     for input in \
       '{' \
       '[]' \

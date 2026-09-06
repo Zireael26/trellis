@@ -20,13 +20,19 @@ setup() {
   # with BASH_BIN=/path/to/bash to exercise another build.
   BASH_BIN="${BASH_BIN:-/bin/bash}"
   [ -x "$BASH_BIN" ] || BASH_BIN="bash"
-  PROJECT_DIR="$(mktemp -d)"
+  GLOBAL_CONFIG="$(mktemp "$BATS_TEST_TMPDIR/check-bypass-global.XXXXXX")"
+  cat > "$GLOBAL_CONFIG" <<'EOF'
+[user]
+  email = test@example.com
+  name = test
+EOF
+  export GIT_CONFIG_GLOBAL="$GLOBAL_CONFIG"
+  export GIT_CONFIG_NOSYSTEM=1
+  PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/check-bypass-project.XXXXXX")"
   (
     cd "$PROJECT_DIR"
     git init -q -b main
-    git config user.email "test@example.com"
-    git config user.name  "test"
-    git commit --allow-empty -q -m "init"
+    git -c commit.gpgsign=false commit --allow-empty -q -m "init"
   )
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   unset CODEX_PROJECT_DIR
@@ -52,7 +58,7 @@ commit_body_and_check() {
   local body="$1"
   (
     cd "$PROJECT_DIR" || exit 1
-    git commit --allow-empty -q -m "chore: trailer test" -m "$body"
+    git -c commit.gpgsign=false commit --allow-empty -q -m "chore: trailer test" -m "$body"
   )
   run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
 }

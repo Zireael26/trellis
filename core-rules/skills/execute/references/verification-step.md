@@ -1,17 +1,17 @@
 # Reference — Per-task verification + receipt protocol
 
-This is the step the loop runs **after each checkbox's implementation work completes** and **before** the box is ticked. It produces the one artifact that authorizes the tick: a canonical Definition-of-Done receipt. The loop never hand-edits a checkbox and never ticks without a well-formed receipt — all checkbox mutation goes through `scripts/tick.sh`, which re-validates the receipt before flipping the box (see `loop.md` for the loop mechanics, `scripts/tick.sh` for the contract).
+This is the step the loop runs once a checkbox's implementation work is complete — whether that box was implemented alone or inside a coherent group — and **before** the box is ticked. It produces the one artifact that authorizes the tick: a canonical Definition-of-Done receipt. Grouping changes who ran the work, never what a tick costs: every box needs evidence that actually covers *its* acceptance, and its own receipt. The loop never hand-edits a checkbox and never ticks without a well-formed receipt — all checkbox mutation goes through `scripts/tick.sh`, which re-validates the receipt before flipping the box (see `loop.md` for the loop mechanics, `scripts/tick.sh` for the contract).
 
 The receipt is recorded in the **transcript** (the agent's turn message / `last_assistant_message`) — that is the receipt's durable home and what the Stop hook (`stop-verify.sh`) actually checks at end-of-turn (`docs/specs/2026-06-02-trellis-process-enforcement-design.md:168`). `tick.sh` does **not** write the receipt into the tasks file: it *validates* the receipt as the gate that proves `execute` constructed a well-formed one, and on success flips the single matching checkbox — and changes nothing else in the file. So the per-task receipt you assemble here is *stated to the transcript*, and the same string is handed to `tick.sh` purely so the flip is gated on a valid receipt.
 
-The receipt grammar is canonical and defined once, in `CLAUDE.md:43`. This document does not redefine it — it describes how to *fill* it per task and where to hand it. The same marker is what the Stop hook checks at end-of-turn; the per-task receipt and the turn receipt are the same grammar.
+The receipt grammar is canonical and defined once, as the `dod-receipt` marker in `CLAUDE.md` *Definition of done*. This document does not redefine it — it describes how to *fill* it per task and where to hand it. The same marker is what the Stop hook checks at end-of-turn; the per-task receipt and the turn receipt are the same grammar.
 
 ## Sequence per task
 
 1. **Run the task's verification command.** Capture its exit code.
 2. **Compute the diff stat** for the work just done (including any newly-created files — see step 2).
-3. **Assemble the canonical marker** by filling the `CLAUDE.md:43` grammar, and **state it in the turn transcript** (this is the receipt the Stop hook reads).
-4. **Run the in-body advisory cores** over the task's just-implemented diff (code review always; UI verify for UI-affecting tasks), **before the tick**. These reviews are **advisory feedback for the rest of the loop** — they do **not** write any marker (see §4 *Write the idempotency marker*).
+3. **Assemble the canonical marker** by filling the `dod-receipt` grammar, and **state it in the turn transcript** (this is the receipt the Stop hook reads).
+4. **Run the in-body advisory cores** over the just-implemented diff at the boundary the work was done at (code review; UI verify when the work touched UI), **before the tick**. These reviews are **advisory feedback for the rest of the loop** — they write **no** marker (see §4).
 5. **Hand the marker to `scripts/tick.sh`** with the box's section + locator. tick.sh re-validates and (only on a valid receipt) flips the box. It writes nothing else.
 
 Step 5 (the tick) is conditional on step 1: **a failed verify never ticks** (see *Failed verify* below).
@@ -23,7 +23,7 @@ Use what the task or plan specifies:
 - **Dialect A** (`specs/NNN/tasks.md`): the task line or its Phase header names the command, or the spec's acceptance criteria do.
 - **Dialect B** (`docs/plans/*.md`): the Step / Task block names the command (build, lint, the specific test).
 
-If nothing is specified, run **the minimal command that proves *this* change** — typically the single test file or test name covering the task, not the whole suite. (The full typecheck/lint/test suite is the *turn-level* bar the Stop hook and process-gate enforce; the per-task receipt only needs to prove the task's own assertion ran.) Prefer a command that fails when the task's business intent is inverted, per `CLAUDE.md:47` — a receipt only proves the command ran, not that it asserts anything load-bearing.
+If nothing is specified, run **the minimal command that proves *this* change** — typically the single test file or test name covering the task, not the whole suite. (The full typecheck/lint/test suite is the *turn-level* bar the Stop hook and process-gate enforce; the per-task receipt only needs to prove the task's own assertion ran.) Prefer a command that fails when the task's business intent is inverted, per `CLAUDE.md` *Definition of done* — a receipt only proves the command ran, not that it asserts anything load-bearing.
 
 Capture the exit code immediately, before any other command overwrites `$?`:
 
@@ -31,6 +31,21 @@ Capture the exit code immediately, before any other command overwrites `$?`:
 # run the task's verify command, then snapshot $? on the SAME line group
 "$VERIFY_CMD" ... ; rc=$?
 ```
+
+### Explicitly opt-in Bash syntax adapter
+
+When verifying shell scripts in the repository, an explicitly opt-in Bash syntax adapter is available under the canonical hooks library (`<same-canonical-hooks-lib>`):
+
+```bash
+python3 -I <same-canonical-hooks-lib>/verification-bash.py --cwd <actual-worktree> --harness <actual-harness>
+```
+
+Contract and outcomes:
+- The adapter emits a structured JSON envelope with status `executed`, `reused`, or `unavailable`.
+- **Unavailable**: When dependencies, storage, or execution fail, it exits with status 3 (`status: "unavailable"`).
+- **Executed / Reused**: Successful validation returns exit code 0; repeated execution across harnesses with unchanged files and runtime returns `status: "reused"` (exit 0).
+- **Parser failures preserved**: Real nonzero parser exit codes (e.g. syntax errors) are strictly preserved and propagated. Failed parsing is never cached or reused as success.
+- **Strict bounds**: This adapter is an explicit Bash syntax check only. It is **not** a generic command cache and **never** replaces tests, linters, typechecks, or publication gates.
 
 ## 2. Compute the diff stat
 
@@ -67,19 +82,21 @@ A field `--shortstat` omits is `0` (e.g. an insertions-only change — the commo
 
 ## 3. Assemble the canonical marker
 
-Fill the grammar from `CLAUDE.md:43` (do not restate the grammar here — read that line). The three fields map 1:1:
+Fill the `dod-receipt` grammar from `CLAUDE.md` *Definition of done* (do not restate the grammar here — read it there). The three fields map 1:1:
 
 - `cmd` ← the verification command you ran (step 1)
 - `exit` ← its captured exit code (step 1), a literal integer
 - `diff` ← the reformatted shortstat (step 2)
 
-Quoting note: the literal `…` (U+2026) in the `CLAUDE.md:43` template is a *placeholder* — a filled receipt puts the real command in `cmd="…"` and a real integer in `exit=`. The gate's validator rejects the unfilled template precisely because `exit=<int>` and `+N/-M` carry no digits; a filled receipt has a digit after `exit=` and a `+<digit>` in `diff=`. Do not paste the template as if it were a receipt.
+Quoting note: the literal `…` (U+2026) in the canonical template is a *placeholder* — a filled receipt puts the real command in `cmd="…"` and a real integer in `exit=`. The gate's validator rejects the unfilled template precisely because `exit=<int>` and `+N/-M` carry no digits; a filled receipt has a digit after `exit=` and a `+<digit>` in `diff=`. Do not paste the template as if it were a receipt.
 
 **State this marker in the turn transcript.** That is where the Stop hook (`stop-verify.sh`, the `last_assistant_message`/transcript scan at line 361) looks for the turn's receipt — `docs/specs/2026-06-02-trellis-process-enforcement-design.md:168`. The receipt's home is the transcript, not the tasks file.
 
 ## 4. In-body advisory cores
 
-After a task's work is verified — and before its box is ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so review happens per-task instead of once per turn. These are advisory here: the per-task reviews feed back into the rest of the loop, and the cores may be absent entirely.
+After a unit's work is verified — and before its boxes are ticked — the execute body runs the same review cores the Stop hook uses, **in-body**, so findings arrive while the loop can still act on them rather than only at end of turn. These are advisory here: they feed back into the rest of the loop, and the cores may be absent entirely.
+
+Review at the **coherent boundary the work was done at**, not once per checkbox. One review over a grouped unit's diff covers that unit; a box whose changes no in-body review saw simply has not been reviewed in-body, and the Stop hook remains armed for it. Do not manufacture a separate review call per box to satisfy a cadence — proportionality is the point. And do not treat a deterministic check as a review: where an independent review is *required*, a green test suite does not supply it, and an unavailable reviewer leaves that requirement visibly unmet rather than quietly satisfied.
 
 ### Resolve the canonical root and the core libs
 
@@ -89,48 +106,39 @@ After a task's work is verified — and before its box is ticked — the execute
 # worktree-safe canonical root, absolutized (bare git-common-dir is relative ".git"):
 ROOT=$(cd "$(dirname "$(git rev-parse --git-common-dir)")" 2>/dev/null && pwd)
 if   [ -f "$ROOT/.claude/hooks/lib/code-reviewer.sh" ]; then
-  LIBDIR="$ROOT/.claude/hooks/lib"; HARNESS=claude
+  LIBDIR="$ROOT/.claude/hooks/lib"
 elif [ -f "$ROOT/.codex/hooks/lib/code-reviewer.sh" ]; then
-  LIBDIR="$ROOT/.codex/hooks/lib";  HARNESS=codex
+  LIBDIR="$ROOT/.codex/hooks/lib"
 else
   LIBDIR=""   # neither core present → advisory skip, do NOT fail
 fi
 ```
 
-This `cd … && pwd` resolution assumes **cwd = the project root** (which the harness guarantees), so the relative `git-common-dir` absolutizes correctly; the resulting marker is a *best-effort* dedup — a resolution miss only causes a redundant review, never an incorrect tick — so do **not** mix `git -C <dir>` with this cwd-relative `cd`.
+This `cd … && pwd` resolution assumes **cwd = the project root** (which the harness guarantees), so the relative `git-common-dir` absolutizes correctly; a resolution miss only costs a skipped in-body review, never an incorrect tick — so do **not** mix `git -C <dir>` with this cwd-relative `cd`.
 
-Probe with `-f` (presence), not `-x` — the body runs the core via `bash "$LIBDIR/…"`, so the execute bit is irrelevant and `-x` would false-skip a validly-synced core. Matches `core-rules/codex/hooks/code-review-subagent.sh:168`. If `LIBDIR` is empty, **advisory skip**: note that in-body review was unavailable and move on. Never fail the task on a missing or partial core.
+Probe with `-f` (presence), not `-x` — the body runs the core via `bash "$LIBDIR/…"`, so the execute bit is irrelevant and `-x` would false-skip a validly-synced core. This matches how the hooks themselves source their siblings. If `LIBDIR` is empty, **advisory skip**: note that in-body review was unavailable and move on. Never fail the task on a missing or partial core.
 
-### Code review — every task with a diff
+### Code review — once per unit with a diff
 
-`code-reviewer.sh` is the canonical review decision core. Invoke it via `bash "$LIBDIR/code-reviewer.sh"` (the same way the hook does — `bash "$HOOK_DIR/lib/code-reviewer.sh"`), so the core's execute bit is never required. Its contract (see the file header — do not restate it): stdin is a review envelope (`{diff, autonomy_level, decisions_log}` JSON, or a raw unified diff); stdout is exactly one line `{"findings":[...]}`; it always exits 0 and fails open. The body decides what to do with the findings — surface and resolve, or acknowledge-and-defer per `autonomy.md`. You do not self-mark your own homework (`CLAUDE.md:45`).
+`code-reviewer.sh` is the canonical review decision core. Invoke it via `bash "$LIBDIR/code-reviewer.sh"` (the same way the hook does — `bash "$HOOK_DIR/lib/code-reviewer.sh"`), so the core's execute bit is never required. Read its current header and ladder for the contract. The operator-selected reviewer is exec'd directly and its nonzero exit propagates; keep failed, malformed or unavailable results visible. Internal deterministic fallback can return exit 0 and a findings-only envelope without `status`, so neither an empty findings array nor the absence of `degraded` proves that a model reviewed the artifact. A required independent review remains outstanding without actual reviewer provenance. Surface and resolve findings, or acknowledge-and-defer per `autonomy.md`; do not self-mark your own homework (`CLAUDE.md` *Definition of done*).
 
 ### UI verify — UI-affecting tasks only
 
-For a task that changes UI, also run `ui-verify-core.sh` (same `LIBDIR`). Its contract (see the file header): it prints one line `{"verdict":"skip|advisory|block|pass",...}` and always exits 0. `skip` = no UI files touched; `advisory` = UI changed but no visual tool / dev server reachable (surface, do not block); `pass`/`block` = tool present, screenshot produced or not. Honor `CLAUDE.md:46`: logically verified is not visually verified.
+For a unit that changes UI, also run `ui-verify-core.sh` (same `LIBDIR`). Its contract (see the file header): it prints one line `{"verdict":"skip|advisory|block|pass",...}` and always exits 0. `skip` = no UI files touched; `advisory` = UI changed but no visual tool / dev server reachable (surface, do not block); `pass`/`block` = tool present, screenshot produced or not. Honor `CLAUDE.md` *Definition of done*: logically verified is not visually verified.
 
-### Write the idempotency marker — ONCE, at turn-end, after the final tick
+### The `.review-done-<hash>` marker is NOT yours to write
 
-This step is **turn-level, not per-task.** The per-task reviews above are advisory feedback for the loop; they write **no** marker. The `.review-done-<hash>` marker is written **exactly once per turn**, **after the final task's tick** (§5), as a single dedup token meaning *"this exact final diff was reviewed AND cleared in-body"* — which lets the Stop hook skip its one end-of-turn review.
+**execute writes no review marker — ever.** The marker has exactly one producer: `core-rules/hooks/code-review-subagent.sh` (and its Codex sibling under `core-rules/codex/hooks/`). Read that hook rather than reconstructing it; the details below are a summary of its behavior, not a recipe to reimplement.
 
-**Why after the final tick — not per task.** Each `tick.sh` flip mutates the *tracked* tasks file, so the working-tree diff changes with every tick. Only the diff taken **after the last tick** is byte-identical to what the Stop hook hashes when it fires at end-of-turn. Keying the marker to a per-task (pre-final-tick) diff would hash bytes the hook never sees, miss the rendezvous, and get the turn double-reviewed — the exact waste this marker exists to prevent. So compute the hash once, after the final tick.
+The hook keys the marker on `git hash-object --stdin` over its own change set — `git diff HEAD` **plus** the contents of untracked non-ignored files, excluding `.claude/`/`.codex/`, capped at 200000 bytes — and writes `<repo-root>/.claude/.review-done-<hash>` (`.codex/` in the Codex sibling). It touches that file **only after validating a reviewer envelope normalized to `completed`**; current legacy compatibility treats a missing status as completed. That normalization is not evidence of independent model review. A `degraded` status, a malformed envelope, a failed reviewer, and the critical-block path all deliberately leave no marker, so the next Stop re-reviews.
 
-The hash must cover the **same bytes the Stop hook hashes**: `git diff HEAD` capped at **200000** bytes (`head -c 200000`) — the single source of that cap being `core-rules/hooks/code-review-subagent.sh:168` (the Claude hook). The marker scheme (sha256 of the capped diff, harness-keyed path) is likewise defined in `core-rules/hooks/code-review-subagent.sh`. Hashing un-capped bytes would make any diff over 200 KB miss the hook's rendezvous and get double-reviewed.
+Three consequences for this skill:
 
-```bash
-DIFF=$(git diff HEAD | head -c 200000)                              # SAME cap as core-rules/hooks/code-review-subagent.sh:168
-DIFF_HASH=$(printf '%s' "$DIFF" | shasum -a 256 | awk '{print $1}') # macOS has no sha256sum
-case "$HARNESS" in
-  claude) mkdir -p "$ROOT/.claude" && : > "$ROOT/.claude/.review-done-${DIFF_HASH}" ;;
-  codex)  mkdir -p "$ROOT/.codex"  && : > "$ROOT/.codex/.review-done-${DIFF_HASH}"  ;;
-esac
-```
+- **Do not hand-mint a marker.** Any prose recipe here would be a second, drifting implementation of a content hash — and hashing the wrong bytes (or with the wrong algorithm) either misses the hook's rendezvous or, worse, writes a name that suppresses a review that never happened. If you find yourself computing a diff hash in the execute body, stop.
+- **In-body review does not certify the turn's final artifact.** Every `tick.sh` flip mutates the tracked tasks file, so the diff at end of turn is not the diff any in-body review saw. In-body findings are real feedback on the code as written; they are not a clearance of the post-tick tree, and claiming otherwise would assert a review that did not occur.
+- **A legitimate deferral goes through the exported escape, not through a marker.** `export TRELLIS_REVIEW_OVERRIDE=1` — **exported**, not a plain shell var, because the hook reads it via `${TRELLIS_REVIEW_OVERRIDE:-}` in a **child process**. The hook itself appends the dated deferral line to `decisions-log.md`, so the skip is recorded rather than silent. Leaving the marker unwritten is the normal, correct state: it keeps the enforcing Stop hook armed.
 
-**The marker means "reviewed AND cleared", not merely "reviewed".** Write it **only if EVERY in-body review that turn came back critical-free** (clean, or advisory-only) — it is a turn-level aggregate over all the per-task reviews, not a verdict on the last task alone. This is the highest-leverage discipline in this step: the Stop hook treats the marker as permission to skip its own review, so writing it on a turn that still has an unresolved critical would *bypass the very block the hook exists to enforce* on edit-heavy turns. Therefore:
-
-- **All in-body reviews clean / advisory-only** → write the marker (once, post-final-tick). The Stop hook skips its redundant re-review of this identical diff.
-- **Any in-body review returned an unresolved `critical`** → **do NOT write the marker.** Either fix the critical (which changes the diff, re-hashes, and re-reviews anyway), or — if the operator *legitimately defers* it — route the deferral through the **exported** escape: `export TRELLIS_REVIEW_OVERRIDE=1`. It must be **exported**, not a plain shell var: the Stop hook reads it via `${TRELLIS_REVIEW_OVERRIDE:-}` in a **child process**, so a non-exported variable never crosses the process boundary and the override would be silently ignored. The override is logged to the decisions-log (`docs/specs/2026-06-02-trellis-process-enforcement-design.md:166`) — it is **not** a silent marker write. Leaving the marker unwritten keeps the enforcing Stop hook armed so it still re-reviews and blocks.
-- When `LIBDIR` was empty (advisory skip), write **no** marker — there was no review to clear.
+When `LIBDIR` was empty (advisory skip), say so — in-body review was unavailable, and the Stop hook is the only review that turn will get.
 
 ## 5. Hand the marker to tick.sh
 
@@ -181,7 +189,7 @@ Task row (canonical table): `| T7 | Add rate-limiter module `src/mw/ratelimit.ts
    <!-- dod-receipt cmd="pnpm vitest run src/mw/ratelimit.test.ts" exit=0 diff="+64/-0 (2 files)" -->
    ```
 
-4. In-body review (advisory), **before the tick**: resolve `ROOT`, find `.claude/hooks/lib/code-reviewer.sh` (via `-f`), pipe `git diff HEAD | head -c 200000` through `bash "$LIBDIR/code-reviewer.sh"`; this task touches no UI, so skip `ui-verify-core.sh`. No marker is written per task (§4).
+4. In-body review (advisory), **before the tick**: resolve `ROOT`, find `.claude/hooks/lib/code-reviewer.sh` (via `-f`), pipe the unit's diff through `bash "$LIBDIR/code-reviewer.sh"`; this task touches no UI, so skip `ui-verify-core.sh`. Had T7 been implemented alongside a coupled sibling box, this one review over their shared diff would serve both. No marker is written here or anywhere else in the loop (§4).
 5. Tick by table ID (exact first-cell match — `T7`, not a substring; flips the row's Status cell):
 
    ```bash

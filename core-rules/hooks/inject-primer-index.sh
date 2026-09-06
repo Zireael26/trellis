@@ -17,8 +17,6 @@
 #   - Skips silently if .claude/primers/INDEX.md absent (opt-in projects).
 #
 # Dependencies: jq (required), git (optional — degrades gracefully).
-#
-# Status: new in v0.3.1.
 
 set -u
 
@@ -98,7 +96,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  status="FRESH"
+  status="UNKNOWN"
   detail=""
 
   if [ "$HAS_GIT" = "1" ]; then
@@ -138,13 +136,16 @@ while IFS= read -r line; do
           while IFS= read -r __p; do
             __path_arr+=("$__p")
           done <<< "$paths"
-          count=$(git -C "$REPO_ROOT" rev-list --count "${pinned}..HEAD" -- "${__path_arr[@]}" 2>/dev/null || echo 0)
-          if [ "$count" -eq 0 ]; then
-            status="FRESH"
-          elif [ "$count" -le 10 ]; then
-            status="WARM"; detail="${count} commits"
+          if count=$(git -C "$REPO_ROOT" rev-list --count "${pinned}..HEAD" -- "${__path_arr[@]}" 2>/dev/null); then
+            if [ "$count" -eq 0 ]; then
+              status="FRESH"
+            elif [ "$count" -le 10 ]; then
+              status="WARM"; detail="${count} commits"
+            else
+              status="STALE"; detail="${count} commits → /primer-refresh"
+            fi
           else
-            status="STALE"; detail="${count} commits → /primer-refresh"
+            status="UNKNOWN"
           fi
         fi
       else
@@ -152,6 +153,8 @@ while IFS= read -r line; do
         detail="primer missing ## Entry points section"
       fi
     fi
+  else
+    status="UNKNOWN"
   fi
 
   if [ -n "$detail" ]; then

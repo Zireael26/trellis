@@ -177,7 +177,7 @@ EOF
   printf 'fixture\n' > "$MAIN/README.md"
   git -C "$MAIN" add .trellis.json README.md
   git -C "$MAIN" commit -qm initial
-  git -C "$MAIN" worktree add -qb t14-session "$WT"
+  git -C "$MAIN" worktree add -q -b t14-session "$WT"
 
   common="$(git -C "$WT" rev-parse --git-common-dir)"
   case "$common" in
@@ -210,7 +210,7 @@ EOF
               root:$main,
               git_common_dir:$common,
               release:"1.2.3",
-              harnesses:["claude","codex","omp"],
+              harnesses:["claude","codex"],
               worktrees:{
                 ($main_id):{root:$main,attachment_id:$main_attachment},
                 ($wt_id):{root:$wt,attachment_id:$wt_attachment}
@@ -254,6 +254,46 @@ teardown() {
     printf '%s' "$out" | jq . >/dev/null
     ctx="$(extract_ctx "$out")"
     [[ "$ctx" != *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
+    [ ! -e "$MARKER" ]
+  done
+}
+
+@test "Pi-only and mixed harness selectors are valid through both session hooks" {
+  build_attachment_fixture
+  # Shared ownership proof only: this fixture does not load a native Pi extension.
+  failures=0
+  for harnesses in '["pi"]' '["claude","pi"]' '["codex","pi"]' '["claude","codex","pi"]'; do
+    jq --arg checkout "$CHECKOUT_ID" --argjson harnesses "$harnesses" '
+      .projects["personal/fixture-project"].checkouts[$checkout].harnesses = $harnesses
+    ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/registry.next.json"
+    mv "$SANDBOX/registry.next.json" "$TRELLIS_HOME/registry.json"
+    chmod 600 "$TRELLIS_HOME/registry.json"
+    for candidate in "$HOOK" "$CODEX_HOOK"; do
+      out="$(run_session_context "$candidate" "$WT")"
+      printf '%s' "$out" | jq . >/dev/null
+      ctx="$(extract_ctx "$out")"
+      if [[ "$ctx" == *"Trellis attachment is missing"* ]]; then
+        echo "$candidate $harnesses: $ctx"
+        failures=$((failures + 1))
+      fi
+      [ ! -e "$MARKER" ]
+    done
+  done
+  [ "$failures" -eq 0 ]
+}
+
+@test "unknown harness selector retains actionable warning through both session hooks" {
+  build_attachment_fixture
+  jq --arg checkout "$CHECKOUT_ID" '
+    .projects["personal/fixture-project"].checkouts[$checkout].harnesses = ["pi", "unknown"]
+  ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/registry.next.json"
+  mv "$SANDBOX/registry.next.json" "$TRELLIS_HOME/registry.json"
+  chmod 600 "$TRELLIS_HOME/registry.json"
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    ctx="$(extract_ctx "$out")"
+    [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
+    [[ "$ctx" == *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
     [ ! -e "$MARKER" ]
   done
 }
@@ -375,6 +415,74 @@ EOF
   out="$(run_session_context "$HOOK" "$MAIN")"
   [[ "$(extract_ctx "$out")" != *"Trellis attachment is missing"* ]] || { echo "$out"; false; }
   [ ! -e "$MARKER" ]
+}
+
+@test "project owner optional shape is diagnosed without executing deferred paths or toolchain" {
+  build_attachment_fixture
+  owner="$TRELLIS_HOME/state/attachments/$CHECKOUT_ID/$WT_ID.json"
+  clean_owner="$SANDBOX/owner.optional.json"
+  mkdir -p "$WT/.agents/skills"
+  ln -s "$POISON_RUNTIME/scripts" "$WT/.agents/skills/local"
+  ln -s "$POISON_RUNTIME/scripts/seed-inheritance-symlinks.sh" "$WT/AGENTS.md"
+  jq --arg toolchain "$POISON_RUNTIME/scripts" --arg target "$POISON_RUNTIME/scripts" '
+    .surface = "project"
+    | .toolchain_path = [$toolchain, "/usr/local/bin", "/usr/bin", "/bin"]
+    | .pre_existing = [
+        {kind:"symlink",path:".agents/skills/local",reason:"pre-existing-symlink",target:$target},
+        {kind:"symlink",path:"AGENTS.md",reason:"project-authored-file",target:($target + "/seed-inheritance-symlinks.sh")}
+      ]
+  ' "$owner" > "$clean_owner"
+  failures=0
+  for mutation in '.' '.pre_existing += [{kind:"file",path:"local.json",reason:"project-authored-render",target:null}]' 'del(.surface, .toolchain_path) | .pre_existing = []'; do
+    jq "$mutation" "$clean_owner" > "$owner"
+    chmod 600 "$owner"
+    for candidate in "$HOOK" "$CODEX_HOOK"; do
+      out="$(run_session_context "$candidate" "$WT")"
+      printf '%s' "$out" | jq . >/dev/null
+      ctx="$(extract_ctx "$out")"
+      if [[ "$ctx" == *"Trellis attachment is missing"* ]]; then
+        echo "$candidate $mutation: $ctx"
+        failures=$((failures + 1))
+      fi
+      [ ! -e "$MARKER" ]
+    done
+  done
+  [ "$failures" -eq 0 ]
+}
+
+@test "malformed project owner optional shape warns without runtime execution through both hooks" {
+  build_attachment_fixture
+  owner="$TRELLIS_HOME/state/attachments/$CHECKOUT_ID/$WT_ID.json"
+  clean_owner="$SANDBOX/owner.optional.json"
+  jq --arg target "$POISON_RUNTIME/scripts" '
+    .surface = "project" | .toolchain_path = [$target, "/usr/local/bin", "/usr/bin", "/bin"]
+    | .pre_existing = [{kind:"symlink",path:"AGENTS.md",reason:"project-authored-file",target:$target}]
+  ' "$owner" > "$clean_owner"
+  for mutation in \
+    '.pre_existing = null' '.pre_existing = {}' '.pre_existing = ["bad"]' \
+    '.pre_existing[0].kind = "directory"' '.pre_existing[0].path = 1' \
+    '.pre_existing[0].path = "../escape"' '.pre_existing[0].path = "/absolute"' \
+    '.pre_existing[0].reason = "unknown"' '.pre_existing[0].reason = "project-authored-render"' \
+    '.pre_existing[0].target = null' '.pre_existing[0].target = "bad\npath"' \
+    '.pre_existing[0].extra = true' '.pre_existing += [.pre_existing[0]]' \
+    '.pre_existing[0].path = ".trellis/runtime"' \
+    '.pre_existing[0] = {kind:"file",path:"local.json",reason:"project-authored-render",target:"not-null"}' \
+    '.surface = "user"' '.surface = null' '.surface = ["project"]' \
+    '.toolchain_path = null' '.toolchain_path = "/usr/bin"' '.toolchain_path = []' \
+    '.toolchain_path = [1]' '.toolchain_path = ["relative"]' '.toolchain_path = ["/"]' \
+    '.toolchain_path = ["/usr/../bin"]' '.toolchain_path = ["/usr//bin"]' \
+    '.toolchain_path = ["/usr/bin/"]' '.toolchain_path = ["/usr/bin\n"]' '.unknown = true'; do
+    jq "$mutation" "$clean_owner" > "$owner"
+    chmod 600 "$owner"
+    for candidate in "$HOOK" "$CODEX_HOOK"; do
+      out="$(run_session_context "$candidate" "$WT")"
+      printf '%s' "$out" | jq . >/dev/null
+      ctx="$(extract_ctx "$out")"
+      [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate $mutation: $ctx"; false; }
+      [[ "$ctx" == *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
+      [ ! -e "$MARKER" ]
+    done
+  done
 }
 
 @test "compact SessionStart remains silent for an opted-in linked worktree" {

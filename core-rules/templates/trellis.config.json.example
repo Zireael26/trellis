@@ -1,12 +1,12 @@
 {
   "$schema": "./scripts/lib/trellis.config.schema.json",
   "schema_version": 2,
-  "comment": "Example portable Trellis policy. Run `trellis configure` for machine-local setup; do not add machine paths here. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude', 'codex', and 'omp'.",
+  "comment": "Example portable Trellis policy. Run `trellis configure` for machine-local setup; do not add machine paths here. Never commit secrets here. Pinning trellis_version is optional but recommended for downstream consumers — it tells scripts/upgrade.sh which canonical version this clone is anchored to. harnesses accepts any combination of 'claude' and 'codex'.",
 
   "maintainer_name": "Your Name",
   "github_user": "your-github-handle",
 
-  "harnesses": ["claude", "codex", "omp"],
+  "harnesses": ["claude", "codex"],
 
   "autonomy_default": 3,
   "comment_autonomy_default": "Optional. Fleet autonomy level 1–5; default 3 (current Trellis behavior). 1=pedagogical, 2=cautious, 3=standard, 4=initiative, 5=autonomous. Per-project override via <project>/.trellis.json autonomy field. Presets may clamp via autonomy_ceiling.",

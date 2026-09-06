@@ -482,17 +482,18 @@ run_with_timeout() {
       if ($pid == 0) { POSIX::setsid(); exec @ARGV or POSIX::_exit(127); }
       $SIG{ALRM} = sub {
         kill("TERM", -$pid); select(undef, undef, undef, 0.3);
-        kill("KILL", -$pid); waitpid($pid, 0); exit(142);
+        kill("KILL", -$pid); waitpid($pid, 0);
+        exit(142);
       };
+      # SAFETY: 90 s is the documented default process-gate budget (core-rules/hooks.md § pr-gate-shiftleft); status 142 remains advisory.
       alarm $secs;
       waitpid($pid, 0);
       my $st = $?;
       exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
     ' "$secs" "$@"
   else
-    # Match the existing advisory-hook convention when perl is unavailable:
-    # execute without a wall-clock cap rather than relying on GNU timeout.
-    "$@"
+    printf '%s\n' 'pr-gate-shiftleft: Perl is unavailable; skipped the process-gate runner rather than running without a wall-clock cap (advisory degradation; CI remains authoritative).' >&2
+    return 1
   fi
 }
 
@@ -593,6 +594,11 @@ case "$TIMEOUT" in
   ''|*[!0-9]*) TIMEOUT=90 ;;
 esac
 RANGE="${PR_GATE_SHIFTLEFT_RANGE:-main..HEAD}"
+
+if ! command -v perl >/dev/null 2>&1; then
+  printf '%s\n' 'pr-gate-shiftleft: Perl is unavailable; skipped the process-gate runner rather than running without a wall-clock cap (advisory degradation; CI remains authoritative).' >&2
+  exit 0
+fi
 
 GATE_OUTPUT=""
 GATE_RC=0

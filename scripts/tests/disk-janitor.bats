@@ -22,7 +22,8 @@ REPO_ROOT="$( cd "$BATS_TEST_DIRNAME/../.." && pwd )"
 DJ="$REPO_ROOT/scripts/disk-janitor.sh"
 
 setup() {
-  SANDBOX="$(mktemp -d)"
+  # Keep standalone fixtures inside Bats' write-allowed temporary root.
+  SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/dj-report.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   CANON="$SANDBOX/canonical"
   PROJECTS="$SANDBOX/projects"
@@ -31,6 +32,8 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS" "$TRELLIS_HOME"
   chmod 700 "$TRELLIS_HOME"
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
+  # Mock build liveness for cache orchestration; not a native process observation.
+  export DJ_BUILD_ACTIVE_OVERRIDE=0
   build_canonical_min
   write_config
 }
@@ -259,6 +262,18 @@ run_dj() { run bash "$DJ" "$@"; }
   [ -d "$PROJECTS/alpha/.next/cache" ]
 }
 
+@test "cache-only report is READ-ONLY: project tree byte-identical before and after" {
+  build_alpha_with_stale_cache
+  local before after
+  before="$(fingerprint "$PROJECTS/alpha")"
+  run_dj --report --scopes caches
+  [ "$status" -eq 0 ]
+  after="$(fingerprint "$PROJECTS/alpha")"
+  [ "$before" = "$after" ]
+  # The cache dir must still exist (nothing was pruned).
+  [ -d "$PROJECTS/alpha/.next/cache" ]
+}
+
 @test "report runs the turbo-outputs recurrence pre-pass and flags an unscoped glob" {
   build_alpha_with_stale_cache
   cat > "$PROJECTS/alpha/turbo.json" <<'JSON'
@@ -360,17 +375,29 @@ JSON
 
 @test "cache discovery failure warns, marks the project skipped, and exits nonzero" {
   build_alpha_with_stale_cache
-  local shim_dir="$SANDBOX/failing-bin"
+  local shim_dir="$SANDBOX/failing-bin" real_python marker="$SANDBOX/cache-walker-reached"
+  real_python="$(command -v python3)"
+  [[ "$real_python" = /* ]]
   mkdir -p "$shim_dir"
-  cat > "$shim_dir/python3" <<'EOF'
+  # Fail only dj_find_caches: registry identity validation must still run.
+  cat > "$shim_dir/python3" <<EOF
 #!/bin/sh
-exit 73
+if [ "\$#" -eq 2 ] && [ "\$1" = "-" ] && [ "\$2" = "$PROJECTS/alpha" ]; then
+  printf 'cache walker reached\n' > "$marker"
+  exit 73
+fi
+exec "$real_python" "\$@"
 EOF
   chmod +x "$shim_dir/python3"
 
   PATH="$shim_dir:$PATH" run_dj --report --scopes caches
 
   [ "$status" -ne 0 ]
+  [ -f "$marker" ]
+  [[ "$output" != *"registry row failed identity validation"* ]] || { echo "$output"; false; }
+  [ -d "$PROJECTS/alpha/.git" ]
+  [ -f "$PROJECTS/alpha/seed.txt" ]
+  [ -f "$PROJECTS/alpha/.next/cache/blob" ]
   [[ "$output" == *"WARNING: cache discovery failed for $PROJECTS/alpha"* ]] || { echo "$output"; false; }
   [[ "$output" == *"WARNING: scan failed for $PROJECTS/alpha"* ]] || { echo "$output"; false; }
   [[ "$output" == *"skipped: scan error ($PROJECTS/alpha)"* ]] || { echo "$output"; false; }

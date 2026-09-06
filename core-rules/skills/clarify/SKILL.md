@@ -7,7 +7,7 @@ description: Front-load the spec-kit pipeline with a structured question pass. U
 
 Front step of the spec → plan → tasks pipeline (opt-in by default; **required** for above-floor changes when `mandatory_pipeline` is enabled — `engineering-process.md` §14.7). The pipeline only works as well as the spec; the spec only works as well as the question pass that fed it. `clarify` is the question pass.
 
-The skill produces `clarify.md` sitting beside `spec.md`. It does NOT write the spec — that's still the `spec` skill's job downstream. Clarify's deliverable is the answers, captured verbatim, with the operator's voice preserved.
+The skill produces `clarify.md` sitting beside `spec.md`. It does NOT write the spec — that's still the `spec` skill's job downstream. Clarify's deliverable is the answers to the five dimensions, each one attributed to whoever actually settled it: the operator's own words where they gave them, and a labelled agent decision where existing authorization let one be taken. Both are legitimate; conflating them is not.
 
 ## When to use
 
@@ -34,7 +34,7 @@ If the directory does not exist yet, run `new-feature.sh <slug>` (or `<slug> --n
 
 ## Output contract
 
-One new file: `specs/<NNN>-<slug>/clarify.md`. Five sections, one per canonical question, plus a conditional sixth `## Blind spots` section. Each section ends with the operator's answer (or, if the operator deferred, an explicit `Deferred: <reason>` block — not silent silence). A blind-spot pass that was not warranted is recorded as `Not run: <domain is familiar>`, not omitted.
+One new file: `specs/<NNN>-<slug>/clarify.md`. Five sections, one per canonical question, plus a conditional sixth `## Blind spots` section. Each section ends with a resolved answer and its attribution — the operator's answer quoted, or `Decided (agent): <answer> — <the authorization it rests on>` — or, where it was deferred, an explicit `Deferred: <reason>` block. Never silent silence, and never an agent decision dressed as an operator quotation. A blind-spot pass that was not warranted is recorded as `Not run: <domain is familiar>`, not omitted.
 
 ## The canonical five questions
 
@@ -53,17 +53,18 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 ## How to use
 
 1. **Read the operator's initial request.** Quote it verbatim at the top of `clarify.md`.
-2. **Walk the five questions, one at a time.** For each: (a) ask the question in the operator's vocabulary; (b) listen to the answer; (c) write it down verbatim; (d) push back if the answer is a handwave.
-3. **Surface contradictions.** If question 3's success metric doesn't match question 1's intent, flag the contradiction in `clarify.md` and resolve before declaring done.
-4. **Don't silently improve answers.** If the operator's voice says "I don't know yet — figure it out", write that down with `Deferred: operator delegated this to the implementer`. Don't paper over with your guess.
-5. **Declare done only when every question has an answer or an explicit deferral.** Then the operator (or the next agent invocation) runs the `spec` skill, which uses `clarify.md` as its input.
+2. **Harvest before you ask.** Walk the five dimensions against what you already have — the request itself, prior turns, the spec being revised, `gotchas.md`, existing authorization. Record each dimension the available material already settles, attributed: quoted where the operator supplied it, `Decided (agent):` where you resolved it under existing authorization. A dimension you can answer honestly from what is in front of you is not a question.
+3. **Ask what genuinely remains, and only that.** For each still-open dimension: (a) ask in the operator's vocabulary; (b) listen; (c) write the answer down verbatim; (d) push back if it is a handwave. Ask about consequential unknowns — a dimension whose either-way answer produces the same spec does not warrant an interview turn. Who answers the rest is the autonomy slider's call, not this skill's: at higher levels resolve them yourself and log the decision; at lower levels put them to the operator. When the operator asked to be interviewed, asked for the questions only, or asked you to wait, that request binds and you ask regardless.
+4. **Surface contradictions.** If question 3's success metric doesn't match question 1's intent, flag the contradiction in `clarify.md` and resolve before declaring done.
+5. **Don't silently improve answers, and don't invent them.** If the operator's voice says "I don't know yet — figure it out", write that down with `Deferred: operator delegated this to the implementer`. Never attribute words to the operator they did not say — an answer you reasoned to is an agent decision and is labelled as one.
+6. **Declare done only when every dimension has an answer — operator's or attributed agent's — or an explicit deferral.** Then continue to the `spec` skill under whatever authorization is already in force; a caller already authorized for the pipeline does not need a fresh permission cycle to proceed, and one who asked to stop here stops here.
 
 ## Authoring rules
 
-- **Operator voice wins.** Quote, don't paraphrase. The spec skill needs the original framing to avoid drift.
+- **Operator voice wins where there is one.** Quote, don't paraphrase — the spec skill needs the original framing to avoid drift. Where no operator answer exists, an attributed agent decision is the honest record; a fabricated quotation is not, and it corrupts the drift detection `analyze` runs against this file.
 - **One answer per question.** If the operator gives two contradictory answers, surface the contradiction — don't pick one.
 - **Deferrals are explicit and labelled.** `Deferred: <reason>` — never just an empty section.
-- **Questions are sequential, not batched.** Asking all five up-front floods the operator; sequential lets answer N inform question N+1.
+- **Ask sequentially when you are asking a person.** Firing all five at once floods the operator, and answer N informs question N+1. Batching is the right shape when the autonomy level has you answering them yourself, or when the operator has asked for the whole set at once.
 - **Order by architectural consequence.** Between two questions, ask first the one whose answer would change the architecture — the data model, an interface shape, a UX flow, a rollback mechanism. A question whose either-way answer produces the same plan is a question for the PR description, not for clarify.
 - **Attach a hypothesis + confidence to each question.** Before asking, state your own best guess at the answer and a confidence 0–1 — "my hypothesis: rollback = revert the deploy and restore the last snapshot (0.7)." Confirming or correcting a concrete guess is faster for the operator than answering a blank prompt, and it surfaces exactly where your mental model is wrong. The guess **primes** the question; it never **replaces** the answer — the operator's word still wins (see "Don't silently improve answers"). (Folded from the `interview-me` pattern.)
 - **Predict-to-stop.** When you can predict the operator's next three answers with high confidence, the interview has converged — offer to stop early and move to `spec`, rather than walking the remaining questions ritually. A predicted answer is still a hypothesis: state it and let the operator veto.
@@ -73,7 +74,7 @@ Every question gets an answer or a `Deferred: <reason>` block. No silent skippin
 
 - **One file written.** `specs/<NNN>-<slug>/clarify.md`. No edits to spec.md (which may not exist yet), no plan.md, no tasks.md, no code.
 - **Read-only against the rest of the tree.** Read whatever you need to ask better questions — recent ADRs, `gotchas.md`, prior specs — modify nothing.
-- **Refuse to overwrite an existing clarify.md.** Operator must explicitly remove it. Clarifications get revised in a follow-up, not silently overwritten.
+- **Never silently overwrite an existing clarify.md.** Blind overwrite is the thing being refused, not revision itself. Unasked, leave the file alone and say it exists. When a revision *is* asked for, edit it in place and surgically: change the sections the new findings actually touch, preserve every other section's text and attribution, and note what changed. Do not require the operator to delete the file first, and do not destroy-and-recreate it — the prior answers are the drift baseline `analyze` compares against.
 
 ## Sensible failure modes
 

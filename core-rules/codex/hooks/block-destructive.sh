@@ -12,7 +12,7 @@
 # Base: github.com/iamfakeguru/claude-md (MIT). Extensions vs upstream:
 #   - DELETE FROM ... without a WHERE clause now triggers.
 #   - **/secrets/** glob on any reader is blocked.
-#   - git reset --hard HEAD / HEAD~N / origin/* all covered.
+#   - git reset --hard with no target, HEAD / HEAD~N / origin/* all covered.
 
 set -u
 
@@ -52,9 +52,9 @@ if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+push([[:space:]]+[^[:space:
   emit_deny "Blocked force push — run manually if intentional."
 fi
 
-# --- git reset --hard HEAD | HEAD~N | origin/* ---
-if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+reset[[:space:]]+--hard[[:space:]]+(HEAD(~[0-9]+)?|origin/[^[:space:]]+)'; then
-  emit_deny "Blocked git reset --hard on HEAD/HEAD~N/origin/* — run manually if intentional."
+# --- git reset --hard [HEAD | HEAD~N | origin/*] ---
+if printf '%s' "$COMMAND" | grep -qE 'git[[:space:]]+reset[[:space:]]+--hard([[:space:]]+(HEAD(~[0-9]+)?|origin/[^[:space:];&|]+)([[:space:];&|]|$)|[[:space:]]*([;&|]|$))'; then
+  emit_deny "Blocked git reset --hard without a target or on HEAD/HEAD~N/origin/* — run manually if intentional."
 fi
 
 # --- codex sandboxless hatch + exception effort (max/ultra) — doctrine ban, mechanized ---

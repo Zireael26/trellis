@@ -96,6 +96,17 @@ suites_named_in_code() {
   [ -z "$missing" ] || { echo "suites absent from the CI stage list:$missing"; false; }
 }
 
+@test "Herdr panel layout regression is wired into local and CI full gates" {
+  local runner="$REPO_ROOT/scripts/run-tests.sh" scope
+  for scope in local ci; do
+    run bash "$runner" "--scope=$scope" --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    printf '%s\n' "$output" | grep -Fxq 'Herdr panel layout'
+  done
+  # Pin the executable too: a retained stage name must not hide a no-op.
+  grep -Fxq '  stage "Herdr panel layout" python3 core-rules/skills/herdr-foreman/tests/test_panel_layout.py' "$runner"
+}
+
 @test "run-tests.sh names no scripts/tests suite by hand except the quick-slice one" {
   local named
   named="$(suites_named_in_code "$REPO_ROOT/scripts/run-tests.sh")"

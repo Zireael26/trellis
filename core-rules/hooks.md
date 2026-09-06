@@ -1,9 +1,9 @@
 # Hook specifications
 
-Two tiers: **fast-local** runs on every relevant turn, **heavy-gated** runs on wrap-up. A third tier — **git-boundary portable dispatcher** — catches anything that slipped past the agent. Specs only; native harness surfaces live per project under `.claude/hooks/`, `.codex/`, and `.omp/hooks`. Git-boundary ownership is deliberately local: attachment points `core.hooksPath` at an absolute dispatcher below `$TRELLIS_HOME/state/git-hooks/<checkout-id>/`; `.husky/` never carries Trellis hooks.
+Two tiers: **fast-local** runs on every relevant turn, **heavy-gated** runs on wrap-up. A third tier — **git-boundary portable dispatcher** — catches anything that slipped past the agent. Specs only; native harness surfaces live per project under `.claude/hooks/` and `.codex/hooks/` (pi shares the Codex `.agents` surface). Git-boundary ownership is deliberately local: attachment points `core.hooksPath` at an absolute dispatcher below `$TRELLIS_HOME/state/git-hooks/<checkout-id>/`; `.husky/` never carries Trellis hooks.
 
 The harnesses use different event envelopes, so Trellis keeps two direct script
-stacks plus one OMP adapter:
+stacks:
 
 - Claude Code: `core-rules/hooks/*.sh`; the direct-copy manifest is
   `core-rules/templates/claude-settings.json`, while portable inheritance links
@@ -13,22 +13,14 @@ stacks plus one OMP adapter:
   `core-rules/codex/hooks.json`, while portable inheritance links the twin tree
   and renders `core-rules/templates/codex-hooks.local.json` to
   `<project>/.codex/hooks.json`.
-- OMP: `core-rules/omp/hooks/pre/trellis.ts`, linked through
-  `<project>/.omp/hooks`, translates OMP lifecycle/tool events and invokes the
-  live canonical scripts.
+- Pi: no separate hook surface; pi agents share the Codex `.agents/agents` tree (`core-rules/pi/agents/`) and run as workflows/subagents.
 
-OMP owns its stop event. Any model-backed hook reached from that event
-(`code-review-subagent` or a proposal hook) MUST use the live non-Anthropic
-`eval`/role-resolver route supplied by the OMP adapter, or skip the model rung
-and use the deterministic fallback. It MUST NOT inherit a Claude model default;
-the canonical shell scripts are implementation assets, not an OMP provider
-selection.
+Any model-backed hook that needs a non-Anthropic model uses pi workflows/subagents via the live role resolver, or skips the model rung and uses the deterministic fallback. It MUST NOT inherit a Claude model default; the canonical shell scripts are implementation assets, not a pi provider selection.
 
 For a hook registered on multiple harnesses, policy intent stays the same.
 Claude-specific JSON such as `hookSpecificOutput.permissionDecision` stays in
 the Claude implementation; Codex blocking hooks emit
-`{"decision":"block","reason":"..."}` and exit 2; the OMP adapter maps the same
-denial to `{block: true, reason}`.
+`{"decision":"block","reason":"..."}` and exit 2.
 
 ---
 
@@ -90,7 +82,7 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, th
   `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"wiki-skill-suggest: project-root gotchas.md changed; consider running wiki-maintain explicitly for any qualifying procedure."}}`
 - **Exit:** always `0`, including malformed input and every unavailable-dependency or path-resolution failure. The suggestion is advisory and nonblocking; it never invokes `wiki-maintain`, another skill, GitHub, or a promotion/landing path.
 - **Runtime boundary:** the hook performs only read-only Git metadata and filesystem-identity checks. It does not read or write `wiki/index.md`, `wiki/patterns/`, `wiki/skill-impact.md`, or any other wiki content, and it does not write `gotchas.md`.
-- **Registration boundary:** the local templates use the `Write|Edit|MultiEdit` matcher and a five-second timeout. There is no legacy direct-copy, `SessionStart`, `Stop`, or OMP registration.
+- **Registration boundary:** the local templates use the `Write|Edit|MultiEdit` matcher and a five-second timeout. There is no legacy direct-copy, `SessionStart`, or `Stop` registration beyond Claude Code and Codex.
 
 The wiki remains on demand: a session may explicitly read `wiki/index.md` and linked
 pattern pages, but no hook injects wiki content. The existing `session-context`
@@ -131,7 +123,7 @@ injection or register on `SessionStart`.
 Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per stop event, guarded against infinite loops.
 
 ### decision-receipt
-- **Event:** `Stop`, after `spec-gate` and before `stop-verify` / review. Codex preserves its existing `save-context-log` call between `spec-gate` and this boundary; OMP invokes the canonical deterministic wrapper, with any model-backed step using the non-Anthropic OMP route above.
+- **Event:** `Stop`, after `spec-gate` and before `stop-verify` / review. Codex preserves its existing `save-context-log` call between `spec-gate` and this boundary; any model-backed step that needs a non-Anthropic model uses pi workflows/subagents via the live role resolver, otherwise the deterministic wrapper is used.
 - **Guard:** if `$stop_hook_active == true`, exit 0 immediately. Resolve the effective, post-ceiling autonomy level through `lib/autonomy.sh`; L1-L3 exit 0 without parsing.
 - **Substantive turn:** validate when the project worktree is dirty or the current turn contains a filled canonical DoD receipt marker. A clean read-only turn exits 0.
 - **Required block:** exactly one `## Decisions made (L<n>)` block for the effective level. Every non-empty line in that block must be a canonical decision entry copied verbatim into `<canonical-root>/decisions-log.md`.
@@ -162,7 +154,7 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
 ### code-review-subagent
 - **Event:** `Stop`
 - **Guard:** `$stop_hook_active` check, then runs only on **edit-heavy turns** (definition: ≥3 files touched OR ≥200 lines added/changed; project may override). Skipped on pure doc edits.
-- **Mechanism:** Claude Code and Codex use the canonical review gate; the OMP adapter invokes the same gate with the live non-Anthropic reviewer route above. The reviewer has read-only access to the current turn's diff and returns structured findings.
+- **Mechanism:** Claude Code and Codex use the canonical review gate; pi workflows/subagents handle the same gate via the live non-Anthropic reviewer route. The reviewer has read-only access to the current turn's diff and returns structured findings.
 - **Reviewer interface (pluggable):**
   - v1: single fresh reviewer — checks correctness, obvious bugs, security red flags, matches project patterns
   - v2 (future): parallel multi-angle reviewers — security, performance, API-design, test-coverage, docs — results merged. Interface reserved; don't wire it until v1 proves useful.
@@ -184,7 +176,7 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
 
 ### propose-rules (default-on, opt-out)
 - **Event:** `Stop`
-- **Status:** default-on in the canonical Claude and Codex hook manifests. The OMP adapter MUST NOT run this Claude-only model-backed proposal path; any OMP equivalent must use the live non-Anthropic `eval`/role-resolver route. Projects opt out by setting `PROCESS_GATE_PROPOSE_RULES=0` in `.claude/hooks/config.sh` and/or `.codex/hooks/config.sh`. Script copies are canonical and synced via `sync-hooks.sh` / `sync-codex-hooks.sh`.
+- **Status:** default-on in the canonical Claude and Codex hook manifests. The Claude-only model-backed proposal path is not used from pi; any pi equivalent uses pi workflows/subagents via the live role resolver. Projects opt out by setting `PROCESS_GATE_PROPOSE_RULES=0` in `.claude/hooks/config.sh` and/or `.codex/hooks/config.sh`. Script copies are canonical and synced via `sync-hooks.sh` / `sync-codex-hooks.sh`.
 - **Guard:** opt-out gate first (silent exit when set to 0), then `$stop_hook_active`, then dirty-tree skip (pure chat → exit), then a cheap heuristic on the transcript tail looking for explicit-correction signals ("no", "don't", "actually", "stop doing", "that's wrong", "never do"). The subagent only fires when at least one signal is present in the last ~200 transcript lines.
 - **Mechanism:** dispatches a one-shot Claude-family subagent only from Claude Code or Codex; it reads the transcript tail + the project's `gotchas.md` and proposes ONE candidate gotchas entry, or emits the literal string `NONE`. The proposal is returned as `additionalContext`; this hook never blocks.
 - **L5 persistence and screening:** candidates are screened before emission or persistence. High-confidence token fingerprints remain blocked, as do nonempty quoted and unquoted assignments to password, passwd, secret, API-key, token, and access-key names. At effective L5 only, the hook stages canonical-root `gotchas.md` and its `[L5]` `decisions-log.md` receipt as temporary siblings, then commits them with per-file atomic renames; L1–L4 remain advisory-only.
@@ -219,15 +211,15 @@ Refines `code-review-subagent`. The realized reviewer is **not** an Agent-tool
 dispatch; it is a three-rung ladder that emits one findings line and lets the caller
 gate. Resolution order, first that applies wins:
 
-1. **Rung 1 — operator or OMP resolver override (`$CODE_REVIEWER_CMD`).** If set
+1. **Rung 1 — operator or pi resolver override (`$CODE_REVIEWER_CMD`).** If set
    and resolvable on `PATH` (`command -v`), it is `exec`'d with the untouched
    stdin on fd 0. That command then owns the contract (its own stdout + exit).
-   The OMP adapter MUST supply its live non-Anthropic reviewer command here;
-   unset on Claude Code/Codex → fall through, while unset on OMP → skip the
+   Pi workflows supply the live non-Anthropic reviewer command here via the role resolver when needed;
+   unset on Claude Code/Codex → fall through, while unset on pi → skip the
    model rung and use rung 3.
 2. **Rung 2 — Claude Code/Codex LLM review (`claude -p`).** This rung is
    available only to those harnesses and is skipped if `claude` is absent or
-   the fork-bomb sentinel is set (see below). OMP MUST NOT enter it. The
+   the fork-bomb sentinel is set (see below). Pi MUST NOT enter it; pi review uses rung 1 via workflows/subagents. The
    verified invocation is:
    `claude -p --max-turns 1 --output-format text --tools Read --max-budget-usd 0.50 "<prompt>"`
    with the JSON envelope piped on stdin, wrapped in a **perl-alarm
@@ -329,7 +321,7 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
   4. **The merge gate** — `process-gate/scripts/run-all.sh --mode=<merge|push>`, derived from the pushed refs: a push targeting `main`/`master` runs `--mode=merge` (full BLOCKED semantics, no downgrade), a WIP feature-branch push runs the lenient `--mode=push`. This single call supersedes the old standalone typecheck+lint+test block (`check-tests.sh` is a strict superset of those). It covers the deterministic gate set: PR-hygiene, secrets, bypass markers, tests, docs, stack profile, security-diff, and analyze. rc 1 → block (exit 1); rc 2 → warn (exit 0); rc 0 → ok.
 - **Purpose:** catches anything where `stop-verify` was bypassed (manual commit outside a Claude turn, amended commit, etc.) and enforces Trellis's PR-flow policy + the deterministic merge gate at the git boundary.
 - **Block:** PR-flow guard trips, or `run-all.sh --mode=merge` returns a hard failure.
-- **Cross-harness reach.** Git hooks are harness-agnostic — they run under Claude Code, Codex, and OMP. This local `pre-push` git hook is therefore the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire that an optional operator bypass audit can surface after the fact. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`; those turn-level gates are enforced through each enabled harness's native session path, not at the git boundary.
+- **Cross-harness reach.** Git hooks are harness-agnostic — they run under Claude Code and Codex (pi has no separate git-hook surface and shares the Codex surface). This local `pre-push` git hook is therefore the cross-harness merge gate **for the deterministic gate set only** (the eight gates above): it is **fail-closed at push** — but **not un-bypassable**. The only escape is an explicit `--no-verify` / direct-push, itself a logged tripwire that an optional operator bypass audit can surface after the fact. There is **no** code-review / ui-verify / receipt gate in `run-all.sh`; those turn-level gates are enforced through each enabled harness's native session path, not at the git boundary.
 - **GitHub-side complement:** local guard prevents accidents; branch protection on the remote is the durable gate. Every Trellis project should have `main` branch-protected (require PR, passing status checks, merge-commit only — squash-merge disabled in repo settings to preserve full history). Review-count enforcement is N/A here — sole-maintainer org, GitHub blocks self-approval; the PR window itself + CI is the gate.
 
 ### spec-gate (mandatory feature pipeline — spec 006)
@@ -337,8 +329,8 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 The gate that makes "every feature gets specced" enforceable rather than aspirational. **Default OFF** — inert until a project sets `mandatory_pipeline.enabled: true`.
 
 - **Teeth location:** the portable dispatcher invokes the verified release's `core-rules/githooks/pre-push`, which invokes `.claude/hooks/spec-gate.sh --gate` (`.agents/` fallback) **after** the PR-flow guard, **before** the process-gate. A block exits non-zero → the push is refused. This is the load-bearing enforcement point.
-- **Parity by construction:** the verdict engine `lib/spec-gate-core.sh` is a **pure function of git + filesystem state** (branch diff size, changed paths, in-range spec triad, bound `/surgical` marker) with **zero model classification**. Same repository state → same verdict on Claude Code, Codex, and OMP. Codex shares the identical core; OMP invokes the canonical script through its adapter. Determinism, not prose, does the enforcing.
-- **Early-warning:** Claude Code and Codex register the script first in their Stop manifests; the OMP adapter invokes it first in `session_stop`. Each surfaces the block before push, while the git-boundary invocation remains the load-bearing gate.
+- **Parity by construction:** the verdict engine `lib/spec-gate-core.sh` is a **pure function of git + filesystem state** (branch diff size, changed paths, in-range spec triad, bound `/surgical` marker) with **zero model classification**. Same repository state → same verdict on Claude Code and Codex (pi reuses the same core via workflows). Determinism, not prose, does the enforcing.
+- **Early-warning:** Claude Code and Codex register the script first in their Stop manifests; pi workflows surface the same block via the role resolver where needed. Each surfaces the block before push, while the git-boundary invocation remains the load-bearing gate.
 - **Thresholds** (config, most-specific wins: project-local `.trellis.json` → deprecated project-local `.trellis.config.json` → immutable runtime `trellis.config.json` → built-in): `spec_required_diff_lines` (floor, default **80**) and `surgical_max_diff_lines` (surgical ceiling, default **400**).
 - **Gated diff:** net added+deleted vs the protected merge-base, with non-feature paths excluded (tests, `docs/`, `specs/`, `audits/`, lockfiles, generated, and operational config like `*.yml`/`package.json`/`trellis.config.json`). Below the floor → passes with no spec (surgical-by-default). Above the floor → one of three routes required.
 - **The three routes** (above the floor):

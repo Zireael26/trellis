@@ -7,7 +7,9 @@ REGISTRY_LIB="$REPO/scripts/lib/local-registry.sh"
 RELEASE_STORE_LIB="$REPO/scripts/lib/release-store.sh"
 
 setup() {
-  SANDBOX="$(mktemp -d)"
+  # A bare `mktemp -d` ignores TMPDIR on Darwin and lands outside a fenced
+  # run's writable root. Template it explicitly under the per-test directory.
+  SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/scheduled-task-contracts.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   TRELLIS_HOME_FIX="$SANDBOX/trellis-home"
   RELEASE_REPO="$SANDBOX/release-source"
@@ -31,10 +33,22 @@ EOF
   chmod 600 "$TRELLIS_HOME_FIX/config.json"
 }
 
+# A ready lane task publishes only when the pinned release actually carries the
+# collector, so every fixture release ships the tracked runner with the tracked
+# executable mode. `git` records 100755 from the exec bit, which is the mode the
+# materializer must admit for this one asset while templates stay 100644.
+install_lane_runner() {
+  local repo="$1"
+  mkdir -p "$repo/scripts"
+  cp "$REPO/scripts/lane-freshness.py" "$repo/scripts/lane-freshness.py"
+  chmod 755 "$repo/scripts/lane-freshness.py"
+}
+
 build_release_repo() {
   mkdir -p "$RELEASE_REPO/core-rules"
   cp -R "$REPO/scheduled-tasks" "$RELEASE_REPO/scheduled-tasks"
   cp "$REPO/trellis.config.json" "$RELEASE_REPO/trellis.config.json"
+  install_lane_runner "$RELEASE_REPO"
   printf '%s\n' '1.2.3' > "$RELEASE_REPO/core-rules/VERSION"
   (
     cd "$RELEASE_REPO" || exit 1
@@ -45,6 +59,9 @@ build_release_repo() {
     git commit -q -m fixture
     git tag -a v1.2.3 -m fixture
   )
+  # The executable mode is the point of the baseline fixture; a 100644 runner
+  # here would make the mode-strictness assertions vacuous.
+  [ "$(git -C "$RELEASE_REPO" ls-files -s scripts/lane-freshness.py | awk '{print $1}')" = 100755 ]
 }
 
 install_fixture_release() {
@@ -52,6 +69,55 @@ install_fixture_release() {
     '. "$1"; release_store_install "$2" "$3" ""' \
     _ "$RELEASE_STORE_LIB" 1.2.3 "$RELEASE_REPO"
   [ "$status" -eq 0 ]
+}
+
+# A second fixture release whose lane-freshness assets are deliberately wrong,
+# installed and activated so the refusal is reached through the real release
+# path rather than by tampering with an already verified store.
+install_variant_release() {
+  local version="$1" defect="$2" repo="$SANDBOX/release-variant-$version"
+  # Built from the tracked tree the same way `build_release_repo` builds the
+  # baseline, never by copying an existing fixture checkout: copying one leaves
+  # its `.git` behind and the next `git add` records a gitlink the release
+  # store rejects as an unsupported tree entry.
+  mkdir -p "$repo/core-rules"
+  cp -R "$REPO/scheduled-tasks" "$repo/scheduled-tasks"
+  cp "$REPO/trellis.config.json" "$repo/trellis.config.json"
+  install_lane_runner "$repo"
+  case "$defect" in
+    unknown-placeholder)
+      printf '%s\n' 'Cache {{LANE_UNKNOWN}} is not a rendered input.' \
+        >> "$repo/scheduled-tasks/lane-freshness/prompt.md"
+      ;;
+    missing-targets)
+      rm -f "$repo/scheduled-tasks/lane-freshness/targets.md"
+      ;;
+    missing-runner)
+      rm -f "$repo/scripts/lane-freshness.py"
+      ;;
+  esac
+  printf '%s\n' "$version" > "$repo/core-rules/VERSION"
+  (
+    cd "$repo" || exit 1
+    git init -q -b main
+    git config user.email materializer@example.invalid
+    git config user.name Materializer
+    git add -A
+    git commit -q -m "fixture $defect"
+    git tag -a "v$version" -m "fixture $defect"
+  )
+  # Every entry must be a blob; a gitlink here would fail the install for a
+  # reason that has nothing to do with the defect under test.
+  [ -z "$(git -C "$repo" ls-tree -r HEAD | awk '$2 != "blob"')" ] ||
+    { git -C "$repo" ls-tree -r HEAD; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
+    '. "$1"; release_store_install "$2" "$3" ""' \
+    _ "$RELEASE_STORE_LIB" "$version" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq --arg version "$version" '.active_cli_release = $version' \
+    "$TRELLIS_HOME_FIX/config.json" > "$TRELLIS_HOME_FIX/config.json.next"
+  mv "$TRELLIS_HOME_FIX/config.json.next" "$TRELLIS_HOME_FIX/config.json"
+  chmod 600 "$TRELLIS_HOME_FIX/config.json"
 }
 
 make_repo() {
@@ -439,4 +505,216 @@ materialize_task() {
   grep -q '^| `aeo-baseline` | drafted |' "$readme"
   run grep -c '^| `aeo-baseline` | \(daily\|weekly\|weekdays\|monthly\|quarterly\) |' "$readme"
   [ "$output" -eq 0 ]
+}
+
+# The lane cache is the one file a task writes outside its output root, so the
+# path must come from the home this run selected — not from whatever `HOME` or
+# `TRELLIS_HOME` the calling shell happened to carry.
+@test "lane-freshness renders the selected home over a conflicting ambient default" {
+  local decoy="$SANDBOX/ambient home"
+  local personal="$SANDBOX/personal/alpha"
+  local root="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+  mkdir -p "$decoy/state"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  grep -Fq '{{LANE_ENVIRONMENT}}' "$REPO/scheduled-tasks/lane-freshness/prompt.md"
+  run env HOME="$decoy" TRELLIS_HOME="$decoy" "$MATERIALIZER" materialize \
+    --home "$TRELLIS_HOME_FIX" --fleet personal lane-freshness
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$root" ]
+
+  grep -Fq "TRELLIS_HOME=$(printf '%q' "$TRELLIS_HOME_FIX")" "$root/prompt.md"
+  grep -Fq "TRELLIS_LANE_CACHE=$(printf '%q' "$TRELLIS_HOME_FIX/state/lane-availability.json")" "$root/prompt.md"
+  grep -Fq "TRELLIS_LANE_RUNNER=$(printf '%q' "$TRELLIS_HOME_FIX/releases/1.2.3/payload/scripts/lane-freshness.py")" "$root/prompt.md"
+  grep -Fq 'python3 "$TRELLIS_LANE_RUNNER" --home "$TRELLIS_HOME"' "$root/prompt.md"
+  [ "$(grep -cF "$decoy" "$root/prompt.md")" -eq 0 ] || { cat "$root/prompt.md"; false; }
+  [ "$(grep -cF '{{' "$root/prompt.md")" -eq 0 ] || { cat "$root/prompt.md"; false; }
+  [ "$(grep -cF '{{' "$root/targets.md")" -eq 0 ] || { cat "$root/targets.md"; false; }
+}
+
+@test "lane environment survives a selected home with spaces and shell metacharacters" {
+  local special_home="$SANDBOX/trellis home & lane\\state"
+  local personal="$SANDBOX/personal/alpha"
+  local root
+  mv "$TRELLIS_HOME_FIX" "$special_home"
+  TRELLIS_HOME_FIX="$special_home"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  materialize_task personal lane-freshness
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  root="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+
+  # Each assignment must survive evaluation as exactly one shell word.
+  run bash -c 'eval "$(grep -m1 -E "^TRELLIS_LANE_CACHE=" "$1")"; printf "%s\n" "$TRELLIS_LANE_CACHE"' \
+    _ "$root/prompt.md"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$TRELLIS_HOME_FIX/state/lane-availability.json" ]
+  run bash -c 'eval "$(grep -m1 -E "^TRELLIS_HOME=" "$1")"; printf "%s\n" "$TRELLIS_HOME"' \
+    _ "$root/prompt.md"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$TRELLIS_HOME_FIX" ]
+  [ "$(jq -r '.lane_cache.path' "$root/manifest.json")" = "$TRELLIS_HOME_FIX/state/lane-availability.json" ]
+}
+
+# This task reads local state only. An empty fleet is a normal ready run, not
+# the reserved no-usable-checkout planned error.
+@test "lane-freshness is ready with an empty fleet and requires no checkout" {
+  local root="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+
+  materialize_task personal lane-freshness
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = ready ] || { cat "$root/manifest.json"; false; }
+  [ "$(jq -r '.requirements.checkout_required' "$root/manifest.json")" = false ]
+  [ "$(jq -c '.requirements.planned_errors' "$root/manifest.json")" = '[]' ]
+  [ "$(jq -c '.requirements.excluded_rows' "$root/manifest.json")" = '[]' ]
+  [ "$(jq -r '.snapshot.entry_count' "$root/manifest.json")" -eq 0 ]
+  [[ "$output" != *"planned error"* ]] || { echo "$output"; false; }
+}
+
+@test "the lane cache authorization is exact and absent from every other task" {
+  local personal="$SANDBOX/personal/alpha"
+  local lane="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+  local digest="$TRELLIS_HOME_FIX/tasks/personal/daily-project-digest"
+  local conductor="$TRELLIS_HOME_FIX/tasks/personal/conductor"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  materialize_task personal lane-freshness
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -cS '.lane_cache' "$lane/manifest.json")" = \
+    "$(jq -ncS --arg home "$TRELLIS_HOME_FIX" \
+      '{path: ($home + "/state/lane-availability.json"), temporary_prefix: ($home + "/state/.lane-availability.")}')" ] ||
+    { jq -c '.lane_cache' "$lane/manifest.json"; false; }
+  # The prefix is the collector's own `mkstemp` prefix, trailing dot included,
+  # read out of the pinned runner rather than restated from memory here.
+  grep -Fq "prefix=\".lane-availability.\"" \
+    "$TRELLIS_HOME_FIX/releases/1.2.3/payload/scripts/lane-freshness.py"
+  [ "$(basename "$(jq -r '.lane_cache.temporary_prefix' "$lane/manifest.json")")" = ".lane-availability." ]
+  # Ordinary file entries stay relative to the task root.
+  [ "$(jq -r '[.files[] | select(startswith("/"))] | length' "$lane/manifest.json")" -eq 0 ]
+
+  materialize_task personal daily-project-digest
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r 'has("lane_cache")' "$digest/manifest.json")" = false ]
+
+  materialize_task personal conductor
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r 'has("lane_cache")' "$conductor/manifest.json")" = false ]
+}
+
+@test "materialize refuses an unknown placeholder and a missing required template asset" {
+  local personal="$SANDBOX/personal/alpha"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  install_variant_release 1.2.4 unknown-placeholder
+  materialize_task personal lane-freshness
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *"unknown placeholder {{LANE_UNKNOWN}}"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"could not render release template"* ]] || { echo "$output"; false; }
+  [ ! -e "$TRELLIS_HOME_FIX/tasks/personal/lane-freshness" ]
+
+  install_variant_release 1.2.5 missing-targets
+  materialize_task personal lane-freshness
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [[ "$output" == *"does not provide required asset: scheduled-tasks/lane-freshness/targets.md"* ]] ||
+    { echo "$output"; false; }
+  [ ! -e "$TRELLIS_HOME_FIX/tasks/personal/lane-freshness" ]
+}
+
+# The lane task publishes a rendered collector invocation. A release that does
+# not carry the collector cannot produce a usable run, so it must be refused as
+# a missing asset before anything is published — not published as `ready` with a
+# runner path that does not resolve.
+@test "a ready lane task requires the pinned release to carry the collector" {
+  local personal="$SANDBOX/personal/alpha"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  install_variant_release 1.2.6 missing-runner
+  materialize_task personal lane-freshness
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [[ "$output" == *"does not provide required asset: scripts/lane-freshness.py"* ]] ||
+    { echo "$output"; false; }
+  [ ! -e "$TRELLIS_HOME_FIX/tasks/personal/lane-freshness" ]
+}
+
+# A registry row whose machine state contradicts the recorded identity is a
+# state error for every task, including the ones that consume no checkout. The
+# lane task must still say so precisely rather than materializing `ready`.
+@test "a registered root that lost its Git linkage plans a lane identity error" {
+  local personal="$SANDBOX/personal/alpha"
+  local root="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+  rm -rf "$personal/.git"
+
+  materialize_task personal lane-freshness
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = planned-error ] || { cat "$root/manifest.json"; false; }
+  [ "$(jq -r '.requirements.checkout_required' "$root/manifest.json")" = false ]
+  [ "$(jq -r '.snapshot.identity_error_entry_count' "$root/manifest.json")" -eq 1 ]
+  [ "$(jq -c '.requirements.planned_errors' "$root/manifest.json")" = \
+    '["local registry row failed identity validation: personal/alpha"]' ] ||
+    { jq -c '.requirements.planned_errors' "$root/manifest.json"; false; }
+  [[ "$output" == *"planned error: local registry row failed identity validation: personal/alpha"* ]] ||
+    { echo "$output"; false; }
+}
+
+# The collector's exit status is always 0, so classification rests entirely on
+# the snapshot. Run the prompt's own jq programs — extracted from the rendered
+# task, not restated here — over fixture caches that reproduce every shape the
+# collector actually writes. No HTTP and no provider is involved.
+@test "the rendered lane classifier separates fresh, preserved-stale and bootstrap caches" {
+  local root="$TRELLIS_HOME_FIX/tasks/personal/lane-freshness"
+  local validator classifier fixtures="$SANDBOX/lane-fixtures"
+
+  materialize_task personal lane-freshness
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  validator="$(sed -n "/^jq -e '(\.stale /{s/^jq -e '//;s/' .*\$//;p;q;}" "$root/prompt.md")"
+  classifier="$(sed -n "/^jq -r 'if /{s/^jq -r '//;s/' .*\$//;p;q;}" "$root/prompt.md")"
+  [ -n "$validator" ] || { cat "$root/prompt.md"; false; }
+  [ -n "$classifier" ] || { cat "$root/prompt.md"; false; }
+
+  mkdir -p "$fixtures"
+  # A successful poll. An empty `lanes` object here is a real empty observation.
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{"codex":{"remaining":0.62}},"errors":[],"stale":false}' > "$fixtures/fresh.json"
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{},"errors":[],"stale":false}' > "$fixtures/fresh-empty.json"
+  # A failed poll over a real prior snapshot: preserved lanes, original
+  # timestamp, plus the collector's `lastErrorAt`.
+  printf '%s\n' '{"fetchedAt":"2026-09-05T00:00:00Z","lanes":{"codex":{"remaining":0.62}},"errors":[],"stale":true,"lastErrorAt":"2026-09-06T00:00:00Z"}' > "$fixtures/stale.json"
+  # The no-prior bootstrap marker the collector writes when the very first poll
+  # fails, and the same marker after a second failed poll added `lastErrorAt`.
+  # Neither carries a measured lane observation.
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{},"errors":[],"stale":true}' > "$fixtures/bootstrap.json"
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{},"errors":[],"stale":true,"lastErrorAt":"2026-09-06T00:01:00Z"}' > "$fixtures/bootstrap-retried.json"
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{},"errors":[]}' > "$fixtures/no-stale.json"
+  printf '%s\n' '{"fetchedAt":"2026-09-06T00:00:00Z","lanes":{},"errors":[],"stale":"true"}' > "$fixtures/stale-string.json"
+  printf '%s\n' 'not json' > "$fixtures/malformed.json"
+
+  local name
+  for name in fresh fresh-empty stale bootstrap bootstrap-retried; do
+    run jq -e "$validator" "$fixtures/$name.json"
+    [ "$status" -eq 0 ] || { echo "$name: $output"; false; }
+  done
+  # `stale` must be validated as a boolean, not merely present.
+  for name in no-stale stale-string malformed; do
+    run jq -e "$validator" "$fixtures/$name.json"
+    [ "$status" -ne 0 ] || { echo "$name: $output"; false; }
+  done
+
+  run jq -r "$classifier" "$fixtures/fresh.json"
+  [ "$output" = fresh ] || { echo "$output"; false; }
+  run jq -r "$classifier" "$fixtures/fresh-empty.json"
+  [ "$output" = fresh ] || { echo "$output"; false; }
+  run jq -r "$classifier" "$fixtures/stale.json"
+  [ "$output" = stale ] || { echo "$output"; false; }
+  # A bootstrap marker is not a usable prior snapshot, with or without the
+  # repeated-failure `lastErrorAt`.
+  run jq -r "$classifier" "$fixtures/bootstrap.json"
+  [ "$output" = error ] || { echo "$output"; false; }
+  run jq -r "$classifier" "$fixtures/bootstrap-retried.json"
+  [ "$output" = error ] || { echo "$output"; false; }
 }

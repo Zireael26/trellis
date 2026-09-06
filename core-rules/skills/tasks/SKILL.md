@@ -39,7 +39,7 @@ One new file: `specs/<NNN>-<slug>/tasks.md`. No edits to spec.md, plan.md, or an
    - **Name the slicing strategy that drives the order.** Beyond ≤4h atoms, decide *how* the work is sliced — **vertical** (a thin end-to-end slice through every layer, shippable on its own), **contract-first** (define and lock the interface/schema, then fill implementations behind it — lets dependent work start in parallel), or **risk-first** (attack the most uncertain / most-likely-to-fail unit first, so a dead end surfaces while it's cheap). Pick per plan: risk-first when there's a big unknown, contract-first when parallel tasks share an interface, vertical by default. (Folded from the `incremental-implementation` pattern.)
 4. **Map back to success criteria.** Every spec success criterion must be referenced by at least one task. If not, either the plan missed it or the task list missed it — surface and fix.
 5. **Order tasks by dependency, not preference.** Reviewer should be able to follow the list top-to-bottom and end up with a working feature.
-6. **Stop after writing.** Implementation is not part of this skill's output.
+6. **Stop after writing.** Implementation is not part of this skill's output — `tasks` writes the list, `execute` builds it, and that boundary holds no matter how simple the tasks look. That is an output boundary, not by itself a demand for a fresh approval: review the list you just wrote, then hand off to `execute` if the caller is already authorized for the pipeline, or stop here if they asked for the breakdown alone.
 
 ## The TodoWrite relationship (read this carefully)
 
@@ -64,8 +64,8 @@ The operator may also add ad-hoc TodoWrite items that aren't in tasks.md (one-of
 ## Boundaries
 
 - **One file written.** `specs/<NNN>-<slug>/tasks.md`. No code, no edits to spec/plan.
-- **Refuse to overwrite an existing tasks.md.** Operator must remove explicitly; the skill doesn't silently rewrite.
-- **Don't start implementation.** Even if the tasks look simple. The skill is a writer, not a builder.
+- **Never silently overwrite an existing tasks.md.** Unasked, leave it and say it exists. When a revision is authorized, edit in place and surgically: add, split or re-word the tasks the revision touches while preserving existing task IDs, `Depends` edges, the Covers mapping, and — critically — the completion state of every box already ticked. Re-emitting a list that resets `[x]` to `[ ]` destroys the provenance those receipts bought. No operator deletion required.
+- **Don't start implementation.** Even if the tasks look simple. The skill is a writer, not a builder; `execute` is the builder, and it alone ticks boxes, through `scripts/tick.sh`.
 
 ## Sensible failure modes
 

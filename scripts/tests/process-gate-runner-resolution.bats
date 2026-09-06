@@ -3,6 +3,7 @@
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 PRE_PUSH="$REPO_ROOT/core-rules/githooks/pre-push"
+HUSKY_PRE_PUSH="$REPO_ROOT/core-rules/husky/pre-push"
 PR_GATE="$REPO_ROOT/core-rules/hooks/pr-gate-shiftleft.sh"
 CODEX_PR_GATE="$REPO_ROOT/core-rules/codex/hooks/pr-gate-shiftleft.sh"
 
@@ -46,6 +47,11 @@ install_claude_source_link() {
 run_pre_push() {
   local checkout="$1"
   run env PROCESS_GATE_CAPTURE="$CAPTURE" sh -c 'cd "$1" && sh "$2" </dev/null' _ "$checkout" "$PRE_PUSH"
+}
+
+run_husky_pre_push() {
+  local checkout="$1"
+  run env PROCESS_GATE_CAPTURE="$CAPTURE" sh -c 'cd "$1" && sh "$2" </dev/null' _ "$checkout" "$HUSKY_PRE_PUSH"
 }
 
 run_pr_gate() {
@@ -156,6 +162,15 @@ assert_runner() {
   mkdir -p "$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh"
 
   run_pre_push "$WORKTREE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]]
+  [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]]
+  [[ "$output" == *"$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh: exists but is not a regular file"* ]]
+  [[ "$output" == *"$WORKTREE/core-rules/skills/process-gate/scripts/run-all.sh: not found"* ]]
+  [[ "$output" == *"$MAIN/.claude/skills/process-gate/scripts/run-all.sh: not found"* ]]
+  [[ "$output" == *"$MAIN/.agents/skills/process-gate/scripts/run-all.sh: not found"* ]]
+
+  run_husky_pre_push "$WORKTREE"
   [ "$status" -eq 1 ]
   [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]]
   [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]]

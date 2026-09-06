@@ -4,9 +4,12 @@
 # llm binary and that an explicit model is forwarded.
 
 setup() {
-  TEST_ROOT="$(mktemp -d)"
+  TEST_ROOT="$(mktemp -d "$BATS_TEST_TMPDIR/security-gate-llm.XXXXXX")"
   BIN="$TEST_ROOT/bin"
-  mkdir -p "$BIN"
+  NO_TIMEOUT_BIN="$TEST_ROOT/no-timeout-bin"
+  ALLOC_FAIL_BIN="$TEST_ROOT/alloc-fail-bin"
+  DIAG_DIR="$TEST_ROOT/diagnostics"
+  mkdir -p "$BIN" "$NO_TIMEOUT_BIN" "$ALLOC_FAIL_BIN" "$DIAG_DIR"
   SCRIPT_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   LLC="$SCRIPT_ROOT/scripts/lib/llm-call.sh"
 
@@ -33,10 +36,36 @@ while [ "$#" -gt 0 ]; do
 done
 # Consume stdin to mimic real llm.
 cat >/dev/null
+if [ -n "${LLM_STUB_STDERR:-}" ]; then
+  printf '%s' "$LLM_STUB_STDERR" >&2
+fi
+if [ "${LLM_STUB_EXIT:-0}" -ne 0 ]; then
+  exit "$LLM_STUB_EXIT"
+fi
 printf '%s\n' '{"ok":1}'
 exit 0
 SH
   chmod +x "$BIN/llm"
+
+  cat > "$ALLOC_FAIL_BIN/mktemp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'stub mktemp refusal' >&2
+exit 1
+SH
+  chmod +x "$ALLOC_FAIL_BIN/mktemp"
+
+  cat > "$BIN/timeout" <<'SH'
+#!/bin/bash
+[ "${1:-}" = "--preserve-status" ] && shift
+shift
+exec "$@"
+SH
+  chmod +x "$BIN/timeout"
+
+  for tool in bash cat; do
+    ln -s "$(command -v "$tool")" "$NO_TIMEOUT_BIN/$tool"
+  done
+  ln -s "$BIN/llm" "$NO_TIMEOUT_BIN/llm"
 }
 
 teardown() {
@@ -110,4 +139,60 @@ teardown() {
   [ "$status" -eq 0 ]
   run cat "$MODEL_LOG"
   [ "$output" = "anthropic-explicit" ]
+}
+
+@test "llm is not invoked unbounded when no timeout utility is available" {
+  run /usr/bin/env PATH="$NO_TIMEOUT_BIN" LLM_PROVIDER=anthropic LLM_MODEL="anthropic-explicit" \
+    /bin/bash "$LLC" "$PROMPT_FILE" "$INPUT_FILE" "$OUT_FILE"
+  [ "$status" -eq 2 ]
+  [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
+  [ ! -s "$OUT_FILE" ]
+  [[ "$output" == *"neither timeout nor gtimeout is available"* ]]
+}
+
+@test "successful llm call removes its private diagnostic" {
+  run env PATH="$BIN:$PATH" TMPDIR="$DIAG_DIR" LLM_PROVIDER=anthropic LLM_MODEL="anthropic-explicit" \
+    bash "$LLC" "$PROMPT_FILE" "$INPUT_FILE" "$OUT_FILE"
+  [ "$status" -eq 0 ]
+  [ -s "$OUT_FILE" ]
+  shopt -s nullglob
+  diagnostics=("$DIAG_DIR"/security-gate-llm.*)
+  [ "${#diagnostics[@]}" -eq 0 ]
+}
+
+@test "failed llm calls retain different private diagnostics with stderr bytes" {
+  run env PATH="$BIN:$PATH" TMPDIR="$DIAG_DIR" LLM_PROVIDER=anthropic LLM_MODEL="anthropic-explicit" \
+    LLM_STUB_STDERR="first private diagnostic" LLM_STUB_EXIT=9 \
+    bash "$LLC" "$PROMPT_FILE" "$INPUT_FILE" "$OUT_FILE"
+  [ "$status" -eq 2 ]
+  FIRST_WARNING="$output"
+  FIRST_ERR="${FIRST_WARNING##* — see }"
+  [ "$FIRST_WARNING" = "warn: llm call failed (model=anthropic-explicit provider=anthropic) — see $FIRST_ERR" ]
+  [ -f "$FIRST_ERR" ]
+  [[ "$(ls -ld "$FIRST_ERR")" == "-rw-------"* ]] || return 1
+  [ "$(cat "$FIRST_ERR")" = "first private diagnostic" ]
+  [ ! -s "$OUT_FILE" ]
+
+  SECOND_OUT="$TEST_ROOT/out-second.json"
+  run env PATH="$BIN:$PATH" TMPDIR="$DIAG_DIR" LLM_PROVIDER=anthropic LLM_MODEL="anthropic-explicit" \
+    LLM_STUB_STDERR="second private diagnostic" LLM_STUB_EXIT=7 \
+    bash "$LLC" "$PROMPT_FILE" "$INPUT_FILE" "$SECOND_OUT"
+  [ "$status" -eq 2 ]
+  SECOND_WARNING="$output"
+  SECOND_ERR="${SECOND_WARNING##* — see }"
+  [ "$SECOND_WARNING" = "warn: llm call failed (model=anthropic-explicit provider=anthropic) — see $SECOND_ERR" ]
+  [ "$SECOND_ERR" != "$FIRST_ERR" ]
+  [ -f "$SECOND_ERR" ]
+  [[ "$(ls -ld "$SECOND_ERR")" == "-rw-------"* ]] || return 1
+  [ "$(cat "$SECOND_ERR")" = "second private diagnostic" ]
+  [ ! -s "$SECOND_OUT" ]
+}
+
+@test "diagnostic allocation failure exits 2 before llm invocation" {
+  run env PATH="$ALLOC_FAIL_BIN:$BIN:$PATH" TMPDIR="$DIAG_DIR" LLM_PROVIDER=anthropic LLM_MODEL="anthropic-explicit" \
+    bash "$LLC" "$PROMPT_FILE" "$INPUT_FILE" "$OUT_FILE"
+  [ "$status" -eq 2 ]
+  [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
+  [ ! -s "$OUT_FILE" ]
+  [[ "$output" == *"unable to allocate private llm diagnostic at $DIAG_DIR/security-gate-llm.XXXXXX"* ]]
 }

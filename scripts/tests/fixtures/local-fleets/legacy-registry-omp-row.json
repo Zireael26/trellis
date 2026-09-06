@@ -1,0 +1,25 @@
+{
+  "$schema": "../../../lib/trellis.registry.schema.json",
+  "schema_version": 1,
+  "projects": {
+    "personal/legacy-omp": {
+      "fleet": "personal",
+      "project_id": "legacy-omp",
+      "status": "active",
+      "metadata": {},
+      "checkouts": {
+        "763f6b2beea006553092c50a005ace49d40879f416f091539ff1d1bad1bb18bf": {
+          "root": "/tmp/trellis-omp-legacy-demo/checkout",
+          "git_common_dir": "/tmp/trellis-omp-legacy-demo/checkout/.git",
+          "release": "1.0.0-rc.45",
+          "harnesses": ["claude", "codex", "omp"],
+          "worktrees": {
+            "47e72b89ab6e614616d331b3f079e3f1dcc74a648b325f4956dc7b435c166423": {
+              "root": "/tmp/trellis-omp-legacy-demo/checkout"
+            }
+          }
+        }
+      }
+    }
+  }
+}

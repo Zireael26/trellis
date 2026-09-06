@@ -1,7 +1,6 @@
 // fanout-verify — generic fan-out-per-target -> verify-on-host -> verdict recipe.
 //
-// The reusable shape extracted from Trellis one-shot scripts: one isolated agent
-// per target works in a worktree, makes the change, VERIFIES it on the host
+// One isolated agent per target works in a worktree, makes the change, VERIFIES it on the host
 // (install/build/typecheck, lint if present, tests best-effort), pushes a branch,
 // opens a PR, and returns a structured VERDICT. Agents NEVER merge — the main
 // loop reads the verdicts and decides (auto-merge greens, hold the rest).

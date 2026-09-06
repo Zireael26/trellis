@@ -1,90 +1,45 @@
 # Cross-model strength routing — steering reference
 
-Source: the July-2026 community + benchmark consensus on Claude/Opus vs Codex/GPT-5.x (last30days engine + web search, distilled to the figures below), not model recall. This doc carries the **work-type → model** routing policy as durable steering **intent** for Trellis's dual-harness setup. It is not a rule that branches on which harness is running — the load-bearing rules live in `core-rules/CLAUDE.md`, `core-rules/autonomy.md`, `core-rules/loop-safety.md`, and the hooks, and they steer every harness **identically** (byte-identical `CLAUDE.md`/`AGENTS.md` symlinks; ADR 2026-05-08). Routing is applied by the orchestrator when it fans work out — and, since spec 009, when a bounded work-order unit surfaces in any interactive turn (§6); it never re-decides who…
-
-The per-model prompting levers live next door: `docs/claude-steering.md` and `docs/gpt-5.x-steering.md`. This doc answers the one question those don't: given two callable models, **which unit of work goes to which**.
-
-> **Evidence status:** §2 retains the July-2026 routing table as historical evidence. D7 closed-with-shortfall after its 2026-08-15 expiry; this document does not represent the table as re-grounded.
-
-
----
+Current routing is capability-based and respects the operator's selected model and harness. The role resolver in `core-rules/references/delegation.md` owns automatic worker selection; this document owns deliberate direct Codex dispatch and its effort policy. Prompt guidance lives in `core-rules/references/model-prompting-deltas.md` and `docs/gpt-5.x-steering.md`.
 
 ## Current status — direct Codex CLI and optional plugin companion
 
-The supported Codex executor surfaces are direct commands. **Generic Codex CLI
-harness support** — `AGENTS.md`, `.agents/`, `.codex/` hooks, and deliberate
-direct `codex exec` use — is supported and independent of any plugin. Operators
-who explicitly install and select the OpenAI Codex plugin may also use its
-plugin-owned `codex-companion.mjs` commands. A rejected, unavailable, or failed
-explicit provider selection stays visible and fails closed unless the operator
-explicitly chooses another lane.
+Generic Codex CLI support is independent of a plugin. The optional OpenAI Codex Companion is a Claude Code integration; an installed copy is not a prerequisite for native Codex work. A selected provider failure is visible and requires explicit re-selection, never silent substitution.
 
-**Retirement note — Spec 013:** the historical `codex-worker` / workflow-recipe
-implementation shipped in rc.10 and was retired by commit `2ad1808` before live
-acceptance. It is not a dispatchable agent type and has no active recipe,
-preflight, or rollout surface. Do not recreate it from this guide. Its achieved
-receipts and field lessons remain in
-`docs/adr/2026-07-10-codex-parallel-orchestration.md` and
-`specs/013-codex-parallel-orchestration/spec.md`.
+The old `codex-worker` and Spec 013 workflow recipes were retired by commit `2ad1808` before live acceptance. Do not recreate them from historical examples. Receipts remain in `docs/adr/2026-07-10-codex-parallel-orchestration.md` and `specs/013-codex-parallel-orchestration/spec.md`.
 
-The older benchmark evidence and §2 table below remain July-2026 historical steering evidence; they are not a D7 Phase-B re-ground. The direct CLI and plugin-owned companion commands above are the current executable surfaces.
+## 1. Topology — the selected main agent orchestrates
 
-## 1. Topology — Claude orchestrates, Codex executors are dispatchable nodes
+Codex, Claude Code, or pi can host the main agent. Keep task ownership, planning, acceptance, and synthesis with that agent; delegate substantial independent units through the host's available tools when useful. A user-selected Astra or Fable session does not need to switch to Claude to plan or to Codex to implement. Check actual tool availability, permissions, model access, and worker receipts.
 
-**Claude is the orchestrator. Deliberate direct Codex CLI execution and, when explicitly selected, plugin-owned `codex-companion.mjs` commands are the dispatchable executor nodes inside Claude-driven workflows and loops.**
-The orchestration surface — `ultracode`, the `Workflow` tool, `/loop` / `/goal`, the fan-out → verify → synthesize discipline — is owned by Claude **as a policy choice, not a capability absence**. Codex-native multi-agent orchestration now exists and was re-checked 2026-07-10 on source evidence (`openai/codex` @ rust-v0.144.0) — a historical D4(d) source check, not a D7 Phase-B consensus sweep, formal topology re-ground, or receipt: `ultra` is a **harness mode, not a deeper model tier** — the API request sends `max` effort (`client.rs` maps `Ultra => Max`) while the harness injects a proactive-delegation developer message that authorizes the model to spawn subagents on its own judgment (CLI default: 4 concurrent threads/session = main + 3 subagents; the c…
+## 2. Routing policy — task requirements and measured results
 
+For automatic worker selection, use the finite task shapes and compatible chains in `core-rules/references/delegation.md`. Explicit operator selections win. Preserve cost/latency roles and family separation for verdict roles; a flagship launch does not justify replacing every worker.
 
-This is a topology, not an identity check. Nothing here reads "if Claude, do X; if Codex, do Y." The orchestrator routes; the executor executes.
+The July 2026 Claude/GPT-5.x benchmark table is superseded as routing guidance. D7 closed with a shortfall on 2026-08-23 after its 2026-08-15 expiry; there was no fresh consensus sweep. That history is retained in Git and the Spec 013 records, and is not evidence that Fable beats Astra at planning or that Astra is cheaper on Trellis's tasks. Re-evaluate representative work with fixed acceptance checks, actual usage, elapsed time, and review outcomes before changing automatic routes.
 
-## 2. Routing policy — work-type → model
-
-> **D7 shortfall (durable; closed-with-shortfall 2026-08-23):** The expiry fired 2026-08-15. No ≥2 independent non-OpenAI consensus sweep occurred, and no Phase-B §2 figures/topology re-ground, D7 verification matrix, or Phase-B review/release receipt occurred. The table below remains July-2026 historical evidence, not a re-grounded Phase-B result. No sources, sweep results, or receipts are reconstructed after the fact, because they would not prove the required work ran and would falsely imply Phase-B completion.
-
-The retained July-2026 consensus split by strength. **Claude** wins on quality, review, planning, and hard reasoning; **Codex** wins on speed, autonomy, token cost, and background/async execution. Concrete signals:
-
-- **Hard reasoning:** SWE-bench Pro **64.3%** (Claude) vs **58.6%** (Codex).
-- **Code review, blind:** cleaner result **67%** (Claude) vs **25%** (Codex).
-- **Token cost:** Codex is **~3–4× cheaper per task**; one Express refactor ran **$155** (Claude) vs **$15** (Codex).
-- **Broad coding parity:** SWE-bench Verified **87.6%** (Claude) vs **88.7%** (Codex) — near-tied, so this axis does *not* drive routing; the deltas above do.
-
-For a future material model-launch or pricing-change review, re-run the consensus research (community + benchmark sweep, same method as the figures above) and update this table with sources; never hand-edit on launch-day claims. The D7 2026-08-15 expiry did not produce such a sweep or update, so this table is retained as historical evidence. A future re-check includes whether §1's "no equivalent orchestration surface" claim still holds. (This instance automates the trigger via its ai-dev-trends adopt loop; forks without it run the sweep manually.)
-
-Default routing (a starting policy, tunable per project):
-
-| Work unit | Route to | Why |
-|---|---|---|
-| Planning, spec, architecture, `analyze` gate | **Claude** (xhigh) | reasoning edge + downstream-shape sensitivity — a shallow plan is the most expensive place to under-think |
-| Code review / adversarial verify | **Claude** (xhigh) | blind-review quality edge (67 vs 25); already the `code-review-subagent` owner |
-| Bounded implementation with useful tests; mechanical refactor with a strong oracle | **Codex executor** (`codex exec`, deliberate direct CLI; effort per §3) | token-cost + autonomy edge on the expensive bulk |
-| Long-running / async execution units in a fan-out | **Codex executor** matched to consequence level; direct Codex CLI only when explicitly selected | executor parallelism or deliberate detached job control |
-| Second-opinion / diversity pass on a hard finding | **the other model** | cross-model diversity beats self-redundancy in a verify panel |
-| Synthesis, final merge decision, orchestration itself | **Claude** | owns the workflow; merges the verdicts |
-
-**Economics — both legs are metered; two quota pools beat one.** Codex bills per token (since 2026-04) and Claude automation draws from metered credit pools (since 2026-06), so the argument is not price-plan arbitrage — neither leg is free. With both subscriptions running, the operator holds two independent quota pools: the token-expensive bulk goes to the leg with the cost edge and the headroom (today, Codex — ~3–4× cheaper per task); the quality-sensitive minority (planning, review, synthesis) stays on the orchestrator. Balance stays structural, not a quota — the split of work is the split of spend, no per-run accounting needed to keep it honest.
-
-The "second-opinion → **the other model**" row is deliberately model-neutral: whichever model produced the finding, the diversity pass goes to the one that didn't. That is the routing intent, expressed without a per-harness branch.
+OpenAI's [Astra guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra), checked 2026-09-05, establishes model capabilities and prompting advice; it does not establish a Trellis cross-model ranking.
 
 ## 3. Effort — set per unit at dispatch
 
 Every deliberate direct Codex CLI command and every plugin-owned `codex-companion.mjs` command selects its effort explicitly at dispatch. Blanket xhigh over-thinks mechanical work orders: slower and quota-hungrier for zero quality gain.
 
-**Operating band** — on the operator's pinned Codex model, `gpt-5.6-sol` (current pin; verify the selected direct CLI configuration before dispatch):
+**Operating band** — Trellis policy for deliberate direct Codex workers; verify the selected model and supported efforts before dispatch:
 
 - **medium** — mechanical or frozen-scope work with a strong oracle: renames, migrations, coverage fills, dependency bumps, and bounded implementation whose tests or compiler make correctness cheap to check.
 - **high** — moderately complex cross-file work with useful tests or diagnostics: implementation that needs broader context or judgment but still has a strong verification path.
 - **xhigh** — weak-oracle debugging, security-sensitive work, difficult design, or high-consequence implementation where missed edge cases matter more than latency.
 
-This ladder supersedes the temporary 2026-07-10 `xhigh`-only operating-band suspension. **`max` is not an approved direct-dispatch tier** — above `xhigh` these models spend substantially more reasoning for very little gain, so `xhigh` is the ceiling (`core-rules/references/model-routing.md` § Effort). The retired recipe validators enforced the same ceiling before the implementation was retired. Explicit effort remains mandatory.
+This ladder supersedes the temporary 2026-07-10 `xhigh`-only operating-band suspension. **`max` is not an approved automatic direct-dispatch tier** — this is a house cost policy, not an Astra capability limit or a new performance measurement (`core-rules/references/model-routing.md` § Effort). Explicit user instructions and host controls govern the current session. The retired recipe validators enforced the same ceiling before the implementation was retired. Explicit effort remains mandatory.
 
 **Explicit effort or error.** Every direct Codex CLI and plugin-owned companion command selects effort explicitly at dispatch. An omitted required effort is a caller error. The legacy plugin-specific Workflow recipes are historical only (Spec 013).
 
 **Exception tiers** — above the band, opt-in per unit:
 
-- **`max`** — **retired 2026-07-30.** The former `verify-panel`, `codex-executor`, `codex-fanout`, and `fleet-audit-remediation` validators hard-rejected it before those recipe surfaces were retired. Retained here only so the ladder's history reads correctly; it is not selectable.
-- **`ultra`** — very difficult units that genuinely decompose. Mechanism (source-verified 2026-07-10): ultra sends `max` effort on the wire plus a proactive-delegation prompt — subagent count is the model's choice, bounded by the CLI's `features.multi_agent_v2.max_concurrent_threads_per_session` (default 4 = main + 3 subagents; CLI warns at ≥8). Sol and terra only (`multi_agent_version: v2`); luna caps at max.
+- **`max`** — retired from automatic direct-dispatch policy on 2026-07-30. The former recipe validators rejected it before those recipes were retired. This does not override an explicit user choice supported by the current host.
+- **`ultra`** — very difficult units that genuinely decompose. Mechanism (source-verified 2026-07-10): ultra sends `max` effort on the wire plus a proactive-delegation prompt — subagent count is the model's choice, bounded by the CLI's `features.multi_agent_v2.max_concurrent_threads_per_session` (default 4 = main + 3 subagents; CLI warns at ≥8). The recorded check covered Sol and Terra; do not extrapolate that historical mode mapping to Astra or a different installed host.
 
-`ultra` requires a named justification logged in the dispatch receipt, is never a default anywhere, and is invocable only where the installed direct CLI exposes it. `max` no longer has an admitting path at all.
+`ultra` requires a named justification for a Trellis-initiated direct dispatch, is never its default, and is invocable only where the installed host exposes it. Automatic routes retain the house band; user-selected session effort follows the host.
 
 **Ultra status (2026-07-10):** D4a prerequisites were satisfied for attended Bash-direct dispatch. The recorded basis was `turn.completed` usage telemetry, loop-safety ×4 accounting, and one instrumented xhigh/ultra paired run. The historical Workflow recipe lane remained limited to xhigh and is now retired.
 
@@ -104,7 +59,7 @@ mirror. Probe it only after the operator explicitly selects that route; absence
 never disables generic Codex CLI harness support.
 
 - **Plugin presence gate:** `node "$CODEX_PLUGIN"/scripts/codex-companion.mjs setup --json` → check `ready`, `codex.available`, `auth.loggedIn`. If any is false or missing, the selected plugin lane is unavailable and the unit fails closed with that receipt.
-- **No quota API, so failure == limit.** There is no rate-limit surface in the plugin. A limit hit, null, or task error is the same visible plugin-lane failure. Do not transparently re-dispatch the unit to Claude or another provider; a new lane requires an explicit caller/operator selection.
+- **Report the actual failure.** A null or task error does not establish quota exhaustion; inspect the returned diagnostics. A confirmed limit hit is a visible plugin-lane failure. Do not transparently re-dispatch the unit to Claude or another provider; a new lane requires an explicit caller/operator selection.
 - **`log()` the failure** with the selected lane and attempted unit so an unavailable plugin route cannot look like success or silent single-family execution.
 
 Quality is not laundered by executor routing: every successful unit flows back
@@ -130,7 +85,7 @@ named in the retirement note above for their receipts and field lessons.
 
 This doc is the durable intent. It is *carried* by two capability-gated surfaces, neither of which branches on harness identity:
 
-- **The `orchestrate` skill** (`core-rules/skills/orchestrate/SKILL.md`) — capability-gated on "does my harness expose a subagent-coordination tool?", not on identity. It provides no `codex-worker` or Codex-recipe dispatch path; when Codex is selected, use the direct CLI or plugin companion command in §4.5.
+- **The `orchestrate` skill** (`core-rules/skills/orchestrate/SKILL.md`) — capability-gated on available subagent coordination. Use native worker tools when present; deliberate external Codex dispatch uses §4.5. The retired `codex-worker` recipe is not required for native orchestration.
 - **A model-neutral capability clause in `CLAUDE.md`** — when orchestrating, route bounded execution-heavy units to an available executor while planning/review/synthesis stay on the orchestrator and explicit provider selections are preserved. Phrased as capabilities the orchestrator may have, never as an identity branch.
 
 As of spec 009, both surfaces cover **interactive units** too (§6) — bounded work-order units route from any turn, not only from orchestrated fan-outs.
@@ -139,17 +94,17 @@ If a future revision re-tunes the split, it lands here next to the table, source
 
 ## 6. Interactive delegation — bounded work orders from any turn
 
-Until 009, this doc lit up only inside orchestrated fan-outs: a plain interactive turn — "fix this bug", "implement this from the plan" — ran 100% on the orchestrator even when the unit fit an executor row in §2. Widened: **any bounded work-order implementation unit may route to an available executor node, from any turn.** Pick the leg by unit type and explicit provider policy first, then capability and quota headroom:
+Any substantial independent work-order unit may route to an available worker from an interactive turn. Pick the leg by task requirements and explicit provider policy first, then capability and quota headroom:
 
 | Leg | Available? | Dispatch | Isolation | Resume | Failure | Cost |
 |---|---|---|---|---|---|---|
 | **Direct Codex CLI** | operator explicitly selects an installed, authenticated `codex` CLI | deliberate `codex exec --json ...`; no plugin required | Codex workspace sandbox; escape-hatch restrictions still apply | `codex exec resume <thread-id>` when captured | CLI failure stays on the selected lane and fails closed | `codex_usd_per_mtok` |
 | **Plugin companion** | operator selected/configured it and `setup --json` reports `ready`, `codex.available`, `auth.loggedIn` (§4) | plugin-owned `task --write --effort <ladder>` command | companion workspace sandbox | companion/Codex thread resume limits apply | null/error is a visible plugin-lane failure; no implicit provider substitution | `codex_usd_per_mtok` |
-| **Claude worker** | permitted native subagent/teammate spawn | Agent/teammate spawn, harness-tracked | harness sandbox + permission system | message an intentionally named live thread | native failure surfaces; unit stays in-family | session budget |
+| **Native worker** | permitted host subagent tool | host-tracked spawn | host sandbox and permissions | reuse the returned worker identity where supported | surface failure on the selected lane | observed usage / session budget |
 
 Every row names an existing mechanic; none authorizes a router to rewrite an explicit provider selection.
 
-**Teardown.** Direct Codex CLI and plugin companion commands exit with their process. An intentionally named teammate stays live until the root calls `TaskStop` in the same turn that accepts, supersedes, fails, or abandons its work. See the teammate-teardown section of the `orchestrate` skill and the *Definition of done* teammate clause in `core-rules/CLAUDE.md`.
+**Teardown.** Direct Codex CLI and plugin companion commands exit with their process. An intentionally persistent teammate must be released with its host's paired lifecycle operation after its work is accepted, superseded, failed, or abandoned; use `TaskStop` only on hosts that expose it. See the teammate-teardown section of the `orchestrate` skill and the *Definition of done* teammate clause in `core-rules/CLAUDE.md`.
 
 **Route predicate.** Delegate when the prompt reads as a **work order**: frozen spec, known repro, mechanical refactor, test/coverage fill, dep bump. Keep home when any of:
 

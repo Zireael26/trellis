@@ -674,7 +674,7 @@ rollout_one() (
     fi
   fi
 
-  if printf '%s\n' "$row" | jq -e '.harnesses | index("codex") != null' >/dev/null; then
+  if printf '%s\n' "$row" | jq -e '.harnesses | index("codex") != null or index("pi") != null' >/dev/null; then
     for name in $declared; do
       if install_preset_symlink "$root" ".agents" "$name" "$presets_dir"; then
         :

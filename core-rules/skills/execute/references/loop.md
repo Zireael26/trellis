@@ -8,7 +8,8 @@ For per-turn cadence and the autonomy slider, see [`autonomy.md`](../../../auton
 for the per-unit verify→receipt→tick mechanics, see
 [`verification-step.md`](verification-step.md). This file specifies the *outer
 loop*: how to read a task list, locate a unit, and where checkbox mutation goes.
-The receipt grammar is **not** redefined here — it is `CLAUDE.md:43`.
+The receipt grammar is **not** redefined here — it is the `dod-receipt` marker in
+`CLAUDE.md` *Definition of done*.
 
 ## Input shapes — two file kinds, three checkbox shapes, two checkbox loci
 
@@ -121,21 +122,30 @@ file (the tasks file carries only the flipped checkbox — see §4), so there is
 nothing to read back from a checked box. Document order is the execution order;
 do not reorder.
 
-### 2. The tickable unit = the checkbox
+### 2. The tickable unit = the checkbox; the execution unit may be larger
 
 The checkbox is the single unit common to every shape — a LIST `- [ ]` line or a
-TABLE `[ ]` Status cell — and it is the unit of work, of verification, of
-receipt, and of tick.
+TABLE `[ ]` Status cell — and it is the unit of **acceptance**: of verification
+evidence, of receipt, and of tick. It is not, by itself, a dispatch boundary.
 
-- **Default: one subagent per checkbox.** Implement it, verify it, emit its
-  receipt, tick it — then move to the next.
-- **Batching latitude:** consecutive checkboxes **under the same header** that
-  are *trivially coupled* — the canonical case being the edit + verify + commit
-  of one logical change (e.g. the plan "Step 1: Update / Step 2: Verify /
-  Step 3: Commit" of a single edit) — MAY be handled by one subagent. Batching
-  is a dispatch convenience only: **each box is still verified, receipted, and
-  ticked individually.** Never tick a box whose work or verification was folded
-  into a sibling. Never batch across a header boundary.
+- **Group by coherence, not by count.** An execution unit is however much work
+  is coherent to do in one go: a single box, or a bounded group of boxes that
+  share context (the canonical case being the edit + verify + commit of one
+  logical change, e.g. the plan "Step 1: Update / Step 2: Verify /
+  Step 3: Commit"). Independent small work and dependency-bound work may equally
+  be done directly rather than dispatched. Grouping is an execution convenience
+  and nothing more.
+- **Each covered box still stands alone at acceptance.** Every box in a group
+  keeps its own `(section, locator)`, its own sufficient green evidence and its
+  own receipt before its tick. A group's shared verification run counts for a
+  box only when that run actually exercises that box's acceptance — otherwise
+  the box needs its own. **Never tick a box whose acceptance nothing evidenced.**
+  A group member that fails stays unchecked while its siblings proceed.
+- **Markdown headers scope ticks, not dispatch.** `tick.sh` scopes a locator to
+  its `## ` section (§3), so header boundaries remain load-bearing for *finding
+  the right box*. They do not bound what one executor may work on. Document and
+  dependency order still govern the sequence: never reorder, and never start a
+  box whose dependency is unticked.
 
 ### 3. Locator derivation — a `(section, locator)` pair per box
 
@@ -243,7 +253,8 @@ Each box is verified and a receipt emitted before its tick. Mechanics —
 what command to run, how to read its exit code, how to compute the diff line
 counts, and the in-body advisory cores — live in
 [`verification-step.md`](verification-step.md), not here. The receipt's
-machine-readable form is the marker defined at `CLAUDE.md:43`; the loop passes
+machine-readable form is the `dod-receipt` marker defined in `CLAUDE.md`
+*Definition of done*; the loop passes
 that exact marker string as `tick.sh`'s **fourth** argument and also surfaces it
 in the turn transcript, which is where the Stop hook validates it.
 
@@ -263,11 +274,13 @@ The loop stops on any of **three** conditions:
   well-formed to `tick.sh` but ticking it is forbidden by loop discipline (§4,
   and [`verification-step.md`](verification-step.md) *Failed verify*).
 
-**Default autonomy level when none is configured.** If no `autonomy.md` applies
-or no level is set — the hook-less / non-onboarded case, where no turn-level
-hooks apply — default to the **most conservative** behavior: **surface
-and wait** for a human decision. Do not auto-retry or auto-defer in the absence
-of an explicit configured level.
+**When no level is explicitly configured.** Resolve the level the canonical way —
+`autonomy.md` defines the precedence and the default (L3) that applies when a
+project declares nothing. Authorization the operator has already given for this
+work carries forward; this step does not add an approval gate of its own. Only
+when resolution genuinely yields nothing to act on — no configured level and no
+applicable authorization, the hook-less / non-onboarded case — surface and wait
+rather than auto-retrying or auto-deferring.
 
 On the two completion conditions `execute` **hands off to the `process-gate`
 skill** and stops. `execute` builds and ticks; it does not run the pre-PR gate
@@ -278,6 +291,7 @@ verdict and outside this skill entirely.
 
 When `execute` runs its in-body review/UI cores mid-loop, it follows
 [`verification-step.md`](verification-step.md) — the single source for canonical-
-root resolution, the core-lib probe, the advisory-skip when no core is present,
-and the harness-matching `.review-done-<hash>` idempotency marker. The loop does
-not re-specify any of that here.
+root resolution, the core-lib probe, and the advisory-skip when no core is
+present. Those reviews are advisory and write no marker; the
+`.review-done-<hash>` idempotency marker belongs to the Stop hook alone. The loop
+does not re-specify any of that here.

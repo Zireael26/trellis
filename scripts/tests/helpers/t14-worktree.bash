@@ -34,6 +34,7 @@ t14_make_runtime_release() {
   local version="${1:-$T14_RELEASE}" repo="$T14_SANDBOX/release source"
   mkdir -p "$repo/scripts" "$repo/core-rules/husky" "$repo/core-rules/githooks"
   cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   chmod +x "$repo/scripts/attach-project.sh" "$repo/scripts/seed-inheritance-symlinks.sh"
@@ -55,12 +56,6 @@ t14_make_runtime_release() {
     "codex": {
       "links": [
         {"source": "core-rules/CLAUDE.md", "destination": ".agents/rules/trellis.md"}
-      ],
-      "render": []
-    },
-    "omp": {
-      "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".omp/AGENTS.md"}
       ],
       "render": []
     }

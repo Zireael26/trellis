@@ -88,7 +88,7 @@ legacy_config_validate() {
       and (test("(^|/)(\\.|\\.\\.)(/|$)") | not);
     def harnesses:
       type == "array" and length > 0
-      and all(.[]; . == "claude" or . == "codex" or . == "omp")
+      and all(.[]; . == "claude" or . == "codex")
       and (unique | length == length);
     type == "object"
     and (.trellis_root | absolute_path)

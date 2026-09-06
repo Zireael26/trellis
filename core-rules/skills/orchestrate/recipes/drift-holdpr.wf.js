@@ -9,8 +9,7 @@
 // project should carry verbatim) is in scope — never a behavioral change.
 //
 // Opt-in and inert until invoked: nothing calls this recipe automatically. The
-// existing `sync-hooks.sh` already does the rsync; the NEW part here is the
-// HOLD-PR orchestration around it (per the cross-model review of the spec).
+// existing `sync-hooks.sh` does the rsync; this recipe adds HOLD-PR orchestration.
 //
 // Inputs (from `args`, never baked literals):
 //   args.drifts        [{ project, path, canonical, fix }] — drift rows. All

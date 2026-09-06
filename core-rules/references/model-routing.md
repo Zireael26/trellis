@@ -2,9 +2,10 @@
 
 *Whether* to delegate is decided in `core-rules/CLAUDE.md` § Context management.
 *How* a delegated unit reaches a lane is in `core-rules/references/model-lanes.md`.
-This file decides **which model** a unit should go to once you have decided to
-delegate it. Read it before choosing a `subagent_type`, before assigning a
-teammate, and before picking models inside a dynamic workflow.
+This file explains the properties supplied to task classification or an explicit
+operator selection; it is not a second model selector. Concrete automatic
+routes and effort come from the live classifier described in
+`core-rules/references/delegation.md`.
 
 The short version: the orchestrator holds the large context and delegates
 execution; route on a model family that fits the unit and on live facts you can
@@ -24,8 +25,9 @@ explicit when nothing distinguishes the candidates.
 
 ## Route on verifiable properties
 
-The following unit properties are decidable before any work begins, and they
-should carry the initial routing decision.
+Use these observable unit properties to classify the work or explain an explicit
+selection. They do not override the classifier's eligibility checks or invent
+an alternative automatic route.
 
 1. **Context footprint.** A unit that must *hold* a large surface — more than
    roughly 200K of it — needs a large-window model and in practice stays close to
@@ -54,11 +56,12 @@ multi-provider unit from four facts:
 1. **Model family.** Select the family whose behavior fits the unit and whose
    independence requirements it can satisfy. Never assume one named model
    remains the universal frontier.
-2. **Live quota and availability.** Treat only an explicitly reported unavailable
-   state — `disabled`, `exhausted`, or `limitReached` — as ineligible, regardless
-   of threshold. Unknown, unreported, and unmetered quota remain eligible; disclose
-   that state in the routing result rather than silently treating it as availability.
-   Decide from the current observation, not a previous successful run.
+2. **Live quota and availability.** The classifier refuses `disabled`, `exhausted`,
+   or `limitReached` states, missing metered telemetry, and reported headroom below
+   the configured threshold. Explicitly declared prepaid/unmetered routes may be
+   eligible without a report, subject to the remaining capability, authentication
+   and family checks. Keep that reportless state visible; it is not measured
+   headroom. Decide from the current observation, not a previous successful run.
 3. **Authentication and policy.** A candidate without a valid, permitted
    credential is ineligible. Credential and data-handling policy can rule out a
    capable provider before price or apparent quality matters.
@@ -88,11 +91,14 @@ exempt: a hook, a type checker, or a test suite is mechanism, not self-review.
 
 ## Profile and effort
 
-| unit shape | choose | evidence |
+These considerations inform classification or explicit selection; concrete
+models and supported effort remain the classifier/host's responsibility.
+
+| unit property | consideration | evidence |
 |---|---|---|
 | high-volume output against a pre-existing oracle — codemods, bulk refactor, generated docs, mechanical migration | a live eligible, low-cost candidate in a capable family, at a low rung | verified: throughput |
 | bounded implementation against a pre-existing oracle | a live eligible capable candidate | published eval |
-| difficult design, weak-oracle debugging, security-sensitive, high-consequence | a high-capability live eligible candidate in a suitable family at `xhigh` | tier definition |
+| difficult design, weak-oracle debugging, security-sensitive, high-consequence | stronger problem-solving and independent assurance at the configured supported effort | observed task performance |
 | short interactive turn, latency felt by a human | a live eligible candidate optimized for interactive latency | verified: TTFT |
 | very cheap read-only fan-out — grep-shaped codebase search | a live eligible low-cost read-only candidate | operator decision |
 
@@ -105,12 +111,14 @@ Effort buys **search over the solution space**. It does not buy knowledge, care,
 or instruction-following. The question is never "is this task important" — it is
 *how many plausible-but-wrong answers exist, and would anything catch one?*
 
-- **`xhigh` is the ceiling. Do not select `max`.** Above `xhigh` these models
-  spend substantially more reasoning for very little additional performance, so
-  `xhigh` is where price-to-performance peaks. Escalate to `xhigh` and stop.
-- **`medium` is the floor.** Below it, `minimal` clamps to `low` anyway.
-- Mechanical work with a strong oracle comes out the same at every rung. Do not
-  pay for depth an oracle already provides.
+- Resolve automatic worker effort from the current role configuration and
+  classifier in `references/delegation.md`; deliberate direct Codex dispatch
+  follows `docs/codex-routing.md` §3. These are workload policies, not universal
+  model capability limits. Explicit user-selected session effort follows the host.
+- Check supported efforts on the selected model and host. Do not infer a floor,
+  clamp, or cost optimum from a different model's ladder.
+- Use a strong oracle to test whether lower effort preserves the required
+  outcome; do not claim all effort levels are equivalent without a comparison.
 - Per-agent effort is independent of session effort; a profile's rung travels
   with the profile.
 

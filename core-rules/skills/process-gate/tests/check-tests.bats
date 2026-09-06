@@ -1,27 +1,10 @@
 #!/usr/bin/env bats
-# Tests for check-tests.sh — the tests/coverage gate (HIGH-2 / DL-P7-04, swept
-# across ALL toolchains by DL-P7-07 + grep-fallback scoping by DL-P7-08).
+# Tests for check-tests.sh — the tests/coverage gate.
 #
-# BRIGHT LINE under test: a check that is DECLARED/DETECTED and FAILS at runtime
+# Invariant (specs/001): a check that is DECLARED/DETECTED and FAILS at runtime
 # is a HARD fail (exit 1); a check that is ABSENT/UNDECLARED/COULDN'T-RUN is a
-# WARN (exit 2), never a fail. The pre-fix bug bricked these shapes of repo:
-#   - JS: package.json present but no typecheck/lint/test script → the JS branch
-#     built `npm run typecheck`, npm exited "Missing script", worst=fail, BLOCK.
-#   - JS: no package.json at all → run_check typecheck with an empty cmd special-
-#     cased worst=fail, BLOCK.
-#   - Python (DL-P7-07): pyproject [tool.mypy] present but mypy not installed →
-#     built `python -m mypy .` on config alone → exits nonzero → BLOCK.
-#   - Go (DL-P7-07): go.mod/go.work present but `go` off PATH → `go vet ./...`
-#     exits 127 → BLOCK; and a go.work workspace root with no Makefile target
-#     fell through to root-level `go vet ./...`/`go test ./...` which are broken
-#     from a workspace root ("directory prefix . does not contain modules") →
-#     BLOCK.
-#   - grep-fallback (DL-P7-08): when jq AND node are both absent, pg_has_npm_script
-#     grepped the WHOLE package.json, so a devDependency literally named `test`
-#     false-positived → built `npm run test` for a missing script → BLOCK.
-# All of these now downgrade to warn (couldn't-run/undeclared). The regression
-# guard pins that a genuinely failing DECLARED+RUNNABLE check still BLOCKs, so
-# the fix did not over-rotate into never-failing.
+# WARN (exit 2), never a fail. A genuinely failing declared+runnable check must
+# still BLOCK; the warn downgrade is only for absent/couldn't-run.
 #
 # Approach mirrors the sibling process-gate bats (check-secrets.bats /
 # check-analyze.bats / check-security-diff.bats): a throwaway fixture dir under
@@ -641,7 +624,9 @@ JSON
 # removed the ceiling from typecheck and lint at the same time. The ceilings are
 # separate now: PROCESS_GATE_CHECK_TIMEOUT governs typecheck and lint.
 @test "raising the test timeout does not raise the typecheck/lint ceiling" {
-  command -v timeout >/dev/null 2>&1 || skip "no timeout(1) on this host"
+  # Was skipped on any host without timeout(1) — i.e. every macOS box, which is
+  # exactly where the ceiling was not being applied at all. `run_with_timeout`
+  # is portable, so this now runs everywhere and the skip is gone.
 
   run bash -c "cd '$PROJECT_DIR' && \
     PROCESS_GATE_TEST_TIMEOUT=30 PROCESS_GATE_CHECK_TIMEOUT=1 \
@@ -650,9 +635,9 @@ JSON
     PROCESS_GATE_TEST_CMD='sleep 3' \
     '$SCRIPT'"
 
-  # typecheck is killed at its own 1 s ceiling → 124 → hard fail.
+  # typecheck is killed at its own 1 s ceiling → hard fail, reported as a timeout.
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"typecheck:"*"exited 124"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"typecheck:"*"exceeded 1s and was killed"* ]] || { echo "$output"; false; }
   # ...while the test command, well inside the raised test ceiling, is untouched.
   [[ "$output" != *"tests:"*"exited"* ]] || { echo "$output"; false; }
 }
@@ -820,4 +805,61 @@ JSON
 
   run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
   [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
+# --- Bounded main checks (2026-09-04) -----------------------------------------
+# `run_check` guarded its ceiling with `command -v timeout`, with no fallback.
+# GNU timeout is normally absent on macOS, so on this platform the test leg ran
+# UNBOUNDED: two real `git push` runs sat in it for 3h17m and 3h45m against a
+# half-dead Docker daemon whose client calls never returned. The mutation probe
+# already had a portable `run_with_timeout`; the main checks now share it.
+#
+# The bats `timeout` on each test is the inversion guard: revert run_check to the
+# unbounded path and these do not merely fail, they hang, which is the defect.
+
+@test "a hanging declared test command is killed at the ceiling and reported as a timeout" {
+  printf '%s' '{"name":"x","scripts":{"test":"sleep 120"}}' > "$PROJECT_DIR/package.json"
+
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=2 PROCESS_GATE_TEST_CMD='sleep 120' PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true '$SCRIPT'"
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"exceeded 2s and was killed"* ]] || { echo "$output"; false; }
+  # It must not read as an ordinary nonzero exit: that sends the operator
+  # hunting for a test bug that is not there.
+  [[ "$output" != *"exited 124"* && "$output" != *"exited 142"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "a hanging typecheck is bounded by the check ceiling, not the test ceiling" {
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TEST_TIMEOUT=900 PROCESS_GATE_TYPECHECK_CMD='sleep 120' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT'"
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"typecheck"* && "$output" == *"exceeded 2s and was killed"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "a passing command still passes through the bounded runner with its output" {
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=30 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='echo ran-under-timeout' '$SCRIPT'"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"was killed"* ]] || { echo "$output"; false; }
+}
+
+@test "no bounded runner on PATH still runs the checks, and says so once" {
+  local tb; tb="$(mktemp -d)"
+  make_toolbox "$tb"   # no timeout, no gtimeout, no perl
+  PATH="$tb" command -v perl    >/dev/null 2>&1 && { rm -rf "$tb"; echo "perl leaked"; false; }
+  PATH="$tb" command -v timeout >/dev/null 2>&1 && { rm -rf "$tb"; echo "timeout leaked"; false; }
+
+  local marker="$PROJECT_DIR/ran"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_TYPECHECK_CMD=': > $marker' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT'"
+  local gate_status="$status" gate_output="$output"
+  rm -rf "$tb"
+
+  # The check RAN — refusing to run would turn the gate into a silent skip.
+  [ -f "$marker" ] || { echo "$gate_output"; false; }
+  # ...and the unbounded condition is reported, exactly once, as a warn.
+  [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"checks ran UNBOUNDED"* ]] || { echo "$gate_output"; false; }
+  [ "$(grep -c 'checks ran UNBOUNDED' <<<"$gate_output")" -eq 1 ] || { echo "$gate_output"; false; }
 }

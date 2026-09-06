@@ -48,11 +48,15 @@ bootstrap_release_admin() {
   chmod 755 "$HOME/.local/bin/trellis"
   cp "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$REPO/scripts/attach-project.sh" \
     "$bootstrap/scripts/"
+  cp "$REPO/scripts/trellis-launcher.sh" "$bootstrap/scripts/trellis-launcher.sh"
   cp -R "$REPO/scripts/lib" "$bootstrap/scripts/lib"
   cat >> "$bootstrap/scripts/attach-project.sh" <<'SH'
 
 if [ "${1:-}" = relink ]; then
   printf '%s\n' "$@" > "$TRELLIS_HOME/test-relink-arguments"
+  printf '%s' "${TMPDIR-}" > "$TRELLIS_HOME/test-relink-temp-tmpdir"
+  printf '%s' "${TMP-}" > "$TRELLIS_HOME/test-relink-temp-tmp"
+  printf '%s' "${TEMP-}" > "$TRELLIS_HOME/test-relink-temp-temp"
   if [ -f "$TRELLIS_HOME/test-relink-child-diagnostic" ]; then
     cat "$TRELLIS_HOME/test-relink-child-diagnostic" >&2
     exit 5
@@ -108,6 +112,7 @@ build_installed_release() {
   cp -R "$REPO/core-rules/codex/hooks/lib" "$SOURCE/core-rules/codex/hooks/"
   cp "$REPO/scripts/attach-project.sh" "$REPO/scripts/seed-inheritance-symlinks.sh" \
     "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$SOURCE/scripts/"
+  cp "$REPO/scripts/trellis-launcher.sh" "$SOURCE/scripts/trellis-launcher.sh"
   cp -R "$REPO/scripts/lib" "$SOURCE/scripts/lib"
   chmod 755 "$SOURCE/core-rules/githooks/pre-push" \
     "$SOURCE/core-rules/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"*.sh \
@@ -138,8 +143,7 @@ build_installed_release() {
       "render": [
         {"template": "core-rules/templates/codex-hooks.local.json", "destination": ".codex/hooks.json", "merge": "explicit-json", "mode": "0600", "required": false}
       ]
-    },
-    "omp": {"links": [], "render": []}
+    }
   }
 }
 JSON
@@ -199,6 +203,22 @@ capture_relink_arguments() {
   rm -f "$RELINK_ARGS"
 }
 
+capture_relink_environment() {
+  SELECTED_TMPDIR="$SANDBOX/relink child temp with spaces"
+  mkdir -p "$SELECTED_TMPDIR"
+  chmod 700 "$SELECTED_TMPDIR"
+  RELINK_TEMP_PREFIX="$HOME_PATH/test-relink-temp"
+  rm -f "$RELINK_TEMP_PREFIX-tmpdir" "$RELINK_TEMP_PREFIX-tmp" "$RELINK_TEMP_PREFIX-temp"
+}
+
+assert_relink_temp_triplet() {
+  local expected="$SANDBOX/expected relink temp value"
+  printf '%s' "$SELECTED_TMPDIR" > "$expected"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-tmpdir"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-tmp"
+  cmp "$expected" "$RELINK_TEMP_PREFIX-temp"
+}
+
 install_snapshot_probe() {
   local library="$MOVED_RUNNER/scripts/lib/release-store.sh"
   local real_library="$MOVED_RUNNER/scripts/lib/release-store.real.sh"
@@ -222,6 +242,9 @@ release_store_snapshot_verified_release() {
     /usr/bin/env -i \
       "HOME=${HOME:-}" \
       "TRELLIS_HOME=${TRELLIS_HOME:-}" \
+      "TMPDIR=${TMPDIR:-/tmp}" \
+      "TMP=${TMPDIR:-/tmp}" \
+      "TEMP=${TMPDIR:-/tmp}" \
       "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
       /bin/bash --noprofile --norc -c '
         . "$1"
@@ -290,7 +313,6 @@ assert_complete_relink_binding() {
      | if .path == "AGENTS.md" or (.path | startswith(".agents/")) or (.path | startswith(".codex/"))
        then "codex"
        elif (.path | startswith(".claude/")) then "claude"
-       elif (.path | startswith(".omp/")) then "omp"
        else empty
        end]
     | unique | sort
@@ -459,6 +481,23 @@ remove_claude_owner_artifacts() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   assert_complete_relink_binding
   [ -f "$MANAGED_HOOKS/pre-push" ]
+}
+
+@test "merge sync propagates the selected temporary directory into real relink" {
+  prepare_fixture
+  capture_relink_environment
+  rm "$PROJECT/.trellis/runtime"
+
+  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+    TMPDIR="$SELECTED_TMPDIR" TMP="$SANDBOX/unselected TMP" TEMP="$SANDBOX/unselected TEMP" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF 'attachment merge dispatcher relinked' <<<"$output"
+  assert_relink_temp_triplet
+  [ -L "$PROJECT/.trellis/runtime" ]
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$HOME_PATH/releases/$VERSION/payload" ]
+  [ -f "$MANAGED_HOOKS/pre-push" ]
+  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
 }
 
 @test "merge sync treats a nonregular owner record as a state error" {

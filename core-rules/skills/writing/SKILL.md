@@ -83,9 +83,8 @@ capability, then take the row's degrade. One row is a hard stop, not a degrade.
 
 | Capability | Have it | Missing → degrade |
 |---|---|---|
-| Logged-in Chrome + Claude-in-Chrome | post the thread | paste-ready thread handoff (numbered tweets + trailing-reply link) |
+| Authenticated browser or supported posting API, with explicit authorization to publish | post the thread using the available tool | paste-ready thread handoff (numbered tweets + trailing-reply link) |
 | Target content repo present + writable | blog PR through its pipeline | draft-file handoff (blog body + placement instructions) |
-| Claude Code harness | both publish legs available | Codex harness: author + validate only; both publish legs hand off |
 | `check-writing.sh` runnable at the skill's own `scripts/` (via the skill-dir symlink) | the validation gate | **HARD STOP** — validation is not optional; report the missing script, publish nothing |
 
 ## Anomaly posture

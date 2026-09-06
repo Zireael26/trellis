@@ -251,11 +251,63 @@ run_hook() {
   [[ "$output" != *'"decision":"block"'* ]]
 }
 
+@test "degraded: reviewer nonzero leaves no marker and retries the same diff" {
+  setup_triggering_repo
+  COUNT="$BATS_TEST_TMPDIR/nonzero-retry.count"; : > "$COUNT"
+  stub="$(make_reviewer_stub 'exit 7' "$COUNT")"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+
+  [ "$(reviewer_call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.claude" ] ||
+    [ -z "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "degraded: malformed reviewer envelope leaves no marker and retries the same diff" {
+  setup_triggering_repo
+  COUNT="$BATS_TEST_TMPDIR/malformed-retry.count"; : > "$COUNT"
+  stub="$(make_reviewer_stub 'printf "%s\n" "not-json"' "$COUNT")"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'code-review-subagent: review degraded'* ]] || { echo "$stderr"; false; }
+
+  [ "$(reviewer_call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.claude" ] ||
+    [ -z "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "degraded: explicit degraded status leaves no marker and retries the same diff" {
+  setup_triggering_repo
+  COUNT="$BATS_TEST_TMPDIR/explicit-degraded.count"; : > "$COUNT"
+  stub="$(make_reviewer_stub 'printf "%s\n" "{\"status\":\"degraded\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  run_hook
+  [ "$status" -eq 0 ]
+
+  [ "$(reviewer_call_count "$COUNT")" -eq 2 ]
+  [ ! -d "$PROJECT_DIR/.claude" ] ||
+    [ -z "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
 # =========================================================================
 # Fail-open (empty findings): a reviewer that emits a well-formed empty verdict
 # → exit 0, no block, no advisory context.
 # =========================================================================
-@test "fail-open: reviewer emits empty findings → exit 0, no block, no advisory" {
+@test "completed: legacy findings-only envelope writes a marker" {
   setup_triggering_repo
   stub="$(make_reviewer_stub 'printf "%s\n" "{\"findings\":[]}"')"
   export CODE_REVIEWER_CMD="$stub"
@@ -264,6 +316,8 @@ run_hook() {
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" != *'additionalContext'* ]]
+  marker_count=$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
+  [ "$marker_count" -eq 1 ]
 }
 
 # =========================================================================
@@ -313,7 +367,7 @@ EOF
   chmod +x "$no_shasum_bin/shasum"
   PATH="$no_shasum_bin:$PATH"
   stub="$(make_reviewer_stub \
-    'printf "%s\n" "{\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":\"alpha.py\",\"line\":1,\"msg\":\"nit\"}]}"' \
     "$COUNT")"
   export CODE_REVIEWER_CMD="$stub"
 
