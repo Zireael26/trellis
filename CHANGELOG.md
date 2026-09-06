@@ -4,6 +4,12 @@ All notable changes to Trellis are documented here.
 
 The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project uses Conventional Commits. Portable Trellis releases use semantic versions and annotated immutable tags. Earlier dated entries remain as historical records.
 
+## [Unreleased]
+
+### Documentation
+
+- Rewrite the public and operator READMEs with architecture and upgrade diagrams, and add a verified 1.0.0 migration procedure covering stable launcher replacement, explicit Pi selection and shared worktree preservation. Correct current setup and upgrade examples to select Pi.
+
 ## [v1.0.0] — 2026-09-06
 
 ### Added

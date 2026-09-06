@@ -446,6 +446,7 @@ fi
 sync_paths=(
   'engineering-process.md'
   'AGENT_SETUP.md'
+  'AGENT_UPGRADE.md'
   'AGENT_ONBOARD_PROJECT.md'
   'AGENT_PI_SETUP.md'
   'CHANGELOG.md'
@@ -482,6 +483,7 @@ sync_paths=(
   'docs/references/'
   'docs/legacy/'
   'docs/UPGRADING.md'
+  'docs/MIGRATING-1.0.0.md'
   'docs/claude-steering.md'
   'docs/gpt-5.x-steering.md'
   'docs/codex-routing.md'

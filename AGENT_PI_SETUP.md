@@ -32,7 +32,7 @@ Substitute your own providers. Everything from step 1 to step 8 is provider-shap
 
 ### Pi is an opt-in harness selection, not a new default
 
-`trellis.config.json` publishes with `"harnesses": ["claude"]`. That placeholder is unchanged and is *not* a statement that pi is unsupported — it is the same conservative default the mirror has always shipped. To get the pi surface, name it: add `"pi"` to `harnesses` in your own `trellis.config.json` before attaching, or pass `--harness pi` to the planner directly. Selecting `pi` or `codex` also pulls in the shared `.agents` surface; selecting neither leaves both untouched.
+`trellis.config.json` publishes with `"harnesses": ["claude"]`. That placeholder is unchanged and is *not* a statement that pi is unsupported — it is the same conservative default the mirror has always shipped. To get the pi surface, name it: pass `--harness pi` explicitly to `trellis attach` (alongside `--harness claude --harness codex` for all three). Changing `trellis.config.json` does not select attachment harnesses. The attachment default is Claude Code and Codex. Selecting `pi` or `codex` also pulls in the shared `.agents` surface; selecting neither leaves both untouched.
 
 You can see exactly what a selection would install, with no writes and no attachment, by running the planner against a checkout's `core-rules` directory:
 
