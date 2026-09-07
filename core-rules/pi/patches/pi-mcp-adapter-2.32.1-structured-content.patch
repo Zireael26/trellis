@@ -1,0 +1,19 @@
+--- a/tool-registrar.ts
++++ b/tool-registrar.ts
+@@ -233,2 +233,2 @@
+- * Resolve a tool result's content blocks, falling back to structuredContent
+- * when content is empty.
++ * Keep structured fields visible to the model even when a server also returns
++ * display text or images. Cua snapshot tokens exist only in structuredContent.
+@@ -238,2 +237,0 @@
+-  if (blocks.length > 0) return blocks;
+-
+@@ -241,4 +239,4 @@
+-    return [{ type: "text" as const, text: stringifyStructuredContent(result.structuredContent) }];
+-  }
+-
+-  return [];
++    return [{ type: "text" as const, text: stringifyStructuredContent(result.structuredContent) }, ...blocks];
++  }
++
++  return blocks;

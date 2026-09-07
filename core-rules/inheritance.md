@@ -210,6 +210,14 @@ settings and local Codex hook configuration.
 This makes a local settings render additive and reversible without claiming the
 surrounding JSON document.
 
+The render helper `merge_missing` is add-only: removing a key from a template
+does not remove it from an existing render. `release adopt` replays the owner
+record's saved values rather than the new template's values. Template key
+removal therefore needs an explicit detach+attach cycle to render the selected
+release afresh; adopt and relink do not deliver that removal. A changed owned
+value remains a detach conflict; resolve it without discarding the owner record
+or unrelated project values before continuing with attach.
+
 ## 7. Shared Git state and managed hook chaining
 
 Git worktrees share a common directory, so attachment writes one exact managed

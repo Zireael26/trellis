@@ -1,5 +1,13 @@
 # Trellis pi harness setup
 
+For the newer **Pi 0.85.1 computer-use profile**, see
+[Computer use with Pi](docs/PI-COMPUTER-USE.md): a dedicated headless browser,
+Cua Driver for native apps, the required structured-response adapter patch,
+verification, and rollback. It is an optional, separately qualified setup;
+existing newer installations should not replay this guide's older base recipe.
+Share the [upgrade prompt](docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md) with an agent
+for an attended installation, including the macOS permission handoff.
+
 This guide has two reading modes:
 
 - **Skim:** the checklist below shows the complete order and the expected checkpoint.
@@ -61,6 +69,7 @@ bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi
 | 10 | Implement the Herdr placement policy | 2x2 fill before overflow; `--tab` is preference plus overflow label |
 | 11 | Understand remote compaction | six reason codes understood; not installed by step 2 |
 | 12 | Fire pi and enumerate active tools | exactly nine names print |
+| Optional | Add computer use on Pi 0.85.1 | follow [the separate profile](docs/PI-COMPUTER-USE.md); its additional tools change the step-12 count |
 
 ## 0. Enter the Trellis checkout
 
