@@ -19,6 +19,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Documentation
 
+- Preserve the add-only render and template-removal delivery contract in the portable inheritance guide, so the gotchas cleanup does not leave it only in a private archive. Point its documentation check at the portable guide.
 - Add an opt-in Pi 0.85.1 computer-use profile with Cua Driver 0.23.2, a patched pi-mcp-adapter 2.32.1, and agent-browser 0.36.0. Keep tools in a separate locked prefix, preserve existing Pi settings, and document background verification, multi-monitor overlay and macOS Spaces limitations, and rollback. Trellis attachment does not install or grant these tools automatically.
 - Rewrite the public and operator READMEs with architecture and upgrade diagrams, and add a verified 1.0.0 migration procedure covering stable launcher replacement, explicit Pi selection and shared worktree preservation. Correct current setup and upgrade examples to select Pi.
 
