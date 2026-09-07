@@ -4,7 +4,7 @@
 
 Trellis is a portable engineering-process control plane for AI-assisted projects: one set of parent rules, harness surfaces, skills, and hooks that every opted-in project inherits locally.
 
-Source version: [`core-rules/VERSION`](core-rules/VERSION) (`1.0.0`). Tag `v1.0.0` is immutable once published — consumers verify it; nobody retags or moves it.
+Source version: [`core-rules/VERSION`](core-rules/VERSION) (`1.1.0`). Tag `v1.1.0` is immutable once published — consumers verify it; nobody retags or moves it.
 
 ## What Trellis does
 
@@ -55,18 +55,19 @@ Capability outcome classes: **enforced** (deny), **advisory** (warn), **unsuppor
 | Move an existing machine to a new release | [`AGENT_UPGRADE.md`](AGENT_UPGRADE.md) + [`docs/UPGRADING.md`](docs/UPGRADING.md) |
 | Migrate to 1.0.0 (launcher, worktree, Pi selectors) | [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md) |
 | Add the opt-in Pi harness | [`AGENT_PI_SETUP.md`](AGENT_PI_SETUP.md) |
+| Add background computer use to Pi | [Setup guide](docs/PI-COMPUTER-USE.md) + [shareable upgrade prompt](docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md) |
 
 Full support on a project requires naming every harness explicitly and repeating the flag:
 
 ```bash
-"$TRELLIS" onboard --home "$TRELLIS_HOME" --fleet "$FLEET" --release 1.0.0 --project-id "$PROJECT_ID" \
+"$TRELLIS" onboard --home "$TRELLIS_HOME" --fleet "$FLEET" --release 1.1.0 --project-id "$PROJECT_ID" \
   --harness claude --harness codex --harness pi \
   "$PROJECT_ROOT"
 ```
 
 The default does **not** include Pi. Attachment defaults to Claude Code and Codex. Changing `trellis.config.json` does not select attachment harnesses.
 
-## Quick safe upgrade (1.0.0)
+## Quick safe upgrade (1.1.0)
 
 Runs only through the installed stable launcher (`$HOME/.local/bin/trellis`). Never run release/upgrade scripts from a source checkout — they refuse by design.
 
@@ -77,20 +78,20 @@ RELEASE_REMOTE=https://github.com/Zireael26/trellis.git
 : "${TRELLIS_HOME:?set the existing local Trellis home}"
 : "${FLEET:?set the intended fleet}"
 : "${PROJECT_ID:?set the intended project ID}"
-"$TRELLIS" release install 1.0.0 --remote "$RELEASE_REMOTE"
-"$TRELLIS" release verify 1.0.0
+"$TRELLIS" release install 1.1.0 --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify 1.1.0
 
-# Continue with docs/MIGRATING-1.0.0.md to configure the CLI and
-# choose project adoption or a full harness render.
+# Continue with docs/UPGRADING.md for explicit adoption and rollback.
+# If starting before 1.0.0, read docs/MIGRATING-1.0.0.md first.
 ```
 
 Use `--fleet NAME` or `--all` only as separately reviewed wider scopes. Install never adopts; adoption never infers `latest`, a branch, or a new path. Details and rollback: [`docs/UPGRADING.md`](docs/UPGRADING.md).
 
 ```mermaid
 flowchart LR
-    TAG["Annotated v1.0.0<br/>remote"]
-    INST["release install 1.0.0"]
-    VER["release verify 1.0.0"]
+    TAG["Annotated v1.1.0<br/>remote"]
+    INST["release install 1.1.0"]
+    VER["release verify 1.1.0"]
     ADOPT["release adopt<br/>--project / --fleet / --all"]
     DOC["doctor"]
 
@@ -104,6 +105,13 @@ flowchart LR
 `trellis upgrade VERSION --project/--fleet/--all` is the same install → verify → adopt sequence in one command (forward-only; it cannot roll back onto an already-installed release — use explicit `release verify` + `release adopt` for that).
 
 ## Pi note
+
+Version 1.1.0 adds an optional [computer-use profile](docs/PI-COMPUTER-USE.md)
+qualified with Pi 0.85.1: headless agent-browser for web tasks and Cua Driver
+for native apps. The [upgrade prompt](docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md)
+guides an agent through installation, macOS permission handoff, and live tests.
+Installing or adopting the Trellis release does not install these user tools.
+This release changes no attachment templates.
 
 [`AGENT_PI_SETUP.md`](AGENT_PI_SETUP.md) is a historical recipe pinned at `pi 0.84.4` (`npm install --global @earendil-works/pi-coding-agent@0.84.4`). It is not an instruction to downgrade an existing Pi. Patch bundles and measurements on other versions are documented separately in that guide. You supply your own providers; this projection carries no provider roster.
 

@@ -449,6 +449,8 @@ sync_paths=(
   'AGENT_UPGRADE.md'
   'AGENT_ONBOARD_PROJECT.md'
   'AGENT_PI_SETUP.md'
+  'docs/PI-COMPUTER-USE.md'
+  'docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md'
   'CHANGELOG.md'
   'dependency-baseline.json'
   'audits/fleet-remediation-ledger.json'

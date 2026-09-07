@@ -46,6 +46,8 @@ EOF
   printf '# Reviewed portable process\n' > "$SOURCE/engineering-process.md"
   printf '# Changelog\n' > "$SOURCE/CHANGELOG.md"
   printf '# Portable infrastructure guidance\n' > "$SOURCE/docs/local-development-infrastructure.md"
+  printf '# Portable Pi computer-use setup\n' > "$SOURCE/docs/PI-COMPUTER-USE.md"
+  printf '# Portable Pi upgrade prompt\n' > "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   printf '{"schema_version":1,"toolchains":[{"name":"private"}]}' > "$SOURCE/dependency-baseline.json"
   printf '{"schema_version":1,"source_reports":["private"]}' > "$SOURCE/audits/fleet-remediation-ledger.json"
   printf '# Portable core policy\n' > "$SOURCE/core-rules/CLAUDE.md"
@@ -572,6 +574,8 @@ EOF
   [ ! -e "$MIRROR/config.json" ]
   [ ! -e "$MIRROR/state" ]
   [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
+  cmp "$SOURCE/docs/PI-COMPUTER-USE.md" "$MIRROR/docs/PI-COMPUTER-USE.md"
+  cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   jq -e '
     .schema_version == 2
     and (.trellis_root? | not)
