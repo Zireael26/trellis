@@ -14,6 +14,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Fixed
 
+- Make the real-manifest publication test validate both private source manifests and already-projected public manifests, retaining missing-source checks and every-harness closure assertions.
 - Preserve structured MCP results alongside text and images in the qualified Pi adapter, so Cua snapshot tokens and active-app flags reach the model. The optional installer checks package identity and complete source digests before replacing a file; regression tests cover content preservation, idempotence and refusal on drift.
 
 ### Documentation
