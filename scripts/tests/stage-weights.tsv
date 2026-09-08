@@ -53,6 +53,7 @@ bats scripts/tests/onboard-project.bats	7
 bats scripts/tests/orchestrate-meta-mirror.bats	0
 bats scripts/tests/orchestrate-recipe-followups.bats	1
 bats scripts/tests/pi-attachment.bats	345
+bats scripts/tests/pi-web-search.bats	95
 bats scripts/tests/portable-home-registry-release.bats	87
 bats scripts/tests/portable-policy.bats	7
 bats scripts/tests/post-checkout-hook.bats	184

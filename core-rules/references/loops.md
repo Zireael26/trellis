@@ -93,3 +93,29 @@ proactive fan-out. Climb the ladder only when the work genuinely demands it —
 the same restraint as surgical-default. A loop with a fuzzy stop condition is
 worse than no loop; if you cannot state the stop signal in one line, you are not
 ready to loop yet.
+
+## Native recurring sessions and fresh-window evidence
+
+Situational guidance. Host capabilities observed here: `pi` 0.85.1 (`--thinking`
+levels; no usage/budget/spend control in help) and `claude` 2.1.263 (`--effort`
+levels, `--autocompact`, `--max-budget-usd` for `--print` only; recurring-loop
+availability unverified here).
+
+- **do not start a native recurring loop inside a long unrelated
+  conversation.** Recommend a separate fresh session that inherits the declared
+  `max_iterations`, `no_progress_iterations`, and `budget_ceiling_usd` and keeps
+  durable state on disk (work-list, progress note, git log per § Resuming above).
+  Distinguish three things: the native recurring session command (availability
+  unverified here), the harness-neutral execute task loop, and the durable
+  operator-owned scheduler. `claude --resume` / `--continue` are session
+  continuity, not recurring-loop commands, and `/goal` is not the execute loop.
+  Do not migrate or restart an already-running task automatically.
+- **a fresh window is optional and must carry evidence.** After two fixes
+  fail while the current context still holds useful contrary evidence, stop
+  repeating the failed assumption: name it, then deliberately choose targeted
+  evidence, independent review, or a supported effort escalation. A fresh window
+  must carry the failed hypotheses, working changes, and known external effects;
+  cost saving is never assumed. Knob bounds live in `docs/claude-steering.md`
+  § Situational bounds.
+- **Limitation.** Anything beyond the flags above is unverified here, not runtime
+  experience.

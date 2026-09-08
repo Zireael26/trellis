@@ -134,3 +134,23 @@ A per-loop `safety` override (recipe block or operator-run declaration) may set 
 ## Verification
 
 The contract stays honest through a process drift check that scans `orchestrate` recipes and configured loop prompts for a present, non-blank loop-safety declaration and flags any loop missing one as a compliance finding. Authoring a loop without the declaration is additionally a `process-gate` / review finding.
+
+## Reporting scope (output-only proxy)
+
+Ceilings, rates, and the conversion above are unchanged. This section only
+qualifies what a `spent_usd / budget_ceiling_usd` line may claim.
+
+- When an attributable output-token meter and a configured `usd_per_mtok` both
+  exist for the report scope, `spent_usd` is an output-only modeled subtotal from
+  that meter at its rate and scope, observed at report time — never total spend,
+  money owed, or a lower bound. Name the actual meter source and scope on the
+  report line (for example the digest-adopt recipe's workflow-reported output
+  tokens at its configured rate).
+- Otherwise the line is `unavailable`: no modeled subtotal exists at report
+  time, never zero spend and never an invented meter or workflow provenance.
+- Input, cache, and child attribution are unknown on this surface; recorded
+  real/notional cost is unavailable here.
+- Enforcement is declaration plus honor, not tool-time interception (see the
+  policy note at the top of this file). Actual host budget/no-progress enforcement
+  beyond the declared ceilings is unverified; supplemental reporting never raises
+  a ceiling, enables continuation, or installs a new stop condition.

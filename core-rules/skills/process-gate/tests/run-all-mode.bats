@@ -147,11 +147,17 @@ run_all() {
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
 
-@test "mode: garbage --mode value resolves to merge (fail-closed, never lenient)" {
+@test "mode: garbage --mode value is REFUSED before any gate runs" {
+  # Was: resolved silently to merge. A typo'd mode is now reported rather than
+  # reinterpreted; `pg_parse_mode`'s fail-closed default still covers the
+  # internal path. The assertion is that NO gate work happens: exit 2, usage on
+  # stderr, and none of the stub gates' output in the result.
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=bogus"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"mode=merge"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"unknown --mode value: bogus"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Usage: run-all.sh"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Overall:"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"mode=merge"* ]] || { echo "$output"; false; }
 }
 
 # --- push: PR-shape downgrade ---------------------------------------------

@@ -1,0 +1,49 @@
+Trellis Pi web search extension (core-rules/pi/web-search)
+
+This extension adapts request/grounding design from two MIT-licensed sources.
+No source file was copied verbatim; the request body shape, Antigravity header
+constants, credential-envelope parsing and grounding-metadata handling follow
+the pinned revisions below. The MIT notices are reproduced as required.
+
+1. oh-my-pi (can1357/oh-my-pi), revision e6e319c915d270b6ce31dff265e840f312550760
+   File: packages/coding-agent/src/web/search/providers/gemini.ts
+   sha256 of the pinned file: 2200eac6bdd0e4777942beb696c6aa58c25e3459d334350a3781fc687d7e2060
+   LICENSE sha256: 16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63
+
+   MIT License
+
+   Copyright (c) 2025 Mario Zechner
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+2. pi-antigravity 0.7.0 (npm; repository github.com/Rahularya01/pi-antigravity)
+   Files consulted: src/client/client.ts (sha256 7773c140150f8adc2f02baf9dd8629df90fbf8e9788ec3960238f367272656ca),
+   src/auth/oauth.ts (85c06c295d473482494df2fc7026e0aa0acb27d656fc7de722982cb87c481f38),
+   src/stream/stream.ts (0fd840be5c59285a576df61af2e385e40b15d66a31688f7baaa9b0aaa9e2e1f1),
+   src/models/models.ts (16db3858960c71071306e73f2c02c804269d5f5999863018929922bc6476b63b).
+
+   MIT License
+
+   Copyright (c) 2026 Rahul Arya
+
+   (Same permission notice as above applies; see the package LICENSE file.)
+
+The Antigravity/Cloud Code Assist protocol used here is an observed client
+protocol, not a documented public Google API. Google, Gemini and Antigravity
+are trademarks of their respective owners.

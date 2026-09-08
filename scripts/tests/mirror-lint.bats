@@ -570,3 +570,118 @@ JSON
   grep -qF 'escape.md: symlink target leaks absolute path' <<<"$output"
   grep -qF 'README.md: local fleet project identifier must not publish' <<<"$output"
 }
+
+# --- Spec 047 adapter: path-scoped public-contract allowance ---------------
+# The adapter's own public contract is unavoidably capitalised. The allowance
+# is scoped to its paths and enumerates exact tokens, so these tests exist in
+# pairs: what the allowance must let through, and what it must still catch.
+# A widened allowance passes the positives and fails the negatives — which is
+# the only way this pair is worth having.
+
+@test "047 adapter public contract publishes inside its own paths" {
+  mkdir -p "$MIRROR/core-rules/pi/web-search/tests" "$MIRROR/scripts"
+  printf 'import { createAntigravityTransport } from "./antigravity.ts";\n' \
+    > "$MIRROR/core-rules/pi/web-search/index.ts"
+  printf 'export const ANTIGRAVITY_API = "antigravity-api";\n' \
+    >> "$MIRROR/core-rules/pi/web-search/index.ts"
+  printf 'const o = deps.env("ANTIGRAVITY_BASE_URL");\n' \
+    >> "$MIRROR/core-rules/pi/web-search/index.ts"
+  printf '// Antigravity-backed Google Search grounding.\n' \
+    >> "$MIRROR/core-rules/pi/web-search/index.ts"
+  printf '{"ideType":"ANTIGRAVITY"}\n' \
+    > "$MIRROR/core-rules/pi/web-search/tests/transport.test.ts"
+  printf 'env -u ANTIGRAVITY_HUB_VERSION -u ANTIGRAVITY_HUB_CL -u ANTIGRAVITY_HUB_OS\n' \
+    > "$MIRROR/scripts/pi-web-search-tests.sh"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "the retired harness spelling still fails INSIDE the allowed adapter paths" {
+  # The widest point of the allowance is where a stale reference would hide.
+  mkdir -p "$MIRROR/core-rules/pi/web-search"
+  printf 'The AntiGravity harness was retired.\n' \
+    > "$MIRROR/core-rules/pi/web-search/notes.ts"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/pi/web-search/notes.ts: stale 'antigravity'"* ]]
+}
+
+@test "an unenumerated capitalised form fails inside the allowed adapter paths" {
+  mkdir -p "$MIRROR/core-rules/pi/web-search"
+  printf 'const s = "AntigravityFoo";\n' > "$MIRROR/core-rules/pi/web-search/x.ts"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/pi/web-search/x.ts: stale 'antigravity'"* ]]
+}
+
+@test "an adapter contract token fails OUTSIDE the allowed adapter paths" {
+  # This is what a global token allowance would have broken.
+  printf 'const x = "ANTIGRAVITY_BASE_URL";\n' > "$MIRROR/README.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"README.md: stale 'antigravity'"* ]]
+}
+
+@test "an unenumerated ANTIGRAVITY_ env name fails inside the allowed adapter paths" {
+  # The adjacency rule must keep ANTIGRAVITY_ from acting as a prefix class:
+  # enumerating the names the adapter reads must not silently cover every
+  # future ANTIGRAVITY_* name, including one carrying a secret.
+  mkdir -p "$MIRROR/core-rules/pi/web-search"
+  printf 'const k = deps.env("ANTIGRAVITY_SECRET_KEY");\n' \
+    > "$MIRROR/core-rules/pi/web-search/leak.ts"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/pi/web-search/leak.ts: stale 'antigravity'"* ]]
+}
+
+@test "the public web-search guide publishes with its env contract" {
+  # The guide carries the same ANTIGRAVITY_ env names as the adapter, so it is
+  # in the same path scope. Prose uses the lowercase provider id.
+  mkdir -p "$MIRROR/docs"
+  printf '# Web search in Pi (opt-in, backed by antigravity)\n' \
+    > "$MIRROR/docs/pi-web-search.md"
+  printf 'Set `ANTIGRAVITY_BASE_URL` only to a matching origin.\n' \
+    >> "$MIRROR/docs/pi-web-search.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "another docs page still fails on the same env name" {
+  # The guide's scope must not become a docs-wide allowance.
+  mkdir -p "$MIRROR/docs"
+  printf 'Set `ANTIGRAVITY_BASE_URL` here too.\n' > "$MIRROR/docs/other-guide.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs/other-guide.md: stale 'antigravity'"* ]]
+}
+
+@test "the public web-search guide is in the sync allowlist (GUARD ONLY)" {
+  # SUPPLEMENTARY GUARD, NOT THE PROOF. This asserts on source text, so it
+  # cannot fail in the way a projection failure would: it still passes if a
+  # later exclusion, a payload_no_publish entry or a prune rule removes the
+  # file from the staged mirror. The behavioural proof that the guide reaches
+  # the mirror is the complete official projection, which lists
+  # docs/pi-web-search.md in the staged output by name; see the release
+  # rehearsal receipt. This test exists only so the allowlist entry cannot be
+  # dropped silently.
+  run grep -qxF "  'docs/pi-web-search.md'" \
+    "$BATS_TEST_DIRNAME/../sync-to-template.sh"
+
+  [ "$status" -eq 0 ]
+}

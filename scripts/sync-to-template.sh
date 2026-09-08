@@ -451,6 +451,7 @@ sync_paths=(
   'AGENT_PI_SETUP.md'
   'docs/PI-COMPUTER-USE.md'
   'docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md'
+  'docs/pi-web-search.md'
   'CHANGELOG.md'
   'dependency-baseline.json'
   'audits/fleet-remediation-ledger.json'

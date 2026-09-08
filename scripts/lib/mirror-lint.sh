@@ -291,20 +291,47 @@ lint_mirror() {
   # stripping the three lowercase tokens still fails, including every
   # capitalised form. Public docs must therefore name the live provider by its
   # lowercase id rather than in prose caps.
+  #
+  # Spec 047 ships a live, public, antigravity-backed web-search adapter whose
+  # public contract is unavoidably capitalised: the environment-variable names
+  # it reads, its exported transport symbol, the provider host fragment, the
+  # wire `ideType` value, and the provider's own spelling in error text and
+  # attribution. Lower-casing any of them breaks the shipped feature.
+  #
+  # The allowance is PATH-SCOPED to the adapter, its runner and its one public
+  # guide, which documents the same env contract, and every extra
+  # token is an exact whole string, never a prefix class. A global allowance was
+  # rejected: it would let a retired-harness reference through anywhere in the
+  # tree. `AntiGravity` still fails everywhere, including inside the scope, and
+  # the private-path, fleet-identity and proxy-token rules are untouched. This
+  # is an allowance, not a skip — the check still runs on these files.
+
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     rel="${f#"$mirror_dir"/}"
     case "$rel" in
       docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats|scripts/sync-to-template.sh) ;;
       *)
-        if awk '
+        # Path-scoped extra tokens for the Spec 047 adapter's public contract.
+        mirror_allowed_tokens='google-antigravity pi-antigravity antigravity'
+        case "$rel" in
+          core-rules/pi/web-search/*|scripts/pi-web-search-tests.sh|docs/pi-web-search.md)
+            mirror_allowed_tokens="ANTIGRAVITY_RUNTIME_MODEL ANTIGRAVITY_USER_AGENT \
+ANTIGRAVITY_HUB_VERSION ANTIGRAVITY_PROJECT_ID ANTIGRAVITY_HUB_ARCH \
+ANTIGRAVITY_BASE_URL createAntigravityTransport ANTIGRAVITY_HUB_OS \
+ANTIGRAVITY_HUB_CL ANTIGRAVITY_API antigravity-api Antigravity-backed \
+ANTIGRAVITY_ ANTIGRAVITY Antigravity $mirror_allowed_tokens"
+            ;;
+        esac
+        if awk -v allowed_tokens="$mirror_allowed_tokens" '
           {
             line = $0
             # Longest first: pi-/google- prefixes must be consumed before the
             # bare id, or the bare-id pass would see their suffix as a match
             # with an identifier character before it and call it stale.
-            split("google-antigravity pi-antigravity antigravity", allowed, " ")
-            for (i = 1; i <= 3; i++) {
+            n = split(allowed_tokens, allowed, /[ \t\n]+/)
+            for (i = 1; i <= n; i++) {
+              if (allowed[i] == "") continue
               token = allowed[i]
               while ((pos = index(line, token)) != 0) {
                 before = pos == 1 ? "" : substr(line, pos - 1, 1)

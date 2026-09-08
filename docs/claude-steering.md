@@ -263,6 +263,36 @@ Effort posture is in §1, which is canonical for it. This section carries the mo
 
 ---
 
+## 11. Situational bounds
+
+Situational reference; the effort posture in §1 and the verification surfaces in
+§6–§7 are unchanged. Host capabilities observed here: `pi` 0.85.1 (`--thinking
+off/minimal/low/medium/high/xhigh/max`; no usage/budget/spend control in help)
+and `claude` 2.1.263 (`--effort low/medium/high/xhigh/max`, `--autocompact`,
+`--max-budget-usd` for `--print` only; no rewind flag in help, broader
+capability unverified here).
+
+- **two failures with contrary evidence in context.** Stop repeating the
+  failed assumption: name it, then deliberately choose targeted evidence,
+  independent review, or a supported effort escalation (`--effort` / `--thinking`
+  per §1, session-scoped only). A fresh window is optional and must carry the
+  failed hypotheses, working changes, and known external effects. Cost saving is
+  never assumed.
+- **conversation-only rewind does not restore actual state.** Discarding
+  recent conversation does not reverse shell writes, most subagent work, or
+  external effects; some direct tracked edits can separately restore where the
+  tracker provides it. Preserve and inspect actual disk/process state before
+  continuing. Do not invent an equivalent rewind on another harness.
+- **knobs need a probe before actionable advice.** Any effort, compaction,
+  or output advice must name the exact supported host/model/build and its
+  source, with a local capability check before it ships as guidance. Unavailable
+  probes produce an explicit limitation. No new global effort, zero-thinking, or
+  compaction setting is authorized here.
+- **truncated output never replaces verification.** Keep the exit status
+  and access to the full relevant log; a quiet/truncated summary does not stand
+  in for an executed check, does not register an indirect read as a direct one,
+  and does not waive the editing agent's read requirement.
+
 ## Deliberately NOT adopted
 
 - **API-only mechanics.** Prefill migration, sampling parameters, thinking configuration, max-output-token sizing, and `output_config.effort` are Messages-API concerns. Trellis steers Claude Code, where effort is the `effortLevel` setting (§1) and thinking is adaptive automatically — none of these are actionable here. Projects that call the API directly should use the bundled `claude-api` skill, which tracks the current request surface.

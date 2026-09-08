@@ -174,7 +174,11 @@ printf 'stdin=<%s> argc=%s first=<%s> second=<%s>\n' "$line" "$#" "$1" "$2"
 (exit 42)
 SH
   reseal_source_release 'mirror stdin and traps probe'
-  run env BOOTSTRAP_POISON=present /bin/bash -c '
+  # The probe asserts the launcher mints an EMPTY verified socket for a caller
+  # without an agent. A live agent socket inherited from the host (macOS launchd
+  # exports one to every login process) is a real, clean socket the launcher
+  # verifies and forwards by design, so drop it here rather than test the host.
+  run env -u SSH_AUTH_SOCK BOOTSTRAP_POISON=present /bin/bash -c '
     printf "%s\n" "caller stdin: spaces and backslash \\" | "$1" mirror "with space" ""
   ' _ "$LAUNCHER"
   echo "stdin/argv/trap raw_exit=$status $output"
