@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -197,6 +198,21 @@ export async function executeWebSearch(query: string, maxResults = 5, signal?: A
 }
 
 export default function registerTrellisWebSearchExtension(pi: ExtensionAPI): void {
+  // Single-registration rule: this same file ships in two places — the
+  // global ~/.pi/agent/extensions/ copy and per-project .pi/extensions/
+  // copies installed by `trellis attach`. Pi fails startup when two loaded
+  // extensions register the same tool name, so per-project copies defer to
+  // the global one whenever it exists. (If the global copy is absent, e.g.
+  // a fresh machine with only an attached project, the project copy serves.)
+  try {
+    const globalCopy = path.join(os.homedir(), ".pi/agent/extensions/trellis-web-search.ts");
+    const selfPath = fs.realpathSync(fileURLToPath(import.meta.url));
+    if (fs.existsSync(globalCopy) && fs.realpathSync(globalCopy) !== selfPath) return;
+  } catch {
+    // If identity can't be established, fall through to safeRegister below,
+    // which still skips names that are already taken.
+  }
+
   const toolDefinition = {
     name: TOOL_NAME,
     label: "Trellis Web Search",
@@ -242,10 +258,29 @@ export default function registerTrellisWebSearchExtension(pi: ExtensionAPI): voi
     },
   };
 
-  pi.registerTool(toolDefinition as any);
+  // Conflict-safe registration: the same file can be loaded twice (global
+  // ~/.pi/agent/extensions + per-project .pi/extensions via `trellis attach`).
+  // Pi fails the second extension to load on duplicate tool names, so skip
+  // names that are already taken and swallow late-detected conflicts.
+  const safeRegister = (tool: any) => {
+    try {
+      const existing = pi.getAllTools().map((t: any) => t.name);
+      if (existing.includes(tool.name)) return;
+    } catch {
+      // Runtime not ready for introspection yet — fall through to register
+      // and rely on the conflict catch below.
+    }
+    try {
+      pi.registerTool(tool);
+    } catch (err: any) {
+      if (!/conflict/i.test(String(err?.message ?? err))) throw err;
+    }
+  };
+
+  safeRegister(toolDefinition as any);
 
   // Register friendly alias web_search
-  pi.registerTool({
+  safeRegister({
     ...toolDefinition,
     name: "web_search",
     label: "Web Search",

@@ -6,14 +6,14 @@ Trellis provides built-in live web search capability for Pi sessions through the
 
 The web search tool enables Pi agents to query real-time external data, verify documentation, inspect package release versions, and cross-check breaking news without leaving the session.
 
-- **Primary Provider:** Google Search Grounding through **Google Antigravity** (`gemini-3.5-flash-lite` on the daily Cloud Code endpoint).
+- **Primary Provider:** Google Search Grounding through **Google Antigravity** (`gemini-3.5-flash-lite` on the daily Cloud Code endpoint — smaller/cheaper than Flash, with live grounding).
   - Uses the existing Antigravity OAuth session already configured in Pi (`/login antigravity`).
   - Returns grounded model synthesis along with source URLs, page titles, and grounding search queries.
 - **Automatic Fallback:** **OpenAI Codex** Search through the user's active ChatGPT Plus/Pro subscription.
   - If Antigravity encounters any issue (e.g. rate limits, network timeouts, authentication expiration), the tool automatically falls back to `codex --search` without failing the agent's turn.
 - **Default Availability:**
-  - Auto-loaded globally from `~/.pi/agent/extensions/trellis-web-search.ts`.
-  - Available to all Trellis-attached projects via `.pi/extensions/trellis-web-search.ts`.
+  - Auto-loaded globally from `~/.pi/agent/extensions/trellis-web-search.ts` (canonical — do NOT copy per-project).
+  - `trellis attach` also installs `.pi/extensions/trellis-web-search.ts` in attached projects, but that copy self-disables whenever the global copy exists, so the two never conflict at startup.
 
 ## Tool Usage
 
