@@ -6,7 +6,7 @@ Trellis provides built-in live web search capability for Pi sessions through the
 
 The web search tool enables Pi agents to query real-time external data, verify documentation, inspect package release versions, and cross-check breaking news without leaving the session.
 
-- **Primary Provider:** Google Search Grounding through **Google Antigravity** (`gemini-3.7-flash-low` on the daily Cloud Code endpoint).
+- **Primary Provider:** Google Search Grounding through **Google Antigravity** (`gemini-3.5-flash-lite` on the daily Cloud Code endpoint).
   - Uses the existing Antigravity OAuth session already configured in Pi (`/login antigravity`).
   - Returns grounded model synthesis along with source URLs, page titles, and grounding search queries.
 - **Automatic Fallback:** **OpenAI Codex** Search through the user's active ChatGPT Plus/Pro subscription.
@@ -45,8 +45,8 @@ For headless environments or bounded batch tasks, an optional task configuration
 ```json
 {
   "provider": "antigravity",
-  "model": "gemini-3.7-flash",
-  "runtime_model": "gemini-3.7-flash-low",
+  "model": "gemini-3.5-flash-lite",
+  "runtime_model": "gemini-3.5-flash-lite",
   "endpoint": "daily",
   "max_calls": 50
 }
