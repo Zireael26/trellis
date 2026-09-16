@@ -212,6 +212,10 @@
           "destination": ".pi/extensions/trellis.ts"
         },
         {
+          "source": "core-rules/pi/extensions/trellis-web-search.ts",
+          "destination": ".pi/extensions/trellis-web-search.ts"
+        },
+        {
           "source": "core-rules/pi/hooks/dispatch.sh",
           "destination": ".pi/hooks/dispatch.sh",
           "executable": true
