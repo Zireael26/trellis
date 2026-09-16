@@ -44,7 +44,7 @@ async function searchAntigravity(query: string, maxResults: number, signal?: Abo
 
   const reqBody = {
     project: projectId,
-    model: "gemini-3.7-flash-low",
+    model: "gemini-3.5-flash-lite",
     request: {
       contents: [{ role: "user", parts: [{ text: query }] }],
       tools: [{ googleSearch: {} }],
@@ -108,7 +108,7 @@ async function searchAntigravity(query: string, maxResults: number, signal?: Abo
   if (!answer.trim()) return null;
 
   return {
-    provider: "Google Antigravity (Gemini 3.7 Flash)",
+    provider: "Google Antigravity (Gemini 3.5 Flash-Lite)",
     answer: answer.trim(),
     sources: sources.slice(0, maxResults),
     queries,
