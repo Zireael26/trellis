@@ -287,6 +287,9 @@ function emitCostLine(summary) {
   phase('Report')
   const costLine = currentCostLine()
   log('digest-adopt report: ' + summary + '; ' + costLine)
+  const rateLabel = usdPerMTokAvailable ? (Number.isInteger(usdPerMTok) ? usdPerMTok.toFixed(2) : String(usdPerMTok)) : 'unavailable'
+  const amountLabel = costLine.indexOf('spent_usd unavailable') === 0 ? 'spent_usd unavailable, so no output-only modeled subtotal at report time' : 'spent_usd is an output-only modeled subtotal at report time'
+  log('digest-adopt cost disclosure: ' + amountLabel + ' from workflow-reported output tokens at configured usd_per_mtok ' + rateLabel + '; input/cache/child attribution unknown; recorded real/notional cost unavailable; max_iterations=' + SAFETY_MAX_ITERATIONS + ' recipe-capped execute-item cap, actual host budget/no-progress enforcement unverified.')
   return costLine
 }
 

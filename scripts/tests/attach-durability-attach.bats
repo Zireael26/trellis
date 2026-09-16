@@ -386,11 +386,11 @@ run_detach() {
   [ "$output" = "$nvm:$fixture/other" ]
 }
 
-@test "B8 gotchas documents the merge_missing add-only contract" {
-  run grep -Fq "merge_missing" "$REPO_ROOT/gotchas.md"
+@test "B8 portable inheritance docs preserve the merge_missing add-only contract" {
+  run grep -Fq "merge_missing" "$REPO_ROOT/core-rules/inheritance.md"
   [ "$status" -eq 0 ]
-  run grep -Fq "add-only" "$REPO_ROOT/gotchas.md"
+  run grep -Fq "add-only" "$REPO_ROOT/core-rules/inheritance.md"
   [ "$status" -eq 0 ]
-  run grep -Fq "detach+attach" "$REPO_ROOT/gotchas.md"
+  run grep -Fq "detach+attach" "$REPO_ROOT/core-rules/inheritance.md"
   [ "$status" -eq 0 ]
 }

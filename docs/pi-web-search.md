@@ -37,3 +37,19 @@ Agents call `trellis_web_search` or `web_search`:
 2. If Antigravity returns valid text and sources, the grounded result is returned immediately with provider metadata.
 3. If Antigravity fails or returns empty content, the tool invokes the local Codex search engine in read-only sandbox mode.
 4. The output clearly cites whether the primary Antigravity provider or the OpenAI Codex fallback was used.
+
+## Configuration & Overrides
+
+For headless environments or bounded batch tasks, an optional task configuration may still be supplied via `TRELLIS_WEB_SEARCH_CONFIG` pointing to a JSON file:
+
+```json
+{
+  "provider": "antigravity",
+  "model": "gemini-3.7-flash",
+  "runtime_model": "gemini-3.7-flash-low",
+  "endpoint": "daily",
+  "max_calls": 50
+}
+```
+
+When `TRELLIS_WEB_SEARCH_CONFIG` is omitted, the tool automatically uses default Antigravity grounding with OpenAI Codex fallback and a generous per-session quota.

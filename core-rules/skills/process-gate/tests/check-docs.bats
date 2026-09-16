@@ -351,3 +351,120 @@ commit_runtime_transition_and_check() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"ADR: unable to enumerate trigger paths"* ]]
 }
+
+# --- large-payload membership: the SIGPIPE regression ----------------------
+# The three membership tests against $changed_files must not pipe into an
+# early-exiting `grep -q`. Under pipefail `grep -q` exits at the first match,
+# `printf` takes SIGPIPE and returns 141, and the pipeline reports 141, so the
+# check reports "not found" because the match succeeded early. Measurements are
+# in the release evidence, not here.
+#
+# These tests invoke check-docs.sh itself. A test that re-implements the fixed
+# expression would pass even if the production logic were broken or deleted.
+# Invocations are kept to a handful; the payload does the work, since the race
+# needs a changed-file list large enough to fill a pipe buffer.
+
+# Commit a wide changed-file set under a CHANGELOG_PATHS trigger prefix, then
+# run the real checker over exactly that one commit. $1 is the commit SUBJECT,
+# so a test can place a gotcha phrase inside the checked range; remaining args
+# are membership targets to touch in the SAME commit. Anything a case needs the
+# checker to see must be uncommitted when this is called — HEAD~1..HEAD covers
+# this commit only, so a precondition staged earlier is outside the range and
+# the case would be vacuous.
+seed_wide_change() {
+  local subject="$1"
+  shift
+  (
+    cd "$PROJECT_DIR" || exit 1
+    mkdir -p scripts
+    i=0
+    while [ "$i" -lt 900 ]; do
+      printf 'x\n' > "scripts/generated-$i.sh"
+      i=$((i + 1))
+    done
+    for target in "$@"; do
+      mkdir -p "$(dirname "$target")"
+      printf '\n- entry %s\n' "$(date +%s)" >> "$target"
+    done
+    git add -A
+    git commit -q -m "$subject"
+  )
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+}
+
+@test "changelog membership is found in a large changed-file set" {
+  seed_wide_change "chore: wide change" CHANGELOG.md
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"CHANGELOG.md: not updated despite code changes"* ]]
+}
+
+@test "changelog absence is still reported in a large changed-file set" {
+  seed_wide_change "chore: wide change"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+}
+
+@test "gotchas membership is found when the hint is in the checked range" {
+  # "silently" is one of check-docs.sh's gotcha_phrases, and it has to be in
+  # THIS commit: the check reads git log over $RANGE, not the whole history.
+  seed_wide_change "fix: the hook silently dropped the exclude block" \
+    CHANGELOG.md gotchas.md
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"gotchas.md"* ]]
+}
+
+@test "gotchas absence is still reported when the hint is in the checked range" {
+  seed_wide_change "fix: the hook silently dropped the exclude block" CHANGELOG.md
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"gotchas.md: commit message hints suggest"* ]]
+}
+
+@test "EPM membership is found when the trigger is in the checked range" {
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf '# process\n' > engineering-process.md
+    git add engineering-process.md
+    git commit -q -m "chore: seed EPM"
+    # Left UNCOMMITTED so seed_wide_change commits it into the checked range.
+    mkdir -p .claude/skills
+    printf 'x\n' > .claude/skills/trigger.md
+  )
+  export PROCESS_GATE_PROJECT_EPM="engineering-process.md"
+
+  seed_wide_change "chore: wide change" CHANGELOG.md engineering-process.md
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"engineering-process.md: process trigger paths changed"* ]]
+}
+
+@test "EPM absence is still reported when the trigger is in the checked range" {
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf '# process\n' > engineering-process.md
+    git add engineering-process.md
+    git commit -q -m "chore: seed EPM"
+    mkdir -p .claude/skills
+    printf 'x\n' > .claude/skills/trigger.md
+  )
+  export PROCESS_GATE_PROJECT_EPM="engineering-process.md"
+
+  seed_wide_change "chore: wide change" CHANGELOG.md
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"engineering-process.md: process trigger paths changed"* ]]
+}
+
+@test "no membership test against changed_files pipes into an early-exiting grep" {
+  # Supplementary source guard. The integration cases above are the evidence;
+  # this only stops the transport being reintroduced silently. Scoped to
+  # `grep -q`: a plain grep on the same payload consumes the whole stream and
+  # is not exposed. check-docs.sh has one such site for the ADR path filter.
+  run grep -nE 'printf "%s.n" "\$changed_files" \| *grep [^|]*-[A-Za-z]*q' \
+    "$BATS_TEST_DIRNAME/../scripts/check-docs.sh"
+
+  [ "$status" -ne 0 ]
+}

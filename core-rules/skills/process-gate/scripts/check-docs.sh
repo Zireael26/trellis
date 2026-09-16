@@ -25,7 +25,13 @@ DEFAULT_ADR_TRIGGERS=("next.config." "middleware." "package.json" "tsconfig.json
 ADR_TRIGGERS=("${PROCESS_GATE_ADR_TRIGGERS[@]:-${DEFAULT_ADR_TRIGGERS[@]}}")
 PROJECT_EPM="${PROCESS_GATE_PROJECT_EPM:-}"
 
-# Get changed files
+# Get changed files.
+#
+# Membership against $changed_files uses a HERESTRING, never `printf | grep -q`.
+# Under `pipefail` that pipeline is a race: `grep -q` exits at the first match,
+# `printf` takes SIGPIPE and returns 141, and the pipeline reports 141 — so the
+# check reports "not found" because the match succeeded early. A plain grep on
+# the same payload consumes the whole stream and is not exposed.
 changed_files="$(pg_diff_files "$RANGE" || true)"
 # ADR triggers also consider deletions. The shared changed-file helper omits
 # them because most gates cannot validate deleted content, but deleting an
@@ -467,7 +473,7 @@ else
   done
 
   if $code_changed; then
-    if ! printf "%s\n" "$changed_files" | grep -Fxq "$CHANGELOG_FILE"; then
+    if ! grep -Fxq -- "$CHANGELOG_FILE" <<<"$changed_files"; then
       findings+=("$CHANGELOG_FILE: not updated despite code changes under: ${CHANGELOG_PATHS[*]}")
       worst="fail"
     else
@@ -516,7 +522,7 @@ fi
 # --- gotchas.md hint -------------------------------------------------------
 gotcha_phrases='turns out|surprised|took two hours|weird interaction|incompatible with|silently'
 if git log --format='%B' "$RANGE" 2>/dev/null | grep -qiE "$gotcha_phrases"; then
-  if ! printf "%s\n" "$changed_files" | grep -qE '^gotchas\.md$'; then
+  if ! grep -qE '^gotchas\.md$' <<<"$changed_files"; then
     findings+=("gotchas.md: commit message hints suggest a gotcha entry might be useful (warn only)")
     [ "$worst" = "pass" ] && worst="warn"
   fi
@@ -530,7 +536,7 @@ if [ -n "$PROJECT_EPM" ] && [ -f "$PROJECT_EPM" ]; then
       .husky/*|.githooks/*|.claude/hooks/*|.claude/skills/*) process_change=true; break ;;
     esac
   done
-  if $process_change && ! printf "%s\n" "$changed_files" | grep -qF "$PROJECT_EPM"; then
+  if $process_change && ! grep -qF -- "$PROJECT_EPM" <<<"$changed_files"; then
     findings+=("$PROJECT_EPM: process trigger paths changed without EPM update")
     [ "$worst" = "pass" ] && worst="warn"
   fi

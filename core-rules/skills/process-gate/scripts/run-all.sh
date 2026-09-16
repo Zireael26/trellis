@@ -7,8 +7,10 @@
 # FAIL in the PR-shape gates (PR hygiene, Docs discipline, Analyze) is remapped
 # to WARN so a WIP push is not blocked on shape. The always-hard gates
 # (Secrets, Bypass markers, Tests, Security) NEVER downgrade at any mode. At
-# merge the verdict is strict — no downgrade. A missing/unknown --mode value
-# resolves to merge (the fail-closed choice).
+# merge the verdict is strict — no downgrade. A MISSING --mode resolves to merge
+# (the fail-closed default); an UNKNOWN --mode VALUE is refused by the argument
+# guard below rather than reinterpreted, so a typo is reported, not silently
+# downgraded to the strict mode.
 
 set -uo pipefail
 
@@ -20,6 +22,58 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # child gates that may exit non-zero (warn=2, fail=1) — disable -e so those
 # returns get captured into RESULTS rather than exiting the aggregator.
 set +e
+
+# --- argument guard -------------------------------------------------------
+# Neither pg_parse_range nor pg_parse_mode has an unknown-argument arm: they
+# scan for their own prefix and silently ignore everything else. That made
+# `run-all.sh --help` — and any typo'd flag — start a FULL gate run against the
+# defaulted range instead of reporting the mistake. Observed 2026-09-07: a
+# `--help` invocation launched a complete four-shard suite. Validate here,
+# before any gate work, and refuse rather than launch. Documented valid flags
+# are unchanged: --range=<gitspec> and --mode=push|merge.
+pg_usage() {
+  printf 'Usage: run-all.sh [--range=<gitspec>] [--mode=push|merge]\n'
+  printf '\n'
+  printf '  --range=<gitspec>  commit range to gate (default: main..HEAD, else\n'
+  printf '                     master..HEAD, else HEAD~1..HEAD)\n'
+  printf '  --mode=push|merge  verdict strictness (default merge when the flag is\n'
+  printf '                     absent; any other value is refused, not remapped)\n'
+  printf '  -h, --help         print this and exit without running any gate\n'
+}
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      pg_usage
+      exit 0
+      ;;
+    --mode=*)
+      # Validate the VALUE, not just the shape. pg_parse_mode resolves any
+      # unknown value to `merge` silently; fail-closed is the right default but
+      # a typo should be reported, not reinterpreted. Supported values are
+      # exactly those documented in the usage line and the header comment.
+      case "${arg#--mode=}" in
+        push|merge) ;;
+        *)
+          printf 'run-all.sh: unknown --mode value: %s (supported: push, merge)\n' "${arg#--mode=}" >&2
+          pg_usage >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    --range=*)
+      if [ -z "${arg#--range=}" ]; then
+        printf 'run-all.sh: --range= requires a gitspec\n' >&2
+        pg_usage >&2
+        exit 2
+      fi
+      ;;
+    *)
+      printf 'run-all.sh: unknown argument: %s\n' "$arg" >&2
+      pg_usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 pg_load_config
 RANGE="$(pg_parse_range "$@")"

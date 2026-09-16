@@ -46,6 +46,8 @@ EOF
   printf '# Reviewed portable process\n' > "$SOURCE/engineering-process.md"
   printf '# Changelog\n' > "$SOURCE/CHANGELOG.md"
   printf '# Portable infrastructure guidance\n' > "$SOURCE/docs/local-development-infrastructure.md"
+  printf '# Portable Pi computer-use setup\n' > "$SOURCE/docs/PI-COMPUTER-USE.md"
+  printf '# Portable Pi upgrade prompt\n' > "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   printf '{"schema_version":1,"toolchains":[{"name":"private"}]}' > "$SOURCE/dependency-baseline.json"
   printf '{"schema_version":1,"source_reports":["private"]}' > "$SOURCE/audits/fleet-remediation-ledger.json"
   printf '# Portable core policy\n' > "$SOURCE/core-rules/CLAUDE.md"
@@ -572,6 +574,8 @@ EOF
   [ ! -e "$MIRROR/config.json" ]
   [ ! -e "$MIRROR/state" ]
   [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
+  cmp "$SOURCE/docs/PI-COMPUTER-USE.md" "$MIRROR/docs/PI-COMPUTER-USE.md"
+  cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   jq -e '
     .schema_version == 2
     and (.trellis_root? | not)
@@ -1044,17 +1048,30 @@ SH
     --exclude='core-rules/usage-federation' \
     "$REPO_ROOT/core-rules" "$export_root/"
 
-  # Unprojected, the real manifest cannot close against the exported subset:
-  # this is the failure the projection exists to remove, asserted before the fix
-  # so the passing assertions below are not vacuous.
+  # Private manifests must fail on the withheld sources before projection.
+  # A public checkout already has a projected manifest and must close as-is.
+  # Select the expectation from the input, never from the planner's result.
+  local private_agents private_skill
+  private_agents="$(jq '[.harnesses.shared_agents.links[]? | select(.source_children == "core-rules/pi/agents")] | length' \
+    "$export_root/core-rules/inheritance-manifest.json")"
+  private_skill="$(jq '[.harnesses.user.links[]? | select(.source == "core-rules/skills/herdr-foreman")] | length' \
+    "$export_root/core-rules/inheritance-manifest.json")"
   run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness pi
-  [ "$status" -eq 4 ]
-  [[ "$output" == *'required source is missing from immutable payload: core-rules/pi/agents'* ]] ||
-    { echo "$output"; false; }
+  if [ "$private_agents" -gt 0 ]; then
+    [ "$status" -eq 4 ] || { echo "$output"; false; }
+    [[ "$output" == *'required source is missing from immutable payload: core-rules/pi/agents'* ]] ||
+      { echo "$output"; false; }
+  else
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  fi
   run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness user
-  [ "$status" -eq 4 ]
-  [[ "$output" == *'required source is missing from immutable payload: core-rules/skills/herdr-foreman'* ]] ||
-    { echo "$output"; false; }
+  if [ "$private_skill" -gt 0 ]; then
+    [ "$status" -eq 4 ] || { echo "$output"; false; }
+    [[ "$output" == *'required source is missing from immutable payload: core-rules/skills/herdr-foreman'* ]] ||
+      { echo "$output"; false; }
+  else
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  fi
 
   run project_manifest_with_publisher_program "$export_root/core-rules/inheritance-manifest.json"
   [ "$status" -eq 0 ] || { echo "$output"; false; }

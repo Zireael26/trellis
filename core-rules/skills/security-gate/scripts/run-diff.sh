@@ -70,6 +70,15 @@ for cfg in \
   fi
 done
 
+# The project-local config is sourced ABOVE, but PROJECT_NAME was already
+# resolved at line 61 — so a pin set in that file never took effect and a clone
+# or detached export fell back to its directory basename, found no baseline and
+# skipped the whole diff scan (2026-09-07: the clone reported "no baseline JSON
+# found for project 'spec047-gate-clone.XXXXXX'" while the tracked config pinned
+# trellis-instance). Re-apply after the load so the file's own intent holds; an
+# inherited environment value still wins over both.
+PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
+
 PROFILE="${SECURITY_GATE_STACK_PROFILE:-web-next}"
 AUDIT_DIR_REL="${SECURITY_GATE_AUDIT_DIR:-audits}"
 AUDIT_DIR="$PROJECT_DIR/$AUDIT_DIR_REL"

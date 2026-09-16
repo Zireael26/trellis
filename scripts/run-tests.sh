@@ -486,7 +486,15 @@ stage "AEO contract, static, and entrypoint" aeo_static_and_python
 stage "conformance-check" bash scripts/conformance-check.sh
 
 if [ "$QUICK" -eq 0 ]; then
-  stage "hooks (claude + codex)" bats core-rules/hooks/tests/ core-rules/codex/hooks/tests/
+  # HERDR_* must not reach the hook suites: code-reviewer.sh takes the rung-2a
+  # (`pi`) branch when HERDR_ENV=1, so every rung-2b assertion fails against the
+  # operator's live roles-resolved.json when the gate is launched from a Herdr
+  # pane (run-tests-local.py spawns shards with os.environ.copy()). Scrubbed
+  # here so it holds for every suite in the stage, including the files that do
+  # not `load helpers`. Suites that need Herdr set it per-invocation.
+  stage "hooks (claude + codex)" env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID \
+    -u HERDR_TAB_ID -u HERDR_SOCKET_PATH -u HERDR_BIN_PATH \
+    bats core-rules/hooks/tests/ core-rules/codex/hooks/tests/
   stage "skill gates" bats core-rules/skills/*/tests/
   stage "recipe routing lint" bash scripts/lint-recipe-routing.sh
   stage "Herdr panel layout" python3 core-rules/skills/herdr-foreman/tests/test_panel_layout.py

@@ -6,8 +6,73 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [v1.2.1] — 2026-09-08
+
+### Fixed
+
+- **`check-docs.sh` no longer fails a release gate from a SIGPIPE race.** Three membership tests
+  piped the whole changed-file list into `grep -q`. Under `set -o pipefail` `grep -q` exits at the
+  first match, `printf` then takes SIGPIPE and returns 141, and the pipeline reports 141 — so the
+  check concluded "not found" *because* the match succeeded early. On a 669-path, 59,153-byte range
+  this produced a spurious `CHANGELOG.md: not updated despite code changes` in 19 of 200 trials and
+  blocked the 1.2.0 gate. All three sites now use a herestring: 0 of 200 with the target present,
+  and still 0 of 50 false positives with the target genuinely absent, so the checks are not no-ops.
+  This fixes **these three sites only**, not the class; the other pipe-into-`grep` sites in the gate
+  were assessed and carry single-line payloads that cannot fill a pipe buffer.
+- **The public web-search guide now publishes with the adapter.** `docs/pi-web-search.md`
+  carries the opt-in configuration and the stated limitations, and
+  `core-rules/skills/herdr-foreman/SKILL.md` references it, but it was absent from the mirror's
+  sync allowlist — so the adapter would have shipped publicly with its documentation
+  unreachable. Added as a single allowlist entry. Its provider prose uses the lowercase
+  provider id, and the lint scope covers this one guide for the literal environment names it
+  documents; another docs page carrying the same name still fails, so this is not a docs-wide
+  allowance. Three links into the private instance repository are named rather than linked,
+  since those targets are not part of the mirror, and the "release candidate until published"
+  line is removed because publication makes it false. The four frozen adapter hashes are
+  unchanged.
+- **The public mirror can publish the Spec 047 web-search adapter.** `lint_mirror` flagged the
+  adapter's own public contract as a stale retired-harness reference: its environment-variable
+  names, its exported transport symbol, the provider host fragment, the wire `ideType` value and
+  the provider's standard spelling. The allowance is **path-scoped** to
+  `core-rules/pi/web-search/**` and `scripts/pi-web-search-tests.sh` and enumerates exact whole
+  tokens; a global relaxation was rejected because it would let a retired-harness reference through
+  anywhere in the tree. `AntiGravity`, the retired harness's distinctive spelling, still fails
+  everywhere including inside the scoped paths. No path is skipped and no rule is disabled: the
+  private-path, fleet-identity and proxy-token guards are untouched.
+
+## [v1.2.0] — 2026-09-08
+
+### Added
+
+- An opt-in Pi web-search adapter backed by the registered Antigravity OAuth owner. It obtains an in-memory token and project envelope through Pi's supported owner API only, never opening or mutating a credential store, confines production file I/O to one explicitly selected bounded regular config file, issues a single request with no retry and no fallback endpoint, model, auth owner or header variant, fails closed on unsupported platform tuples, and never fetches a received URL. Its cost receipt excludes the query, the answer, source URLs and titles, citations, raw stream and token or project values.
+- An honest session cost and efficiency disclosure adjacent to the existing digest and guidance output. It reports a modeled output subtotal with its configured rate and the actual meter scope, marks unavailable fields unavailable rather than inventing a zero, and makes no total, bill or lower-bound claim.
+- A registered stage covering the Pi web-search adapter's deterministic tests through a fenced offline runner, so the adapter's 175 Node tests run in the normal local gate rather than resting on retained receipts.
+
+### Fixed
+
+- Report an unparseable test summary as a result with a receipt instead of aborting the fenced runner: the summary parse ran under `set -e` with `pipefail` and exited before writing its diagnostic or receipt.
+- Pin the Node test reporter the fenced runner parses and strip `NODE_OPTIONS` and `NODE_TEST_CONTEXT` inside the fence, so an inherited reporter cannot silently change the output protocol or make Node reject the run.
+- Escape the fenced runner's JSON receipt fields, and hash files from stdin, so a path containing a quote or backslash no longer produces an unparseable receipt or a digest shifted one character left while the fence-versus-source comparison still passed.
+
 ### Documentation
 
+- Document the opt-in Pi web-search profile, its owner boundary and the routes actually verified: the Meta parent is the only qualified route; the native Codex and Luna parents are registered unrun; the Gemini and OpenAI parent families are unverified.
+
+## [v1.1.0] — 2026-09-07
+
+### Added
+
+- An opt-in Pi computer-use skill routing web tasks to a dedicated headless browser and native-app tasks to Cua Driver, with explicit background delivery and observed UI verification.
+
+### Fixed
+
+- Make the real-manifest publication test validate both private source manifests and already-projected public manifests, retaining missing-source checks and every-harness closure assertions.
+- Preserve structured MCP results alongside text and images in the qualified Pi adapter, so Cua snapshot tokens and active-app flags reach the model. The optional installer checks package identity and complete source digests before replacing a file; regression tests cover content preservation, idempotence and refusal on drift.
+
+### Documentation
+
+- Preserve the add-only render and template-removal delivery contract in the portable inheritance guide, so the gotchas cleanup does not leave it only in a private archive. Point its documentation check at the portable guide.
+- Add an opt-in Pi 0.85.1 computer-use profile with Cua Driver 0.23.2, a patched pi-mcp-adapter 2.32.1, and agent-browser 0.36.0. Keep tools in a separate locked prefix, preserve existing Pi settings, and document background verification, multi-monitor overlay and macOS Spaces limitations, and rollback. Trellis attachment does not install or grant these tools automatically.
 - Rewrite the public and operator READMEs with architecture and upgrade diagrams, and add a verified 1.0.0 migration procedure covering stable launcher replacement, explicit Pi selection and shared worktree preservation. Correct current setup and upgrade examples to select Pi.
 
 ## [v1.0.0] — 2026-09-06
