@@ -209,7 +209,8 @@ AGENT
     },
     "user": {
       "links": [
-        {"source": "core-rules/skills/herdr-foreman", "destination": ".claude/skills/herdr-foreman", "destination_home": true}
+        {"source": "core-rules/skills/herdr-foreman", "destination": ".claude/skills/herdr-foreman", "destination_home": true},
+        {"source": "core-rules/skills/herdr-foreman", "destination": ".agents/skills/herdr-foreman", "destination_home": true}
       ]
     }
   }

@@ -494,3 +494,82 @@ rewrite_manifest() {
   [ "$status" -eq 4 ]
   [[ "$output" == *"source symlink collision inside immutable payload"* ]] || { echo "$output"; false; }
 }
+
+@test "user skill under both shared and pi roots is exposed twice to pi" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  rewrite_manifest '.harnesses.user.links += [{"source": "core-rules/skills/herdr-foreman", "destination": ".pi/agent/skills/herdr-foreman", "destination_home": true}]'
+
+  run_plan --harness user
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"exposed twice to one harness"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"herdr-foreman"* ]] || { echo "$output"; false; }
+}
+
+@test "user skill under both shared and codex roots is exposed twice to codex" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  rewrite_manifest '.harnesses.user.links += [{"source": "core-rules/skills/herdr-foreman", "destination": ".codex/skills/herdr-foreman", "destination_home": true}]'
+
+  run_plan --harness user
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"exposed twice to one harness"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"herdr-foreman"* ]] || { echo "$output"; false; }
+}
+
+@test "user skill sharing a name prefix with a solo-root skill is not exposed twice" {
+  mkdir -p "$SANDBOX/user-home"
+  export HOME="$SANDBOX/user-home"
+  mkdir -p "$PAYLOAD/core-rules/skills/prefix-foo" "$PAYLOAD/core-rules/skills/prefix-foobar"
+  printf '# Foo\n' > "$PAYLOAD/core-rules/skills/prefix-foo/SKILL.md"
+  printf '# Foobar\n' > "$PAYLOAD/core-rules/skills/prefix-foobar/SKILL.md"
+  rewrite_manifest '.harnesses.user.links += [{"source": "core-rules/skills/prefix-foo", "destination": ".agents/skills/prefix-foo", "destination_home": true}, {"source": "core-rules/skills/prefix-foobar", "destination": ".pi/agent/skills/prefix-foobar", "destination_home": true}]'
+
+  run_plan --harness user
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "shipped user manifest exposes release skills once per harness" {
+  local user_home="$SANDBOX/user home"
+  mkdir -p "$user_home"
+
+  jq -e '
+    ([.harnesses.user.links[] |
+      select(
+        .source == "core-rules/skills/herdr-foreman"
+        and .destination == ".agents/skills/herdr-foreman"
+        and has("destination_home")
+        and .destination_home == true
+      )
+    ] | length) == 1
+    and ([.harnesses.user.links[] |
+      select(
+        .source == "core-rules/pi/computer-use"
+        and .destination == ".pi/agent/skills/trellis-computer-use"
+        and has("destination_home")
+        and .destination_home == true
+      )
+    ] | length) == 1
+  ' "$MANIFEST" >/dev/null
+
+  HOME="$user_home" run_plan --harness user
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e --arg home "$user_home" --arg payload "$PAYLOAD" '
+    ([.artifacts[] |
+      select(
+        .kind == "symlink"
+        and .source == "core-rules/skills/herdr-foreman"
+        and .destination == ($home + "/.agents/skills/herdr-foreman")
+        and .target == ($payload + "/core-rules/skills/herdr-foreman")
+      )
+    ] | length) == 1
+    and ([.artifacts[] |
+      select(
+        .kind == "symlink"
+        and .source == "core-rules/pi/computer-use"
+        and .destination == ($home + "/.pi/agent/skills/trellis-computer-use")
+        and .target == ($payload + "/core-rules/pi/computer-use")
+      )
+    ] | length) == 1
+  ' >/dev/null
+}

@@ -156,6 +156,29 @@ JSON
   [ -z "$output" ]
 }
 
+@test "049 user skill store public surface lints clean at mirror paths" {
+  # Spec 049 classifies the computer-use pi link, skills.sh, skill-roots.sh,
+  # the doctor check and the docs as PUBLIC: they publish through the existing
+  # allowlist entries (core-rules/pi/, scripts/, docs/, core-rules/) with no
+  # new prune entry. A public file must therefore pass this lint at its mirror
+  # path with no widened token list and no new exemption path.
+  mkdir -p "$MIRROR/scripts/lib" "$MIRROR/docs" \
+    "$MIRROR/core-rules/pi/computer-use"
+  cp "$REPO_ROOT/scripts/skills.sh" "$MIRROR/scripts/skills.sh"
+  cp "$REPO_ROOT/scripts/lib/skill-roots.sh" "$MIRROR/scripts/lib/skill-roots.sh"
+  cp "$REPO_ROOT/scripts/lib/health-checks.sh" "$MIRROR/scripts/lib/health-checks.sh"
+  cp "$REPO_ROOT/docs/UPGRADING.md" "$MIRROR/docs/UPGRADING.md"
+  cp "$REPO_ROOT/docs/PI-COMPUTER-USE.md" "$MIRROR/docs/PI-COMPUTER-USE.md"
+  cp "$REPO_ROOT/core-rules/inheritance.md" "$MIRROR/core-rules/inheritance.md"
+  cp "$REPO_ROOT/core-rules/pi/computer-use/SKILL.md" \
+    "$MIRROR/core-rules/pi/computer-use/SKILL.md"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ]
+}
+
 @test "canonical google-antigravity provider id remains publishable" {
   printf 'flash: google-antigravity/gemini-3.8-flash:high\n' > "$MIRROR/omp-config.yml"
 

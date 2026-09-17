@@ -2320,6 +2320,7 @@ REQUIRED_SOURCES = (
     "scripts/lib/trellis-home.sh",
     "scripts/lib/release-store.sh",
     "scripts/lib/local-registry.sh",
+    "scripts/lib/skill-roots.sh",
     "scripts/lib/surface-plan.sh",
     "scripts/lib/attachment.sh",
     "scripts/attach-project.sh",

@@ -212,10 +212,6 @@
           "destination": ".pi/extensions/trellis.ts"
         },
         {
-          "source": "core-rules/pi/extensions/trellis-web-search.ts",
-          "destination": ".pi/extensions/trellis-web-search.ts"
-        },
-        {
           "source": "core-rules/pi/hooks/dispatch.sh",
           "destination": ".pi/hooks/dispatch.sh",
           "executable": true
@@ -294,6 +290,11 @@
     },
     "user": {
       "links": [
+        {
+          "source": "core-rules/pi/computer-use",
+          "destination": ".pi/agent/skills/trellis-computer-use",
+          "destination_home": true
+        },
         {
           "source": "core-rules/hooks/herdr-foreman-session.sh",
           "destination": ".claude/hooks/herdr-foreman-session.sh",

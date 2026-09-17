@@ -65,6 +65,17 @@ HC_CANONICAL_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks
 HC_CANONICAL_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
 export HC_CANONICAL_SKILLS HC_CANONICAL_COMMANDS
 
+# Spec 049 harness table. The user-skill root mapping lives in
+# skill-roots.sh; source it here (when not already loaded, e.g. via
+# surface-plan.sh) so standalone consumers of this library share the one
+# table instead of duplicating root literals.
+if ! command -v skill_roots_for_harnesses >/dev/null 2>&1; then
+  _HC_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  # shellcheck source=skill-roots.sh
+  . "$_HC_LIB_DIR/skill-roots.sh"
+  unset _HC_LIB_DIR
+fi
+
 # ---------------------------------------------------------------------------
 # Small helpers (pure where possible).
 # ---------------------------------------------------------------------------
@@ -1187,7 +1198,7 @@ import sys
 releases, version, expected_digest = sys.argv[1:4]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-SOURCES = ("scripts/lib/trellis-home.sh", "scripts/lib/surface-plan.sh")
+SOURCES = ("scripts/lib/trellis-home.sh", "scripts/lib/skill-roots.sh", "scripts/lib/surface-plan.sh")
 
 
 def fail(message):
@@ -1903,6 +1914,140 @@ hc_portable_user_surface() {
   HC_PORTABLE_USER_SURFACE_STATE="attached"
   echo "user surface: exact committed owner, immutable release, owned leaves, and explicit-json keys match"
   return "$HC_OK"
+}
+
+# hc_user_skill_roots <home> <trellis-home>
+# Report-only Trellis user-skill store check (spec 049 SC5). Inspects the
+# harness skill roots under the checked account HOME and WARNs on real
+# directories (stray copies, with the `trellis skills import` remedy),
+# dangling links, links whose target is foreign (resolves neither under the
+# active release payload nor under $TRELLIS_HOME/skills), and one skill name
+# visible twice to a single harness per the skill-roots.sh table (the shared
+# .agents/skills root overlapping the pi/codex solo roots). Symlinks
+# resolving under the active release payload or the skill store are
+# Trellis-owned and ok. Harness-managed entries are exempt:
+# .claude/skills/synced, .codex/skills/.system, and dot-files. Never repairs;
+# --fix behavior is unchanged.
+hc_user_skill_roots() {
+  local home="$1" trellis_home="$2"
+  local release payload_dir store_dir canonical
+  local claude_root shared_root pi_root codex_root
+  local root rootdir entry name owned shared_entry
+  local stray="" dangling="" foreign="" unexpected="" dupes="" findings=""
+  if [ -z "$home" ] || [ ! -d "$home" ]; then
+    echo "user skills: account home is unavailable: $home"
+    return "$HC_WARN"
+  fi
+  if [ -z "$trellis_home" ] || [ ! -d "$trellis_home" ]; then
+    echo "user skills: Trellis home is unavailable: $trellis_home"
+    return "$HC_WARN"
+  fi
+  # Root strings come from the harness table, not from literals here.
+  if ! claude_root="$(skill_roots_for_harnesses claude)" \
+    || ! shared_root="$(skill_roots_for_harnesses codex pi)" \
+    || ! pi_root="$(skill_roots_for_harnesses pi)" \
+    || ! codex_root="$(skill_roots_for_harnesses codex)"; then
+    echo "user skills: failed to resolve harness skill roots"
+    return "$HC_WARN"
+  fi
+  release="$(jq -r '.active_cli_release // empty' "$trellis_home/config.json" 2>/dev/null)" || release=""
+  payload_dir=""
+  if [ -n "$release" ]; then
+    payload_dir="$(TRELLIS_HOME="$trellis_home" release_store_locate "$release" 2>/dev/null)" || payload_dir=""
+    if [ -n "$payload_dir" ] && [ -d "$payload_dir/payload" ]; then
+      payload_dir="$payload_dir/payload"
+    else
+      payload_dir=""
+    fi
+  fi
+  store_dir="$trellis_home/skills"
+  if [ -d "$store_dir" ]; then
+    canonical="$(CDPATH='' cd "$store_dir" 2>/dev/null && pwd -P)" || canonical=""
+    [ -n "$canonical" ] && store_dir="$canonical"
+  fi
+  if [ -d "$payload_dir" ]; then
+    canonical="$(CDPATH='' cd "$payload_dir" 2>/dev/null && pwd -P)" || canonical=""
+    [ -n "$canonical" ] && payload_dir="$canonical"
+  fi
+  for root in "$claude_root" "$shared_root" "$codex_root" "$pi_root"; do
+    [ -n "$root" ] || continue
+    rootdir="$home/$root"
+    [ -d "$rootdir" ] || continue
+    for entry in "$rootdir"/*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name="${entry##*/}"
+      case "$name" in .* ) continue ;; esac
+      if [ "$root" = "$claude_root" ] && [ "$name" = synced ]; then continue; fi
+      if [ -L "$entry" ]; then
+        if [ ! -e "$entry" ]; then
+          dangling="$dangling $root/$name"
+          continue
+        fi
+        canonical="$(CDPATH='' cd "$entry" 2>/dev/null && pwd -P)" || canonical=""
+        owned=false
+        if [ -n "$canonical" ]; then
+          # Children of the store or payload only: a link resolving to
+          # either root itself is not a skill and stays foreign.
+          case "$canonical" in "$store_dir"/*) owned=true ;; esac
+          if [ -n "$payload_dir" ]; then
+            case "$canonical" in "$payload_dir"/*) owned=true ;; esac
+          fi
+        fi
+        if [ "$owned" != true ]; then
+          foreign="$foreign $root/$name"
+        fi
+      elif [ -d "$entry" ]; then
+        stray="$stray $root/$name"
+      else
+        # A non-directory, non-link file is not a skill copy and the
+        # import remedy does not apply to it; report it generically.
+        unexpected="$unexpected $root/$name"
+      fi
+    done
+  done
+  # Duplicate exposure: the shared codex+pi root overlaps both solo roots,
+  # so a name present under the shared root may not repeat under either
+  # solo root. Presence is checked on disk (exact name match); a repeated
+  # name WARNs here in addition to whatever each link itself reports above.
+  for root in "$pi_root" "$codex_root"; do
+    [ -n "$root" ] && [ "$root" != "$shared_root" ] || continue
+    rootdir="$home/$root"
+    [ -d "$rootdir" ] || continue
+    for entry in "$rootdir"/*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name="${entry##*/}"
+      case "$name" in .* ) continue ;; esac
+      shared_entry="$home/$shared_root/$name"
+      if [ -e "$shared_entry" ] || [ -L "$shared_entry" ]; then
+        dupes="$dupes $name ($shared_root + $root)"
+      fi
+    done
+  done
+  if [ -n "$stray" ]; then
+    findings="stray copy:${stray} (move it into the store with 'trellis skills import <dir>')"
+  fi
+  if [ -n "$dangling" ]; then
+    [ -n "$findings" ] && findings="${findings}; "
+    findings="${findings}dangling link:${dangling}"
+  fi
+  if [ -n "$foreign" ]; then
+    [ -n "$findings" ] && findings="${findings}; "
+    findings="${findings}foreign link:${foreign} (not under the active release payload or the skill store)"
+  fi
+  if [ -n "$unexpected" ]; then
+    [ -n "$findings" ] && findings="${findings}; "
+    findings="${findings}unexpected file:${unexpected} (not a skill link or directory)"
+  fi
+  if [ -n "$dupes" ]; then
+    [ -n "$findings" ] && findings="${findings}; "
+    findings="${findings}visible twice to one harness:${dupes}"
+  fi
+  if [ -z "$findings" ]; then
+    echo "user skills: harness skill roots clean"
+    return "$HC_OK"
+  fi
+  echo "user skills: ${findings}"
+  return "$HC_WARN"
 }
 
 # A checkout has one recorded hook authority. A managed path must resolve to one

@@ -1357,6 +1357,180 @@ PY
   [ "$(grep -c 'user surface:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
 }
 
+@test "portable doctor reports clean harness skill roots for a healthy user surface" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "portable doctor warns on a stray real skill directory with the import remedy" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy"
+  printf -- '---\nname: stray-copy\ndescription: stray\n---\n' \
+    > "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy/SKILL.md"
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"stray copy:"*".agents/skills/stray-copy"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"trellis skills import"* ]] || { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+
+  # Inversion: removing the stray copy returns the check to clean.
+  rm -rf "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy"
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor passes harness-managed skill entries" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.claude/skills/synced/inner"
+  printf 'managed\n' > "$PORTABLE_ACCOUNT_HOME/.claude/skills/synced/inner/skill.md"
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.codex/skills/.system"
+  printf 'managed\n' > "$PORTABLE_ACCOUNT_HOME/.codex/skills/.system/skill.md"
+  printf 'managed\n' > "$PORTABLE_ACCOUNT_HOME/.agents/skills/.DS_Store"
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+
+  # The exemptions are load-bearing: the same entries under non-exempt,
+  # non-dot names are reported (synced/system as stray copies, the former
+  # dot-file as an unexpected file).
+  mv "$PORTABLE_ACCOUNT_HOME/.claude/skills/synced" "$PORTABLE_ACCOUNT_HOME/.claude/skills/not-synced"
+  mv "$PORTABLE_ACCOUNT_HOME/.codex/skills/.system" "$PORTABLE_ACCOUNT_HOME/.codex/skills/system"
+  mv "$PORTABLE_ACCOUNT_HOME/.agents/skills/.DS_Store" "$PORTABLE_ACCOUNT_HOME/.agents/skills/README-note"
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"stray copy:"*".claude/skills/not-synced"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *".codex/skills/system"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"unexpected file:"*".agents/skills/README-note"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "portable doctor warns on a dangling user skill link" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.codex/skills"
+  ln -s "$PORTABLE_HOME/skills/gone" "$PORTABLE_ACCOUNT_HOME/.codex/skills/dangling-skill"
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"dangling link:"*".codex/skills/dangling-skill"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+
+  # Inversion: removing the dangling link returns the check to clean.
+  rm "$PORTABLE_ACCOUNT_HOME/.codex/skills/dangling-skill"
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor warns on a foreign user skill link" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  mkdir -p "$SANDBOX/elsewhere/foreign-skill"
+  printf -- '---\nname: foreign-skill\ndescription: foreign\n---\n' \
+    > "$SANDBOX/elsewhere/foreign-skill/SKILL.md"
+  ln -s "$SANDBOX/elsewhere/foreign-skill" "$PORTABLE_ACCOUNT_HOME/.pi/agent/skills/foreign-skill"
+  # A link resolving to the store root itself is not a skill: foreign.
+  # (The store dir must exist, else the link would dangle instead.)
+  mkdir -p "$PORTABLE_HOME/skills"
+  ln -s "$PORTABLE_HOME/skills" "$PORTABLE_ACCOUNT_HOME/.agents/skills/rootptr"
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"foreign link:"*".pi/agent/skills/foreign-skill"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *".agents/skills/rootptr"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+
+  # Inversion: removing the foreign links returns the check to clean.
+  rm "$PORTABLE_ACCOUNT_HOME/.pi/agent/skills/foreign-skill" \
+    "$PORTABLE_ACCOUNT_HOME/.agents/skills/rootptr"
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor warns when one skill is visible twice to one harness" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  # Both links resolve under the skill store, so each is individually
+  # owned: only the double exposure WARNs.
+  mkdir -p "$PORTABLE_HOME/skills/dup-pi" "$PORTABLE_HOME/skills/dup-codex"
+  printf -- '---\nname: dup-pi\ndescription: dup\n---\n' \
+    > "$PORTABLE_HOME/skills/dup-pi/SKILL.md"
+  printf -- '---\nname: dup-codex\ndescription: dup\n---\n' \
+    > "$PORTABLE_HOME/skills/dup-codex/SKILL.md"
+  ln -s "$PORTABLE_HOME/skills/dup-pi" "$PORTABLE_ACCOUNT_HOME/.agents/skills/dup-pi"
+  ln -s "$PORTABLE_HOME/skills/dup-pi" "$PORTABLE_ACCOUNT_HOME/.pi/agent/skills/dup-pi"
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.codex/skills"
+  ln -s "$PORTABLE_HOME/skills/dup-codex" "$PORTABLE_ACCOUNT_HOME/.agents/skills/dup-codex"
+  ln -s "$PORTABLE_HOME/skills/dup-codex" "$PORTABLE_ACCOUNT_HOME/.codex/skills/dup-codex"
+
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"visible twice to one harness:"*"dup-pi (.agents/skills + .pi/agent/skills)"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"dup-codex (.agents/skills + .codex/skills)"* ]] ||
+    { echo "$output"; false; }
+  [ "$(grep -c 'user skills:' <<<"$output")" -eq 1 ] || { echo "$output"; false; }
+
+  # Inversion: removing the repeated exposures returns the check to clean.
+  rm "$PORTABLE_ACCOUNT_HOME/.pi/agent/skills/dup-pi" \
+    "$PORTABLE_ACCOUNT_HOME/.codex/skills/dup-codex"
+  run_portable_doctor
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"✓ user skills: harness skill roots clean"* ]] ||
+    { echo "$output"; false; }
+}
+
+@test "portable doctor --fix leaves stray harness skill copies untouched" {
+  build_portable_doctor_home
+  prepare_portable_user_attachment
+  mkdir -p "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy"
+  printf -- '---\nname: stray-copy\ndescription: stray\n---\n' \
+    > "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy/SKILL.md"
+
+  run_portable_doctor --fix
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"⚠ user skills:"*"stray copy:"*".agents/skills/stray-copy"* ]] ||
+    { echo "$output"; false; }
+  [ -d "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy" ]
+  [ -f "$PORTABLE_ACCOUNT_HOME/.agents/skills/stray-copy/SKILL.md" ]
+}
+
 @test "portable doctor rejects an unsafe absent user-owner authority without touching it" {
   local outside="$SANDBOX/user-owner-authority"
   build_portable_doctor_home

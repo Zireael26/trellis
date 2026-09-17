@@ -297,7 +297,60 @@ and shared state first, does not silently select a different release, and never
 edits tracked project files. It is the repair path after a local-home relocation
 or lost anchor; explicit adoption remains the only way to change release.
 
-## 10. Migration and policy boundary
+## 10. User-global skills
+
+Harness skill roots hold no Trellis-copied skill bodies. Every harness refers
+to Trellis-owned skill directories: a harness skill directory is either a
+Trellis-managed link or it is not Trellis content at all.
+
+There are two canonical stores. Release skills resolve only into the verified
+active release payload through the manifest's `user` surface, whose link
+entries each name one destination with `destination_home`. Operator and
+third-party skills live as real directories only under
+`$TRELLIS_HOME/skills/<name>/`; each harness discovery root holds only
+Trellis-managed absolute symlinks into that store. The store is a source for
+the skills command below, not a surface-plan destination. No skill body is
+copied into a harness directory by Trellis.
+
+A skill declares its harness set (`claude`, `codex`, `pi`; an absent declaration
+means all three), and the set maps to native discovery roots by one table,
+defined once in `scripts/lib/skill-roots.sh` and shared by the manifest
+validator, the skills command, and doctor:
+
+| Harness set | Discovery root |
+|---|---|
+| `claude` | `~/.claude/skills` |
+| `codex` and `pi` together | `~/.agents/skills` (one shared link) |
+| `pi` alone | `~/.pi/agent/skills` |
+| `codex` alone | `~/.codex/skills` |
+
+The mapping never exposes one skill twice to one harness: the manifest
+validator rejects a user skill name that appears under both the shared
+`.agents/skills` root and either solo root. The current release surface links
+`herdr-foreman` for all three harnesses and `trellis-computer-use` (source
+`core-rules/pi/computer-use`) for pi only; the validator rule and the shipped
+manifest are proved together by the surface-plan suite.
+
+Operator skills are managed by `trellis skills list|import|link|unlink`. A store
+skill carries an optional `trellis-skill.json` naming its harness set; absent
+means all three, and an unknown harness or an empty list is a usage error.
+`import` moves one real skill directory into the store and removes other copies
+of the same name in harness roots only when byte-identical, refusing and naming
+differing copies before anything moves; a name already in the store or colliding
+with a release user skill is refused the same way. `link` reconciles owned links
+from each skill's harness set, `unlink` removes only owned links, and an unowned
+existing path is never replaced or deleted. Every created link is recorded in
+the Trellis-owned `$TRELLIS_HOME/state/user-skills.json` record, written
+atomically under the user-surface lock with the same ownership, journal, and
+inverse-detach semantics as `attach --user`.
+
+Diagnosis is report-only. The doctor user-skill check inspects the four harness
+roots and warns on real directories (stray copies, with the
+`trellis skills import` remedy), dangling or foreign links, and one skill name
+visible twice to a single harness under the table above. Harness-managed entries
+(`~/.claude/skills/synced`, `~/.codex/skills/.system`) and dot-files are exempt.
+
+## 11. Migration and policy boundary
 
 The old live canonical checkout, absolute direct symlinks, Trellis-managed
 `@`-imports, tracked registry/blacklist, and fixed-root clean-`main` runtime

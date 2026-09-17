@@ -1,6 +1,6 @@
 ---
 name: trellis-computer-use
-description: Use Pi to operate browser pages or native desktop apps, preferring a dedicated headless browser for web tasks and Cua Driver for desktop UI.
+description: Use Pi to operate browser pages or native desktop apps, preferring a dedicated headless browser for web tasks and Cua Driver for desktop UI with visible cursor overlay.
 ---
 
 # Computer use in Pi
@@ -41,6 +41,20 @@ Close only the task's session when done with `--session task-name close`.
 5. If background input is refused, report the app/window limitation. Use
    foreground delivery only when interrupting the desktop is authorized for
    that task; background-only requests must stop instead of escalating.
+
+## Visual Cursor & Pointer Configuration
+
+Cua Driver includes a built-in agent cursor overlay (`cua.default` theme) that
+visually shows where the agent acts on screen without stealing physical OS control:
+- **Daemon Configuration:** The daemon must run **with overlay enabled** (the default).
+  In `~/Library/LaunchAgents/com.trycua.cua-driver.plist`, ensure `--no-overlay` is
+  **omitted** from `ProgramArguments`.
+- **Theme Tools:** Ensure `cua-cursor-theme` is symlinked in `$HOME/.local/bin/`
+  pointing to `/Applications/CuaDriver.app/Contents/MacOS/cua-cursor-theme`.
+- **Seeing the Cursor Glide:** Pure accessibility (AX) clicks (`element_token`) snap
+  with a brief pulse on the target element. To produce a visible gliding cursor for
+  demos or when visual tracking is needed, route through pixel actions (`x, y` coordinates
+  on `cua_click` or `move_cursor`).
 
 macOS windows on another Space can expose a screenshot but no actionable AX
 tree. Do not guess snapshot IDs, borrow another window's elements, or replay an

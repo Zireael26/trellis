@@ -40,6 +40,7 @@ Existing commands:
                 (launcher-only route; not runnable from this dispatcher)
   mirror        Publish the verified immutable policy payload to a mirror
   sync          Sync Claude hooks into managed projects
+  skills        Manage Trellis-owned user skills (list, import, link, unlink)
   worktree      Create/repair a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
 EOF
@@ -204,6 +205,7 @@ case "$cmd" in
                 ;;
   mirror)       shift; exec "$SCRIPT_DIR/sync-to-template.sh" "$@" ;;
   sync)         shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
+  skills)       shift; exec "$SCRIPT_DIR/skills.sh" "$@" ;;
   hook)
                 shift
                 run_session_hook "$@"

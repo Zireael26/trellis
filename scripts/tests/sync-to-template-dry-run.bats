@@ -140,8 +140,10 @@ AGENT
   printf '# Fixture patch notes\n' > "$SOURCE/core-rules/pi/patches/FIXTURE.md"
 }
 
-# A canonical minimal manifest carrying the two exact private link entries the
-# publisher projects out, plus portable neighbours that must survive untouched.
+# A canonical minimal manifest carrying the three exact private link entries the
+# publisher projects out (the roster plus the herdr-foreman pair), plus portable
+# neighbours that must survive untouched — including the public computer-use
+# user link, which proves a same-harness user entry the allowlist keeps.
 write_inheritance_manifest_fixture() {
   cat > "$1" <<'MANIFEST'
 {
@@ -187,6 +189,16 @@ write_inheritance_manifest_fixture() {
         {
           "source": "core-rules/skills/herdr-foreman",
           "destination": ".claude/skills/herdr-foreman",
+          "destination_home": true
+        },
+        {
+          "source": "core-rules/skills/herdr-foreman",
+          "destination": ".agents/skills/herdr-foreman",
+          "destination_home": true
+        },
+        {
+          "source": "core-rules/pi/computer-use",
+          "destination": ".pi/agent/skills/trellis-computer-use",
           "destination_home": true
         },
         {
@@ -811,10 +823,12 @@ EOF
   published="$MIRROR/core-rules/inheritance-manifest.json"
   [ -f "$published" ]
 
-  # The two private entries are gone.
+  # The two private entries are gone; the public computer-use user link stays.
   jq -e '[.harnesses.shared_agents.links[] | select(.source_children == "core-rules/pi/agents")] | length == 0' \
     "$published" >/dev/null
   jq -e '[.harnesses.user.links[] | select(.source == "core-rules/skills/herdr-foreman")] | length == 0' \
+    "$published" >/dev/null
+  jq -e '[.harnesses.user.links[] | select(.source == "core-rules/pi/computer-use" and .destination == ".pi/agent/skills/trellis-computer-use")] | length == 1' \
     "$published" >/dev/null
 
   # Everything else — key order, harness order, sibling entries, the user link
@@ -827,7 +841,7 @@ EOF
          == ["core-rules/pi/extensions/trellis.ts", "core-rules/pi/hooks/dispatch.sh"]' "$published" >/dev/null
   jq -e '.harnesses.pi.links[1].executable == true' "$published" >/dev/null
   jq -e '[.harnesses.user.links[] | .source]
-         == ["core-rules/hooks/herdr-foreman-session.sh"]' "$published" >/dev/null
+         == ["core-rules/pi/computer-use", "core-rules/hooks/herdr-foreman-session.sh"]' "$published" >/dev/null
   jq -e '.harnesses.user.links[0].destination_home == true' "$published" >/dev/null
   jq -e '(.harnesses.shared_agents.render | length) == 0' "$published" >/dev/null
 
@@ -1002,6 +1016,23 @@ SH
   [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before" ]
 }
 
+@test "projection refuses a duplicated private user skill entry instead of guessing" {
+  jq '.harnesses.user.links += [.harnesses.user.links[1]]' \
+    "$SOURCE/core-rules/inheritance-manifest.json" > "$SANDBOX/dup-user-manifest.json"
+  cat "$SANDBOX/dup-user-manifest.json" > "$SOURCE/core-rules/inheritance-manifest.json"
+  reseal_source_release 'duplicated private user skill entry'
+  printf 'unchanged mirror\n' > "$MIRROR/README.md"
+  before="$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)"
+
+  run_sync --apply
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'names private source core-rules/skills/herdr-foreman 3 times in user.links'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *'applied.'* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$MIRROR/README.md" | cut -d ' ' -f 1)" = "$before" ]
+}
+
 @test "projection refuses a private entry whose destination semantics were altered" {
   jq '.harnesses.user.links[0].destination = ".claude/skills/renamed-foreman"' \
     "$SOURCE/core-rules/inheritance-manifest.json" > "$SANDBOX/altered-manifest.json"
@@ -1090,12 +1121,15 @@ SH
   [ "$(printf '%s' "$plan" | jq '.artifacts | length')" -gt 0 ]
   [ "$(printf '%s' "$plan" | jq '[.artifacts[] | select(.destination | test("\\.agents/agents/"))] | length')" -eq 0 ]
 
-  # The user surface keeps its hook and output-style links and its settings
-  # render; only the private skill link is gone.
+  # The user surface keeps its hook and output-style links, its settings
+  # render, and the public computer-use skill link; only the private skill
+  # links are gone.
   run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness user
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | .destination | sub("^.*/\\.claude/"; ".claude/")] | sort | join(",")')" = \
+  [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | .destination | select(test("\\.claude/")) | sub("^.*/\\.claude/"; ".claude/")] | sort | join(",")')" = \
     '.claude/hooks/herdr-foreman-session.sh,.claude/output-styles/trellis-orchestration.md,.claude/settings.json' ]
+  [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | select(.destination | test("\\.pi/agent/skills/trellis-computer-use$")) | .source] | join(",")')" = \
+    'core-rules/pi/computer-use' ]
 }
 
 @test "removing a required portable manifest source fails closure at the business boundary" {

@@ -6,6 +6,37 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [v1.3.0] — 2026-09-17
+
+### Added
+
+- **User skills are stored by Trellis, not copied into each harness.** Skills a harness loads
+  from the home directory now have two canonical locations: Trellis-authored skills stay in the
+  verified release payload, and third-party skills live as real directories under
+  `$TRELLIS_HOME/skills/<name>`. Harness skill directories hold only Trellis-owned symlinks.
+- **One harness table for user skills** (`scripts/lib/skill-roots.sh`): `claude` →
+  `~/.claude/skills`; `codex` and `pi` together → `~/.agents/skills` (one shared link); `pi`
+  alone → `~/.pi/agent/skills`; `codex` alone → `~/.codex/skills`. A live probe of Codex 0.154.0
+  confirmed it discovers both `~/.agents/skills` and `~/.codex/skills` and lists a name present
+  in both twice. The manifest validator rejects a user skill link that would expose one name
+  twice to a harness.
+- **`trellis skills list|import|link|unlink`.** `import` moves a skill directory into the store,
+  deletes other same-name copies in harness roots only when they are identical
+  (`diff -r`, ignoring `.DS_Store`), replaces harness symlinks that pointed at the source, and
+  links it per its optional `trellis-skill.json` harness set (default all three). Any differing
+  copy or unowned path refuses before mutation. Links are recorded in
+  `$TRELLIS_HOME/state/user-skills.json`; nothing unowned is replaced.
+- **`doctor` reports user skill roots.** It warns on real directories (stray copies), dangling
+  or foreign links, and a name visible twice to one harness. Claude.ai-synced skills and Codex
+  system skills are exempt. Report-only.
+
+### Changed
+
+- The user surface now links `trellis-computer-use` into `~/.pi/agent/skills` from the release
+  (`core-rules/pi/computer-use`, which gains the cursor-overlay guidance), replacing the hand-copy
+  step in `docs/PI-COMPUTER-USE.md`. A hand-placed identical copy migrates with
+  `trellis attach --user --adopt-identical`.
+
 ## [v1.2.1] — 2026-09-08
 
 ### Fixed

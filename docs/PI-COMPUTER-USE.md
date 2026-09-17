@@ -143,22 +143,21 @@ does not patch the Cua binary or claim the rendering defect is fixed.
 
 ```bash
 pi install "$PI_CUA_PREFIX/node_modules/pi-mcp-adapter"
-mkdir -p "$HOME/.local/bin" "$HOME/.pi/agent/skills/trellis-computer-use"
+mkdir -p "$HOME/.local/bin"
 test ! -e "$HOME/.local/bin/agent-browser"
 test ! -L "$HOME/.local/bin/agent-browser"
 ln -s "$PI_CUA_PREFIX/node_modules/.bin/agent-browser" "$HOME/.local/bin/agent-browser"
-PI_CUA_SKILL="$HOME/.pi/agent/skills/trellis-computer-use/SKILL.md"
-if [ -e "$PI_CUA_SKILL" ] || [ -L "$PI_CUA_SKILL" ]; then
-  cmp "$TRELLIS_REPO_ROOT/core-rules/pi/computer-use/SKILL.md" "$PI_CUA_SKILL"
-else
-  cp "$TRELLIS_REPO_ROOT/core-rules/pi/computer-use/SKILL.md" "$PI_CUA_SKILL"
-fi
+test -L "$HOME/.pi/agent/skills/trellis-computer-use"
 ```
 
 If the browser command already exists, inspect its target and version; retain a
-matching installation instead of replacing it. Likewise preserve a customized
-existing skill. The skill is an explicitly installed user resource, not a
-source-checkout symlink or an automatically attached project surface.
+matching installation instead of replacing it. The `trellis-computer-use` skill
+arrives as a Trellis-managed link from the active release — `trellis attach
+--user` creates it — and the `test -L` above fails closed while the user surface
+is not attached. Never copy `SKILL.md` by hand: a real directory at that path
+is an ownership conflict that blocks `attach --user`. If a hand-placed copy is
+in the way, run `trellis attach --user --adopt-identical` when its bytes match
+the release, otherwise remove the copy by hand and run `trellis attach --user`.
 
 Merge this server into `~/.pi/agent/mcp.json`, preserving other servers/settings.
 Replace `ABSOLUTE_CUA_DRIVER_PATH` with the absolute value of
@@ -217,7 +216,7 @@ named session. The displayed confirmation and image were independently checked.
 
 Remove only this profile's local package entry with
 `pi remove "$PI_CUA_PREFIX/node_modules/pi-mcp-adapter"`, remove its `cua` server
-entry and copied skill, and restart Pi. Preserve other packages, servers, and
+entry and the `trellis-computer-use` skill link, and restart Pi. Preserve other packages, servers, and
 customizations. Close this profile's browser sessions before removing its CLI
 symlink or tool directory. To disable daemon autostart, use
 `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.trycua.cua-driver.plist"`.

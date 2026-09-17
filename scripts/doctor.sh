@@ -2048,6 +2048,10 @@ else
       printf '%s\n' '  [manual] user attachment is report-only; remedy: review, then use trellis attach --user for an unmanaged surface or trellis relink --user for an owned surface' ;;
   esac
 fi
+# User skill roots live under the account HOME (destination_home leaves), not
+# under TRELLIS_HOME ($HOME_PATH): pass the runtime HOME as the checked home.
+# Report-only like the user surface; --fix never touches harness roots.
+run_check '  ' hc_user_skill_roots "${HOME:-}" "$HOME_PATH" || true
 run_check '  ' hc_usage_cli "$HOME_PATH" || true
 run_check '  ' hc_usage_root "$HOME_PATH" || true
 run_check '  ' hc_usage_store "$HOME_PATH" || true

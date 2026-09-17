@@ -9,6 +9,8 @@ if [ "${TRELLIS_LIBS_PRELOADED:-}" != 1 ]; then
   _SURFACE_PLAN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   # shellcheck source=trellis-home.sh
   . "$_SURFACE_PLAN_LIB_DIR/trellis-home.sh"
+  # shellcheck source=skill-roots.sh
+  . "$_SURFACE_PLAN_LIB_DIR/skill-roots.sh"
 else
   _SURFACE_PLAN_LIB_DIR=""
 fi
@@ -755,6 +757,8 @@ surface_plan_emit_harness() {
 
 surface_plan_validate_manifest() {
   local manifest="$1" harness require_user=false require_pi=false
+  local shared_root pi_root codex_root destinations_file destination skill
+  local shared_names="" pi_names="" codex_names="" nl pi_scan codex_scan
 
   for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
     if [ "$harness" = "user" ]; then
@@ -900,6 +904,71 @@ surface_plan_validate_manifest() {
     surface_plan_err "inheritance manifest is malformed or unsafe: $manifest"
     return "$TRELLIS_EX_STATE"
   fi
+
+  # Duplicate-exposure rule (SC2/SC3): one harness must never see the same
+  # user skill name twice. The shared codex+pi root overlaps both solo
+  # roots, so a name under the shared root may not repeat under the pi
+  # solo root (pi would see it twice) nor under the codex solo root (codex
+  # would see it twice). Root strings come from the harness table in
+  # skill-roots.sh, not from literals here.
+  if ! jq -e '.harnesses | has("user")' "$manifest" >/dev/null 2>&1; then
+    return 0
+  fi
+  shared_root="$(skill_roots_for_harnesses codex pi)" || return "$?"
+  pi_root="$(skill_roots_for_harnesses pi)" || return "$?"
+  codex_root="$(skill_roots_for_harnesses codex)" || return "$?"
+  surface_plan_make_tempfile || return "$?"
+  destinations_file="$_SURFACE_PLAN_LAST_TMP"
+  if ! jq -r '.harnesses.user.links[] | select(has("destination")) | .destination' "$manifest" > "$destinations_file"; then
+    surface_plan_err "could not enumerate user skill destinations: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  while IFS= read -r destination || [ -n "$destination" ]; do
+    [ -n "$destination" ] || continue
+    case "$destination" in
+      "$shared_root"/*)
+        skill="${destination#"$shared_root"/}"
+        skill="${skill%%/*}"
+        [ -n "$skill" ] || continue
+        shared_names="${shared_names}${skill}
+"
+        ;;
+      "$pi_root"/*)
+        skill="${destination#"$pi_root"/}"
+        skill="${skill%%/*}"
+        [ -n "$skill" ] || continue
+        pi_names="${pi_names}${skill}
+"
+        ;;
+      "$codex_root"/*)
+        skill="${destination#"$codex_root"/}"
+        skill="${skill%%/*}"
+        [ -n "$skill" ] || continue
+        codex_names="${codex_names}${skill}
+"
+        ;;
+    esac
+  done < "$destinations_file"
+  [ -n "$shared_names" ] || return 0
+  nl='
+'
+  pi_scan="${nl}${pi_names}"
+  codex_scan="${nl}${codex_names}"
+  while IFS= read -r skill || [ -n "$skill" ]; do
+    [ -n "$skill" ] || continue
+    case "$pi_scan" in
+      *"${nl}${skill}${nl}"*)
+        surface_plan_err "user skill '$skill' is exposed twice to one harness via '$shared_root' and '$pi_root': $manifest"
+        return "$TRELLIS_EX_STATE"
+        ;;
+    esac
+    case "$codex_scan" in
+      *"${nl}${skill}${nl}"*)
+        surface_plan_err "user skill '$skill' is exposed twice to one harness via '$shared_root' and '$codex_root': $manifest"
+        return "$TRELLIS_EX_STATE"
+        ;;
+    esac
+  done <<< "$shared_names"
   return 0
 }
 

@@ -1080,19 +1080,21 @@ stage_verified_payload() {
 # actually satisfy. The verified payload's manifest is read-only input and stays
 # byte-identical; only the disposable stage is rewritten.
 #
-# Two of its link entries name sources the positive allowlist deliberately
-# withholds -- `core-rules/pi/agents` (the provider roster) and
-# `core-rules/skills/herdr-foreman` (the executable skill that encodes it). A
-# published manifest that still declared them would hand every mirror user a
-# planner that fails closed on `required source is missing from immutable
-# payload` for a source they can never obtain.
+# Two of its link sources name payload paths the positive allowlist
+# deliberately withholds -- `core-rules/pi/agents` (the provider roster) and
+# `core-rules/skills/herdr-foreman` (the executable skill that encodes it). The
+# skill source carries two user link entries (the Claude root and the shared
+# Codex+pi root); both project out. A published manifest that still declared
+# them would hand every mirror user a planner that fails closed on
+# `required source is missing from immutable payload` for a source they can
+# never obtain.
 #
 # This is emphatically NOT "drop entries whose source is absent". A dangling
 # source the allowlist did not intend to withhold is a real publication defect,
 # and `ref_integrity_check` plus the closure tests exist to catch it; a blanket
 # filter here would swallow exactly that signal. So each private entry is
 # matched by its full declared shape and removed only then. Adding a key to
-# either entry in `core-rules/inheritance-manifest.json` is therefore a
+# any entry in `core-rules/inheritance-manifest.json` is therefore a
 # two-place edit -- the manifest and the expectations below -- which is the same
 # deliberate cost the `delist_prune` pairing already charges.
 #
@@ -1112,7 +1114,10 @@ import json
 import sys
 
 # (harness, full expected entry shape). The source string is read back out of
-# the shape, so the identity predicate and the shape check cannot drift.
+# the shape, so the identity predicate and the shape check cannot drift. The
+# herdr-foreman source carries two entries (one per harness root), so the
+# removal loop below groups expectations by source: matching per entry would
+# count the pair as a duplicate of itself.
 PRIVATE_ENTRIES = (
     (
         "shared_agents",
@@ -1128,6 +1133,14 @@ PRIVATE_ENTRIES = (
         {
             "source": "core-rules/skills/herdr-foreman",
             "destination": ".claude/skills/herdr-foreman",
+            "destination_home": True,
+        },
+    ),
+    (
+        "user",
+        {
+            "source": "core-rules/skills/herdr-foreman",
+            "destination": ".agents/skills/herdr-foreman",
             "destination_home": True,
         },
     ),
@@ -1166,9 +1179,20 @@ for harness, expected in PRIVATE_ENTRIES:
     if not isinstance(links, list):
         refuse("staged inheritance manifest has no %s.links array" % harness)
 
+grouped = {}
+group_order = []
+for harness, expected in PRIVATE_ENTRIES:
     private_source = next(
         expected[key] for key in SOURCE_KEYS if key in expected
     )
+    if private_source not in grouped:
+        grouped[private_source] = []
+        group_order.append(private_source)
+    grouped[private_source].append((harness, expected))
+
+for private_source in group_order:
+    items = grouped[private_source]
+    expected_harnesses = set(harness for harness, _ in items)
     matched = [
         (name, index, entry)
         for name, candidate in harnesses.items()
@@ -1180,22 +1204,32 @@ for harness, expected in PRIVATE_ENTRIES:
     # own output, so a re-published mirror is not a second, different manifest.
     if not matched:
         continue
-    if any(name != harness for name, _, _ in matched):
+    if any(name not in expected_harnesses for name, _, _ in matched):
         refuse("staged inheritance manifest has misplaced or cross-array private source %s" % private_source)
-    if len(matched) > 1:
+    remaining = [(name, entry) for name, _, entry in matched]
+    for harness, expected in items:
+        hit = None
+        for entry_harness, entry in remaining:
+            if entry_harness != harness:
+                continue
+            if (entry.keys() == expected.keys()
+                    and all(type(entry[key]) is type(value) and entry[key] == value
+                            for key, value in expected.items())):
+                hit = (entry_harness, entry)
+                break
+        if hit is None:
+            refuse(
+                "staged inheritance manifest entry for private source %s in %s.links "
+                "does not match the withheld shape" % (private_source, harness)
+            )
+        remaining.remove(hit)
+    if remaining:
         refuse(
             "staged inheritance manifest names private source %s %d times in %s.links"
-            % (private_source, len(matched), harness)
+            % (private_source, len(matched), remaining[0][0])
         )
-    _, index, entry = matched[0]
-    if (entry.keys() != expected.keys()
-            or any(type(entry[key]) is not type(value) or entry[key] != value
-                   for key, value in expected.items())):
-        refuse(
-            "staged inheritance manifest entry for private source %s in %s.links "
-            "does not match the withheld shape" % (private_source, harness)
-        )
-    del links[index]
+    for name, index, _ in sorted(matched, key=lambda triple: triple[1], reverse=True):
+        del harnesses[name]["links"][index]
 
 with open(path, "w", encoding="utf-8") as handle:
     handle.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")

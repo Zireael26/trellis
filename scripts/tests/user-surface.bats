@@ -713,3 +713,62 @@ teardown() {
   [ ! -L "$(user_owner_path)" ]
 }
 
+@test "attach relink detach manage the release user skill links" {
+  local first=3.0.0 second=3.0.1 agents_link pi_link owner
+  agents_link="$HOME/.agents/skills/herdr-foreman"
+  pi_link="$HOME/.pi/agent/skills/trellis-computer-use"
+  make_full_user_release "$first"
+
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release "$first"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$agents_link" ]
+  [ "$(readlink "$agents_link")" = "$TRELLIS_HOME/releases/$first/payload/core-rules/skills/herdr-foreman" ]
+  [ -L "$pi_link" ]
+  [ "$(readlink "$pi_link")" = "$TRELLIS_HOME/releases/$first/payload/core-rules/pi/computer-use" ]
+  owner="$(user_owner_path)"
+  jq -e --arg destination "$agents_link" '([.artifacts[] | select(.destination == $destination and .kind == "symlink")] | length) == 1' "$owner" >/dev/null
+  jq -e --arg destination "$pi_link" '([.artifacts[] | select(.destination == $destination and .kind == "symlink")] | length) == 1' "$owner" >/dev/null
+
+  make_full_user_release "$second"
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$second"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$agents_link" ]
+  [ "$(readlink "$agents_link")" = "$TRELLIS_HOME/releases/$second/payload/core-rules/skills/herdr-foreman" ]
+  [ -L "$pi_link" ]
+  [ "$(readlink "$pi_link")" = "$TRELLIS_HOME/releases/$second/payload/core-rules/pi/computer-use" ]
+  jq -e --arg release "$second" '.release == $release' "$owner" >/dev/null
+
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$agents_link" ]
+  [ ! -L "$agents_link" ]
+  [ ! -e "$pi_link" ]
+  [ ! -L "$pi_link" ]
+  [ ! -e "$owner" ]
+  [ ! -L "$owner" ]
+}
+
+@test "configure --release moves the release user skill links" {
+  local configure_source agents_link pi_link
+  configure_source="$(make_configure_source)"
+  agents_link="$HOME/.agents/skills/herdr-foreman"
+  pi_link="$HOME/.pi/agent/skills/trellis-computer-use"
+  make_full_user_release 2.0.0
+
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$agents_link")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/skills/herdr-foreman" ]
+  [ "$(readlink "$pi_link")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/pi/computer-use" ]
+  make_full_user_release 2.0.1
+
+  run "$USER_CLI" configure \
+    --source "$configure_source" \
+    --home "$TRELLIS_HOME" \
+    --release 2.0.1 \
+    --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$agents_link")" = "$TRELLIS_HOME/releases/2.0.1/payload/core-rules/skills/herdr-foreman" ]
+  [ "$(readlink "$pi_link")" = "$TRELLIS_HOME/releases/2.0.1/payload/core-rules/pi/computer-use" ]
+  jq -e '.release == "2.0.1"' "$(user_owner_path)" >/dev/null
+}
+

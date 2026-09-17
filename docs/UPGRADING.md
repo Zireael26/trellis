@@ -146,9 +146,11 @@ where a command supports it.
 
 `trellis attach --user` manages the machine-level user surface from an
 installed, verified release. It is separate from project attachments: it takes
-no project path, fleet, or harness selector. The managed user surface is
-Claude Code only: the manifest's `user` group renders three `.claude/` links
-plus `.claude/settings.json`, and no other harness has a user-level surface.
+no project path, fleet, or harness selector. The manifest's `user` group links
+release skills into harness discovery roots alongside two `.claude/` leaves and
+the `.claude/settings.json` render: `herdr-foreman` for all three harnesses
+(`.claude/skills` and the shared `.agents/skills` root Codex and pi both read)
+and `trellis-computer-use` for pi only (`.pi/agent/skills`).
 
 The normal first attach uses the active release (or an explicitly selected
 installed release):
@@ -219,6 +221,41 @@ configure finalizes it and succeeds. Otherwise, if relink cannot complete,
 configure compensates the user surface, restores the prior configuration and
 launcher, and returns the initiating failure; it never reports success with a
 mixed configuration and user surface.
+
+### User skill store
+
+Release skills above are one half of the user-global skill surface. The other
+half is the operator skill store: third-party and operator-authored skills live
+as real directories only under `$TRELLIS_HOME/skills/<name>/`, and each harness
+discovery root holds only Trellis-managed links into the store. A skill declares
+its harness set in an optional `trellis-skill.json`
+(`{"harnesses": ["claude", "codex", "pi"]}`; absent means all three); the set
+maps to discovery roots by one table — `claude` → `~/.claude/skills`,
+`codex`+`pi` together → the shared `~/.agents/skills` link, `pi` alone →
+`~/.pi/agent/skills`, `codex` alone → `~/.codex/skills` — so one skill is never
+visible twice to one harness.
+
+Manage the store with `trellis skills list|import|link|unlink`:
+
+```sh
+"$TRELLIS" skills list
+"$TRELLIS" skills import <dir>...
+"$TRELLIS" skills link [name...]
+"$TRELLIS" skills unlink <name>
+```
+
+`import` moves one real skill directory into the store and removes other copies
+of the same name in harness roots only when byte-identical; a differing copy, a
+name already in the store, or a collision with a release user skill refuses with
+exit `3` and names the path, before anything moves. `link` reconciles owned
+links from each skill's harness set (narrowing a set removes the links it drops),
+`unlink` removes only owned links and leaves the store untouched, and an unowned
+existing path is never replaced or deleted. Every created link is recorded in
+`$TRELLIS_HOME/state/user-skills.json`. A malformed harness set exits `2`.
+
+`doctor` reports the state without changing it: a real directory in a harness
+root warns as a stray copy (remedy `trellis skills import`), as do dangling or
+foreign links and one skill name visible twice to a single harness.
 
 **Criterion 6 notice — project surfaces are separate.** This user-surface
 lifecycle does not refresh project attachments. Project templates and links are
