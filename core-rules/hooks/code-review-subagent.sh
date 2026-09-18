@@ -181,9 +181,21 @@ if [ "$NONDOC_COUNT" -eq 0 ]; then
 fi
 
 # --- Gather the diff for the reviewer (capped) ---
-DIFF=$(_cr_full_diff | head -c 200000)
+# SAFETY: marker identity covers the FULL change set, never the capped prefix:
+# two diffs sharing a 200 KB prefix must hash differently. The reviewer payload
+# stays capped (provider cost); only the hash sees the whole diff.
+FULL_DIFF=$(_cr_full_diff)
+FULL_BYTES=$(printf '%s' "$FULL_DIFF" | wc -c | tr -d ' ')
+DIFF=$(printf '%s' "$FULL_DIFF" | head -c 200000)
 if [ -z "$DIFF" ]; then
   exit 0
+fi
+# SAFETY: a diff larger than the payload cap is only prefix-reviewed. The flag
+# below forces the completion check away from completed so no marker is ever
+# written for it and the next Stop re-reviews.
+CR_TRUNCATED=0
+if [ "$FULL_BYTES" -gt 200000 ]; then
+  CR_TRUNCATED=1
 fi
 
 # --- Idempotency marker ---
@@ -192,8 +204,9 @@ fi
 # diff (git hash-object --stdin — always present in a git hook, no coreutils
 # dependency). If this exact diff was already reviewed this turn, exit 0. The marker is touched only AFTER a completed
 # review (clean + advisory paths), NOT on the block path — a blocked turn must
-# re-review once the diff changes via the fix.
-DIFF_HASH=$(printf '%s' "$DIFF" | git hash-object --stdin 2>/dev/null)
+# re-review once the diff changes via the fix. Hashed over the FULL diff (see
+# above), so a prefix-reviewed diff never shares a marker with its full self.
+DIFF_HASH=$(printf '%s' "$FULL_DIFF" | git hash-object --stdin 2>/dev/null)
 MARKER="$REPO_ROOT/.claude/.review-done-${DIFF_HASH}"
 if [ -f "$MARKER" ]; then
   exit 0
@@ -288,6 +301,12 @@ fi
 
 # Only a validated completed review authorizes the idempotency marker. A
 # degraded deterministic fallback remains advisory and is retried next Stop.
+# SAFETY: a truncated (prefix-only) review must never mint a completed marker —
+# force the status away from completed so the marker below is never written.
+if [ "$CR_TRUNCATED" -eq 1 ]; then
+  COMPLETION_STATUS="incomplete"
+  printf '%s\n' "code-review-subagent: review incomplete: diff (${FULL_BYTES} bytes) exceeds the 200000-byte reviewer payload cap; only the prefix was reviewed, no marker written — will re-review on the next Stop" >&2
+fi
 if [ "$COMPLETION_STATUS" != "completed" ]; then
   exit 0
 fi

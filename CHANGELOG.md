@@ -6,6 +6,52 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-18
+
+Spec 050 (`specs/050-lean-enforcement/`): gate rows must not render clean over work that never ran.
+
+### Fixed
+- **process-gate aggregator (C7-F18).** An unset, empty or blank-only `PROCESS_GATE_STACK_VALIDATORS`
+  with a declared profile renders the Stack profile row `warn`, never `pass`; a `check-slop.sh` that
+  exits nonzero or prints a token outside the contract fails the Anti-slop row instead of `n/a`.
+- **check-slop.sh (C7-F15).** An unresolvable `--range` fails visibly; scanner, native-parser and
+  ratchet/sort failures degrade the row and are named, never swallowed by `|| true`.
+- **check-tests.sh (C7-F17 residual).** The coverage command runs under the portable timeout with
+  its exit captured; mutation clone/checkout, control and mutant stderr reach the warning.
+- **Review hooks (Claude and Codex).** The `.review-done-<hash>` marker is keyed on the full diff,
+  not the 200,000-byte reviewer payload; an over-cap diff reports the review incomplete and writes
+  no marker, so the next Stop re-reviews.
+- **herdr-foreman probes (C7-F02, C7-F03, C7-F28).** Roster check asserts set equality; the
+  durability probe runs under a temporary HOME; the three identical RPC cleanup blocks live in
+  `tests/probe_lib.sh`; dead `read_probe`, an unreachable render fallback and `tick.sh`'s unused
+  `SKILL_DIR` block are gone. `roles.json`'s `harness` property is kept: a test reads it.
+
+### Added
+- **Push-callback protocol.** A worker's or foreman's final act is `herdr agent prompt <apex-pane>`;
+  the apex waits with a backgrounded `herdr agent wait`, never a sleep loop. Live probe receipt in
+  `specs/050-lean-enforcement/CALLBACK-PROBE-2026-09-18.md`; `foreman-start.sh`'s session-binding
+  poll now uses `herdr agent wait`, and its two remaining bounded backoffs carry `SAFETY:` lines.
+- **Broken-tool fixtures** for every live anti-slop native lane (oxlint, ruff, mypy) and the dormant
+  Go fragment: a crashing engine degrades, never renders clean.
+- **Advisory `actionlint` and `shfmt -d` validators** for the Trellis repository itself
+  (`.claude/skills/process-gate-local/validators/`, repo-local, not a payload leaf). With the binary
+  absent they render `unavailable` (warn), never pass. Promotion to required is a separate posture
+  change after the observation period.
+
+
+### Changed
+- **Loop budget rates are standard list prices, not promotional ones.** Trellis runs on
+  subscriptions rather than metered API keys, so a promotional API rate is never what the
+  fleet is charged and a ceiling derived from one over-buys work the moment the promotion
+  lapses. `usd_per_mtok` moves 25.00 → **50.00** (Claude Fable 5.1 output, verified
+  2026-09-18): the fleet runs Opus 5 ($25/MTok) and Fable 5.1 ($50/MTok), and the
+  documented rule is to price the most expensive model a loop may reach, so the $1000
+  fallback ceiling now maps onto 20,000,000 output tokens instead of 40,000,000.
+  `codex_usd_per_mtok` moves 10.00 → **50.00** (GPT-6 Astra standard output); GPT-5.6
+  Sol's published $4/$20 is promotional at least through 2026-11-21 with no published
+  post-promotional price, so the GPT lane is deliberately metered at Astra's standard rate.
+  Also corrects a stale note: Sonnet 5's scheduled rise to $15 on 2026-09-01 was cancelled.
+
 ## [v1.3.0] — 2026-09-17
 
 ### Added

@@ -190,10 +190,16 @@ run_gate 4 "$SKILL_DIR/scripts/check-docs.sh"
 profile="${PROCESS_GATE_STACK_PROFILE:-}"
 if [ -z "$profile" ] || [ "$profile" = "n-a" ]; then
   set_result 5 "n/a" "profile=${profile:-<unset>} (no validators run)"
+elif [ -z "${PROCESS_GATE_STACK_VALIDATORS+set}" ]; then
+  set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS unset (no validators run)"
 else
   validators=("${PROCESS_GATE_STACK_VALIDATORS[@]:-}")
-  if [ "${#validators[@]}" -eq 0 ]; then
-    set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS empty"
+  nonblank=0
+  for v in "${validators[@]}"; do
+    [ -n "$v" ] && nonblank=$((nonblank + 1))
+  done
+  if [ "$nonblank" -eq 0 ]; then
+    set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS empty (no validators run)"
   else
     worst="pass"; combined=""
     for v in "${validators[@]}"; do
@@ -230,22 +236,29 @@ run_gate 7 "$SKILL_DIR/scripts/check-analyze.sh"
 # project renders ➖ n/a. Deliberately absent from the PR-shape downgrade set:
 # the only posture that can fail is one the project opted into.
 #
-# Existence is checked FIRST, and a missing script is a FAIL. Reading the level
-# off the first printed token means a shell "no such file" error falls through the
-# `*)` arm to `n/a` — so a project whose process-gate leaf predates row 9 would
-# report a clean n/a instead of a missing validator, the only gate in this
-# aggregator that fails open. Every run_gate gate lands a missing script in its
-# `*) status="fail"` arm; this one has to say so explicitly.
+# Existence is checked FIRST, and a missing script is a FAIL. The row reads the
+# level off check-slop.sh's exit code first and its first printed token second:
+# a nonzero rc fails the row even with no contract token, and past the contract
+# tokens (pass/warn/fail/info) the `*)` arm fails rather than rendering n/a —
+# historically this arm rendered n/a, the only gate in this aggregator that
+# failed open. Every run_gate gate lands a missing script in its
+# `*) status="fail"` arm; this one says so explicitly.
 if [ ! -f "$SKILL_DIR/scripts/check-slop.sh" ]; then
   set_result 8 "fail" "fail Anti-slop: validator not found at scripts/check-slop.sh — this process-gate leaf predates gate row 9; re-run the skill rollout"
 else
-  slop_out="$(bash "$SKILL_DIR/scripts/check-slop.sh" --range="$RANGE" 2>&1)"
-  case "$(printf "%s\n" "$slop_out" | head -1 | awk '{print $1}')" in
-    pass) set_result 8 "pass" "$slop_out" ;;
-    warn) set_result 8 "warn" "$slop_out" ;;
-    fail) set_result 8 "fail" "$slop_out" ;;
-    *)    set_result 8 "n/a"  "$slop_out" ;;
-  esac
+  slop_out="$(bash "$SKILL_DIR/scripts/check-slop.sh" --range="$RANGE" 2>&1)"; slop_rc=$?
+  slop_token="$(printf "%s\n" "$slop_out" | head -1 | awk '{print $1}')"
+  if [ "$slop_rc" -ne 0 ]; then
+    set_result 8 "fail" "$slop_out"
+  else
+    case "$slop_token" in
+      pass) set_result 8 "pass" "$slop_out" ;;
+      warn) set_result 8 "warn" "$slop_out" ;;
+      fail) set_result 8 "fail" "$slop_out" ;;
+      info) set_result 8 "n/a"  "$slop_out" ;;
+      *)    set_result 8 "fail" "$slop_out" ;;
+    esac
+  fi
 fi
 
 # --- Render verdict --------------------------------------------------------

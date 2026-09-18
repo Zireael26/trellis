@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
-import json
 import re
 import ssl
 import socket
@@ -199,10 +198,6 @@ def write_probe(
     body_path = raw_dir / f"probe-{observation.agent}.html"
     atomic_write(body_path, _sanitize_body(body))
     return metadata_path, body_path
-
-
-def read_probe(path: Path) -> ProbeObservation:
-    return ProbeObservation(**json.loads(path.read_text(encoding="utf-8")))
 
 
 def _safe_headers(items) -> dict[str, str]:

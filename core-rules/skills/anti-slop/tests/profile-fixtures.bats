@@ -20,6 +20,36 @@ setup() {
   [ -f "$LIB" ] || skip "pattern lib not found at $LIB"
   # shellcheck disable=SC1090
   . "$LIB"
+  AUDIT="$SKILL/scripts/audit-slop.sh"
+  # Red-phase seam: AUDIT_BIN points at a deliberately clean-rendering stub
+  # to prove these cases fail when a crash is swallowed, then at the real
+  # audit for the green run. Unset in normal runs.
+  AUDIT_BIN="${AUDIT_BIN:-$AUDIT}"
+}
+
+teardown() {
+  [ -z "${REPO:-}" ] || rm -rf "$REPO"
+  [ -z "${SHIM:-}" ] || rm -rf "$SHIM"
+}
+
+# new_repo — throwaway git repo for audit-slop.sh, which only sees tracked files.
+# Seed files live here, never under a fixtures/ dir: `**/fixtures/**` is a
+# carve-out glob, so content placed there would scan as 0 for the wrong reason.
+new_repo() {
+  REPO="$(mktemp -d)"
+  (
+    cd "$REPO" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "test"
+  )
+}
+
+# broken_engine <path> <name> — crashing stub fixture: empty stdout, exit 2.
+broken_engine() {
+  mkdir -p "$(dirname "$1")"
+  printf '#!/usr/bin/env bash\necho "%s: simulated crash" >&2\nexit 2\n' "$2" > "$1"
+  chmod +x "$1"
 }
 
 # scan <profile-dir> <basename> <lang> -> finding count on stdout
@@ -117,4 +147,68 @@ scan() {
   run bash "$LIB" --self-test
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" != *FAIL* ]] || { echo "$output"; false; }
+}
+
+# --- broken native engines (050 S5, SC8) --------------------------------------
+# Each lane below seeds an INSTALLED profile (the marker that routes to the
+# native engine), a crashing engine stub (empty stdout, exit 2), and source
+# content, then asserts the audit degrades instead of rendering the unrun
+# tool's silence as clean. oxlint/ruff/mypy use CLEAN content — the case where
+# a swallowed crash would fake a clean bill. Go (dormant, no native lane) uses
+# SLOP content with a crashing golangci-lint first on PATH, proving the pattern
+# layer still reports and no native result is ever claimed.
+
+@test "broken oxlint: a crashing TS engine degrades, it never yields clean" {
+  new_repo
+  printf '{"plugins": ["anti-slop"]}\n' > "$REPO/.oxlintrc.json"
+  mkdir -p "$REPO/src"
+  printf 'export const two: number = 2;\n' > "$REPO/src/app.ts"
+  broken_engine "$REPO/node_modules/.bin/oxlint" "broken-oxlint"
+  ( cd "$REPO" && git add -A )
+  run bash -c "cd '$REPO' && '$AUDIT_BIN' --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"degraded to the pattern set for ts"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"lang":"ts","engine":"patterns"'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'"engine":"oxlint"'* ]] || { echo "$output"; false; }
+}
+
+@test "broken ruff: a crashing Python engine degrades, it never yields clean" {
+  new_repo
+  printf '[lint]\nextend-select = ["ANN401", "PGH004"]\n' > "$REPO/ruff.toml"
+  mkdir -p "$REPO/app"
+  printf 'CLEAN = 1\n' > "$REPO/app/client.py"
+  broken_engine "$REPO/.venv/bin/ruff" "broken-ruff"
+  ( cd "$REPO" && git add -A )
+  run bash -c "cd '$REPO' && '$AUDIT_BIN' --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"degraded to the pattern set for py"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"lang":"py","engine":"patterns"'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'"engine":"ruff"'* ]] || { echo "$output"; false; }
+}
+
+@test "broken mypy: a crashing type engine degrades, it never yields clean" {
+  new_repo
+  printf '[mypy]\nwarn_return_any = True\ndisallow_untyped_defs = True\nenable_error_code = ignore-without-code\n' > "$REPO/mypy.ini"
+  mkdir -p "$REPO/app"
+  printf 'CLEAN = 1\n' > "$REPO/app/client.py"
+  broken_engine "$REPO/.venv/bin/mypy" "broken-mypy"
+  ( cd "$REPO" && git add -A )
+  run bash -c "cd '$REPO' && '$AUDIT_BIN' --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"degraded to the pattern set for py"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"lang":"py","engine":"patterns"'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'"engine":"mypy"'* ]] || { echo "$output"; false; }
+}
+
+@test "broken golangci (dormant): a crashing Go engine degrades, it never yields clean" {
+  new_repo
+  printf 'package app\n\nfunc Widen(v any) string {\n\treturn "x"\n}\n' > "$REPO/app.go"
+  SHIM="$(mktemp -d)"
+  broken_engine "$SHIM/golangci-lint" "broken-golangci"
+  ( cd "$REPO" && git add -A )
+  run bash -c "cd '$REPO' && PATH='$SHIM:$PATH' '$AUDIT_BIN' --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"go-empty-interface"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"lang":"go","engine":"patterns"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"dormant"* ]] || { echo "$output"; false; }
 }

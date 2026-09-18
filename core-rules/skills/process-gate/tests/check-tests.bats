@@ -863,3 +863,171 @@ JSON
   [[ "$gate_output" == *"checks ran UNBOUNDED"* ]] || { echo "$gate_output"; false; }
   [ "$(grep -c 'checks ran UNBOUNDED' <<<"$gate_output")" -eq 1 ] || { echo "$gate_output"; false; }
 }
+
+# --- S3 (C7-F17 residual): coverage status is captured, not swallowed ---------
+# Pre-fix the coverage block ran `bash -c "$CMD" || true`: a failing reporter
+# exited nonzero, the status was discarded, and with no parseable percent the
+# gate stayed pass — a red coverage signal rendered as clean. The fix routes
+# coverage through run_with_timeout at the check ceiling and warns naming the
+# command and its status (nonzero or 124/142).
+@test "coverage: a failing coverage command warns and names its status" {
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='exit 7' '$SCRIPT'"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"coverage"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"exited 7"* ]] || { echo "$output"; false; }
+}
+
+# Pre-fix the same block ran UNBOUNDED: a hung reporter sat until the operator
+# killed it. Coverage is a reporter, not the test battery, so it shares the
+# typecheck/lint ceiling (PROCESS_GATE_CHECK_TIMEOUT), not TEST_TIMEOUT.
+# NOTE: against a pre-fix script this hangs the full 600 s (the hang IS the
+# defect, same convention as the hanging-declared-check cases above); the RED
+# receipt bounds it with an outer `timeout` instead of waiting it out.
+@test "coverage: a hanging coverage command is killed at the ceiling and warned" {
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='sleep 600' '$SCRIPT'"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"coverage"* && "$output" == *"exceeded 2s and was killed"* ]] || { echo "$output"; false; }
+  # A ceiling firing must not read as an ordinary nonzero exit.
+  [[ "$output" != *"exited 124"* && "$output" != *"exited 142"* ]] ||
+    { echo "$output"; false; }
+}
+
+# --- S3 (C7-F17 residual): mutation setup stderr reaches the warning ----------
+# Pre-fix clone/checkout ran `>/dev/null 2>&1`: the skip warning named the
+# failure but discarded git's own stderr, so the operator could not see WHY
+# the isolated setup failed. The fix carries the clone/checkout output into
+# the skip warning.
+@test "mutation: clone/checkout failure carries its stderr into the skip warning" {
+  make_mutation_fixture js
+  local real_git shim
+  real_git="$(command -v git)"
+  shim="$(mktemp -d)"
+  # A git shim that fails ONLY the isolated-setup verbs with a sentinel on
+  # stderr; every other git call passes through to the real binary captured
+  # above at runtime (no host path baked into the file).
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" clone "*|*" checkout "*)
+    echo "CLONE-CHECKOUT-STDERR-SENTINEL" >&2
+    exit 1
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+  export REAL_GIT="$real_git"
+  PATH="$shim:$PATH" run_mutation_gate
+  local gate_status="$status" gate_output="$output"
+  unset REAL_GIT
+  rm -rf "$shim"
+  [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"clone/control setup failed"* ]] || { echo "$gate_output"; false; }
+  [[ "$gate_output" == *"CLONE-CHECKOUT-STDERR-SENTINEL"* ]] || { echo "$gate_output"; false; }
+}
+
+# Pre-fix the control run discarded stderr to /dev/null: a control that failed
+# for an environmental reason (missing dep, bad interpreter) skipped as
+# "ambiguous" with no trace of the cause. The fix captures the control
+# output into the skip warning (the mutant run gets the same capture).
+# The wrapper passes the gate's own run_check (PWD is the project) and fails
+# ONLY inside the disposable clone, so worst is still pass when control runs.
+@test "mutation: control run stderr reaches the skip warning" {
+  make_mutation_fixture js
+  cat > "$PROJECT_DIR/control-runner.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$PWD" = "${CLAUDE_PROJECT_DIR:-}" ]; then
+  exit 0
+fi
+echo "CONTROL-STDERR-SENTINEL" >&2
+exit 3
+SH
+  chmod +x "$PROJECT_DIR/control-runner.sh"
+  git -C "$PROJECT_DIR" add control-runner.sh
+  git -C "$PROJECT_DIR" commit -q --amend --no-edit
+  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./control-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=3" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"isolated control exited 3"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"CONTROL-STDERR-SENTINEL"* ]] || { echo "$output"; false; }
+}
+
+# Pre-fix the mutant run discarded stderr to /dev/null: a surviving probe that
+# printed (missing dep warning, noisy harness) warned as "survived" with no
+# trace of what it printed. The fix carries the mutant output into the
+# survive warning via `(mutant output: ...)` (the control run gets the same
+# capture). The wrapper passes the gate's own run_check (PWD is the project)
+# and passes the isolated control (no flip present), then prints a sentinel
+# to stderr while still surviving (exit 0) ONLY on the mutant run, detected
+# via the flipped `.not.toBe` marker (mirroring mutation-runner.sh logic).
+@test "mutation: mutant run stderr reaches the survive warning" {
+  make_mutation_fixture js
+  cat > "$PROJECT_DIR/mutant-runner.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "$PWD" = "${CLAUDE_PROJECT_DIR:-}" ]; then
+  exit 0
+fi
+if [ -f tests/a.test.js ] && grep -qF '.not.toBe' tests/a.test.js; then
+  echo "MUTANT-STDERR-SENTINEL" >&2
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$PROJECT_DIR/mutant-runner.sh"
+  git -C "$PROJECT_DIR" add mutant-runner.sh
+  git -C "$PROJECT_DIR" commit -q --amend --no-edit
+  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./mutant-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=3" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"assertion flip survived"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"MUTANT-STDERR-SENTINEL"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"(mutant output:"* ]] || { echo "$output"; false; }
+}
+
+# --- S3 (C7-F17): the portable runner bounds declared checks without GNU timeout
+# GNU `timeout` is normally absent on macOS; pre-portable-runner, run_check
+# guarded its ceiling with `command -v timeout` and no fallback, so a sleeping
+# declared check ran UNBOUNDED there. Declared checks already route through
+# run_with_timeout on main (4871752d); this case pins that the ceiling fires
+# with only perl on PATH, using the stub-PATH-dir-holding-neither-binary
+# fixture (plan §6). The RED half reconstructs the pre-runner run_check
+# in-tree (same driver convention as the DL-P7-08/09 cases above) and proves
+# it runs the full sleep unbounded; the GREEN half proves the fixed script
+# kills at the ceiling via the perl fallback.
+@test "checks: timeout and gtimeout absent, perl present — a sleeping check is killed at the ceiling" {
+  command -v perl >/dev/null 2>&1 || skip "perl not installed"
+  local skill_dir tb tree
+  skill_dir="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+  tb="$(mktemp -d)"
+  make_toolbox "$tb" perl sleep
+  PATH="$tb" command -v perl    >/dev/null 2>&1 || { echo "perl missing from toolbox"; false; }
+  PATH="$tb" command -v sleep   >/dev/null 2>&1 || { echo "sleep missing from toolbox"; false; }
+  PATH="$tb" command -v timeout >/dev/null 2>&1 && { echo "timeout leaked"; false; }
+  PATH="$tb" command -v gtimeout >/dev/null 2>&1 && { echo "gtimeout leaked"; false; }
+
+  tree="$(mktemp -d)"
+  mkdir -p "$tree/scripts/lib"
+  cp "$skill_dir/scripts/lib/common.sh" "$tree/scripts/lib/common.sh"
+  sed -e 's/^\( *\)if \[ -n "\$PG_TIMEOUT_RUNNER" \]; then$/\1if command -v timeout >\/dev\/null 2>\&1; then/' \
+      -e 's/out="\$(run_with_timeout "\$limit" bash -c "\$cmd" 2>&1)"; rc=\$?/out="$(timeout "$limit" bash -c "$cmd" 2>\&1)"; rc=$?/' \
+      "$skill_dir/scripts/check-tests.sh" > "$tree/scripts/check-tests.sh"
+  chmod +x "$tree/scripts/check-tests.sh"
+  [ "$(grep -cF 'run_with_timeout "$limit"' "$tree/scripts/check-tests.sh")" -eq 0 ] ||
+    { grep -nF 'run_with_timeout "$limit"' "$tree/scripts/check-tests.sh"; false; }
+  bash -n "$tree/scripts/check-tests.sh"
+
+  # RED: the reconstruction has no fallback, so under the stub PATH the
+  # sleeping check runs the full sleep unbounded (else-branch) — no kill
+  # message, only the once-only unbounded warn.
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$tree/scripts/check-tests.sh'"
+  local rec_status="$status" rec_output="$output"
+  # GREEN: the fixed script kills via the perl fallback at the 2 s ceiling.
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$skill_dir/scripts/check-tests.sh'"
+  local fixed_status="$status" fixed_output="$output"
+
+  rm -rf "$tb" "$tree"
+
+  [ "$rec_status" -eq 2 ] || { echo "$rec_output"; false; }
+  [[ "$rec_output" != *"was killed"* ]] || { echo "$rec_output"; false; }
+  [[ "$rec_output" == *"UNBOUNDED"* ]] || { echo "$rec_output"; false; }
+  [ "$fixed_status" -eq 1 ] || { echo "$fixed_output"; false; }
+  [[ "$fixed_output" == *"exceeded 2s and was killed"* ]] || { echo "$fixed_output"; false; }
+}

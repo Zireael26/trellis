@@ -359,6 +359,69 @@ linter_free_path() {
   [[ "$output" == *"native engine failed to run"* ]] || { echo "$output"; false; }
 }
 
+# --- swallowed statuses (050 S2, C7-F15) --------------------------------------
+# Each site below discarded a status with `|| true` and rendered the resulting
+# emptiness as a clean row. One guard per site: each must degrade or fail,
+# never pass.
+
+@test "range: an unresolvable --range fails visibly, it never passes" {
+  posture enforced
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=nope..nope"
+  [ "$status" -ne 0 ]
+  [[ "$output" == fail* ]] || { echo "$output"; false; }
+  [[ "$output" == *"nope..nope"* ]] || { echo "$output"; false; }
+  [[ "$output" != pass* ]] || { echo "$output"; false; }
+}
+
+@test "degradation: a native parser that fails is reported, not swallowed" {
+  # The engine RAN (stub ruff exits 1 with a canned concise report), but the
+  # stage that parses its output fails: stub awk exits 2 on the parser's own
+  # `-v keep=`, which no other awk invocation in the script carries, and
+  # delegates everything else to the real awk.
+  posture enforced
+  seed_stub_ruff
+  FAKEBIN="$(mktemp -d)"
+  REAL_AWK="$(command -v awk)"
+  cat > "$FAKEBIN/awk" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    keep=*) exit 2 ;;
+  esac
+done
+exec "$REAL_AWK" "\$@"
+EOF
+  chmod +x "$FAKEBIN/awk"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    mkdir -p app
+    printf 'CLIENT = 1\n' > app/client.py
+    git add app/client.py
+    git commit -q -m "add clean py"
+  )
+  run bash -c "cd '$PROJECT_DIR' && PATH='$FAKEBIN:$PATH' '$SCRIPT' --range=HEAD~1..HEAD"
+  [[ "$output" == warn* ]] || { echo "$output"; false; }
+  [[ "$output" == *"rc=2"* ]] || { echo "$output"; false; }
+  [[ "$output" != pass* ]] || { echo "$output"; false; }
+  rm -rf "$FAKEBIN"
+}
+
+@test "degradation: a ratchet/sort failure is reported, not swallowed" {
+  # A real slop finding is in the range, but `sort` (candidate listing and the
+  # ratchet alike) fails, so both stages come back empty. Empty must degrade,
+  # never pass.
+  posture enforced
+  FAKEBIN="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$FAKEBIN/sort"
+  chmod +x "$FAKEBIN/sort"
+  commit_and_check "src/slop.ts" "$SLOP_TS"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$FAKEBIN:$PATH' '$SCRIPT' --range=HEAD~1..HEAD"
+  [[ "$output" == warn* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ratchet"* ]] || { echo "$output"; false; }
+  [[ "$output" != pass* ]] || { echo "$output"; false; }
+  rm -rf "$FAKEBIN"
+}
+
 # The stub linter above cannot prove the rule set is narrowed: a canned report only
 # ever emits what it was written to emit, so inverting the requirement (a project
 # rule that is NOT an anti-slop rule) could not break any assertion. These two run

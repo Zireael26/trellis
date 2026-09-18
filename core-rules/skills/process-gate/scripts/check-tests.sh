@@ -292,14 +292,48 @@ run_check "typecheck" "${PROCESS_GATE_TYPECHECK_CMD:-}"
 run_check "lint"      "${PROCESS_GATE_LINT_CMD:-}"
 run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
 
-# Optional: coverage
+# Optional: coverage. Routed through run_with_timeout at the check ceiling like
+# the declared checks above — a hung reporter must be killed, never unbounded —
+# and its status is captured: the old `|| true` swallowed a failing reporter
+# into a silent pass. Coverage is a reporter, not the test battery, so it
+# shares PROCESS_GATE_CHECK_TIMEOUT, not PROCESS_GATE_TEST_TIMEOUT.
+# SAFETY: the coverage command always runs under the CHECK_TIMEOUT ceiling (or
+# the once-only unbounded warn when no runner exists), so a hung reporter is
+# killed at the ceiling exactly like a hung declared check.
 if [ -n "${PROCESS_GATE_COVERAGE_CMD:-}" ]; then
-  out="$(bash -c "$PROCESS_GATE_COVERAGE_CMD" 2>&1 || true)"
-  pct="$(printf "%s" "$out" | grep -oE 'All files[^|]*\|[[:space:]]*[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?$' | head -1)"
-  floor="${PROCESS_GATE_COVERAGE_FLOOR:-0}"
-  if [ -n "$pct" ] && [ "$(printf '%.0f' "$pct")" -lt "$floor" ]; then
-    findings+=("coverage: ${pct}% < floor ${floor}%")
+  set +e
+  if [ -n "$PG_TIMEOUT_RUNNER" ]; then
+    cov_out="$(run_with_timeout "$PROCESS_GATE_CHECK_TIMEOUT" bash -c "$PROCESS_GATE_COVERAGE_CMD" 2>&1)"; cov_rc=$?
+  else
+    cov_out="$(bash -c "$PROCESS_GATE_COVERAGE_CMD" 2>&1)"; cov_rc=$?
+    if [ "$pg_unbounded_warned" = no ]; then
+      pg_unbounded_warned=yes
+      findings+=("checks ran UNBOUNDED: no timeout, gtimeout or perl on PATH — a hung command will not be killed")
+      if [ "$worst" = "pass" ]; then
+        worst="warn"
+      fi
+    fi
+  fi
+  set -e
+  if [ -n "$PG_TIMEOUT_RUNNER" ] && { [ "$cov_rc" -eq 124 ] || [ "$cov_rc" -eq 142 ]; }; then
+    findings+=("coverage: \`$PROCESS_GATE_COVERAGE_CMD\` exceeded ${PROCESS_GATE_CHECK_TIMEOUT}s and was killed")
+    while IFS= read -r line; do
+      findings+=("    $line")
+    done < <(printf "%s\n" "$cov_out" | tail -n 10)
     if [ "$worst" = "pass" ]; then worst="warn"; fi
+  elif [ "$cov_rc" -ne 0 ]; then
+    findings+=("coverage: \`$PROCESS_GATE_COVERAGE_CMD\` exited $cov_rc")
+    while IFS= read -r line; do
+      findings+=("    $line")
+    done < <(printf "%s\n" "$cov_out" | tail -n 10)
+    if [ "$worst" = "pass" ]; then worst="warn"; fi
+  else
+    pct="$(printf "%s" "$cov_out" | grep -oE 'All files[^|]*\|[[:space:]]*[0-9]+(\.[0-9]+)?' | grep -oE '[0-9]+(\.[0-9]+)?$' | head -1 || true)"
+    floor="${PROCESS_GATE_COVERAGE_FLOOR:-0}"
+    if [ -n "$pct" ] && [ "$(printf '%.0f' "$pct")" -lt "$floor" ]; then
+      findings+=("coverage: ${pct}% < floor ${floor}%")
+      if [ "$worst" = "pass" ]; then worst="warn"; fi
+    fi
   fi
 fi
 
@@ -557,17 +591,27 @@ if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; 
     mutation_repo="$mutation_work/repo"
     mutation_head="$(git rev-parse --verify HEAD 2>/dev/null || true)"
     set +e
-    run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" git clone --quiet --shared --no-checkout "$PROJECT_DIR" "$mutation_repo" >/dev/null 2>&1
+    clone_out="$(run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" git clone --quiet --shared --no-checkout "$PROJECT_DIR" "$mutation_repo" 2>&1)"
     clone_rc=$?
     if [ "$clone_rc" -eq 0 ]; then
-      run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" git -C "$mutation_repo" checkout --quiet --detach "$mutation_head" >/dev/null 2>&1
+      checkout_out="$(run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" git -C "$mutation_repo" checkout --quiet --detach "$mutation_head" 2>&1)"
       checkout_rc=$?
     else
+      # No checkout ran: leave checkout_out empty so the setup tail below
+      # carries the clone output once, not duplicated.
+      checkout_out=""
       checkout_rc="$clone_rc"
     fi
     set -e
     if [ "$clone_rc" -ne 0 ] || [ "$checkout_rc" -ne 0 ]; then
       mutation_skip="isolated clone/control setup failed or timed out — skipped"
+      # The setup verbs run --quiet, so anything captured here is git's own
+      # error text; carry it into the warning instead of /dev/null so the
+      # operator can see WHY the isolated setup failed.
+      mutation_setup_tail="$(printf "%s\n%s" "$clone_out" "$checkout_out" | grep -v '^$' | tail -n 5 | tr '\n' ';' || true)"
+      if [ -n "$mutation_setup_tail" ]; then
+        mutation_skip="$mutation_skip (clone/checkout output: ${mutation_setup_tail%;})"
+      fi
     fi
   fi
 
@@ -594,7 +638,7 @@ if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; 
     esac
 
     set +e
-    run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" bash -c 'cd "$1" && exec bash -c "$2"' _ "$mutation_repo" "$mutation_cmd" >/dev/null 2>&1
+    control_out="$(run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" bash -c 'cd "$1" && exec bash -c "$2"' _ "$mutation_repo" "$mutation_cmd" 2>&1)"
     control_rc=$?
     set -e
     if [ "$control_rc" -ne 0 ]; then
@@ -603,6 +647,12 @@ if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; 
         125)     mutation_skip="no bounded timeout runner available — skipped" ;;
         *)       mutation_skip="isolated control exited $control_rc — skipped (mutation result would be ambiguous)" ;;
       esac
+      # A control that fails for an environmental reason must say why: carry
+      # its output into the warning instead of /dev/null.
+      control_tail="$(printf "%s" "$control_out" | grep -v '^$' | tail -n 5 | tr '\n' ';' || true)"
+      if [ -n "$control_tail" ]; then
+        mutation_skip="$mutation_skip (control output: ${control_tail%;})"
+      fi
     fi
   fi
 
@@ -610,7 +660,7 @@ if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; 
     mkdir -p "$mutation_repo/$(dirname "$mutation_target")"
     cp "$mutation_work/mutated" "$mutation_repo/$mutation_target"
     set +e
-    run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" bash -c 'cd "$1" && exec bash -c "$2"' _ "$mutation_repo" "$mutation_cmd" >/dev/null 2>&1
+    mutant_out="$(run_with_timeout "$mutation_timeout" "${mutation_clean_env[@]}" bash -c 'cd "$1" && exec bash -c "$2"' _ "$mutation_repo" "$mutation_cmd" 2>&1)"
     mutant_rc=$?
     set -e
     case "$mutant_rc" in
@@ -625,6 +675,16 @@ if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; 
         ;;
       *)
         mutation_result="mutation spot-check: assertion flip killed in $mutation_target"
+        ;;
+    esac
+    case "$mutant_rc" in
+      0|124|142)
+        # An inconclusive or surviving probe that printed must say what it
+        # printed: carry the mutant output into the warning.
+        mutant_tail="$(printf "%s" "$mutant_out" | grep -v '^$' | tail -n 5 | tr '\n' ';' || true)"
+        if [ -n "$mutant_tail" ]; then
+          mutation_skip="$mutation_skip (mutant output: ${mutant_tail%;})"
+        fi
         ;;
     esac
   fi

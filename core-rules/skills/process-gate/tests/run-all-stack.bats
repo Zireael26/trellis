@@ -211,3 +211,43 @@ EOF
   [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }  # it was FOUND, not missing
   [ -f "$INVOKED_MARKER" ]                             # and it actually RAN
 }
+
+# --- S1 guards (C7-F18): three validator-array shapes warn, never pass -----
+
+@test "stack: an UNSET validators array with a declared profile warns, never passes" {
+  local cfgdir="$PROJECT_DIR/.claude/skills/process-gate-local"
+  mkdir -p "$cfgdir"
+  cat > "$cfgdir/local.config.sh" <<EOF
+PROCESS_GATE_STACK_PROFILE="custom"
+EOF
+  run bash -c "cd '$PROJECT_DIR' && unset PROCESS_GATE_STACK_VALIDATORS; '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }
+}
+
+@test "stack: a DECLARED-EMPTY validators array warns, never passes" {
+  local cfgdir="$PROJECT_DIR/.claude/skills/process-gate-local"
+  mkdir -p "$cfgdir"
+  cat > "$cfgdir/local.config.sh" <<EOF
+PROCESS_GATE_STACK_PROFILE="custom"
+PROCESS_GATE_STACK_VALIDATORS=()
+EOF
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }
+}
+
+@test "stack: a BLANK-ONLY validators array warns, never passes" {
+  local cfgdir="$PROJECT_DIR/.claude/skills/process-gate-local"
+  mkdir -p "$cfgdir"
+  cat > "$cfgdir/local.config.sh" <<EOF
+PROCESS_GATE_STACK_PROFILE="custom"
+PROCESS_GATE_STACK_VALIDATORS=("" "")
+EOF
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }
+}

@@ -77,21 +77,34 @@ These are the documented defaults a loop falls back to when no `loop_safety` blo
 `budget_ceiling_usd` is human-meaningful; the Workflow engine's `budget.total` is output-token-native. The conversion uses a single documented rate, `usd_per_mtok`, expressed per million output tokens and documented here so it updates in one place as model pricing moves:
 
 ```
-usd_per_mtok = 25.00   # Claude Opus 5 output price, $25 / MTok (verified 2026-07-25)
+usd_per_mtok = 50.00   # Claude Fable 5.1 output price, $50 / MTok (verified 2026-09-18)
 budget_tokens = round(budget_ceiling_usd / usd_per_mtok * 1_000_000)
 ```
 
 **The rate is per model, and the spread is wide enough to matter.** Opus 5 and
-Opus 4.8 both output at $25 / MTok, so the constant above is correct for the
-usual daily driver. Fable 5 and Mythos 5 output at **$50 / MTok** — double. A
-loop that runs on Fable against an Opus-priced rate believes it has spent half
-what it actually has, and sails through a ceiling it should have tripped. Set
-`usd_per_mtok` to the rate of the model the loop actually runs on, or to the
-most expensive model it may reach.
+Opus 4.8 output at $25 / MTok; Fable 5.1, Mythos 5.1, Fable 5 and Mythos 5
+output at **$50 / MTok** — double. A loop that runs on Fable against an
+Opus-priced rate believes it has spent half what it actually has, and sails
+through a ceiling it should have tripped. Set `usd_per_mtok` to the rate of the
+model the loop actually runs on, or to the most expensive model it may reach —
+the constant above is Fable 5.1 because this fleet runs Opus 5 and Fable 5.1,
+and pricing the cheaper of the two would under-meter every Fable loop.
 
-Two rates worth having in front of you when you set one (verified against
-published pricing on 2026-07-25): Fable 5 and Mythos 5 at $50, Opus 5 and Opus
-4.8 at $25, Sonnet 5 at $10 (rising to $15 on 2026-09-01), Haiku 4.5 at $5.
+Rates worth having in front of you when you set one (verified against published
+pricing on 2026-09-18): Fable 5.1, Mythos 5.1, Fable 5 and Mythos 5 at $50,
+Opus 5 and Opus 4.8 at $25, Sonnet 5 at $10, Haiku 4.5 at $5. Sonnet 5's
+scheduled rise to $15 on 2026-09-01 **was cancelled** — $10 is now its standard
+price.
+
+**Use standard list rates, never promotional ones.** This fleet runs on
+subscriptions rather than metered API keys, so no promotional API rate is what
+we are actually charged, and a ceiling derived from one silently over-buys work
+the moment the promotion lapses. Price every lane at its standard rate. The live
+example: GPT-5.6 Sol's published $4 in / $20 out is promotional at least through
+2026-11-21, and OpenAI does not publish the post-promotional standard price — so
+the GPT lane is metered at GPT-6 Astra's standard $50 / MTok output below rather
+than at Sol's promotional rate, which also keeps the figure correct when GPT-6
+Sol replaces it.
 
 A second correction applies to any ceiling carried over from before Claude 4.7:
 those models and later use a different tokenizer that produces roughly **30
@@ -102,16 +115,16 @@ inherit.
 Worked example — the fallback `budget_ceiling_usd` of **1000**:
 
 ```
-1000 / 25.00 * 1_000_000 = 40,000,000 output tokens
+1000 / 50.00 * 1_000_000 = 20,000,000 output tokens
 ```
 
-So the $1000 ceiling maps onto a `budget.total` of **40,000,000 output tokens**. When model pricing changes, update `usd_per_mtok` (one constant) and every dollar ceiling re-maps automatically.
+So the $1000 ceiling maps onto a `budget.total` of **20,000,000 output tokens**. When model pricing changes, update `usd_per_mtok` (one constant) and every dollar ceiling re-maps automatically.
 
 ### Per-model rate (cross-harness loops)
 
-`usd_per_mtok` is the Claude/Opus output price. A cross-harness workflow (see the Codex↔Claude dual-harness integration) spends on **both** Claude and Codex units in one loop, so a single Opus-priced rate mis-attributes the Codex spend when mapping the USD ceiling onto the engine's token budget.
+`usd_per_mtok` is the Claude output price. A cross-harness workflow (see the Codex↔Claude dual-harness integration) spends on **both** Claude and Codex units in one loop, so a single Opus-priced rate mis-attributes the Codex spend when mapping the USD ceiling onto the engine's token budget.
 
-An **optional** second field, `codex_usd_per_mtok`, carries the GPT-5.x / Codex output price. When both are present, each unit's spend is attributed to **its own model's rate** — Claude tokens at `usd_per_mtok`, Codex tokens at `codex_usd_per_mtok` — so the dollar ceiling maps onto each engine's token budget at the price that engine actually bills. When `codex_usd_per_mtok` is **absent**, Codex spend falls back to `usd_per_mtok`, so a single-rate config behaves exactly as before (backward compatible).
+An **optional** second field, `codex_usd_per_mtok`, carries the GPT-6 Astra / Codex output price ($50/MTok standard output, verified 2026-09-07 against developers.openai.com/api/docs/models/gpt-6-astra: $10 input / $1 cached / $12.50 writes / $50 output). When both are present, each unit's spend is attributed to **its own model's rate** — Claude tokens at `usd_per_mtok`, Codex tokens at `codex_usd_per_mtok` — so the dollar ceiling maps onto each engine's token budget at the price that engine actually bills. When `codex_usd_per_mtok` is **absent**, Codex spend falls back to `usd_per_mtok`, so a single-rate config behaves exactly as before (backward compatible).
 
 Nuance worth stating so the field is not over-relied on: Codex's per-task cost win is mostly that it spends **~3–4× fewer tokens** on an equivalent task, *not* a dramatically lower per-MTok rate. `codex_usd_per_mtok` only corrects the rate term; the larger saving already shows up because fewer Codex tokens are counted against the budget in the first place. Set the field to Codex's real output price, not to a fudge factor standing in for the token-count difference.
 
@@ -124,8 +137,8 @@ The ceiling values live in `trellis.config.json` under `loop_safety`; the schema
   "max_iterations": 100,
   "no_progress_iterations": 3,
   "budget_ceiling_usd": 1000,
-  "usd_per_mtok": 25.00,
-  "codex_usd_per_mtok": 10.00
+  "usd_per_mtok": 50.00,
+  "codex_usd_per_mtok": 50.00
 }
 ```
 

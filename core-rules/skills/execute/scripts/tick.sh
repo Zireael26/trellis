@@ -69,12 +69,6 @@
 
 set -euo pipefail
 
-# SKILL_DIR resolution precedent (mirrors core-rules/skills/process-gate):
-# tick.sh lives in scripts/, so this yields the skill root. Kept for parity /
-# future use; tick.sh itself is self-contained and sources nothing.
-SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export SKILL_DIR
-
 # --- Canonical receipt grammar (CLAUDE.md:43) -------------------------------
 # Marker (literal): <!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->
 # (the … is U+2026 HORIZONTAL ELLIPSIS).

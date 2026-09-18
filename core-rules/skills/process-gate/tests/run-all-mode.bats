@@ -259,3 +259,33 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(cat "$seen")" = "push" ]
 }
+
+# --- S1 guards (C7-F18): check-slop nonzero / off-contract output blocks ---
+
+@test "render: check-slop exiting nonzero fails the row, it does not render n/a" {
+  cat > "$STUB/scripts/check-slop.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected output with no contract token"
+exit 3
+EOF
+  chmod +x "$STUB/scripts/check-slop.sh"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Anti-slop:"*"fail"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+}
+
+@test "render: an off-contract first token from check-slop fails the row" {
+  cat > "$STUB/scripts/check-slop.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "boom: something unexpected"
+exit 0
+EOF
+  chmod +x "$STUB/scripts/check-slop.sh"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Anti-slop:"*"fail"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+}

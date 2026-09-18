@@ -284,12 +284,12 @@
           "minimum": 0
         },
         "usd_per_mtok": {
-          "description": "US dollars per million output tokens, used to convert budget_ceiling_usd to the engine's token-native budget (budget_tokens = round(budget_ceiling_usd / usd_per_mtok * 1_000_000)). Tracks the loop model's output price; update here when pricing changes. Default 25.00 (Claude Opus 4.8 output, $25/MTok).",
+          "description": "US dollars per million output tokens, used to convert budget_ceiling_usd to the engine's token-native budget (budget_tokens = round(budget_ceiling_usd / usd_per_mtok * 1_000_000)). Tracks the loop model's STANDARD output price - never a promotional rate, which is not what a subscription fleet is charged. Update here when pricing changes. Default 50.00 (Claude Fable 5.1 output, $50/MTok, verified 2026-09-18; Opus 5 and Opus 4.8 are $25/MTok).",
           "type": "number",
           "minimum": 0
         },
         "codex_usd_per_mtok": {
-          "description": "Optional. US dollars per million output tokens for the GPT-5.x / Codex model, used by cross-harness loops so Codex-unit spend is attributed at the Codex rate rather than the Opus rate when mapping budget_ceiling_usd onto the engine's token budget. Absent \u2192 Codex spend falls back to usd_per_mtok (backward compatible). Note: Codex's per-task cost win is mostly ~3-4x fewer tokens, not a lower per-MTok rate; set this to Codex's real output price, not a fudge factor.",
+          "description": "Optional. US dollars per million output tokens for the GPT-6 Astra / Codex model ($50/MTok standard output, verified 2026-09-18; GPT-5.6 Sol's published $4/$20 is promotional at least through 2026-11-21 and is deliberately not used as the basis), used by cross-harness loops so Codex-unit spend is attributed at the Codex rate rather than the Opus rate when mapping budget_ceiling_usd onto the engine's token budget. Absent \u2192 Codex spend falls back to usd_per_mtok (backward compatible). Note: Codex's per-task cost win is mostly ~3-4x fewer tokens, not a lower per-MTok rate; set this to Codex's real output price, not a fudge factor.",
           "type": "number",
           "minimum": 0
         }

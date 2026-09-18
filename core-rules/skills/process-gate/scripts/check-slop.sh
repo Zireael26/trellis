@@ -108,6 +108,7 @@ WORK="$(mktemp -d 2>/dev/null || mktemp -d -t check-slop)"
 # shellcheck disable=SC2154  # `rc` is assigned inside the trap
 trap 'rc=$?; rm -rf "$WORK"; exit "$rc"' EXIT
 LOOKUP="$WORK/added"
+DEGRADED=""
 
 # `-c core.quotePath=false` so a non-ASCII path arrives as itself rather than
 # C-quoted (`"src/na\303\257ve.ts"`), whose extension would parse as `ts"` and
@@ -117,12 +118,24 @@ LOOKUP="$WORK/added"
 # so the trailing tab (and git's own `\t<info>` suffix) has to come off the name —
 # otherwise the LOOKUP columns shift by one and every finding in that file is
 # silently dropped.
-git -c core.quotePath=false diff --no-color --unified=0 "$RANGE" 2>/dev/null \
-  | awk 'BEGIN{file=""; line=0} \
-      /^\+\+\+ b\// {file=substr($0,7); sub(/\t.*$/, "", file); next} \
-      /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; next} \
-      /^\+/ && !/^\+\+\+/ {printf "%s\t%d\t%s\n", file, line, substr($0,2); line++}' \
-  > "$LOOKUP" || true
+diff_rc=0
+git -c core.quotePath=false diff --no-color --unified=0 "$RANGE" 2>"$WORK/diff.err" >"$WORK/diff.raw" || diff_rc=$?
+# SAFETY: an unresolvable range must fail visibly — an empty lookup would pass over work that never ran.
+if [ "$diff_rc" -ne 0 ]; then
+  pg_log fail "Anti-slop (range=$RANGE, posture=$POSTURE)"
+  pg_finding "unresolvable range \"$RANGE\" — no diff to scan ($(head -n 1 "$WORK/diff.err" 2>/dev/null | cut -c1-120))"
+  exit 1
+fi
+lookup_rc=0
+awk 'BEGIN{file=""; line=0} \
+    /^\+\+\+ b\// {file=substr($0,7); sub(/\t.*$/, "", file); next} \
+    /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; next} \
+    /^\+/ && !/^\+\+\+/ {printf "%s\t%d\t%s\n", file, line, substr($0,2); line++}' \
+  <"$WORK/diff.raw" >"$LOOKUP" || lookup_rc=$?
+# SAFETY: a broken lookup pipeline must degrade — a truncated lookup is not a clean scan.
+if [ "$lookup_rc" -ne 0 ]; then
+  DEGRADED="$DEGRADED lookup(rc=$lookup_rc)"
+fi
 
 # --- candidate files -------------------------------------------------------
 # In-scope extension, not carved out, and actually contributing an added line.
@@ -249,27 +262,41 @@ run_native() {
 # Go lane — and every tab-indented TS/JS/PY file — invisible to the gate while the
 # tripwire flagged the same lines.
 scan_patterns() {
-  local file="$1" lang="$2"
+  local file="$1" lang="$2" scan_rc=0 join_rc=0
   awk -F'\t' -v f="$file" '$1 == f { sub(/^[^\t]*\t[^\t]*\t/, ""); print }' "$LOOKUP" > "$WORK/lines"
   awk -F'\t' -v f="$file" '$1 == f { print $2 }' "$LOOKUP" > "$WORK/nums"
   [ -s "$WORK/lines" ] || return 0
-  slop_scan_text "$lang" < "$WORK/lines" \
-    | awk -F'\t' -v f="$file" -v nf="$WORK/nums" '
+  slop_scan_text "$lang" < "$WORK/lines" > "$WORK/hits" || scan_rc=$?
+  # SAFETY: slop_scan_text is grep-like — only status 1 means clean; an error must degrade, never pass as a clean scan.
+  if [ "$scan_rc" -ge 2 ]; then
+    DEGRADED="$DEGRADED scan-$lang(rc=$scan_rc)"
+    return 0
+  fi
+  if [ "$scan_rc" -eq 1 ]; then return 0; fi
+  awk -F'\t' -v f="$file" -v nf="$WORK/nums" '
         BEGIN { while ((getline l < nf) > 0) { n[++i] = l } }
-        { printf "%s\t%s\t%s\n", f, n[$1], $2 }' || true
+        { printf "%s\t%s\t%s\n", f, n[$1], $2 }' "$WORK/hits" || join_rc=$?
+  # SAFETY: a failed line-number join must degrade — partial output is not a clean scan.
+  if [ "$join_rc" -ne 0 ]; then
+    DEGRADED="$DEGRADED scan-join-$lang(rc=$join_rc)"
+  fi
 }
 
 RAW="$WORK/raw"
 : > "$RAW"
 MODES=""
-DEGRADED=""
 
 if [ "${#TS_FILES[@]}" -gt 0 ]; then
   ts_engine="patterns"
   if [ -n "$oxlint_bin" ]; then
     if run_native oxlint "$WORK/out" "$oxlint_bin" --format=unix "${TS_FILES[@]}"; then
       ts_engine="oxlint"
-      parse_unix_findings "$SLOP_OXLINT_PLUGIN" < "$WORK/out" >> "$RAW" || true
+      parse_rc=0
+      parse_unix_findings "$SLOP_OXLINT_PLUGIN" < "$WORK/out" >> "$RAW" || parse_rc=$?
+      # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
+      if [ "$parse_rc" -ne 0 ]; then
+        DEGRADED="$DEGRADED oxlint-parse(rc=$parse_rc)"
+      fi
     fi
   fi
   if [ "$ts_engine" = "patterns" ]; then
@@ -290,7 +317,12 @@ if [ "${#PY_FILES[@]}" -gt 0 ]; then
     if run_native ruff "$WORK/out" "$ruff_bin" check --no-cache \
       --output-format=concise --select "$SLOP_RUFF_RULES" "${PY_FILES[@]}"; then
       py_engine="ruff"
-      parse_unix_findings < "$WORK/out" >> "$WORK/py.native" || true
+      parse_rc=0
+      parse_unix_findings < "$WORK/out" >> "$WORK/py.native" || parse_rc=$?
+      # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
+      if [ "$parse_rc" -ne 0 ]; then
+        DEGRADED="$DEGRADED ruff-parse(rc=$parse_rc)"
+      fi
     else
       py_failed=1
     fi
@@ -299,7 +331,12 @@ if [ "${#PY_FILES[@]}" -gt 0 ]; then
     if run_native mypy "$WORK/out" "$mypy_bin" --no-incremental \
       --cache-dir=/dev/null --no-error-summary "${PY_FILES[@]}"; then
       py_engine="${py_engine:+$py_engine+}mypy"
-      parse_mypy_findings "$SLOP_MYPY_CODES" < "$WORK/out" >> "$WORK/py.native" || true
+      parse_rc=0
+      parse_mypy_findings "$SLOP_MYPY_CODES" < "$WORK/out" >> "$WORK/py.native" || parse_rc=$?
+      # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
+      if [ "$parse_rc" -ne 0 ]; then
+        DEGRADED="$DEGRADED mypy-parse(rc=$parse_rc)"
+      fi
     else
       py_failed=1
     fi
@@ -324,9 +361,17 @@ fi
 # The ratchet, applied to every detection mode alike: drop any finding whose
 # file:line is not an added line in the range. This is what keeps a native
 # linter's whole-file report diff-scoped.
-HITS="$(awk -F'\t' -v lk="$LOOKUP" '
+ratchet_awk_rc=0
+ratchet_sort_rc=0
+awk -F'\t' -v lk="$LOOKUP" '
   BEGIN { while ((getline l < lk) > 0) { split(l, p, "\t"); added[p[1] "\t" p[2]] = 1 } }
-  ($1 "\t" $2) in added { print }' "$RAW" | sort -u || true)"
+  ($1 "\t" $2) in added { print }' "$RAW" > "$WORK/ratchet.in" 2>"$WORK/ratchet.err" || ratchet_awk_rc=$?
+sort -u "$WORK/ratchet.in" > "$WORK/ratchet.out" 2>>"$WORK/ratchet.err" || ratchet_sort_rc=$?
+# SAFETY: the ratchet is the diff scope — if it fails, findings are lost or unfiltered, so the row must degrade, never pass.
+if [ "$ratchet_awk_rc" -ne 0 ] || [ "$ratchet_sort_rc" -ne 0 ]; then
+  DEGRADED="$DEGRADED ratchet(awk-rc=$ratchet_awk_rc,sort-rc=$ratchet_sort_rc)"
+fi
+HITS="$(cat "$WORK/ratchet.out")"
 
 # --- verdict ---------------------------------------------------------------
 worst="pass"
@@ -341,7 +386,8 @@ fi
 # fallback came back clean. Silence here would be the pattern-lane result wearing
 # the native lane's authority.
 if [ -n "$DEGRADED" ]; then
-  findings+=("native engine failed to run:${DEGRADED} — degraded to the pattern set ($(head -n 1 "$WORK/err" 2>/dev/null | cut -c1-120))")
+  # SAFETY: $WORK/err exists only once a native engine has run — parser/scan/ratchet degradation must not abort on its absence.
+  findings+=("native engine failed to run:${DEGRADED} — degraded to the pattern set ($(head -n 1 "$WORK/err" 2>/dev/null | cut -c1-120 || true))")
   [ "$worst" = "fail" ] || worst="warn"
 fi
 

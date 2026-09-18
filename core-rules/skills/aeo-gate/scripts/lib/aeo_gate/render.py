@@ -20,7 +20,7 @@ def render_markdown(baseline: Baseline) -> str:
         f"# AEO gate: {baseline.project}",
         "",
         f"- Domain: `{baseline.domain}`",
-        f"- Commit: `{baseline.commit or 'unknown'}`",
+        f"- Commit: `{baseline.commit}`",
         f"- Mapping: **{baseline.mapping.status}** — {baseline.mapping.reason}",
         f"- Overall status: **{baseline.overall_status}**",
         "",

@@ -558,3 +558,100 @@ EOF
   [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 3 ]
   [ -z "$(jq -r '.decisions_log' "$CAPTURE_FILE")" ]
 }
+
+# =========================================================================
+# S4 review-coverage parity (spec 050, SC6/SC7): the Codex sibling keys its
+# `.codex/.review-done-<hash>` marker on the FULL diff while the reviewer
+# payload stays capped at 200000 bytes. Mirrors
+# core-rules/hooks/tests/code-review-marker.bats cases 1–4.
+# =========================================================================
+
+# A throwaway git repo whose staged diff exceeds the 200000-byte reviewer cap:
+# filler.py holds 4000 identical 80-char lines (~324 KB of diff), so the first
+# 200000 bytes of `git diff HEAD` are filler content identical across runs.
+# tail.py is the small varying tail placed AFTER the filler alphabetically, so
+# rewriting it changes only bytes past the cap. .py clears the doc-only skip.
+setup_overcap_repo() {
+  local tail_content="$1"
+  PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/projover.XXXXXX")"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    git init -q
+    git commit --allow-empty -q -m init
+    awk 'BEGIN{line=sprintf("%80s"," "); gsub(/ /,"A",line); for(i=0;i<4000;i++) print line}' > filler.py
+    printf '%s\n' "$tail_content" > tail.py
+    git add -A
+  )
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+}
+
+# Count idempotency markers written under the fixture repo (.codex sibling).
+codex_marker_count() {
+  [ -d "$PROJECT_DIR/.codex" ] || { printf '0'; return 0; }
+  find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' '
+}
+
+# SAFETY: two diffs sharing the first 200000 bytes must not share one marker.
+# Only tail.py is re-staged between runs (never `git add -A`: that would stage
+# run 1's marker under .codex/ and shift the tracked-diff prefix for run 2).
+@test "codex marker: two diffs sharing the 200 KB prefix hash differently (both runs review)" {
+  setup_overcap_repo 'TAIL = "alpha"'
+  COUNT="$BATS_TEST_TMPDIR/prefix.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+
+  ( cd "$PROJECT_DIR" && printf '%s\n' 'TAIL = "beta"' > tail.py && git add tail.py )
+
+  run_hook
+  [ "$status" -eq 0 ]
+
+  [ "$(call_count "$COUNT")" -eq 2 ]
+}
+
+# SAFETY: a diff larger than the reviewer payload cap was only prefix-reviewed,
+# so the hook must report incomplete and mint NO completed marker.
+@test "codex marker: an over-cap diff reports incomplete and writes NO marker" {
+  setup_overcap_repo 'TAIL = "alpha"'
+  COUNT="$BATS_TEST_TMPDIR/overcap.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'incomplete'* ]] || { echo "$stderr"; false; }
+  [ "$(codex_marker_count)" -eq 0 ]
+}
+
+# SAFETY: with no completed marker written for a prefix review, the next Stop
+# over the same over-cap diff must run the review again, not skip it.
+@test "codex marker: a second invocation over the same over-cap diff re-runs the review" {
+  setup_overcap_repo 'TAIL = "alpha"'
+  COUNT="$BATS_TEST_TMPDIR/rerun.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  run_hook
+  [ "$status" -eq 0 ]
+
+  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ "$(codex_marker_count)" -eq 0 ]
+}
+
+# SAFETY: the full-diff marker rule must not break the normal path — an
+# under-cap completed review still writes its idempotency marker exactly once.
+@test "codex marker: an under-cap completed review still writes its marker" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/undercap.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(call_count "$COUNT")" -eq 1 ]
+  [ "$(codex_marker_count)" -eq 1 ]
+}
