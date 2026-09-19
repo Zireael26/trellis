@@ -312,6 +312,17 @@ run_portable_onboard() {
   [ "$(sed -n '12p' "$ATTACH_LOG")" = "$PORTABLE_PROJECT" ]
 }
 
+@test "portable onboarding accepts the pi harness and forwards it" {
+  build_portable_onboard_fixture
+
+  run_portable_onboard --fleet personal --home "$SANDBOX/home" --release 1.2.3 \
+    --harness pi --project-id portable-project "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(sed -n '8p' "$ATTACH_LOG")" = --harness ]
+  [ "$(sed -n '9p' "$ATTACH_LOG")" = pi ]
+  [ "$(sed -n '10p' "$ATTACH_LOG")" = "$PORTABLE_PROJECT" ]
+}
+
 @test "portable onboarding is idempotent for an existing valid manifest" {
   build_portable_onboard_fixture
   run_portable_onboard --fleet personal --project-id portable-project "$PORTABLE_PROJECT"

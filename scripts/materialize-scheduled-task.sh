@@ -447,7 +447,7 @@ canonicalize_registry_snapshot() {
       );
     def harnesses:
       type == "array"
-      and all(.[]; type == "string" and (. == "claude" or . == "codex"));
+      and all(.[]; type == "string" and (. == "claude" or . == "codex" or . == "pi"));
     def safe_text:
       type == "string" and length > 0 and (test("[[:cntrl:]]") | not);
     def safe_date:

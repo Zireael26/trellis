@@ -306,6 +306,27 @@ materialize_task() {
   [ "$(jq '[.entries[] | select(.availability == "available")] | length' "$root/snapshot.json")" -eq 1 ]
 }
 
+# Pi is a first-class harness: the registry write path already admits pi
+# rows, so the snapshot canonicalizer must accept them too. Before this
+# contract landed, a single pi-attached row drove every materialized task to
+# a canonicalization failure (exit 4) and no audit in the fleet could run.
+@test "a pi-attached row materializes ready" {
+  local personal="$SANDBOX/personal/alpha"
+  local root="$TRELLIS_HOME_FIX/tasks/personal/daily-project-digest"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+  jq '(.projects["personal/alpha"].checkouts[].harnesses) |= (if index("pi") then . else . + ["pi"] end)' \
+    "$TRELLIS_HOME_FIX/registry.json" > "$TRELLIS_HOME_FIX/registry.json.next"
+  mv "$TRELLIS_HOME_FIX/registry.json.next" "$TRELLIS_HOME_FIX/registry.json"
+  chmod 600 "$TRELLIS_HOME_FIX/registry.json"
+
+  materialize_task personal daily-project-digest
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.status' "$root/manifest.json")" = ready ] || { cat "$root/manifest.json"; false; }
+  [ "$(jq -r '.entries[0].harnesses | index("pi") != null' "$root/snapshot.json")" = true ] || \
+    { jq -c '.entries[0].harnesses' "$root/snapshot.json"; false; }
+}
+
 # The reserved case: no row the task could act on at all. That invalidates the
 # whole run rather than one project, so it stays a planned error and exit 5.
 @test "a fleet with no usable checkout at all is still a planned error" {

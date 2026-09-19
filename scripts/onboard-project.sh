@@ -31,7 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 portable_usage() {
   cat <<'EOF'
 usage: onboard-project.sh --fleet NAME [--home PATH] [--release VERSION]
-       [--harness claude|codex]... [--project-id ID] <project-path>
+       [--harness claude|codex|pi]... [--project-id ID] <project-path>
 EOF
 }
 
@@ -196,7 +196,7 @@ portable_onboard() (
         release="$2"; shift 2 ;;
       --harness)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --harness requires NAME\n' >&2; portable_usage >&2; return 2; }
-        case "$2" in claude|codex) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
+        case "$2" in claude|codex|pi) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
         harnesses+=("$2"); shift 2 ;;
       --project-id)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --project-id requires ID\n' >&2; portable_usage >&2; return 2; }

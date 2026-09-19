@@ -6,6 +6,18 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-09-19
+
+### Fixed
+- **First-class `pi` harness support.** The scheduled-task snapshot
+  canonicalizer, portable policy loader, legacy config validator,
+  `show-config` policy check, and `onboard --harness` now all admit `pi`
+  alongside `claude`/`codex` (the registry schema, registry write path, and
+  attach flow already did). Previously a single pi-attached row made every
+  task materialization fail closed with `invalid strict registry snapshot`,
+  so no audit in the fleet could run. `onboard-project.sh` also accepts
+  `--harness pi` and forwards it to attach.
+
 ## [1.3.1] - 2026-09-18
 
 Spec 050 (`specs/050-lean-enforcement/`): gate rows must not render clean over work that never ran.

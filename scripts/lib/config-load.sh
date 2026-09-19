@@ -189,7 +189,7 @@ _pgcfg_validate_policy_fallback() {
     and (.github_user? | safe_text)
     and ((.harnesses? | type) == "array")
     and ((.harnesses | length) > 0)
-    and ([.harnesses[] | . == "claude" or . == "codex"] | all)
+    and ([.harnesses[] | . == "claude" or . == "codex" or . == "pi"] | all)
     and ((.harnesses | unique | length) == (.harnesses | length))
     and (
       [
