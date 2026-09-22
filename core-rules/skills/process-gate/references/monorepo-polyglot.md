@@ -157,7 +157,7 @@ packages:
 ### 5.3 Python
 
 - One root `pyproject.toml` carrying shared `[tool.ruff]`, `[tool.mypy]` (with `strict = true`), and `[tool.pytest.ini_options]`. Per-service `pyproject.toml` overrides where the service needs different deps or Python version.
-- Lockfile: `uv.lock` preferred (fast, deterministic, single tool for env + deps); `poetry.lock` accepted for legacy services.
+- Lockfile: `uv.lock` (fast, deterministic, single tool for env + deps); uv is the only supported Python lock/env tool.
 - Python 3.12 minimum.
 - Mypy `--strict` is non-negotiable per the project's coding standards. New code without type annotations fails typecheck.
 
@@ -241,7 +241,6 @@ ADRs live at `docs/adr/`, numbered `NNNN-<slug>.md`. Cross-language decisions al
 - "buf for codegen" — why buf over protoc, raw generators, or hand-written stubs.
 - "Python only at the GPU boundary" — the constraint that gates new Python services.
 - "Turborepo vs Nx" — pick-one rationale for the TS task runner.
-- "uv vs poetry" — Python lock-file and env-manager choice.
 
 Representative `<repo>/docs/adr/0001-slice-1-bundle.md` and `<repo>/docs/adr/0002-slice-2-bundle.md` files illustrate the pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
 

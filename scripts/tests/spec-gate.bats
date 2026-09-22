@@ -296,6 +296,19 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "uv.lock does not count toward the gated diff" {
+  _config true 80 400
+  # The fleet is uv-only: a lock refresh (thousands of lines in the defect
+  # report) must not read as gated feature code — at the root or nested in a
+  # monorepo workspace (e.g. services/api/uv.lock).
+  _write_lines uv.lock 250
+  _write_lines services/api/uv.lock 250
+  git checkout -q -b feat/uv-refresh
+  git add -A && git commit -qm "chore: refresh uv.lock" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ]
+}
+
 @test "root-level AGENT_*.md guides do not count toward the gated diff" {
   _config true 80 400
   # Paste-into-agent guides live at the root, not under docs/, because the public

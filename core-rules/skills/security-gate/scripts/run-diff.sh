@@ -356,7 +356,7 @@ fi
 DEPS_CHANGED=0
 while IFS= read -r f; do
   case "$f" in
-    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*Pipfile.lock|*Gemfile.lock|*requirements*.txt|*package.json|*Cargo.toml|*go.mod|*pyproject.toml)
+    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*uv.lock|*Pipfile.lock|*Gemfile.lock|*requirements*.txt|*package.json|*Cargo.toml|*go.mod|*pyproject.toml)
       DEPS_CHANGED=1
       ;;
   esac

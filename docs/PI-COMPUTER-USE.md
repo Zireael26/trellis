@@ -6,9 +6,10 @@ provider credentials, or a project's MCP configuration.
 
 Qualified on 2026-09-07: Pi **0.85.1**, Node **24**, `pi-mcp-adapter`
 **2.32.1** with the patch below, Cua Driver **0.23.2**, and `agent-browser`
-**0.36.0** on macOS. The older base recipe in `AGENT_PI_SETUP.md` is separately
-pinned to Pi 0.84.4; do not replay its package/settings replacement steps over
-an existing newer installation.
+**0.36.0** on macOS. Those adapter/driver/browser versions carry forward unchanged
+on the current `AGENT_PI_SETUP.md` base (Pi 0.87.0), where the adapter path and the
+`cua` MCP server are already part of step 2; do not replay that guide's
+package/settings replacement steps over an existing newer installation.
 
 ## 1. Preflight and install the separate tool directory
 

@@ -2813,7 +2813,7 @@ EOF
     && [[ "$output" == *"✓ gate-interpreters: node=$fake_bin/node; python=$hp/.venv/bin/python; mypy=$hp/.venv/bin/mypy; pytest=$hp/.venv/bin/pytest"* ]]
 }
 
-@test "gate-interpreters: lock-pinned Poetry and uv launchers beat global shims" {
+@test "gate-interpreters: lock-pinned uv launcher beats global shims and poetry.lock is ignored" {
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project
@@ -2827,16 +2827,22 @@ EOF
     chmod +x "$fake_bin/$tool"
   done
 
-  touch "$hp/poetry.lock"
+  touch "$hp/poetry.lock" "$hp/uv.lock"
   run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
-  [ "$status" -eq 0 ] \
-    && [[ "$output" == *"python=$fake_bin/poetry run python; mypy=$fake_bin/poetry run mypy; pytest=$fake_bin/poetry run pytest"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
+
+  rm "$hp/uv.lock"
+  run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"python=$fake_bin/python; mypy=$fake_bin/mypy; pytest=$fake_bin/pytest"* ]]
+  [[ "$output" != *"poetry run"* ]]
 
   rm "$hp/poetry.lock"
   touch "$hp/uv.lock"
   run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
-  [ "$status" -eq 0 ] \
-    && [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
 }
 
 @test "gate-interpreters: absent tools are explicit without failing unrelated checks" {

@@ -312,7 +312,7 @@ EOF
   done
 }
 
-@test "T8: Poetry lock selects Poetry before uv and global tools in both stop verifiers" {
+@test "T8: uv lock selects uv and ignores poetry.lock in both stop verifiers" {
   local fake_bin="$BATS_TEST_TMPDIR/python-bin"
   local call_log="$BATS_TEST_TMPDIR/python-calls.log"
 
@@ -324,8 +324,8 @@ EOF
   make_python_command "$fake_bin/pytest" global-pytest
 
   assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
-    'poetry run mypy .' \
-    'poetry run pytest --tb=short -q')"
+    'uv run mypy .' \
+    'uv run pytest --tb=short -q')"
 }
 
 @test "T8: uv lock selects uv before global tools in both stop verifiers" {
@@ -341,6 +341,21 @@ EOF
   assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
     'uv run mypy .' \
     'uv run pytest --tb=short -q')"
+}
+
+@test "T8: poetry.lock alone does not select Poetry in both stop verifiers" {
+  local fake_bin="$BATS_TEST_TMPDIR/python-bin"
+  local call_log="$BATS_TEST_TMPDIR/python-calls.log"
+
+  prepare_python_tool_project "$fake_bin"
+  touch "$PROJECT_DIR/poetry.lock"
+  make_python_command "$fake_bin/poetry" poetry
+  make_python_command "$fake_bin/mypy" global-mypy
+  make_python_command "$fake_bin/pytest" global-pytest
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' \
+    'global-mypy .' \
+    'global-pytest --tb=short -q')"
 }
 
 @test "T8: global Python tools remain the final fallback in both stop verifiers" {

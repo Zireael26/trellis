@@ -1,0 +1,19 @@
+{
+	"name": "omp-statusline",
+	"version": "0.50.0-omp.1",
+	"description": "Local fork of @narumitw/pi-statusline that adds the Oh My Pi status-line segments (hostname, session, subagents, commit, token_in/out/total/rate, cache_read/write/hit, context_total, time_spent).",
+	"type": "module",
+	"private": true,
+	"license": "MIT",
+	"keywords": ["pi-package", "pi-extension", "pi", "statusline", "footer"],
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"dependencies": {
+		"@narumitw/pi-tui-kit": "^0.59.0"
+	}
+}

@@ -94,10 +94,9 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
     if pg_has_npm_script test;      then PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PM run test}"; fi
   fi
 
-  # Python toolchain detection (order: uv → poetry → pdm → bare pyproject)
+  # Python toolchain detection (order: uv → pdm → bare pyproject)
   if [ -z "${PM:-}" ] && [ -f "pyproject.toml" ]; then
     if   [ -f "uv.lock" ];     then PY_RUN="uv run"
-    elif [ -f "poetry.lock" ]; then PY_RUN="poetry run"
     elif [ -f "pdm.lock" ];    then PY_RUN="pdm run"
     else PY_RUN="python -m"
     fi
@@ -106,7 +105,7 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
     # Pyright is opt-in via explicit PROCESS_GATE_TYPECHECK_CMD override.
     # Config-presence is NOT enough (DL-P7-07): also probe that the tool is
     # RUNNABLE in its own env via the EXACT `$PY_RUN <tool>` invocation form
-    # (so `python -m mypy`, `uv run mypy`, `poetry run mypy` each resolve a
+    # (so `python -m mypy`, `uv run mypy` each resolve a
     # venv/uv-managed tool; `--version` is fast and side-effect-free). A
     # configured-but-not-installed tool leaves the cmd EMPTY → run_check WARNs
     # (couldn't-run), instead of failing at runtime → BLOCK.

@@ -294,8 +294,6 @@ _se_resolve_python_tool() {
 
   if [ -x ".venv/bin/$tool" ]; then
     printf '%s' ".venv/bin/$tool"
-  elif [ -f "poetry.lock" ] && command -v poetry >/dev/null 2>&1; then
-    printf 'poetry run %s' "$tool"
   elif [ -f "uv.lock" ] && command -v uv >/dev/null 2>&1; then
     printf 'uv run %s' "$tool"
   elif command -v "$tool" >/dev/null 2>&1; then

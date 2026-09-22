@@ -6,6 +6,16 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-09-22
+
+### Fixed
+- **Public-mirror publication unblocked.** Removes a fleet project identifier from a `spec-gate.bats` comment (introduced in #494), which failed the mirror publication lint and blocked every publish. Supersedes 1.3.3, which was tagged instance-side only and never published to the mirror; it carries the 1.3.3 pi setup parity payload (guide at pi 0.87.0, `omp-statusline` fork source) unchanged.
+
+## [1.3.3] - 2026-09-22
+
+### Fixed
+- **Pi setup guide parity with the operator machine.** `AGENT_PI_SETUP.md` now pins pi `0.87.0`, the six active npm packages (`pi-intercom` 0.13.0, disabled upstream statusline 0.50.2, `pi-codex-compact` 0.53.3, `pi-meta-oauth` 0.6.1, `pi-antigravity` 0.7.0) plus the local `pi-mcp-adapter` path, the `openai-responses` account-2 provider, five OAuth flows, the 19-segment `omp-statusline` footer config, and the 22-tool surface. The `omp-statusline` fork source ships at `core-rules/pi/statusline/omp-statusline/` so the guide's copy step resolves. Previously a mirror checkout following the guide rendered the old 11-segment footer with no usage row.
+
 ## [1.3.2] - 2026-09-19
 
 ### Fixed

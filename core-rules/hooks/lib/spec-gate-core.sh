@@ -210,7 +210,7 @@ sg_is_excluded_path() {
     .claude/*|*/.claude/*|.codex/*|*/.codex/*|.agents/*|*/.agents/*) return 0 ;;
     */generated/*|*.gen.*|*.pb.*|*_pb2.*|*.min.js|*.min.css|*.map) return 0 ;;
     *.svg|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.pdf) return 0 ;;
-    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
+    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*uv.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
     package.json|*/package.json|trellis.config.json|.trellis.config.json) return 0 ;;
     *.yml|*.yaml) return 0 ;;
     # Root-level paste-into-agent guides: AGENT_SETUP.md, AGENT_ONBOARD_PROJECT.md,

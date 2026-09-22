@@ -134,7 +134,7 @@ pg_diff_stats() {
 # Lockfile / generated detection. Echoes 1 if the path is excluded for size purposes.
 pg_is_lockfile() {
   case "$1" in
-    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
+    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*uv.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
     *) return 1 ;;
   esac
 }

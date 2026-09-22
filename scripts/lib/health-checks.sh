@@ -270,15 +270,13 @@ hc_tooling_noninteractive_path() {
 
 # hc_resolve_python_tool <project> <tool>
 # Mirrors stop-verify's pinned-project precedence without executing the selected
-# tool. Direct .venv paths prevent a global shim from winning; Poetry and uv
-# are considered only when their corresponding lockfile is present.
+# tool. Direct .venv paths prevent a global shim from winning; uv
+# is considered only when its lockfile is present.
 hc_resolve_python_tool() {
   local proj="$1" tool="$2"
 
   if [ -x "$proj/.venv/bin/$tool" ]; then
     printf '%s' "$proj/.venv/bin/$tool"
-  elif [ -f "$proj/poetry.lock" ] && command -v poetry >/dev/null 2>&1; then
-    printf '%s run %s' "$(command -v poetry)" "$tool"
   elif [ -f "$proj/uv.lock" ] && command -v uv >/dev/null 2>&1; then
     printf '%s run %s' "$(command -v uv)" "$tool"
   elif command -v "$tool" >/dev/null 2>&1; then

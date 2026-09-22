@@ -440,12 +440,6 @@ function parsePyproject(text) {
       if (line.includes(']')) arrayBucket = null
       continue
     }
-    if (/^tool\.poetry(?:\.group\.[^.]+)?\.dependencies$/.test(section)) {
-      const match = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/)
-      if (match && match[1].toLowerCase() !== 'python') {
-        dependencies.push({ name: match[1].toLowerCase().replaceAll('_', '-'), range: match[2].replace(/^['"]|['"]$/g, ''), bucket: section.includes('.group.') ? 'devDependencies' : 'dependencies' })
-      }
-    }
   }
   return dependencies
 }
@@ -484,7 +478,7 @@ function collectProject(project, ref) {
     }
   }
 
-  const pythonLocks = files.filter((file) => /(^|\/)(poetry|uv)\.lock$/.test(file))
+  const pythonLocks = files.filter((file) => /(^|\/)uv\.lock$/.test(file))
   const pythonResolvedByDir = new Map()
   for (const lockPath of pythonLocks) {
     const parsed = parsePythonLock(source.read(lockPath))

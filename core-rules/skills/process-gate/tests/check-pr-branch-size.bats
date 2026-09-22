@@ -207,3 +207,19 @@ write_bulk() {
   [ "$status" -eq 0 ]
   grep -Fq '10 lines' <<<"$output"
 }
+
+@test "size: uv.lock lines do not count toward PR size" {
+  # The fleet is uv-only: a lock refresh must not read as gated feature code.
+  (
+    cd "$PROJECT_DIR"
+    git checkout -q -b feat/uv-refresh
+  )
+  write_bulk "$PROJECT_DIR/uv.lock" 900
+  (
+    cd "$PROJECT_DIR"
+    git add -A && git commit -q -m "chore: refresh uv.lock"
+  )
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 0 ]
+  grep -Fq '0 lines' <<<"$output"
+}

@@ -32,7 +32,7 @@ Measured on the diff (additions + deletions, excluding lockfiles, generated file
 | Between limit and `PROCESS_GATE_PR_SIZE_HARD` (default 800) | warn — request reviewer ack in PR description |
 | > `PROCESS_GATE_PR_SIZE_HARD` | fail — split, or carry a changed ADR under `PROCESS_GATE_ADR_DIR` explaining why splitting harms clarity |
 
-Lockfiles (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, etc.), generated files declared via `.gitattributes` `linguist-generated`, and test snapshots do not count.
+Lockfiles (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, etc.), generated files declared via `.gitattributes` `linguist-generated`, and test snapshots do not count.
 
 Override via `local.config.sh`:
 
