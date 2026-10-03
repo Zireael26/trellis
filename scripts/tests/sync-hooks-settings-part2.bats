@@ -1,23 +1,25 @@
 #!/usr/bin/env bats
-# Portable merge-dispatcher reconciliation coverage. The dispatcher is owned by
-# the attachment in TRELLIS_HOME, never by .husky/.githooks/.git hooks files.
+# Portable attachment reconciliation coverage for Claude and Codex hook sync.
+# Every fixture uses a private temporary TRELLIS_HOME and an installed immutable
+# release. The synchronizers must not inspect tracked registry Markdown, derive
+# a checkout under one root, or copy mutable source files into a project.
 
 REPO="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 VERSION="1.2.3"
-PROJECT_ID="merge-project"
+PROJECT_ID="attached-project"
 
 setup() {
-  SANDBOX="$BATS_TEST_TMPDIR/merge gate fixture"
+  SANDBOX="$BATS_TEST_TMPDIR/sync hook fixture"
   mkdir -p "$SANDBOX"
   SANDBOX="$(CDPATH= cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/operator home"
   export TRELLIS_HOME="$SANDBOX/trellis home"
   HOME_PATH="$TRELLIS_HOME"
-  PROJECT="$SANDBOX/projects/Merge Project With Spaces"
+  PROJECT="$SANDBOX/projects/Project With Spaces"
   SOURCE="$SANDBOX/release source"
   RUNNER="$SANDBOX/old mutable source"
   MOVED_RUNNER="$SANDBOX/moved synchronizer"
-  UNAVAILABLE_ROOT="$SANDBOX/Missing Volume/merge project"
+  UNAVAILABLE_ROOT="$SANDBOX/Missing Volume/project not mounted"
   mkdir -p "$HOME" "$HOME_PATH"
   chmod 700 "$HOME" "$HOME_PATH"
   bootstrap_release_admin
@@ -68,8 +70,8 @@ SH
   mkdir -p "$bootstrap/core-rules"
   printf '0.0.0\n' > "$bootstrap/core-rules/VERSION"
   git -C "$bootstrap" init -q
-  git -C "$bootstrap" config user.email 'merge-fixture@trellis.test'
-  git -C "$bootstrap" config user.name 'Merge Fixture'
+  git -C "$bootstrap" config user.email 'sync-fixture@trellis.test'
+  git -C "$bootstrap" config user.name 'Sync Fixture'
   git -C "$bootstrap" config commit.gpgsign false
   git -C "$bootstrap" config tag.gpgSign false
   git -C "$bootstrap" add core-rules scripts
@@ -78,7 +80,7 @@ SH
   bootstrap="$(canonical_dir "$bootstrap")"
   TRELLIS_HOME="$HOME_PATH" bash -c \
     '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
-    sync-merge-bootstrap "$REPO/scripts/lib/release-store.sh" 0.0.0 "$bootstrap"
+    sync-hooks-bootstrap "$REPO/scripts/lib/release-store.sh" 0.0.0 "$bootstrap"
   config="$HOME_PATH/config.json"
   jq -n --arg source "$bootstrap" --arg root "$SANDBOX" '{
     schema_version:1,
@@ -149,8 +151,8 @@ build_installed_release() {
 JSON
 
   git -C "$SOURCE" init -q
-  git -C "$SOURCE" config user.email 'merge-fixture@trellis.test'
-  git -C "$SOURCE" config user.name 'Merge Fixture'
+  git -C "$SOURCE" config user.email 'sync-fixture@trellis.test'
+  git -C "$SOURCE" config user.name 'Sync Fixture'
   git -C "$SOURCE" config commit.gpgsign false
   git -C "$SOURCE" config tag.gpgSign false
   git -C "$SOURCE" add -A
@@ -169,7 +171,7 @@ create_project() {
   git -C "$PROJECT" config commit.gpgsign false
   git -C "$PROJECT" config user.name 'Project Fixture'
   printf '{"schema_version":1,"project_id":"%s"}\n' "$PROJECT_ID" > "$PROJECT/.trellis.json"
-  printf '# merge project fixture\n' > "$PROJECT/README.md"
+  printf '# project fixture\n' > "$PROJECT/README.md"
   git -C "$PROJECT" add .
   git -C "$PROJECT" commit -qm 'fixture project'
 }
@@ -177,15 +179,16 @@ create_project() {
 attach_project() {
   run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
     bash "$REPO/scripts/attach-project.sh" attach --home "$HOME_PATH" \
-      --fleet personal --release "$VERSION" --harness claude "$PROJECT"
+      --fleet personal --release "$VERSION" --harness claude --harness codex "$PROJECT"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
 make_movable_runner() {
   mkdir -p "$RUNNER/scripts"
-  cp "$REPO/scripts/sync-merge-gate.sh" "$RUNNER/scripts/"
+  cp "$REPO/scripts/sync-hooks.sh" "$RUNNER/scripts/"
+  cp "$REPO/scripts/sync-codex-hooks.sh" "$RUNNER/scripts/"
   cp -R "$REPO/scripts/lib" "$RUNNER/scripts/lib"
-  chmod 755 "$RUNNER/scripts/sync-merge-gate.sh"
+  chmod 755 "$RUNNER/scripts/sync-hooks.sh" "$RUNNER/scripts/sync-codex-hooks.sh"
 
   mv "$RUNNER" "$MOVED_RUNNER"
   cat > "$MOVED_RUNNER/scripts/attach-project.sh" <<'SH'
@@ -194,8 +197,8 @@ printf '%s\n' source-poisoned >&2
 exit 99
 SH
   chmod 755 "$MOVED_RUNNER/scripts/attach-project.sh"
-  mkdir -p "$RUNNER/core-rules/githooks"
-  printf '#!/usr/bin/env bash\nprintf source-poisoned\\n\n' > "$RUNNER/core-rules/githooks/pre-push"
+  mkdir -p "$RUNNER/core-rules/hooks"
+  printf '#!/usr/bin/env bash\nprintf source-poisoned\\n\n' > "$RUNNER/core-rules/hooks/source-poison.sh"
 }
 
 capture_relink_arguments() {
@@ -349,16 +352,36 @@ prepare_fixture() {
   make_movable_runner
   OWNER="$(owner_path)"
   [ -n "$OWNER" ] && [ -f "$OWNER" ]
-  MANAGED_HOOKS="$(jq -r '.git_hooks.managed_hooks_path' "$OWNER")"
-  [ -n "$MANAGED_HOOKS" ] && [ "$MANAGED_HOOKS" != null ]
 }
 
 record_unavailable_row() {
-  local project_id="${1:-unavailable-merge}" root="${2:-$UNAVAILABLE_ROOT}"
+  local project_id="${1:-unavailable-project}" root="${2:-$UNAVAILABLE_ROOT}"
   run env TRELLIS_HOME="$HOME_PATH" bash -c \
     '. "$1"; local_registry_record_unavailable_root "$2" personal "$3" "$4" "{}"' \
     _ "$REPO/scripts/lib/local-registry.sh" "$HOME_PATH" "$project_id" "$root"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+# Registers a second, healthy project row and then breaks its Git identity in
+# place: the root stays present but stops resolving as a canonical Git worktree,
+# so its registry row lists as `identity_error` while the fixture project stays
+# healthy.
+register_drifted_sibling() {
+  local sibling="$SANDBOX/projects/drifted sibling"
+  mkdir -p "$sibling"
+  git -C "$sibling" init -q
+  git -C "$sibling" config user.email 'sibling-fixture@trellis.test'
+  git -C "$sibling" config user.name 'Sibling Fixture'
+  git -C "$sibling" config commit.gpgsign false
+  printf '{"schema_version":1,"project_id":"drifted-sibling"}\n' > "$sibling/.trellis.json"
+  printf '# sibling\n' > "$sibling/README.md"
+  git -C "$sibling" add .
+  git -C "$sibling" commit -qm 'sibling fixture'
+  run env TRELLIS_HOME="$HOME_PATH" bash -c \
+    '. "$1"; local_registry_register_worktree "$2" personal drifted-sibling "$3" "" "[]" "" "{}"' \
+    _ "$REPO/scripts/lib/local-registry.sh" "$HOME_PATH" "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  rm -rf "$sibling/.git"
 }
 
 assert_terminal_safe() {
@@ -382,7 +405,7 @@ local_registry_list_json() {
   jq -n --arg root "$TRELLIS_TEST_TERMINAL_ROOT" '{
     entries: [{
       fleet: "personal",
-      project_id: "terminal-merge",
+      project_id: "terminal-project",
       kind: "unavailable",
       availability: "unavailable",
       status: "unavailable",
@@ -400,275 +423,179 @@ local_registry_list_json() {
 SH
 }
 
-# Rewrite the owner record through FILTER. Used for both dispatcher-metadata
-# shapes below: the schema-legal one (no `git_hooks` block at all) and the
-# schema-illegal one (a block the owner validator rejects).
-rewrite_owner() {
-  local next="$OWNER.next"
-  chmod u+w "$OWNER"
-  jq "$1" "$OWNER" > "$next"
-  mv "$next" "$OWNER"
-  chmod 600 "$OWNER"
-}
-
-# The owner schema makes `git_hooks` optional, so this is a VALID record for an
-# attachment that manages no hooks — not corruption.
-drop_merge_dispatcher_metadata() {
-  rewrite_owner 'del(.git_hooks)'
-}
-
-# A PRESENT block the `hooks` definition rejects: `.enabled` must be a boolean.
-corrupt_merge_dispatcher_metadata() {
-  rewrite_owner '.git_hooks.enabled = "yes"'
-}
-
-remove_claude_owner_artifacts() {
+remove_codex_owner_artifacts() {
   local next
   chmod u+w "$OWNER"
   next="$OWNER.next"
-  jq '.artifacts |= map(select((.path | startswith(".claude/")) | not))' \
-    "$OWNER" > "$next"
+  jq '
+    .artifacts |= map(select(
+      ((.path == "AGENTS.md")
+       or (.path | startswith(".agents/"))
+       or (.path | startswith(".codex/")))
+      | not
+    ))
+  ' "$OWNER" > "$next"
   mv "$next" "$OWNER"
   chmod 600 "$OWNER"
 }
 
-@test "merge sync validates the moved attachment dispatcher and leaves project hooks untouched" {
-  prepare_fixture
-  owner_before="$(shasum -a 256 "$OWNER" | awk '{print $1}')"
-  dispatcher_before="$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')"
+create_release_missing_attachment() {
+  local registry next candidate
+  SECOND_PROJECT_ID="missing-release-project"
+  SECOND_PROJECT="$SANDBOX/projects/Second Project With Spaces"
+  mkdir -p "$SECOND_PROJECT"
+  git -C "$SECOND_PROJECT" init -q
+  git -C "$SECOND_PROJECT" config user.email 'second-project@trellis.test'
+  git -C "$SECOND_PROJECT" config commit.gpgsign false
+  git -C "$SECOND_PROJECT" config user.name 'Second Project'
+  printf '{"schema_version":1,"project_id":"%s"}\n' "$SECOND_PROJECT_ID" > "$SECOND_PROJECT/.trellis.json"
+  printf '# second fixture\n' > "$SECOND_PROJECT/README.md"
+  git -C "$SECOND_PROJECT" add .
+  git -C "$SECOND_PROJECT" commit -qm 'second fixture project'
 
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF "attachment-managed immutable dispatcher for $VERSION" <<<"$output"
+  run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
+    bash "$REPO/scripts/attach-project.sh" attach --home "$HOME_PATH" \
+      --fleet personal --release "$VERSION" --harness claude "$SECOND_PROJECT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 
-  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
-  [ -f "$MANAGED_HOOKS/pre-push" ]
-  [ "$(cat "$MANAGED_HOOKS/release-payload")" = "$HOME_PATH/releases/$VERSION/payload" ]
-  [ ! -e "$PROJECT/.husky/pre-push" ]
-  [ ! -e "$PROJECT/.githooks/pre-push" ]
-  [ "$(shasum -a 256 "$OWNER" | awk '{print $1}')" = "$owner_before" ]
-  [ "$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')" = "$dispatcher_before" ]
+  SECOND_OWNER=""
+  for candidate in "$HOME_PATH"/state/attachments/*/*.json; do
+    [ -f "$candidate" ] || continue
+    if [ "$(jq -r '.project_id' "$candidate")" = "$SECOND_PROJECT_ID" ]; then
+      SECOND_OWNER="$candidate"
+    fi
+  done
+  [ -n "$SECOND_OWNER" ] || return 1
+
+  chmod u+w "$SECOND_OWNER"
+  jq --arg release '9.9.9' '.release = $release' "$SECOND_OWNER" > "$SECOND_OWNER.next"
+  mv "$SECOND_OWNER.next" "$SECOND_OWNER"
+  chmod 600 "$SECOND_OWNER"
+
+  registry="$HOME_PATH/registry.json"
+  chmod u+w "$registry"
+  next="$registry.next"
+  jq --arg key "personal/$SECOND_PROJECT_ID" --arg release '9.9.9' \
+    '.projects[$key].checkouts |= with_entries(.value.release = $release)' \
+    "$registry" > "$next"
+  mv "$next" "$registry"
+  chmod 600 "$registry"
 }
 
-@test "merge sync dry-run preserves a stale dispatcher and relink restores it from the immutable release" {
-  prepare_fixture
-  rm "$MANAGED_HOOKS/pre-push"
+# POST-SYNC VERIFICATION lives in rollout-hooks.sh --check, not here.
+# sync-hooks.sh carried a --verify flag under the registry.md model; the
+# portable-fleet model removed it, because verification now compares a
+# project against its attached immutable release rather than against the
+# mutable checkout that launched the command. The seven tests that exercised
+# the old flag were dropped with it; scripts/tests/rollout-hooks.bats owns the
+# sweep contract now.
 
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF 'would reconcile attachment-managed merge dispatcher' <<<"$output"
-  [ ! -e "$MANAGED_HOOKS/pre-push" ]
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF 'attachment merge dispatcher relinked' <<<"$output"
-  [ "$(grep -cF source-poisoned <<<"$output")" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$MANAGED_HOOKS/pre-push" ]
-  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
-  [ ! -e "$PROJECT/.githooks/pre-push" ]
-}
-
-@test "merge sync passes the complete strict binding to attachment relink" {
-  prepare_fixture
-  rm "$MANAGED_HOOKS/pre-push"
-  capture_relink_arguments
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  assert_complete_relink_binding
-  [ -f "$MANAGED_HOOKS/pre-push" ]
-}
-
-@test "merge sync propagates the selected temporary directory into real relink" {
-  prepare_fixture
-  capture_relink_environment
-  rm "$PROJECT/.trellis/runtime"
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    TMPDIR="$SELECTED_TMPDIR" TMP="$SANDBOX/unselected TMP" TEMP="$SANDBOX/unselected TEMP" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF 'attachment merge dispatcher relinked' <<<"$output"
-  assert_relink_temp_triplet
-  [ -L "$PROJECT/.trellis/runtime" ]
-  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$HOME_PATH/releases/$VERSION/payload" ]
-  [ -f "$MANAGED_HOOKS/pre-push" ]
-  [ "$(git -C "$PROJECT" config --local --get core.hooksPath)" = "$MANAGED_HOOKS" ]
-}
-
-@test "merge sync treats a nonregular owner record as a state error" {
-  prepare_fixture
-  rm "$OWNER"
-  mkdir "$OWNER"
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 4 ] || { echo "$output"; false; }
-  grep -qF 'blocked (corrupt attachment owner record)' <<<"$output"
-  [ -d "$OWNER" ]
-}
-
-@test "merge sync reports unavailable strict rows without creating a guessed checkout" {
+@test "unavailable local row is explicit and never reconstructed under a root" {
   prepare_fixture
   record_unavailable_row
 
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run unavailable-merge
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --dry-run unavailable-project
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qF 'skip (unavailable): personal/unavailable-merge' <<<"$output"
+  grep -qF 'skip (unavailable): personal/unavailable-project' <<<"$output"
   escaped_root="$(LC_ALL=C printf '%q' "$UNAVAILABLE_ROOT")"
   grep -qF "$escaped_root" <<<"$output"
   [ ! -e "$UNAVAILABLE_ROOT" ]
 }
 
-@test "merge sync rejects owner harness divergence as a strict conflict" {
+@test "both sync owner projections preserve Pi native and legacy harness attribution with strict conflicts" {
+  local script functions owner paths expected
+  owner="$SANDBOX/projection-owner.json"
+  functions="$SANDBOX/owner-functions.sh"
+  for script in sync-hooks.sh sync-merge-gate.sh; do
+    # Extract the actual definition without executing the synchronizer CLI.
+    sed -n '/^owner_harnesses_json() {$/,/^}$/p' "$REPO/scripts/$script" > "$functions"
+    [ -s "$functions" ]
+    while IFS='|' read -r paths expected; do
+      printf '%s\n' "$paths" > "$owner"
+      run bash -c '. "$1"; owner_harnesses_json "$2"' _ "$functions" "$owner"
+      [ "$status" -eq 0 ] || { echo "$script: $output"; false; }
+      [ "$output" = "$expected" ] || { echo "$script: $paths => $output, expected $expected"; false; }
+    done <<'JSON'
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"},{"path":".pi/extensions/trellis.ts"}]}|["pi"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"},{"path":".claude/hooks/check.sh"},{"path":".codex/hooks/check.sh"},{"path":".pi/extensions/trellis.ts"}]}|["claude","codex","pi"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"}]}|["codex"]
+{"artifacts":[{"path":"AGENTS.md"},{"path":".agents/rules/trellis.md"}],"pre_existing":[{"path":".pi/extensions/trellis.ts"}]}|["pi"]
+{"artifacts":[],"pre_existing":[{"path":".claude/hooks/check.sh"},{"path":".codex/hooks/check.sh"},{"path":".pi/extensions/trellis.ts"}]}|["claude","codex","pi"]
+JSON
+  done
+
   prepare_fixture
-  remove_claude_owner_artifacts
+  remove_codex_owner_artifacts
+  local owner_before registry_before
+  owner_before="$(shasum -a 256 "$OWNER")"
+  registry_before="$(shasum -a 256 "$HOME_PATH/registry.json")"
+  for script in sync-hooks.sh sync-merge-gate.sh; do
+    run env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$HOME_PATH" \
+      bash "$REPO/scripts/$script" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+    [ "$status" -eq 3 ] || { echo "$script: $output"; false; }
+    grep -qF 'owner record conflicts with strict registry' <<<"$output"
+    [ "$(shasum -a 256 "$OWNER")" = "$owner_before" ]
+    [ "$(shasum -a 256 "$HOME_PATH/registry.json")" = "$registry_before" ]
+    [ -L "$PROJECT/.trellis/runtime" ]
+  done
+}
+
+@test "owner harness divergence is a strict conflict before attachment mutation" {
+  prepare_fixture
+  remove_codex_owner_artifacts
 
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   grep -qF 'owner record conflicts with strict registry' <<<"$output"
-  [ -f "$MANAGED_HOOKS/pre-push" ]
+  [ -L "$PROJECT/.trellis/runtime" ]
 }
 
-@test "merge sync preserves a failed dispatcher relink conflict" {
+@test "failed attachment relink preserves its conflict exit class" {
   prepare_fixture
-  printf 'foreign dispatcher artifact\n' > "$MANAGED_HOOKS/pre-push"
+  rm "$PROJECT/.trellis/runtime"
+  printf 'foreign runtime artifact\n' > "$PROJECT/.trellis/runtime"
 
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   grep -qF 'attachment relink failed (3)' <<<"$output"
-  grep -qF 'foreign dispatcher artifact' "$MANAGED_HOOKS/pre-push"
+  [ -f "$PROJECT/.trellis/runtime" ]
 }
 
-@test "merge sync treats a missing owner record as a state error" {
+@test "bulk sync reports a missing owner, continues, and returns the highest failure class" {
   prepare_fixture
   rm "$OWNER"
+  create_release_missing_attachment
 
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 4 ] || { echo "$output"; false; }
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
   grep -qF 'blocked (corrupt attachment owner record)' <<<"$output"
-  [ ! -e "$OWNER" ]
+  grep -qF 'recorded immutable release unavailable' <<<"$output"
+  [ ! -e "$HOME_PATH/releases/9.9.9" ]
 }
 
-@test "merge sync skips an owner record that declares no managed merge dispatcher" {
-  prepare_fixture
-  # `git_hooks` is optional in the owner schema (scripts/lib/attachment.sh's
-  # owner validator: `if has("git_hooks") then (.git_hooks | hooks) else true
-  # end`), so its absence is a legal record meaning "hooks are not managed" —
-  # exactly what `enabled: false` means. Reconciliation skips, and the
-  # dispatcher this attachment installed earlier is left untouched.
-  dispatcher_before="$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')"
-  drop_merge_dispatcher_metadata
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # Counted, and guarded: this is the test's central claim, so it must print the
-  # run's output when it fails rather than dying silently mid-test.
-  [ "$(grep -cF 'skip (attachment has no managed merge dispatcher): personal/merge-project' <<<"$output")" -ge 1 ] ||
-    { echo "$output"; false; }
-  [ "$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')" = "$dispatcher_before" ] ||
-    { echo "$output"; false; }
-}
-
-@test "merge sync treats a schema-invalid dispatcher block as a corrupt owner record" {
-  prepare_fixture
-  # The state-error branch this command used to keep for dispatcher metadata is
-  # unreachable: `_attachment_owner_json_valid` runs first and applies the full
-  # `hooks` definition, so a present-but-invalid block is reported one step
-  # earlier, as owner corruption, and never as dispatcher metadata.
-  corrupt_merge_dispatcher_metadata
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [ "$(grep -cF 'blocked (corrupt attachment owner record): personal/merge-project' <<<"$output")" -ge 1 ] ||
-    { echo "$output"; false; }
-}
-
-@test "merge sync keeps root and child diagnostics terminal-safe" {
+@test "Claude sync keeps root and child diagnostics terminal-safe" {
   prepare_fixture
   terminal_root="$SANDBOX/Missing$(printf '\033\001\302\201')Root"
   install_terminal_registry_stub
 
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
     TRELLIS_TEST_TERMINAL_ROOT="$terminal_root" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --dry-run terminal-merge
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --dry-run terminal-project
   # This test's whole subject is escape bytes in diagnostics, so a failure
   # here must render them printably instead of replaying them.
   [ "$status" -eq 0 ] || { cat -v <<<"$output"; false; }
-  grep -qF 'skip (unavailable): personal/terminal-merge' <<<"$output"
+  grep -qF 'skip (unavailable): personal/terminal-project' <<<"$output"
   assert_terminal_safe "$output"
 
-  rm "$MANAGED_HOOKS/pre-push"
+  rm "$PROJECT/.trellis/runtime"
   printf 'fixture child diagnostic: \033\001\302\201\n' > "$HOME_PATH/test-relink-child-diagnostic"
   run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+    bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 5 ] || { cat -v <<<"$output"; false; }
   grep -qF 'attachment relink failed (5)' <<<"$output"
   assert_terminal_safe "$output"
-}
-
-@test "merge sync executes the immutable bundle after active carrier and library swap" {
-  prepare_fixture
-  rm "$MANAGED_HOOKS/pre-push"
-  install_snapshot_probe
-  marker="$SANDBOX/active carrier or library executed"
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=original \
-    TRELLIS_TEST_CARRIER_MARKER="$marker" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$marker" ]
-  [ -f "$MANAGED_HOOKS/pre-push" ]
-}
-
-@test "merge sync refuses mixed immutable snapshot carrier and library before relink" {
-  prepare_fixture
-  rm "$MANAGED_HOOKS/pre-push"
-  install_snapshot_probe
-  marker="$SANDBOX/snapshot carrier or library executed"
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=snapshot-lib \
-    TRELLIS_TEST_CARRIER_MARKER="$marker" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 4 ] || { echo "$output"; false; }
-  grep -qF 'attachment relink failed (4)' <<<"$output"
-  [ ! -e "$marker" ]
-  [ ! -e "$MANAGED_HOOKS/pre-push" ]
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=snapshot-carrier \
-    TRELLIS_TEST_CARRIER_MARKER="$marker" \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 4 ] || { echo "$output"; false; }
-  grep -qF 'attachment relink failed (4)' <<<"$output"
-  [ ! -e "$marker" ]
-  [ ! -e "$MANAGED_HOOKS/pre-push" ]
-}
-
-@test "merge sync surfaces immutable snapshot cleanup failure above a relink conflict" {
-  prepare_fixture
-  printf 'foreign dispatcher artifact\n' > "$MANAGED_HOOKS/pre-push"
-  install_snapshot_probe
-
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
-    TRELLIS_TEST_SNAPSHOT_PROBE_MODE=cleanup \
-    TRELLIS_TEST_CLEANUP_STATUS=5 \
-    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
-  [ "$status" -eq 5 ] || { echo "$output"; false; }
-  grep -qF 'attachment relink failed (3)' <<<"$output"
-  grep -qF 'active immutable execution snapshot cleanup failed (5)' <<<"$output"
-  assert_terminal_safe "$output"
-  grep -qF 'foreign dispatcher artifact' "$MANAGED_HOOKS/pre-push"
 }

@@ -301,15 +301,15 @@ setup() {
 # 2. Block on critical — against the REAL CORE (rung 3, deterministic).
 # NO CODE_REVIEWER_CMD, NO fake claude (claude-less PATH) → the ladder falls to
 # rung 3, the real deterministic_review flags the planted AWS key as critical,
-# and the hook exits 2 with a {"decision":"block",...} object carrying the
+# and the hook exits 0 with a {"decision":"block",...} object carrying the
 # finding. This is the case the Phase-2a trap hid: it runs the real core, not a
 # rung-1 stub.
 # =========================================================================
-@test "block: real core (rung 3) flags planted secret → exit 2 with {\"decision\":\"block\"}" {
+@test "block: real core (rung 3) flags planted secret → exit 0 with {\"decision\":\"block\"}" {
   setup_triggering_repo_with_secret
 
   run_hook
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'AWS access key'* ]] || { echo "$output"; false; }
   # A blocked turn must NOT advise; it blocks.
@@ -436,6 +436,8 @@ setup() {
   run_hook
   [ "$status" -eq 0 ]
   [ "$(call_count "$CLAUDE_COUNT")" -eq 0 ]
+  [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -name '.review-done-*' -print 2>/dev/null)" ]
+  [[ "$output" != *'<review>'* ]]
 
   log="$PROJECT_DIR/decisions-log.md"
   [ -f "$log" ]
@@ -502,8 +504,8 @@ EOF
   run_hook
   # Rung 2 was reached: the built-in claude reviewer was actually invoked.
   [ "$(call_count "$CLAUDE_COUNT")" -ge 1 ]
-  # And its critical finding propagated to a block.
-  [ "$status" -eq 2 ]
+  # And its critical finding propagated to a Codex stdout JSON block.
+  [ "$status" -eq 0 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'eval injection'* ]]
 }

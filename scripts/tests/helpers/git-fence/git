@@ -622,7 +622,7 @@ case "$SUBCOMMAND" in
     # switches bypass repository proof.
     [ "$clean_dry_run" -eq 1 ] || require_fenced_repo "git clean"
     ;;
-  add|am|apply|bisect|checkout|cherry-pick|commit|commit-tree|fetch|filter-branch|gc|merge|mktree|mv|notes|pack-refs|prune|pull|push|read-tree|rebase|reflog|repack|replace|reset|restore|revert|rm|sparse-checkout|stage|stash|submodule|switch|update-index|update-ref)
+  add|am|apply|bisect|checkout|cherry-pick|commit|commit-tree|fetch|filter-branch|gc|merge|mktag|mktree|mv|notes|pack-refs|prune|pull|push|read-tree|rebase|reflog|repack|replace|reset|restore|revert|rm|sparse-checkout|stage|stash|submodule|switch|update-index|update-ref)
     require_fenced_repo "git $SUBCOMMAND"
     ;;
   archive)

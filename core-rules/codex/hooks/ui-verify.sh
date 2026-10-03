@@ -18,11 +18,12 @@
 #       advisory  → Stop-safe systemMessage note; exit 0 (fail-open: no visual tool,
 #                   dev server unreachable, probe/timeout error).
 #       pass      → Stop-safe systemMessage note with the screenshot path; exit 0.
-#       block     → {"decision":"block",...}; exit 2. The ONLY blocking path:
+#       block     → {"decision":"block",...} on stdout; exit 0. The ONLY blocking path:
 #                   a visual tool IS present, the dev server IS up, yet the
 #                   capture produced no artifact. Net: server-down → advisory.
+#   - Missing core: block with the repair line (spec 055 R1.3) — fail closed.
 #   - Fail-open: if the core emits nothing or unparseable output (infra
-#     failure / core not yet deployed), exit 0 — never block on a core failure.
+#     failure), exit 0 — never block on a core failure.
 #
 # Dependencies: jq (required). git/curl/screenshot tooling live in the core.
 #
@@ -46,6 +47,24 @@ fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 
+# Resolve the decision core before any project config is sourced (spec 055
+# R1.1): sibling first, from this script's resolved directory. Run in place from
+# the payload, the shared core-rules/hooks/lib/ is the fallback, and only when
+# this directory IS the declared runtime's Codex tree — never for a project path
+# that merely ends in core-rules/codex/hooks.
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+CORE="$__h_dir/lib/ui-verify-core.sh"
+if [ ! -f "$CORE" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  CORE="$__h_dir/../../hooks/lib/ui-verify-core.sh"
+fi
+# A missing core fails CLOSED (spec 055 R1.3): the gate cannot decide. Codex
+# consumes a Stop block as stdout JSON on exit 0; exit 2 needs a stderr prompt.
+if [ ! -f "$CORE" ]; then
+  jq -nc --arg reason "ui-verify degraded: core library missing at $CORE; run trellis doctor in $PROJECT_DIR" '{decision: "block", reason: $reason}'
+  exit 0
+fi
+
 # Source optional project-level hook config (UI_PORT, UI_PATH, UI_REGEX, …) with
 # auto-export on, so any UI_* it sets propagate into the core subprocess below.
 # The Pi bridge selects .pi with the fixed TRELLIS_HARNESS=pi enum; all other
@@ -68,10 +87,9 @@ fi
 # The core ignores stdin; redirect from /dev/null so it never blocks on a tty.
 # Discard stderr and `|| true` so a core infra failure surfaces as empty output
 # (→ fail-open below), never a non-zero abort under `set -u`.
-CORE="$(dirname "${BASH_SOURCE[0]}")/lib/ui-verify-core.sh"
 VERDICT_JSON=$(bash "$CORE" "$PROJECT_DIR" </dev/null 2>/dev/null || true)
 
-# Fail-open: no output (missing/broken core) → never block.
+# Fail-open: no output (broken core) → never block.
 [ -n "$VERDICT_JSON" ] || exit 0
 
 VERDICT=$(printf '%s' "$VERDICT_JSON" | jq -r '.verdict // "skip"' 2>/dev/null)
@@ -95,7 +113,7 @@ case "$VERDICT" in
     ;;
   block)
     jq -nc --arg reason "UI-visible change requires visual verification. $REASON" '{decision: "block", reason: $reason}'
-    exit 2
+    exit 0
     ;;
   *)
     # Unknown verdict → fail-open.

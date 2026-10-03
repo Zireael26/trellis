@@ -201,10 +201,9 @@ workflow agents auto-terminate, named teammates do not.
 - Treat a lingering pane as a spend leak, not only a housekeeping one: it holds a
   live session whose whole context is re-sent on every wake. Past **272K input
   tokens OpenAI bills 2x input and 1.5x output for the entire request**, not just
-  the overage — `gpt-5.6-sol` goes $5/$30 to $10/$45 per 1M. Keep
-  `compaction.methodOrder` remote-first (`remote` is provider-native server
-  compaction, the mechanism that holds a pi session under the line) and close panes
-  at acceptance so there is no context to re-send.
+  the overage. Keep `compaction.methodOrder` remote-first (`remote` is
+  provider-native server compaction, the mechanism that holds a pi session under
+  the line) and close panes at acceptance so there is no context to re-send.
 
 ## Panel layout in a terminal multiplexer
 

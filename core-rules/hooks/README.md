@@ -29,6 +29,8 @@ surfaces.
 | `env-echo.sh` | SessionStart (environment probe) | new |
 | `core-rules/hooks/wiki-skill-suggest.sh` | PostToolUse (Write/Edit/MultiEdit) | new |
 | `core-rules/codex/hooks/wiki-skill-suggest.sh` | PostToolUse (Write/Edit/MultiEdit) | new |
+| `core-rules/hooks/hookspath-guard.sh` | PostToolUse (Bash, advisory: core.hooksPath drift) | new |
+| `core-rules/codex/hooks/hookspath-guard.sh` | PostToolUse (Bash, advisory: core.hooksPath drift) | new |
 
 **User-global SessionStart**
 
@@ -36,8 +38,9 @@ surfaces.
 |---|---|---|
 | `herdr-foreman-session.sh` | SessionStart (Herdr user-global) | new |
 
-The local-template-only twin's inventory basename is
-`wiki-skill-suggest.sh`; its exact Claude and Codex paths are listed above.
+The local-template-only twins' inventory basenames are
+`wiki-skill-suggest.sh` and `hookspath-guard.sh`; their exact Claude and Codex
+paths are listed above.
 
 **Tier 2 — heavy-gated (wrap-up)**
 
@@ -66,8 +69,11 @@ Extensions vs upstream are documented in each script's header.
 renders `core-rules/templates/{claude-settings.local,codex-hooks.local}.json`
 into each attached project. The direct-copy surfaces use
 `core-rules/templates/claude-settings.json` and `core-rules/codex/hooks.json`.
-The `wiki-skill-suggest.sh` twin is intentionally registered only by those
-attach-rendered local templates, not by either legacy direct-copy manifest.
+The `wiki-skill-suggest.sh` and `hookspath-guard.sh` twins are intentionally
+registered only by those attach-rendered local templates, not by either legacy
+direct-copy manifest. `hookspath-guard.sh` is rendered behind
+`[ -f "$h" ] || exit 0`, so a rollback to a payload without it leaves Bash
+working; it is the only hook with that guard, because it is advisory.
 Override project-local tooling through the harness hook `config.sh` files (for
 example `TODOS_FILE`, `UI_PORT`, or `REVIEW_MIN_FILES`; see script headers).
 

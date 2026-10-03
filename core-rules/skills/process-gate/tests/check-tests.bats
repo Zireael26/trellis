@@ -31,9 +31,17 @@ setup() {
   unset PROCESS_GATE_COVERAGE_CMD PROCESS_GATE_COVERAGE_FLOOR
   unset PROCESS_GATE_MUTATION_SPOTCHECK PROCESS_GATE_MUTATION_TIMEOUT
   unset MUTATION_BEHAVIOR MUTATION_LOG
+  # Keep the heavy-slot preflight off the operator's real launcher and
+  # ~/.trellis: every test takes the fallback path unless it builds a sandboxed
+  # gate with heavy_gate_setup (spec 054, H8).
+  export PROCESS_GATE_HEAVY_LAUNCHER="$BATS_TEST_TMPDIR/no-trellis-launcher"
+  unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID HEAVY_HOLDER_PID
 }
 
 teardown() {
+  if [ -n "${HEAVY_HOLDER_PID:-}" ]; then
+    kill -KILL "$HEAVY_HOLDER_PID" 2>/dev/null || true
+  fi
   if [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ]; then
     rm -rf "$PROJECT_DIR"
   fi
@@ -1006,7 +1014,8 @@ SH
   tree="$(mktemp -d)"
   mkdir -p "$tree/scripts/lib"
   cp "$skill_dir/scripts/lib/common.sh" "$tree/scripts/lib/common.sh"
-  sed -e 's/^\( *\)if \[ -n "\$PG_TIMEOUT_RUNNER" \]; then$/\1if command -v timeout >\/dev\/null 2>\&1; then/' \
+  # `elif` since spec 054 put the heavy-slot branch in front of this one.
+  sed -e 's/^\( *\)\(el\)*if \[ -n "\$PG_TIMEOUT_RUNNER" \]; then$/\1\2if command -v timeout >\/dev\/null 2>\&1; then/' \
       -e 's/out="\$(run_with_timeout "\$limit" bash -c "\$cmd" 2>&1)"; rc=\$?/out="$(timeout "$limit" bash -c "$cmd" 2>\&1)"; rc=$?/' \
       "$skill_dir/scripts/check-tests.sh" > "$tree/scripts/check-tests.sh"
   chmod +x "$tree/scripts/check-tests.sh"
@@ -1030,4 +1039,87 @@ SH
   [[ "$rec_output" == *"UNBOUNDED"* ]] || { echo "$rec_output"; false; }
   [ "$fixed_status" -eq 1 ] || { echo "$fixed_output"; false; }
   [[ "$fixed_output" == *"exceeded 2s and was killed"* ]] || { echo "$fixed_output"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# Spec 054 H8: the test battery runs through `trellis heavy` when its --check
+# preflight passes, and otherwise falls back to run_with_timeout with a notice.
+# The launcher stand-in execs this checkout's dispatcher against a sandboxed
+# TRELLIS_HOME and slot directory; no real slot is ever touched.
+
+HEAVY_REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd -P)"
+
+# heavy_gate_setup SLOTS_JSON
+heavy_gate_setup() {
+  local sandbox
+  sandbox="$(cd "$(mktemp -d "$BATS_TEST_TMPDIR/heavy.XXXXXX")" && pwd -P)"
+  export TRELLIS_HOME="$sandbox/trellis-home"
+  export TRELLIS_HEAVY_TEST=1 TRELLIS_HEAVY_DIR="$sandbox/slots" TRELLIS_HEAVY_TEST_POLL=0.1
+  mkdir -m 700 "$TRELLIS_HOME"
+  printf '{"heavy_slots": %s}\n' "$1" > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  printf '#!/bin/bash\nexec %q "$@"\n' "$HEAVY_REPO_ROOT/scripts/trellis" > "$sandbox/trellis"
+  chmod 755 "$sandbox/trellis"
+  export PROCESS_GATE_HEAVY_LAUNCHER="$sandbox/trellis"
+  HEAVY_SANDBOX="$sandbox"
+}
+
+@test "H8: a held heavy slot delays the battery without spending its timeout" {
+  heavy_gate_setup 1
+  "$PROCESS_GATE_HEAVY_LAUNCHER" heavy --lane holder -- sh -c "touch '$HEAVY_SANDBOX/ready'; sleep 2" >/dev/null 2>&1 3>&- &
+  HEAVY_HOLDER_PID=$!
+  local tries=100
+  while [ ! -e "$HEAVY_SANDBOX/ready" ] && [ "$tries" -gt 0 ]; do sleep 0.05; tries=$((tries - 1)); done
+  [ -e "$HEAVY_SANDBOX/ready" ]
+  local start end
+  start="$(perl -MTime::HiRes=time -e 'printf "%.3f", time')"
+  export PROCESS_GATE_TEST_TIMEOUT=2 PROCESS_GATE_TEST_CMD='sleep 1' PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  run_gate
+  end="$(perl -MTime::HiRes=time -e 'printf "%.3f", time')"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"heavy-gate-unavailable"* ]] || { echo "$output"; false; }
+  # It waited for the holder (about 2 s) and then ran for 1 s under a 2 s limit.
+  perl -e 'exit(($ARGV[1] - $ARGV[0]) >= 2.5 ? 0 : 1)' "$start" "$end" || { echo "elapsed too short: $start $end"; false; }
+  wait "$HEAVY_HOLDER_PID"
+}
+
+@test "H8: a --check refusal (78) falls back with the notice and runs a failing battery once" {
+  heavy_gate_setup '"x"'
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'; exit 1" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"process-gate: notice (heavy-gate-unavailable: trellis heavy --check exited 78: "* ]] || { echo "$output"; false; }
+  [ "$(wc -l < "$HEAVY_SANDBOX/count")" -eq 1 ] || { cat "$HEAVY_SANDBOX/count"; false; }
+}
+
+@test "H8: a missing launcher falls back with the notice" {
+  local marker="$PROJECT_DIR/ran"
+  export PROCESS_GATE_TEST_CMD=": > '$marker'" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"process-gate: notice (heavy-gate-unavailable: trellis launcher not found: $PROCESS_GATE_HEAVY_LAUNCHER)"* ]] ||
+    { echo "$output"; false; }
+  [ -f "$marker" ]
+}
+
+@test "H8: a failing battery on the heavy path runs once and blocks" {
+  heavy_gate_setup 1
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'; exit 1" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" != *"heavy-gate-unavailable"* ]] || { echo "$output"; false; }
+  [ "$(wc -l < "$HEAVY_SANDBOX/count")" -eq 1 ] || { cat "$HEAVY_SANDBOX/count"; false; }
+}
+
+@test "H8: argv with spaces and a nonzero exit survive both paths" {
+  export PROCESS_GATE_TEST_CMD='echo "slot=${TRELLIS_HEAVY_SLOT-none}"; printf "<%s>" "a b" c; echo; exit 3'
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"exited 3"* && "$output" == *"<a b><c>"* && "$output" == *"slot=none"* ]] || { echo "fallback: $output"; false; }
+
+  heavy_gate_setup 1
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"exited 3"* && "$output" == *"<a b><c>"* && "$output" == *"slot=1"* ]] || { echo "heavy: $output"; false; }
 }

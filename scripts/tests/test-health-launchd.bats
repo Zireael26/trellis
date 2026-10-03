@@ -1,301 +1,244 @@
 #!/usr/bin/env bats
-# Focused, hermetic tests for the Darwin host test-health runner and its
-# LaunchAgent installer. The installer uses a fixture config/home plus a fake
-# launchctl; Claude and uname are fakes, so no fleet test or API call occurs.
-
+# Hermetic LaunchAgent and materialize-before-dispatch contract.
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-RUNNER="$REPO_ROOT/scripts/run-test-health-host.sh"
-INSTALLER="$REPO_ROOT/scripts/install-test-health-launchd.sh"
+RUNNER="${TEST_HEALTH_RUNNER_OVERRIDE:-$REPO_ROOT/scripts/run-test-health-host.sh}"
+INSTALLER="${TEST_HEALTH_INSTALLER_OVERRIDE:-$REPO_ROOT/scripts/install-test-health-launchd.sh}"
 
 setup() {
   SANDBOX="$(mktemp -d)"
-  # config-load canonicalises source_root, so on macOS the installer writes
-  # /private/var/... while an uncanonicalised fixture path stays /var/... —
-  # every path assertion below would compare two spellings of the same
-  # directory and fail. Canonicalise once, here, like local-registry.bats does.
   SANDBOX="$(CDPATH='' cd "$SANDBOX" && pwd -P)"
-  CANON="$SANDBOX/canonical"
-  PROJECTS="$SANDBOX/projects"
-  USER_HOME="$SANDBOX/home"
-  FAKE_BIN="$SANDBOX/bin"
-  CONFIG="$CANON/trellis.config.json"
-  PROMPT="$CANON/scheduled-tasks/test-health/prompt.md"
-  LOCK_FILE="$SANDBOX/test-health.lock"
-  FAKE_ARGS="$SANDBOX/claude-args.bin"
-  FAKE_CWD="$SANDBOX/claude-cwd"
-  LAUNCHCTL_CALLS="$SANDBOX/launchctl-calls"
-
-  mkdir -p "$CANON" "$PROJECTS" "$USER_HOME" "$FAKE_BIN"
-  # Tracked policy carries no machine paths. config-load now rejects a policy
-  # file containing trellis_root / projects_root / user_home outright, so the
-  # roots below moved into the machine-local config written further down.
-  cat > "$CONFIG" <<EOF
-{
-  "schema_version": 2,
-  "maintainer_name": "Test Maintainer",
-  "github_user": "tester",
-  "harnesses": ["claude"],
-  "template": { "remote": "https://example.invalid/trellis.git", "branch": "main" }
-}
-EOF
-
-  # Tracked policy no longer carries machine paths: config-load derives
-  # TRELLIS_ROOT and USER_HOME from validated machine-local state, so the
-  # fixture has to supply a real TRELLIS_HOME as well as the policy file.
-  # Without it the installer aborts before writing anything and every
-  # status assertion below reads as a spurious failure.
-  export TRELLIS_HOME="$SANDBOX/trellis-home"
-  mkdir -p "$TRELLIS_HOME"
+  export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/state"
+  export TRELLIS_ROOT="$SANDBOX/canonical" TRELLIS_FLEET=personal
+  export TRELLIS_LAUNCHER="$HOME/.local/bin/trellis"
+  export CLAUDE_BIN="$HOME/.local/bin/claude"
+  export TEST_HEALTH_LOCK_FILE="$SANDBOX/lock"
+  export TEST_HEALTH_FAKE_CWD="$SANDBOX/claude-cwd"
+  export TEST_HEALTH_FAKE_PROMPT="$SANDBOX/claude-prompt"
+  export TEST_HEALTH_FAKE_ARGS="$SANDBOX/claude-args"
+  export LAUNCHER_CALLS="$SANDBOX/launcher-calls"
+  export LAUNCHCTL_CALLS="$SANDBOX/launchctl-calls"
+  export TASK_ROOT="$TRELLIS_HOME/tasks/$TRELLIS_FLEET/test-health"
+  export MANIFEST="$TASK_ROOT/manifest.json" PROMPT="$TASK_ROOT/prompt.md"
+  RAW_PROMPT="$TRELLIS_ROOT/scheduled-tasks/test-health/prompt.md"
+  mkdir -p "$HOME/.local/bin" "$TRELLIS_ROOT/scheduled-tasks/test-health" "$TRELLIS_HOME" "$SANDBOX/bin"
   chmod 700 "$TRELLIS_HOME"
+  printf '%s\n' 'RAW TEMPLATE {{TASK_ROOT}} {{OUTPUT_ROOT}}' > "$RAW_PROMPT"
+  cat > "$TRELLIS_ROOT/trellis.config.json" <<'EOF'
+{"schema_version":2,"maintainer_name":"Test Maintainer","github_user":"tester","harnesses":["claude"],"template":{"remote":"https://example.invalid/trellis.git","branch":"main"}}
+EOF
   cat > "$TRELLIS_HOME/config.json" <<EOF
-{
-  "schema_version": 1,
-  "source_root": "$CANON",
-  "release_remote": "fixture://release",
-  "active_cli_release": "1.0.0-fixture",
-  "default_fleet": "personal",
-  "fleets": { "personal": { "discovery_roots": ["$PROJECTS"] } }
-}
+{"schema_version":1,"source_root":"$TRELLIS_ROOT","release_remote":"fixture://release","active_cli_release":"1.0.0-fixture","default_fleet":"personal","fleets":{"personal":{"discovery_roots":["$SANDBOX/projects"]},"team":{"discovery_roots":["$SANDBOX/projects"]}}}
 EOF
   chmod 600 "$TRELLIS_HOME/config.json"
-
-  cat > "$FAKE_BIN/launchctl" <<'EOF'
+  mkdir -p "$SANDBOX/projects"
+  cat > "$SANDBOX/bin/uname" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  -sm) printf '%s\n' "${FAKE_HOST:-Darwin arm64}" ;;
+  -s) exec /usr/bin/uname -s ;;
+  *) exec /usr/bin/uname "$@" ;;
+esac
+EOF
+  cat > "$TRELLIS_LAUNCHER" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$LAUNCHER_CALLS"
+[ "$*" = "task materialize --fleet $TRELLIS_FLEET test-health --home $TRELLIS_HOME" ] || exit 44
+[ "${MATERIALIZE_FAIL:-0}" != 1 ] || exit 42
+[ -f "$TEST_HEALTH_LOCK_FILE" ] || exit 43
+mkdir -p "$TASK_ROOT"
+if [ "${OMIT_MANIFEST:-0}" != 1 ]; then
+  printf '%s\n' "${MANIFEST_BODY:-$DEFAULT_MANIFEST}" > "$MANIFEST"
+fi
+if [ "${OMIT_PROMPT:-0}" != 1 ]; then
+  if [ "${PROMPT_BODY+x}" ]; then
+    printf '%s' "$PROMPT_BODY" > "$PROMPT"
+  else
+    printf '%s\n' 'Materialized prompt with trailing newline.' > "$PROMPT"
+  fi
+fi
+EOF
+  cat > "$CLAUDE_BIN" <<'EOF'
+#!/usr/bin/env bash
+[ -f "$TEST_HEALTH_LOCK_FILE" ] || exit 45
+printf '%s\n' "$PWD" > "$TEST_HEALTH_FAKE_CWD"
+printf '%s\0' "$@" > "$TEST_HEALTH_FAKE_ARGS"
+last="${@: -1}"
+printf '%s' "$last" > "$TEST_HEALTH_FAKE_PROMPT"
+EOF
+  cat > "$SANDBOX/bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$LAUNCHCTL_CALLS"
 EOF
-  chmod +x "$FAKE_BIN/launchctl"
+  export DEFAULT_MANIFEST='{"status":"ready","requirements":{"planned_errors":[]}}'
+  chmod +x "$SANDBOX/bin/"* "$TRELLIS_LAUNCHER" "$CLAUDE_BIN"
+  export PATH="$SANDBOX/bin:$PATH"
 }
 
-teardown() {
-  rm -rf "$SANDBOX"
+teardown() { rm -rf "$SANDBOX"; }
+
+seed_ready() {
+  mkdir -p "$TASK_ROOT"
+  printf '%s\n' '{"status":"ready","requirements":{"planned_errors":[]}}' > "$MANIFEST"
+  printf '%s\n' 'A materialized prompt.' > "$PROMPT"
 }
 
-write_prompt() {
-  mkdir -p "$(dirname "$PROMPT")"
-  printf '%s\n' "$1" > "$PROMPT"
+assert_refusal() {
+  local step="$1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == "test-health: refused ($step): "* ]]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ]
+  [ ! -e "$TEST_HEALTH_FAKE_ARGS" ]
 }
 
-# The stub answers per flag rather than echoing the same string for every
-# invocation. The host gate asks for `uname -sm`, but config-load now asks for
-# `uname -s` alone to pick its stat(1) flavour — a stub that answered "Darwin
-# arm64" to both sent it down the GNU branch and made every install look like a
-# permissions failure.
-# The stub simulates what the HOST GATE observes (`uname -sm`), not the kernel
-# the process is really running on. `uname -s` deliberately delegates to the
-# real binary: config-load uses it to pick between BSD `stat -f` and GNU
-# `stat -c`, and answering "Linux" on a macOS host sends it to a stat flavour
-# that does not exist there — config-load then fails with an unavailable-home
-# error before the gate under test ever runs.
-make_uname() {
-  cat > "$FAKE_BIN/uname" <<EOF
-#!/usr/bin/env bash
-full='$1'
-case "\$1" in
-  -s) exec /usr/bin/uname -s ;;
-  -m) printf '%s\\n' "\${full##* }" ;;
-  *)  printf '%s\\n' "\$full" ;;
-esac
-EOF
-  chmod +x "$FAKE_BIN/uname"
-}
-
-make_claude() {
-  cat > "$FAKE_BIN/claude" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$PWD" > "$TEST_HEALTH_FAKE_CWD"
-printf '%s\0' "$@" > "$TEST_HEALTH_FAKE_ARGS"
-EOF
-  chmod +x "$FAKE_BIN/claude"
-}
-
-make_durable_claude() {
-  mkdir -p "$USER_HOME/.local/bin"
-  cat > "$USER_HOME/.local/bin/claude" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$USER_HOME/.local/bin/claude"
-}
-
-
-@test "installer renders a bootstrapped Monday host LaunchAgent idempotently" {
-  write_prompt 'Canonical test-health prompt.'
-  make_uname 'Darwin arm64'
-  make_durable_claude
-
-  run env \
-    "HOME=$USER_HOME" \
-    "TRELLIS_CONFIG=$CONFIG" \
-    "PATH=$FAKE_BIN:$PATH" \
-    "LAUNCHCTL_CALLS=$LAUNCHCTL_CALLS" \
-    /bin/bash "$INSTALLER"
+@test "installer bakes resolver HOME, config fleet, root and stable launcher into plist" {
+  run /bin/bash "$INSTALLER"
   [ "$status" -eq 0 ]
-
-  plist="$USER_HOME/Library/LaunchAgents/com.trellis.test-health.plist"
-  installed_runner="$USER_HOME/Library/LaunchAgents/com.trellis.test-health.runner.sh"
-  durable_path="$USER_HOME/.local/bin:$USER_HOME/.nvm/default-node/bin:$USER_HOME/.pyenv/shims:$USER_HOME/.bun/bin:$USER_HOME/.cargo/bin:$USER_HOME/go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-
-  [ -f "$plist" ]
-  [ -x "$installed_runner" ]
-  [ -d "$CANON/logs" ]
+  plist="$HOME/Library/LaunchAgents/com.trellis.test-health.plist"
+  [ -x "$HOME/Library/LaunchAgents/com.trellis.test-health.runner.sh" ]
   run /usr/bin/plutil -lint "$plist"
   [ "$status" -eq 0 ]
-  run /usr/bin/grep -F '__' "$plist"
-  [ "$status" -eq 1 ]
-  run /usr/bin/grep -F "<string>$CANON/logs/test-health.out.log</string>" "$plist"
-  [ "$status" -eq 0 ]
-  run /usr/bin/grep -F "<string>$CANON/logs/test-health.err.log</string>" "$plist"
-  [ "$status" -eq 0 ]
-  run /usr/bin/grep -F "<string>$durable_path</string>" "$plist"
-  [ "$status" -eq 0 ]
+  for entry in "TRELLIS_HOME:$TRELLIS_HOME" "TRELLIS_FLEET:personal" "TRELLIS_ROOT:$TRELLIS_ROOT" "TRELLIS_LAUNCHER:$TRELLIS_LAUNCHER"; do
+    key="${entry%%:*}" value="${entry#*:}"
+    run /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist"
+    [ "$status" -eq 0 ] && [ "$output" = "$value" ]
+  done
   run /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Weekday' "$plist"
-  [ "$status" -eq 0 ]
-  [ "$output" = '1' ]
+  [ "$output" = 1 ]
   run /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Hour' "$plist"
+  [ "$output" = 11 ]
+  run /bin/bash "$INSTALLER"
   [ "$status" -eq 0 ]
-  [ "$output" = '11' ]
-  run /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Minute' "$plist"
-  [ "$status" -eq 0 ]
-  [ "$output" = '0' ]
-
-  run env \
-    "HOME=$USER_HOME" \
-    "TRELLIS_CONFIG=$CONFIG" \
-    "PATH=$FAKE_BIN:$PATH" \
-    "LAUNCHCTL_CALLS=$LAUNCHCTL_CALLS" \
-    /bin/bash "$INSTALLER"
-  [ "$status" -eq 0 ]
-  run cat "$LAUNCHCTL_CALLS"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"bootstrap gui/$(id -u) $plist"* ]]
-
-  run env \
-    "HOME=$USER_HOME" \
-    "TRELLIS_CONFIG=$CONFIG" \
-    "PATH=$FAKE_BIN:$PATH" \
-    "LAUNCHCTL_CALLS=$LAUNCHCTL_CALLS" \
-    /bin/bash "$INSTALLER" --uninstall
+  run /bin/bash "$INSTALLER" --uninstall
   [ "$status" -eq 0 ]
   [ ! -e "$plist" ]
-  [ ! -e "$installed_runner" ]
 }
 
-@test "host gate stops before accessing a canonical prompt off Darwin arm64" {
-  make_uname 'Linux arm64'
-
-  run env \
-    "PATH=$FAKE_BIN:$PATH" \
-    "TRELLIS_ROOT=$SANDBOX/missing-canonical" \
-    "CLAUDE_BIN=$FAKE_BIN/missing-claude" \
-    /bin/bash "$RUNNER" --smoke
-
-  [ "$status" -eq 3 ]
-  [ "$output" = 'info: test-health could not run: off-host (uname=Linux arm64); darwin node_modules cannot execute under this kernel' ]
-}
-
-@test "installer rejects an off-host install before creating artifacts" {
-  write_prompt 'Canonical test-health prompt.'
-  make_uname 'Linux arm64'
-  make_durable_claude
-
-  run env \
-    "HOME=$USER_HOME" \
-    "TRELLIS_CONFIG=$CONFIG" \
-    "PATH=$FAKE_BIN:$PATH" \
-    "LAUNCHCTL_CALLS=$LAUNCHCTL_CALLS" \
-    /bin/bash "$INSTALLER"
-
-  [ "$status" -eq 3 ]
-  [ "$output" = 'info: test-health could not run: off-host (uname=Linux arm64); darwin node_modules cannot execute under this kernel' ]
-  [ ! -e "$USER_HOME/Library/LaunchAgents/com.trellis.test-health.plist" ]
-  [ ! -e "$LAUNCHCTL_CALLS" ]
-  [ ! -d "$CANON/logs" ]
-}
-
-@test "installer validates the canonical prompt before creating artifacts" {
-  make_uname 'Darwin arm64'
-  make_durable_claude
-
-  run env \
-    "HOME=$USER_HOME" \
-    "TRELLIS_CONFIG=$CONFIG" \
-    "PATH=$FAKE_BIN:$PATH" \
-    "LAUNCHCTL_CALLS=$LAUNCHCTL_CALLS" \
-    /bin/bash "$INSTALLER"
-
-  [ "$status" -eq 1 ]
-  [ "$output" = "test-health runner: canonical prompt missing: $PROMPT" ]
-  [ ! -e "$USER_HOME/Library/LaunchAgents/com.trellis.test-health.plist" ]
-  [ ! -e "$LAUNCHCTL_CALLS" ]
-  [ ! -d "$CANON/logs" ]
-}
-
-@test "smoke verifies Darwin arm64 and the canonical prompt without invoking Claude" {
-  write_prompt 'Canonical test-health prompt.'
-  make_uname 'Darwin arm64'
-  make_claude
-
-  run env \
-    "PATH=$FAKE_BIN:$PATH" \
-    "TRELLIS_ROOT=$CANON" \
-    "CLAUDE_BIN=$FAKE_BIN/claude" \
-    "TEST_HEALTH_LOCK_FILE=$LOCK_FILE" \
-    /bin/bash "$RUNNER" --smoke
-
+@test "installer uses explicit fleet before config default, and config default before personal" {
+  # A non-personal default proves the config branch, not just the fallback.
+  /usr/bin/python3 - "$TRELLIS_HOME/config.json" <<'PY'
+import json,sys
+p=sys.argv[1]; c=json.load(open(p)); c['default_fleet']='team'; open(p,'w').write(json.dumps(c))
+PY
+  unset TRELLIS_FLEET
+  run /bin/bash "$INSTALLER"
   [ "$status" -eq 0 ]
-  prompt_hash="$(/usr/bin/shasum -a 256 "$PROMPT")"
-  prompt_hash="${prompt_hash%% *}"
-  [[ "$output" == *'smoke: host preflight: Darwin arm64'* ]]
-  [[ "$output" == *"smoke: canonical cwd: $CANON"* ]]
-  [[ "$output" == *"smoke: canonical prompt: $PROMPT"* ]]
-  [[ "$output" == *"smoke: prompt sha256: $prompt_hash"* ]]
-  [[ "$output" == *'--max-turns 100 --max-budget-usd 25'* ]]
-  [ ! -e "$FAKE_ARGS" ]
-  [ ! -e "$LOCK_FILE" ]
+  plist="$HOME/Library/LaunchAgents/com.trellis.test-health.plist"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:TRELLIS_FLEET' "$plist")" = team ]
+  export TRELLIS_FLEET=personal
+  run /bin/bash "$INSTALLER"
+  [ "$status" -eq 0 ]
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:TRELLIS_FLEET' "$plist")" = personal ]
 }
 
-@test "runner dispatches the exact canonical prompt with bounded Claude arguments" {
-  prompt_body=$'Canonical test-health prompt.\nSecond line stays in the user prompt.'
-  write_prompt "$prompt_body"
-  make_uname 'Darwin arm64'
-  make_claude
+@test "installer refuses resolver-invalid fleet and home without publishing" {
+  export TRELLIS_FLEET='../escape'
+  run /bin/bash "$INSTALLER"
+  [ "$status" -ne 0 ]
+  [ ! -e "$HOME/Library/LaunchAgents/com.trellis.test-health.plist" ]
+  [ ! -e "$LAUNCHCTL_CALLS" ]
+  unset TRELLIS_FLEET
+  export TRELLIS_HOME=relative
+  run /bin/bash "$INSTALLER"
+  [ "$status" -ne 0 ]
+  [ ! -e "$LAUNCHCTL_CALLS" ]
+}
 
-  run env \
-    "PATH=$FAKE_BIN:$PATH" \
-    "TRELLIS_ROOT=$CANON" \
-    "CLAUDE_BIN=$FAKE_BIN/claude" \
-    "TEST_HEALTH_LOCK_FILE=$LOCK_FILE" \
-    "TEST_HEALTH_FAKE_CWD=$FAKE_CWD" \
-    "TEST_HEALTH_FAKE_ARGS=$FAKE_ARGS" \
-    /bin/bash "$RUNNER"
+@test "host gate precedes materialize and smoke checks" {
+  export FAKE_HOST='Linux arm64'
+  run /bin/bash "$RUNNER"
+  [ "$status" -eq 3 ]
+  [[ "$output" == 'info: test-health could not run: off-host '* ]]
+  [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
+}
 
+@test "smoke prints exactly four facts and never locks, materializes, or invokes Claude" {
+  seed_ready
+  # An already-held lock must not stop smoke.
+  /usr/bin/shlock -f "$TEST_HEALTH_LOCK_FILE" -p "$$"
+  run /bin/bash "$RUNNER" --smoke
   [ "$status" -eq 0 ]
-  [ "$(cat "$FAKE_CWD")" = "$CANON" ]
-  actual_args="$(/usr/bin/tr '\0' '\n' < "$FAKE_ARGS")"
-  expected_args=$'-p\n--permission-mode\nbypassPermissions\n--max-turns\n100\n--max-budget-usd\n25\nCanonical test-health prompt.\nSecond line stays in the user prompt.'
+  hash="$(/usr/bin/shasum -a 256 "$PROMPT")"; hash="${hash%% *}"
+  [ "$output" = "$MANIFEST"$'\n'"$PROMPT"$'\n'"$hash"$'\n''placeholders: none unfilled' ]
+  [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_FAKE_ARGS" ]
+  [ "$(cat "$TEST_HEALTH_LOCK_FILE")" = "$$" ]
+  rm -f "$TEST_HEALTH_LOCK_FILE"
+}
+
+@test "runner locks before materialize and holds through Claude; prompt bytes differ from raw template" {
+  export PROMPT_BODY=$'Materialized body, not raw.\n\n'
+  run /bin/bash "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$LAUNCHER_CALLS")" = "task materialize --fleet personal test-health --home $TRELLIS_HOME" ]
+  [ "$(cat "$TEST_HEALTH_FAKE_CWD")" = "$TRELLIS_ROOT" ]
+  cmp -s "$PROMPT" "$TEST_HEALTH_FAKE_PROMPT"
+  ! cmp -s "$RAW_PROMPT" "$TEST_HEALTH_FAKE_PROMPT"
+  expected_args=$'-p\n--permission-mode\nbypassPermissions\n--max-turns\n100\n--max-budget-usd\n25'
+  actual_args="$(/usr/bin/tr '\0' '\n' < "$TEST_HEALTH_FAKE_ARGS" | /usr/bin/head -n 7)"
   [ "$actual_args" = "$expected_args" ]
-  [ ! -e "$LOCK_FILE" ]
+  [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
+  /usr/bin/shlock -f "$TEST_HEALTH_LOCK_FILE" -p "$$"
+  rm -f "$LAUNCHER_CALLS" "$TEST_HEALTH_FAKE_ARGS"
+  run /bin/bash "$RUNNER"
+  [ "$status" -eq 0 ] && [[ "$output" == info:* ]]
+  [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_FAKE_ARGS" ]
+  rm -f "$TEST_HEALTH_LOCK_FILE"
 }
 
-@test "runner skips when the macOS shlock is already held" {
-  write_prompt 'Canonical test-health prompt.'
-  make_uname 'Darwin arm64'
-  make_claude
-  /usr/bin/shlock -f "$LOCK_FILE" -p "$$"
+@test "materialize failure refuses before Claude" {
+  export MATERIALIZE_FAIL=1
+  run /bin/bash "$RUNNER"
+  assert_refusal materialize
+}
 
-  run env \
-    "PATH=$FAKE_BIN:$PATH" \
-    "TRELLIS_ROOT=$CANON" \
-    "CLAUDE_BIN=$FAKE_BIN/claude" \
-    "TEST_HEALTH_LOCK_FILE=$LOCK_FILE" \
-    "TEST_HEALTH_FAKE_CWD=$FAKE_CWD" \
-    "TEST_HEALTH_FAKE_ARGS=$FAKE_ARGS" \
-    /bin/bash "$RUNNER"
+@test "missing manifest refuses before Claude" {
+  export OMIT_MANIFEST=1
+  run /bin/bash "$RUNNER"
+  assert_refusal manifest
+  [[ "$output" == *"$MANIFEST"* ]]
+}
 
-  [ "$status" -eq 0 ]
-  [ "$output" = "info: test-health skipped: another run is active (pid=$$)" ]
-  [ ! -e "$FAKE_ARGS" ]
-  [ "$(cat "$LOCK_FILE")" = "$$" ]
-  rm -f "$LOCK_FILE"
+@test "non-ready manifest refuses before Claude" {
+  export MANIFEST_BODY='{"status":"blocked","requirements":{"planned_errors":[]}}'
+  run /bin/bash "$RUNNER"
+  assert_refusal manifest
+}
+
+@test "planned errors refuse before Claude" {
+  export MANIFEST_BODY='{"status":"ready","requirements":{"planned_errors":["missing dep"]}}'
+  run /bin/bash "$RUNNER"
+  assert_refusal manifest
+}
+
+@test "missing prompt refuses before Claude" {
+  export OMIT_PROMPT=1
+  run /bin/bash "$RUNNER"
+  assert_refusal prompt
+  [[ "$output" == *"$PROMPT"* ]]
+}
+
+@test "placeholder in materialized prompt refuses before Claude" {
+  export PROMPT_BODY='Read {{TASK_ROOT}}'
+  run /bin/bash "$RUNNER"
+  assert_refusal prompt
+  [[ "$output" == *'unfilled placeholder'* ]]
+}
+
+@test "relative TRELLIS_HOME refuses before lock or launcher" {
+  export TRELLIS_HOME=relative
+  run /bin/bash "$RUNNER"
+  assert_refusal home
+  [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
+}
+
+@test "smoke refuses invalid manifest and prompt without materializing" {
+  seed_ready
+  printf '%s\n' '{"status":"blocked","requirements":{"planned_errors":[]}}' > "$MANIFEST"
+  run /bin/bash "$RUNNER" --smoke
+  assert_refusal manifest
+  [ ! -e "$LAUNCHER_CALLS" ]
+  seed_ready
+  printf '%s\n' '{{OUTPUT_ROOT}}' > "$PROMPT"
+  run /bin/bash "$RUNNER" --smoke
+  assert_refusal prompt
+  [ ! -e "$LAUNCHER_CALLS" ]
 }

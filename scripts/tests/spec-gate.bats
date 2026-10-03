@@ -5,7 +5,7 @@
 # THE PARITY GUARANTEE under test: the verdict is a pure function of git +
 # filesystem state (branch diff size, which paths changed, whether a spec triad
 # was added in THIS branch's range, whether a bound surgical marker exists). Zero
-# model classification. That is what makes enforcement equal on Claude + Codex.
+# model classification. Stop response exit contracts differ across harnesses.
 #
 # Isolation: every test stands up its own throwaway git repo under `mktemp`. The
 # CANONICAL scripts under core-rules/ are exercised in place (spec-gate.sh sources
@@ -798,7 +798,7 @@ NODE
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
-@test "Stop-hook mode: DEPLOYED Codex twin blocks identically (exit 2 + JSON)" {
+@test "Stop-hook mode: DEPLOYED Codex twin blocks with exit 0 + JSON" {
   local cdir="$SANDBOX/codex/hooks"
   mkdir -p "$cdir/lib"
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
@@ -810,12 +810,33 @@ NODE
   git checkout -q -b feat/stop-codex
   git add -A && git commit -qm "feat: big" >/dev/null
   run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$cdir/spec-gate.sh'"
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
 }
 
-@test "parity: Claude spec-gate.sh and Codex twin are byte-identical" {
-  cmp -s "$GATE" "$CODEX_GATE"
+@test "parity: twins share byte-identical gate/mark prefix; Claude still exits 2" {
+  local cdir="$SANDBOX/codex/hooks" claude_output
+  mkdir -p "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  # Compare the actual twin scripts' shared executable prefix, not the core
+  # against its own deployed copy. Headers and Stop emitters are harness-specific.
+  diff -u \
+    <(awk '/^DIR=/{shared=1} /^# --- (Claude|Codex) Stop-hook early-warning mode/{exit} shared{print}' "$GATE") \
+    <(awk '/^DIR=/{shared=1} /^# --- (Claude|Codex) Stop-hook early-warning mode/{exit} shared{print}' "$CODEX_GATE")
+  _config true 80 400
+  _write_lines src/f.js 200
+  git checkout -q -b feat/parity-stop
+  git add -A && git commit -qm 'feat: big' >/dev/null
+  run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$GATE'"
+  [ "$status" -eq 2 ]
+  claude_output="$output"
+  run bash -c "cd '$REPO_DIR' && printf '{}' | bash '$cdir/spec-gate.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$claude_output" ]
+  printf '%s' "$output" | jq -e 'keys == ["decision", "reason"] and .decision == "block"' >/dev/null
 }
 
 @test "parity: same verdict from the DEPLOYED Codex twin on the same state" {

@@ -7,7 +7,7 @@
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).
 #   - Pure chat / no edits: exit 0 (skip).
 #   - Runs checks in order. On any failure, emit
-#     {"decision":"block","reason":"<step>: <sliced output>"} and exit 2.
+#     {"decision":"block","reason":"<step>: <sliced output>"} on stdout and exit 0.
 #   - Error slicing: typecheck/lint → first 30 lines; tests → last 30 lines.
 #   - Budget: 90s soft cap.
 #   - Receipts gate (Step 5): on a dirty non-doc tree with no open todos and all
@@ -112,7 +112,7 @@ PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 if ! cd "$PROJECT_DIR" 2>/dev/null; then
   jq -nc --arg dir "$PROJECT_DIR" \
     '{decision: "block", reason: ("project directory: could not enter configured project directory: " + $dir)}'
-  exit 2
+  exit 0
 fi
 
 # Fail-counter state: absolute under the canonical project root (NOT a subtree —
@@ -186,7 +186,9 @@ emit_block() {
 STOP: re-read top-down, state the wrong assumption before retrying (same files failed ${count} times)."
   fi
   jq -nc --arg reason "$reason" '{decision: "block", reason: $reason}'
-  exit 2
+  # Fail-counter state was already persisted above; Codex reads this decision
+  # from stdout only on exit 0 (exit 2 instead requires a stderr prompt).
+  exit 0
 }
 
 # _se_find_subtree — echo the deepest subtree (relative to PROJECT_DIR) that
@@ -513,7 +515,14 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
     # would allow a stale receipt to satisfy the current turn.
     LAST_USER=""
     if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-      if ! TRANSCRIPT_ROLES=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>&1); then
+      # Rollout roles live on response_item messages; older transcripts use
+      # .message.role or .role. Non-message payload roles cannot anchor a turn.
+      if ! TRANSCRIPT_ROLES=$(jq -rR '
+        (fromjson? | (
+          (if .type == "response_item" and .payload.type == "message"
+           then .payload.role else null end) // .message.role // .role
+        )) // "null"
+      ' "$TRANSCRIPT" 2>&1); then
         emit_block "transcript-unusable" "could not parse transcript roles from ${TRANSCRIPT}"
       fi
       LAST_USER=$(printf '%s\n' "$TRANSCRIPT_ROLES" \
@@ -543,7 +552,7 @@ if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
       # receipt in last_assistant_message + marker only in the transcript (or
       # vice versa) passes clean. Present → silent pass, byte-identical to
       # pre-012 behaviour. Absent → NON-BLOCKING advisory. Warn stays warn:
-      # never emit_block, never exit 2, on this path. The fail-counter stays
+      # never emit_block, never emit a block decision on this path. The fail-counter stays
       # GIT-derived — this scan never feeds it.
       # dod-receipt spans stripped first (perl non-greedy) so a receipt quoting
       # the marker inside cmd="…" cannot false-satisfy the scan (012 review F1).

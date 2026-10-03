@@ -21,15 +21,15 @@ function fixture(t) {
     const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
     writeFileSync(resolve(cwd, '.pi/hooks', name), `#!/bin/bash\nprintf '%s' ${quote(output)}\nprintf '%s' ${quote(stderr)} >&2\nexit ${rc}\n`, { mode: 0o755 });
   };
-  const run = (optional = false) => {
-    const event = { schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase: optional ? 'post_action' : 'pre_action', native_event: optional ? 'tool_result' : 'tool_call', action: { family: 'shell', tool_name: 'bash', input: { command: 'printf harmless' }, targets: [] }, result: optional ? { status: 'succeeded', is_error: false, output: [] } : null };
+  const run = (optional = false, command = 'printf harmless') => {
+    const event = { schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase: optional ? 'post_action' : 'pre_action', native_event: optional ? 'tool_result' : 'tool_call', action: { family: 'shell', tool_name: 'bash', input: { command }, targets: [] }, result: optional ? { status: 'succeeded', is_error: false, output: [] } : null };
     const result = spawnSync('bash', [script, '--base64', Buffer.from(JSON.stringify(event)).toString('base64')], { cwd, env: { PATH: process.env.PATH, HOME: cwd, TMPDIR: resolve(cwd, 'tmp') }, encoding: 'utf8', timeout: 10_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
     return { status: result.status, decision: JSON.parse(result.stdout) };
   };
   hook('pr-gate-shiftleft.sh', '', 0);
-  return { hook, run };
+  return { cwd, hook, run };
 }
 
 for (const [name, payload, reason] of [['top', top, 'top reason'], ['nested', nested, 'nested reason']]) {
@@ -77,13 +77,13 @@ for (const [name, output, rc] of [
   });
 }
 
-test('both reasons, context and stderr survive without weakening denial', t => {
+test('both reasons, context and stderr survive without weakening enforced denial', t => {
   const f = fixture(t);
   f.hook('block-destructive.sh', JSON.stringify({ ...top, hookSpecificOutput: { ...nested.hookSpecificOutput, additionalContext: 'context sentinel' } }), 2, 'stderr sentinel');
   const result = f.run();
   assert.equal(result.status, 1);
   assert.equal(result.decision.decision, 'deny');
-  assert.equal(result.decision.capability_status, 'unknown');
+  assert.equal(result.decision.capability_status, 'enforced');
   assert.equal(result.decision.context, 'context sentinel');
   assert.equal(result.decision.reason, 'block-destructive.sh: top reason\nnested reason\nblock-destructive.sh stderr: stderr sentinel');
 });
@@ -102,17 +102,44 @@ for (const output of ['', JSON.stringify({ hookSpecificOutput: { permissionDecis
 
 for (const payload of [top, nested]) {
   for (const rc of [0, 2]) {
-    test(`required ${payload === top ? 'top' : 'nested'} deny with stderr exit ${rc} remains deny and unknown`, t => {
+    test(`required ${payload === top ? 'top' : 'nested'} deny with stderr exit ${rc} retains capability`, t => {
       const f = fixture(t);
       f.hook('block-destructive.sh', JSON.stringify(payload), rc, 'required diagnostic');
       const result = f.run();
       assert.equal(result.status, 1);
       assert.equal(result.decision.decision, 'deny');
-      assert.equal(result.decision.capability_status, 'unknown');
+      assert.equal(result.decision.capability_status, rc === 2 ? 'enforced' : 'unknown');
       assert.match(result.decision.reason, /required diagnostic/);
     });
   }
 }
+
+test('real deployed Codex destructive block stays enforced without repeating stderr reason', t => {
+  const f = fixture(t);
+  const hookDir = new URL('../../codex/hooks/', import.meta.url);
+  // Use the actual release-owned hook and its sibling dependency, not a stub.
+  mkdirSync(resolve(f.cwd, '.pi/hooks/lib'), { recursive: true });
+  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.pi/hooks/block-destructive.sh'));
+  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.pi/hooks/lib/deps.sh'));
+  const result = f.run(false, 'rm -rf /absolute-fixture');
+  assert.equal(result.status, 1);
+  assert.equal(result.decision.decision, 'deny');
+  assert.equal(result.decision.capability_status, 'enforced');
+  assert.equal(result.decision.reason, 'block-destructive.sh: Blocked destructive rm targeting absolute path, ~, $HOME, or .. — run manually if intentional.');
+});
+
+test('real deployed non-block stderr remains unknown and warns', t => {
+  const f = fixture(t);
+  const hookDir = new URL('../../codex/hooks/', import.meta.url);
+  mkdirSync(resolve(f.cwd, '.pi/hooks/lib'), { recursive: true });
+  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.pi/hooks/block-destructive.sh'));
+  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.pi/hooks/lib/deps.sh'));
+  const result = f.run(false, 'cat .env');
+  assert.equal(result.status, 0);
+  assert.equal(result.decision.decision, 'warn');
+  assert.equal(result.decision.capability_status, 'unknown');
+  assert.match(result.decision.reason, /block-destructive\.sh stderr: block-destructive: \.env read allowed/);
+});
 
 test('optional stderr remains advisory and warns without denying', t => {
   const f = fixture(t);

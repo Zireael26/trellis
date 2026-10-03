@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Forward-only high-autonomy decision receipt coverage for the Claude wrapper.
 
+bats_require_minimum_version 1.5.0
 load helpers
 
 HOOK="$HOOKS_DIR/decision-receipt.sh"
@@ -52,6 +53,33 @@ run_preserving_log() {
 assert_block() {
   [ "$status" -eq 2 ]
   printf '%s\n' "$output" | jq -e '.decision == "block" and (.reason | startswith("decision-receipt:"))' >/dev/null
+}
+
+@test "deployed Claude and Codex decision-receipt twins preserve log and differ only at Stop exit" {
+  make_dirty_code
+  local claude="$BATS_TEST_TMPDIR/deploy/.claude/hooks"
+  local codex="$BATS_TEST_TMPDIR/deploy/.codex/hooks"
+  local envelope before claude_output
+  mkdir -p "$claude/lib" "$codex/lib"
+  cp "$HOOK" "$claude/decision-receipt.sh"
+  cp "$HOOKS_DIR/lib/"*.sh "$claude/lib/"
+  cp "$CODEX_HOOKS_DIR/decision-receipt.sh" "$codex/decision-receipt.sh"
+  cp "$HOOKS_DIR/lib/"*.sh "$codex/lib/"
+  cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$codex/lib/deps.sh"
+  cp "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$codex/lib/autonomy.sh"
+  envelope="$(make_envelope 'Done without a decision block.')"
+  before="$(shasum -a 256 "$PROJECT_DIR/decisions-log.md")"
+
+  run --separate-stderr bash "$claude/decision-receipt.sh" <<<"$envelope"
+  [ "$status" -eq 2 ]
+  claude_output="$output"
+  [ "$(shasum -a 256 "$PROJECT_DIR/decisions-log.md")" = "$before" ]
+
+  run --separate-stderr bash "$codex/decision-receipt.sh" <<<"$envelope"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$claude_output" ]
+  printf '%s' "$output" | jq -e 'keys == ["decision", "reason"] and .decision == "block" and (.reason | length > 0)' >/dev/null
+  [ "$(shasum -a 256 "$PROJECT_DIR/decisions-log.md")" = "$before" ]
 }
 
 @test "valid current L4 receipt passes without changing the log" {

@@ -305,6 +305,11 @@ lint_mirror() {
   # tree. `AntiGravity` still fails everywhere, including inside the scope, and
   # the private-path, fleet-identity and proxy-token rules are untouched. This
   # is an allowance, not a skip — the check still runs on these files.
+  #
+  # Spec 053 adds a second, narrower scope on the same terms: the one tracked
+  # file `core-rules/pi/extensions/trellis-web-search.ts`, which the public pi
+  # guide installs and which must stay byte-identical to the operator's live
+  # copy, so its capitalised spellings cannot be edited away.
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -321,6 +326,14 @@ ANTIGRAVITY_HUB_VERSION ANTIGRAVITY_PROJECT_ID ANTIGRAVITY_HUB_ARCH \
 ANTIGRAVITY_BASE_URL createAntigravityTransport ANTIGRAVITY_HUB_OS \
 ANTIGRAVITY_HUB_CL ANTIGRAVITY_API antigravity-api Antigravity-backed \
 ANTIGRAVITY_ ANTIGRAVITY Antigravity $mirror_allowed_tokens"
+            ;;
+          # Spec 053 C6: the always-loaded pi web-search extension, tracked
+          # byte-identical to the operator's live copy. Exactly one file and
+          # four exact whole tokens, the compound identifiers first so the bare
+          # capitalised form never sees their suffix. No ANTIGRAVITY_ prefix.
+          core-rules/pi/extensions/trellis-web-search.ts)
+            mirror_allowed_tokens="antigravityError searchAntigravity \
+Antigravity ANTIGRAVITY $mirror_allowed_tokens"
             ;;
         esac
         if awk -v allowed_tokens="$mirror_allowed_tokens" '

@@ -12,6 +12,16 @@
     "release_remote": { "type": "string", "minLength": 1 },
     "active_cli_release": { "$ref": "#/$defs/version" },
     "default_fleet": { "$ref": "#/$defs/fleetName" },
+    "heavy_slots": {
+      "description": "Machine-wide slots for `trellis heavy` (spec 054). Absent means 2. Only `trellis heavy --check` enforces the type, so a bad value disables the heavy gate alone.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "heavy_light_slots": {
+      "description": "Machine-wide slots for `trellis heavy --light` (spec 054 Amendment A1), a pool separate from heavy_slots. Absent means 4. Only `trellis heavy --check` enforces the type.",
+      "type": "integer",
+      "minimum": 1
+    },
     "fleets": {
       "type": "object",
       "minProperties": 1,

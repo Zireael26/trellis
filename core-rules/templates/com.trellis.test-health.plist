@@ -8,7 +8,9 @@
   current user's ~/Library/LaunchAgents/. The snapshot keeps a bootstrapped
   agent independent of the implementation worktree that installed it; the
   runner itself changes to __TRELLIS_ROOT__ before dispatching Claude, so the
-  canonical project rules and canonical prompt remain authoritative.
+  canonical project rules remain authoritative. The prompt it dispatches is the
+  freshly materialized one under the resolved TRELLIS_HOME/tasks/TRELLIS_FLEET/
+  test-health/, never the raw scheduled-tasks template.
 
   This task is deliberately host-only. The runner rejects every uname value
   other than Darwin arm64 before it reads the prompt or any project path. It
@@ -47,6 +49,12 @@
         <string>__PATH__</string>
         <key>TRELLIS_ROOT</key>
         <string>__TRELLIS_ROOT__</string>
+        <key>TRELLIS_HOME</key>
+        <string>__TRELLIS_HOME__</string>
+        <key>TRELLIS_FLEET</key>
+        <string>__TRELLIS_FLEET__</string>
+        <key>TRELLIS_LAUNCHER</key>
+        <string>__TRELLIS_LAUNCHER__</string>
         <key>CLAUDE_BIN</key>
         <string>__CLAUDE_BIN__</string>
         <key>TEST_HEALTH_LOCK_FILE</key>

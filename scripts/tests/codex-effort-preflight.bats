@@ -64,7 +64,7 @@ _assert_json() {
   _run_preflight "$FIXTURES/config-right.toml" "$FIXTURES/plugin" "$bin"
   [ "$status" -eq 0 ]
   _assert_json
-  [[ "$output" == *'"model_pin": "gpt-5.6-sol"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"model_pin": "gpt-6-sol"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'"pin_ok": true'* ]] || { echo "$output"; false; }
   [[ "$output" == *'"supported_efforts": ["none", "minimal", "low", "medium", "high", "xhigh"]'* ]] || { echo "$output"; false; }
   [[ "$output" == *'"cli_version": "0.144.0"'* ]] || { echo "$output"; false; }

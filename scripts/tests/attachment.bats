@@ -208,7 +208,7 @@ prepare_managed_hooks() {
 }
 
 prepare_older_managed_hooks() {
-  local managed payload release old_lib old_lib_tmp old_oid manifest
+  local managed payload release old_lib old_lib_tmp old_oid home_oid manifest
   local old_launcher launcher_oid
   local legacy_post legacy_pre
   managed="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID"
@@ -219,6 +219,7 @@ prepare_older_managed_hooks() {
   old_launcher="$payload/scripts/trellis-launcher.sh"
   mkdir -p "$(dirname "$old_lib")"
   cp "$BATS_TEST_DIRNAME/../lib/attachment.sh" "$old_lib" || return 1
+  cp "$BATS_TEST_DIRNAME/../lib/trellis-home.sh" "${old_lib%/*}/trellis-home.sh" || return 1
   sed \
     -e '/^[[:space:]]*TRELLIS_ALLOW_MAIN_PUSH=.*$/d' \
     -e '/^[[:space:]]*SECURITY_GATE_SKIP=.*$/d' \
@@ -242,21 +243,25 @@ prepare_older_managed_hooks() {
   cp "$BATS_TEST_DIRNAME/../trellis-launcher.sh" "$old_launcher" || return 1
   chmod 755 "$old_launcher" || return 1
   old_oid="$(git hash-object "$old_lib")" || return 1
+  home_oid="$(git hash-object "${old_lib%/*}/trellis-home.sh")" || return 1
   launcher_oid="$(git hash-object "$old_launcher")" || return 1
-  # One rewrite: the manifest hash below covers release.json, so both declared
+  # One rewrite: the manifest hash below covers release.json, so all copied
   # payload files must be in it before the manifest is taken.
-  rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" --arg launcher "$launcher_oid" \
+  rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" --arg home "$home_oid" --arg launcher "$launcher_oid" \
     '.tree += [{path:"scripts/lib/attachment.sh",mode:"100755",oid:$oid},
+               {path:"scripts/lib/trellis-home.sh",mode:"100755",oid:$home},
                {path:"scripts/trellis-launcher.sh",mode:"100755",oid:$launcher}]' || return 1
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
   legacy_post="$(
-    TRELLIS_LIBS_PRELOADED=1 /bin/bash --noprofile --norc -c '
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$payload" /bin/bash --noprofile --norc -c '
+      source "${1%/*}/trellis-home.sh" || exit
       source "$1"
       _attachment_hooks_post_checkout_dispatcher_body "$2" "$3"
     ' legacy-dispatcher "$old_lib" "$payload" "$manifest"
   )" || return 1
   legacy_pre="$(
-    TRELLIS_LIBS_PRELOADED=1 /bin/bash --noprofile --norc -c '
+    TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$payload" /bin/bash --noprofile --norc -c '
+      source "${1%/*}/trellis-home.sh" || exit
       source "$1"
       _attachment_hooks_pre_push_dispatcher_body "$2" "$3" "$4"
     ' legacy-dispatcher "$old_lib" "$payload" \
@@ -386,6 +391,7 @@ teardown() {
   local common="$ROOT/common" before="$ROOT/exclude-before" after="$ROOT/exclude-after"
   local block="$ROOT/managed-block" exclude foreign_before foreign_after state with_foreign
   mkdir -p "$common/info"
+  source "$BATS_TEST_DIRNAME/../lib/trellis-home.sh"
   TRELLIS_LIBS_PRELOADED=1
   source "$BATS_TEST_DIRNAME/../attach-project.sh"
 

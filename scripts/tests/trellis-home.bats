@@ -11,6 +11,245 @@
 #
 # Fixtures are file-local on purpose: this suite owns no shared helper.
 
+@test "trellis_jq uses original argv without scratch below 64 KiB of values" {
+  run bash -c '
+    . "$1"
+    mkdir "$2/tmp" || exit
+    export TMPDIR="$2/tmp"
+    witness="$2/mktemp-used"
+    # Even a scratch directory later cleaned up is a fast-path failure.
+    mktemp() { printf unexpected > "$witness"; return 99; }
+    raw="$(jq -rn "\"x\" * 32767")" || exit
+    json="$(jq -cn "\"y\" * 32766")" || exit
+    # 32767 raw bytes + 32768 JSON bytes = 65535, summed across both flags.
+    for flags in -cn -cnS; do
+      jq "$flags" --arg raw "$raw" --argjson json "$json" \
+        "{raw:\$raw,json:\$json}" > "$2/expected" || exit
+      trellis_jq "$flags" --arg raw "$raw" --argjson json "$json" \
+        "{raw:\$raw,json:\$json}" > "$2/actual" || exit
+      cmp "$2/expected" "$2/actual" || exit
+    done
+    [ ! -e "$witness" ] || exit 1
+    [ -z "$(find "$TMPDIR" -mindepth 1 -print)" ]
+  ' small-path "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq uses file transport at 64 KiB of summed values" {
+  run bash -c '
+    . "$1"
+    mkdir "$2/tmp" || exit
+    export TMPDIR="$2/tmp"
+    witness="$2/mktemp-used"
+    mktemp() {
+      local dir
+      dir="$(command mktemp "$@")" || return
+      printf "%s\n" "$dir" >> "$witness"
+      printf "%s\n" "$dir"
+    }
+    raw="$(jq -rn "\"x\" * 32767")" || exit
+    json="$(jq -cn "\"y\" * 32767")" || exit
+    # 32767 raw bytes + 32769 JSON bytes = 65536; neither alone reaches it.
+    for flags in -cn -cnS; do
+      jq "$flags" --arg raw "$raw" --argjson json "$json" \
+        "{raw:\$raw,json:\$json}" > "$2/expected" || exit
+      trellis_jq "$flags" --arg raw "$raw" --argjson json "$json" \
+        "{raw:\$raw,json:\$json}" > "$2/actual" || exit
+      cmp "$2/expected" "$2/actual" || exit
+    done
+    [ "$(wc -l < "$witness" | tr -d " ")" -eq 2 ] || exit 1
+    [ -z "$(find "$TMPDIR" -mindepth 1 -print)" ]
+  ' file-path "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq counts multibyte values in bytes and restores the locale" {
+  local utf8_locale candidate
+  for candidate in en_US.UTF-8 C.UTF-8 C.utf8; do
+    if LC_ALL="$candidate" locale charmap 2>/dev/null | grep -qi '^UTF-8$'; then
+      utf8_locale="$candidate"
+      break
+    fi
+  done
+  [ -n "${utf8_locale:-}" ] || skip "no UTF-8 locale installed"
+  run env LC_ALL="$utf8_locale" bash -c '
+    . "$1"
+    mkdir "$2/tmp" || exit
+    export TMPDIR="$2/tmp"
+    original_locale="$LC_ALL"
+    witness="$2/mktemp-used"
+    mktemp() {
+      local dir
+      [ "$LC_ALL" = "$original_locale" ] || return 1
+      dir="$(command mktemp "$@")" || return
+      printf "%s\n" "$dir" > "$witness"
+      printf "%s\n" "$dir"
+    }
+    unit=$'"'"'\303\251'"'"'
+    raw="$(jq -rn --arg unit "$unit" "\$unit * 32768")" || exit
+    [ "${#raw}" -eq 32768 ] || exit 1
+    jq -cn --arg raw "$raw" "{raw:\$raw}" > "$2/expected" || exit
+    trellis_jq -cn --arg raw "$raw" "{raw:\$raw}" > "$2/actual" || exit
+    cmp "$2/expected" "$2/actual" || exit
+    [ -s "$witness" ] || exit 1
+    [ "$LC_ALL" = "$original_locale" ] || exit 1
+    [ -z "$(find "$TMPDIR" -mindepth 1 -print)" ]
+  ' byte-length "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq preserves JSON bytes key order raw strings and stdin" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    value=$'"'"'quotes"\\ tabs\t and trailing newlines\n\n'"'"'
+    large="$(jq -rn "\"x\" * 65536")" || exit
+    for padding in "" "$large"; do
+      for flags in -cn -cnS; do
+        jq "$flags" --argjson record "{\"z\":1,\"a\":null}" --arg text "$value" --arg padding "$padding" \
+          "{record:\$record,text:\$text}" > "$2/expected" || exit
+        trellis_jq "$flags" --argjson record "{\"z\":1,\"a\":null}" --arg text "$value" --arg padding "$padding" \
+          "{record:\$record,text:\$text}" > "$2/actual" || exit
+        cmp "$2/expected" "$2/actual" || exit
+      done
+      printf "%s\n" "[1,2]" | jq -cS --argjson value false --arg padding "$padding" \
+        "def f: {value:\$value,input:.}; f" > "$2/expected" || exit
+      printf "%s\n" "[1,2]" | trellis_jq -cS --argjson value false --arg padding "$padding" \
+        "def f: {value:\$value,input:.}; f" > "$2/actual" || exit
+      cmp "$2/expected" "$2/actual" || exit
+    done
+    [ -z "$(find "$2" -name "trellis-jq.*" -print)" ]
+  ' json-bytes "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq handles accumulated JSON and raw payloads over ARG_MAX" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    owners="$(jq -cn "[range(13) | {path:(tostring),record:{padding:(\"x\" * 110000)}}]")" || exit
+    raw="$(jq -rn "\"x\" * 1100000")" || exit
+    result="$(trellis_jq -cn --argjson owners "$owners" --arg raw "$raw" \
+      "{owners:(\$owners|length),raw:(\$raw|length)}")" || exit
+    [ "$result" = "{\"owners\":13,\"raw\":1100000}" ] || exit 1
+    [ -z "$(find "$2" -name "trellis-jq.*" -print)" ]
+  ' large-json "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq rejects malformed and multiple JSON values and cleans scratch" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    padding="$(jq -rn "\"x\" * 65536")" || exit
+    for invalid in "" "[" "null null"; do
+      trellis_jq -e --arg padding "$padding" --argjson value "$invalid" "." < /dev/null
+      [ "$?" -eq 2 ] || exit 1
+      [ -z "$(find "$2" -name "trellis-jq.*" -print)" ] || exit 1
+    done
+  ' invalid-json "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq preserves jq exit statuses and caller traps" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    trap "printf caller > \"$2/trap\"" EXIT
+    expected_trap="$(trap -p EXIT)"
+    padding="$(jq -rn "\"x\" * 65536")" || exit
+    for filter in "false" "null" "empty" "error(\"fixture\")"; do
+      jq -en "$filter" >/dev/null 2>&1; expected=$?
+      trellis_jq -en --arg padding "$padding" --argjson value null "$filter" >/dev/null 2>&1; actual=$?
+      [ "$actual" -eq "$expected" ] || exit 1
+      [ "$(trap -p EXIT)" = "$expected_trap" ] || exit 1
+      [ -z "$(find "$2" -name "trellis-jq.*" -print)" ] || exit 1
+    done
+  ' jq-status "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$SANDBOX/trap")" = caller ]
+}
+
+@test "trellis_jq file transport reports usage failures on one stderr line" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    padding="$(jq -rn "\"x\" * 65536")" || exit
+    for invalid in unsupported bad-name missing-value missing-file missing-filter; do
+      case "$invalid" in
+        unsupported) trellis_jq -n --arg padding "$padding" --tab "." ;;
+        bad-name) trellis_jq -n --arg padding "$padding" --arg bad-name x "." ;;
+        missing-value) trellis_jq -n --arg padding "$padding" --arg name ;;
+        missing-file) trellis_jq -n --arg padding "$padding" --rawfile name ;;
+        missing-filter) trellis_jq -n --arg padding "$padding" ;;
+      esac 2> "$2/stderr"
+      [ "$?" -eq 2 ] || exit 1
+      [ "$(wc -l < "$2/stderr" | tr -d " ")" -eq 1 ] || exit 1
+      grep -q "^trellis_jq: " "$2/stderr" || exit 1
+      [ -z "$(find "$2" -name "trellis-jq.*" -print)" ] || exit 1
+    done
+  ' jq-usage "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq returns 2 for scratch creation and payload write failures" {
+  run bash -c '
+    . "$1"
+    export TMPDIR="$2"
+    padding="$(jq -rn "\"x\" * 65536")" || exit
+    mktemp() { return 1; }
+    trellis_jq -n --arg padding "$padding" "." >/dev/null 2>&1
+    [ "$?" -eq 2 ] || exit 1
+    # Make the first payload path a directory: redirection must fail, even
+    # for root, and the EXIT trap must remove the allocated scratch.
+    mktemp() {
+      local dir
+      dir="$(command mktemp "$@")" || return
+      mkdir "$dir/0" || return
+      printf "%s\n" "$dir"
+    }
+    trellis_jq -n --arg padding "$padding" "." >/dev/null 2>&1
+    [ "$?" -eq 2 ] || exit 1
+    [ -z "$(find "$2" -name "trellis-jq.*" -print)" ]
+  ' jq-infrastructure "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "trellis_jq under /bin/bash preserves traps statuses and scratch cleanup" {
+  # /bin/bash is 3.2 on macOS; use the system shell, not PATH-selected bash.
+  run /bin/bash --noprofile --norc -c '
+    set -eu
+    . "$1"
+    mkdir "$2/tmp"
+    export TMPDIR="$2/tmp"
+    witness="$2/mktemp-used"
+    mktemp() {
+      local dir
+      dir="$(command mktemp "$@")" || return
+      printf "%s\n" "$dir" >> "$witness"
+      printf "%s\n" "$dir"
+    }
+    trap "printf caller > \"$2/bash-trap\"" EXIT
+    expected_trap="$(trap -p EXIT)"
+    large="$(jq -rn "\"x\" * 65536")"
+    for padding in "" "$large"; do
+      for filter in "true" "false" "null" "empty" "error(\"fixture\")"; do
+        expected=0
+        jq -en "$filter" >/dev/null 2>&1 || expected=$?
+        actual=0
+        trellis_jq -en --arg padding "$padding" --argjson value null "$filter" \
+          >/dev/null 2>&1 || actual=$?
+        [ "$actual" -eq "$expected" ] || exit 1
+        [ "$(trap -p EXIT)" = "$expected_trap" ] || exit 1
+        [ -z "$(find "$TMPDIR" -mindepth 1 -print)" ] || exit 1
+      done
+    done
+    [ "$(wc -l < "$witness" | tr -d " ")" -eq 5 ]
+  ' system-bash "$HOME_LIB" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$SANDBOX/bash-trap")" = caller ]
+}
+
 REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 HOME_LIB="$REPO_ROOT/scripts/lib/trellis-home.sh"
 VALID_MACHINE_A="$REPO_ROOT/scripts/tests/fixtures/local-fleets/valid-machine-personal-work-a.json"

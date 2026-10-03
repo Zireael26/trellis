@@ -100,11 +100,9 @@ price.
 subscriptions rather than metered API keys, so no promotional API rate is what
 we are actually charged, and a ceiling derived from one silently over-buys work
 the moment the promotion lapses. Price every lane at its standard rate. The live
-example: GPT-5.6 Sol's published $4 in / $20 out is promotional at least through
-2026-11-21, and OpenAI does not publish the post-promotional standard price — so
-the GPT lane is metered at GPT-6 Astra's standard $50 / MTok output below rather
-than at Sol's promotional rate, which also keeps the figure correct when GPT-6
-Sol replaces it.
+example: GPT-6 Sol's standard list price is not verified here, so the GPT lane is
+metered at GPT-6 Astra's verified standard $50 / MTok output below until Sol's
+standard rate is verified.
 
 A second correction applies to any ceiling carried over from before Claude 4.7:
 those models and later use a different tokenizer that produces roughly **30

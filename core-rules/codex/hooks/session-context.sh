@@ -1008,6 +1008,28 @@ if [ "${_se_worktree_warn:-}" = "WARN" ]; then
 ${CTX}"
 fi
 
+# core.hooksPath drift (spec 055 R4.1): husky's `prepare` can point git away
+# from the Trellis dispatcher, and no git hook can then report its own removal.
+# Read-only; one advisory line, never a repair. The helper is a sibling when
+# deployed; in place, the shared lib is reached only inside the declared
+# runtime's Codex tree (spec 055 R1.1).
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+__se_hp_lib="$__h_dir/lib/hookspath-check.sh"
+if [ ! -f "$__se_hp_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __se_hp_lib="$__h_dir/../../hooks/lib/hookspath-check.sh"
+fi
+if [ -f "$__se_hp_lib" ]; then
+  # shellcheck source=../../hooks/lib/hookspath-check.sh disable=SC1090,SC1091
+  . "$__se_hp_lib"
+  _se_hookspath_line="$(trellis_hookspath_drift_line "$PROJECT_DIR" 2>/dev/null)"
+  if [ -n "$_se_hookspath_line" ]; then
+    CTX="${_se_hookspath_line}
+
+${CTX}"
+  fi
+fi
+
 FULL_CTX="${CTX}${AUTONOMY_CTX}${TASK_CTX}${CTX_TAIL}"
 if [ -z "$FULL_CTX" ]; then
   exit 0

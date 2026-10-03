@@ -18,8 +18,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/config-load.sh
 . "$SCRIPT_DIR/lib/config-load.sh"
-# shellcheck source=lib/sed-portable.sh
-. "$SCRIPT_DIR/lib/sed-portable.sh"
 
 LABEL="com.trellis.test-health"
 TEMPLATE="$SOURCE_ROOT/core-rules/templates/$LABEL.plist"
@@ -30,6 +28,7 @@ RUNNER_DEST="$LAUNCH_AGENTS_DIR/$LABEL.runner.sh"
 LOCK_FILE="$USER_HOME/Library/Caches/$LABEL.lock"
 LAUNCH_DOMAIN="gui/$(id -u)"
 DURABLE_CLAUDE_BIN="$USER_HOME/.local/bin/claude"
+DURABLE_LAUNCHER="$USER_HOME/.local/bin/trellis"
 # launchd starts with only system directories. Bake stable host tool roots rather
 # than the installing terminal's session-specific PATH: test-health needs the
 # NVM default Node/pnpm toolchain and pyenv shims as well as Homebrew, Bun, Go,
@@ -77,24 +76,57 @@ remove_agent() {
 }
 
 render_plist() {
-  cp "$TEMPLATE" "$PLIST_TMP"
-  # Paths use '/' heavily, so retain the disk-janitor installer's portable
-  # delimiter and render only values owned by this installer.
-  sed_inplace -e "s|__TRELLIS_ROOT__|$TRELLIS_SOURCE_ROOT|g" "$PLIST_TMP"
-  sed_inplace -e "s|__USER_HOME__|$USER_HOME|g" "$PLIST_TMP"
-  sed_inplace -e "s|__CLAUDE_BIN__|$DURABLE_CLAUDE_BIN|g" "$PLIST_TMP"
-  sed_inplace -e "s|__PATH__|$DURABLE_PATH|g" "$PLIST_TMP"
+  # Escape XML values rather than interpolating them into sed expressions.
+  TRELLIS_PLIST_ROOT="$TRELLIS_SOURCE_ROOT" TRELLIS_PLIST_HOME="$TRELLIS_HOME" \
+  TRELLIS_PLIST_FLEET="$TRELLIS_FLEET_NAME" TRELLIS_PLIST_LAUNCHER="$DURABLE_LAUNCHER" \
+  TRELLIS_PLIST_USER="$USER_HOME" TRELLIS_PLIST_CLAUDE="$DURABLE_CLAUDE_BIN" \
+  TRELLIS_PLIST_PATH="$DURABLE_PATH" /usr/bin/python3 - "$TEMPLATE" "$PLIST_TMP" <<'PY'
+import os
+import sys
+from xml.sax.saxutils import escape
+
+values = {
+    '__TRELLIS_ROOT__': 'TRELLIS_PLIST_ROOT',
+    '__TRELLIS_HOME__': 'TRELLIS_PLIST_HOME',
+    '__TRELLIS_FLEET__': 'TRELLIS_PLIST_FLEET',
+    '__TRELLIS_LAUNCHER__': 'TRELLIS_PLIST_LAUNCHER',
+    '__USER_HOME__': 'TRELLIS_PLIST_USER',
+    '__CLAUDE_BIN__': 'TRELLIS_PLIST_CLAUDE',
+    '__PATH__': 'TRELLIS_PLIST_PATH',
+}
+with open(sys.argv[1], encoding='utf-8') as source:
+    rendered = source.read()
+for token, name in values.items():
+    rendered = rendered.replace(token, escape(os.environ[name], {'"': '&quot;', "'": '&apos;'}))
+with open(sys.argv[2], 'w', encoding='utf-8') as destination:
+    destination.write(rendered)
+PY
   /usr/bin/plutil -lint "$PLIST_TMP" >/dev/null
 }
 
 preflight_install() {
   [ -f "$TEMPLATE" ] || { printf 'template missing: %s\n' "$TEMPLATE" >&2; exit 1; }
   [ -x "$RUNNER_SOURCE" ] || { printf 'runner missing or not executable: %s\n' "$RUNNER_SOURCE" >&2; exit 1; }
-
-  # Reuse the runner's exact host/root/prompt/Claude preflight before this
-  # installer creates either host artifacts or the canonical log directory.
-  TRELLIS_ROOT="$TRELLIS_SOURCE_ROOT" CLAUDE_BIN="$DURABLE_CLAUDE_BIN" \
-    "$RUNNER_SOURCE" --smoke >/dev/null
+  # config-load calls the real home and fleet resolvers; repeat explicitly to
+  # pin the values that will survive the launchd shell environment boundary.
+  local home fleet
+  home="$(_pgcfg_resolve_home)" || return "$?"
+  home="${home%/}"
+  fleet="$(_pgcfg_resolve_fleet "$home/config.json")" || return "$?"
+  [ "$home" = "$TRELLIS_HOME" ] && [ "$fleet" = "$TRELLIS_FLEET_NAME" ] || {
+    printf 'test-health: refused (resolver): changed home or fleet\n' >&2
+    return 1
+  }
+  [ -f "$DURABLE_LAUNCHER" ] && [ -x "$DURABLE_LAUNCHER" ] || {
+    printf 'test-health: refused (launcher): %s\n' "$DURABLE_LAUNCHER" >&2
+    return 1
+  }
+  local host
+  host="$(uname -sm)"
+  [ "$host" = 'Darwin arm64' ] || {
+    printf 'info: test-health could not run: off-host (uname=%s); darwin node_modules cannot execute under this kernel\n' "$host" >&2
+    return 3
+  }
 }
 
 install_agent() {
@@ -118,7 +150,7 @@ install_agent() {
   printf 'installed: %s\n' "$PLIST_DEST"
   printf 'installed runner: %s\n' "$RUNNER_DEST"
   printf 'bootstrapped LaunchAgent: %s\n' "$LABEL"
-  printf '  runs: %s -p <canonical test-health prompt> (Monday 11:00 local)\n' "$DURABLE_CLAUDE_BIN"
+  printf '  runs: %s -p <materialized test-health prompt> (Monday 11:00 local)\n' "$DURABLE_CLAUDE_BIN"
   printf '  logs: %s/logs/test-health.out.log and %s/logs/test-health.err.log\n' "$TRELLIS_SOURCE_ROOT" "$TRELLIS_SOURCE_ROOT"
 }
 

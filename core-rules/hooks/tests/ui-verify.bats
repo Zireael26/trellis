@@ -134,7 +134,7 @@ run_wrapper() {
   [ ! -e "$marker" ]
 }
 
-@test "canonical and Codex wrappers emit the same block JSON and exit 2" {
+@test "canonical exits 2 and Codex exits 0 with the same block JSON" {
   local canonical codex tools canonical_output canonical_status
   tools="$BATS_TEST_TMPDIR/wrapper-tools"
   mkdir -p "$tools"
@@ -154,7 +154,7 @@ SH
   run_wrapper "$codex" "$tools"
 
   [ "$canonical_status" -eq 2 ]
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
   [ "$canonical_output" = "$output" ]
   [ "$(printf '%s' "$output" | jq -r '.decision')" = "block" ]
   [[ "$(printf '%s' "$output" | jq -r '.reason')" == "UI-visible change requires visual verification. "* ]]

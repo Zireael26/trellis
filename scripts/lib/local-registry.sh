@@ -1080,7 +1080,7 @@ local_registry_propose_register_worktree() {
     return "$TRELLIS_EX_CONFLICT"
   fi
 
-  if ! jq \
+  if ! trellis_jq \
     --arg key "$key" --arg fleet "$fleet" --arg project_id "$project_id" \
     --arg checkout_root "$checkout_root" --arg common "$common" --arg checkout_id "$checkout_id" \
     --arg worktree_root "$worktree_root" --arg worktree_id "$worktree_id" \
@@ -1150,7 +1150,7 @@ local_registry_propose_unavailable_root() {
     local_registry_err "identity or path collision for unavailable root $root"
     return "$TRELLIS_EX_CONFLICT"
   fi
-  if ! jq \
+  if ! trellis_jq \
     --arg key "$key" --arg fleet "$fleet" --arg project_id "$project_id" --arg root "$root" --argjson metadata "$metadata" '
       .projects = (.projects // {})
       | .projects[$key] = (.projects[$key] // {fleet: $fleet, project_id: $project_id, status: "unavailable", metadata: {}, checkouts: {}})
@@ -1195,7 +1195,7 @@ local_registry_propose_discovery_ignores() {
     return "$TRELLIS_EX_STATE"
   }
   local_registry_validate_file "$input" || return "$?"
-  if ! jq -e --argjson ignores "$normalized" '
+  if ! trellis_jq -e --argjson ignores "$normalized" '
     def roots:
       [ .projects | to_entries[] as $project
         | $project.value.checkouts | to_entries[] as $checkout
@@ -1214,7 +1214,7 @@ local_registry_propose_discovery_ignores() {
     local_registry_err "discovery ignore collides with a registered project path"
     return "$TRELLIS_EX_CONFLICT"
   fi
-  if ! jq --arg fleet "$fleet" --argjson ignores "$normalized" '
+  if ! trellis_jq --arg fleet "$fleet" --argjson ignores "$normalized" '
     .discovery_ignores = (.discovery_ignores // {})
     | .discovery_ignores[$fleet] = $ignores
     | if (.discovery_ignores[$fleet] | length) == 0
@@ -1259,7 +1259,7 @@ local_registry_propose_metadata() {
     local_registry_err "project is not registered: $key"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
-  if ! jq --arg key "$key" --argjson metadata "$metadata" \
+  if ! trellis_jq --arg key "$key" --argjson metadata "$metadata" \
     '.projects[$key].metadata = (.projects[$key].metadata + $metadata)' "$input" > "$output"; then
     local_registry_err "could not construct metadata proposal for $key"
     return "$TRELLIS_EX_STATE"
@@ -1399,7 +1399,7 @@ local_registry_update_harnesses() (
       # Validate both snapshots against the full schema without replacing any
       # other row. Even the idempotent path must reject a malformed expected.
       for current in "$expected" "$after"; do
-        jq --arg key "$key" --arg checkout "$checkout" --argjson snapshot "$current" \
+        trellis_jq --arg key "$key" --arg checkout "$checkout" --argjson snapshot "$current" \
           '.projects[$key].checkouts[$checkout] = $snapshot' "$base" > "$proposal" || { rc="$TRELLIS_EX_STATE"; break; }
         local_registry_validate_file "$proposal" || { rc="$?"; break; }
       done
@@ -1407,12 +1407,12 @@ local_registry_update_harnesses() (
         bindings="$(printf '%s\n' "$after" | jq -c --arg checkout "$checkout" '[.worktrees | keys[] | {checkout_id:$checkout,worktree_id:.}]')" || rc="$TRELLIS_EX_STATE"
       fi
       if [ "$rc" -eq 0 ]; then
-        if jq -e --arg key "$key" --arg checkout "$checkout" --argjson after "$after" '.projects[$key].checkouts[$checkout] == $after' "$base" >/dev/null; then
+        if trellis_jq -e --arg key "$key" --arg checkout "$checkout" --argjson after "$after" '.projects[$key].checkouts[$checkout] == $after' "$base" >/dev/null; then
           while IFS= read -r worktree; do
             local_registry_validate_bound_row_identity "$(jq -c . "$base")" "$checkout" "$worktree" || { rc="$?"; break; }
           done < <(printf '%s\n' "$after" | jq -r '.worktrees | keys[]')
         else
-          jq --arg key "$key" --arg checkout "$checkout" --argjson after "$after" \
+          trellis_jq --arg key "$key" --arg checkout "$checkout" --argjson after "$after" \
             '.projects[$key].checkouts[$checkout].harnesses = $after.harnesses' "$base" > "$proposal" || rc="$TRELLIS_EX_STATE"
           if [ "$rc" -eq 0 ]; then
             local_registry_write_locked_bound_rows "$home" "$proposal" "$bindings" || rc="$?"
@@ -2087,7 +2087,7 @@ local_registry_report_unselected_state_errors() {
              (.worktree_id // ""), (.root // "")] ]
   ' 2>/dev/null)" || seen=''
   [ -n "$seen" ] || seen='[]'
-  rows="$(printf '%s\n' "$listing" | jq -r --argjson seen "$seen" '
+  rows="$(printf '%s\n' "$listing" | trellis_jq -r --argjson seen "$seen" '
     def key: [(.project_key // ""), (.kind // ""), (.checkout_id // ""),
               (.worktree_id // ""), (.root // "")];
     .entries[]?
@@ -2308,7 +2308,7 @@ local_registry_parse_legacy_markdown() {
 
 local_registry_legacy_metadata() {
   local registry_file="${1:-}" line_number="${2:-}" class="${3:-}" shared_services="${4:-}" project_infra="${5:-}" fixed_ports="${6:-}" notes="${7:-}" exclusion="${8:-null}" legacy_path="${9:-}"
-  jq -n -cS \
+  trellis_jq -n -cS \
     --arg registry_file "$registry_file" --arg class "$class" --arg shared_services "$shared_services" \
     --arg project_infra "$project_infra" --arg fixed_ports "$fixed_ports" --arg notes "$notes" \
     --arg legacy_path "$legacy_path" \

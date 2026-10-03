@@ -19,6 +19,9 @@ setup() {
     commit --allow-empty -q -m init
   export CODEX_PROJECT_DIR="$PROJECT_DIR"
   unset CLAUDE_PROJECT_DIR
+  # The hooks run in place from this tree, as the rendered hooks.json does; their
+  # shared-lib fallback is bound to TRELLIS_ROOT (spec 055 R1.1).
+  export TRELLIS_ROOT="$REPO_ROOT"
 }
 
 teardown() {

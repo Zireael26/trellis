@@ -73,6 +73,18 @@ PROCESS_GATE_TEST_TIMEOUT=600
 
 The trade-off (faster gate but theoretically incomplete coverage) must be acknowledged in the project's `CLAUDE.md`.
 
+## Machine-wide heavy slots
+
+The test battery runs through `trellis heavy` (spec 054), so parallel lanes on one host take
+turns instead of starving each other. `check-tests.sh` runs `trellis heavy --check` once, before
+any check. On exit 0 the battery waits for a slot, and `PROCESS_GATE_TEST_TIMEOUT` starts only once
+the slot is held. On any other exit, or with no launcher, the battery runs on the old bounded
+path and the gate prints `process-gate: notice (heavy-gate-unavailable: <reason>)` to stderr.
+The path is chosen before the battery runs, so a failing battery is never re-run.
+`PROCESS_GATE_HEAVY_LAUNCHER` names the launcher (default: `trellis` on `PATH`). Typecheck, lint,
+coverage and the mutation spot-check are not gated. The battery always uses the heavy pool, never
+`--light`.
+
 ## CI vs gate
 
 The gate runs locally or in a pre-merge agent context. CI runs on the merge commit. Both must be green:

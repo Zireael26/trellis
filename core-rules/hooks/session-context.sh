@@ -1010,6 +1010,21 @@ if [ "${_se_worktree_warn:-}" = "WARN" ]; then
 ${CTX}"
 fi
 
+# core.hooksPath drift (spec 055 R4.1): husky's `prepare` can point git away
+# from the Trellis dispatcher, and no git hook can then report its own removal.
+# Read-only; one advisory line, never a repair.
+__se_hp_lib="$(dirname "${BASH_SOURCE[0]}")/lib/hookspath-check.sh"
+if [ -f "$__se_hp_lib" ]; then
+  # shellcheck source=lib/hookspath-check.sh disable=SC1090,SC1091
+  . "$__se_hp_lib"
+  _se_hookspath_line="$(trellis_hookspath_drift_line "$PROJECT_DIR" 2>/dev/null)"
+  if [ -n "$_se_hookspath_line" ]; then
+    CTX="${_se_hookspath_line}
+
+${CTX}"
+  fi
+fi
+
 FULL_CTX="${CTX}${AUTONOMY_CTX}${TASK_CTX}${CTX_TAIL}"
 if [ -z "$FULL_CTX" ]; then
   exit 0

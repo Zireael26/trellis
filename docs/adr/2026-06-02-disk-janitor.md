@@ -143,6 +143,18 @@ crosses the same boundary that keeps doctor from rewriting a project's `CLAUDE.m
 The guard reports the landmine and prints the fix; the operator applies it. (See
 "report-only Component-3 refinement" above.)
 
+## Amendment (2026-09-28, spec 059): the janitor never deletes Docker volumes
+
+A legacy nightly apply agent with `docker` in its scopes removed 197 anonymous
+volumes that no container was attached to (`Links == 0`). An unattached volume can
+still hold data, so the janitor no longer deletes volumes in any mode, with any
+flag. The Docker scope lists unattached anonymous volume IDs under a report-only
+heading, and its only mutation is the BuildKit cache prune. Removing a volume is an
+operator action under PROTOCOL §10. `trellis launchd` refuses to install, and
+`trellis doctor` reports an error, while any `org.trellis.disk-janitor*.plist`
+differs from the installer's exact ProgramArguments and schedule
+(`scripts/lib/disk-janitor-agents.sh`). See `specs/059-janitor-volume-safety/spec.md`.
+
 ## Related
 
 - Host CLI: `scripts/disk-janitor.sh`; scanner library: `scripts/lib/disk-janitor-lib.sh`.

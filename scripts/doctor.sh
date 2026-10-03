@@ -1080,18 +1080,24 @@ fi
 . "$SCRIPT_DIR/lib/attachment.sh"
 . "$SCRIPT_DIR/lib/health-checks.sh"
 
-ONLY_PROJECT=""; ONLY_FLEET=""; DO_FIX=0; DO_DRY_RUN=0
+ONLY_PROJECT=""; ONLY_FLEET=""; DO_FIX=0; DO_DRY_RUN=0; DO_ADOPT_HUSKY=0
 usage() {
   cat <<'EOF'
 Usage: trellis doctor [--home PATH] [--fleet NAME] [--project ID]
        trellis doctor --fix [--home PATH] [--fleet NAME] [--project ID] [--dry-run]
+                     [--adopt-husky]
 
 Enumerates local registry rows including unavailable paths. Validates the
 report-only user-surface row, immutable releases, exact local attachment
 ownership, local excludes, and manifest-driven Claude/Codex leaves.
 --fix repairs only safe project attachment rows through attach/relink/recover;
 the user-surface row is report-only and prints an attach/relink remedy. It
-never deletes project-owned files or migrates legacy/mixed layouts.
+never deletes project-owned files or migrates legacy/mixed layouts. The one
+write it makes itself restores a core.hooksPath that husky reset to .husky/_,
+under the checkout lock and only when every preflight condition holds.
+--adopt-husky first records husky's .husky/_ as the previous hooks path of
+the checkout's hooks-enabled worktree and creates the passthrough shims its
+hooks need, so .husky/pre-commit and friends keep running; all or nothing.
 
 Usage visibility diagnostics are advisory and read-only: they inspect one private
 snapshot, never collect, refresh, probe providers, or create/migrate a store.
@@ -1104,11 +1110,13 @@ while [ "$#" -gt 0 ]; do
     --project) [ "$#" -ge 2 ] || { echo 'doctor: --project requires ID' >&2; exit 2; }; ONLY_PROJECT="$2"; shift 2 ;;
     --fix) DO_FIX=1; shift ;;
     --dry-run) DO_DRY_RUN=1; shift ;;
+    --adopt-husky) DO_ADOPT_HUSKY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "doctor: unknown option: $1" >&2; exit 2 ;;
   esac
 done
 [ "$DO_DRY_RUN" -eq 0 ] || [ "$DO_FIX" -eq 1 ] || { echo 'doctor: --dry-run requires --fix' >&2; exit 2; }
+[ "$DO_ADOPT_HUSKY" -eq 0 ] || [ "$DO_FIX" -eq 1 ] || { echo 'doctor: --adopt-husky requires --fix' >&2; exit 2; }
 [ -z "$ONLY_FLEET" ] || trellis_home_require_fleet_name "$ONLY_FLEET" || exit "$?"
 [ -z "$ONLY_PROJECT" ] || local_registry_require_project_id "$ONLY_PROJECT" || exit "$?"
 command -v jq >/dev/null 2>&1 || { echo 'doctor: jq is required' >&2; exit "$TRELLIS_EX_UNAVAILABLE"; }
@@ -2036,6 +2044,10 @@ fi
 run_check '  ' hc_portable_source_root "$HOME_PATH" || true
 run_check '  ' hc_portable_release_store "$HOME_PATH" || true
 run_check '  ' hc_portable_active_cli_release "$HOME_PATH" || true
+# Spec 055 R2.7: WARN-only rows; silent when healthy.
+if launcher_row="$(hc_launcher_currency "${HOME:-}" "$HOME_PATH")"; then :; else
+  report '  ' "$?" "$launcher_row"
+fi
 if run_check '  ' hc_portable_user_surface "$HOME_PATH"; then
   :
 else
@@ -2058,6 +2070,19 @@ run_check '  ' hc_usage_store "$HOME_PATH" || true
 run_check '  ' hc_usage_visibility "$HOME_PATH" || true
 run_check '  ' hc_usage_watermarks "$HOME_PATH" || true
 run_check '  ' hc_usage_receipts "$HOME_PATH" || true
+# One host-level row per applicable container-runtime condition. Keep the
+# read-only predicates in health-checks.sh and tally each row in this shell.
+while IFS=$'\t' read -r runtime_status runtime_message; do
+  [ -n "$runtime_message" ] || continue
+  report '  ' "$runtime_status" "$runtime_message"
+done < <(hc_container_runtime_rows /Applications/Docker.app)
+# Scheduled disk-janitor agents must equal the installer's expected vector
+# exactly (spec 059 R3): a mismatching agent is an error, a renamed one is
+# reported as disabled. Read-only; the account HOME holds the LaunchAgents.
+while IFS=$'\t' read -r agent_status agent_message; do
+  [ -n "$agent_message" ] || continue
+  report '  ' "$agent_status" "$agent_message"
+done < <(hc_disk_janitor_agent_rows "${HOME:-}" "$HOME_PATH")
 # The snapshot lives INSIDE the invocation scratch tree, and NO trap is
 # installed here: a second `trap … EXIT` would silently replace the
 # invocation-wide cleanup trap above and strand that tree on every exit.
@@ -2195,9 +2220,40 @@ while IFS= read -r row; do
     report '  ' "$HC_WARN" 'registry exclusion: automatic attachment repair is withheld'
   fi
   owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"; owner_state=missing
+  owner_errors_at_start="$N_ERROR"
   if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
   if [ "$owner_state" != missing ]; then
+    # Spec 055 R4.6: the one repair --fix makes itself, on an owner whose only
+    # failure is the hook authority. It runs before the hooks-path check so a
+    # successful repair is reported as the state it left behind, and the owner
+    # is then re-verified in place of its pre-repair result.
+    if [ "$DO_FIX" -eq 1 ]; then
+      if [ "$owner_state" = attached ] || [ "${HC_PORTABLE_OWNER_HOOKS_ONLY:-false}" = true ]; then
+        if hooks_fix_output="$(hc_hooks_path_fix "$HOME_PATH" "$root" "$owner" "$([ "$DO_DRY_RUN" -eq 1 ] && echo true || echo false)" \
+             "$([ "$DO_ADOPT_HUSKY" -eq 1 ] && echo true || echo false)")"; then
+          hooks_fix_status=0
+        else
+          hooks_fix_status=$?
+        fi
+        case "$hooks_fix_status" in
+          0)
+            report '  ' "$HC_INFO" "$hooks_fix_output"
+            if [ "$DO_DRY_RUN" -eq 0 ] && [ "$owner_state" != attached ]; then
+              N_ERROR="$owner_errors_at_start"
+              if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
+            fi
+            ;;
+          1) printf '  [manual] %s\n' "$hooks_fix_output" ;;
+          2|3) report '  ' "$HC_ERROR" "$hooks_fix_output" "$DOCTOR_EX_CONFLICT" ;;
+        esac
+      elif [ -n "$(hc_hooks_path_fix_needed "$owner" "$root")" ]; then
+        printf '  [manual] core.hooksPath repair withheld: the attachment owner does not verify; resolve that row first\n'
+      fi
+    fi
     run_check '  ' hc_portable_hooks_path "$HOME_PATH" "$root" "$checkout_id" "$owner" || true
+    if toolchain_row="$(hc_portable_toolchain_provenance "$root" "$owner")"; then :; else
+      report '  ' "$?" "$toolchain_row"
+    fi
   fi
   if [ -z "$release" ] && [ "$owner_state" != missing ]; then
     report '  ' "$HC_ERROR" 'immutable release: registry worktree has no recorded release' "$DOCTOR_EX_STATE"
@@ -2221,6 +2277,12 @@ while IFS= read -r row; do
   # language profile config and a gate_profiles.anti_slop.posture exist, and never
   # errors, so it stays out of $row_diagnostics_ok and out of the repair plan.
   run_check '  ' hc_anti_slop_profile "$root" || true
+  # Test-runner exposure (spec 055 R3.2): read-only, WARN or nothing. It prints
+  # a row only when the heuristic warns, so a project with no payload tests or
+  # no vitest config sees no line at all.
+  test_runner_status=0
+  test_runner_message="$(hc_test_runner_exposure "$root")" || test_runner_status=$?
+  [ "$test_runner_status" -eq 0 ] || report '  ' "$test_runner_status" "$test_runner_message"
   row_diagnostics_ok=false
   [ "$N_ERROR" -eq "$ROW_ERRORS_AT_START" ] && row_diagnostics_ok=true
   plan_safe_repair "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \
@@ -2267,6 +2329,20 @@ while IFS= read -r row; do
     report '  ' "$HC_INFO" 'repair boundary: no automatic mutation; review migration/ownership conflict without deleting project-owned files'
   fi
 done < <(jq -c '.entries[]' "$SNAPSHOT")
+# Owner records are read straight from state, not through registry rows: a
+# record whose row was dropped is invisible above and still blocks attach.
+for orphan_owner in "$HOME_PATH"/state/attachments/*/*.json; do
+  [ -f "$orphan_owner" ] && [ ! -L "$orphan_owner" ] || continue
+  orphan_verdict="$(attachment_owner_orphan_reason "$orphan_owner")"
+  case "$orphan_verdict" in
+    missing|not-a-worktree)
+      report '  ' "$HC_WARN" "orphan-owner-record $orphan_owner (worktree_root $(local_registry_safe_display "$(jq -r '.worktree_root' "$orphan_owner")") $orphan_verdict)"
+      ;;
+    undetermined*)
+      report '  ' "$HC_INFO" "orphan-check-undetermined $orphan_owner ($(local_registry_safe_display "${orphan_verdict#undetermined }"))"
+      ;;
+  esac
+done
 if [ "$ROWS_CHECKED" -eq 0 ] && [ -n "$ONLY_PROJECT" ]; then report '  ' "$HC_ERROR" "local registry has no record for requested project $ONLY_PROJECT"; fi
 echo; echo '== Summary =='
 printf '%s %d error(s)  %s %d warning(s)  %s %d info  (%d local row(s) checked)\n' "$GLYPH_ERR" "$N_ERROR" "$GLYPH_WARN" "$N_WARN" "$GLYPH_INFO" "$N_INFO" "$ROWS_CHECKED"

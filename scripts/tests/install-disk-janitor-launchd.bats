@@ -338,3 +338,32 @@ SH
   expected_log="$(printf 'unload\t%s' "$destination")"
   [ "$(cat "$LAUNCHCTL_LOG")" = "$expected_log" ]
 }
+
+@test "an ACL on Library/Logs is refused with the inspect and remove remedy" {
+  local logs quoted line
+  # A home that needs quoting: each remedy line must still name exactly $logs.
+  HOME="$SANDBOX/O'Brien home"
+  mkdir -p "$HOME/.local/bin"
+  cp "$SANDBOX/operator-home/.local/bin/trellis" "$HOME/.local/bin/trellis"
+  logs="$HOME/Library/Logs"
+  mkdir -p "$logs"
+  TRELLIS_TEST_ACL_PATH="$logs"
+  printf -v quoted %q "$logs"
+
+  run_installer --with-apply
+
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"Logs directory has an extended ACL: $logs"* ]] || { echo "$output"; false; }
+  [[ "$output" == *$'\n'"  /bin/ls -led $quoted"$'\n'* ]] || { echo "$output"; false; }
+  [[ "$output" == *$'\n'"  /bin/chmod -a# N $quoted"$'\n'* ]] || { echo "$output"; false; }
+  [[ "$output" == *$'\n'"  /bin/chmod -N $quoted"$'\n'* ]] || { echo "$output"; false; }
+  # Every command line is one shell command whose last word is the Logs path.
+  while IFS= read -r line; do
+    case "$line" in
+      '  /bin/'*) eval "set -- ${line#  }"; [ "${!#}" = "$logs" ] || { echo "$line"; false; } ;;
+    esac
+  done <<< "$output"
+  [ ! -e "$HOME/Library/LaunchAgents/$REPORT_LABEL.plist" ]
+  [ ! -e "$HOME/Library/LaunchAgents/org.trellis.disk-janitor-apply.plist" ]
+  [ ! -s "$LAUNCHCTL_LOG" ]
+}

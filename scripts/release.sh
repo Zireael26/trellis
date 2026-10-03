@@ -828,7 +828,7 @@ replace_hook_payload() (
 
 adoption_render_owned_parents_valid() {
   local file="$1" keys="$2"
-  jq -e --argjson keys "$keys" '
+  trellis_jq -e --argjson keys "$keys" '
     def lookup($value; $path):
       reduce $path[] as $key ({value:$value,exists:true};
         if .exists and (.value | type) == "object" and (.value | has($key))
@@ -955,7 +955,7 @@ adoption_snapshot_render() {
   if [ -n "$new_payload" ]; then
     template_leaves="$(adoption_new_template_leaves "$new_payload" "$relative")" || template_leaves='{"found":false,"leaves":[]}'
     if [ "$(printf '%s\n' "$template_leaves" | jq -r '.found // false' 2>/dev/null)" = true ]; then
-      template_dropped="$(jq -cn --argjson keys "$keys" --argjson template "$template_leaves" '
+      template_dropped="$(trellis_jq -cn --argjson keys "$keys" --argjson template "$template_leaves" '
         ($template.leaves | map(.path)) as $tpaths
         | [($keys | map(.path))[]
            | select(. as $owned
@@ -964,7 +964,7 @@ adoption_snapshot_render() {
     fi
   fi
 
-  jq --argjson keys "$keys" '
+  trellis_jq --argjson keys "$keys" '
     reduce $keys[] as $owned (. ; setpath($owned.path; $owned.value))
   ' "$source" > "$candidate" || return "$TRELLIS_EX_CONFLICT"
   chmod "${after_mode#0}" "$candidate" || return "$TRELLIS_EX_UNAVAILABLE"
@@ -973,7 +973,7 @@ adoption_snapshot_render() {
   candidate_identity="$(_attachment_fs_identity "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
   candidate_hash="$(_attachment_hash "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  jq -cn --argjson render "$render" --arg path "$relative" --arg destination "$destination" \
+  trellis_jq -cn --argjson render "$render" --arg path "$relative" --arg destination "$destination" \
     --arg path_identity "$path_identity" --arg source "$source" --arg source_identity "$source_identity" \
     --arg source_sha256 "$source_hash" --arg source_mode "$source_mode" \
     --arg candidate "$candidate" --arg candidate_identity "$candidate_identity" \
@@ -1146,7 +1146,7 @@ preflight_target() {
   while IFS= read -r render; do
     index=$((index + 1))
     render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload")" || return "$?"
-    renders="$(jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
+    renders="$(trellis_jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
       return "$TRELLIS_EX_STATE"
   done < <(jq -c '(.renders // [])[]' "$old_owner")
 
@@ -1167,7 +1167,7 @@ preflight_target() {
     *) return "$TRELLIS_EX_STATE" ;;
   esac
 
-  jq -cn \
+  trellis_jq -cn \
     --argjson row "$row" --argjson binding "$binding" --argjson identity "$identity" \
     --arg owner "$owner" --arg old_owner "$old_owner" --arg new_owner "$new_owner" \
     --arg old_version "$old_version" --arg old_payload "$old_payload" \
@@ -1910,6 +1910,9 @@ run_adopt() {
     shift
   done
   release_store_normalize_version "$version" >/dev/null || return "$?"
+  # Names this command in the attachment library's refusal lines.
+  # shellcheck disable=SC2034  # Read by scripts/lib/attachment.sh.
+  ATTACHMENT_ACTION=adopt
   if [ "$anchor_seen" = true ]; then
     [ "$project_seen" = false ] && [ "$fleet_seen" = false ] && [ "$all" = false ] || { usage_error '--runtime-anchor cannot be combined with registry selectors'; return $?; }
     home="$(release_home)" || return "$?"

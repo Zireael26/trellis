@@ -32,6 +32,27 @@ region. `asia-south1` in particular is on limited rollouts.
 
 *(observed across 3 GCP projects)*
 
+## Container runtime
+
+On macOS, use **Colima as the only container runtime**; do not start Docker
+Desktop. Install the Docker CLI, buildx, compose, and the credential helper
+through Homebrew. Configure `~/.docker/config.json` with
+`credsStore: osxkeychain`, `cliPluginsExtraDirs: [/opt/homebrew/lib/docker/cli-plugins]`,
+and `currentContext: colima`. An installed but dormant Docker Desktop is not a
+runtime problem; starting it can silently flip the global context to
+`desktop-linux`.
+
+Export `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` in the login
+shell environment. Trellis forwards it to project hooks but deliberately does
+not forward `DOCKER_CONTEXT`. GUI and IDE git clients may not inherit the
+login-shell export; configure their environment separately or use the optional
+socket bridge. For tools that hardcode `/var/run/docker.sock`, an operator may
+install a root LaunchDaemon that recreates a symlink from that path to
+`~/.colima/default/docker.sock` at boot. This is optional and is not installed
+by Trellis.
+
+*(observed after a Colima migration and a Docker Desktop context flip)*
+
 ## Shared credentials
 
 Fires before a deploy, and only then — which is why it lives here rather than in

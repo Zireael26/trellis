@@ -121,18 +121,19 @@ make_deciding_reviewer_state() {
   local workspace="${3:-fixture-workspace}"
   local pane="${4:-fixture-pane}"
   local state="$home/.trellis/state/roles-resolved.json"
+  local implementer="${5:-luna}"
   local resolver
   resolver="$(make_active_release_resolver "$home")"
 
   mkdir -p "$(dirname "$state")"
-  python3 - "$resolver" "$home" "$nonce" "$workspace" "$pane" <<'PY'
+  python3 - "$resolver" "$home" "$nonce" "$workspace" "$pane" "$implementer" <<'PY'
 import contextlib
 import importlib.util
 import io
 import os
 import sys
 
-resolver_path, home, nonce, workspace, pane = sys.argv[1:]
+resolver_path, home, nonce, workspace, pane, implementer = sys.argv[1:]
 os.environ["HOME"] = home
 os.environ["TRELLIS_HOME"] = os.path.join(home, ".trellis")
 os.environ["HERDR_ENV"] = "1"
@@ -142,6 +143,7 @@ os.environ["HERDR_RESOLUTION_NONCE"] = nonce
 
 usage = {
     "reports": [
+        {"provider": "anthropic", "limits": [{"id": "shared", "amount": {"remainingFraction": 0.9}}]},
         {"provider": "openai-codex", "limits": [{"id": "shared", "amount": {"remainingFraction": 0.9}}]},
         {"provider": "xai-oauth", "limits": [{"id": "shared", "amount": {"remainingFraction": 0.9}}]},
         {"provider": "opencode-go", "limits": [{"id": "shared", "amount": {"remainingFraction": 0.9}}]},
@@ -159,7 +161,7 @@ rr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rr)
 rr.load_usage = lambda ttl, fresh, usage_source="openusage": (usage, "fixture")
 rr.auth_probe_passes = lambda candidate, cache: True
-sys.argv = [resolver_path, "--implementer", "luna"]
+sys.argv = [resolver_path, "--implementer", implementer]
 with contextlib.redirect_stdout(io.StringIO()):
     rr.main()
 PY
@@ -540,4 +542,48 @@ PY
   [[ "$RAN" == *RAN_PI* ]] || { echo "expected the pi route to run; stderr: $stderr"; false; }
   [ ! -s "$TOMBSTONE" ] || { echo "CLAUDE REACHED:"; cat "$TOMBSTONE"; false; }
   teardown_tombstone
+}
+
+@test "code-reviewer validator enforces the SC7 independence fixture set" {
+  FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
+  POLICY="$(make_active_release_policy "$FAKE_HOME")"
+  SC7_DIR="$FAKE_HOME/sc7"
+  STATE="$FAKE_HOME/.trellis/state/roles-resolved.json"
+  mkdir -p "$(dirname "$STATE")"
+  python3 "$HOOKS_DIR/../../scripts/tests/fixtures/herdr-task-routing/sc7_artifacts.py" \
+    "$POLICY" "$SC7_DIR" fixture-workspace fixture-pane fixture-nonce
+
+  # The same crafted set runs through the resolver and both SessionStart hook
+  # copies; here it goes through code-reviewer.sh's public shell function.
+  run python3 - "$LIB" "$SC7_DIR" "$STATE" "$FAKE_HOME" <<'PY'
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+lib_path, sc7_dir, state_path, home = sys.argv[1:]
+env = dict(os.environ, HOME=home, TRELLIS_HOME=home + "/.trellis",
+           HERDR_ENV="1", HERDR_WORKSPACE_ID="fixture-workspace",
+           HERDR_PANE_ID="fixture-pane")
+manifest = json.load(open(os.path.join(sc7_dir, "manifest.json")))
+assert len(manifest) == 18, manifest
+for case in manifest:
+    source = os.path.join(sc7_dir, case["case"] + ".json")
+    shutil.copyfile(source, state_path)
+    os.chmod(state_path, 0o600)
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; resolve_reviewer_model', "--", lib_path],
+        env=env, text=True, capture_output=True,
+    )
+    accepted = result.returncode == 0
+    assert accepted is (case["expect"] == "accept"), (case, result.stderr)
+    if accepted:
+        reviewer = json.load(open(source))["roles"]["reviewer"]["chosen"]
+        assert result.stdout == reviewer["model"], (case, result.stdout)
+print("code-reviewer enforces SC7")
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"code-reviewer enforces SC7"* ]]
+  rm -rf "$FAKE_HOME"
 }

@@ -85,6 +85,17 @@
             "statusMessage": "Suggesting wiki maintenance..."
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "h=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/hookspath-guard.sh\"; [ -f \"$h\" ] || exit 0; TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"$h\"",
+            "timeout": 10,
+            "statusMessage": "Checking git hooks path..."
+          }
+        ]
       }
     ],
     "SessionStart": [

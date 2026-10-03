@@ -70,6 +70,44 @@ relatively to a regular project `CLAUDE.md` when one exists; otherwise it uses
 the immutable runtime fallback. Attachment never creates or overwrites the
 project's root `CLAUDE.md` to make that choice possible.
 
+### Test runners and the runtime anchor
+
+`.trellis/runtime` is a symlink into the payload, and a test runner that walks
+the project and follows symlinks walks the payload too. From 1.3.7 the payload
+carries no tests: `specs/` and every test directory listed in
+`core-rules/payload-exclude.txt` are left out when the release is packaged.
+Payloads up to 1.3.6 do carry them, including JS/TS `*.test.ts` files.
+
+vitest collects them: its file globbing follows symlinks and it reads no ignore
+file. Exclude the anchor in the vitest (or vite) config:
+
+```ts
+import { configDefaults, defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    exclude: [...configDefaults.exclude, '**/.trellis/**'],
+  },
+})
+```
+
+Setting `exclude` replaces vitest's defaults rather than adding to them, so keep
+`...configDefaults.exclude` or `node_modules` is collected as well. Every config
+the project runs vitest with needs it: each `vitest.config.*`, a `vite.config.*`
+with a `test` block, any file a `package.json` script passes with `--config`,
+and each workspace or `test.projects` entry.
+
+`trellis doctor` warns when an attached project's runtime holds JS/TS tests and
+a vitest config it reads lacks a literal `'**/.trellis/**'` in `test.exclude`.
+The check is conservative: it never loads the config, so an exclude built from a
+variable still warns, and a workspace or `test.projects` always warns.
+
+Other runners are unaffected by default, by inference rather than measurement:
+pytest skips dot-directories through its default `norecursedirs`, Jest's crawler
+does not follow symlinks, and bats and mocha run only the paths they are given.
+A project that points any runner at `.trellis/` explicitly, or widens its
+discovery to follow links, needs the same exclusion.
+
 ## 3. Manifest-owned native leaves
 
 The release payload's `core-rules/inheritance-manifest.json` is the sole list

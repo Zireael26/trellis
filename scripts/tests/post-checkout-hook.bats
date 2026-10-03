@@ -206,8 +206,9 @@ assert_broken_generator_attach_is_recoverable() {
   [ "$status" -eq 1 ]
   [ -z "$(find "$TRELLIS_HOME/state/git-hooks" -type f -print 2>/dev/null)" ]
   # The established transaction commits ownership before installing hooks.
-  # Keep that incomplete record visible and exercise the explicit recovery
-  # instruction from detach before checking that it restores the prior hook.
+  # Keep that incomplete record visible. Detach names doctor --fix rather than
+  # a bare config write (spec 055 R4.6); doctor --fix repairs only .husky/_, so
+  # set the managed path by hand before checking detach restores the prior hook.
   run t14_owner_for_root "$T14_PROJECT"
   [ "$status" -eq 0 ] && [ -f "$output" ]
   owner="$output"
@@ -216,7 +217,7 @@ assert_broken_generator_attach_is_recoverable() {
   run t14_detach
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   [[ "$output" == *'refusing detach: core.hooksPath is'* ]]
-  [[ "$output" == *'config core.hooksPath'* ]]
+  [[ "$output" == *'run trellis doctor --fix'* ]]
   git -C "$T14_PROJECT" config core.hooksPath "$managed"
   run t14_detach
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -250,4 +251,81 @@ assert_broken_generator_attach_is_recoverable() {
   run bash -c '. "$1"; _attachment_hooks_state_owned_matches_data "$2" "$(cat "$3")"' \
     t14-owned-state "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$owner"
   [ "$status" -eq 3 ] || { echo "ownership status=$status"; echo "$output"; false; }
+}
+
+# --- spec 055 R2.3 / A2.2: seeding copies the donor's toolchain ---------------
+#
+# `git worktree add` runs the managed post-checkout dispatcher, which reconciles
+# the new worktree through the control payload under the sanitized control PATH.
+# The whole add also runs from a control-only environment, so nothing but the
+# donor record can supply a real toolchain.
+
+control_worktree_add() {
+  run /usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    HOME="$T14_SANDBOX" \
+    TRELLIS_HOME="$TRELLIS_HOME" \
+    /usr/bin/git -C "$T14_PROJECT" worktree add -q -b "$1" "$T14_WORKTREE"
+}
+
+@test "seeding under the control env records the donor's toolchain array" {
+  fx="$T14_SANDBOX/fx"
+  mkdir -p "$fx/a" "$fx/b"
+  run env TRELLIS_HOME="$TRELLIS_HOME" TRELLIS_ATTACH_CALLER_PATH="$fx/a:$fx/b" \
+    bash "$REPO_ROOT/scripts/attach-project.sh" attach \
+    --home "$TRELLIS_HOME" --fleet personal --release "$T14_RELEASE" "$T14_PROJECT"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  donor_owner="$(t14_owner_for_root "$T14_PROJECT")"
+  jq -e --arg a "$fx/a" --arg b "$fx/b" '.toolchain_path == [$a,$b]' "$donor_owner" >/dev/null
+
+  T14_WORKTREE="$T14_SANDBOX/donor toolchain linked worktree"
+  control_worktree_add t14-donor-toolchain
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  [ -f "$linked_owner" ] || { printf 'linked worktree was not seeded\n%s\n' "$output"; false; }
+  jq -e --arg a "$fx/a" --arg b "$fx/b" '.toolchain_path == [$a,$b]' "$linked_owner" >/dev/null ||
+    { jq -c '.toolchain_path' "$linked_owner"; false; }
+}
+
+make_control_only_donor() {
+  t14_attach
+  [ "$?" -eq 0 ] || return 1
+  donor_owner="$(t14_owner_for_root "$T14_PROJECT")"
+  jq -cS '.toolchain_path = ["/usr/bin","/bin"]' "$donor_owner" > "$T14_SANDBOX/donor.next"
+  mv -f "$T14_SANDBOX/donor.next" "$donor_owner"
+  chmod 600 "$donor_owner"
+}
+
+@test "a control-only donor is copied with exactly one warning" {
+  make_control_only_donor
+  T14_WORKTREE="$T14_SANDBOX/control donor warned worktree"
+  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-control-warned "$T14_WORKTREE"
+  run /usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/dev/null TRELLIS_HOME="$TRELLIS_HOME" \
+    /bin/bash "$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/seed-inheritance-symlinks.sh" \
+    --target "$T14_WORKTREE" --quiet
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  warnings="$(printf '%s\n' "$output" | grep -c 'donor toolchain is the sanitized control PATH' || true)"
+  [ "$warnings" -eq 1 ] || { printf 'warnings=%s\n%s\n' "$warnings" "$output"; false; }
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  jq -e '.toolchain_path == ["/usr/bin","/bin"]' "$linked_owner" >/dev/null
+}
+
+@test "unattended: a control-only donor is copied and the next push is refused with the refresh remedy" {
+  make_control_only_donor
+  managed="$(dispatcher_path)"
+
+  T14_WORKTREE="$T14_SANDBOX/control donor linked worktree"
+  control_worktree_add t14-control-donor
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  [ -f "$linked_owner" ] || { printf 'linked worktree was not attached\n%s\n' "$output"; false; }
+  jq -e '.toolchain_path == ["/usr/bin","/bin"]' "$linked_owner" >/dev/null
+
+  printf '%s\n' 'refs/heads/x deadbeef refs/heads/x abcdef' > "$T14_SANDBOX/refs"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$T14_WORKTREE" "$managed/pre-push" "$T14_SANDBOX/refs"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  printf '%s\n' "$output" | grep -F "trellis attach --refresh-toolchain $T14_WORKTREE" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
 }

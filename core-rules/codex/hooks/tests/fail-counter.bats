@@ -31,6 +31,11 @@ setup() {
   setup_deployed_hook
 }
 
+assert_block() {
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
+}
+
 seed_todos_none() {
   rm -f "$PROJECT_DIR/.codex/todos.json" "$PROJECT_DIR/.claude/todos.json"
 }
@@ -105,11 +110,11 @@ make_failing_npx_dir() {
   write_transcript_no_receipt "$tx"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" == *"$ESCALATION"* ]]
 }
 
@@ -133,12 +138,12 @@ EOF
 
   # Block 1: one payload.
   run bash "$HOOK" <<<"$(make_envelope "All done — the change is complete." "$tx1")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   # Block 2: DIFFERENT last_assistant_message + DIFFERENT transcript, SAME files.
   run bash "$HOOK" <<<"$(make_envelope "Wrapped up, all good here." "$tx2")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" == *"$ESCALATION"* ]]
 }
 
@@ -153,14 +158,14 @@ EOF
   write_transcript_no_receipt "$tx"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
 
   # Change the file SET (add a second non-doc file).
   echo "function sub(a,b){return a-b}" > "$PROJECT_DIR/other.js"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
+  assert_block
   [[ "$output" != *"$ESCALATION"* ]]
 }
 
@@ -179,7 +184,7 @@ EOF
   write_transcript_current_receipt "$tx_pass"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx_block")"
-  [ "$status" -eq 2 ]
+  assert_block
   [ -f "$PROJECT_DIR/$STATE_REL" ]
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx_pass")"
@@ -205,7 +210,7 @@ EOF
   local stderr_file="$BATS_TEST_TMPDIR/typecheck-stderr" stderr
   if output="$(bash "$HOOK" <<<"$(make_envelope)" 2>"$stderr_file")"; then status=0; else status=$?; fi
   stderr="$(cat "$stderr_file")"
-  [ "$status" -eq 2 ]
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):") and contains("error TS1005: synthetic typecheck failure")' >/dev/null
   [[ "$stderr" == *'checks ran unchanged, no durable evidence recorded (re-run sync-codex-hooks)'* ]] || { echo "$stderr"; false; }
   [[ "$output" != *"$ESCALATION"* ]] || { echo "$output"; false; }
@@ -213,7 +218,7 @@ EOF
   stderr_file="$BATS_TEST_TMPDIR/typecheck-second-stderr"
   if output="$(bash "$HOOK" <<<"$(make_envelope)" 2>"$stderr_file")"; then status=0; else status=$?; fi
   stderr="$(cat "$stderr_file")"
-  [ "$status" -eq 2 ]
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("typecheck (tsc):") and contains("error TS1005: synthetic typecheck failure")' >/dev/null
   [[ "$stderr" == *'checks ran unchanged, no durable evidence recorded (re-run sync-codex-hooks)'* ]] || { echo "$stderr"; false; }
   [[ "$output" == *"$ESCALATION"* ]] || { echo "$output"; false; }

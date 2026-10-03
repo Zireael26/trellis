@@ -54,17 +54,30 @@ INPUT=$(cat)
 # the .md files this hook has no interest in — the warning fatigue the tier is
 # designed to avoid. Absence is reported where it is actionable instead: doctor's
 # anti-slop presence row.
-__st_lib_dir="$(dirname "${BASH_SOURCE[0]}")/lib"
+#
+# The shared cores are siblings when deployed. Run in place from the payload,
+# the shared core-rules/hooks/lib/ is the fallback, and only when this script's
+# resolved directory IS the declared runtime's Codex tree (spec 055 R1.1) —
+# never for a project path that merely ends in core-rules/codex/hooks.
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+__st_lib_dir="$__h_dir/lib"
 [ -f "$__st_lib_dir/deps.sh" ] || exit 0
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__st_lib_dir/deps.sh"
 _se_require_jq "slop-tripwire"
-[ -f "$__st_lib_dir/slop-patterns.sh" ] || exit 0
+__st_patterns="$__h_dir/lib/slop-patterns.sh"
+if [ ! -f "$__st_patterns" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __st_patterns="$__h_dir/../../hooks/lib/slop-patterns.sh"
+fi
+[ -f "$__st_patterns" ] || exit 0
 # shellcheck source=lib/slop-patterns.sh disable=SC1090
-. "$__st_lib_dir/slop-patterns.sh"
+. "$__st_patterns"
 
-__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
-[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+__ta_lib="$__h_dir/lib/action-normalize.sh"
+if [ ! -f "$__ta_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __ta_lib="$__h_dir/../../hooks/lib/action-normalize.sh"
+fi
 [ -f "$__ta_lib" ] || exit 0
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"

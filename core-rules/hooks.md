@@ -19,8 +19,10 @@ Any model-backed hook that needs a non-Anthropic model uses pi workflows/subagen
 
 For a hook registered on multiple harnesses, policy intent stays the same.
 Claude-specific JSON such as `hookSpecificOutput.permissionDecision` stays in
-the Claude implementation; Codex blocking hooks emit
-`{"decision":"block","reason":"..."}` and exit 2.
+the Claude implementation. Codex Stop blocks emit
+`{"decision":"block","reason":"..."}` and exit 0; Codex PreToolUse and
+PostToolUse blocks exit 2 with a non-empty reason on stderr (and only
+schema-valid JSON, if any, on stdout). Claude hook semantics are unchanged.
 
 ---
 
@@ -38,7 +40,7 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, th
   - `.env*` file reads via `cat`, `less`, `head`, `tail`, `more`, `source`, `grep`, `sed`, `awk`, `bat`, or `**/secrets/**` glob on any reader
 - **Block condition:** trigger matched
 - **Return:** Claude emits `{ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "<which rule fired, one line>" } }`; Codex emits `{ "decision": "block", "reason": "<which rule fired, one line>" }`.
-- **Exit:** Claude exits 0 because PreToolUse decisions ride in the JSON payload. Codex exits 2 for a block. Non-blocking paths exit 0.
+- **Exit:** Claude exits 0 because PreToolUse decisions ride in the JSON payload. Codex exits 2 for a block with its reason on stderr. Non-blocking paths exit 0.
 
 ### pr-gate-shiftleft
 - **Event:** `PreToolUse` on `Bash`, immediately after `block-destructive` in the Claude and Codex manifests.
@@ -58,7 +60,7 @@ Goal: sub-second feedback, zero approval fatigue. If a fast-local hook fails, th
   - Go → `golangci-lint run <file>` if on path, else `go vet $(dirname <file>)`
 - **Block condition:** linter exits non-zero
 - **Return:** `{ "decision": "block", "reason": "<error output truncated to 50 lines>" }` on failure
-- **Exit:** 2 on block, 0 otherwise. JSON decision takes precedence when present.
+- **Exit:** 2 on block (Codex writes the reason to stderr), 0 otherwise. JSON decision takes precedence when present.
 - **Invariant:** must complete in <3s for a single-file edit. Anything slower belongs in tier 2.
 
 ### slop-tripwire
@@ -129,7 +131,7 @@ Goal: catch "claims done but isn't" before the turn ends. Runs exactly once per 
 - **Required block:** exactly one `## Decisions made (L<n>)` block for the effective level. Every non-empty line in that block must be a canonical decision entry copied verbatim into `<canonical-root>/decisions-log.md`.
 - **Entry validation:** current UTC date, valid `HH:MM:SSZ`, effective `[L<n>]`, one of `interpretation` / `pattern` / `scope` / `architectural`, and filled decision, `Reasoning:`, and `Alternatives considered:` clauses. Architectural entries alone end in ` SURFACED INLINE`.
 - **Forward-only invariant:** reads the current assistant message or current-turn transcript and the canonical log; never appends, rewrites, normalizes, rotates, or validates legacy log entries.
-- **Return on block:** `{"decision":"block","reason":"decision-receipt: ..."}` and exit 2. Passes are silent with exit 0.
+- **Return on block:** `{"decision":"block","reason":"decision-receipt: ..."}`; Claude exits 2, Codex exits 0. Passes are silent with exit 0.
 - **Budget:** 15s.
 
 ### stop-verify
@@ -202,8 +204,8 @@ prose above describes intent, the contracts here describe what the shipped
 `core-rules/hooks/lib/*.sh` cores actually do. Where they differ, the cores win — the
 differences are deliberate and called out inline. The framing convention matches the
 receipt-marker note: every core emits **exactly one newline-terminated line of JSON**,
-machine-readable and byte-stable; the core never decides block/allow, the **caller**
-maps the payload to its own `emit_block` / exit 2.
+machine-readable and byte-stable; the core never decides block/allow. The **caller**
+maps the payload to its own `emit_block`: Claude Stop exits 2, Codex Stop exits 0.
 
 ### Reviewer ladder (`lib/code-reviewer.sh`)
 
@@ -249,7 +251,7 @@ rungs.
 (no jq, no eligible reviewer command, timeout, SIGPIPE, unparseable LLM output)
 degrades to `{"findings":[]}` and **exit 0 — never blocks on infra**. Conversely, a
 successfully parsed finding with `severity=="critical"` is the one path that makes the
-**caller** block (caller exits 2); every other severity is advisory and non-blocking.
+**caller** block (Claude Stop exits 2; Codex Stop exits 0 with block JSON); every other severity is advisory and non-blocking.
 `critical` is reserved for **exactly three classes**: (1) a security hole introduced
 by the diff, (2) data loss, (3) a broken build. Everything else is `important` or
 `minor`.
@@ -269,7 +271,8 @@ Claude-only path.
 Refines `ui-verify`. The realized core **ignores stdin** and decides from git state +
 env, not from the hook envelope (reading stdin in a sourced lib would hang). It emits one
 line — `{"verdict":"skip|advisory|block|pass","reason":"…","artifacts":["…"]}` — and the
-caller maps `verdict=="block"` to its own `emit_block` / exit 2. `artifacts` is `[]`
+caller maps `verdict=="block"` to its own `emit_block` (Claude Stop exits 2;
+Codex Stop exits 0 with block JSON). `artifacts` is `[]`
 except on `pass`, where it holds the screenshot path. The core itself always exits 0.
 
 Decision table (first matching row wins):
@@ -310,7 +313,11 @@ Goal: last-line defense. If a tier-1 or tier-2 hook misfired, the local git comm
 - **One owner:** attachment records the prior local `core.hooksPath` and sets the clone's active path to its absolute dispatcher below `$TRELLIS_HOME/state/git-hooks/<checkout-id>/`. The dispatcher is local clone state, not a tracked project artifact, and is the sole Trellis hook owner.
 - **Husky boundary:** `.husky/` remains project-owned when present, but it never carries Trellis hooks and is never the active Trellis `core.hooksPath` while attached.
 - **Chaining and detach:** the dispatcher invokes an executable prior `post-checkout` hook with its original arguments and standard input before release reconciliation, and it does not hide a prior non-zero result. Detach restores the recorded prior setting only when it still matches; a changed hook configuration is a conflict and is never clobbered.
-- **Doctor:** `trellis doctor` verifies that exactly one local `core.hooksPath` equals the recorded dispatcher. It reports drift — including a package installer re-clobbering the setting — as an error with no automatic repair.
+- **Doctor:** `trellis doctor` verifies that exactly one local `core.hooksPath` equals the recorded dispatcher, and reports drift — including a package installer re-clobbering the setting — as an error. Its messages point to `trellis doctor --fix`, never to a bare `git config` write.
+- **The single repair exception (spec 055 R4.6):** `trellis doctor --fix` restores the managed path when husky's `prepare` has set it to `.husky/_`, and in no other case. It takes the checkout lock that attach and detach take (serializing it against Trellis writers, not husky), and writes only when every condition holds: every worktree `git worktree list` knows is attached, exactly one record (the worktree that owns the shared exclude block) has hooks enabled with this managed path, and every other is the `{"enabled":false}` record attach writes for a linked worktree; the local value is exactly one `.husky/_`; the managed dispatcher verifies; and the recorded previous path is `.husky/_`, or null with no hook file in `.husky/` outside `_/`. Otherwise it refuses, changes nothing, and names the failed condition and its remedy. After writing it re-reads: if the value is still exactly the one it wrote but a check failed, it restores the preflight value; any other change is reported, not restored. It prints the value before and after.
+- **Adopting husky (spec 055 R4.6a):** `trellis doctor --fix --adopt-husky` is the explicit operator action for a recorded previous path of null while `.husky/` holds project hooks. Under the same lock it records `.husky/_` as the previous path in the hooks-enabled owner record and in the `previous-hooks-path` sidecar every worktree shares (linked worktrees' disabled records are checked, never written), and creates one passthrough shim per passthrough-eligible hook name in `.husky/_/` (never `pre-push` or `post-checkout`). It refuses before writing unless every record of the checkout names one release, that release is the active CLI release and its payload verifies, and the managed dir holds no passthrough-named entry. It writes shims, then the record, then the sidecar; any failure, including a failed repair after it, restores every file to its original bytes and mode and removes the shims it created.
+- **Harness warnings:** SessionStart (both harnesses) and a `PostToolUse(Bash)` guard after package-manager, `make`/`just`, `core.hooksPath` and `worktree add` commands add one advisory line on drift. Neither writes anything; between the drift and the repair, pushes are ungated because git no longer invokes the dispatcher.
+- **Per-install workaround:** `HUSKY=0 pnpm install` (or the npm/yarn equivalent) skips husky's `prepare` for that install. Do not set `HUSKY=0` globally: it also disables husky's own hooks.
 - **Installed Trellis handlers:** the dispatcher provides `post-checkout` reconciliation and the `pre-push` gate. Trellis does not install `.husky/pre-commit`, `.husky/commit-msg`, or `.husky/pre-push`.
 
 ### pre-push (portable dispatcher → `core-rules/githooks/pre-push`)

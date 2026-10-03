@@ -4,7 +4,8 @@
 #
 # Contract:
 #   - Reads Codex tool event JSON on stdin.
-#   - Emits {"decision":"block","reason":"..."} and exits 2 when a rule fires.
+#   - Emits schema-valid JSON on stdout and the blocking reason on stderr;
+#     exits 2 when a rule fires.
 #   - Exits 0 when allowed.
 #
 # Dependencies: jq (required — assumed present), grep.
@@ -37,6 +38,7 @@ emit_deny() {
   jq -nc \
     --arg reason "$reason" \
     '{decision: "block", reason: $reason}'
+  printf '%s\n' "$reason" >&2
   exit 2
 }
 

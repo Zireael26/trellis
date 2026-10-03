@@ -72,10 +72,12 @@ warn_rows() {
 }
 
 # Run the Codex guard for $1. Its state is deliberately separate from Claude's.
+# Attached, it runs in place from the runtime, as the rendered hooks.json does.
 run_codex_guard() {
-  local target="$1"
+  local target="$1" guard="$CODEX_GUARD"
+  [ -z "${TRELLIS_ROOT:-}" ] || guard="$TRELLIS_ROOT/core-rules/codex/hooks/reread-guard.sh"
   export CODEX_PROJECT_DIR="$PROJECT_DIR"
-  run_with_stderr "$CODEX_GUARD" "$(jq -nc --arg tp "$TP" --arg t "$target" \
+  run_with_stderr "$guard" "$(jq -nc --arg tp "$TP" --arg t "$target" \
     '{transcript_path: $tp, tool_input: {file_path: $t}}')"
   unset CODEX_PROJECT_DIR
 }
@@ -83,8 +85,13 @@ run_codex_guard() {
 set_codex_turn_epoch() { printf '%s\n' "$1" > "$CODEX_STATE_DIR/$KEY.epoch"; }
 
 # Install an attached immutable payload anchor exactly as deployed projects use.
+# The payload carries the hook trees the in-place Codex guard resolves its
+# shared libs from (spec 055 R1.1).
 attach_runtime() {
   RUNTIME_DIR="$(mktemp -d)"
+  mkdir -p "$RUNTIME_DIR/core-rules/codex" "$RUNTIME_DIR/core-rules/hooks"
+  cp -R "$CODEX_HOOKS_DIR" "$RUNTIME_DIR/core-rules/codex/hooks"
+  cp -R "$HOOKS_DIR/lib" "$RUNTIME_DIR/core-rules/hooks/lib"
   mkdir -p "$PROJECT_DIR/.trellis"
   ln -s "$RUNTIME_DIR" "$PROJECT_DIR/.trellis/runtime"
   export TRELLIS_ROOT="$PROJECT_DIR/.trellis/runtime"
@@ -228,7 +235,7 @@ run_guard_with_home() {
 
   run_codex_guard "$f"
   [ "$status" -eq 2 ]
-  [ -z "$stderr" ]
+  [[ "$stderr" == *'BLOCKED edit'* ]]
   [ "$(printf '%s' "$output" | jq -r '.decision // empty')" = "block" ]
   [[ "$output" == *"$f"* ]]
 }

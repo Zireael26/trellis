@@ -23,6 +23,11 @@ setup() {
   setup_deployed_hook
 }
 
+assert_block() {
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
+}
+
 # Ensure no open todos so the Step-1 TodoWrite gate never fires first (it would
 # block at step "TodoWrite", masking the receipts behaviour under test). A fresh
 # PROJECT_DIR has no todos.json; this makes that explicit + defensive (both the
@@ -142,8 +147,7 @@ EOF
   envelope="$(make_envelope NULL NULL)"
 
   run env CODEX_PROJECT_DIR="$missing" bash "$HOOK" <<<"$envelope"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("project directory:")' >/dev/null
 }
 
@@ -156,8 +160,7 @@ EOF
   for operation in diff ls-files; do
     run env GIT_FAIL_COMMAND="$operation" PATH="$FAILING_GIT_BIN:$PATH" \
       bash "$HOOK" <<<"$(make_envelope "Done. $RECEIPT_MARKER <!-- follow-ups: none -->" NULL)"
-    [ "$status" -eq 2 ]
-    printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+    assert_block
     printf '%s' "$output" | jq -e '.reason | startswith("git changed files:")' >/dev/null
   done
 }
@@ -167,8 +170,7 @@ EOF
   printf '%s\n' '{"status":"pending"' > "$PROJECT_DIR/.codex/todos.json"
 
   run bash "$HOOK" <<<"$(make_envelope NULL NULL)"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("TodoWrite:")' >/dev/null
   printf '%s' "$output" | jq -r '.reason' | grep -qi 'parse'
 }
@@ -179,8 +181,7 @@ EOF
 
   run env GIT_FAIL_COMMAND=status PATH="$FAILING_GIT_BIN:$PATH" \
     bash "$HOOK" <<<"$(make_envelope NULL NULL)"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("git status:")' >/dev/null
 }
 
@@ -191,8 +192,7 @@ EOF
   write_transcript_without_user_anchor "$tx"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("transcript-unusable:")' >/dev/null
 }
 
@@ -222,7 +222,7 @@ EOF
 }
 
 # =========================================================================
-# Done-claim with a receipt in NEITHER source → block (2, receipts).
+# Done-claim with a receipt in NEITHER source → block (exit 0 JSON, receipts).
 # transcript present (so this is NOT the fail-open path) but receipt-less.
 # =========================================================================
 @test "receipts: done-claim, receipt in neither source → block (2, receipts)" {
@@ -232,8 +232,7 @@ EOF
   write_transcript_no_receipt "$tx"
 
   run bash "$HOOK" <<<"$(make_envelope "All done — the change is complete." "$tx")"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
 }
 
@@ -249,8 +248,7 @@ EOF
   write_transcript_stale_receipt "$tx"
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
 }
 
@@ -306,8 +304,7 @@ EOF
   make_dirty_code
 
   run bash "$HOOK" <<<"$(make_envelope "All done — shipped it." NULL)"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
 }
 
@@ -412,8 +409,7 @@ EOF
   make_dirty_code
 
   run bash "$HOOK" <<<"$(make_envelope "All done — the change is complete. $FOLLOWUPS_MARKER" NULL)"
-  [ "$status" -eq 2 ]
-  printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+  assert_block
   printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
 }
 

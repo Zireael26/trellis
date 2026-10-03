@@ -466,7 +466,10 @@ state_path, config_path = sys.argv[1:]
 VERDICT_ROLE_ORDER = ("reviewer", "security_reviewer", "merge_reviewer", "refuter")
 VERDICT_ROLES = set(VERDICT_ROLE_ORDER)
 SINGLE_VERDICT_ROLES = ("reviewer", "security_reviewer", "merge_reviewer")
-CANDIDATE_FIELDS = ("agent", "model", "provider", "remaining", "note")
+CANDIDATE_FIELDS = ("agent", "model", "provider", "launcher", "remaining", "note")
+# Catalog harness -> launcher. `launcher` is optional (artifacts written before
+# spec 052 omit it), but when present it must be the catalog-derived value.
+LAUNCHERS = {"pi": "pi", "claude-code": "apex"}
 
 
 def reject():
@@ -581,6 +584,11 @@ def candidate_matches_policy(config, role, entry):
         )
         and entry.get("model") == identity[1]
         and entry.get("provider") == identity[2]
+        and (
+            "launcher" not in entry
+            or entry["launcher"]
+            == LAUNCHERS.get(config["agents"][agent].get("harness"))
+        )
     )
 
 
@@ -771,19 +779,32 @@ try:
     ):
         reject()
 
-    verdict_families = set()
+    verdict_families = {}
     for role in SINGLE_VERDICT_ROLES:
         chosen = roles[role]["chosen"]
         if chosen is None:
             continue
-        family = families.get(chosen["agent"])
-        if (
-            not nonempty_string(family)
-            or family == implementer_family
-            or family in verdict_families
-        ):
+        family = families.get(chosen.get("agent"))
+        if not nonempty_string(family) or family == implementer_family:
             reject()
-        verdict_families.add(family)
+        verdict_families[role] = family
+    if (
+        verdict_families.get("security_reviewer") is not None
+        and verdict_families.get("security_reviewer") == verdict_families.get("reviewer")
+    ):
+        reject()
+    # Spec 052 rules 1 and 2 bind every eligible verdict fallback, not only
+    # the chosen row.
+    for role in SINGLE_VERDICT_ROLES:
+        for entry in roles[role]["trail"]:
+            family = families.get(entry.get("agent"))
+            if not nonempty_string(family) or family == implementer_family:
+                reject()
+            if (
+                role == "security_reviewer"
+                and family == verdict_families.get("reviewer")
+            ):
+                reject()
 
     resolved = roles["refuter"]
     policy_required = role_specs["refuter"].get("required_seats")
@@ -805,14 +826,17 @@ try:
         family = families.get(entry.get("agent"))
         if not nonempty_string(family):
             reject()
-        if family == implementer_family or family in verdict_families:
+        if family == implementer_family:
             reject()
-        if family in seen_families:
+        # Spec 052 rule 3: a refuter seat never echoes the reviewer's family.
+        if family == verdict_families.get("reviewer"):
+            reject()
+        # Every eligible entry is checked; only the first distinct families
+        # up to the quorum become seats.
+        if family in seen_families or len(derived_seats) >= required:
             continue
         derived_seats.append(entry)
         seen_families.add(family)
-        if len(derived_seats) >= required:
-            break
     if len(seats) != len(derived_seats):
         reject()
     seat_families = set()

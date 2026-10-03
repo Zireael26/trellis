@@ -202,8 +202,11 @@ class Corpus:
 
     def hook(self, case, root, name, event, extra_env=None):
         base = 'core-rules/hooks' if case['harness'] == 'claude' else 'core-rules/codex/hooks'
+        # Codex hooks run in place, as the rendered command does; their shared-lib
+        # fallback is bound to TRELLIS_ROOT (spec 055 R1.1).
+        runtime = {} if case['harness'] == 'claude' else {'TRELLIS_ROOT': str(self.source)}
         return self.command(case['commands'], [self.runtime['bash']['executable'], self.source / base / name],
-                            root, json.dumps(event), {**(extra_env or {}),
+                            root, json.dumps(event), {**(extra_env or {}), **runtime,
                             'CLAUDE_PROJECT_DIR': str(root), 'CODEX_PROJECT_DIR': str(root)})
 
     def normalize(self, case, root, event):

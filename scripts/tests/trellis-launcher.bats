@@ -4,6 +4,7 @@
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 LAUNCHER_TEMPLATE="$REPO_ROOT/scripts/trellis-launcher.sh"
 DISPATCHER_TEMPLATE="$REPO_ROOT/scripts/trellis"
+load helpers/payload-fixture
 
 setup() {
   SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/trellis-launcher.XXXXXX")"
@@ -488,7 +489,16 @@ launcher_verified_ssh_auth_sock"
   [ "$(cat "$ARGV_LOG")" = "$expected" ]
   [ ! -e "$SOURCE_POISON_MARKER" ]
   [ "$(cat "$ATTACH_PATH_LOG")" = "$expected_path" ]
-  run_launcher doctor
+  # Spec 055 R2.5: every operator route that can attach forwards the caller
+  # PATH; any other route does not.
+  for route in onboard worktree doctor; do
+    rm -f "$ATTACH_PATH_LOG"
+    run_launcher "$route"
+    [ "$status" -eq 3 ] || { echo "$route: $output"; false; }
+    [ "$(cat "$ATTACH_PATH_LOG")" = "$expected_path" ] || { echo "$route: $(cat "$ATTACH_PATH_LOG")"; false; }
+  done
+  rm -f "$ATTACH_PATH_LOG"
+  run_launcher registry
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   [ "$(cat "$ATTACH_PATH_LOG")" = __UNSET__ ]
   # The dispatcher intentionally exits 3 after the launcher has created and
@@ -1428,4 +1438,103 @@ for bad in (":", "1::2", "123", "", "١:2"):
   run "$DISPATCH_ROOT/trellis" unknown-command
   [ "$status" -eq 2 ]
   [[ "$output" == *"Usage: trellis <command> [args...]"* ]] || { echo "$output"; false; }
+}
+
+# Spec 049 regression. The launcher exports TRELLIS_LIBS_PRELOADED=1, and every
+# library guarded by that flag skips sourcing its own dependencies when it is
+# set. So LIBRARIES must carry what those guards skip; a dependency added to a
+# guard but not here is a definition the flag promises and nobody loaded. 1.3.0
+# shipped exactly that skew: surface-plan.sh skips skill-roots.sh, the launcher
+# did not preload it, and doctor reported `skill_roots_for_harnesses: command
+# not found`, failing managed-excludes, native-surfaces and manifest-leaves on
+# every attachment it evaluated.
+@test "launcher preloads every dependency a PRELOADED guard skips sourcing" {
+  run /usr/bin/python3 "$REPO_ROOT/scripts/tests/helpers/preload-closure.py" \
+    "$LAUNCHER_TEMPLATE" "$REPO_ROOT/scripts/lib"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "surface-plan resolves skill roots under the launcher preload flag" {
+  # Source exactly what the launcher preloads — read from LIBRARIES, never a
+  # hardcoded list, or this passes while the launcher omits the dependency.
+  libs="$(
+    /usr/bin/python3 -c '
+import re, sys
+block = re.search(r"^LIBRARIES = \((.*?)^\)", open(sys.argv[1]).read(), re.S | re.M).group(1)
+print("\n".join(re.findall(r"\"([^\"]+)\"", block)))
+' "$LAUNCHER_TEMPLATE"
+  )"
+  [ -n "$libs" ]
+
+  run /bin/bash --noprofile --norc -c '
+    cd "$1" || exit 1
+    export TRELLIS_LIBS_PRELOADED=1
+    while IFS= read -r lib; do
+      [ -n "$lib" ] && . "$lib"
+    done <<<"$2"
+    . scripts/lib/surface-plan.sh
+    command -v skill_roots_for_harnesses >/dev/null || exit 1
+    skill_roots_for_harnesses claude
+  ' _ "$REPO_ROOT" "$libs"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *".claude/skills" ]] || { echo "$output"; false; }
+}
+
+# Spec 055 A3.4, the launcher half. The released 1.3.6 launcher and store, both
+# unchanged, install one packaged tag from a remote whose main has moved past
+# the release commit and never contained the payload commit. Both records are
+# byte-identical and carry no excluded entry; the released 1.3.6 configure then
+# selects the release and the 1.3.6 launcher dispatches into it. The inversion
+# runs the same launcher on an unfiltered release-commit tag.
+@test "A3.4 the v1.3.6 launcher and store install one packaged tag identically and configure selects it" {
+  local v136="$SANDBOX/v1.3.6" src="$SANDBOX/packaged-source" remote="$SANDBOX/packaged-remote.git"
+  local launcher store_home="$SANDBOX/v136-store-home" record
+  payload_fixture_v136 "$v136" scripts/trellis-launcher.sh scripts/lib/release-store.sh scripts/lib/semver.sh
+  launcher="$v136/scripts/trellis-launcher.sh"
+  chmod 755 "$launcher"
+  mkdir -p "$v136/configure"
+  git -C "$REPO_ROOT" archive v1.3.6 scripts/configure.sh scripts/lib | tar -x -C "$v136/configure"
+
+  payload_fixture_source "$src" 7.7.7
+  payload_fixture_package "$src"
+  payload_fixture_tag "$src" 7.7.7 "$PAYLOAD_FIXTURE_PAYLOAD"
+  payload_fixture_remote "$src" "$remote" 7.7.7
+  [ -z "$(payload_fixture_git --git-dir="$remote" rev-list main | grep -x "$PAYLOAD_FIXTURE_PAYLOAD")" ]
+
+  write_config 7.7.7 "$remote"
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$launcher" release install 7.7.7 --remote "$remote"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  record="$TRELLIS_HOME/releases/7.7.7/release.json"
+  [ "$(jq -r .commit "$record")" = "$PAYLOAD_FIXTURE_PAYLOAD" ]
+  [ "$(payload_fixture_excluded_entries "$record")" -eq 0 ]
+
+  mkdir -p "$store_home"
+  chmod 700 "$store_home"
+  run env TRELLIS_HOME="$store_home" bash -c '. "$1"; release_store_install 7.7.7 "$2" ""' _ \
+    "$v136/scripts/lib/release-store.sh" "$remote"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cmp "$record" "$store_home/releases/7.7.7/release.json"
+
+  mkdir -p "$SANDBOX/configure-source/core-rules"
+  printf '{}\n' > "$SANDBOX/configure-source/trellis.config.json"
+  printf '7.7.7\n' > "$SANDBOX/configure-source/core-rules/VERSION"
+  run env HOME="$HOME" bash "$v136/configure/scripts/configure.sh" --home "$TRELLIS_HOME" \
+    --source "$SANDBOX/configure-source" --release 7.7.7 --default-fleet personal \
+    --discovery-root "$SANDBOX/projects" --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r .active_cli_release "$TRELLIS_HOME/config.json")" = 7.7.7 ]
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$launcher" probe filtered
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = 'fixture dispatcher: probe filtered' ] || { echo "$output"; false; }
+
+  # Inversion: the same launcher on the unfiltered release-commit tag.
+  payload_fixture_write "$src/core-rules/VERSION" 7.7.8
+  payload_fixture_git -C "$src" commit -qam 'release 7.7.8'
+  PAYLOAD_FIXTURE_RELEASE="$(payload_fixture_git -C "$src" rev-parse HEAD)"
+  payload_fixture_unfiltered_remote "$src" "$SANDBOX/unfiltered-remote.git" 7.7.8
+  write_config 7.7.8 "$SANDBOX/unfiltered-remote.git"
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$launcher" release install 7.7.8 \
+    --remote "$SANDBOX/unfiltered-remote.git"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(payload_fixture_excluded_entries "$TRELLIS_HOME/releases/7.7.8/release.json")" -eq 5 ]
 }

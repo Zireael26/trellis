@@ -43,6 +43,7 @@ Existing commands:
   skills        Manage Trellis-owned user skills (list, import, link, unlink)
   worktree      Create/repair a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
+  heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
 EOF
 }
 
@@ -213,6 +214,7 @@ case "$cmd" in
   worktree)     shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
   task)         shift; exec "$SCRIPT_DIR/materialize-scheduled-task.sh" "$@" ;;
   usage)        shift; exec "$SCRIPT_DIR/usage-federation.py" "$@" ;;
+  heavy)        shift; exec "$SCRIPT_DIR/heavy.sh" "$@" ;;
   help|-h|--help) usage ;;
   *)            usage >&2; exit 2 ;;
 esac

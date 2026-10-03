@@ -533,7 +533,7 @@ file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
   fake_out "real failure"
 
   run_stop "$hooks/stop-verify.sh"
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
   [ "$(call_count)" -eq 1 ]
   [ "$(printf '%s' "$output" | jq -r '.reason')" = "lint (ruff): real failure" ]
   printf '%s\n' "$stderr" | grep -q 'missing sibling lib'

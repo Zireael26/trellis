@@ -89,10 +89,13 @@ const SAFETY_BUDGET_CEILING_USD = 60
 // inheriting the calling main loop; Refresh/Rank remain inherited bounded reads.
 // Per-stage author/reviewer family contract — mirroring core-rules/skills/herdr-foreman/roles.json
 const AGENT_FAMILIES = {
-  sol: 'openai', luna: 'openai', terra: 'openai', 'code-reviewer': 'openai',
+  sol: 'openai', 'sol-xhigh': 'openai', 'sol-max': 'openai',
+  luna: 'openai', astra: 'openai', 'code-reviewer': 'openai',
+  opus: 'anthropic',
   grok: 'xai', 'security-reviewer': 'xai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
-  cheap: 'meta', flash: 'google',
+  cheap: 'meta', 'cheap-1': 'meta', 'cheap-2': 'meta', 'muse-meta': 'meta',
+  gemini: 'google', flash: 'google',
 }
 function familyOf(agent) {
   if (typeof agent !== 'string') return null

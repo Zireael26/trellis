@@ -227,6 +227,38 @@ else
 fi
 pg_unbounded_warned=no
 
+# Machine-wide heavy-slot gate (spec 054). The test battery waits for a
+# `trellis heavy` slot so parallel lanes on one host do not starve each other;
+# the timeout starts once the slot is held, not while waiting for it. `--check`
+# runs first and decides the path before the battery runs even once: 0 runs
+# through the gate, anything else (or no launcher) runs the old bounded path
+# with a notice. So a failing test is never re-run on the fallback path.
+# PROCESS_GATE_HEAVY_LAUNCHER names the launcher; it defaults to `trellis` on
+# PATH.
+PG_HEAVY_LAUNCHER=""
+pg_heavy_preflight() {
+  local launcher="${PROCESS_GATE_HEAVY_LAUNCHER:-}" out rc reason
+  if [ -z "$launcher" ]; then
+    launcher="$(command -v trellis 2>/dev/null || true)"
+  fi
+  if [ -z "$launcher" ] || [ ! -x "$launcher" ]; then
+    reason="trellis launcher not found${launcher:+: $launcher}"
+  else
+    set +e
+    out="$("$launcher" heavy --check 2>&1)"; rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      PG_HEAVY_LAUNCHER="$launcher"
+      return 0
+    fi
+    reason="trellis heavy --check exited $rc: $(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  printf 'process-gate: notice (heavy-gate-unavailable: %s)\n' "$reason" >&2
+}
+if [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
+  pg_heavy_preflight
+fi
+
 run_check() {
   local label="$1" cmd="$2" limit
   case "$label" in
@@ -247,7 +279,9 @@ run_check() {
 
   local out rc
   set +e
-  if [ -n "$PG_TIMEOUT_RUNNER" ]; then
+  if [ "$label" = tests ] && [ -n "$PG_HEAVY_LAUNCHER" ]; then
+    out="$("$PG_HEAVY_LAUNCHER" heavy --lane process-gate --timeout "$limit" -- bash -c "$cmd" 2>&1)"; rc=$?
+  elif [ -n "$PG_TIMEOUT_RUNNER" ]; then
     out="$(run_with_timeout "$limit" bash -c "$cmd" 2>&1)"; rc=$?
   else
     # No bounded runner reachable on this PATH. Still RUN the check -- refusing
@@ -268,7 +302,8 @@ run_check() {
   # ceiling fired. Say so: "exited 124" reads like a test failure and sends the
   # operator hunting for a bug that is not there. Only meaningful when a runner
   # was actually used -- unbounded, those are the command's own exit codes.
-  if [ -n "$PG_TIMEOUT_RUNNER" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; }; then
+  if { [ -n "$PG_TIMEOUT_RUNNER" ] || { [ "$label" = tests ] && [ -n "$PG_HEAVY_LAUNCHER" ]; }; } &&
+    { [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; }; then
     findings+=("$label: \`$cmd\` exceeded ${limit}s and was killed")
     while IFS= read -r line; do
       findings+=("    $line")

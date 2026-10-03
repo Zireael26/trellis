@@ -61,6 +61,11 @@ shebang_is_shell() {
        END { exit rc }' 2>/dev/null
 }
 
+# `scripts/tests/doctor-fix-common.bash` is Bats context: the byte-identical
+# helper half of the doctor-fix.bats split (Spec 064 A1 Decision 0), loaded by
+# the doctor-fix-part*.bats files. Bats files are not linted here, and the
+# helper keeps that treatment so the split stays byte-identical.
+#
 # NUL-delimited paths. The two finds are disjoint by construction: `! -name '*.*'`
 # admits only basenames with no dot at all, so nothing matched by the suffix pass
 # can reappear in the shebang pass.
@@ -68,7 +73,8 @@ shell_tree_files() {
   find "${ROOTS[@]}" \
     \( -name '*.sh' -o -name '*.bash' \) -type f \
     -not -path 'core-rules/evals/*' \
-    -not -path '.claude/worktrees/*' -print0
+    -not -path '.claude/worktrees/*' \
+    -not -path 'scripts/tests/doctor-fix-common.bash' -print0
 
   local file
   # `if`, not `&&`: a while loop's status is its body's last command, so a final

@@ -6,7 +6,7 @@
 # plugin command. Three probes, all fail-closed:
 #
 #   (a) model pin  — parse `model = "…"` from the Codex config and compare to
-#       the expected pin ($1, default gpt-5.6-sol). Missing file / missing key
+#       the expected pin ($1, default gpt-6-sol). Missing file / missing key
 #       / wrong value → pin_ok: false.
 #   (b) selected plugin enum — extract the accepted --effort values from the
 #       selected plugin's validator SOURCE (the search pattern is hardcoded;
@@ -37,7 +37,7 @@
 
 set -u
 
-EXPECTED_PIN="${1:-gpt-5.6-sol}"
+EXPECTED_PIN="${1:-gpt-6-sol}"
 CONFIG_PATH="${CODEX_CONFIG:-$HOME/.codex/config.toml}"
 PLUGIN_ROOT="${CODEX_PLUGIN:-$HOME/.claude/plugins/cache/openai-codex/codex}"
 CODEX_BIN="${CODEX_BIN:-codex}"

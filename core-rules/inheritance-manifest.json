@@ -180,6 +180,11 @@
           "executable": true
         },
         {
+          "source": "core-rules/hooks/lib/hookspath-check.sh",
+          "destination": ".codex/hooks/lib/hookspath-check.sh",
+          "executable": true
+        },
+        {
           "source": "core-rules/hooks/lib/task-context.sh",
           "destination": ".codex/hooks/lib/task-context.sh",
           "executable": true
@@ -268,6 +273,11 @@
         {
           "source": "core-rules/hooks/lib/action-normalize.sh",
           "destination": ".pi/hooks/lib/action-normalize.sh",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/hookspath-check.sh",
+          "destination": ".pi/hooks/lib/hookspath-check.sh",
           "executable": true
         },
         {

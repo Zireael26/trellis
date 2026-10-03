@@ -23,12 +23,91 @@
 #
 # bash 3.2 compatible: no associative arrays, no `mapfile`, no `declare -A`.
 
+# File-backed JSON transport is also available to standalone health readers.
+if ! command -v trellis_jq >/dev/null 2>&1; then
+  _HC_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  # shellcheck source=trellis-home.sh
+  . "$_HC_LIB_DIR/trellis-home.sh"
+  unset _HC_LIB_DIR
+fi
+
 # Status-code constants (exported so doctor.sh can reference by name).
 HC_OK=0
 HC_ERROR=1
 HC_WARN=2
 HC_INFO=3
 export HC_OK HC_ERROR HC_WARN HC_INFO
+
+# Print status<TAB>message rows for the host container runtime. An explicit
+# app path keeps the predicate hermetic in tests; doctor passes the real path.
+# This is report-only: an absent CLI is not a container-runtime failure.
+hc_container_runtime_rows() {
+  local app="${1:-/Applications/Docker.app}" os docker_cli="" resolved="" context=""
+  os="$(uname -s)" || os=""
+  if [ "$os" != Darwin ]; then
+    printf '%s\t%s\n' "$HC_INFO" 'container-runtime n/a (not macOS)'
+    return 0
+  fi
+
+  docker_cli="$(command -v docker 2>/dev/null)" || docker_cli=""
+  if [ -n "$docker_cli" ]; then
+    resolved="$(realpath "$docker_cli" 2>/dev/null)" || resolved=""
+  fi
+  case "$resolved" in
+    "$app"/*) printf '%s\t%s\n' "$HC_WARN" 'docker-cli-from-desktop' ;;
+  esac
+  if [ -e "$app" ] && { [ -z "$resolved" ] || [ "${resolved#"$app"/}" = "$resolved" ]; }; then
+    printf '%s\t%s\n' "$HC_INFO" 'docker-desktop-dormant'
+  fi
+  if ! command -v colima >/dev/null 2>&1; then
+    printf '%s\t%s\n' "$HC_INFO" 'colima-not-installed'
+  elif [ "${DOCKER_HOST+x}" != x ] && [ -n "$docker_cli" ]; then
+    context="$(docker context show 2>/dev/null)" || context=""
+    if [ "$context" != colima ]; then
+      printf '%s\t%s\n' "$HC_WARN" 'docker-context-not-colima'
+    fi
+  fi
+}
+
+# Print status<TAB>message rows for the disk-janitor LaunchAgents under
+# USER_HOME/Library/LaunchAgents (spec 059 R3). Every org.trellis.disk-janitor*
+# .plist must equal the installer's expected ProgramArguments and schedule
+# exactly, through the same dj_agent_matches the installer refuses with; any
+# difference is an error. A name not ending in .plist is reported as disabled.
+# Read-only; an explicit USER_HOME keeps the predicate hermetic in tests.
+hc_disk_janitor_agent_rows() {
+  local user_home="$1" trellis_home="$2" rows state path detail mismatched=false
+  [ -n "$user_home" ] || return 0
+  if [ ! -d "$user_home/Library/LaunchAgents" ]; then
+    printf '%s\t%s\n' "$HC_INFO" 'disk-janitor agents: none installed'
+    return 0
+  fi
+  # Compare against the canonical spellings the installer renders.
+  user_home="$(CDPATH='' cd "$user_home" && pwd -P)" || return 0
+  if [ -d "$trellis_home" ]; then
+    trellis_home="$(CDPATH='' cd "$trellis_home" && pwd -P)" || return 0
+  fi
+  rows="$(dj_agent_scan "$user_home/Library/LaunchAgents" "$user_home" "$trellis_home")"
+  if [ -z "$rows" ]; then
+    printf '%s\t%s\n' "$HC_INFO" 'disk-janitor agents: none installed'
+    return 0
+  fi
+  while IFS="$(printf '\t')" read -r state path detail; do
+    case "$state" in
+      match)
+        printf '%s\t%s\n' "$HC_OK" "disk-janitor agent: $path matches the installer's expected arguments and schedule" ;;
+      mismatch)
+        printf '%s\t%s\n' "$HC_ERROR" "disk-janitor agent: $path does not match the installer's expected arguments and schedule ($detail); remedy: $(dj_agent_remedy "$path")"
+        mismatched=true
+        ;;
+      disabled)
+        printf '%s\t%s\n' "$HC_INFO" "disk-janitor agent: $path is disabled ($detail; launchd does not load it)" ;;
+    esac
+  done <<< "$rows"
+  if "$mismatched"; then
+    printf '%s\t%s\n' "$HC_INFO" "disk-janitor agents: after the remedy, $DJ_AGENT_REMEDY_NEXT"
+  fi
+}
 
 hc_diagnostic_escape() {
   LC_ALL=C printf '%q' "${1-}"
@@ -73,6 +152,14 @@ if ! command -v skill_roots_for_harnesses >/dev/null 2>&1; then
   _HC_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   # shellcheck source=skill-roots.sh
   . "$_HC_LIB_DIR/skill-roots.sh"
+  unset _HC_LIB_DIR
+fi
+# Spec 059: the disk-janitor agent expectation shared with the launchd
+# installer, loaded the same way so the two can never disagree.
+if ! command -v dj_agent_scan >/dev/null 2>&1; then
+  _HC_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  # shellcheck source=disk-janitor-agents.sh
+  . "$_HC_LIB_DIR/disk-janitor-agents.sh"
   unset _HC_LIB_DIR
 fi
 
@@ -1389,7 +1476,7 @@ hc_portable_surface_plan_metadata() (
        | .destination_dir]
     | unique | sort
   ')" || return 1
-  plan="$(printf '%s\n' "$plan" | jq -cS --argjson directories "$directories" \
+  plan="$(printf '%s\n' "$plan" | trellis_jq -cS --argjson directories "$directories" \
     '.source_child_directories = $directories')" || return 1
   count="$(printf '%s\n' "$plan" | jq '[.artifacts[] | select(.kind == "render" and .merge == "explicit-json")] | length')" ||
     return 1
@@ -1411,7 +1498,7 @@ hc_portable_surface_plan_metadata() (
       else error("explicit-json template must be an object")
       end
     ' "$payload/$source")" || return 1
-    plan="$(printf '%s\n' "$plan" | jq -cS --argjson index "$index" --argjson expected "$expected" '
+    plan="$(printf '%s\n' "$plan" | trellis_jq -cS --argjson index "$index" --argjson expected "$expected" '
       ([.artifacts | to_entries[]
         | select(.value.kind == "render" and .value.merge == "explicit-json")][$index].key) as $artifact
       | .artifacts[$artifact].expected_owned_keys = $expected
@@ -1492,7 +1579,7 @@ hc_portable_expected_exclude_block() (
   plan="$(hc_portable_payload_surface_plan "$home" "$release" "$payload" "${harnesses[@]}")" ||
     return 1
   printf '%s\n' '# --- Trellis local attachment exclude block ---'
-  printf '%s\n' "$plan" | jq -r --argjson deferred "$deferred" '
+  printf '%s\n' "$plan" | trellis_jq -r --argjson deferred "$deferred" '
     ($deferred | map(.path)) as $skip
     | ["/.trellis/runtime"]
       + [.artifacts[].destination | . as $d | select(($skip | index($d)) == null) | "/" + .]
@@ -1574,7 +1661,9 @@ hc_portable_machine_config() {
       and ([.discovery_roots[] | absolute_safe_path] | all)
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema"])
+    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
+    # alone (spec 054), so a bad value disables only the heavy gate.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -1736,7 +1825,7 @@ hc_portable_user_transaction_state() {
 # over an unrelated directory.
 hc_portable_user_owner_matches_payload() {
   local owner="$1" payload="$2" plan="$3"
-  jq -e --arg payload "$payload" --argjson plan "$plan" '
+  trellis_jq -e --arg payload "$payload" --argjson plan "$plan" '
     .artifacts as $artifacts
     | ([$plan.artifacts[]
         | select(.kind == "symlink" or .kind == "render")
@@ -2179,7 +2268,7 @@ hc_portable_hooks_path() {
     fi
     current_display="$(hc_diagnostic_escape "$current")" || return "$HC_ERROR"
     root_display="$(hc_diagnostic_escape "$root")" || return "$HC_ERROR"
-    echo "git hook authority: core.hooksPath is $current_display; the Trellis managed dispatcher is $expected_display; run git -C $root_display config core.hooksPath $expected_display (likely cause: \`husky\` \`prepare\` after a package install resets core.hooksPath)"
+    echo "git hook authority: core.hooksPath is $current_display in $root_display; the Trellis managed dispatcher is $expected_display; run trellis doctor --fix, which repairs it only when it is safe (likely cause: \`husky\` \`prepare\` after a package install resets core.hooksPath)"
     return "$HC_ERROR"
   fi
   if [ "$status" -ne 0 ]; then
@@ -2213,6 +2302,552 @@ hc_portable_hooks_path() {
   esac
 }
 
+# --- spec 055 R4.6: narrow core.hooksPath repair ------------------------------
+#
+# `trellis doctor --fix` repairs exactly one drift: husky's `prepare` replaced
+# the managed dispatcher with `.husky/_`. It writes the recorded managed path
+# only when every preflight condition holds, under the checkout lock that attach
+# and detach take (which serializes it against Trellis writers, not husky), and
+# re-reads before claiming success. A refusal changes nothing, prints no bare
+# `git config` command, and names the failed condition, the worktree and its
+# remedy. The re-read detects interference up to that point only.
+
+# hc_hooks_path_restore <root> <prior> <prior-set>
+# Put core.hooksPath back to exactly what preflight read. A null prior
+# (prior-set=false) means "unset", never an empty string.
+hc_hooks_path_restore() {
+  local root="$1" prior="$2" prior_set="$3" rc
+  if [ "$prior_set" = true ]; then
+    git -C "$root" config --local core.hooksPath "$prior"
+    return $?
+  fi
+  git -C "$root" config --local --unset-all core.hooksPath
+  rc=$?
+  # 5: nothing to unset, which is the state being restored.
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]
+}
+
+# _hc_hooks_path_read <root>: every local core.hooksPath value, one per line, in
+# HC_HOOKS_PATH_VALUES; returns git's status (1: unset). The sentinel keeps a
+# trailing empty value, which git honours as the last one and which command
+# substitution would otherwise strip.
+HC_HOOKS_PATH_VALUES=""
+_hc_hooks_path_read() {
+  local out rc
+  out="$(git -C "$1" config --local --get-all core.hooksPath 2>/dev/null && printf .)"
+  rc=$?
+  out="${out%.}"
+  HC_HOOKS_PATH_VALUES="${out%$'\n'}"
+  return "$rc"
+}
+
+# True when .husky/ holds a git hook file outside husky's own `_/` runner dir.
+_hc_husky_has_project_hooks() {
+  local dir="$1/.husky" entry base
+  [ -d "$dir" ] || return 1
+  for entry in "$dir"/* "$dir"/.[!.]*; do
+    [ -f "$entry" ] || [ -L "$entry" ] || continue
+    base="${entry##*/}"
+    case "$base" in
+      pre-push|post-checkout) return 0 ;;
+    esac
+    _attachment_hooks_is_passthrough_name "$base" && return 0
+  done
+  return 1
+}
+
+_hc_hooks_path_refuse() {
+  printf 'core.hooksPath repair refused in %s: %s; remedy: %s; nothing was changed\n' \
+    "$(hc_diagnostic_escape "$1")" "$2" "$3"
+  return 1
+}
+
+# Every worktree `git worktree list` knows must be an attached Trellis worktree:
+# the core.hooksPath being repaired lives in the config every one of them
+# shares. Attach enables hooks only on the worktree that owns the shared
+# exclude block and records every linked worktree as {"enabled":false}, so
+# exactly one record has hooks enabled with this managed path and every other
+# is a valid disabled record. Leaves every owner record, one per line in list
+# order, in HC_HOOKS_PATH_OWNERS; the enabled one in HC_HOOKS_PATH_ENABLED; the
+# disabled ones in HC_HOOKS_PATH_DISABLED as "<sha256> <path>" lines.
+HC_HOOKS_PATH_OWNERS=""
+HC_HOOKS_PATH_ENABLED=""
+HC_HOOKS_PATH_DISABLED=""
+_hc_hooks_path_worktrees_ok() {
+  local home="$1" root="$2" checkout="$3" managed="$4" line path="" prunable=false wroot wid wowner
+  local list enabled enabled_roots="" enabled_root="" enabled_wid="" count=0 sum
+  local remedy='detach every worktree of the checkout, then attach the owning worktree first'
+  HC_HOOKS_PATH_OWNERS=""
+  HC_HOOKS_PATH_ENABLED=""
+  HC_HOOKS_PATH_DISABLED=""
+  list="$(git -C "$root" worktree list --porcelain 2>/dev/null)" ||
+    _hc_hooks_path_refuse "$root" 'git could not list the worktrees of this checkout' 'repair the repository, then run trellis doctor --fix again' || return 1
+  while IFS= read -r line || [ -n "$path" ]; do
+    case "$line" in
+      'worktree '*) path="${line#worktree }"; prunable=false; continue ;;
+      prunable*) prunable=true; continue ;;
+      '') ;;
+      *) continue ;;
+    esac
+    [ -n "$path" ] || continue
+    if [ "$prunable" = true ] || [ ! -d "$path" ]; then
+      _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$path") is prunable" 'git worktree prune'
+      return 1
+    fi
+    wroot="$(CDPATH='' cd -P "$path" && pwd -P)" || return 1
+    wid="$(hc_portable_sha256_text "$wroot")" || return 1
+    wowner="$home/state/attachments/$checkout/$wid.json"
+    if [ ! -f "$wowner" ] || [ -L "$wowner" ]; then
+      _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$wroot") is not attached but shares this core.hooksPath" \
+        "trellis worktree sync $(hc_diagnostic_escape "$wroot"), or git worktree remove $(hc_diagnostic_escape "$wroot")"
+      return 1
+    fi
+    enabled="$(jq -r '.git_hooks.enabled // false' "$wowner" 2>/dev/null)" || enabled=""
+    if [ "$enabled" = true ]; then
+      if [ "$(jq -r '.git_hooks.managed_hooks_path // empty' "$wowner" 2>/dev/null)" != "$managed" ]; then
+        _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$wroot") has Trellis git hooks enabled with another managed path" "$remedy"
+        return 1
+      fi
+      count=$((count + 1))
+      enabled_roots="${enabled_roots:+$enabled_roots, }$(hc_diagnostic_escape "$wroot")"
+      enabled_root="$wroot"
+      enabled_wid="$wid"
+      HC_HOOKS_PATH_ENABLED="$wowner"
+    elif [ "$enabled" = false ] && _attachment_owner_json_valid "$wowner" >/dev/null 2>&1; then
+      sum="$(_attachment_hash "$wowner")" || return 1
+      HC_HOOKS_PATH_DISABLED="$HC_HOOKS_PATH_DISABLED$sum $wowner
+"
+    else
+      _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$wroot") has an owner record that is neither hooks-enabled nor a valid record with Trellis git hooks disabled" "$remedy"
+      return 1
+    fi
+    HC_HOOKS_PATH_OWNERS="$HC_HOOKS_PATH_OWNERS$wowner
+"
+    path=""
+  done <<EOF
+$list
+
+EOF
+  if [ "$count" -ne 1 ]; then
+    if [ "$count" -eq 0 ]; then
+      _hc_hooks_path_refuse "$root" 'no worktree of this checkout has an owner record with Trellis git hooks enabled' "$remedy"
+    else
+      _hc_hooks_path_refuse "$root" "more than one worktree of this checkout has Trellis git hooks enabled ($enabled_roots)" "$remedy"
+    fi
+    return 1
+  fi
+  # The one enabled record must be the exclude-owning worktree's, bound to it.
+  if [ "$(jq -r --arg checkout "$checkout" --arg wid "$enabled_wid" \
+       '.checkout_id == $checkout and .worktree_id == $wid and .exclude.managed_by_attachment == true' \
+       "$HC_HOOKS_PATH_ENABLED" 2>/dev/null)" != true ]; then
+    _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$enabled_root") has Trellis git hooks enabled but its owner record is not bound to that worktree or does not own the shared exclude block" "$remedy"
+    return 1
+  fi
+  return 0
+}
+
+# hc_hooks_path_fix_needed <owner> <root>: prints "drift" when hooks are enabled
+# and the local core.hooksPath is not exactly the recorded managed path.
+hc_hooks_path_fix_needed() {
+  local owner="$1" root="$2" managed values
+  [ "$(jq -r '.git_hooks.enabled // false' "$owner" 2>/dev/null)" = true ] || return 0
+  managed="$(jq -r '.git_hooks.managed_hooks_path // empty' "$owner" 2>/dev/null)" || return 0
+  _hc_hooks_path_read "$root"
+  values="$HC_HOOKS_PATH_VALUES"
+  [ -n "$managed" ] && [ "$values" = "$managed" ] || printf 'drift\n'
+}
+
+# --- spec 055 R4.6a: `trellis doctor --fix --adopt-husky` ---------------------
+#
+# Adopts husky's `.husky/_` as the recorded previous hooks path, so the managed
+# dispatcher chains to husky's hooks, then lets R4.6 restore core.hooksPath.
+# The write set is every file strict verification ties to that previous path:
+# one passthrough shim per passthrough-eligible hook name in `.husky/_/`, the
+# hooks-enabled owner record, and the previous-hooks-path sidecar every
+# worktree of the checkout shares. Linked worktrees' {"enabled":false} records
+# cannot carry a previous path, so they are validated and never written.
+# Shims come from this process's generator, which is the one every verifier
+# uses, so the preflight requires the active CLI release to be the release the
+# records name. The set is written shims, then record, then sidecar, and rolled
+# back in reverse on any failure, including a failure of the R4.6 repair that
+# follows it.
+
+HC_ADOPT_NAMES=""
+HC_ADOPT_BACKUP=""
+HC_ADOPT_CREATED=""
+
+# All records name one release, that release is the active CLI release, and its
+# installed payload verifies.
+_hc_adopt_husky_release_preflight() {
+  local home="$1" root="$2" o r release="" releases="" active root_display
+  root_display="$(hc_diagnostic_escape "$root")"
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    r="$(jq -r '.release // empty' "$o" 2>/dev/null)" || r=""
+    case " $releases " in *" ${r:-<none>} "*) ;; *) releases="${releases:+$releases }${r:-<none>}" ;; esac
+    [ -n "$release" ] || release="$r"
+  done <<EOF
+$HC_HOOKS_PATH_OWNERS
+EOF
+  case "$releases" in
+    *' '*|''|'<none>')
+      _hc_hooks_path_refuse "$root" "the owner records of this checkout name more than one release ($(hc_diagnostic_escape "$releases"))" \
+        'trellis release adopt so every worktree of this checkout records one release, then run trellis doctor --fix --adopt-husky again'
+      return 1
+      ;;
+  esac
+  active="$(jq -r '.active_cli_release // empty' "$home/config.json" 2>/dev/null)" || active=""
+  if [ "$active" != "$release" ]; then
+    _hc_hooks_path_refuse "$root" "the active CLI release $(hc_diagnostic_escape "${active:-<unset>}") differs from the recorded release $(hc_diagnostic_escape "$release"), and every verifier builds passthrough shims with the active CLI's generator" \
+      "trellis configure --release $(hc_diagnostic_escape "$release"), or detach and attach $root_display at $(hc_diagnostic_escape "${active:-<unset>}")"
+    return 1
+  fi
+  if ! TRELLIS_HOME="$home" release_store_verify "$release" >/dev/null 2>&1; then
+    _hc_hooks_path_refuse "$root" "the recorded release $(hc_diagnostic_escape "$release") payload is missing or its manifest does not verify" \
+      "trellis release install $(hc_diagnostic_escape "$release"), then trellis release verify $(hc_diagnostic_escape "$release")"
+    return 1
+  fi
+}
+
+# The enabled record's previous is present and null, the shared sidecar is one
+# empty line, and the managed dir holds no passthrough-named entry of any type:
+# with previous null strict verification forbids one, so a present entry is
+# foreign.
+_hc_adopt_husky_set_preflight() {
+  local root="$1" managed="$2" o="$HC_HOOKS_PATH_ENABLED" entry base found="" stored
+  if [ "$(jq -r '.git_hooks | has("previous_hooks_path") and .previous_hooks_path == null' "$o" 2>/dev/null)" != true ]; then
+    _hc_hooks_path_refuse "$root" 'the hooks-enabled owner record does not record a null previous core.hooksPath; --adopt-husky adopts only over a null previous' \
+      "detach and attach $(hc_diagnostic_escape "$root")"
+    return 1
+  fi
+  if ! stored="$(_attachment_hooks_read_sidecar "$managed/previous-hooks-path" true)" || [ -n "$stored" ]; then
+    _hc_hooks_path_refuse "$root" "the shared previous-hooks-path sidecar in $(hc_diagnostic_escape "$managed") is not one empty line" \
+      'trellis release adopt (regenerates the managed hook state)'
+    return 1
+  fi
+  for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    base="${entry##*/}"
+    _attachment_hooks_is_passthrough_name "$base" && found="${found:+$found, }$(hc_diagnostic_escape "$base")"
+  done
+  if [ -n "$found" ]; then
+    _hc_hooks_path_refuse "$root" "the managed dir $(hc_diagnostic_escape "$managed") already holds passthrough-named entries: $found" \
+      'inspect them; Trellis will not overwrite an entry it did not create, and a detach and attach rebuilds the managed dir'
+    return 1
+  fi
+  HC_ADOPT_NAMES="$(_attachment_hooks_expected_passthrough_names "$root" .husky/_)" || return 1
+}
+
+# Replace <path> atomically: a temp file in the same directory, then rename.
+_hc_adopt_replace_file() {
+  local path="$1" content="$2" mode="$3" tmp
+  tmp="$(mktemp "$(dirname "$path")/.${path##*/}.XXXXXX")" || return 1
+  if chmod "$mode" "$tmp" && printf '%s\n' "$content" > "$tmp" && mv -f "$tmp" "$path"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Put back the original bytes and mode kept in <backup>, atomically.
+_hc_adopt_restore_file() {
+  local backup="$1" path="$2" tmp
+  tmp="$(mktemp "$(dirname "$path")/.${path##*/}.XXXXXX")" || return 1
+  if cp -p "$backup" "$tmp" && mv -f "$tmp" "$path"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# True when every linked worktree's disabled record still validates and holds
+# the bytes the preflight hashed.
+_hc_adopt_disabled_unchanged() {
+  local sum o
+  while IFS=' ' read -r sum o; do
+    [ -n "$sum" ] || continue
+    _attachment_owner_json_valid "$o" >/dev/null 2>&1 || return 1
+    [ "$(_attachment_hash "$o")" = "$sum" ] || return 1
+  done <<EOF
+$HC_HOOKS_PATH_DISABLED
+EOF
+}
+
+# Writes the set: shims, then the enabled record, then the sidecar; then strict
+# verification of the enabled record, and every disabled record unchanged.
+# Originals are kept in HC_ADOPT_BACKUP.
+_hc_adopt_husky_commit() {
+  local home="$1" root="$2" managed="$3" record="$HC_HOOKS_PATH_ENABLED" name tmp json
+  HC_ADOPT_CREATED=""
+  HC_ADOPT_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/trellis-adopt-husky.XXXXXX")" || return 1
+  chmod 700 "$HC_ADOPT_BACKUP" || return 1
+  cp -p "$managed/previous-hooks-path" "$HC_ADOPT_BACKUP/sidecar" || return 1
+  cp -p "$record" "$HC_ADOPT_BACKUP/record" || return 1
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    tmp="$(mktemp "$managed/.$name.XXXXXX")" || return 1
+    if ! { chmod 700 "$tmp" &&
+           printf '%s\n' "$(_attachment_hooks_passthrough_shim_body "$name")" > "$tmp" &&
+           release_store_rename_no_clobber "$tmp" "$managed/$name" 2>/dev/null; }; then
+      rm -f "$tmp"
+      return 1
+    fi
+    HC_ADOPT_CREATED="$HC_ADOPT_CREATED$name
+"
+  done <<EOF
+$HC_ADOPT_NAMES
+EOF
+
+  json="$(jq -cS '.git_hooks.previous_hooks_path = ".husky/_"' "$record")" || return 1
+  _hc_adopt_replace_file "$record" "$json" "$(_attachment_mode "$HC_ADOPT_BACKUP/record")" || return 1
+
+  # Test seam: a failure after the shims and the record, before the sidecar.
+  [ "${DOCTOR_FIX_FAULT_PHASE:-}" != adopt-husky-before-sidecar ] || return 1
+  _hc_adopt_replace_file "$managed/previous-hooks-path" ".husky/_" "$(_attachment_mode "$HC_ADOPT_BACKUP/sidecar")" || return 1
+
+  # Test seam: husky adds a hook name between the preflight and the post-check.
+  case "${DOCTOR_FIX_FAULT_PHASE:-}" in
+    adopt-husky-new-hook)
+      printf '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n' > "$root/.husky/_/sendemail-validate"
+      chmod 755 "$root/.husky/_/sendemail-validate"
+      ;;
+  esac
+  _attachment_hooks_state_owned_matches "$home" "$record" >/dev/null 2>&1 || return 1
+  _hc_adopt_disabled_unchanged
+}
+
+# Reverse order: sidecar, record, then every shim this repair created. Then
+# re-verify that each is back to its original bytes and mode, each created shim
+# is gone, and every disabled record is unchanged. The backup is kept, and
+# named, when that fails.
+_hc_adopt_husky_rollback() {
+  local managed="$1" record="$HC_HOOKS_PATH_ENABLED" name ok=true
+  [ -n "$HC_ADOPT_BACKUP" ] || return 0
+  # Every original is kept before the first write, so a missing backup is a
+  # file this repair never wrote.
+  if [ -f "$HC_ADOPT_BACKUP/sidecar" ]; then
+    _hc_adopt_restore_file "$HC_ADOPT_BACKUP/sidecar" "$managed/previous-hooks-path" || ok=false
+  fi
+  if [ -f "$HC_ADOPT_BACKUP/record" ]; then
+    _hc_adopt_restore_file "$HC_ADOPT_BACKUP/record" "$record" || ok=false
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    rm -f "$managed/$name" || ok=false
+  done <<EOF
+$HC_ADOPT_CREATED
+EOF
+
+  if [ -f "$HC_ADOPT_BACKUP/sidecar" ]; then
+    cmp -s "$HC_ADOPT_BACKUP/sidecar" "$managed/previous-hooks-path" &&
+      [ "$(_attachment_mode "$HC_ADOPT_BACKUP/sidecar")" = "$(_attachment_mode "$managed/previous-hooks-path")" ] || ok=false
+  fi
+  if [ -f "$HC_ADOPT_BACKUP/record" ]; then
+    cmp -s "$HC_ADOPT_BACKUP/record" "$record" &&
+      [ "$(_attachment_mode "$HC_ADOPT_BACKUP/record")" = "$(_attachment_mode "$record")" ] || ok=false
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ ! -e "$managed/$name" ] && [ ! -L "$managed/$name" ] || ok=false
+  done <<EOF
+$HC_ADOPT_CREATED
+EOF
+  _hc_adopt_disabled_unchanged || ok=false
+  [ "$ok" = true ] || return 1
+  rm -rf "$HC_ADOPT_BACKUP"
+  HC_ADOPT_BACKUP=""
+}
+
+# Prints the rollback outcome after a failure; returns 2 when the set is back
+# to its original bytes and modes, 3 when it is not.
+_hc_adopt_husky_rollback_report() {
+  local root_display="$1" managed="$2" cause="$3"
+  if _hc_adopt_husky_rollback "$managed"; then
+    printf 'husky adoption rolled back in %s after %s: the hooks-enabled owner record and the previous-hooks-path sidecar are restored to their original bytes and mode, every passthrough shim this repair created is removed, and every linked worktree record is unchanged\n' \
+      "$root_display" "$cause"
+    return 2
+  fi
+  printf 'husky adoption failed in %s after %s and its rollback did not verify; the original record and sidecar are kept in %s; remedy: restore them from there, then detach and attach every worktree of this checkout\n' \
+    "$root_display" "$cause" "$(hc_diagnostic_escape "$HC_ADOPT_BACKUP")"
+  return 3
+}
+
+# hc_hooks_path_fix <home> <root> <owner> <dry-run:true|false> [adopt-husky:true|false]
+# Returns 0 repaired (or, under dry-run, planned), 1 refused with nothing
+# changed, 2 failed after the write and restored, 3 failed after the write and
+# not restored, 4 nothing to repair. Prints one line per outcome.
+hc_hooks_path_fix() {
+  local home="$1" root="$2" owner="$3" dry_run="${4:-false}" adopt="${5:-false}" enabled managed values rc identity checkout common
+  enabled="$(jq -r '.git_hooks.enabled // false' "$owner" 2>/dev/null)" || return 4
+  [ "$enabled" = true ] || return 4
+  managed="$(jq -r '.git_hooks.managed_hooks_path // empty' "$owner" 2>/dev/null)" || return 4
+  [ -n "$managed" ] || return 4
+  _hc_hooks_path_read "$root"
+  rc=$?
+  values="$HC_HOOKS_PATH_VALUES"
+  [ "$rc" -ne 0 ] || [ "$values" != "$managed" ] || return 4
+  identity="$(local_registry_identity_for_root "$root" 2>/dev/null)" ||
+    { _hc_hooks_path_refuse "$root" 'the checkout identity could not be read' 'run trellis doctor and resolve the identity row first'; return 1; }
+  checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return 1
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')" || return 1
+  attachment_checkout_lock_reclaim "$home" "$checkout" "$common" >/dev/null 2>&1
+  if ! attachment_checkout_lock_acquire "$home" "$checkout" "$common" >/dev/null 2>&1; then
+    _hc_hooks_path_refuse "$root" 'another Trellis writer holds the checkout lock' 'let it finish, then run trellis doctor --fix again'
+    return 1
+  fi
+  _hc_hooks_path_fix_locked "$home" "$root" "$owner" "$dry_run" "$checkout" "$managed" "$adopt"
+  rc=$?
+  _attachment_checkout_lock_release >/dev/null 2>&1
+  return "$rc"
+}
+
+_hc_hooks_path_fix_locked() {
+  local home="$1" root="$2" owner="$3" dry_run="$4" checkout="$5" managed="$6" adopt="${7:-false}"
+  local values rc count previous root_display adopting=false linked shims
+  root_display="$(hc_diagnostic_escape "$root")"
+  _hc_hooks_path_worktrees_ok "$home" "$root" "$checkout" "$managed" || return 1
+
+  _hc_hooks_path_read "$root"
+  rc=$?
+  values="$HC_HOOKS_PATH_VALUES"
+  count=0
+  [ "$rc" -ne 0 ] || count="$(printf '%s\n' "$values" | wc -l | tr -d ' ')"
+  if [ "$count" -ne 1 ] || [ "$values" != ".husky/_" ]; then
+    _hc_hooks_path_refuse "$root" 'the local core.hooksPath is not exactly one value equal to .husky/_' \
+      "inspect it with git -C $root_display config --show-origin --get-all core.hooksPath; Trellis will not overwrite a value it did not record"
+    return 1
+  fi
+
+  previous="$(jq -r '.git_hooks.previous_hooks_path // empty' "$owner" 2>/dev/null)" || return 1
+  if [ "$adopt" = true ] && [ "$previous" != ".husky/_" ]; then
+    if [ -n "$previous" ]; then
+      _hc_hooks_path_refuse "$root" "the recorded previous core.hooksPath is $(hc_diagnostic_escape "$previous"), not null; --adopt-husky adopts only over a null previous" \
+        "detach and attach $root_display"
+      return 1
+    fi
+    _hc_adopt_husky_release_preflight "$home" "$root" || return 1
+    _hc_adopt_husky_set_preflight "$root" "$managed" || return 1
+    adopting=true
+  fi
+
+  if ! _attachment_hooks_state_matches "$home" "$owner" >/dev/null 2>&1; then
+    _hc_hooks_path_refuse "$root" 'the managed dispatcher does not verify' 'trellis release adopt (regenerates the dispatcher)'
+    return 1
+  fi
+
+  if [ "$adopting" = false ] && [ "$previous" != ".husky/_" ] &&
+     { [ -n "$previous" ] || _hc_husky_has_project_hooks "$root"; }; then
+    _hc_hooks_path_refuse "$root" 'the recorded previous core.hooksPath is not .husky/_ and .husky/ holds project hooks that would stop running' \
+      'trellis doctor --fix --adopt-husky'
+    return 1
+  fi
+
+  linked="$(printf '%s' "$HC_HOOKS_PATH_DISABLED" | grep -c .)"
+  shims="$(printf '%s' "$HC_ADOPT_NAMES" | grep -c .)"
+  if [ "$dry_run" = true ]; then
+    [ "$adopting" = false ] ||
+      printf 'husky adoption planned in %s: .husky/_ as the previous hooks path in the hooks-enabled owner record and the shared sidecar, with %s passthrough shim(s); %s linked worktree record(s) left unchanged (dry run; nothing was changed)\n' \
+        "$root_display" "$shims" "$linked"
+    printf 'core.hooksPath repair planned in %s: .husky/_ -> %s (dry run; nothing was changed)\n' \
+      "$root_display" "$(hc_diagnostic_escape "$managed")"
+    return 0
+  fi
+
+  if [ "$adopting" = true ]; then
+    _hc_adopt_husky_commit "$home" "$root" "$managed" ||
+      { _hc_adopt_husky_rollback_report "$root_display" "$managed" 'a failed write or post-check'; return $?; }
+  fi
+  _hc_hooks_path_write_verified "$home" "$root" "$owner" "$managed"
+  rc=$?
+  if [ "$adopting" = true ]; then
+    if [ "$rc" -eq 0 ]; then
+      rm -rf "$HC_ADOPT_BACKUP"
+      printf 'husky adopted in %s: .husky/_ is the previous hooks path in the hooks-enabled owner record and the shared sidecar; %s passthrough shim(s) created; %s linked worktree record(s) unchanged\n' \
+        "$root_display" "$shims" "$linked"
+      return 0
+    fi
+    _hc_adopt_husky_rollback_report "$root_display" "$managed" 'the core.hooksPath repair failed' || [ "$?" -eq 2 ] || rc=3
+    [ "$rc" -ne 1 ] || rc=2
+  fi
+  return "$rc"
+}
+
+# The R4.6 write, its re-read and re-verification, and its own restore.
+_hc_hooks_path_write_verified() {
+  local home="$1" root="$2" owner="$3" managed="$4" values rc root_display observed
+  root_display="$(hc_diagnostic_escape "$root")"
+  git -C "$root" config --local core.hooksPath "$managed" || {
+    printf 'core.hooksPath repair could not write in %s; nothing was changed\n' "$root_display"
+    return 1
+  }
+  # Test seam: interference between the write and the re-read.
+  case "${DOCTOR_FIX_FAULT_PHASE:-}" in
+    hooks-path-second-value) git -C "$root" config --local --add core.hooksPath /trellis-fault/second-value ;;
+    hooks-path-invalidate-dispatcher) printf '#\n' >> "$managed/pre-push" ;;
+    hooks-path-unset) git -C "$root" config --local --unset-all core.hooksPath ;;
+  esac
+
+  _hc_hooks_path_read "$root"
+  rc=$?
+  values="$HC_HOOKS_PATH_VALUES"
+  if [ "$rc" -eq 0 ] && [ "$values" = "$managed" ]; then
+    # Test seam: the re-verification fails with the state left intact.
+    if [ "${DOCTOR_FIX_FAULT_PHASE:-}" != hooks-path-reverify-fails ] &&
+       _attachment_hooks_state_matches "$home" "$owner" >/dev/null 2>&1; then
+      printf 'core.hooksPath repaired in %s: .husky/_ -> %s\n' "$root_display" "$(hc_diagnostic_escape "$managed")"
+      return 0
+    fi
+    # Still exactly the value this repair wrote: put back what preflight read.
+    if hc_hooks_path_restore "$root" ".husky/_" true; then
+      printf 'core.hooksPath repair failed: the managed dispatcher no longer verifies in %s; restored .husky/_; remedy: trellis release adopt\n' "$root_display"
+      return 2
+    fi
+    printf 'core.hooksPath repair failed in %s and the restore of .husky/_ failed; inspect it with git -C %s config --show-origin --get-all core.hooksPath\n' \
+      "$root_display" "$root_display"
+    return 3
+  fi
+  observed=""
+  [ "$rc" -ne 0 ] ||
+    observed="$(printf '%s\n' "$values" | while IFS= read -r v; do hc_diagnostic_escape "$v"; printf ' '; done)"
+  printf 'core.hooksPath changed during the repair in %s; observed values: %s; nothing was restored because they are not the value this repair wrote\n' \
+    "$root_display" "${observed:-<unset>}"
+  return 3
+}
+
+# Spec 055 R2.7: a record holding a control-only toolchain makes the managed
+# pre-push refuse every push from its worktree. WARN with the refresh remedy;
+# otherwise stay silent (HC_OK, no text). An unreadable record is reported by
+# the ownership rows, not here.
+hc_portable_toolchain_provenance() {
+  local root="$1" owner="$2" joined="" root_display
+  joined="$(jq -er 'if (.toolchain_path | type) == "array" then .toolchain_path | join(":") else empty end' \
+    "$owner" 2>/dev/null)" || return "$HC_OK"
+  trellis_toolchain_control_only "$joined" || return "$HC_OK"
+  root_display="$(hc_diagnostic_escape "$root")" || return "$HC_ERROR"
+  echo "toolchain provenance: the recorded toolchain is the sanitized control PATH, so every push from this worktree is refused; run trellis attach --refresh-toolchain $root_display"
+  return "$HC_WARN"
+}
+
+# Spec 055 R2.7: caller-PATH forwarding lives in the launcher, which `configure`
+# never replaces once one differs. WARN when the installed launcher is not
+# byte-identical to the active release's scripts/trellis-launcher.sh; otherwise
+# stay silent. A missing active release is reported by the machine rows.
+hc_launcher_currency() {
+  local user_home="$1" home="$2" installed release release_path payload_launcher
+  installed="$user_home/.local/bin/trellis"
+  release="$(jq -r '.active_cli_release // empty' "$home/config.json" 2>/dev/null)" || release=""
+  [ -n "$release" ] || return "$HC_OK"
+  release_path="$(TRELLIS_HOME="$home" release_store_locate "$release" 2>/dev/null)" || return "$HC_OK"
+  payload_launcher="$release_path/payload/scripts/trellis-launcher.sh"
+  [ -f "$payload_launcher" ] || return "$HC_OK"
+  if [ -f "$installed" ] && cmp -s "$installed" "$payload_launcher"; then
+    return "$HC_OK"
+  fi
+  echo "launcher currency: the installed launcher $(hc_diagnostic_escape "$installed") is not identical to release $release's scripts/trellis-launcher.sh, so caller PATH forwarding is not guaranteed; reinstall it (docs/UPGRADING.md, \"Reinstalling the launcher\")"
+  return "$HC_WARN"
+}
+
 # Verify every owned leaf except the runtime anchor.  This distinguishes the
 # one safe relink condition (only runtime absent) from any conflicting mutation.
 hc_portable_owner_without_runtime_exact() {
@@ -2242,11 +2877,13 @@ hc_portable_owner_without_runtime_exact() {
 }
 
 HC_PORTABLE_OWNER_STATE=""
+HC_PORTABLE_OWNER_HOOKS_ONLY=false
 hc_portable_owner() {
   local home="$1" owner="$2" root="$3" fleet="$4" project_id="$5"
   local checkout_id="$6" worktree_id="$7" attachment_id="$8" release="$9"
   local expected identity expected_runtime
   HC_PORTABLE_OWNER_STATE=""
+  HC_PORTABLE_OWNER_HOOKS_ONLY=false
   if [ -L "$root" ] || [ ! -d "$root" ]; then
     HC_PORTABLE_OWNER_STATE="corrupt"
     echo "attachment ownership: registered worktree root is unavailable or a raw symlink: $root"
@@ -2341,6 +2978,10 @@ hc_portable_owner() {
   fi
   if ! hc_portable_managed_hooks "$home" "$owner"; then
     HC_PORTABLE_OWNER_STATE="conflict"
+    # Everything but the hook authority verified: the core.hooksPath repair
+    # (spec 055 R4.6) may run its own preflight on this row.
+    # shellcheck disable=SC2034  # Out-parameter: doctor reads it after this check returns.
+    HC_PORTABLE_OWNER_HOOKS_ONLY=true
     echo "attachment ownership: the required managed hook authority is missing, disabled, modified, or escapes its recorded state"
     return "$HC_ERROR"
   fi
@@ -2680,7 +3321,7 @@ hc_portable_verify_payload_render_record() (
           end
         ' > "$reconstructed_path" 2>/dev/null || return 1
       [ "$(hc_portable_sha256_file "$reconstructed_path")" = "$after_hash" ] || return 1
-      printf '%s\n' "$render_record" | jq -e --arg mode "$mode" --argjson expected "$expected_render" '
+      printf '%s\n' "$render_record" | trellis_jq -e --arg mode "$mode" --argjson expected "$expected_render" '
         .merge == "explicit-json"
         and .mode == $mode
         and .after_mode == $mode
@@ -2691,7 +3332,7 @@ hc_portable_verify_payload_render_record() (
         and .created_paths == $expected.created_paths
         and (([.owned_keys[].path] | sort) == ([$expected.owned_keys[].path] | sort))
       ' >/dev/null 2>&1 || return 1
-      printf '%s\n' "$artifact_record" | jq -e --arg mode "$mode" --argjson render "$render_record" '
+      printf '%s\n' "$artifact_record" | trellis_jq -e --arg mode "$mode" --argjson render "$render_record" '
         .kind == "file"
         and .path == $render.path
         and .mode == $render.after_mode
@@ -2722,7 +3363,7 @@ hc_portable_verify_payload_renders() (
     type attachment_contextual_render_context_validate >/dev/null 2>&1 ||
     type attach_json_render_plan >/dev/null 2>&1 || return 1
   deferred="$(jq -c '[(.pre_existing // [])[].path]' "$owner")" || return 1
-  expected_paths="$(printf '%s\n' "$plan" | jq -cS --argjson deferred "$deferred" '
+  expected_paths="$(printf '%s\n' "$plan" | trellis_jq -cS --argjson deferred "$deferred" '
     [.artifacts[]
      | select(.kind == "render" and .merge == "explicit-json")
      | .destination
@@ -2738,7 +3379,7 @@ hc_portable_verify_payload_renders() (
   while IFS= read -r record; do
     [ -n "$record" ] || continue
     hc_portable_verify_payload_render_record "$home" "$owner" "$payload" "$record" "$context" || return 1
-  done < <(printf '%s\n' "$plan" | jq -c --argjson deferred "$deferred" '
+  done < <(printf '%s\n' "$plan" | trellis_jq -c --argjson deferred "$deferred" '
     .artifacts[]
     | select(.kind == "render")
     | .destination as $d | select(($deferred | index($d)) == null)')
@@ -2860,7 +3501,7 @@ hc_portable_native_surfaces() (
     echo "native surfaces: a leaf recorded as project-owned no longer matches the immutable manifest or the checkout"
     return "$HC_ERROR"
   fi
-  expected="$(printf '%s\n' "$plan" | jq -cS --arg payload "$payload" --argjson project_claude "$project_claude" --argjson deferred "$deferred" '
+  expected="$(printf '%s\n' "$plan" | trellis_jq -cS --arg payload "$payload" --argjson project_claude "$project_claude" --argjson deferred "$deferred" '
     .artifacts as $artifacts
     | ($deferred | map(.path)) as $skip
     | ([{path:".trellis/runtime",kind:"symlink",target:$payload}]
@@ -2974,7 +3615,7 @@ health_checks_missing_leaves() (
     echo "manifest leaves: installed skill, command, and agent declarations are invalid"
     return "$HC_ERROR"
   }
-  destinations="$(printf '%s\n' "$plan" | jq -r --argjson directories "$directories" '
+  destinations="$(printf '%s\n' "$plan" | trellis_jq -r --argjson directories "$directories" '
     [.artifacts[]
      | select(.kind == "symlink")
      | .destination as $destination
@@ -3241,4 +3882,113 @@ hc_anti_slop_profile() {
   fi
   echo "anti-slop: no profile config installed and $posture_note — not rolled out here (advisory era: absence is informational)"
   return "$HC_INFO"
+}
+
+# hc_test_runner_exposure <project>
+# Spec 055 R3.2 — READ-ONLY, conservative heuristic for vitest collecting the
+# payload's tests. `.trellis/runtime` is a symlink to the absolute payload path;
+# tinyglobby follows it and vitest reads no ignore file, so an unexcluded vitest
+# walks the payload. Payloads from 1.3.7 carry no tests; older ones do.
+#
+# It never loads a config. It runs only when the runtime resolves to a payload
+# holding a JS/TS `*.test.*` or `*.spec.*` file, and reads `vitest.config.*`,
+# any `vite.config.*` with `test[[:space:]]*:`, and every file a package.json
+# script passes with `--config`, bare, single-quoted or JSON-escaped
+# double-quoted (`\"path\"`). A config passes only when, with `//` and `/* */`
+# comments stripped (outside string literals), it matches HC_VITEST_EXCLUDE_ERE:
+# a literal `'**/.trellis/**'` (or `.trellis/**`) inside an `exclude: [` array.
+# An exclude built from a variable does not pass (a documented false positive).
+# The row WARNs unless every config read passes, and always when a
+# `vitest.workspace.*` or `test.projects` is present. No payload tests, or no
+# config read and no workspace, means no row: nothing printed, HC_OK returned.
+#
+# The ERE holds a literal backtick, never `\x60`, and runs under BSD
+# /usr/bin/grep -E, which is what a stock macOS doctor has. The EREs use POSIX
+# [[:space:]], never the GNU `\s` extension.
+HC_VITEST_EXCLUDE_ERE='exclude[[:space:]]*:[[:space:]]*\[[^]]*[`'"'"'"](\*\*/)?\.trellis/\*\*[`'"'"'"]'
+
+hc_grep_e() {
+  if [ -x /usr/bin/grep ]; then /usr/bin/grep -E "$@"; else grep -E "$@"; fi
+}
+
+# Print <file> as one line with // and /* */ comments removed. Quoted strings
+# (', ", `) are copied verbatim, so '**/.trellis/**' never reads as a comment.
+hc_strip_js_comments() {
+  awk -v q="'" '
+    { src = src $0 "\n" }
+    END {
+      n = length(src); out = ""; state = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(src, i, 1); d = substr(src, i + 1, 1)
+        if (state == 0) {
+          if (c == "/" && d == "/") { state = 4; i++; continue }
+          if (c == "/" && d == "*") { state = 5; i++; continue }
+          if (c == q) state = 1
+          else if (c == "\"") state = 2
+          else if (c == "`") state = 3
+          out = out c
+        } else if (state <= 3) {
+          out = out c
+          if (c == "\\") { out = out d; i++; continue }
+          if ((state == 1 && c == q) || (state == 2 && c == "\"") || (state == 3 && c == "`")) state = 0
+        } else if (state == 4) {
+          if (c == "\n") { out = out c; state = 0 }
+        } else if (c == "*" && d == "/") {
+          state = 0; i++
+        }
+      }
+      gsub(/\n/, " ", out)
+      print out
+    }' "$1"
+}
+
+hc_test_runner_exposure() {
+  local proj="$1" runtime payload configs="" config stripped rel failing="" reasons="" f
+  local sq="'" esc_dq='\"'
+  runtime="$proj/.trellis/runtime"
+  [ -e "$runtime" ] || return "$HC_OK"
+  payload="$(CDPATH='' cd -P -- "$runtime" 2>/dev/null && pwd -P)" || return "$HC_OK"
+  # No -q: an early grep exit would SIGPIPE find and read as "no tests".
+  find "$payload" -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null |
+    hc_grep_e '\.(test|spec)\.[cm]?[jt]sx?$' >/dev/null || return "$HC_OK"
+
+  for f in "$proj"/vitest.config.*; do
+    [ -f "$f" ] && configs="$configs${f#"$proj"/}"$'\n'
+  done
+  for f in "$proj"/vite.config.*; do
+    [ -f "$f" ] || continue
+    stripped="$(hc_strip_js_comments "$f")"
+    hc_grep_e -q 'test[[:space:]]*:' <<<"$stripped" && configs="$configs${f#"$proj"/}"$'\n'
+  done
+  if [ -f "$proj/package.json" ]; then
+    while IFS= read -r rel; do
+      rel="${rel#--config}"
+      rel="${rel#=}"
+      rel="${rel#"${rel%%[![:space:]]*}"}"
+      case "$rel" in
+        "$sq"*"$sq") rel="${rel#"$sq"}"; rel="${rel%"$sq"}" ;;
+        "$esc_dq"*"$esc_dq") rel="${rel#"$esc_dq"}"; rel="${rel%"$esc_dq"}" ;;
+      esac
+      rel="${rel#./}"
+      [ -n "$rel" ] && [ -f "$proj/$rel" ] && configs="$configs$rel"$'\n'
+    done < <(hc_grep_e -o -- '--config(=|[[:space:]]+)('"'[^']+'"'|\\"[^"\\]+\\"|[^[:space:]"'"'"'\\;&|]+)' \
+      "$proj/package.json" 2>/dev/null)
+  fi
+
+  for f in "$proj"/vitest.workspace.*; do
+    [ -f "$f" ] && reasons="$reasons; ${f#"$proj"/} is present"
+  done
+  while IFS= read -r config; do
+    [ -n "$config" ] || continue
+    stripped="$(hc_strip_js_comments "$proj/$config")"
+    if hc_grep_e -q 'projects[[:space:]]*:' <<<"$stripped"; then
+      reasons="$reasons; $config declares test.projects"
+    fi
+    hc_grep_e -q "$HC_VITEST_EXCLUDE_ERE" <<<"$stripped" || failing="$failing $config"
+  done < <(printf '%s' "$configs" | LC_ALL=C sort -u)
+
+  [ -z "$failing" ] || reasons="$reasons; no literal '**/.trellis/**' in test.exclude of:$failing"
+  [ -n "$reasons" ] || return "$HC_OK"
+  echo "test-runner exposure: .trellis/runtime holds JS/TS test files that vitest may collect — ${reasons#; } — add '**/.trellis/**' to test.exclude (core-rules/inheritance.md, Test runners and the runtime anchor)"
+  return "$HC_WARN"
 }

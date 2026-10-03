@@ -477,6 +477,42 @@ local lifecycle recovery prescribed by [AGENT_SETUP.md](../AGENT_SETUP.md):
 artifacts manually. `trellis relink` repairs an already-owned anchor; it is not
 a release upgrade command and cannot choose a different version.
 
+### Reinstalling the launcher
+
+Caller-PATH forwarding (the operator's toolchain reaching `attach`, `onboard`,
+`worktree` and `doctor`) lives in the stable launcher, and `configure` refuses
+to overwrite an installed launcher that differs from its template. A release
+that changes the launcher therefore reaches a machine only through this
+explicit reinstall. `doctor` WARNs with `launcher currency` until the installed
+launcher is byte-identical to the active release's
+`scripts/trellis-launcher.sh`.
+
+```sh
+: "${TARGET_RELEASE:?Set the active release version}"
+PAYLOAD_LAUNCHER="${TRELLIS_HOME:-$HOME/.trellis}/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh"
+# 1. The operator moves the installed launcher aside (keep it until step 4 passes).
+mv "$HOME/.local/bin/trellis" "$HOME/.local/bin/trellis.before-$TARGET_RELEASE"
+# 2. Install the release's own launcher. Name the template explicitly: without
+#    --launcher-template, configure installs the source checkout's copy.
+"$HOME/.local/bin/trellis.before-$TARGET_RELEASE" configure --release "$TARGET_RELEASE" \
+  --launcher-template "$PAYLOAD_LAUNCHER"
+# 3. Both must match the payload's launcher.
+cmp "$HOME/.local/bin/trellis" "$PAYLOAD_LAUNCHER"
+shasum -a 256 "$HOME/.local/bin/trellis" "$PAYLOAD_LAUNCHER"
+```
+
+4. Run `trellis worktree sync <path>` on a scratch attached worktree, then
+   `trellis doctor`: it must show no `toolchain provenance` WARN for that
+   worktree (its recorded toolchain is not the sanitized control PATH) and no
+   `launcher currency` WARN. Only then remove the moved-aside launcher.
+
+A record that already holds the sanitized control PATH makes every push from
+its worktree refuse with `toolchain is the sanitized control PATH`. Repair it
+from your own shell, where your real PATH is visible:
+`trellis attach --refresh-toolchain <path>`. The refresh replaces only the
+recorded toolchain, and it refuses unless the worktree's local `core.hooksPath`
+is exactly its managed hooks path (fix that first with `trellis doctor --fix`).
+
 ## Roll back a release adoption
 
 Rollback is an explicit adoption of a previously installed, verified immutable
@@ -745,6 +781,51 @@ render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
 
+## `1.3.6` → `1.3.7` adoption
+
+Adoption delivers the new managed `pre-push` and `post-checkout` dispatchers and
+immutable pre-push carrier. It does not rerun the surface plan or rewrite
+rendered harness files: the new `hookspath-guard.sh` and
+`lib/hookspath-check.sh` leaves, their managed exclude entries, and the new
+Claude/Codex `hooks.PostToolUse` entry are not delivered. Doctor can report the
+missing leaves and exclude entries, but its render check validates recorded
+values rather than the new template values; a clean doctor does not prove the
+settings entry is present.
+
+Full delivery requires a detach and fresh attach of each **entire checkout
+group**. Record every worktree root and its harness selection first; detach all
+worktrees together, then attach the former manager first and each remaining root
+with its recorded `--harness` flags. Do not use the default harness set or
+reattach any root before the whole group has been detached.
+
+After reattachment, run the scoped `doctor`. For every root, verify both new
+hookspath leaves are live links and both exact exclude entries are present for
+each recorded harness. If attach records a project-owned deferral, inspect the
+new owner's `.pre_existing` record instead; deferred paths are not Trellis links
+and are omitted from the managed exclude block. Independently compare the
+`hooks.PostToolUse` array with
+the selected release template for each attached Claude or Codex surface; doctor
+does not detect a stale array value. The following is the standard Claude case,
+with no recorded deferrals:
+
+```sh
+PAYLOAD="$TRELLIS_HOME/releases/$TARGET_RELEASE/payload"
+for path in .claude/hooks/hookspath-guard.sh .claude/hooks/lib/hookspath-check.sh; do
+  test -L "$ROOT/$path" && test -e "$ROOT/$path" || exit 1
+  grep -Fx "/$path" "$COMMON/info/exclude" >/dev/null || exit 1
+done
+cmp <(jq -S '.hooks.PostToolUse' "$PAYLOAD/core-rules/templates/claude-settings.local.json") <(jq -S '.hooks.PostToolUse' "$ROOT/.claude/settings.local.json")
+```
+
+For a Codex-attached root, compare its settings array too:
+
+```sh
+cmp <(jq -S '.hooks.PostToolUse' "$PAYLOAD/core-rules/templates/codex-hooks.local.json") <(jq -S '.hooks.PostToolUse' "$ROOT/.codex/hooks.json")
+```
+
+For Codex and Pi, substitute `.codex` or `.pi` in the two leaf paths and the
+exact exclude lines; do not hand-edit owned settings or exclude state.
+
 ## Source checkout and publication boundary
 
 The Trellis source checkout is for development and release publication. It is
@@ -767,6 +848,96 @@ Before a compatibility or cutover release is pushed or published:
 A failed publication gate leaves push roles unchanged. It is never acceptable to
 work around it by pushing a private source checkout at a public remote or by
 tracking local machine state.
+
+## Ownerless exclude block
+
+`trellis attach` refuses with `orphan-owner-record` when an owner record under
+`$TRELLIS_HOME/state/attachments/<checkout>/` names a worktree that Git no
+longer lists for that checkout, usually one that was pruned after its registry
+row was dropped. Attach never deletes such a record. Move it aside with its mode
+kept, then attach again:
+
+```sh
+: "${RECORD:?Set the record path from the refusal line}"
+BACKUP="$TRELLIS_HOME/backups/stale-owner-records-$(date +%Y%m%d)"
+mkdir -p "$BACKUP" && chmod 700 "$BACKUP"
+mv "$RECORD" "$BACKUP/"
+```
+
+When that record was the checkout's only one, attach also prints
+`orphan-owner-sole`: the managed exclude block in
+`<git_common_dir>/info/exclude` was recorded by that record alone, so moving it
+aside leaves the block with no owner, and attach still refuses it (`managed
+exclude block has no matching committed checkout ownership`). No other
+attachment of the checkout depends on the block. Remove it, keeping every other
+line of the file, then attach and run the scoped doctor:
+
+```sh
+: "${COMMON:?Set the git_common_dir from the orphan-owner-sole line}"
+cp -p "$COMMON/info/exclude" "$BACKUP/info-exclude.before"
+sed -e '/^# --- Trellis local attachment exclude block ---$/,/^# --- end Trellis local attachment exclude block ---$/d' \
+  "$BACKUP/info-exclude.before" > "$COMMON/info/exclude"
+"$TRELLIS" attach --fleet "$FLEET" "$WORKTREE"
+"$TRELLIS" doctor --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+`trellis doctor` reports every such record as an `orphan-owner-record` warning,
+whether or not the registry still has a row for it.
+
+### Cutting a release: the payload tag (from 1.3.7)
+
+From 1.3.7 the release tag names a **payload commit**, not the approved release
+commit on `main` (spec 055 Unit 3). The payload commit's sole parent is the
+approved release commit; its tree is that commit's tree minus the directories
+in `core-rules/payload-exclude.txt` (`specs/` and every test directory); its
+author and committer are copied from the release commit, so rebuilding it gives
+the same SHA. Every installer, including the 1.3.6 launcher and store, extracts
+the tag's tree, so every installer delivers the filtered payload without a code
+change. The public mirror stays complete: it restores the test paths it already
+publishes from the verified parent.
+
+Cut the release in this order, from the source checkout, after the release PR
+has merged to `main`:
+
+1. `git fetch origin main`. The ancestry check in steps 4, 6 and 8 reads the
+   fetched `origin/main`, so fetch first.
+2. Run the off-main tag consumer gate:
+   `bats scripts/tests/release-tag-consumers.bats`. It must pass, including the
+   case that pushes a payload tag through the managed pre-push. A new consumer
+   hit means reviewing the consumer, not widening the allowlist to pass.
+3. Build the payload commit from the approved release commit:
+   `payload="$(scripts/release-payload-commit.sh <approved-release-commit>)"`.
+   It writes one commit object and touches no ref, index or working-tree file.
+4. `scripts/release-payload-commit.sh --verify-candidate "$payload" <approved-release-commit> <VERSION>`.
+   It refuses a wrong first parent, anything but the listed deletions, a
+   `VERSION` mismatch, or an approved commit that is not on `origin/main`.
+5. `git tag -a v<VERSION> -m "release <VERSION>" "$payload"`.
+6. `scripts/release-payload-commit.sh --verify-tag v<VERSION> <approved-release-commit>`.
+7. `git push origin v<VERSION>` through the managed pre-push. Never
+   `--no-verify`: the pre-push gates the tag by the range it adds, which is the
+   deletions-only payload commit.
+8. Verify the pushed tag, not the local one: clone the remote into scratch
+   (`git clone --no-checkout <remote> <scratch>`, which also sets
+   `origin/main`) and run step 6 inside it:
+   `(cd <scratch> && <source>/scripts/release-payload-commit.sh --verify-tag v<VERSION> <approved-release-commit>)`.
+9. Mirror: install the release, then `trellis mirror --template-dir <mirror> --dry-run`.
+   `--source-repo <source-checkout>` may fetch the tag and `main` from a local
+   checkout in any mode, with the same commit, tree and parent verification;
+   it reads that checkout's local `main`, so update it first. Review the diff:
+   it must delete no test file and never add `specs/`. Then `--apply` (or
+   `--push`), retaining `--source-repo` if used for the dry run. Without it,
+   the mirror fetches from the release remote and refuses when it is unreachable.
+
+The mirror pins the tag's commit, the `.commit` of a `release.json` rebuilt
+from the fetch, and the installed `.commit` to one value, and requires the
+rebuilt and installed `.tree` to match, before it reads anything from the
+parent. A tag whose tree has no `core-rules/payload-exclude.txt` (every release
+up to 1.3.6) is legacy: it is published from its payload alone and nothing is
+restored from any parent.
+
+`git describe` on `main` no longer names the newest release; that is cosmetic.
+Nothing in Trellis resolves a release by walking `main`, and
+`release-tag-consumers.bats` keeps it that way.
 
 ## Failure classes
 

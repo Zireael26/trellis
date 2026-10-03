@@ -3,12 +3,12 @@
 # creates a verified immutable payload from one committed source tree; a dirty
 # source checkout is deliberately untrusted input and must never be executed.
 
-REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+REPO_ROOT="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 RELEASE_VERSION="1.2.3"
 
 setup() {
   mkdir -p "$BATS_TEST_TMPDIR/portable-mirror"
-  SANDBOX="$(CDPATH= cd "$BATS_TEST_TMPDIR/portable-mirror" && pwd -P)"
+  SANDBOX="$(CDPATH='' cd "$BATS_TEST_TMPDIR/portable-mirror" && pwd -P)"
   SOURCE="$SANDBOX/source"
   MIRROR="$SANDBOX/mirror"
   VICTIM=""
@@ -33,6 +33,10 @@ setup() {
   cp "$REPO_ROOT/scripts/sync-to-template.sh" "$SOURCE/scripts/"
   cp "$REPO_ROOT/scripts/lib/mirror-lint.sh" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/trellis.config.schema.json" "$SOURCE/scripts/lib/"
+  # The mirror rebuilds the release record from the fetched tag with the
+  # installers' writer, and verifies a payload tag with the shipped tool.
+  cp "$REPO_ROOT/scripts/lib/release-store.sh" "$REPO_ROOT/scripts/lib/semver.sh" "$SOURCE/scripts/lib/"
+  cp "$REPO_ROOT/scripts/release-payload-commit.sh" "$SOURCE/scripts/"
   cat > "$SOURCE/trellis.config.json" <<EOF
 {
   "schema_version": 2,
@@ -51,6 +55,7 @@ EOF
   printf '{"schema_version":1,"toolchains":[{"name":"private"}]}' > "$SOURCE/dependency-baseline.json"
   printf '{"schema_version":1,"source_reports":["private"]}' > "$SOURCE/audits/fleet-remediation-ledger.json"
   printf '# Portable core policy\n' > "$SOURCE/core-rules/CLAUDE.md"
+  printf '%s\n' "$RELEASE_VERSION" > "$SOURCE/core-rules/VERSION"
   # The real tree tracks core-rules/AGENTS.md as a relative symlink to
   # CLAUDE.md and publishes it explicitly, so the fixture must too. A fixture
   # without it cannot reach the symlink-destination paths at all.
@@ -68,6 +73,10 @@ EOF
   git -C "$SOURCE" add -A
   git -C "$SOURCE" commit -qm source
   SOURCE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
+  # The mirror fetches the installed release's tag and main from its recorded
+  # remote to pin the tag to the installed commit (spec 055 R3.6).
+  RELEASE_REMOTE="$SANDBOX/release-remote.git"
+  git init -q --bare "$RELEASE_REMOTE"
 
   mkdir -p "$PAYLOAD"
   git -C "$SOURCE" archive --format=tar "$SOURCE_COMMIT" | tar -x -C "$PAYLOAD"
@@ -138,6 +147,14 @@ AGENT
   printf 'process.exit(0);\n' \
     > "$SOURCE/core-rules/pi/patches/tests/fixture-patch.test.mjs"
   printf '# Fixture patch notes\n' > "$SOURCE/core-rules/pi/patches/FIXTURE.md"
+  # Spec 053 C7: a blocked extension, the guide that installs it, and the
+  # parity tooling that proves the guide. All of them are real payload paths.
+  printf '// Blocked web-search extension fixture\n' \
+    > "$SOURCE/core-rules/pi/extensions/trellis-web-search.ts"
+  printf '# Updated pi guide fixture\n' > "$SOURCE/AGENT_PI_SETUP.md"
+  mkdir -p "$SOURCE/scripts/tests"
+  printf '#!/usr/bin/env bash\n# Guide parity fixture\nexit 0\n' > "$SOURCE/scripts/pi-guide-parity.sh"
+  printf '#!/usr/bin/env bats\n# Guide parity test fixture\n' > "$SOURCE/scripts/tests/pi-guide-parity.bats"
 }
 
 # A canonical minimal manifest carrying the three exact private link entries the
@@ -222,18 +239,39 @@ MANIFEST
 reseal_source_release() {
   git -C "$SOURCE" add -A
   git -C "$SOURCE" commit -qm "$1"
-  SOURCE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
+  install_release_commit "$(git -C "$SOURCE" rev-parse HEAD)"
+}
 
+# install_release_commit <commit> [hook]: rebuild and reseal the immutable
+# release from <commit>'s tree. The optional hook runs on the unsealed payload
+# before the record is written, so a test can install bytes the tag never had
+# behind a self-consistent record.
+install_release_commit() {
+  SOURCE_COMMIT="$1"
   chmod u+w "$RELEASE_DIR" "$RELEASE_DIR/release.json"
   find "$PAYLOAD" -type f -exec chmod u+w {} \;
   find "$PAYLOAD" -depth -type d -exec chmod u+w {} \;
   rm -rf "$PAYLOAD"
   mkdir -p "$PAYLOAD"
   git -C "$SOURCE" archive --format=tar "$SOURCE_COMMIT" | tar -x -C "$PAYLOAD"
+  [ -z "${2:-}" ] || "$2"
   write_release_record
   find "$PAYLOAD" -type f -exec chmod a-w {} \;
   find "$PAYLOAD" -type d -exec chmod a-w {} \;
   chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
+}
+
+# Tag the installed commit v<version> and publish it with main to the release
+# remote, the way a release cut does. RELEASE_MAIN_COMMIT (default: the tagged
+# commit) is what main names; FIXTURE_TAG_UNPUSHED=1 keeps the tag local only.
+publish_release_tag() {
+  git -C "$SOURCE" tag -f -a "v$RELEASE_VERSION" -m "release $RELEASE_VERSION" "$SOURCE_COMMIT" >/dev/null
+  git -C "$SOURCE" push -q -f "$RELEASE_REMOTE" "${RELEASE_MAIN_COMMIT:-$SOURCE_COMMIT}:refs/heads/main"
+  if [ "${FIXTURE_TAG_UNPUSHED:-0}" = 1 ]; then
+    git --git-dir="$RELEASE_REMOTE" tag -d "v$RELEASE_VERSION" >/dev/null 2>&1 || true
+  else
+    git -C "$SOURCE" push -q -f "$RELEASE_REMOTE" "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
+  fi
 }
 
 # Run the publisher's OWN projection program against an arbitrary manifest.
@@ -306,16 +344,18 @@ write_release_record() {
     jq -cn --arg path "$relative" --arg mode "$mode" --arg oid "$oid" \
       '{path: $path, mode: $mode, oid: $oid}' >> "$manifest"
   done < <(find -P "$PAYLOAD" \( -type f -o -type l \) -print | LC_ALL=C sort)
-  jq -n --arg version "$RELEASE_VERSION" --arg commit "$SOURCE_COMMIT" --slurpfile tree "$manifest" '
+  jq -n --arg version "$RELEASE_VERSION" --arg commit "$SOURCE_COMMIT" \
+    --arg remote "${RELEASE_RECORD_REMOTE:-$RELEASE_REMOTE}" --slurpfile tree "$manifest" '
     {
       schema_version: 1,
       version: $version,
       tag: ("v" + $version),
       commit: $commit,
-      remote: "fixture://release",
+      remote: $remote,
       tree: $tree
     }
   ' > "$RELEASE_DIR/release.json"
+  publish_release_tag
 }
 
 run_sync() {
@@ -586,7 +626,8 @@ EOF
   [ ! -e "$MIRROR/config.json" ]
   [ ! -e "$MIRROR/state" ]
   [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
-  cmp "$SOURCE/docs/PI-COMPUTER-USE.md" "$MIRROR/docs/PI-COMPUTER-USE.md"
+  # Held with the pi guide until Spec 053 C7 approves (see the 053 C7 cases).
+  [ ! -e "$MIRROR/docs/PI-COMPUTER-USE.md" ]
   cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   jq -e '
     .schema_version == 2
@@ -795,6 +836,48 @@ EOF
   [ ! -e "$MIRROR/core-rules/pi/agents" ]
   [ "$(git -C "$SOURCE" rev-parse HEAD:core-rules/pi/extensions/trellis.ts)" = \
     "$(git hash-object --no-filters "$MIRROR/core-rules/pi/extensions/trellis.ts")" ]
+}
+
+@test "053 C7: a held guide keeps its published bytes and the blocked extension never publishes" {
+  printf '# Previously published pi guide\n' > "$MIRROR/AGENT_PI_SETUP.md"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Held, not pruned: the old public guide survives byte for byte.
+  [ "$(cat "$MIRROR/AGENT_PI_SETUP.md")" = '# Previously published pi guide' ]
+  [ ! -e "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts" ]
+  [ ! -e "$MIRROR/scripts/pi-guide-parity.sh" ]
+  [ ! -e "$MIRROR/scripts/tests/pi-guide-parity.bats" ]
+  # The rest of the pi surface still publishes beside the withheld file.
+  [ -f "$MIRROR/core-rules/pi/extensions/trellis.ts" ]
+}
+
+@test "053 C7: a held guide is not created in a mirror that never had it" {
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$MIRROR/AGENT_PI_SETUP.md" ]
+  [ ! -e "$MIRROR/docs/PI-COMPUTER-USE.md" ]
+  [ ! -e "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts" ]
+}
+
+@test "053 C7: the held computer-use doc keeps its published bytes" {
+  # The source fixture carries a different, updated body; the mirror must keep
+  # the old public copy unchanged rather than take the update or lose the file.
+  mkdir -p "$MIRROR/docs"
+  printf '# Previously published computer-use doc\n' > "$MIRROR/docs/PI-COMPUTER-USE.md"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE.md")" = '# Previously published computer-use doc' ]
+  # Its sibling upgrade prompt is not held and still publishes.
+  cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
 }
 
 @test "the withheld roster's private sentinels never reach the mirror" {
@@ -1150,4 +1233,206 @@ SH
   [ "$status" -eq 4 ]
   [[ "$output" == *'required source is missing from immutable payload: core-rules/pi/extensions/trellis.ts'* ]] ||
     { echo "$output"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# Spec 055 R3.6 / A3.6. From 1.3.7 a release tag names a payload commit whose
+# tree has no tests. The mirror pins that tag to the installed release, and
+# restores the test paths it already publishes from the verified first parent.
+# ---------------------------------------------------------------------------
+
+# An exclusion list plus test paths the mirror must treat three ways: restored
+# (published before), withheld (private or no-publish), and never restored
+# (specs/, which is not allowlisted).
+write_packaged_release_sources() {
+  printf '%s\n' specs/ scripts/tests/ core-rules/pi/patches/tests/ core-rules/skills/herdr-foreman/tests/ \
+    > "$SOURCE/core-rules/payload-exclude.txt"
+  mkdir -p "$SOURCE/specs/001-fixture" "$SOURCE/scripts/tests" \
+    "$SOURCE/core-rules/skills/herdr-foreman/tests"
+  printf '# Fixture spec\n' > "$SOURCE/specs/001-fixture/spec.md"
+  printf '@test "portable" { true; }\n' > "$SOURCE/scripts/tests/portable.bats"
+  printf '@test "withheld" { true; }\n' > "$SOURCE/scripts/tests/usage-federation.bats"
+  printf '@test "private" { true; }\n' > "$SOURCE/core-rules/skills/herdr-foreman/tests/private.bats"
+}
+
+# Commit the release, package it with the shipped tool, and install the payload
+# commit behind an annotated tag; main names the release commit.
+seal_packaged_release() {
+  write_packaged_release_sources
+  git -C "$SOURCE" add -A
+  git -C "$SOURCE" commit -qm 'packaged release'
+  RELEASE_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
+  PAYLOAD_COMMIT="$(cd "$SOURCE" && bash "$REPO_ROOT/scripts/release-payload-commit.sh" "$RELEASE_COMMIT")"
+  [ -n "$PAYLOAD_COMMIT" ] || return 1
+  RELEASE_MAIN_COMMIT="$RELEASE_COMMIT" install_release_commit "$PAYLOAD_COMMIT"
+}
+
+fresh_mirror() {
+  local dir="$SANDBOX/$1"
+  mkdir -p "$dir"
+  git -C "$dir" init -q
+  printf '%s\n' "$dir"
+}
+
+# The reviewed part of a dry run: its line count and the diff body, without the
+# per-run file headers that carry scratch paths and timestamps.
+dry_run_diff() {
+  printf '%s\n' "$1" | sed -n '/^  [0-9]* diff lines$/p; /^===== DIFF/,/^===== END DIFF/p' |
+    grep -vE '^(\+\+\+|---|diff) '
+}
+
+refused_before_staging() {
+  [ "$status" -eq "$1" ] || { echo "expected $1, got $status: $output"; false; }
+  [[ "$output" == *"$2"* ]] || { echo "missing '$2': $output"; false; }
+  [[ "$output" != *'Staging portable policy'* ]] || { echo "$output"; false; }
+  [ "$(ls -A "$MIRROR")" = .git ] || { ls -A "$MIRROR"; false; }
+}
+
+@test "A3.6 a packaged release publishes exactly what its unfiltered release commit publishes" {
+  seal_packaged_release
+  [ -z "$(git -C "$SOURCE" ls-tree -r --name-only "$PAYLOAD_COMMIT" -- specs scripts/tests core-rules/pi/patches/tests)" ]
+
+  run_sync --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Verifying v$RELEASE_VERSION against its first parent $RELEASE_COMMIT"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'restore from parent: scripts/tests/'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'restore from parent: specs/'* ]] || { echo "$output"; false; }
+  packaged_diff="$(dry_run_diff "$output")"
+  packaged_mirror="$(fresh_mirror mirror-packaged)"
+  run "$LAUNCHER" mirror --template-dir "$packaged_mirror" --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # The unfiltered twin: the release commit minus only the list, which the
+  # mirror never publishes, so it is a legacy tag carrying every test file.
+  git -C "$SOURCE" rm -q core-rules/payload-exclude.txt
+  git -C "$SOURCE" commit -qm 'unfiltered twin'
+  install_release_commit "$(git -C "$SOURCE" rev-parse HEAD)"
+  run_sync --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'is a legacy unfiltered release'* ]] || { echo "$output"; false; }
+  [ "$(dry_run_diff "$output")" = "$packaged_diff" ] || {
+    diff <(printf '%s\n' "$packaged_diff") <(dry_run_diff "$output"); false; }
+  unfiltered_mirror="$(fresh_mirror mirror-unfiltered)"
+  run "$LAUNCHER" mirror --template-dir "$unfiltered_mirror" --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  diff -r --exclude=.git "$packaged_mirror" "$unfiltered_mirror"
+  [ -f "$packaged_mirror/scripts/tests/portable.bats" ]
+  [ -f "$packaged_mirror/core-rules/pi/patches/tests/fixture-patch.test.mjs" ]
+  [ ! -e "$packaged_mirror/specs" ]
+  [ ! -e "$packaged_mirror/scripts/tests/usage-federation.bats" ]
+  [ ! -e "$packaged_mirror/core-rules/skills/herdr-foreman" ]
+
+  # Over the unfiltered publication, the packaged release deletes nothing.
+  RELEASE_MAIN_COMMIT="$RELEASE_COMMIT" install_release_commit "$PAYLOAD_COMMIT"
+  run "$LAUNCHER" mirror --template-dir "$unfiltered_mirror" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'  no changes.'* ]] || { echo "$output"; false; }
+}
+
+@test "A3.6 the mirror refuses a tag whose commit is not the installed commit" {
+  seal_packaged_release
+  git -C "$SOURCE" tag -f -a "v$RELEASE_VERSION" -m moved "$RELEASE_COMMIT" >/dev/null
+  git -C "$SOURCE" push -q -f "$RELEASE_REMOTE" "refs/tags/v$RELEASE_VERSION:refs/tags/v$RELEASE_VERSION"
+  run_sync --apply
+  refused_before_staging 4 "release identity mismatch: v$RELEASE_VERSION names commit $RELEASE_COMMIT but the installed release records $PAYLOAD_COMMIT"
+}
+
+tamper_installed_payload() {
+  printf 'bytes the tag never had\n' >> "$PAYLOAD/engineering-process.md"
+}
+
+@test "A3.6 the mirror refuses an installed tree that differs from the fetched release record" {
+  seal_packaged_release
+  RELEASE_MAIN_COMMIT="$RELEASE_COMMIT" install_release_commit "$PAYLOAD_COMMIT" tamper_installed_payload
+  run_sync --apply
+  refused_before_staging 4 "the tree of fetched v$RELEASE_VERSION differs from the installed release tree"
+}
+
+@test "A3.6 the mirror refuses a payload tag that fails --verify-tag" {
+  local index="$SANDBOX/extra.index" blob tree bad
+  seal_packaged_release
+  GIT_INDEX_FILE="$index" git -C "$SOURCE" read-tree "$PAYLOAD_COMMIT"
+  blob="$(printf 'extra\n' | git -C "$SOURCE" hash-object -w --stdin)"
+  GIT_INDEX_FILE="$index" git -C "$SOURCE" update-index --add --cacheinfo "100644,$blob,scripts/extra.sh"
+  tree="$(GIT_INDEX_FILE="$index" git -C "$SOURCE" write-tree)"
+  bad="$(git -C "$SOURCE" commit-tree "$tree" -p "$RELEASE_COMMIT" -m 'payload with an extra change')"
+  RELEASE_MAIN_COMMIT="$RELEASE_COMMIT" install_release_commit "$bad"
+  run_sync --dry-run
+  refused_before_staging 4 "failed --verify-tag; refusing to restore anything from its parent"
+  [[ "$output" == *'payload changes more than deletions: A scripts/extra.sh'* ]] || { echo "$output"; false; }
+}
+
+@test "A3.6 the mirror refuses when the release remote is unreachable, packaged or legacy" {
+  RELEASE_RECORD_REMOTE="$SANDBOX/unreachable-remote.git" install_release_commit "$SOURCE_COMMIT"
+  run_sync --apply
+  refused_before_staging 5 "could not fetch v$RELEASE_VERSION and main from $SANDBOX/unreachable-remote.git; refusing to publish"
+
+  seal_packaged_release
+  RELEASE_RECORD_REMOTE="$SANDBOX/unreachable-remote.git" RELEASE_MAIN_COMMIT="$RELEASE_COMMIT" \
+    install_release_commit "$PAYLOAD_COMMIT"
+  run_sync --dry-run
+  refused_before_staging 5 'a payload-only publish would drop the tests'
+}
+
+@test "A3.6 --apply --source-repo publishes a verified local packaged release" {
+  FIXTURE_TAG_UNPUSHED=1 seal_packaged_release
+  git -C "$SOURCE" update-ref refs/heads/main "$RELEASE_COMMIT"
+
+  run_sync --apply
+  refused_before_staging 5 "could not fetch v$RELEASE_VERSION and main from $RELEASE_REMOTE"
+
+  run_sync --apply --source-repo "$SOURCE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"tag commit $PAYLOAD_COMMIT, fetched record $PAYLOAD_COMMIT, installed record $PAYLOAD_COMMIT"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"tag v$RELEASE_VERSION verified"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'  applied.'* ]] || { echo "$output"; false; }
+  cmp "$PAYLOAD/engineering-process.md" "$MIRROR/engineering-process.md"
+  cmp "$SOURCE/scripts/tests/portable.bats" "$MIRROR/scripts/tests/portable.bats"
+  [ -f "$MIRROR/core-rules/pi/patches/tests/fixture-patch.test.mjs" ]
+  [ ! -e "$MIRROR/specs" ]
+  [ ! -e "$MIRROR/scripts/tests/usage-federation.bats" ]
+}
+
+@test "A3.6 --apply and --push --source-repo refuse a local tag pin mismatch" {
+  local mode
+  seal_packaged_release
+  git -C "$SOURCE" update-ref refs/heads/main "$RELEASE_COMMIT"
+  git -C "$SOURCE" tag -f -a "v$RELEASE_VERSION" -m moved "$RELEASE_COMMIT" >/dev/null
+
+  for mode in --apply --push; do
+    run_sync "$mode" --source-repo "$SOURCE"
+    refused_before_staging 4 "release identity mismatch: v$RELEASE_VERSION names commit $RELEASE_COMMIT but the installed release records $PAYLOAD_COMMIT"
+  done
+}
+
+@test "A3.6 a legacy unfiltered tag publishes its payload and takes nothing from its parent" {
+  printf 'process.exit(0);\n' > "$SOURCE/core-rules/pi/patches/tests/parent-only.test.mjs"
+  git -C "$SOURCE" add -A
+  git -C "$SOURCE" commit -qm 'parent carries a different test'
+  git -C "$SOURCE" rm -q core-rules/pi/patches/tests/parent-only.test.mjs
+  printf 'process.exit(0);\n' > "$SOURCE/core-rules/pi/patches/tests/release-only.test.mjs"
+  reseal_source_release 'legacy release'
+
+  run_sync --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"v$RELEASE_VERSION is a legacy unfiltered release"* ]] || { echo "$output"; false; }
+  [[ "$output" != *'restore from parent'* ]] || { echo "$output"; false; }
+  [ -f "$MIRROR/core-rules/pi/patches/tests/release-only.test.mjs" ]
+  [ ! -e "$MIRROR/core-rules/pi/patches/tests/parent-only.test.mjs" ]
+}
+
+@test "A3.6 --dry-run --source-repo verifies an unpushed tag from a local checkout" {
+  FIXTURE_TAG_UNPUSHED=1 seal_packaged_release
+  git -C "$SOURCE" update-ref refs/heads/main "$RELEASE_COMMIT"
+
+  run_sync --dry-run
+  refused_before_staging 5 "could not fetch v$RELEASE_VERSION and main from $RELEASE_REMOTE"
+
+  run_sync --dry-run --source-repo "$SOURCE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Fetching v$RELEASE_VERSION and main from $SOURCE"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"tag v$RELEASE_VERSION verified"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
+  [ "$(ls -A "$MIRROR")" = .git ]
 }

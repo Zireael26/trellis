@@ -6,6 +6,274 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-10-03
+
+### Fixed
+
+- **Local-source mirror publication.** `trellis mirror --source-repo` now works
+  with `--apply` and `--push`, using the same commit, tree and parent verification
+  as the release remote. Historical changelog entries no longer name local fleet
+  projects, so the fleet-identity lint permits publication.
+
+## [1.3.7] - 2026-10-03
+
+### Added
+
+- **Partitioned Trellis source gate with qualified process containment (Spec 064, Spec 062
+  Amendment 2).** `scripts/run-tests-local.py` now runs the complete canonical inventory in
+  eight LPT shards under a 7200-second deadline (7260 s outer `PROCESS_GATE_TEST_TIMEOUT`
+  default), with productive work stopping 60 s early for teardown. `doctor-fix.bats` is split
+  into four byte-identical parts plus `doctor-fix-common.bash`. Gate-owned work is bounded by a
+  five-signal boundary (registered process groups held as unreaped leaders, an inherited
+  sentinel descriptor, the run's own output files, `TRELLIS_GATE_RUN_ID` in the environment,
+  files under the run's private tmp) read in-process through libproc/sysctl. Teardown runs
+  on every exit and needs two consecutive empty scans; foreign or ambiguous processes are
+  never signaled. New exit classes: 70 (containment unavailable or a slot quarantined before
+  launch) and 71 (boundary not empty at the end of the reserve). A durable owner-private run
+  record under `${TRELLIS_GATE_STATE_DIR:-~/.local/state/trellis-gate}/runs/` is the slot
+  quarantine; `scripts/gate-runs.sh status|reap` reads and sweeps it.
+  `scripts/check-gate-inventory.sh <base> <head> <aggregate>` proves a gate aggregate covers
+  the full inventory and that the doctor split is a pure file split. A red run now keeps its
+  aggregate receipt as evidence.
+
+- **`trellis heavy [--lane NAME] [--timeout SECONDS] -- <cmd...>`, a machine-wide slot gate
+  for heavy test runs (spec 054).** A run waits for one of `heavy_slots` slots (optional key in
+  `$TRELLIS_HOME/config.json`, integer >= 1, default 2, re-read on every 5 s poll), then runs the
+  command in its own process group and holds the slot until that whole group has exited — a
+  background grandchild still counts. Slots are `flock(2)` locks on
+  `$TRELLIS_HOME/locks/heavy/slot-<i>.lock`, so a dead holder frees its slot by dying and there
+  is no reclaim protocol. The supervisor is a perl process that never returns to a shell: it keeps
+  the group leader an unreaped zombie until the group is empty, so teardown signals cannot reach
+  a reused group ID; a `ps` probe that fails or omits the leader is read as unknown, never as an
+  empty group, so the slot stays held. INT, TERM, HUP and `--timeout` (counted from launch, not from the wait) send
+  TERM to the group, then KILL after `TRELLIS_HEAVY_KILL_AFTER` (default 10 s); exits are the
+  command's status, `128+signal`, or `124`; INT, TERM and HUP stay blocked from acquisition until
+  the launch is armed, so a cancellation is always `128+signal`. A nested call inside a held slot
+  is verified against a dup of the inherited lock descriptor and takes no second slot: the holder
+  publishes an ownership token under its lock and removes it before releasing, and a nested call
+  must present that token, be granted the lock on the inherited description, and still find the
+  token unchanged afterwards, so ownership is proven continuous rather than merely current. `--check` exits 78 on a bad config;
+  `--status` lists every slot, including retired slots above a reduced `heavy_slots`. The gate is
+  accounting for well-behaved workloads, not a sandbox: a descendant that calls `setsid` escapes.
+- **`trellis heavy --light`, a separate light pool (spec 054 Amendment A1).** `light-<i>.lock`
+  slots, `heavy_light_slots` in the machine config (integer >= 1, default 4), never borrowed by or
+  from the heavy pool. It is for single-file or targeted runs expected to take under 2 minutes;
+  a light run past 120 s prints one advisory stderr line naming the threshold and keeps running.
+  Holders export `TRELLIS_HEAVY_POOL`, and nested verification takes the pool from that marker,
+  so a nested call in either pool inside a holder of either pool takes no slot, at any depth.
+  `--status` lists both pools. The process gate stays on the heavy pool.
+- **The process gate's test battery runs through `trellis heavy`.** `check-tests.sh` runs
+  `trellis heavy --check` first; on 0 the battery waits for a slot and its timeout starts once the
+  slot is held, and on anything else (or no launcher) it keeps the old bounded path and prints
+  `process-gate: notice (heavy-gate-unavailable: <reason>)`. A failing battery is never re-run.
+  `PROCESS_GATE_HEAVY_LAUNCHER` overrides the launcher path.
+
+### Changed
+
+- **The stable launcher relays the caller's environment to `trellis heavy` only.** Every other
+  route still starts under `env -i`; the heavy route carries `env -0` as an opaque blob that only
+  the supervisor decodes, for the wrapped command, so PATH entries, `DOCKER_HOST` and the rest
+  reach the workload. The launcher also forwards HUP, INT and TERM to a heavy run, each as
+  itself, instead of deferring them until the run finishes. The child resets the INT and QUIT
+  dispositions Bash leaves ignored and acknowledges; a signal that lands before that is queued
+  and replayed once it has. This is a launcher change: re-run `trellis configure` to
+  refresh `~/.local/bin/trellis`; an older launcher is refused with exit 78 rather than silently
+  stripping the environment.
+- **`heavy_slots` and `heavy_light_slots` join the machine config's closed key set** in all
+  three validators (`trellis-home.sh`, the launcher, `health-checks.sh`) and the machine schema.
+  Only `trellis heavy --check` types them, so a bad value disables the heavy gate and nothing
+  else.
+### Fixed
+
+- **Detach and adopt work on large checkout groups.** `trellis detach` used to exit 4 with
+  `jq: Argument list too long` once a checkout's owner records passed macOS's 1 MiB argument
+  limit (about 11 worktrees; large multi-worktree projects were affected). State builders now call
+  `trellis_jq` (`scripts/lib/trellis-home.sh`): it runs plain `jq` with the original arguments when
+  the `--arg`/`--argjson` values total under 64 KiB, and above that passes them through private
+  temporary files (`--rawfile`/`--slurpfile`) with byte-identical output.
+
+- **The disk-janitor never deletes Docker volumes.** Every volume-removal path is gone; the
+  `docker` scope lists unattached anonymous volume IDs under a report-only heading, and its only
+  mutation is the BuildKit cache prune. `trellis launchd` refuses to install, and `trellis doctor`
+  reports an error, while any `org.trellis.disk-janitor*.plist` differs from the installer's exact
+  ProgramArguments and schedule; renamed agents are reported as disabled. The launchd ACL refusal
+  now names the `ls -led` / `chmod -a#` remedy. Spec 059.
+
+- **`detach` and `release adopt` refused silently.** Two projects' pi rollouts stalled
+  on `trellis detach` exiting 3 or 4 with nothing on stderr, so nobody could tell owned-file
+  drift from a corrupt record or a registry mismatch. The detach refusal sites, and the
+  owned-artifact check that adopt shares with detach, now print one line,
+  `trellis <detach|adopt>: refused (<code>): <path>`, and keeps its exit class. The codes are
+  `owned-file-drift`, `owned-symlink-drift`, `owner-record-invalid`, `owner-path-mislocated`,
+  `render-missing`, `render-not-regular`, `render-mode`, `render-reverted`,
+  `owned-key-value-changed`,
+  `registry-id-mismatch`, `plan-failed`, `journal-invalid`, `journal-mismatch`,
+  `artifact-changed`, `parent-not-removable` and `owner-changed`. Artifacts are checked in
+  sorted path order, so the path a refusal names is deterministic. A symlinked owner directory
+  used to report `already detached` and exit 0; it now refuses with exit 4
+  (`owner-dir-symlink`). A detach whose records exist but whose `--harness` matches nothing
+  keeps its `already detached` stdout and exit 0, and adds one stderr notice,
+  `trellis detach: notice (no-matching-harness): <root>`. Adopt still keeps the attach-time
+  owner snapshots, so detach stays fail-closed after adopt.
+- **An orphaned owner record blocked attaching a sibling worktree behind a misleading
+  message.** A record left behind by a pruned worktree made `trellis attach` print a
+  vanished-root line and then `managed exclude block has no matching committed checkout
+  ownership`, which points at the wrong cause. Attach now classifies each record against
+  `git worktree list` for the checkout the record names and, for a record Git no longer lists,
+  prints `trellis attach: refused (orphan-owner-record): <record> (worktree_root <path>
+  missing|not-a-worktree); move it to $TRELLIS_HOME/backups/stale-owner-records-<YYYYMMDD>/`,
+  one line per record, and exits 3. It never deletes or skips the record. A listed worktree is
+  live even while its directory is absent, and a checkout Git cannot list is left to the
+  existing checks. When the orphan was the checkout's only record and the managed exclude block
+  is still present, a second line (`orphan-owner-sole`) points at the new
+  `docs/UPGRADING.md` "Ownerless exclude block" recovery. `trellis doctor` now scans
+  `$TRELLIS_HOME/state/attachments/*/*.json` without going through the registry and reports
+  each orphan as an `orphan-owner-record` warning, using the same predicate as attach.
+- **`foreman-start.sh` keeps panes visible without taking the caller's focus, and aborts a
+  failed overflow move.** Panes are created with `--no-focus`, so the operator's focus and
+  tab stay put. If moving a pane to an overflow tab fails, the launcher closes it and exits 5
+  before any receipt or agent start, instead of leaving a sixth pane in a full tab. Spec 043
+  amendment; PR #502.
+- **Codex Stop hooks now block as a continuation instead of failing as a hook error.** The
+  Trellis Codex Stop hooks printed block JSON and exited 2 with empty stderr, which Codex
+  0.157.1 reports as a hook error. They now exit 0 with one `{"decision":"block","reason"}`
+  object. PreToolUse/PostToolUse exit-2 blocks write their reason to stderr, `stop-verify`
+  reads Codex rollout transcripts (every Codex turn was blocked as `transcript-unusable`),
+  and the pi bridge keeps such blocks `enforced`. Claude hooks are unchanged. Spec 045
+  amendment; PR #504.
+
+- **The public pi guide did not reproduce the live pi setup (Spec 053 Unit C).** Step 12
+  expected `trellis_web_search`, `web_search` and the `cua_*` tools, but no step installed the
+  web-search extension, wrote the `cua` server into `mcp.json`, or made the first `/mcp`
+  connection that caches the `cua` tool list; an "optional" computer-use row sent readers to a
+  0.85.1 version check that fails on the pinned base; and the pins had drifted (pi 0.87.0 →
+  0.87.1, `pi-intercom` 0.13.0 → 0.15.0, `pi-meta-oauth` 0.6.1 → 0.7.0). `settings.json` is
+  now written whole, including the GPT-6 `modelThinkingLevels`, and step 12 attributes
+  `web_search`, `generate_image` and `mcpScript` to the extension, `pi-antigravity` and
+  `pi-mcp-adapter` instead of pi built-ins. `core-rules/pi/extensions/trellis-web-search.ts`
+  and `opencode-go-2.ts` are tracked byte-identical to the live copies, and the guide installs
+  them from there. Every block that writes a file is tagged `<!-- pi-guide:file <path> -->`;
+  the new `scripts/pi-guide-parity.sh` replays only those blocks into a temporary HOME. It
+  runs no shell: each line must be an allowlisted file operation (`mkdir -p`, a heredoc, `cp`
+  or `install` from the repository, `chmod`, `rm -rf` of the tagged path itself) with every
+  destination resolved inside the temporary HOME and confined to its tagged path (`mkdir -p`
+  included, which may create only the tagged path or its ancestors). Repository sources may
+  contain no symlink at all, an unquoted heredoc expands `$HOME` only at a variable boundary,
+  and only a passing render is emitted. So a wrapped `env security …` or
+  `command npm …`, arbitrary code, or a `~/../..` tag is refused. It checks JSON (lockfiles
+  included), secrets, residual `/Users/` paths and byte identity with the tracked sources, and
+  with `--against-live` compares the six rendered files with `~/.pi/agent` read-only. The
+  replay covers 8 tagged blocks. Step 4's `auth.json` block is a Python merge that preserves
+  existing OAuth objects, which the allowlist refuses by design, so it is untagged and relies
+  on its own Verify block. Step 3
+  now ends each Keychain command in a bare `-w`, so `security` prompts for the key and it
+  never enters a process argument list. The mirror lint's path-scoped allowance covers exactly
+  the tracked extension with four exact tokens (`Antigravity`, `ANTIGRAVITY`,
+  `antigravityError`, `searchAntigravity`) and no prefix class.
+- **Held from the public mirror pending security review (Spec 053 C7).** The cross-family
+  review of `trellis-web-search.ts` returned BLOCK: its fallback runs a general local Codex
+  agent with the operator's credentials on a model-written query, raw error text reaches the
+  model, an aborted request still launches the fallback, there is no call budget, and the
+  query is passed without `--`. The file stays byte-identical to the live copy (changing it is
+  an operator decision) and is added to `payload_no_publish`, with the parity script and its
+  tests. `AGENT_PI_SETUP.md` and `docs/PI-COMPUTER-USE.md` leave the sync allowlist without a
+  prune, so the previously published copies of both stay public, unchanged, until approval;
+  the computer-use doc's update describes the held guide's base, so it cannot publish alone
+  without the public docs disagreeing. Step 12 now states what the fallback runs.
+
+## [1.3.6] - 2026-09-27
+
+### Changed
+
+- **The herdr-foreman roster moved to GPT-6, and GPT-5.6 Terra was retired** (spec 052, operator
+  directive 2026-09-27).
+  - Catalog agents: `sol` (`gpt-6-sol:high`) is the workhorse for well-specified coding and for
+    reviews of non-OpenAI output; `sol-xhigh` is the foreman seat; `sol-max` is an exact
+    selection. `luna` is pinned at max. `astra` (`gpt-6-astra:high`) takes hard work only.
+  - Every `gpt-5.6`/Terra id left the live roster, the pi agents, recipes and routing docs. A
+    sweep test with a checked-in record allowlist keeps it that way.
+  - Claude Opus 5.5 joins the catalog as the `opus` verdict seat, with harness `claude-code`.
+    Receipts carry `launcher: apex` for it, and it is never dispatched on pi. The OpenUsage
+    `claude` report now maps to provider `anthropic`, so the seat obeys real quota.
+
+### Fixed
+
+- **The `AEO contract, static, and entrypoint` stage failed every PR gate on a host whose
+  `ruff` resolved to 0.16.7.** Both gate rows — the `aeo_static_and_python` stage in
+  `scripts/run-tests.sh` and `PROCESS_GATE_LINT_CMD` — ran bare `ruff check`, so the rule set
+  was whatever the resolved binary enabled by default. With no config file and no `RUFF_*`
+  variable anywhere, 0.16.7 enables a wider set than 0.15.5 (the version CI pins) and reported
+  `Found 35 errors` (TRY004 21, UP035 5, I001 4, RUF100 2, SIM117 2, BLE001 1) that 0.15.5
+  does not. Both rows now pin the rule set on the command line: `ruff check --isolated
+  --select E4,E7,E9,F`, and the stage runs `ruff format --isolated --check`. No config file
+  ships, so the installed `aeo-gate` skill does not override consumers' lint settings. The
+  stage also prints `ruff: <path> <version>` so every gate receipt names its binary. New
+  `scripts/tests/ruff-rule-pin.bats` asserts both command strings literally and that the skill
+  ships no ruff config; removing either pin turns it red on any machine. Spec 058.
+
+- **The weekly `test-health` launchd job halted without auditing anything.** Its runner fed the
+  raw `scheduled-tasks/test-health/prompt.md` template to `claude -p`, so the
+  `{{TASK_ROOT}}`/`{{OUTPUT_ROOT}}` placeholders reached the model unfilled and the 2026-09-21
+  run stopped at its own preflight. The installer resolves and pins home, fleet, checkout and
+  stable launcher in the plist. Each scheduled fire locks before re-materializing through that
+  launcher, validates a ready manifest with no planned errors and a placeholder-free prompt,
+  then dispatches the exact materialized bytes from the canonical checkout. `--smoke` checks
+  the existing materialization without locking, materializing or invoking Claude. The old
+  `--smoke` passed against the broken prompt; the regression suite now exercises each refusal.
+- **Managed project gates now have a per-run private writable HOME.** macOS turbo and Vercel CLI auth lookups could not use `HOME=/dev/null` despite writable XDG directories, blocking pre-push checks. The gate HOME is mode 700 inside the command scratch and is removed with it; failed creation refuses the gate before running project code. Control payloads retain `HOME=/dev/null`, prior hooks retain the caller HOME, and Git/XDG/Corepack isolation remains unchanged.
+- Forward caller `DOCKER_HOST` (but never `DOCKER_CONTEXT`) to prior pre-push
+  hooks and passthrough project hooks, so Colima socket settings survive Trellis
+  hook isolation. Doctor now reports macOS Docker CLI/context hazards and
+  informational Docker Desktop/Colima states; the operational gotcha documents
+  the Colima-only setup.
+
+- **SessionStart reported `merge_reviewer: NONE` and `refuter 1/3` in every session, whatever
+  the quota.**
+  - Cause: every verdict seat had to be distinct from every other one. Beside an OpenAI
+    producer that needs six other families, and the roster had three.
+  - The rule is now per role: each verdict excludes the producer's family; the security
+    reviewer differs from the reviewer; the refuter's three seats are pairwise distinct and
+    exclude the reviewer's family. It applies to every eligible trail entry, not only the
+    chosen row, and resolution order is explicit rather than JSON key order.
+  - One fixture set of 18 crafted artifacts runs through the resolver, both SessionStart hooks
+    and the Stop-hook code reviewer.
+  - `resolve-roles.py --panel … --finding-author` implements the refuter quorum (a seat in the
+    finding author's family is recused).
+  - Live resolve with every provider healthy: no DEGRADED role for any producer family.
+
+## [1.3.5] - 2026-09-22
+
+### Fixed
+
+- **`doctor` reported `skill_roots_for_harnesses: command not found` against every 1.3.0
+  attachment, failing three checks that were not actually broken.** The launcher emits
+  `TRELLIS_LIBS_PRELOADED=1` and preloads the libraries in its `LIBRARIES` tuple; every library
+  guarded by that flag skips sourcing its own dependencies when it is set. Spec 049 made
+  `skill-roots.sh` a dependency of `surface-plan.sh` and added it to the surface-plan bundle's
+  `SOURCES`, but not to `LIBRARIES` — so in the launcher's main shell the flag promised a
+  definition nobody loaded, and `managed excludes`, `native surfaces` and `manifest leaves`
+  each reported the payload as invalid. The bundled subprocess path was always correct, which
+  is why `release install` and `release verify` passed and only `doctor` failed. Measured on a
+  live 1.3.0 adoption: 3 of 7 doctor errors on the one adopted project, cleared by adding the
+  one entry. Two regression tests, both proven to fail with the entry removed: a closure check
+  that every `TRELLIS_LIBS_PRELOADED`-guarded dependency appears in `LIBRARIES` — which catches
+  the class, not just this library — and a live source of exactly the preloaded set, read from
+  `LIBRARIES` rather than hardcoded, asserting `skill_roots_for_harnesses` resolves afterwards.
+- **`pre-push` judged a feature branch's entire history instead of what the push adds.** The
+  hook derived a `--range` only for refs targeting `main`/`master`; every other push left it
+  empty, so `run-all.sh` fell back to `main..HEAD` (or `master..HEAD`) and gated every commit
+  on the branch. In one attached project that blocked a feature push on 1,134 pre-existing
+  lint errors and old placeholder credentials the push never touched. Every pushed ref now
+  derives its own range: an update gates `<remote_sha>..<local_sha>`, a new branch gates from
+  its merge-base with the remote's default branch (resolved from `refs/remotes/<remote>/HEAD`,
+  then `<remote>/main`, then `<remote>/master` — never assumed), and a deletion is skipped.
+  Fail-closed behaviour is kept: a remote tip missing locally, an unresolvable default branch,
+  or a multi-ref push whose refs disagree on a range leaves `--range` unset so `run-all.sh`
+  scans its broader default. A `main`/`master`-targeting ref still selects `--mode=merge` and
+  its range wins. Both hook copies (`core-rules/githooks`, `core-rules/husky`) stay identical.
+  Nine regression cases in `scripts/tests/pre-push-range.bats` run against both copies; five
+  fail on the previous hook.
+
 ## [1.3.4] - 2026-09-22
 
 ### Fixed

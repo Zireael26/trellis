@@ -27,16 +27,14 @@
           "id": "luna-window",
           "status": "exhausted",
           "scope": {
-            "modelId": "gpt-5.6-luna"
+            "modelId": "gpt-6-luna"
           }
         },
         {
           "id": "sol-window",
-          "amount": {
-            "remainingFraction": 0.9
-          },
+          "status": "exhausted",
           "scope": {
-            "modelId": "gpt-5.6-sol"
+            "modelId": "gpt-6-sol"
           }
         }
       ]

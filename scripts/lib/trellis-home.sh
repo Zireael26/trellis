@@ -41,6 +41,104 @@ trellis_home_require_jq() {
   }
 }
 
+# Small calls exec jq with the original argv; at 64 KiB of --arg/--argjson
+# values, use files to avoid ARG_MAX. Shell function arguments and builtin
+# printf do not cross exec's limit. Keep JSON order, bytes and hashes intact.
+# The large-call path supports --arg/--argjson, --rawfile/--slurpfile, short
+# flags, FILTER [FILES]; it is not a general jq CLI wrapper (-f/--args).
+trellis_jq() (
+  local bytes=0 remaining=0 measure=0 arg
+  local original_lc_all="${LC_ALL-}" lc_all_set="${LC_ALL+x}"
+  # Bash lengths count characters in multibyte locales. Restore the caller's
+  # locale before exec so the fast path changes neither argv nor environment.
+  LC_ALL=C
+  for arg in "$@"; do
+    if [ "$remaining" -gt 0 ]; then
+      remaining=$((remaining - 1))
+      if [ "$remaining" -eq 0 ] && [ "$measure" -eq 1 ]; then
+        bytes=$((bytes + ${#arg}))
+        [ "$bytes" -lt 65536 ] || break
+      fi
+      continue
+    fi
+    case "$arg" in
+      --arg|--argjson) remaining=2; measure=1 ;;
+      --rawfile|--slurpfile) remaining=2; measure=0 ;;
+      --) break ;;
+      -*) ;;
+      *) break ;;
+    esac
+  done
+  if [ "$lc_all_set" = x ]; then
+    LC_ALL="$original_lc_all"
+  else
+    unset LC_ALL
+  fi
+  [ "$bytes" -ge 65536 ] || exec jq "$@"
+
+  local scratch name file prefix='' validation='true' count=0 kind
+  local -a options=() json_options=()
+  umask 077
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/trellis-jq.XXXXXX")" || return 2
+  trap 'rm -rf -- "$scratch"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --arg|--argjson)
+        [ "$#" -ge 3 ] || {
+          printf 'trellis_jq: %s requires a name and value\n' "$1" >&2
+          return 2
+        }
+        kind="$1" name="$2"
+        [[ "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || {
+          printf '%s\n' 'trellis_jq: invalid argument name' >&2
+          return 2
+        }
+        file="$scratch/$count"
+        count=$((count + 1))
+        builtin printf '%s' "$3" > "$file" || return 2
+        if [ "$kind" = --argjson ]; then
+          options+=(--slurpfile "$name" "$file")
+          json_options+=(--slurpfile "$name" "$file")
+          validation="$validation and (\$$name | length == 1)"
+          prefix="$prefix (\$${name}[0]) as \$$name |"
+        else
+          options+=(--rawfile "$name" "$file")
+        fi
+        shift 3
+        ;;
+      --slurpfile|--rawfile)
+        [ "$#" -ge 3 ] || {
+          printf 'trellis_jq: %s requires a name and file\n' "$1" >&2
+          return 2
+        }
+        options+=("$1" "$2" "$3")
+        shift 3
+        ;;
+      -f|--*)
+        printf '%s\n' 'trellis_jq: unsupported flag in file transport' >&2
+        return 2
+        ;;
+      -*) options+=("$1"); shift ;;
+      *) break ;;
+    esac
+  done
+  [ "$#" -gt 0 ] || {
+    printf '%s\n' 'trellis_jq: filter is required' >&2
+    return 2
+  }
+  # Like --argjson, reject malformed/empty/multiple JSON values even when
+  # stdin is empty. The files are private and cannot change between reads.
+  if [ "${#json_options[@]}" -gt 0 ]; then
+    jq -en "${json_options[@]}" "$validation" >/dev/null || return 2
+  fi
+  local filter="$1"
+  shift
+  jq "${options[@]+"${options[@]}"}" "$prefix ($filter)" "$@"
+)
+
 trellis_home_has_unsafe_chars() {
   local LC_ALL=C value
   value="$1"
@@ -704,7 +802,9 @@ trellis_home_validate_config() {
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema"])
+    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
+    # alone (spec 054), so a bad value disables only the heavy gate.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)

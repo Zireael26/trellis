@@ -24,8 +24,12 @@
 #                       Destructive ops are a bright-line guardrail, so the
 #                       prompt is mandatory without --yes. Re-scan + report
 #                       reclaimed bytes. The opt-in nightly apply LaunchAgent
-#                       runs unattended-safe worktrees, orphaned release staging,
-#                       and Docker.
+#                       runs only `--scopes worktrees --safe-only`.
+#
+# Docker volumes are never deleted, in any mode or with any flag: the Docker
+# scope lists unattached anonymous volumes as report-only (Links == 0 does not
+# mean a volume holds no data). Its only mutation is the BuildKit cache prune.
+# Deleting a volume is an operator action under PROTOCOL §10.
 #
 # Worktree reap (default, reap_pushed_worktrees=true) is gated on: is_main==0
 # AND not in use (live cwd/open handles via a fail-safe lsof snapshot) AND
@@ -74,9 +78,9 @@ Usage:
   disk-janitor.sh --report                 Same as no flag: scan + write audit.
   disk-janitor.sh --dry-run                Print the exact deletion plan only.
   disk-janitor.sh --apply                  Apply, confirming per category (y/N).
-                                           NOTE: bare --apply now includes anonymous
-                                           Docker volume + BuildKit cache pruning by
-                                           default; previous releases did not.
+                                           NOTE: bare --apply includes BuildKit
+                                           cache pruning by default. Docker
+                                           volumes are never deleted.
   disk-janitor.sh --apply --yes            Apply without the per-category prompt.
   disk-janitor.sh --apply --yes --safe-only
                                            Unattended-safe worktree reap and
@@ -95,12 +99,17 @@ Modes (escalating):
              cache vs ceiling). Deletes nothing. The default report LaunchAgent
              runs only this mode.
   --dry-run  Prints the deletion plan (path, size, why-safe; worktrees show
-             the reap verdict; Docker shows anonymous-volume and BuildKit
-             cache prune commands). Deletes nothing.
+             the reap verdict; Docker shows the BuildKit cache prune command
+             and lists unattached anonymous volumes as report-only). Deletes
+             nothing.
   --apply    Prints the plan, then per category reads a y/N line from stdin
              before deleting (mandatory unless --yes). Re-scans, reports
-             reclaimed bytes. Bare --apply includes Docker pruning by default,
-             unlike previous releases; use --scopes to omit it explicitly.
+             reclaimed bytes. Bare --apply includes the BuildKit cache prune by
+             default; use --scopes to omit it explicitly.
+
+The janitor never deletes Docker volumes, in any mode or with any flag. Volumes
+are reported only (see PROTOCOL §10); removing one is an operator action taken
+with the Docker CLI directly.
 
 Merge detection uses a read-only `gh pr list` query (a merged PR for the
 branch); it modifies no git refs and deletes nothing, so report/dry-run stay
@@ -144,13 +153,13 @@ Scopes:
               stale+clean+merged gates after the liveness gate.
   stores      pnpm store / npm cache footprint — REPORT-ONLY (best-effort
               estimate; --apply does not prune stores in this release).
-  docker      Host-global, scanned exactly once. Report/dry-run are read-only and
-              show total + dangling anonymous volumes (64-lowercase-hex names),
-              dangling reclaimable size, BuildKit cache reclaimable, image count,
-              and Engine version. Apply revalidates and removes only exact
-              anonymous volume IDs from the plan, then runs `docker buildx prune
-              -f --reserved-space <N>GB`; images are never pruned. If Docker is
-              not already live, the scope is skipped without starting Desktop.
+  docker      Host-global, scanned exactly once. Every mode shows total and
+              unattached (Links == 0) anonymous volumes (64-lowercase-hex names),
+              their size and IDs under a report-only heading, BuildKit cache
+              reclaimable, image count, and Engine version. Apply runs only
+              `docker buildx prune -f --reserved-space <N>GB`; volumes and
+              images are never deleted. If Docker is not already live, the scope
+              is skipped without starting Desktop.
   releases    Host-global TRELLIS_HOME/releases staging. Only real direct-child
               .tmp.<version>.exec.<alphanumeric-suffix> directories are scanned.
               Fresh snapshots, live-owner snapshots, and malformed owner records
@@ -1027,17 +1036,15 @@ DOCKER_SCAN_OK=0
 DOCKER_SKIP_REASON=""
 DOCKER_SCAN_ERROR=""
 DOCKER_SERVER_VERSION="unknown"
-DOCKER_VOLUME_DELETE_SUPPORTED=0
 DOCKER_ANON_VOLUME_COUNT=0
 DOCKER_ANON_DANGLING_COUNT=0
 DOCKER_ANON_RECLAIMABLE_BYTES=0
 DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES=0
 DOCKER_IMAGE_COUNT=0
-DOCKER_VOLUME_DELETE_APPLIED=0
 DOCKER_BUILDX_PRUNE_APPLIED=0
 
 scan_docker() {
-  local summary verbose buildx_du volume_parsed buildx_parsed server_major planned_volume_count
+  local summary verbose buildx_du volume_parsed buildx_parsed listed_volume_count
 
   if ! command -v docker >/dev/null 2>&1; then
     DOCKER_SKIP_REASON="Docker CLI unavailable"
@@ -1054,11 +1061,6 @@ scan_docker() {
     DOCKER_SERVER_VERSION="unavailable"
   fi
   [ -n "$DOCKER_SERVER_VERSION" ] || DOCKER_SERVER_VERSION="unavailable"
-  server_major="${DOCKER_SERVER_VERSION%%.*}"
-  case "$server_major" in
-    ''|*[!0-9]*) DOCKER_VOLUME_DELETE_SUPPORTED=0 ;;
-    *) [ "$server_major" -ge 23 ] && DOCKER_VOLUME_DELETE_SUPPORTED=1 ;;
-  esac
 
   if ! summary="$(docker system df --format json 2>/dev/null)"; then
     DOCKER_SCAN_ERROR="docker system df failed"
@@ -1085,8 +1087,10 @@ scan_docker() {
     return 0
   fi
 
-  # Docker reports decimal SI sizes. Count every 64-hex anonymous volume, but
-  # plan reclamation only for the dangling subset (Links==0).
+  # Docker reports decimal SI sizes. Count every 64-hex anonymous volume and
+  # the unattached subset (Links==0). This enumeration is read-only: Links==0
+  # means no container uses the volume now, not that it holds no data, so the
+  # IDs are reported and never deleted.
   if ! volume_parsed="$(printf '%s\n' "$verbose" | jq -r '
     def docker_bytes:
       if test("kB$") then (sub("kB$"; "") | tonumber * 1000)
@@ -1114,13 +1118,13 @@ EOF
      | .Name]
     | unique[]
   ' >"$DOCKER_VOLUME_IDS_TMP"; then
-    DOCKER_SCAN_ERROR="could not record exact dangling anonymous Docker volume IDs"
+    DOCKER_SCAN_ERROR="could not record unattached anonymous Docker volume IDs"
     EXIT_STATUS=1
     return 0
   fi
-  planned_volume_count="$(awk 'NF { count += 1 } END { print count + 0 }' "$DOCKER_VOLUME_IDS_TMP")"
-  if [ "$planned_volume_count" -ne "$DOCKER_ANON_DANGLING_COUNT" ]; then
-    DOCKER_SCAN_ERROR="exact Docker volume plan does not match scan count"
+  listed_volume_count="$(awk 'NF { count += 1 } END { print count + 0 }' "$DOCKER_VOLUME_IDS_TMP")"
+  if [ "$listed_volume_count" -ne "$DOCKER_ANON_DANGLING_COUNT" ]; then
+    DOCKER_SCAN_ERROR="unattached Docker volume ID list does not match scan count"
     EXIT_STATUS=1
     return 0
   fi
@@ -1153,45 +1157,21 @@ EOF
   return 0
 }
 
-# docker_planned_anonymous_volume_is_unused ID
-#
-# Recheck the exact planned name immediately before direct deletion. The name
-# must still be the 64-hex anonymous form and no current container may reference
-# it; Docker itself rejects any attachment racing the final volume rm.
-docker_planned_anonymous_volume_is_unused() {
-  local volume_id="$1" inspected_name references
-  if ! printf '%s\n' "$volume_id" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
-    return 1
-  fi
-  if ! inspected_name="$(docker volume inspect --format '{{.Name}}' "$volume_id" 2>/dev/null)"; then
-    return 1
-  fi
-  [ "$inspected_name" = "$volume_id" ] || return 1
-  if ! references="$(docker ps -a --filter "volume=$volume_id" --format '{{.ID}}' 2>/dev/null)"; then
-    return 1
-  fi
-  [ -z "$references" ]
-}
-
-# docker_planned_anonymous_volume_became_attached ID
-#
-# A direct `volume rm` can race a container attach after the pre-delete check.
-# That is the sole benign refusal: prove that the exact planned anonymous volume
-# still exists and is now referenced. A vanished volume, failed inspect/query,
-# changed name, or still-unattached volume is an apply failure, not a skip.
-docker_planned_anonymous_volume_became_attached() {
-  local volume_id="$1" inspected_name references
-  if ! printf '%s\n' "$volume_id" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
-    return 1
-  fi
-  if ! inspected_name="$(docker volume inspect --format '{{.Name}}' "$volume_id" 2>/dev/null)"; then
-    return 1
-  fi
-  [ "$inspected_name" = "$volume_id" ] || return 1
-  if ! references="$(docker ps -a --filter "volume=$volume_id" --format '{{.ID}}' 2>/dev/null)"; then
-    return 1
-  fi
-  [ -n "$references" ]
+# print_docker_volumes_report_only — the anonymous-volume counts and the
+# unattached IDs, shared by report, dry-run and apply. Output only: nothing in
+# this script deletes a Docker volume (spec 059).
+print_docker_volumes_report_only() {
+  local volume_id listed=0
+  printf '  anonymous volumes: %s total; %s unattached (Links == 0), %s\n' \
+    "$DOCKER_ANON_VOLUME_COUNT" "$DOCKER_ANON_DANGLING_COUNT" \
+    "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
+  echo "  unattached anonymous volumes, report-only — the janitor never deletes volumes (PROTOCOL §10):"
+  while IFS= read -r volume_id; do
+    [ -n "$volume_id" ] || continue
+    printf '    %s\n' "$volume_id"
+    listed=$((listed + 1))
+  done <"$DOCKER_VOLUME_IDS_TMP"
+  [ "$listed" -gt 0 ] || echo "    (none)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1449,14 +1429,7 @@ INNER
       echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
     else
       printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
-      printf '  anonymous volumes: %s total; %s dangling/reclaimable (%s)\n' \
-        "$DOCKER_ANON_VOLUME_COUNT" "$DOCKER_ANON_DANGLING_COUNT" \
-        "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
-      if [ "$DOCKER_VOLUME_DELETE_SUPPORTED" -eq 1 ]; then
-        echo "  exact planned anonymous-volume removal support: yes (Engine >=23)"
-      else
-        echo "  exact planned anonymous-volume removal support: no/unknown (removal will be skipped)"
-      fi
+      print_docker_volumes_report_only
       printf '  BuildKit cache reclaimable: %s\n' "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
       printf '  images: %s (report-only; images are never pruned)\n' "$DOCKER_IMAGE_COUNT"
       printf '  BuildKit reserved space on apply: %sGB\n' "$DOCKER_CACHE_KEEP_GB"
@@ -1477,9 +1450,9 @@ INNER
   echo "== Total =="
   printf '  host-project reclaimable now (caches + reaped worktrees + release staging): %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
   if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
-    printf '  Docker VM (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable\n' \
-      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
-      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
+    printf '  Docker VM (separate; not included above): BuildKit cache %s reclaimable; %s unattached anonymous volume(s), %s, report-only\n' \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" \
+      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
   fi
 }
 
@@ -1558,18 +1531,7 @@ if [ "$MODE" = "dry-run" ]; then
       echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
     else
       printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
-      if [ "$DOCKER_VOLUME_DELETE_SUPPORTED" -eq 1 ]; then
-        printf '  anonymous Docker volume removal: exact planned IDs only — %s of %s anonymous volume(s) dangling, %s reclaimable\n' \
-          "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT" \
-          "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
-        while IFS= read -r volume_id; do
-          [ -n "$volume_id" ] || continue
-          printf '    docker volume rm %s\n' "$volume_id"
-        done <"$DOCKER_VOLUME_IDS_TMP"
-      else
-        printf '  anonymous Docker volume removal: SKIP — Engine %s is below 23 or unparseable; %s of %s anonymous volume(s) dangling\n' \
-          "$DOCKER_SERVER_VERSION" "$DOCKER_ANON_DANGLING_COUNT" "$DOCKER_ANON_VOLUME_COUNT"
-      fi
+      print_docker_volumes_report_only
       printf '  BuildKit cache prune: docker buildx prune -f --reserved-space %sGB — %s currently reclaimable\n' \
         "$DOCKER_CACHE_KEEP_GB" "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")"
       printf '  images: %s (never pruned)\n' "$DOCKER_IMAGE_COUNT"
@@ -1582,9 +1544,9 @@ if [ "$MODE" = "dry-run" ]; then
     printf '  release-staging plan (aged orphaned snapshots): %s\n' "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
   fi
   if scope_enabled docker && [ "$DOCKER_SCAN_OK" -eq 1 ]; then
-    printf '  Docker VM plan (separate; not included above): %s dangling anonymous volume(s), %s; BuildKit cache %s reclaimable, retaining %sGB\n' \
-      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
-      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
+    printf '  Docker VM plan (separate; not included above): BuildKit cache %s reclaimable, retaining %sGB; %s unattached anonymous volume(s) report-only\n' \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB" \
+      "$DOCKER_ANON_DANGLING_COUNT"
   fi
   echo
   echo "(dry-run: re-run with --apply to act; --apply confirms per category)"
@@ -1944,46 +1906,14 @@ if scope_enabled docker; then
     echo "  docker scope: unavailable ($DOCKER_SCAN_ERROR)"
   else
     printf '  Docker Engine server version: %s\n' "$DOCKER_SERVER_VERSION"
-    if [ "$DOCKER_VOLUME_DELETE_SUPPORTED" -eq 1 ]; then
-      printf '  anonymous Docker volume removal: %s exact planned ID(s), %s reclaimable\n' \
-        "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
-      while IFS= read -r volume_id; do
-        [ -n "$volume_id" ] || continue
-        printf '    docker volume rm %s\n' "$volume_id"
-      done <"$DOCKER_VOLUME_IDS_TMP"
-    else
-      printf '  anonymous Docker volume removal: SKIP — Engine %s is below 23 or unparseable\n' \
-        "$DOCKER_SERVER_VERSION"
-    fi
+    print_docker_volumes_report_only
     printf '  BuildKit cache prune: %s currently reclaimable; retain %sGB with --reserved-space\n' \
       "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
     printf '  images: %s (never pruned)\n' "$DOCKER_IMAGE_COUNT"
-    if confirm_category "exact planned anonymous Docker volume removals and BuildKit cache prune"; then
+    if confirm_category "BuildKit cache (docker buildx prune, retaining ${DOCKER_CACHE_KEEP_GB}GB)"; then
       if ! docker info >/dev/null 2>&1; then
         echo "  docker scope: skipped (Docker is no longer live; no prune performed)"
       else
-        if [ "$DOCKER_VOLUME_DELETE_SUPPORTED" -eq 1 ]; then
-          while IFS= read -r volume_id; do
-            [ -n "$volume_id" ] || continue
-            if ! docker_planned_anonymous_volume_is_unused "$volume_id"; then
-              echo "  skipped planned Docker volume (changed or in use): $volume_id"
-              continue
-            fi
-            if docker volume rm "$volume_id" >/dev/null 2>&1; then
-              DOCKER_VOLUME_DELETE_APPLIED=$((DOCKER_VOLUME_DELETE_APPLIED + 1))
-            else
-              if docker_planned_anonymous_volume_became_attached "$volume_id"; then
-                echo "  skipped planned Docker volume (benign attachment race): $volume_id"
-              else
-                echo "  REFUSED/failed planned Docker volume removal: $volume_id" >&2
-                EXIT_STATUS=1
-              fi
-            fi
-          done <"$DOCKER_VOLUME_IDS_TMP"
-        else
-          printf '  skipped anonymous Docker volume removal: Engine %s is below 23 or unparseable\n' \
-            "$DOCKER_SERVER_VERSION"
-        fi
         # BuildKit has no stable per-record delete API. Its scope remains the
         # explicitly confirmed cache class, bounded by the retained-space floor.
         if docker buildx prune -f --reserved-space "${DOCKER_CACHE_KEEP_GB}GB"; then
@@ -2039,11 +1969,10 @@ if scope_enabled releases; then
 fi
 if scope_enabled docker; then
   if [ "$DOCKER_SCAN_OK" -eq 1 ]; then
-    printf '  Docker VM (separate from host-project bytes): %s dangling anonymous volume(s), %s planned; BuildKit cache %s reclaimable before prune, retaining %sGB\n' \
-      "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")" \
-      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB"
-    printf '  Docker prune commands completed: exact-volume-removals=%s buildkit=%s\n' \
-      "$DOCKER_VOLUME_DELETE_APPLIED" "$DOCKER_BUILDX_PRUNE_APPLIED"
+    printf '  Docker VM (separate from host-project bytes): BuildKit cache %s reclaimable before prune, retaining %sGB; %s unattached anonymous volume(s) left in place (report-only)\n' \
+      "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" "$DOCKER_CACHE_KEEP_GB" \
+      "$DOCKER_ANON_DANGLING_COUNT"
+    printf '  Docker prune commands completed: buildkit=%s\n' "$DOCKER_BUILDX_PRUNE_APPLIED"
   elif [ "$DOCKER_LIVE" -ne 1 ]; then
     echo "  Docker VM: no plan (Docker was not live)"
   else

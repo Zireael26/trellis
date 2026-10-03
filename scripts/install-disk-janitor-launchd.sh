@@ -72,6 +72,8 @@ esac
 SCRIPT_DIR="$(CDPATH='' cd "$installer_source_dir" && pwd -P)"
 # shellcheck source=lib/trellis-home.sh
 . "$SCRIPT_DIR/lib/trellis-home.sh"
+# shellcheck source=lib/disk-janitor-agents.sh
+. "$SCRIPT_DIR/lib/disk-janitor-agents.sh"
 
 usage() {
   cat <<'EOF'
@@ -231,6 +233,10 @@ require_path_controls() {
   }
   if path_has_extended_acl "$path"; then
     printf 'trellis launchd: %s has an extended ACL: %s\n' "$label" "$path" >&2
+    printf 'trellis launchd: inspect the ACL entries with:\n  /bin/ls -led %q\n' "$path" >&2
+    printf 'trellis launchd: remove one entry (N = its index in that listing) with:\n  /bin/chmod -a# N %q\n' "$path" >&2
+    printf 'trellis launchd: or remove every entry with:\n  /bin/chmod -N %q\n' "$path" >&2
+    printf 'trellis launchd: then re-run trellis launchd\n' >&2
     return "$TRELLIS_EX_STATE"
   else
     rc=$?
@@ -773,39 +779,37 @@ plist_value() {
 plist_is_owned() {
   local label="$1" destination="$2"
   [ "$(plist_value "$destination" Label)" = "$label" ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.0)" = '/usr/bin/env' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.1)" = '-i' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.2)" = "HOME=$user_home" ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.3)" = "TRELLIS_HOME=$trellis_home" ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.4)" = 'PATH=/usr/bin:/bin:/usr/sbin:/sbin' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.5)" = '/bin/bash' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.6)" = '--noprofile' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.7)" = '--norc' ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.8)" = "$launcher" ] || return 1
-  [ "$(plist_value "$destination" ProgramArguments.9)" = 'disk-janitor' ] || return 1
+  # ProgramArguments and schedule: the one shared expectation (spec 059 R3).
+  dj_agent_matches "$destination" "$label" "$user_home" "$trellis_home" || return 1
   ! plist_value "$destination" EnvironmentVariables >/dev/null 2>&1 || return 1
   [ "$(plist_value "$destination" StandardOutPath)" = "$logs_dir/$label.log" ] || return 1
   [ "$(plist_value "$destination" StandardErrorPath)" = "$logs_dir/$label.log" ] || return 1
   [ "$(plist_value "$destination" RunAtLoad)" = false ] || return 1
-  case "$label" in
-    org.trellis.disk-janitor)
-      [ "$(plist_value "$destination" ProgramArguments.10)" = '--report' ] || return 1
-      ! plist_value "$destination" ProgramArguments.11 >/dev/null 2>&1 || return 1
-      [ "$(plist_value "$destination" StartCalendarInterval.Hour)" = 3 ] || return 1
-      [ "$(plist_value "$destination" StartCalendarInterval.Minute)" = 30 ] || return 1
-      ;;
-    org.trellis.disk-janitor-apply)
-      [ "$(plist_value "$destination" ProgramArguments.10)" = '--apply' ] || return 1
-      [ "$(plist_value "$destination" ProgramArguments.11)" = '--scopes' ] || return 1
-      [ "$(plist_value "$destination" ProgramArguments.12)" = worktrees ] || return 1
-      [ "$(plist_value "$destination" ProgramArguments.13)" = '--yes' ] || return 1
-      [ "$(plist_value "$destination" ProgramArguments.14)" = '--safe-only' ] || return 1
-      ! plist_value "$destination" ProgramArguments.15 >/dev/null 2>&1 || return 1
-      [ "$(plist_value "$destination" StartCalendarInterval.Hour)" = 4 ] || return 1
-      [ "$(plist_value "$destination" StartCalendarInterval.Minute)" = 0 ] || return 1
-      ;;
-    *) return 1 ;;
-  esac
+}
+
+# Refuse to install while any org.trellis.disk-janitor* agent that launchd would
+# load differs from the installer's expected vector, whatever its name. A
+# legacy apply agent with no --scopes deletes through the janitor's default
+# scopes; installing beside it would leave it scheduled (spec 059 R3).
+require_matching_janitor_agents() {
+  local rows state path detail refused=false
+  rows="$(dj_agent_scan "$launch_agents_dir" "$user_home" "$trellis_home")"
+  while IFS=$'\t' read -r state path detail; do
+    case "$state" in
+      mismatch)
+        printf 'trellis launchd: refusing to install: %s does not match the installer'"'"'s expected arguments and schedule (%s)\n' "$path" "$detail" >&2
+        printf 'trellis launchd: remedy:\n  %s\n' "$(dj_agent_remedy "$path")" >&2
+        refused=true
+        ;;
+      disabled)
+        printf 'note: disabled disk-janitor agent left in place: %s\n' "$path"
+        ;;
+    esac
+  done <<< "$rows"
+  if "$refused"; then
+    printf 'trellis launchd: %s\n' "$DJ_AGENT_REMEDY_NEXT" >&2
+    return "$TRELLIS_EX_CONFLICT"
+  fi
 }
 
 require_owned_destination() {
@@ -1011,6 +1015,7 @@ main() {
   else
     logs_identity="$(snapshot_directory_identity "$logs_dir" 'Logs directory')" || return "$?"
   fi
+  if ! "$uninstall"; then require_matching_janitor_agents || return "$?"; fi
   for label in "${selected_labels[@]}"; do
     if ! "$uninstall"; then preflight_template "$label" || return "$?"; fi
     require_owned_destination "$label" "$launch_agents_dir/$label.plist" || return "$?"

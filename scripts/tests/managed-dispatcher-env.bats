@@ -595,6 +595,166 @@ EOS
   fi
 }
 
+# --- spec 055 R2.1/R2.2: one first line and remedy per gate failure ----------
+
+path_stage_owner() {
+  local common checkout worktree
+  common="$(git -C "$PATH_STAGE_PROJECT" rev-parse --git-common-dir)" || return 1
+  case "$common" in /*) ;; *) common="$PATH_STAGE_PROJECT/$common" ;; esac
+  common="$(CDPATH= cd "$common" && pwd -P)" || return 1
+  checkout="$(_attachment_hash_text "$common")" || return 1
+  worktree="$(_attachment_hash_text "$PATH_STAGE_PROJECT")" || return 1
+  printf '%s\n' "$ROOT/path-managed-home/state/attachments/$checkout/$worktree.json"
+}
+
+run_path_pre_push_from() {
+  run env \
+    "PATH=$PATH_CALLER_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "HOME=$PATH_CALLER_HOME" \
+    "TMPDIR=$PATH_CALLER_TMP" \
+    /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$1" "$PATH_PRE_DISPATCHER" "$PATH_REFS"
+}
+
+refute_toolchain_moved() {
+  if printf '%s\n' "$output" | grep -F 'toolchain moved' >/dev/null; then
+    printf '%s\n' "$output"
+    false
+  fi
+}
+
+gate_first_line() {
+  printf '%s\n' "$output" | grep -m1 '^trellis gate: '
+}
+
+@test "gate: no git common dir says cannot identify the checkout and exits 1" {
+  prepare_path_stage_fixture
+  mkdir -p "$ROOT/not-a-repo"
+  run_path_pre_push_from "$ROOT/not-a-repo"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: cannot identify the checkout: $ROOT/not-a-repo" ] ||
+    { printf '%s\n' "$output"; false; }
+  refute_toolchain_moved
+}
+
+@test "gate: unattached linked worktree says not attached and names worktree sync" {
+  prepare_path_stage_fixture
+  git -C "$PATH_STAGE_PROJECT" -c user.email=f@example.invalid -c user.name=F \
+    commit -q --allow-empty -m base
+  git -C "$PATH_STAGE_PROJECT" worktree add -q "$ROOT/linked-wt"
+  linked="$(CDPATH= cd "$ROOT/linked-wt" && pwd -P)"
+  run_path_pre_push_from "$linked"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: not attached: $linked" ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -Fx "trellis gate: run \`trellis worktree sync $linked\`" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  if printf '%s\n' "$output" | grep -F "trellis attach $linked" >/dev/null; then
+    printf '%s\n' "$output"; false
+  fi
+  refute_toolchain_moved
+}
+
+@test "gate: unattached main checkout says not attached and names trellis attach" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  rm -f "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: not attached: $PATH_STAGE_PROJECT" ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -Fx "trellis gate: run \`trellis attach $PATH_STAGE_PROJECT\`" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  if printf '%s\n' "$output" | grep -F 'worktree sync' >/dev/null; then
+    printf '%s\n' "$output"; false
+  fi
+  refute_toolchain_moved
+}
+
+@test "gate: a symlinked record is reported unsafe" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  mv "$owner" "$owner.real"
+  ln -s "$owner.real" "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: record unsafe (symlink): $owner" ] || { printf '%s\n' "$output"; false; }
+  refute_toolchain_moved
+}
+
+@test "gate: a record whose mode is not 600 is reported unsafe" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  chmod 644 "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: record unsafe (mode 644, expected 600): $owner" ] ||
+    { printf '%s\n' "$output"; false; }
+  refute_toolchain_moved
+}
+
+@test "gate: a record that fails validation is reported invalid with re-attach" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  jq '.schema_version = 2' "$owner" > "$owner.new"
+  mv "$owner.new" "$owner"
+  chmod 600 "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: record invalid, re-attach: $owner" ] || { printf '%s\n' "$output"; false; }
+  refute_toolchain_moved
+}
+
+@test "gate: a control-only recorded toolchain is refused with the refresh remedy" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  # Duplicates still count: the comparison is over the deduplicated set.
+  jq '.toolchain_path = ["/usr/bin","/bin","/usr/sbin","/sbin","/bin"]' "$owner" > "$owner.new"
+  mv "$owner.new" "$owner"
+  chmod 600 "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [ "$(gate_first_line)" = "trellis gate: toolchain is the sanitized control PATH: $owner" ] ||
+    { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -Fx \
+    "trellis gate: run \`trellis attach --refresh-toolchain $PATH_STAGE_PROJECT\`" >/dev/null ||
+    { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F 'GATE_PATH=' >/dev/null && { printf '%s\n' "$output"; false; }
+  refute_toolchain_moved
+}
+
+@test "gate: a toolchain with one real entry beside the control set still runs" {
+  prepare_path_stage_fixture
+  owner="$(path_stage_owner)"
+  jq --arg b "$PATH_RECORDED_B" '.toolchain_path = [$b,"/usr/bin","/bin"]' "$owner" > "$owner.new"
+  mv "$owner.new" "$owner"
+  chmod 600 "$owner"
+  run_path_pre_push_from "$PATH_STAGE_PROJECT"
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  printf '%s\n' "$output" | grep -Fx "GATE_PATH=$PATH_RECORDED_B:/usr/bin:/bin" >/dev/null
+}
+
+@test "control-only predicate: canonical subset test over split, realpath'd, deduplicated entries" {
+  ln -s /usr/bin "$ROOT/usr-bin-link"
+  mkdir -p "$ROOT/real-bin"
+  for value in \
+    '/usr/bin:/bin:/usr/sbin:/sbin' '/bin:/usr/bin' '/usr/bin::/bin:' '/usr/bin/../bin' \
+    "$ROOT/usr-bin-link" ':::' '   ' '' ' :/bin/:	' '/usr/bin:/usr/bin'; do
+    trellis_toolchain_control_only "$value" || { printf 'expected control-only: [%s]\n' "$value"; false; }
+  done
+  for value in "$ROOT/real-bin" "/usr/bin:$ROOT/real-bin" 'bin' '/usr/bin:usr/bin' "$ROOT/missing:/usr/bin"; do
+    if trellis_toolchain_control_only "$value"; then
+      printf 'expected NOT control-only: [%s]\n' "$value"; false
+    fi
+  done
+}
+
+@test "generated dispatcher embeds the control-only predicate byte-exactly from the library" {
+  printf '%s\n' "$DISPATCHER_TEXT" > "$ROOT/body.txt"
+  extract_shell_function "$REPO_ROOT/scripts/lib/attachment.sh" trellis_toolchain_control_only > "$ROOT/pred.lib"
+  extract_shell_function "$ROOT/body.txt" trellis_toolchain_control_only > "$ROOT/pred.body"
+  [ -s "$ROOT/pred.lib" ] && [ -s "$ROOT/pred.body" ]
+  diff -u "$ROOT/pred.lib" "$ROOT/pred.body"
+}
+
 # --- private command scratch -------------------------------------------------
 #
 # The managed dispatcher allocates its own mode-0700 scratch under
@@ -620,6 +780,7 @@ prepare_fake_payload() {
   mkdir -p "$FAKE_PAYLOAD/scripts/lib"
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
   cp "$REPO_ROOT/scripts/lib/attachment.sh" "$FAKE_PAYLOAD/scripts/lib/attachment.sh"
+  cp "$REPO_ROOT/scripts/lib/trellis-home.sh" "$FAKE_PAYLOAD/scripts/lib/trellis-home.sh"
 }
 
 generate_in_preloaded_context() {
@@ -631,6 +792,7 @@ generate_in_preloaded_context() {
     "TRELLIS_VERIFIED_PAYLOAD=$FAKE_PAYLOAD" \
     /bin/bash --noprofile --norc -c '
       set -u
+      . "${1%/*}/trellis-home.sh" || exit 1
       . "$1" || exit 1
       "$2" "$3" core-rules/githooks/pre-push \
         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -656,8 +818,11 @@ prepare_scratch_fixture() {
   SCRATCH_CALLER_HOME="$ROOT/scratch-caller-home"
   SCRATCH_CALLER_TMP="$ROOT/scratch-caller-tmp"
   SCRATCH_WITNESS="$ROOT/scratch-witness"
+  # A control-only toolchain is refused by the gate (spec 055 R2.1), so the
+  # recorded toolchain carries one real directory beside the system set.
+  SCRATCH_RECORDED_BIN="$ROOT/scratch-recorded-bin"
 
-  mkdir -p "$payload/core-rules/githooks" "$payload/scripts" "$prior_hooks" \
+  mkdir -p "$SCRATCH_RECORDED_BIN" "$payload/core-rules/githooks" "$payload/scripts" "$prior_hooks" \
     "$SCRATCH_PROJECT" "$SCRATCH_CALLER_HOME" "$SCRATCH_CALLER_TMP" "$SCRATCH_WITNESS"
   git init -q "$SCRATCH_PROJECT"
   common="$(git -C "$SCRATCH_PROJECT" rev-parse --git-common-dir)" || return 1
@@ -735,13 +900,14 @@ CONTROL
   jq -n \
     --arg checkout "$checkout" --arg worktree "$worktree" \
     --arg root "$SCRATCH_PROJECT" --arg payload "$payload" \
-    --arg managed "$managed" --arg prior "$prior_hooks" '
+    --arg managed "$managed" --arg prior "$prior_hooks" \
+    --arg recorded "$SCRATCH_RECORDED_BIN" '
     {
       schema_version:1, status:"committed", fleet:"personal",
       project_id:"scratch-fixture", checkout_id:$checkout, worktree_id:$worktree,
       attachment_id:"00000000-0000-0000-0000-000000000003",
       project_root:$root, worktree_root:$root, release:"1.2.3",
-      toolchain_path:["/usr/bin","/bin"],
+      toolchain_path:[$recorded,"/usr/bin","/bin"],
       artifacts:[{path:".trellis/runtime",kind:"symlink",target:$payload}],
       git_hooks:{
         enabled:true, managed_hooks_path:$managed, previous_hooks_path:$prior,
@@ -872,6 +1038,114 @@ PY
   leftovers="$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)"
   [ -z "$leftovers" ] || { echo "command scratch leaked: $leftovers"; false; }
   [ ! -e "$carrier_alloc" ] || { echo "carrier allocation survived cleanup"; false; }
+}
+
+@test "gate HOME is private mode 700 and cleaned on success, failure and SIGTERM" {
+  local fixture_root="$ROOT"
+  for outcome in success failure term; do
+    ROOT="$fixture_root/$outcome"
+    mkdir -p "$ROOT"
+    case "$outcome" in
+      success) body='exit 0'; expected=0 ;;
+      failure) body='exit 9'; expected=9 ;;
+      term) body='kill -TERM "$PPID"; exit 0'; expected=143 ;;
+    esac
+    SCRATCH_CARRIER_BODY='printf "GATE_HOME=%s\nGATE_OWNER=%s\nGATE_MODE=%s\n" "$HOME" "$(stat -f %u "$HOME")" "$(stat -f %Lp "$HOME")" >> '"$ROOT"'/gate-homes.txt
+[ -d "$HOME" ] && [ ! -L "$HOME" ] || exit 20
+'"$body" prepare_scratch_fixture
+    run_scratch_pre_push
+    [ "$status" -eq "$expected" ] || { printf '%s\n' "$output"; false; }
+    gate_home="$(sed -n 's/^GATE_HOME=//p' "$ROOT/gate-homes.txt" | tail -n 1)"
+    case "$gate_home" in "$SCRATCH_ROOT_DIR"/.cmd.*/gate-home) ;; *) echo "wrong gate HOME: $gate_home"; false ;; esac
+    grep -Fx "GATE_OWNER=$(id -u)" "$ROOT/gate-homes.txt" >/dev/null
+    grep -Fx 'GATE_MODE=700' "$ROOT/gate-homes.txt" >/dev/null
+    [ ! -e "$gate_home" ] || { echo "gate HOME survived: $gate_home"; false; }
+    [ -z "$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)" ]
+  done
+  ROOT="$fixture_root"
+}
+
+@test "gate preserves XDG Corepack and Git pins while control and prior paths retain HOME" {
+  SCRATCH_CARRIER_BODY='{
+  printf "GATE_HOME=%s\n" "$HOME"
+  printf "GATE_XDG_CONFIG=%s\n" "$XDG_CONFIG_HOME"
+  printf "GATE_XDG_CACHE=%s\n" "$XDG_CACHE_HOME"
+  printf "GATE_COREPACK=%s\n" "$COREPACK_HOME"
+  printf "GATE_GIT_NOSYSTEM=%s\n" "$GIT_CONFIG_NOSYSTEM"
+  printf "GATE_GIT_GLOBAL=%s\n" "$GIT_CONFIG_GLOBAL"
+} >> '"$ROOT"'/gate-env.txt
+exit 0' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  gate_home="$(sed -n 's/^GATE_HOME=//p' "$ROOT/gate-env.txt")"
+  case "$gate_home" in "$SCRATCH_ROOT_DIR"/.cmd.*/gate-home) ;; *) false ;; esac
+  grep -Fx "GATE_XDG_CONFIG=$SCRATCH_MANAGED_HOME/state/gate-xdg/config" "$ROOT/gate-env.txt" >/dev/null
+  grep -Fx "GATE_XDG_CACHE=$SCRATCH_MANAGED_HOME/state/gate-xdg/cache" "$ROOT/gate-env.txt" >/dev/null
+  grep -Fx "GATE_COREPACK=$SCRATCH_MANAGED_HOME/state/gate-xdg/cache/node/corepack" "$ROOT/gate-env.txt" >/dev/null
+  grep -Fx 'GATE_GIT_NOSYSTEM=1' "$ROOT/gate-env.txt" >/dev/null
+  grep -Fx 'GATE_GIT_GLOBAL=/dev/null' "$ROOT/gate-env.txt" >/dev/null
+  grep -Fx "PRIOR_HOME=$SCRATCH_CALLER_HOME" "$SCRATCH_WITNESS/prior.txt" >/dev/null
+  run env "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$SCRATCH_CALLER_HOME" \
+    /bin/bash -c 'cd "$1" && "$2" old new 1' _ "$SCRATCH_PROJECT" "$SCRATCH_POST_DISPATCHER"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  # This seed is a control-plane payload: the existing HOME=/dev/null assertions above remain unchanged.
+  grep -Fx '    HOME=/dev/null \' "$SCRATCH_POST_DISPATCHER" >/dev/null
+}
+
+@test "gate home gitconfig cannot override the global Git configuration pin" {
+  SCRATCH_CARRIER_BODY='git config --file "$HOME/.gitconfig" alias.gate-home-probe "status" || exit 19
+[ "$GIT_CONFIG_GLOBAL" = /dev/null ] || exit 20
+if git config --global --get alias.gate-home-probe >/dev/null; then exit 21; fi
+if git gate-home-probe >/dev/null 2>&1; then exit 22; fi
+printf "GIT_PIN=ok\n" >> '"$ROOT"'/git-pin.txt' prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  grep -Fx GIT_PIN=ok "$ROOT/git-pin.txt" >/dev/null
+}
+
+@test "gate writes and reads both macOS auth paths without touching caller HOME" {
+  mkdir -p "$ROOT/sentinel-home/.config" "$ROOT/sentinel-home/Library/Application Support/turborepo"
+  printf 'caller\n' > "$ROOT/sentinel-home/.config/token"
+  printf 'existing\n' > "$ROOT/sentinel-home/Library/Application Support/turborepo/auth.json"
+  SCRATCH_CARRIER_BODY='[ "$HOME" != '"$ROOT"'/sentinel-home ] || exit 20
+for app in turborepo com.vercel.cli; do
+  target="$HOME/Library/Application Support/$app/auth.json"
+  mkdir -p "$(dirname "$target")" || exit 21
+  printf "%s\n" "$app-private" > "$target" || exit 22
+  [ "$(cat "$target")" = "$app-private" ] || exit 23
+done
+printf "AUTH_HOME=%s\n" "$HOME" >> '"$ROOT"'/auth-home.txt' prepare_scratch_fixture
+  before="$(tar -cf - -C "$ROOT/sentinel-home" . | shasum -a 256)"
+  # Use the sentinel as the caller HOME; the prior-hook fixture is not used to read it.
+  SCRATCH_CALLER_HOME="$ROOT/sentinel-home"
+  run_scratch_pre_push
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  after="$(tar -cf - -C "$ROOT/sentinel-home" . | shasum -a 256)"
+  [ "$before" = "$after" ] || { echo 'caller HOME changed'; false; }
+  auth_home="$(sed -n 's/^AUTH_HOME=//p' "$ROOT/auth-home.txt")"
+  case "$auth_home" in "$SCRATCH_ROOT_DIR"/.cmd.*/gate-home) ;; *) false ;; esac
+  [ ! -e "$auth_home" ]
+}
+
+@test "gate refuses mkdir failure before invoking the project carrier" {
+  SCRATCH_CARRIER_BODY='printf "RAN\n" >> '"$ROOT"'/ran.txt' prepare_scratch_fixture
+  # Test-only hook: inject a shell function into this generated dispatcher, not the production generator.
+  python3 - "$SCRATCH_PRE_DISPATCHER" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+assert s.count('trellis_run_gate_payload() {') == 1
+s = s.replace('trellis_run_gate_payload() {', 'trellis_run_gate_payload() {\n  mkdir() { return 1; }', 1)
+open(p, 'w').write(s)
+PY
+  run_scratch_pre_push
+  [ "$status" -ne 0 ]
+  case "$output" in
+    'trellis gate: refused (gate-home): could not create '"$SCRATCH_ROOT_DIR"/.cmd.*/gate-home) ;;
+    *) printf '%s\n' "$output"; false ;;
+  esac
+  [ ! -e "$ROOT/ran.txt" ]
+  [ -z "$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)" ]
 }
 
 @test "control-plane stage receives the private scratch as TMPDIR" {

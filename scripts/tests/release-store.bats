@@ -8,6 +8,7 @@ RELEASE_STORE_LIB="$REPO_ROOT/scripts/lib/release-store.sh"
 LOCAL_FLEET_FIXTURES="$REPO_ROOT/scripts/tests/fixtures/local-fleets"
 ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 REGISTRY_LIB="$REPO_ROOT/scripts/lib/local-registry.sh"
+load helpers/payload-fixture
 # release.sh admits a TMPDIR candidate only when it is a private mode-0700
 # `.cmd.*` child of THAT home's command scratch root, the shape the stable
 # launcher builds. This suite drives the installed payload by pathname, so it
@@ -2063,4 +2064,41 @@ EOF
     \( -name '.tmp.*.exec.*' -o -name '.tmp.*.exec.*.owner.json' \) \
     -print 2>&1)"
   [ -z "$leftover" ] || { echo "post-creation snapshot leaked: $leftover"; false; }
+}
+
+# Spec 055 A3.4, the store half (the launcher half is in trellis-launcher.bats).
+# The released 1.3.6 store, unchanged, installs a packaged tag from a remote
+# whose main has moved past the release commit and never contained the payload
+# commit. The inversion is the same store on the unfiltered release-commit tag:
+# it records the excluded entries, so the "none" assertion can fail.
+@test "A3.4 the v1.3.6 store installs a packaged off-main tag with no excluded entries" {
+  local v136="$SANDBOX/v1.3.6" src="$SANDBOX/packaged-source" remote="$SANDBOX/packaged-remote.git"
+  local unfiltered="$SANDBOX/unfiltered-remote.git" home record
+  payload_fixture_v136 "$v136" scripts/lib/release-store.sh scripts/lib/semver.sh
+  payload_fixture_source "$src" 7.7.7
+  payload_fixture_package "$src"
+  payload_fixture_tag "$src" 7.7.7 "$PAYLOAD_FIXTURE_PAYLOAD"
+  payload_fixture_remote "$src" "$remote" 7.7.7
+  [ -z "$(payload_fixture_git --git-dir="$remote" rev-list main | grep -x "$PAYLOAD_FIXTURE_PAYLOAD")" ]
+  [ -n "$(payload_fixture_git --git-dir="$remote" rev-list main | grep -x "$PAYLOAD_FIXTURE_RELEASE")" ]
+  [ "$(payload_fixture_git --git-dir="$remote" rev-parse main)" != "$PAYLOAD_FIXTURE_RELEASE" ]
+
+  home="$SANDBOX/v136-store-packaged"
+  run env TRELLIS_HOME="$home" bash -c '. "$1"; release_store_install 7.7.7 "$2" ""' _ \
+    "$v136/scripts/lib/release-store.sh" "$remote"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  record="$home/releases/7.7.7/release.json"
+  [ "$(jq -r .commit "$record")" = "$PAYLOAD_FIXTURE_PAYLOAD" ]
+  [ "$(payload_fixture_excluded_entries "$record")" -eq 0 ]
+  jq -e '[.tree[].path] | index("core-rules/VERSION") and index("core-rules/hooks/x.sh")' "$record" >/dev/null
+  [ ! -e "$home/releases/7.7.7/payload/specs" ]
+
+  payload_fixture_unfiltered_remote "$src" "$unfiltered" 7.7.7
+  home="$SANDBOX/v136-store-unfiltered"
+  run env TRELLIS_HOME="$home" bash -c '. "$1"; release_store_install 7.7.7 "$2" ""' _ \
+    "$v136/scripts/lib/release-store.sh" "$unfiltered"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  record="$home/releases/7.7.7/release.json"
+  [ "$(jq -r .commit "$record")" = "$PAYLOAD_FIXTURE_RELEASE" ]
+  [ "$(payload_fixture_excluded_entries "$record")" -eq 5 ]
 }

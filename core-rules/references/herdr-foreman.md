@@ -43,9 +43,11 @@ to review:
   The orchestrator keeps full height because it is where the operator reads and
   coordinates; foremen are glanced at, not read line by line. Fill all four slots
   before giving the fifth foreman an overflow tab rather than shrinking the
-  orchestrator or crowding the operator's working tab. Preserve operator focus.
-  `--tab <label>` prefers an existing labelled tab with room, then the caller's
-  tab with room, and labels a new tab only when both are full or unavailable.
+  orchestrator or crowding the operator's working tab. Panes remain visible in
+  the grid; `foreman-start.sh` passes `--no-focus` to the split and both
+  overflow-move call sites so the operator's focused pane and active tab do not
+  change. `--tab <label>` prefers an existing labelled tab with room, then the
+  caller's tab with room, and labels a new tab only when both are full or unavailable.
 - Prefer visible panes when the operator needs to watch the work; reserve
   headless runs for throwaway bounded work.
 - Close each owned foreman or worker pane as soon as its output is accepted,

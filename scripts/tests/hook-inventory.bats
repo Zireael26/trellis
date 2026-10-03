@@ -6,7 +6,7 @@ ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 # exact local-template registration assertion below.
 is_local_template_only_hook() {
   case "$1" in
-    wiki-skill-suggest.sh) return 0 ;;
+    wiki-skill-suggest.sh|hookspath-guard.sh) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -62,6 +62,29 @@ core-rules/templates/codex-hooks.local.json|core-rules/codex/hooks.json|core-rul
 EOF
 }
 
+# spec 055 R4.4: the advisory PostToolUse(Bash) hookspath-guard is wired once per
+# local template behind a missing-script guard, so a rollback to a payload that
+# lacks it leaves Bash working. It is the one command with that guard, and it
+# falls back to nothing.
+@test "hookspath-guard is wired once per local template behind a missing-script guard" {
+  local template legacy hook_path prefix command expected
+  while IFS='|' read -r template legacy hook_path prefix; do
+    command="$(jq -r --arg path "$hook_path" '
+      [.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[] | .command
+       | select(contains("/" + $path + "\""))] | if length == 1 then .[0] else error("not wired once") end
+    ' "$ROOT/$template")" || { echo "hookspath-guard not wired exactly once in $template"; false; }
+    expected="h=\"$prefix/.trellis/runtime/$hook_path\"; [ -f \"\$h\" ] || exit 0; TRELLIS_ROOT=\"$prefix/.trellis/runtime\" \"\$h\""
+    [ "$command" = "$expected" ] || { printf 'got:  %s\nwant: %s\n' "$command" "$expected"; false; }
+    jq -e '[.. | strings | select(contains("hookspath-guard"))] | length == 1' "$ROOT/$template" >/dev/null
+    jq -e '[.. | strings | select(contains("|| exit 0"))] | length == 1' "$ROOT/$template" >/dev/null
+    jq -e '[.. | strings | select(contains("hookspath-guard"))] | length == 0' "$ROOT/$legacy" >/dev/null ||
+      { echo "hookspath-guard leaked into legacy manifest $legacy"; false; }
+  done <<'EOF'
+core-rules/templates/claude-settings.local.json|core-rules/templates/claude-settings.json|core-rules/hooks/hookspath-guard.sh|$CLAUDE_PROJECT_DIR
+core-rules/templates/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/hookspath-guard.sh|${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}
+EOF
+}
+
 # Every script at the top of a hook directory is EXECUTED by path — both harness
 # templates put the bare path in a `command`, with no `bash` prefix — so a hook
 # without the executable bit returns 126 in every attached project and the
@@ -99,4 +122,192 @@ EOF
   offenders="$(git -C "$ROOT" ls-files -s -- 'core-rules/hooks/*.sh' 'core-rules/codex/hooks/*.sh' |
     awk '$4 !~ /\/lib\// && $1 != "100755" { print $4 }' | tr '\n' ' ')"
   [ -z "$offenders" ] || { echo "hook scripts not 100755 in the index: $offenders"; false; }
+}
+
+# --- spec 055 R1.2/R1.5: Codex hook libraries, in place and deployed ----------
+#
+# The rendered .codex/hooks.json runs Codex hooks IN PLACE from the payload,
+# where core-rules/codex/hooks/lib/ holds only the Codex-local libs; the shared
+# cores live in core-rules/hooks/lib/. A deployed .codex/hooks/ or .pi/hooks/
+# gets every lib as a sibling through the manifest. A hook whose lib resolves in
+# one layout only is inert in the other, and a fallback outside the R1.1 guard
+# lets a deployed hook source <project>/hooks/lib/. The expected inventory is a
+# checked-in list, not derived from the hooks, so a dropped or new reference
+# fails here until the list is edited.
+
+# Libraries a Codex hook references by path, comment lines stripped.
+_codex_hook_lib_refs() {
+  local hook base lib
+  for hook in "$ROOT"/core-rules/codex/hooks/*.sh; do
+    base="${hook##*/}"
+    sed -E 's/^[[:space:]]*#.*$//' "$hook" |
+      grep -oiE '(lib|lib_dir)/[A-Za-z0-9_.-]+\.(sh|py)' |
+      sed 's|.*/||' | sort -u |
+      while IFS= read -r lib; do printf '%s\t%s\n' "$base" "$lib"; done
+  done
+}
+
+# Lib basenames the manifest links into <harness>'s deployed hooks/lib/.
+_deployed_hook_libs() {
+  local harness="$1" dir
+  jq -r --arg h "$harness" '
+    .harnesses[$h].links[]
+    | select((.destination // "") | test("^\\.[a-z]+/hooks/lib/[^/]+$"))
+    | .destination | split("/") | last
+  ' "$ROOT/core-rules/inheritance-manifest.json"
+  while IFS= read -r dir; do
+    find "$ROOT/$dir" -maxdepth 1 -type f -name '*.sh' -exec basename {} \;
+  done < <(jq -r --arg h "$harness" '
+    .harnesses[$h].links[]
+    | select((.destination_dir // "") | test("^\\.[a-z]+/hooks/lib$"))
+    | .source_children
+  ' "$ROOT/core-rules/inheritance-manifest.json")
+}
+
+# Echo "<lib>" for each ../../hooks/lib fallback in <hook> that sits inside an
+# R1.1 guard: the sibling assignment, then the fallback only when the resolved
+# script directory equals realpath($TRELLIS_ROOT)/core-rules/codex/hooks. Exit 1
+# on any fallback outside a guard. The three suffix-only guards the spec leaves
+# for a follow-up (session-context, stop-verify, post-compact-context) are
+# accepted in those three files only.
+_guarded_fallbacks() {
+  local hook="$1" base="${1##*/}" prev="" prev2="" line n=0 var dir rt lib
+  local guard_re='^[[:space:]]*if \[ ! -f "\$([A-Za-z_]+)" \] && \[ -n "\$([A-Za-z_]+)" \] && \[ "\$([A-Za-z_]+)" = "\$([A-Za-z_]+)/core-rules/codex/hooks" \]; then$'
+  local assign_re='^[[:space:]]*([A-Za-z_]+)="\$([A-Za-z_]+)/\.\./\.\./hooks/lib/([A-Za-z0-9_.-]+)"$'
+  local legacy_re='^[[:space:]]*\*/core-rules/codex/hooks\)[[:space:]]+[A-Za-z_]+="\$[A-Za-z_]+/\.\./\.\./hooks/lib/([A-Za-z0-9_.-]+)"[[:space:]]*;;$'
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [[ "$line" != *"../../hooks/lib/"* ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+      prev2="$prev" prev="$line"
+      continue
+    fi
+    if [[ "$line" =~ $legacy_re ]]; then
+      case "$base" in
+        session-context.sh|stop-verify.sh|post-compact-context.sh) printf '%s\n' "${BASH_REMATCH[1]}" ;;
+        *) echo "$base:$n: suffix-only fallback outside the R1.1 guard: $line"; return 1 ;;
+      esac
+    elif [[ "$line" =~ $assign_re ]] && var="${BASH_REMATCH[1]}" && dir="${BASH_REMATCH[2]}" && lib="${BASH_REMATCH[3]}" &&
+      [[ "$prev" =~ $guard_re ]] && [ "${BASH_REMATCH[1]}" = "$var" ] && [ "${BASH_REMATCH[3]}" = "$dir" ] &&
+      rt="${BASH_REMATCH[2]}" && [ "${BASH_REMATCH[4]}" = "$rt" ] &&
+      [ "$prev2" = "$var=\"\$$dir/lib/$lib\"" ] &&
+      grep -qxF -- "$dir=\$(unset CDPATH; cd -P -- \"\$(dirname -- \"\${BASH_SOURCE[0]}\")\" && pwd -P)" "$hook" &&
+      grep -qxF -- "$rt=\$(unset CDPATH; [ -n \"\${TRELLIS_ROOT:-}\" ] && cd -P -- \"\$TRELLIS_ROOT\" 2>/dev/null && pwd -P)" "$hook"; then
+      printf '%s\n' "$lib"
+    else
+      echo "$base:$n: ../../hooks/lib fallback outside the R1.1 guard: $line"
+      return 1
+    fi
+    prev2="$prev" prev="$line"
+  done < "$hook"
+}
+
+@test "Codex hook libraries match the expected inventory and resolve in place and deployed" {
+  local expected actual hook lib codex_libs pi_libs guarded missing=""
+  expected="$(grep -v '^#' "$ROOT/scripts/tests/fixtures/codex-hook-libs.tsv" | sed '/^$/d' | sort)"
+  actual="$(_codex_hook_lib_refs | sort)"
+  diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || {
+    echo "Codex hook lib references differ from scripts/tests/fixtures/codex-hook-libs.tsv (< expected, > actual)"
+    return 1
+  }
+
+  codex_libs="$(_deployed_hook_libs codex | sort -u)"
+  pi_libs="$(_deployed_hook_libs pi | sort -u)"
+  while IFS=$'\t' read -r hook lib; do
+    guarded="$(_guarded_fallbacks "$ROOT/core-rules/codex/hooks/$hook")" || { echo "$guarded"; return 1; }
+    if [ ! -f "$ROOT/core-rules/codex/hooks/lib/$lib" ]; then
+      { [ -f "$ROOT/core-rules/hooks/lib/$lib" ] && grep -qxF -- "$lib" <<<"$guarded"; } ||
+        missing="$missing $hook->$lib(in-place)"
+    fi
+    grep -qxF -- "$lib" <<<"$codex_libs" || missing="$missing $hook->$lib(.codex)"
+    grep -qxF -- "$lib" <<<"$pi_libs" || missing="$missing $hook->$lib(.pi)"
+  done <<<"$expected"
+  [ -z "$missing" ] || { echo "unreachable hook libs:$missing"; false; }
+
+  # R1.2: no fallback anywhere in the tree outside a guard, inventoried or not.
+  for hook in "$ROOT"/core-rules/codex/hooks/*.sh; do
+    _guarded_fallbacks "$hook" >/dev/null || { _guarded_fallbacks "$hook"; return 1; }
+  done
+}
+
+# --- spec 055 R1.1a: rendered in-place commands pin TRELLIS_ROOT --------------
+#
+# The R1.1 fallback is bound to TRELLIS_ROOT. Every rendered in-place command
+# must set it to the runtime it executes from, and that runtime must be the
+# rendered project's own. The renderer copies in-place commands verbatim, so the
+# template is the generator; this pins the rendered output, not the template.
+
+# _check_rendered_roots <rendered.json> <project>: echo the in-place count, or
+# fail naming the first bad command.
+_check_rendered_roots() {
+  local rendered="$1" project="$2" cmd root_expr path_expr root_val path_val runtime count=0
+  local re='^TRELLIS_ROOT="([^"]+)" "([^"]+)"$'
+  # The advisory hookspath-guard form (spec 055 R4.4): a missing script exits 0.
+  local guarded_re='^h="([^"]+)"; \[ -f "\$h" \] \|\| exit 0; TRELLIS_ROOT="([^"]+)" "\$h"$'
+  while IFS= read -r cmd; do
+    [[ "$cmd" == *".trellis/runtime/core-rules/"* ]] || continue
+    count=$((count + 1))
+    if [[ "$cmd" =~ $re ]]; then
+      root_expr="${BASH_REMATCH[1]}" path_expr="${BASH_REMATCH[2]}"
+    elif [[ "$cmd" =~ $guarded_re ]]; then
+      path_expr="${BASH_REMATCH[1]}" root_expr="${BASH_REMATCH[2]}"
+    else
+      echo "no TRELLIS_ROOT prefix: $cmd"
+      return 1
+    fi
+    root_val="$(cd "$project" && env -i PATH="$PATH" CODEX_PROJECT_DIR="$project" CLAUDE_PROJECT_DIR="$project" bash -c "printf '%s' \"$root_expr\"")"
+    path_val="$(cd "$project" && env -i PATH="$PATH" CODEX_PROJECT_DIR="$project" CLAUDE_PROJECT_DIR="$project" bash -c "printf '%s' \"$path_expr\"")"
+    runtime="${path_val%%/core-rules/*}"
+    [ "$runtime" = "$project/.trellis/runtime" ] || { echo "runs outside its project's runtime: $cmd"; return 1; }
+    [ "$(cd -P "$root_val" 2>/dev/null && pwd -P)" = "$(cd -P "$runtime" && pwd -P)" ] ||
+      { echo "TRELLIS_ROOT is not the runtime the command runs from: $cmd"; return 1; }
+  done < <(jq -r '.. | objects | .command? // empty | strings' "$rendered")
+  printf '%s\n' "$count"
+}
+
+_render_template() {
+  HOME="$RENDER_HOME" bash -c '
+    . "$1/scripts/lib/attachment.sh" || exit 90
+    context="$(attachment_contextual_render_context "$2")" || exit 91
+    attachment_contextual_template_render "$3" "$4" "$context"
+  ' _ "$ROOT" "$RENDER_TRELLIS_HOME" "$1" "$2"
+}
+
+@test "rendered in-place hook commands set TRELLIS_ROOT to their own project's runtime" {
+  local tmp project other entry name out count
+  tmp="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+  RENDER_HOME="$tmp/home" RENDER_TRELLIS_HOME="$tmp/trellis-home"
+  project="$tmp/project" other="$tmp/other"
+  mkdir -p "$RENDER_HOME/.local/bin" "$RENDER_TRELLIS_HOME" "$project/.trellis" "$other/.trellis" \
+    "$tmp/payload-a" "$tmp/payload-b"
+  printf '#!/bin/sh\n' > "$RENDER_HOME/.local/bin/trellis"
+  chmod +x "$RENDER_HOME/.local/bin/trellis"
+  ln -s "$tmp/payload-a" "$project/.trellis/runtime"
+  ln -s "$tmp/payload-b" "$other/.trellis/runtime"
+
+  for entry in claude-settings.local.json:20 codex-hooks.local.json:18; do
+    name="${entry%%:*}" out="$tmp/rendered-$name"
+    _render_template "$ROOT/core-rules/templates/$name" "core-rules/templates/$name" > "$out"
+    count="$(_check_rendered_roots "$out" "$project")" || { echo "$name: $count"; false; }
+    [ "$count" -eq "${entry##*:}" ] || { echo "$name: $count in-place commands"; false; }
+
+    # Inversion 1: one command loses its TRELLIS_ROOT prefix.
+    jq '(first(paths(strings) as $p | select(($p | last) == "command")
+            | select(getpath($p) | contains(".trellis/runtime/core-rules/")) | $p)) as $p
+        | setpath($p; getpath($p) | sub("^TRELLIS_ROOT=\"[^\"]+\" "; ""))' \
+      "$ROOT/core-rules/templates/$name" > "$tmp/no-root-$name"
+    _render_template "$tmp/no-root-$name" "core-rules/templates/$name" > "$out"
+    if _check_rendered_roots "$out" "$project" >/dev/null; then echo "$name: mutated render accepted"; false; fi
+
+    # Inversion 2: one command names another project's runtime.
+    jq --arg other "$other/.trellis/runtime" \
+      '(first(paths(strings) as $p | select(($p | last) == "command")
+            | select(getpath($p) | contains(".trellis/runtime/core-rules/")) | $p)) as $p
+        | setpath($p; getpath($p) | sub("^TRELLIS_ROOT=\"[^\"]+\""; "TRELLIS_ROOT=\"" + $other + "\""))' \
+      "$ROOT/core-rules/templates/$name" > "$tmp/wrong-project-$name"
+    _render_template "$tmp/wrong-project-$name" "core-rules/templates/$name" > "$out"
+    if _check_rendered_roots "$out" "$project" >/dev/null; then echo "$name: mutated render accepted"; false; fi
+  done
+
+  # pi runs its deployed .pi/hooks copies with the same binding.
+  grep -qF 'TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi "$HOOKS/$name"' "$ROOT/core-rules/pi/hooks/dispatch.sh"
 }

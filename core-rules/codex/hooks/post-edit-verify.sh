@@ -5,7 +5,7 @@
 # Contract:
 #   - Normalizes legacy file events and native multi-file apply_patch events.
 #   - Runs the per-file linter for every declared existing mutation target.
-#   - On failure: emits {"decision":"block","reason":...} on stdout, exit 2.
+#   - On failure: emits schema-valid JSON on stdout and feedback on stderr, exit 2.
 #   - On success / non-code file / no linter: exit 0 silently.
 #
 # Dependencies: jq (required). Linters are opportunistic: absence → skip.
@@ -28,8 +28,14 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "post-edit-verify"
 
-__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
-[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+# Sibling first; the in-place fallback applies only inside the declared
+# runtime's Codex tree (spec 055 R1.1), never a project-controlled hooks/lib/.
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+__ta_lib="$__h_dir/lib/action-normalize.sh"
+if [ ! -f "$__ta_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __ta_lib="$__h_dir/../../hooks/lib/action-normalize.sh"
+fi
 [ -f "$__ta_lib" ] || { echo "post-edit-verify: missing action normalizer — re-run sync-codex-hooks" >&2; exit 1; }
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"
@@ -180,6 +186,7 @@ if [ -n "$ERRORS" ]; then
   REASON="Lint failed — fix before continuing:
 ${TRUNCATED}"
   jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
+  printf '%s\n' "$REASON" >&2
   exit 2
 fi
 

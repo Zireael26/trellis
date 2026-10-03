@@ -324,6 +324,48 @@ mirror_require_verified_ssh_socket() {
   printf '%s\n' "$canonical"
 }
 
+# The one git call that dials out for a read: the release tag and main are
+# fetched from the release remote (or a local checkout via --source-repo).
+# Unlike mirror_git it must allow the local `file` transport, which is how the
+# installers and every fixture reach a path remote; the remote itself is
+# screened by mirror_remote_transport_is_allowed first.
+mirror_git_fetch() {
+  local socket="${TRELLIS_VERIFIED_SSH_AUTH_SOCK:-}"
+  /usr/bin/env -i \
+    "HOME=${HOME:-/}" \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    ${socket:+"SSH_AUTH_SOCK=$socket"} \
+    "GIT_TERMINAL_PROMPT=0" \
+    "GIT_CONFIG_NOSYSTEM=1" \
+    "GIT_CONFIG_GLOBAL=/dev/null" \
+    "GIT_CONFIG_COUNT=5" \
+    "GIT_CONFIG_KEY_0=core.fsmonitor" \
+    "GIT_CONFIG_VALUE_0=false" \
+    "GIT_CONFIG_KEY_1=core.hooksPath" \
+    "GIT_CONFIG_VALUE_1=/dev/null" \
+    "GIT_CONFIG_KEY_2=core.sshCommand" \
+    "GIT_CONFIG_VALUE_2=/usr/bin/ssh -oBatchMode=yes" \
+    "GIT_CONFIG_KEY_3=credential.helper" \
+    "GIT_CONFIG_VALUE_3=" \
+    "GIT_CONFIG_KEY_4=protocol.ext.allow" \
+    "GIT_CONFIG_VALUE_4=never" \
+    /usr/bin/git "$@"
+}
+
+# Twin of launcher_bootstrap_remote_transport_is_allowed
+# (scripts/trellis-launcher.sh): unauthenticated http:// and git:// and every
+# command transport are refused.
+mirror_remote_transport_is_allowed() {
+  case "${1:-}" in
+    https://*|ssh://*|git+ssh://*|file://*) return 0 ;;
+    *://*) return 1 ;;
+    *::*) return 1 ;;
+    /*) return 0 ;;
+    *@*:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 mirror_git_push() {
   local socket="$1"
   shift
@@ -353,16 +395,25 @@ mirror_git_push() {
 
 # shellcheck source=lib/mirror-lint.sh
 . "$SCRIPT_DIR/lib/mirror-lint.sh"
+# shellcheck source=lib/release-store.sh
+. "$SCRIPT_DIR/lib/release-store.sh"
 
 usage() {
   cat <<'EOF'
 Usage:
-  trellis mirror --template-dir PATH [--dry-run|--apply|--push]
+  trellis mirror --template-dir PATH [--dry-run|--apply|--push] [--source-repo PATH]
 
 Stages portable policy/tools from the verified immutable release into PATH.
 --dry-run is the default and validates a simulated post-sync mirror without
 changing PATH. --apply writes only after staged and simulated whole-tree lint
 passes. --push also offers an interactive commit and push after apply.
+
+The release tag and main are fetched from the installed release's remote to
+pin the tag to the installed commit and to restore the test paths the mirror
+already publishes from the payload commit's verified parent. The mirror refuses
+when that fetch fails. --source-repo PATH fetches both from a local checkout
+instead in any mode, with the same commit, tree and parent verification. It reads
+that checkout's local main, so update it first.
 EOF
 }
 
@@ -409,6 +460,7 @@ mirror_require_real_root() {
 apply=false
 push=false
 template_dir=""
+source_repo=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -421,6 +473,12 @@ while [ "$#" -gt 0 ]; do
       template_dir="$1"
       ;;
     --template-dir=*) template_dir="${1#--template-dir=}" ;;
+    --source-repo)
+      shift
+      [ "$#" -gt 0 ] || { printf 'trellis mirror: --source-repo requires PATH\n' >&2; exit 2; }
+      source_repo="$1"
+      ;;
+    --source-repo=*) source_repo="${1#--source-repo=}" ;;
     --help|-h) usage; exit 0 ;;
     *) printf 'trellis mirror: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -431,6 +489,16 @@ done
   printf 'trellis mirror: --template-dir PATH is required\n' >&2
   exit 2
 }
+if [ -n "$source_repo" ]; then
+  case "$source_repo" in
+    /*) ;;
+    *) printf 'trellis mirror: --source-repo must be an absolute path: %s\n' "$source_repo" >&2; exit 2 ;;
+  esac
+  source_repo="$(CDPATH='' cd -P -- "$source_repo" 2>/dev/null && pwd -P)" || {
+    printf 'trellis mirror: --source-repo is not a directory\n' >&2
+    exit 5
+  }
+fi
 template_dir="$(mirror_require_real_root "$template_dir")" || exit "$?"
 [ -d "$template_dir/.git" ] && [ ! -L "$template_dir/.git" ] || {
   printf 'trellis mirror: template repository not found at %s\n' "$template_dir" >&2
@@ -448,8 +516,16 @@ sync_paths=(
   'AGENT_SETUP.md'
   'AGENT_UPGRADE.md'
   'AGENT_ONBOARD_PROJECT.md'
-  'AGENT_PI_SETUP.md'
-  'docs/PI-COMPUTER-USE.md'
+  # 'AGENT_PI_SETUP.md' is HELD, not delisted (Spec 053 C7). The updated guide
+  # installs core-rules/pi/extensions/trellis-web-search.ts, which a
+  # cross-family security review blocked, so the guide must not publish ahead
+  # of it. Leaving the path out of this allowlist means the sync neither
+  # copies nor removes it: the previously published guide stays public,
+  # unchanged, until the review approves. Do not add it to delist_prune.
+  # 'docs/PI-COMPUTER-USE.md' is HELD on the same terms and for the same review:
+  # its update describes the held guide's base (0.87.1, the /mcp connect in
+  # step 5), so publishing it alone would make the public docs disagree. The
+  # previously published copy stays public, unchanged. Not in delist_prune.
   'docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md'
   'docs/pi-web-search.md'
   'CHANGELOG.md'
@@ -537,6 +613,17 @@ payload_no_publish=(
   'scripts/lib/usage_federation'
   # Its test suite names the same provider modules, so it is withheld with it.
   'scripts/tests/usage-federation.bats'
+  # Spec 056 publish hold (supersedes the spec 053 C7 BLOCK): the pi web-search
+  # extension ships to the mirror only after its cross-family security
+  # re-review. The hold is lifted by removing these entries and their
+  # delist_prune pairs. Its tests use the provider's capitalised spelling, which
+  # the mirror-lint path-scoped allowance does not yet cover.
+  'core-rules/pi/extensions/trellis-web-search.ts'
+  'core-rules/pi/extensions/tests'
+  # The guide-parity tooling proves the held guide; it checks for the withheld
+  # extension, so it would fail in a mirror that has neither. Withheld with it.
+  'scripts/pi-guide-parity.sh'
+  'scripts/tests/pi-guide-parity.bats'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -551,6 +638,10 @@ payload_no_publish=(
 delist_prune=(
   'scripts/lib/usage_federation'
   'scripts/tests/usage-federation.bats'
+  'core-rules/pi/extensions/trellis-web-search.ts'
+  'core-rules/pi/extensions/tests'
+  'scripts/pi-guide-parity.sh'
+  'scripts/tests/pi-guide-parity.bats'
   'core-rules/pi/agents'
   'core-rules/usage-federation'
   'docs/antigravity-steering.md'
@@ -998,6 +1089,154 @@ check_payload_core_rules_coverage() {
   return "$rc"
 }
 
+# From 1.3.7 a release tag names a payload commit: the approved release commit
+# minus the directories in core-rules/payload-exclude.txt (spec 055 Unit 3).
+# The installed payload has no tests, but the public mirror stays complete: the
+# test paths it already publishes are restored from the payload commit's first
+# parent, and only after that parent has been pinned and verified.
+#
+# mirror_pin_release_source fetches the installed release's tag and main into a
+# private repository and requires three commits to be equal: the fetched tag's,
+# the `.commit` of a release.json rebuilt from the fetch the way the installers
+# build it, and the installed `.commit`. The rebuilt `.tree` must equal the
+# installed `.tree` too. A tag whose tree has no exclusion list is a legacy,
+# unfiltered release: it is staged from its payload alone and nothing is taken
+# from any parent. Otherwise `release-payload-commit.sh --verify-tag` must pass
+# with the fetched main as origin/main. A failed fetch refuses: a payload-only
+# publish would drop the tests.
+RELEASE_SOURCE_WORK=""
+RESTORE_REPO=""
+RESTORE_PARENT=""
+RELEASE_EXCLUDE_LIST="core-rules/payload-exclude.txt"
+
+mirror_pin_release_source() {
+  local release_json="$PAYLOAD_ROOT/../release.json" tag remote source repo tag_commit
+  local installed_commit fetched_commit tsv entry mode type oid path parent
+
+  command -v jq >/dev/null 2>&1 || {
+    printf 'trellis mirror: jq is required to pin the release identity\n' >&2
+    return 5
+  }
+  tag="$(jq -r '.tag' "$release_json")" && remote="$(jq -r '.remote' "$release_json")" &&
+    installed_commit="$(jq -r '.commit' "$release_json")" || {
+    printf 'trellis mirror: verified release record is unreadable\n' >&2
+    return 5
+  }
+  [ "$tag" = "v$RELEASE_VERSION" ] && [ "$installed_commit" = "$SOURCE_COMMIT" ] || {
+    printf 'trellis mirror: verified release record does not name tag v%s at commit %s\n' \
+      "$RELEASE_VERSION" "$SOURCE_COMMIT" >&2
+    return 4
+  }
+  case "$remote" in
+    ''|*$'\t'*|*$'\n'*|*$'\r'*)
+      printf 'trellis mirror: verified release record has no usable remote\n' >&2
+      return 4
+      ;;
+  esac
+  if [ -n "$source_repo" ]; then
+    source="$source_repo"
+  else
+    source="$remote"
+    mirror_remote_transport_is_allowed "$source" || {
+      printf 'trellis mirror: release remote uses a transport that cannot authenticate its origin: %s\n' "$source" >&2
+      return 4
+    }
+  fi
+
+  RELEASE_SOURCE_WORK="$(mktemp -d "${TMPDIR:-/tmp}/trellis-mirror-release.XXXXXX")" || return 5
+  repo="$RELEASE_SOURCE_WORK/repo"
+  mirror_git init -q "$repo" || return 5
+  printf '==> Fetching %s and main from %s\n' "$tag" "$source"
+  mirror_git_fetch -C "$repo" fetch -q --no-tags -- "$source" \
+    "refs/tags/$tag:refs/tags/$tag" "refs/heads/main:refs/remotes/origin/main" || {
+    printf 'trellis mirror: could not fetch %s and main from %s; refusing to publish without the verified parent (a payload-only publish would drop the tests)\n' \
+      "$tag" "$source" >&2
+    return 5
+  }
+
+  tag_commit="$(mirror_git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}")" || {
+    printf 'trellis mirror: fetched %s does not resolve to a commit\n' "$tag" >&2
+    return 4
+  }
+  tsv="$RELEASE_SOURCE_WORK/tree.tsv"
+  : > "$tsv"
+  while IFS= read -r -d '' entry; do
+    mode="${entry%% *}"
+    entry="${entry#* }"
+    type="${entry%% *}"
+    entry="${entry#* }"
+    oid="${entry%%	*}"
+    path="${entry#*	}"
+    [ "$type" = blob ] || {
+      printf 'trellis mirror: fetched %s has an unsupported tree entry: %s\n' "$tag" "$path" >&2
+      return 4
+    }
+    printf '%s\t%s\t%s\n' "$mode" "$oid" "$path" >> "$tsv"
+  done < <(mirror_git -C "$repo" ls-tree -rz "$tag_commit")
+  release_store_write_manifest_json "$tsv" "$RELEASE_SOURCE_WORK/release.json" \
+    "$RELEASE_VERSION" "$tag" "$tag_commit" "$remote" || return 5
+  fetched_commit="$(jq -r '.commit' "$RELEASE_SOURCE_WORK/release.json")" || return 5
+  printf '==> Pinning %s: tag commit %s, fetched record %s, installed record %s\n' \
+    "$tag" "$tag_commit" "$fetched_commit" "$installed_commit"
+  [ "$tag_commit" = "$installed_commit" ] && [ "$fetched_commit" = "$installed_commit" ] || {
+    printf 'trellis mirror: release identity mismatch: %s names commit %s but the installed release records %s\n' \
+      "$tag" "$tag_commit" "$installed_commit" >&2
+    return 4
+  }
+  jq -cS '.tree | sort_by(.path) | .[]' "$RELEASE_SOURCE_WORK/release.json" > "$RELEASE_SOURCE_WORK/fetched.tree"
+  jq -cS '.tree | sort_by(.path) | .[]' "$release_json" > "$RELEASE_SOURCE_WORK/installed.tree"
+  cmp -s "$RELEASE_SOURCE_WORK/fetched.tree" "$RELEASE_SOURCE_WORK/installed.tree" || {
+    printf 'trellis mirror: release identity mismatch: the tree of fetched %s differs from the installed release tree\n' "$tag" >&2
+    diff "$RELEASE_SOURCE_WORK/fetched.tree" "$RELEASE_SOURCE_WORK/installed.tree" | sed -n '2,5p' >&2
+    return 4
+  }
+
+  if ! mirror_git -C "$repo" cat-file -e "$tag_commit:$RELEASE_EXCLUDE_LIST" 2>/dev/null; then
+    printf '==> %s is a legacy unfiltered release: staging from its payload alone, nothing restored\n' "$tag"
+    return 0
+  fi
+  parent="$(mirror_git -C "$repo" rev-parse -q --verify "$tag_commit^1")" || {
+    printf 'trellis mirror: payload commit %s has no parent to restore tests from\n' "$tag_commit" >&2
+    return 4
+  }
+  printf '==> Verifying %s against its first parent %s\n' "$tag" "$parent"
+  (
+    cd "$repo" || exit 5
+    /usr/bin/env -i "HOME=${HOME:-/}" "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "TMPDIR=$RELEASE_SOURCE_WORK" \
+      "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null" \
+      /bin/bash --noprofile --norc "$SCRIPT_DIR/release-payload-commit.sh" --verify-tag "$tag" "$parent"
+  ) || {
+    printf 'trellis mirror: %s failed --verify-tag; refusing to restore anything from its parent\n' "$tag" >&2
+    return 4
+  }
+  RESTORE_REPO="$repo"
+  RESTORE_PARENT="$parent"
+}
+
+# Restore, from the verified parent, each listed path the mirror publishes:
+# the allowlist minus core_rules_no_sync. payload_no_publish entries inside a
+# restored directory are dropped by stage_verified_payload's own redaction pass,
+# which runs after this. specs/ is not allowlisted, so it is never restored.
+mirror_restore_published_tests() {
+  local entry
+  [ -n "$RESTORE_PARENT" ] || return 0
+  while IFS= read -r entry; do
+    case "$entry" in ''|'#'*) continue ;; esac
+    safe_prune_path "${entry%/}" || {
+      printf 'trellis mirror: unsafe exclusion list entry: %s\n' "$entry" >&2
+      return 4
+    }
+    sync_path_covers_ref "$entry" || continue
+    core_rules_private_ref "$entry" && continue
+    printf '  restore from parent: %s\n' "$entry"
+    mirror_git -C "$RESTORE_REPO" archive --format=tar "$RESTORE_PARENT" -- "${entry%/}" |
+      tar -x -f - -C "$stage" || {
+      printf 'trellis mirror: could not restore %s from the verified parent\n' "$entry" >&2
+      return 5
+    }
+  done < "$PAYLOAD_ROOT/$RELEASE_EXCLUDE_LIST"
+}
+
 stage_verified_payload() {
   local path source destination staged_path
   for path in "${sync_paths[@]}"; do
@@ -1042,6 +1281,13 @@ stage_verified_payload() {
   # payload links.
   find -P "$stage" -type d -exec chmod u+rwx {} + || return 5
   find -P "$stage" -type f -exec chmod u+rw {} + || return 5
+  if [ -n "$RESTORE_PARENT" ]; then
+    mirror_restore_published_tests || return "$?"
+    mirror_validate_symlinks "$stage" || {
+      printf 'trellis mirror: restored tests contain unsafe symlinks\n' >&2
+      return 4
+    }
+  fi
   while IFS= read -r -d '' staged_path; do
     rm -f "$staged_path" || return 5
   done < <(find -P "$stage" \( -type f -o -type l \) \( -name '.DS_Store' -o -name '*.swp' -o -name 'check-secrets.bats' \) -print0)
@@ -1271,7 +1517,8 @@ stage="$(CDPATH='' cd -P -- "$stage_tmp" && pwd -P)" || {
   printf 'trellis mirror: unable to canonicalize staging directory\n' >&2
   exit 5
 }
-trap 'rm -rf "$stage"' EXIT INT TERM
+trap 'rm -rf "$stage" ${RELEASE_SOURCE_WORK:+"$RELEASE_SOURCE_WORK"}' EXIT INT TERM
+mirror_pin_release_source || exit "$?"
 printf '==> Staging portable policy from verified commit %s\n' "$SOURCE_COMMIT"
 stage_verified_payload || exit "$?"
 

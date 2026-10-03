@@ -452,6 +452,21 @@ itself: `trellis release install <active_cli_release> [--remote URL]`. It
 accepts no other version and no other flag, so bootstrapping never needs a
 mutable source dispatcher.
 
+**The heavy route carries the caller's environment.** `trellis heavy [--lane NAME]
+[--timeout SECONDS] -- <cmd...>` is the one route whose child is an arbitrary workload
+rather than Trellis code, so the launcher relays the caller's environment to it as an
+opaque blob that only the heavy supervisor decodes, for the wrapped command alone, and
+forwards HUP, INT and TERM to it. The command waits for one of `heavy_slots` machine-wide
+slots (`$TRELLIS_HOME/config.json`, default 2), runs in its own process group, and holds
+the slot until that group is empty; `--timeout` counts from launch, not from the wait.
+`--light` uses a separate pool (`heavy_light_slots`, default 4) for single-file or
+targeted runs expected to take under 2 minutes; a light run past 120 s prints one
+advisory line. `--check` exits 78 on a bad config and `--status` lists both pools. Lowering
+`heavy_slots` never evicts a holder: retired slots drain as their runs finish. A nested
+call inside a held slot of either pool, and any fan-out under it, counts as the same one
+workload and takes no slot. The gate is accounting, not a sandbox: a descendant that
+calls `setsid` leaves the count. The process gate's test battery runs through it (spec 054).
+
 **No publication side effects.** No release, adoption, or upgrade command tags,
 pushes, or mirrors. Tagging and public-mirror publication are the separate,
 separately gated operations of §7.2.
@@ -797,7 +812,10 @@ immutable release boundaries apply.
 release source revision. It is bumped deliberately when a meaningful rule, hook,
 or skill change lands, and a release publishes an annotated `vVERSION` tag whose
 `core-rules/VERSION` equals `VERSION` exactly — installation refuses the tag
-otherwise.
+otherwise. From 1.3.7 that tag names a payload commit whose parent is the
+approved release commit and whose tree omits `specs/` and the test directories;
+the cut procedure is in `docs/UPGRADING.md` ("Cutting a release: the payload
+tag").
 
 Consumers do not track a branch and do not resolve "latest". They install a
 named annotated tag from an explicit `--remote` or the machine-local
@@ -1052,6 +1070,7 @@ clone/common-dir owner; common Git state persists until its final owner detaches
 | Configure a machine or create fleets | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
 | Install and verify a release | Follow [docs/UPGRADING.md](docs/UPGRADING.md). |
 | Install, verify, and adopt in one step | `trellis upgrade VERSION [--remote URL]` with exactly one selector; launcher-only, forward-only (§14.6). |
+| Run a heavy test battery without starving other lanes | `trellis heavy --lane NAME -- <cmd...>` (add `--light` for a single-file run under 2 minutes); `trellis heavy --status` shows who holds the slots (§6.5). |
 | Import or rebuild local inventory | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
 | Attach, move, recover, or detach a checkout | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
 | Migrate a legacy project | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |

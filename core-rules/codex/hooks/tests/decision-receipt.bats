@@ -58,7 +58,7 @@ run_preserving_log() {
 }
 
 assert_block() {
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
   printf '%s\n' "$output" | jq -e '.decision == "block" and (.reason | startswith("decision-receipt:"))' >/dev/null
 }
 

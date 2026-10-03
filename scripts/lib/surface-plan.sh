@@ -1020,7 +1020,7 @@ surface_plan_write_json() {
   harnesses="$(jq -cn --args '$ARGS.positional' "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}")" || return "$TRELLIS_EX_STATE"
   artifacts="$(surface_plan_json_array "${_SURFACE_PLAN_RECORDS[@]+"${_SURFACE_PLAN_RECORDS[@]}"}")" || return "$TRELLIS_EX_STATE"
   optional_missing="$(surface_plan_json_array "${_SURFACE_PLAN_OPTIONAL_MISSING[@]+"${_SURFACE_PLAN_OPTIONAL_MISSING[@]}"}")" || return "$TRELLIS_EX_STATE"
-  plan="$(jq -n \
+  plan="$(trellis_jq -n \
     --argjson harnesses "$harnesses" \
     --argjson artifacts "$artifacts" \
     --argjson optional_missing "$optional_missing" \

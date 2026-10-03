@@ -15,9 +15,8 @@
 # MIRROR DELTAS vs the Claude hook:
 #   (a) STATE_DIR is ROOT/.pi/.reread-state only when TRELLIS_HARNESS=pi;
 #       otherwise it remains ROOT/.codex/.reread-state (not .claude).
-#   (b) BLOCK rides the Codex convention: {"decision":"block","reason":...} on
-#       stdout + exit 2 (NOT the Claude permissionDecision JSON). Confirmed
-#       against the sibling block-destructive.sh / code-review-subagent.sh.
+#   (b) BLOCK emits schema-valid decision JSON on stdout, its reason on
+#       stderr, and exits 2 (NOT the Claude permissionDecision JSON).
 #   (c) Codex may pass a RELATIVE file_path; it is resolved against the project
 #       dir EARLY and then lexically normalized via _se_normpath (FIX-4) so the
 #       path stored by track-read and the path compared here are identical. A
@@ -28,7 +27,7 @@
 #   - Reads Codex tool event JSON on stdin.
 #   - WARN  = advisory on STDERR, append a warns row, exit 0, NO decision JSON
 #             (so it never bypasses Codex's normal permission handling).
-#   - BLOCK = {"decision":"block","reason":...} on stdout, exit 2.
+#   - BLOCK = {"decision":"block","reason":...} on stdout, reason on stderr, exit 2.
 #   - PERMIT = exit 0, empty stdout.
 #   - FAIL-OPEN: any STATE error (missing/corrupt state, shasum/mkdir failure,
 #     empty/odd target — e.g. a TAB/NEWLINE in the path) → PERMIT silently (no
@@ -69,8 +68,14 @@ __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
-__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
-[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+# Sibling first; the in-place fallback applies only inside the declared
+# runtime's Codex tree (spec 055 R1.1), never a project-controlled hooks/lib/.
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+__ta_lib="$__h_dir/lib/action-normalize.sh"
+if [ ! -f "$__ta_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __ta_lib="$__h_dir/../../hooks/lib/action-normalize.sh"
+fi
 [ -f "$__ta_lib" ] || { echo "reread-guard: missing action normalizer — permitting" >&2; exit 0; }
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"
@@ -219,9 +224,10 @@ if [ "$WARN_COUNT" -lt "$BUDGET" ]; then
   return 0
 fi
 
-# BLOCK: budget exhausted. Emit the Codex block convention; exit 2.
+# BLOCK: budget exhausted. Codex requires a stderr blocking reason on exit 2.
 REASON="reread-guard: BLOCKED edit of $T — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override."
 jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
+printf '%s\n' "$REASON" >&2
 exit 2
 }
 

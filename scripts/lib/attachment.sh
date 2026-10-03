@@ -236,6 +236,98 @@ _attachment_diag() {
   printf 'trellis: %s\n' "$1" >&2
 }
 
+# One stderr line per refusal: `trellis <action>: refused (<code>): <path>`.
+# Entry points name the action in ATTACHMENT_ACTION (detach, adopt, attach) and
+# library sites pass it through; a caller that names no action stays silent, as
+# every refusal was before spec 053.
+_attachment_refuse() {
+  [ -n "$1" ] || return 0
+  printf 'trellis %s: refused (%s): %s\n' "$1" "$2" "$(_attachment_visible "$3")" >&2
+}
+
+# Control characters as visible escapes (`\n`, `\r`, `\t`, else `\xHH`), so
+# a path can never split a one-line diagnostic. Any other text is unchanged.
+_attachment_visible() {
+  local LC_ALL=C value=$1 out='' char i
+  case "$value" in
+    *[[:cntrl:]]*) ;;
+    *) printf '%s' "$value"; return 0 ;;
+  esac
+  for ((i = 0; i < ${#value}; i++)); do
+    char=${value:i:1}
+    case "$char" in
+      $'\n') out+='\n' ;;
+      $'\r') out+='\r' ;;
+      $'\t') out+='\t' ;;
+      [[:cntrl:]]) out+=$(printf '\\x%02x' "'$char") ;;
+      *) out+=$char ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Classifies an owner record against Git's own worktree list for the checkout
+# the record names, and prints one line: `live`, `missing`, `not-a-worktree`,
+# or `undetermined <why>`. Attach and doctor share it, so they never disagree.
+# Git keeps a worktree listed until it is pruned, so a listed root is live even
+# while its directory is absent (an unmounted volume, a locked worktree);
+# `prunable` does not change that. No list, no verdict: undetermined.
+attachment_owner_orphan_reason() {
+  local owner=$1 root common listed entry
+  root=$(jq -r '.worktree_root | strings' "$owner" 2>/dev/null) || root=
+  common=$(jq -r '.exclude.git_common_dir | strings' "$owner" 2>/dev/null) || common=
+  if [ -z "$root" ] || [ -z "$common" ]; then
+    printf 'undetermined owner record names no worktree root or common dir\n'
+    return 0
+  fi
+  if [ ! -d "$common" ]; then
+    printf 'undetermined git common dir %s is missing\n' "$common"
+    return 0
+  fi
+  listed=$(git --git-dir="$common" -c safe.directory='*' worktree list --porcelain 2>/dev/null) || {
+    printf 'undetermined git worktree list failed for %s\n' "$common"
+    return 0
+  }
+  root=$(_attachment_orphan_canonical "$root")
+  while IFS= read -r entry; do
+    case "$entry" in 'worktree '*) ;; *) continue ;; esac
+    if [ "$(_attachment_orphan_canonical "${entry#worktree }")" = "$root" ]; then
+      printf 'live\n'
+      return 0
+    fi
+  done <<< "$listed"
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    printf 'not-a-worktree\n'
+  else
+    printf 'missing\n'
+  fi
+}
+
+# Canonical form of an absolute path, existing or not: normalised lexically
+# (no `//`, `.`, `..` or trailing `/`), then its nearest existing directory
+# resolved with `pwd -P` and the remainder appended.
+_attachment_orphan_canonical() {
+  local part base physical rest=''
+  local -a parts kept=()
+  IFS=/ read -r -a parts <<< "$1"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) [ "${#kept[@]}" -eq 0 ] || unset 'kept[${#kept[@]}-1]' ;;
+      *) kept+=("$part") ;;
+    esac
+  done
+  base=/
+  [ "${#kept[@]}" -eq 0 ] || base="/$(IFS=/; printf '%s' "${kept[*]}")"
+  while [ "$base" != / ] && [ ! -d "$base" ]; do
+    rest="/$(basename "$base")$rest"
+    base=$(dirname "$base")
+  done
+  if physical=$(CDPATH='' cd "$base" 2>/dev/null && pwd -P); then base=$physical; fi
+  base="${base%/}$rest"
+  printf '%s\n' "${base:-/}"
+}
+
 _attachment_canonical_dir() {
   local value=$1 actual
   _attachment_no_symlink_components "$value" 0 || return 1
@@ -325,7 +417,7 @@ _attachment_toolchain_path_resolve() {
         printf 'trellis: refusing PATH entry '\''%s'\'': resolved target is not canonical ('\''%s'\'')\n' "$entry" "$actual" >&2
         return 1
       }
-      resolved="$(jq -cn --argjson resolved "$resolved" --arg entry "$actual" \
+      resolved="$(trellis_jq -cn --argjson resolved "$resolved" --arg entry "$actual" \
         '$resolved + [$entry]')" || return 1
     fi
     [ "$more" -eq 1 ] || break
@@ -340,13 +432,45 @@ _attachment_toolchain_path_resolve() {
     if [ -n "$first_nvm" ]; then
       anchor_index="$(printf '%s\n' "$resolved" | jq -r --arg anchor "$anchor" 'index($anchor) // empty')" || anchor_index=""
       if [ -z "$anchor_index" ]; then
-        resolved="$(jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" '[$anchor] + $resolved')" || return 1
+        resolved="$(trellis_jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" '[$anchor] + $resolved')" || return 1
       elif [ "$anchor_index" -gt "$first_nvm" ]; then
-        resolved="$(jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" --argjson first "$first_nvm" --argjson at "$anchor_index" '($resolved | del(.[$at])) | .[0:$first] + [$anchor] + .[$first:]')" || return 1
+        resolved="$(trellis_jq -cn --argjson resolved "$resolved" --arg anchor "$anchor" --argjson first "$first_nvm" --argjson at "$anchor_index" '($resolved | del(.[$at])) | .[0:$first] + [$anchor] + .[$first:]')" || return 1
       fi
     fi
   fi
   printf '%s\n' "$resolved"
+}
+
+# Spec 055: a toolchain is control-only when its entries -- split on `:`,
+# empty and whitespace-only entries dropped, each resolved with `cd -P` --
+# form a subset of the sanitized control PATH set. The empty set counts.
+# Deduplication is implicit: a subset test is a set comparison. A relative
+# entry is never control (resolving it would depend on the working directory),
+# and an unresolvable entry is kept literally, so it matches only if spelled
+# exactly. The dispatcher embeds this definition verbatim (extracted like the
+# launcher's scratch emitters), so keep `<name>() {` and a column-zero `}`,
+# and nothing that allocates a temporary.
+trellis_toolchain_control_only() {
+  local remaining="${1-}" entry="" actual="" more=0
+  while :; do
+    more=0
+    case "$remaining" in
+      *:*) entry="${remaining%%:*}"; remaining="${remaining#*:}"; more=1 ;;
+      *) entry="$remaining"; remaining="" ;;
+    esac
+    case "$entry" in
+      *[![:space:]]*)
+        case "$entry" in /*) ;; *) return 1 ;; esac
+        actual="$(CDPATH='' cd -P -- "$entry" 2>/dev/null && pwd -P)" || actual="$entry"
+        case "$actual" in
+          /usr/bin|/bin|/usr/sbin|/sbin) ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+    [ "$more" -eq 1 ] || break
+  done
+  return 0
 }
 
 _attachment_canonical_file() {
@@ -737,6 +861,9 @@ TRELLIS_GIT_ENV_EOF
     set -- "$@" "$hook_arg"
     hook_index=$((hook_index + 1))
   done
+  if [ "${DOCKER_HOST+x}" = x ]; then
+    set -- "DOCKER_HOST=$DOCKER_HOST" "$@"
+  fi
   exec /usr/bin/env -i PATH="$caller_path" HOME="$caller_home" TMPDIR="$caller_tmpdir" TMP="$caller_tmpdir" TEMP="$caller_tmpdir" LC_ALL=C "$@"
 fi
 exit 0
@@ -926,6 +1053,16 @@ _attachment_launcher_source() {
   printf '%s\n' "$directory/${candidate##*/}"
 }
 
+# This library's own file, located the same way as the launcher above, so the
+# dispatcher can embed a library function verbatim rather than a second copy.
+_attachment_library_source() {
+  local launcher="" candidate=""
+  launcher="$(_attachment_launcher_source)" || return 1
+  candidate="${launcher%/*}/lib/attachment.sh"
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
 # Extract one complete, fixed-name shell function definition verbatim. Refuses
 # a missing, duplicated, truncated or empty definition, and refuses text that
 # does not parse, so a broken emitter can never reach a generated dispatcher.
@@ -952,13 +1089,19 @@ _attachment_command_scratch_emitters() {
 }
 
 _attachment_hooks_dispatcher_common_body() {
-  local payload=${1:-} source=${2:-} manifest_sha256=${3:-} emitters=""
+  local payload=${1:-} source=${2:-} manifest_sha256=${3:-} emitters="" library="" predicate=""
   emitters="$(_attachment_command_scratch_emitters)" || return 1
+  library="$(_attachment_library_source)" || return 1
+  predicate="$(_attachment_extract_shell_function "$library" trellis_toolchain_control_only)" || return 1
   cat <<'EOF'
 #!/bin/sh
 caller_path=${PATH-}
 caller_home=${HOME-}
 caller_tmpdir=${TMPDIR-}
+# Carry the set/unset distinction across the control-plane env -i without
+# exporting the variable into the control-plane process.
+caller_docker_host_set=${DOCKER_HOST+x}
+caller_docker_host=${DOCKER_HOST-}
 exec /usr/bin/env -i \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   HOME=/dev/null \
@@ -972,14 +1115,16 @@ dispatcher=$1
 caller_path=$2
 caller_home=$3
 caller_tmpdir=$4
-shift 4
+caller_docker_host_set=$5
+caller_docker_host=$6
+shift 6
 /usr/bin/grep -qx "# trellis-managed-dispatcher-body" "$dispatcher" || exit 1
 body="$(/usr/bin/awk "seen { print } /^# trellis-managed-dispatcher-body\$/ { seen=1 }" "$dispatcher")" || exit 1
 [ -n "$body" ] || exit 1
 TRELLIS_MANAGED_DISPATCHER="$dispatcher"
 export TRELLIS_MANAGED_DISPATCHER
 eval "$body"
-' trellis-managed-dispatcher "$0" "$caller_path" "$caller_home" "$caller_tmpdir" "$@"
+' trellis-managed-dispatcher "$0" "$caller_path" "$caller_home" "$caller_tmpdir" "$caller_docker_host_set" "$caller_docker_host" "$@"
 # trellis-managed-dispatcher-body
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -1088,7 +1233,8 @@ readonly TMPDIR TMP TEMP
 # trellis-command-scratch-end
 # trellis-gate-xdg-begin
 # Writable XDG dirs for node toolchains (corepack/pnpm) under managed state,
-# never the real HOME. HOME stays /dev/null for hermeticity (spec 044 R6.1).
+# never the real HOME. Control payloads keep HOME=/dev/null; gate payloads
+# use a per-command private HOME inside the command scratch.
 gate_xdg_base="$managed_home/state/gate-xdg"
 gate_xdg_config="$gate_xdg_base/config"
 gate_xdg_cache="$gate_xdg_base/cache"
@@ -1137,24 +1283,49 @@ trellis_hash_text() {
   printf '%s\n' "${output%% *}"
 }
 
+# Spec 055 R2.1: each failure has its own first line and, where one exists, a
+# remedy line. Only an entry that is no longer a canonical directory says
+# "toolchain moved". Every failure returns 1 (R2.2).
 trellis_gate_toolchain_path() {
-  local common="" checkout="" worktree="" owner="" entries="" entry="" toolchain_path=""
+  local common="" gitdir="" checkout="" worktree="" owner="" mode="" entries="" entry="" toolchain_path=""
   common="$(/usr/bin/git -C "$project_root" rev-parse --git-common-dir 2>/dev/null)" || common=""
   if [ -n "$common" ]; then
     case "$common" in /*) ;; *) common="$project_root/$common" ;; esac
     common="$(CDPATH= cd "$common" && pwd -P 2>/dev/null)" || common=""
   fi
-  if [ -z "$common" ]; then
-    printf 'trellis gate: toolchain moved, re-attach: attachment identity is unavailable\n' >&2
+  if [ -n "$common" ]; then
+    checkout="$(trellis_hash_text "$common")" || checkout=""
+    worktree="$(trellis_hash_text "$project_root")" || worktree=""
+  fi
+  if [ -z "$checkout" ] || [ -z "$worktree" ]; then
+    printf 'trellis gate: cannot identify the checkout: %s\n' "$project_root" >&2
     return 1
   fi
-  checkout="$(trellis_hash_text "$common")" || checkout=""
-  worktree="$(trellis_hash_text "$project_root")" || worktree=""
   owner="$managed_home/state/attachments/$checkout/$worktree.json"
-  if [ -z "$checkout" ] || [ -z "$worktree" ] ||
-     [ ! -f "$owner" ] || [ -L "$owner" ] ||
-     [ "$(trellis_mode "$owner" 2>/dev/null)" != 600 ]; then
-    printf 'trellis gate: toolchain moved, re-attach: recorded toolchain PATH is unavailable\n' >&2
+  if [ -L "$owner" ]; then
+    printf 'trellis gate: record unsafe (symlink): %s\n' "$owner" >&2
+    return 1
+  fi
+  if [ ! -e "$owner" ]; then
+    printf 'trellis gate: not attached: %s\n' "$project_root" >&2
+    gitdir="$(/usr/bin/git -C "$project_root" rev-parse --absolute-git-dir 2>/dev/null)" || gitdir=""
+    if [ -n "$gitdir" ]; then
+      gitdir="$(CDPATH= cd "$gitdir" && pwd -P 2>/dev/null)" || gitdir=""
+    fi
+    if [ -n "$gitdir" ] && [ "$gitdir" != "$common" ]; then
+      printf 'trellis gate: run `trellis worktree sync %s`\n' "$project_root" >&2
+    else
+      printf 'trellis gate: run `trellis attach %s`\n' "$project_root" >&2
+    fi
+    return 1
+  fi
+  if [ ! -f "$owner" ]; then
+    printf 'trellis gate: record unsafe (not a regular file): %s\n' "$owner" >&2
+    return 1
+  fi
+  mode="$(trellis_mode "$owner" 2>/dev/null)" || mode=""
+  if [ "$mode" != 600 ]; then
+    printf 'trellis gate: record unsafe (mode %s, expected 600): %s\n' "${mode:-unreadable}" "$owner" >&2
     return 1
   fi
   entries="$(jq -er \
@@ -1175,24 +1346,29 @@ trellis_gate_toolchain_path() {
       else error("invalid recorded toolchain PATH")
       end
     ' "$owner" 2>/dev/null)" || {
-    printf 'trellis gate: toolchain moved, re-attach: recorded toolchain PATH is unavailable\n' >&2
+    printf 'trellis gate: record invalid, re-attach: %s\n' "$owner" >&2
     return 1
   }
   while IFS= read -r entry; do
-    if ! trellis_canonical_dir "$entry"; then
-      printf 'trellis gate: toolchain moved, re-attach: %s\n' "$entry" >&2
-      return 1
-    fi
     if [ -n "$toolchain_path" ]; then
       toolchain_path="$toolchain_path:$entry"
     else
       toolchain_path="$entry"
     fi
   done <<< "$entries"
-  [ -n "$toolchain_path" ] || {
-    printf 'trellis gate: toolchain moved, re-attach: recorded toolchain PATH is unavailable\n' >&2
+  # A known-bad record blocks the push instead of passing silently, whatever
+  # recorded it.
+  if trellis_toolchain_control_only "$toolchain_path"; then
+    printf 'trellis gate: toolchain is the sanitized control PATH: %s\n' "$owner" >&2
+    printf 'trellis gate: run `trellis attach --refresh-toolchain %s`\n' "$project_root" >&2
     return 1
-  }
+  fi
+  while IFS= read -r entry; do
+    if ! trellis_canonical_dir "$entry"; then
+      printf 'trellis gate: toolchain moved, re-attach: %s\n' "$entry" >&2
+      return 1
+    fi
+  done <<< "$entries"
   printf '%s\n' "$toolchain_path"
 }
 
@@ -1514,15 +1690,16 @@ trellis_prior_hook() {
 
 trellis_run_prior_hook() {
   local hook="$1"
+  local -a prior_env=(
+    "PATH=$caller_path" "HOME=$caller_home"
+    "TMPDIR=$caller_tmpdir" "TMP=$caller_tmpdir" "TEMP=$caller_tmpdir"
+    'LC_ALL=C'
+  )
   shift
-  /usr/bin/env -i \
-    PATH="$caller_path" \
-    HOME="$caller_home" \
-    TMPDIR="$caller_tmpdir" \
-    TMP="$caller_tmpdir" \
-    TEMP="$caller_tmpdir" \
-    LC_ALL=C \
-    "$hook" "$@"
+  if [ "${caller_docker_host_set:-}" = x ]; then
+    prior_env+=("DOCKER_HOST=$caller_docker_host")
+  fi
+  /usr/bin/env -i "${prior_env[@]}" "$hook" "$@"
 }
 
 trellis_run_control_payload() {
@@ -1547,12 +1724,34 @@ trellis_run_control_payload() {
 }
 
 trellis_run_gate_payload() {
-  local executable="$1" toolchain_path=""
+  local executable="$1" toolchain_path="" gate_home="" owner="" mode="" reason=""
   shift
+  if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ] || [ -L "$TMPDIR" ]; then
+    reason="private command scratch is unavailable"
+  else
+    gate_home="$TMPDIR/gate-home"
+    if ! (umask 077 && mkdir "$gate_home" 2>/dev/null); then
+      reason="could not create $gate_home"
+    elif [ ! -d "$gate_home" ] || [ -L "$gate_home" ]; then
+      reason="not a directory: $gate_home"
+    else
+      owner="$(stat -f '%u' "$gate_home" 2>/dev/null)" ||
+        owner="$(stat -c '%u' "$gate_home" 2>/dev/null)" || owner=""
+      mode="$(stat -f '%Lp' "$gate_home" 2>/dev/null)" ||
+        mode="$(stat -c '%a' "$gate_home" 2>/dev/null)" || mode=""
+      if [ "$owner" != "$(id -u)" ] || [ "$mode" != 700 ]; then
+        reason="unsafe owner or mode: $gate_home"
+      fi
+    fi
+  fi
+  if [ -n "$reason" ]; then
+    printf 'trellis gate: refused (gate-home): %s\n' "$reason" >&2
+    return 1
+  fi
   toolchain_path="$(trellis_gate_toolchain_path)" || return 1
   /usr/bin/env -i \
     PATH="$toolchain_path" \
-    HOME=/dev/null \
+    HOME="$gate_home" \
     TMPDIR="$TMPDIR" \
     TMP="$TMPDIR" \
     TEMP="$TMPDIR" \
@@ -1568,6 +1767,7 @@ trellis_run_gate_payload() {
     /bin/bash --noprofile --norc "$executable" "$@"
 }
 EOF
+  printf '%s\n' "$predicate"
 }
 
 # Dispatcher bytes are release-versioned. A command bundle may be running a
@@ -2756,7 +2956,7 @@ _attachment_pending_destination_owned() {
 attach_detach_json_keys_detail() {
   local file=$1 keys=$2
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
-  jq -c --argjson keys "$keys" '
+  trellis_jq -c --argjson keys "$keys" '
     def lookup($value; $path):
       reduce $path[] as $key ({value:$value,exists:true};
         if .exists and (.value | type) == "object" and (.value | has($key))
@@ -2795,9 +2995,13 @@ attach_detach_render_state() {
   before_mode="$(printf '%s\n' "$render" | jq -r '.before_mode // empty')" || return "$TRELLIS_EX_STATE"
   if [ ! -e "$root/$path" ] && [ ! -L "$root/$path" ]; then
     [ "$before_exists" = false ] && { printf 'before\n'; return 0; }
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" render-missing "$root/$path"
     return "$TRELLIS_EX_CONFLICT"
   fi
-  [ -f "$root/$path" ] && [ ! -L "$root/$path" ] || return "$TRELLIS_EX_CONFLICT"
+  [ -f "$root/$path" ] && [ ! -L "$root/$path" ] || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" render-not-regular "$root/$path"
+    return "$TRELLIS_EX_CONFLICT"
+  }
   current_hash="$(_attachment_hash "$root/$path")" || return "$TRELLIS_EX_STATE"
   if [ "$current_hash" = "$after_hash" ] && _attachment_mode_matches "$root/$path" "$after_mode"; then
     printf 'after\n'
@@ -2808,19 +3012,37 @@ attach_detach_render_state() {
     return 0
   fi
   keys="$(printf '%s\n' "$render" | jq -c '.owned_keys')" || return "$TRELLIS_EX_STATE"
-  _attachment_mode_matches "$root/$path" "$after_mode" &&
-    attach_detach_json_keys_match "$root/$path" "$keys" ||
+  _attachment_mode_matches "$root/$path" "$after_mode" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" render-mode "$root/$path"
     return "$TRELLIS_EX_CONFLICT"
+  }
+  attach_detach_json_keys_match "$root/$path" "$keys" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owned-key-value-changed "$root/$path"
+    return "$TRELLIS_EX_CONFLICT"
+  }
   printf 'merged\n'
 }
 
 attach_detach_render_preflight() {
-  local owner=$1 renders=$2 root render state
+  local owner=$1 renders=$2 root render state path
   root="$(printf '%s\n' "$owner" | jq -r '.worktree_root')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r render; do
     state="$(attach_detach_render_state "$root" "$render")" || return "$?"
-    case "$state" in after|merged) ;; *) return "$TRELLIS_EX_CONFLICT" ;; esac
-  done < <(printf '%s\n' "$renders" | jq -c '.[]')
+    case "$state" in
+      after|merged) ;;
+      *)
+        # `before`: the file is back to its pre-attach bytes, or gone when it
+        # did not exist before attach.
+        path="$root/$(printf '%s\n' "$render" | jq -r '.path')"
+        if [ -e "$path" ] || [ -L "$path" ]; then
+          _attachment_refuse "${ATTACHMENT_ACTION:-}" render-reverted "$path"
+        else
+          _attachment_refuse "${ATTACHMENT_ACTION:-}" render-missing "$path"
+        fi
+        return "$TRELLIS_EX_CONFLICT"
+        ;;
+    esac
+  done < <(printf '%s\n' "$renders" | jq -c 'sort_by(.path)[]')
 }
 
 _attachment_render_pairings_valid() {
@@ -2889,20 +3111,29 @@ _attachment_verify_owner_artifacts() {
 }
 
 _attachment_verify_detach_owner_artifacts() {
-  local owner=$1 record root artifact
-  record=$(jq -c . "$owner") || return 3
-  _attachment_validate_roots "$record" || return 3
-  _attachment_validate_ids "$record" || return 3
-  root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || return 3
+  local owner=$1 record root artifact relative code
+  record=$(jq -c . "$owner") && _attachment_validate_roots "$record" && _attachment_validate_ids "$record" &&
+    root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
+    return 3
+  }
+  # Sorted by path (jq's codepoint order is LC_ALL=C byte order for UTF-8), so
+  # the drifted artifact reported first is deterministic.
   while IFS= read -r artifact; do
-    _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || return 3
-    _attachment_artifact_exact "$root" "$artifact" || return 3
+    relative=$(printf '%s\n' "$artifact" | jq -r '.path')
+    if ! _attachment_parent_safe "$root" "$relative" || ! _attachment_artifact_exact "$root" "$artifact"; then
+      code=owned-file-drift
+      [ "$(printf '%s\n' "$artifact" | jq -r '.kind')" != symlink ] || code=owned-symlink-drift
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" "$code" "$root/$relative"
+      return 3
+    fi
   done < <(printf '%s\n' "$record" | jq -c '
     . as $owner
     | (($owner.renders // []) | map(.path)) as $render_paths
-    | $owner.artifacts[] as $artifact
-    | select(($render_paths | index($artifact.path)) == null)
-    | $artifact
+    | [$owner.artifacts[] as $artifact
+       | select(($render_paths | index($artifact.path)) == null)
+       | $artifact]
+    | sort_by(.path)[]
   ')
 }
 
@@ -3254,10 +3485,10 @@ _attachment_set_pending() {
   parent_identity=$(_attachment_fs_identity "$parent") || return 1
   if [ -n "$stage" ]; then
     [ "$(dirname "$stage")" = "$parent" ] || return 2
-    next=$(jq -cS --argjson artifact "$artifact" --arg stage "$stage" --arg parent_identity "$parent_identity" \
+    next=$(trellis_jq -cS --argjson artifact "$artifact" --arg stage "$stage" --arg parent_identity "$parent_identity" \
       '.pending = {artifact:$artifact,staging_path:$stage,staging_identity:null,destination_identity:null,parent_identity:$parent_identity}' "$journal") || return 1
   else
-    next=$(jq -cS --argjson artifact "$artifact" --arg parent_identity "$parent_identity" \
+    next=$(trellis_jq -cS --argjson artifact "$artifact" --arg parent_identity "$parent_identity" \
       '.pending = {artifact:$artifact,staging_path:null,staging_identity:null,destination_identity:null,parent_identity:$parent_identity}' "$journal") || return 1
   fi
   _attachment_write_json "$journal" "$next"
@@ -3299,7 +3530,7 @@ _attachment_clear_removal_intent() {
 
 _attachment_finalize_pending() {
   local journal=$1 artifact=$2 next
-  next=$(jq -cS --argjson artifact "$artifact" '.applied += [$artifact] | .phase = (.applied | length) | .pending = null' "$journal") || return 1
+  next=$(trellis_jq -cS --argjson artifact "$artifact" '.applied += [$artifact] | .phase = (.applied | length) | .pending = null' "$journal") || return 1
   _attachment_write_json "$journal" "$next"
 }
 
@@ -3889,14 +4120,23 @@ _attachment_verify_adoption_impl() {
 }
 
 _attachment_verify_detach_impl() {
-  local home=$1 owner=$2 checkout worktree canonical
+  local home=$1 owner=$2 checkout worktree canonical status
   [ "$#" -eq 2 ] || return 2
   _attachment_prepare_state "$home" || return $?
-  _attachment_owner_json_valid "$owner" || return $?
-  checkout=$(jq -r '.checkout_id' "$owner") || return 2
-  worktree=$(jq -r '.worktree_id' "$owner") || return 2
+  _attachment_owner_json_valid "$owner" || {
+    status=$?
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
+    return "$status"
+  }
+  checkout=$(jq -r '.checkout_id' "$owner") && worktree=$(jq -r '.worktree_id' "$owner") || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
+    return 2
+  }
   canonical=$(_attachment_ownership_path "$home" "$checkout" "$worktree")
-  [ "$owner" = "$canonical" ] || return 2
+  [ "$owner" = "$canonical" ] || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-path-mislocated "$owner"
+    return 2
+  }
   _attachment_verify_detach_owner_artifacts "$owner"
 }
 
@@ -4016,7 +4256,7 @@ _attachment_detach_journal_valid() {
     _attachment_detach_owner_data_valid "$expected" || return 2
     _attachment_detach_owner_data_valid "$after" || return 2
   fi
-  jq -e --argjson original "$original" --argjson next "$next" '
+  trellis_jq -e --argjson original "$original" --argjson next "$next" '
     def paths_unique($items): ($items | map(.path) | unique | length) == ($items | length);
     def no_path_overlap($left; $right):
       all($left[]; .path as $path | any($right[]; .path == $path) | not);
@@ -4180,7 +4420,7 @@ _attachment_detach_file_matches_data() {
 _attachment_detach_journal_update() {
   local journal=$1 next
   shift
-  next=$(jq -cS "$@" "$journal") || return 2
+  next=$(trellis_jq -cS "$@" "$journal") || return 2
   _attachment_write_json "$journal" "$next"
 }
 
@@ -4230,7 +4470,7 @@ _attachment_detach_render_begin_impl() {
   parent=$(dirname "$destination") || return 2
   _attachment_canonical_dir "$parent" || return 3
   parent_identity=$(_attachment_fs_identity "$parent") || return 1
-  next=$(jq -cS --argjson render "$render" --arg source_identity "$source_identity" --arg source_sha "$source_sha" --arg source_mode "$source_mode" \
+  next=$(trellis_jq -cS --argjson render "$render" --arg source_identity "$source_identity" --arg source_sha "$source_sha" --arg source_mode "$source_mode" \
     --argjson result_exists "$result_exists" --arg result_base64 "$result_base64" --arg result_sha "$result_sha" --argjson result_mode "$result_mode" \
     --argjson staging_path "$staging_path" --arg parent_identity "$parent_identity" '
       if .owner_committed == true and .removal == null and .external.phase == 1
@@ -4518,10 +4758,14 @@ _attachment_detach_render_pending_runtime_valid() (
 )
 
 _attachment_detach_prepare_impl() {
-  local home=$1 owner=$2 next_owner=$3 remove=$4 external=$5 original checkout worktree attachment journal expected
+  local home=$1 owner=$2 next_owner=$3 remove=$4 external=$5 original checkout worktree attachment journal expected status
   [ "$#" -eq 5 ] || return 2
   _attachment_prepare_state "$home" || return $?
-  _attachment_owner_json_valid "$owner" || return $?
+  _attachment_owner_json_valid "$owner" || {
+    status=$?
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
+    return "$status"
+  }
   _attachment_verify_detach_owner_artifacts "$owner" || return 3
   original=$(jq -cS . "$owner") || return 2
   checkout=$(printf '%s\n' "$original" | jq -r '.checkout_id') || return 2
@@ -4534,18 +4778,25 @@ _attachment_detach_prepare_impl() {
        printf '%s\n' "$next_owner" | jq -e --arg checkout "$checkout" --arg worktree "$worktree" --arg attachment "$attachment" \
          '.checkout_id == $checkout and .worktree_id == $worktree and .attachment_id == $attachment' >/dev/null 2>&1 || return 2 ;;
   esac
-  printf '%s\n' "$remove" | jq -e --argjson original "$original" --argjson next "$next_owner" '
+  printf '%s\n' "$remove" | trellis_jq -e --argjson original "$original" --argjson next "$next_owner" '
     type == "array"
     and all(.[]; . as $artifact | any($original.artifacts[]; . == $artifact))
     and ($next == null or (all($next.artifacts[]; . as $artifact | any($original.artifacts[]; . == $artifact))))
   ' >/dev/null 2>&1 || return 2
   printf '%s\n' "$external" | jq -e 'type == "object"' >/dev/null 2>&1 || return 2
   journal=$(_attachment_detach_journal_path "$home" "$attachment")
-  expected=$(jq -cn --argjson original "$original" --argjson next "$next_owner" --argjson remove "$remove" --argjson external "$external" \
+  expected=$(trellis_jq -cn --argjson original "$original" --argjson next "$next_owner" --argjson remove "$remove" --argjson external "$external" \
     '{schema_version:1,status:"detaching",attachment_id:$original.attachment_id,checkout_id:$original.checkout_id,worktree_id:$original.worktree_id,original_owner:$original,next_owner:$next,remove:$remove,phase:0,owner_committed:false,removal:null,external:($external + {phase:0,render_phase:0,render_pending:null})}') || return 2
   if [ -e "$journal" ] || [ -L "$journal" ]; then
-    _attachment_detach_journal_valid "$journal" || return $?
-    [ "$(jq -cS . "$journal")" = "$(printf '%s\n' "$expected" | jq -cS .)" ] || return 3
+    _attachment_detach_journal_valid "$journal" || {
+      status=$?
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" journal-invalid "$journal"
+      return "$status"
+    }
+    [ "$(jq -cS . "$journal")" = "$(printf '%s\n' "$expected" | jq -cS .)" ] || {
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" journal-mismatch "$journal"
+      return 3
+    }
     return 0
   fi
   _attachment_write_json "$journal" "$expected"
@@ -4554,26 +4805,37 @@ _attachment_detach_prepare_impl() {
 _attachment_detach_preflight_remaining() {
   local journal=$1 root=$2 artifact
   while IFS= read -r artifact; do
-    _attachment_artifact_exact "$root" "$artifact" || return 3
-  done < <(jq -c '.remove[]' "$journal")
+    _attachment_artifact_exact "$root" "$artifact" || {
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" artifact-changed "$root/$(printf '%s\n' "$artifact" | jq -r '.path')"
+      return 3
+    }
+  done < <(jq -c '.remove | sort_by(.path)[]' "$journal")
 }
 
 _attachment_detach_remove_one() {
-  local journal=$1 root=$2 artifact=$3 relative destination kind
+  local journal=$1 root=$2 artifact=$3 relative destination kind status
   relative=$(printf '%s\n' "$artifact" | jq -r '.path') || return 2
-  _attachment_parent_safe "$root" "$relative" || return 3
   destination=$(_attachment_destination "$root" "$relative")
+  _attachment_parent_safe "$root" "$relative" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" artifact-changed "$destination"
+    return 3
+  }
   kind=$(printf '%s\n' "$artifact" | jq -r '.kind') || return 2
   case "$kind" in
     parent|directory)
       if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then return 0; fi
-      [ -d "$destination" ] && [ ! -L "$destination" ] || return 3
-      rmdir -- "$destination" 2>/dev/null && return 0
-      [ -d "$destination" ] && [ ! -L "$destination" ] && return 0
+      if [ -d "$destination" ] && [ ! -L "$destination" ]; then
+        rmdir -- "$destination" 2>/dev/null && return 0
+        [ -d "$destination" ] && [ ! -L "$destination" ] && return 0
+      fi
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" parent-not-removable "$destination"
       return 3
       ;;
     file|symlink)
       _attachment_remove_pinned "$journal" "$destination" "$artifact" "" 0 1
+      status=$?
+      [ "$status" -ne 3 ] || _attachment_refuse "${ATTACHMENT_ACTION:-}" artifact-changed "$destination"
+      return "$status"
       ;;
     *) return 2 ;;
   esac
@@ -4588,10 +4850,10 @@ _attachment_detach_commit_locked() {
   total=$(jq '.remove | length' "$journal") || return 2
   phase=$(jq -r '.phase' "$journal") || return 2
   if [ "$(jq -r '.owner_committed' "$journal")" = true ]; then
-    if [ "$next_owner" = null ]; then
-      [ ! -e "$owner" ] && [ ! -L "$owner" ] || return 3
-    else
-      _attachment_detach_file_matches_data "$owner" "$next_owner" || return 3
+    if { [ "$next_owner" = null ] && { [ -e "$owner" ] || [ -L "$owner" ]; }; } ||
+      { [ "$next_owner" != null ] && ! _attachment_detach_file_matches_data "$owner" "$next_owner"; }; then
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
+      return 3
     fi
     return 0
   fi
@@ -4603,6 +4865,7 @@ _attachment_detach_commit_locked() {
         return 0
       fi
     fi
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
     return 3
   fi
   if [ "$phase" -eq 0 ]; then _attachment_detach_preflight_remaining "$journal" "$root" || return $?; fi
@@ -4612,11 +4875,13 @@ _attachment_detach_commit_locked() {
     phase=$((phase + 1))
     _attachment_detach_journal_update "$journal" --argjson phase "$phase" '.phase = $phase'
   done
+  _attachment_detach_file_matches_data "$owner" "$original" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
+    return 3
+  }
   if [ "$next_owner" = null ]; then
-    _attachment_detach_file_matches_data "$owner" "$original" || return 3
     rm -- "$owner" || return 1
   else
-    _attachment_detach_file_matches_data "$owner" "$original" || return 3
     _attachment_write_json "$owner" "$next_owner" || return $?
   fi
   _attachment_detach_journal_update "$journal" '.owner_committed = true'
@@ -5334,7 +5599,7 @@ _attachment_user_restore_exact() {
 
 _attachment_user_json_keys_match() {
   local file=$1 keys=$2
-  jq -e --argjson keys "$keys" '
+  trellis_jq -e --argjson keys "$keys" '
     def exists_at($value; $path):
       reduce $path[] as $key ({value:$value,exists:true};
         if .exists and (.value | type) == "object" and (.value | has($key))
@@ -5411,7 +5676,7 @@ _attachment_user_set_pending() {
         ;;
     esac
   fi
-  next=$(jq -cS --argjson artifact "$artifact" --arg stage "$stage" --arg identity "$identity" \
+  next=$(trellis_jq -cS --argjson artifact "$artifact" --arg stage "$stage" --arg identity "$identity" \
     --arg destination_identity "$destination_identity" '
     .pending = {
       artifact:$artifact,
@@ -5428,7 +5693,7 @@ _attachment_user_finalize_pending() {
   local journal=$1 artifact=$2 identity next
   identity=$(jq -r '.pending.destination_identity // empty' "$journal") || return 2
   [ -n "$identity" ] || return 3
-  next=$(jq -cS --argjson artifact "$artifact" --arg identity "$identity" '
+  next=$(trellis_jq -cS --argjson artifact "$artifact" --arg identity "$identity" '
     .applied += [$artifact]
     | .identities += [$identity]
     | .phase = (.applied | length)
@@ -5734,7 +5999,7 @@ _attachment_user_restore_adopted() (
 _attachment_user_parent_from_original() {
   local journal=$1 artifact=$2
   printf '%s\n' "$artifact" | jq -e '.kind == "parent"' >/dev/null 2>&1 || return 1
-  jq -e --argjson artifact "$artifact" '
+  trellis_jq -e --argjson artifact "$artifact" '
     .original_owner != null and any(.original_owner.artifacts[]?; . == $artifact)
   ' "$journal" >/dev/null 2>&1
 }
@@ -5770,7 +6035,7 @@ _attachment_user_rollback_replace_conflict() {
 
 _attachment_user_rollback_clear_pending() {
   local journal=$1 artifact=$2 next
-  next=$(jq -cS --argjson artifact "$artifact" '
+  next=$(trellis_jq -cS --argjson artifact "$artifact" '
     . as $current
     | if ($current.pending != null and $current.pending.artifact == $artifact)
       then .pending = null
@@ -5796,7 +6061,7 @@ _attachment_user_rollback_begin_pending_destination() {
     [ "$(printf '%s\n' "$pending" | jq -r '.staging_identity')" = \
       "$(printf '%s\n' "$pending" | jq -r '.destination_identity')" ] || return 3
   fi
-  next=$(jq -cS --argjson artifact "$artifact" --arg stage "$stage" '
+  next=$(trellis_jq -cS --argjson artifact "$artifact" --arg stage "$stage" '
     . as $current
     | if ($current.pending != null
           and $current.pending.artifact == $artifact
@@ -5822,7 +6087,7 @@ _attachment_user_rollback_record_pending_destination_stage() {
   _attachment_user_rollback_pending_parent_matches "$pending" "$destination" || return $?
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 3
   _attachment_user_pending_stage_owned "$pending" "$artifact" || return 3
-  next=$(jq -cS --argjson artifact "$artifact" '
+  next=$(trellis_jq -cS --argjson artifact "$artifact" '
     . as $current
     | if ($current.pending != null
           and $current.pending.artifact == $artifact
@@ -5839,7 +6104,7 @@ _attachment_user_rollback_record_pending_destination_stage() {
 
 _attachment_user_rollback_begin_pending_stage() {
   local journal=$1 artifact=$2 next
-  next=$(jq -cS --argjson artifact "$artifact" '
+  next=$(trellis_jq -cS --argjson artifact "$artifact" '
     . as $current
     | if ($current.pending != null
           and $current.pending.artifact == $artifact
@@ -5969,7 +6234,7 @@ _attachment_user_rollback_pending_replace() {
 
 _attachment_user_rollback_finish_applied() {
   local journal=$1 index=$2 artifact=$3 next
-  next=$(jq -cS --argjson index "$index" --argjson artifact "$artifact" '
+  next=$(trellis_jq -cS --argjson index "$index" --argjson artifact "$artifact" '
     . as $current
     | if ($current.pending == null
           and $current.phase == ($index + 1)
@@ -6214,7 +6479,7 @@ _attachment_user_prepare_relink_impl() {
   [ ! -e "$journal" ] && [ ! -L "$journal" ] || return 3
   home_identity=$(_attachment_fs_identity "$(_attachment_user_runtime_home)") || return 1
   trellis_home_identity=$(_attachment_fs_identity "$home") || return 1
-  journal_json=$(printf '%s\n' "$plan" | jq -cS --argjson original "$original" \
+  journal_json=$(printf '%s\n' "$plan" | trellis_jq -cS --argjson original "$original" \
     --arg home_identity "$home_identity" --arg trellis_home_identity "$trellis_home_identity" '
     . + {
       home_identity:$home_identity,
@@ -6240,7 +6505,7 @@ _attachment_user_prepare_relink_impl() {
 
 _attachment_user_set_reconcile_state() {
   local journal=$1 operation=$2 original=$3 next_plan=$4 owner_override=${5:-null} next
-  next=$(jq -cS --arg operation "$operation" --argjson original "$original" \
+  next=$(trellis_jq -cS --arg operation "$operation" --argjson original "$original" \
     --argjson next_owner "$next_plan" --argjson owner_override "$owner_override" '
       .operation = $operation
       | .original_owner = $original
@@ -6458,7 +6723,7 @@ _attachment_user_inverse_render_result() (
       jq -cn --arg sha "$(_attachment_hash_text '')" \
         '{result_exists:false,result_base64:"",result_sha256:$sha,result_mode:null}'
     else
-      jq -cn \
+      trellis_jq -cn \
         --arg bytes "$(printf '%s\n' "$render" | jq -r '.before_base64')" \
         --arg sha "$(printf '%s\n' "$render" | jq -r '.before_sha256')" \
         --arg mode "$before_mode" \
@@ -6485,7 +6750,7 @@ _attachment_user_inverse_render_result() (
   else
     printf '{}\n' > "$before_tmp" || return 1
   fi
-  jq -S --argjson keys "$keys" --argjson created "$created" --slurpfile before "$before_tmp" '
+  trellis_jq -S --argjson keys "$keys" --argjson created "$created" --slurpfile before "$before_tmp" '
     def exists_at($value; $path):
       reduce $path[] as $key ({value:$value,exists:true};
         if .exists and (.value | type) == "object" and (.value | has($key))
@@ -6513,14 +6778,14 @@ _attachment_user_inverse_render_result() (
   chmod "${result_mode#0}" "$tmp" || return 1
   result_hash=$(_attachment_hash "$tmp") || return 1
   result_base64=$(base64 < "$tmp" | tr -d '\n') || return 1
-  jq -cn --arg bytes "$result_base64" --arg sha "$result_hash" --arg mode "$result_mode" \
+  trellis_jq -cn --arg bytes "$result_base64" --arg sha "$result_hash" --arg mode "$result_mode" \
     '{result_exists:true,result_base64:$bytes,result_sha256:$sha,result_mode:$mode}'
 )
 
 _attachment_user_detach_journal_update() {
   local journal=$1 next
   shift
-  next=$(jq -cS "$@" "$journal") || return 2
+  next=$(trellis_jq -cS "$@" "$journal") || return 2
   _attachment_write_json "$journal" "$next"
 }
 
@@ -6615,7 +6880,7 @@ _attachment_user_detach_journal_valid() {
   if [ "$next" != null ]; then
     printf '%s\n' "$next" | jq -e "$_attachment_user_plan_filter" >/dev/null 2>&1 || return 2
   fi
-  jq -e --argjson original "$original" --argjson next "$next" '
+  trellis_jq -e --argjson original "$original" --argjson next "$next" '
     . as $journal
     | ([$original.renders[].destination]) as $render_destinations
     | ([$original.artifacts[]
@@ -6688,7 +6953,7 @@ _attachment_user_detach_prepare_impl() {
   if [ "$next_owner" != null ]; then
     printf '%s\n' "$next_owner" | jq -e "$_attachment_user_plan_filter" >/dev/null 2>&1 || return 2
   fi
-  printf '%s\n' "$original" | jq -e --argjson remove "$remove" \
+  printf '%s\n' "$original" | trellis_jq -e --argjson remove "$remove" \
     --argjson external "$external" --argjson next "$next_owner" '
       . as $original
       | ([.renders[].destination]) as $render_destinations
@@ -6706,7 +6971,7 @@ _attachment_user_detach_prepare_impl() {
     destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 2
     _attachment_user_artifact_exact "$(_attachment_user_runtime_home)" "$artifact" || return 3
     identity=$(_attachment_fs_identity "$destination") || return 1
-    remove_identities=$(jq -cn --argjson current "$remove_identities" --arg identity "$identity" \
+    remove_identities=$(trellis_jq -cn --argjson current "$remove_identities" --arg identity "$identity" \
       '$current + [$identity]') || return 2
   done < <(printf '%s\n' "$remove" | jq -c '.[]')
   parents=$(printf '%s\n' "$original" | jq -c '[.artifacts[] | select(.kind == "parent")] | reverse') || return 2
@@ -6714,13 +6979,13 @@ _attachment_user_detach_prepare_impl() {
     destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 2
     [ -d "$destination" ] && [ ! -L "$destination" ] || return 3
     identity=$(_attachment_fs_identity "$destination") || return 1
-    parent_identities=$(jq -cn --argjson current "$parent_identities" --arg identity "$identity" \
+    parent_identities=$(trellis_jq -cn --argjson current "$parent_identities" --arg identity "$identity" \
       '$current + [$identity]') || return 2
   done < <(printf '%s\n' "$parents" | jq -c '.[]')
 
   home_identity=$(_attachment_fs_identity "$(_attachment_user_runtime_home)") || return 1
   trellis_home_identity=$(_attachment_fs_identity "$home") || return 1
-  journal_json=$(jq -cn \
+  journal_json=$(trellis_jq -cn \
     --arg attachment "$(printf '%s\n' "$original" | jq -r '.attachment_id')" \
     --arg home_identity "$home_identity" --arg trellis_home_identity "$trellis_home_identity" \
     --argjson homes "$(printf '%s\n' "$original" | jq -c '.home_paths')" \
@@ -6856,7 +7121,7 @@ _attachment_user_detach_resume_removal() {
   if printf '%s\n' "$artifact" | jq -e 'has("restore")' >/dev/null 2>&1; then
     restore_record=$(printf '%s\n' "$artifact" | jq -c '.restore') || return 2
     restore_kind=$(_attachment_user_restore_kind "$artifact") || return 2
-    if [ "$operation" = detach ] || ! jq -e --arg destination "$destination" --arg kind "$kind" \
+    if [ "$operation" = detach ] || ! trellis_jq -e --arg destination "$destination" --arg kind "$kind" \
       --argjson restore "$restore_record" '
         any(.next_owner.artifacts[]?;
           .destination == $destination and .kind == $kind and .restore == $restore)
@@ -6936,7 +7201,7 @@ _attachment_user_detach_remove_one() {
   parent_identity=$(_attachment_fs_identity "$parent") || return 1
   restoration_stage=$(_attachment_user_detach_restoration_stage "$destination" "$attachment" "$phase") || return 1
   [ ! -e "$restoration_stage" ] && [ ! -L "$restoration_stage" ] || return 3
-  intent=$(jq -cS --argjson artifact "$artifact" --arg destination "$destination" \
+  intent=$(trellis_jq -cS --argjson artifact "$artifact" --arg destination "$destination" \
     --arg stage "$stage" --arg identity "$identity" --arg parent_identity "$parent_identity" \
     --argjson index "$phase" '
       .removal = {
@@ -6967,7 +7232,7 @@ _attachment_user_detach_render_begin() {
     stage=
   fi
   parent_identity=$(_attachment_fs_identity "$(dirname "$destination")") || return 1
-  next=$(jq -cS --argjson render "$render" --arg source_identity "$source_identity" \
+  next=$(trellis_jq -cS --argjson render "$render" --arg source_identity "$source_identity" \
     --arg source_sha "$source_sha" --arg source_mode "$source_mode" \
     --argjson result "$result" --arg stage "$stage" --arg parent_identity "$parent_identity" '
       .external.render_pending = ({

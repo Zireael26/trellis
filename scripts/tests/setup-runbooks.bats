@@ -138,7 +138,8 @@ make_policy_source_clone() {
   }
 }
 JSON
-  fixture_git init -q "$root"
+  # The real release remote publishes main; the mirror fetches it beside the tag.
+  fixture_git init -q -b main "$root"
   fixture_commit_repo "$root" "release $version"
   fixture_git -C "$root" tag -a "v$version" -m "release $version"
 }

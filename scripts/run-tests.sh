@@ -472,9 +472,20 @@ shellcheck_tree() {
   bash scripts/lint-shell-tree.sh
 }
 
+# Ruff is pinned on the command line (spec 058): `--isolated` ignores every
+# config file and `--select` fixes the rule set, because the default set differs
+# between binaries — 0.16.7 finds 35 errors here that 0.15.5 (CI's pin) does
+# not. The `ruff:` line records which binary the receipt used; it never fails
+# the stage, and a missing ruff still fails the next command.
 aeo_static_and_python() {
-  ruff format --check core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
-    ruff check core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
+  local _ruff_bin _ruff_ver
+  if _ruff_bin="$(command -v ruff)" && _ruff_ver="$(ruff --version 2>/dev/null)"; then
+    printf 'ruff: %s %s\n' "$_ruff_bin" "$_ruff_ver" || true
+  else
+    printf 'ruff: unavailable\n' || true
+  fi
+  ruff format --isolated --check core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
+    ruff check --isolated --select E4,E7,E9,F core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
     mypy core-rules/skills/aeo-gate/scripts/lib/aeo_gate &&
     python3 -m unittest discover -s core-rules/skills/aeo-gate/tests -p 'test_*.py' &&
     bash scripts/tests/aeo-gate.test.sh
@@ -506,7 +517,7 @@ if [ "$QUICK" -eq 0 ]; then
     # posix-bootstrap-prologue already ran above as part of the quick slice.
     [ "$suite" = "posix-bootstrap-prologue" ] && continue
     case "$suite" in
-      rollout-hooks|sync-hooks-settings|doctor|t6-phase-a-integration|detach-project|pi-attachment|release-store|setup-runbooks|attach-project|disk-janitor-apply)
+      rollout-hooks-part*|sync-hooks-settings-part*|doctor-part*|t6-phase-a-integration|detach-project-part*|pi-attachment|release-store|setup-runbooks|attach-project|disk-janitor-apply)
         # These suites allocate all mutable fixtures per test. Keep the outer
         # four-shard bound; Bats uses two internal semaphore slots per file.
         # Disabling cross-file parallelism avoids a GNU parallel dependency.

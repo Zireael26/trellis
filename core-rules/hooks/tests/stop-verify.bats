@@ -208,7 +208,11 @@ EOF
     [ -z "$output" ]
 
     run env -u TRELLIS_REVIEW_IN_PROGRESS bash "$candidate" <<<'{}'
-    [ "$status" -eq 2 ]
+    if [ "$candidate" = "$CODEX_HOOK" ]; then
+      [ "$status" -eq 0 ]
+    else
+      [ "$status" -eq 2 ]
+    fi
     printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
     printf '%s' "$output" | jq -e '.reason | startswith("TodoWrite:")' >/dev/null
   done
@@ -234,10 +238,12 @@ EOF
   chmod +x "$fake_bin/go"
   input="$(jq -nc --arg path "$source_file" '{tool_input: {file_path: $path}}')"
 
+  # The Codex twin runs in place from this tree, as the rendered hooks.json
+  # does; its shared-lib fallback is bound to TRELLIS_ROOT (spec 055 R1.1).
   for candidate in "$POST_EDIT_HOOK" "$CODEX_POST_EDIT_HOOK"; do
     : > "$call_log"
     run env GO_CALL_LOG="$call_log" PATH="$fake_bin:/usr/bin:/bin" \
-      bash "$candidate" <<<"$input"
+      TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)" bash "$candidate" <<<"$input"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
     [ "$(wc -l < "$call_log" | tr -d ' ')" -eq 1 ]

@@ -72,8 +72,17 @@ if [ "${TRELLIS_REVIEW_IN_PROGRESS:-}" = "1" ]; then
 fi
 
 # Resolve the hook directory now, BEFORE any `cd`, so the sibling-ladder path
-# below is correct regardless of the working directory we change into.
-HOOK_DIR="$(dirname "${BASH_SOURCE[0]}")"
+# below is correct regardless of the working directory we change into. The
+# ladder is a sibling when deployed; run in place from the payload, the shared
+# core-rules/hooks/lib/ is the fallback, and only when this directory IS the
+# declared runtime's Codex tree (spec 055 R1.1) — never for a project path that
+# merely ends in core-rules/codex/hooks.
+HOOK_DIR=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
+if [ ! -f "$REVIEWER_LIB" ] && [ -n "$__h_rt" ] && [ "$HOOK_DIR" = "$__h_rt/core-rules/codex/hooks" ]; then
+  REVIEWER_LIB="$HOOK_DIR/../../hooks/lib/code-reviewer.sh"
+fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
@@ -228,7 +237,6 @@ REVIEW_PAYLOAD=$(jq -nc \
 # `claude` stderr unsuppressed so a failing reviewer is visible; silencing fd 2
 # on the caller side would hide the degradation. stdout (the one findings line)
 # is captured and validated before it can authorize an idempotency marker.
-REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
 if [ ! -f "$REVIEWER_LIB" ]; then
   printf '%s\n' 'code-review-subagent: review degraded: reviewer library unavailable; this diff will be retried on the next Stop' >&2
   exit 0
@@ -272,8 +280,9 @@ if [ -n "$CRITICAL" ]; then
 ${CRITICAL}"
   jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
   # Block path: do NOT touch the marker — a blocked turn must re-review the
-  # corrected diff (which will hash differently anyway).
-  exit 2
+  # corrected diff (which will hash differently anyway). Codex consumes the
+  # stdout block decision on exit 0; exit 2 would require a stderr prompt.
+  exit 0
 fi
 
 # Advisory findings → Stop-safe systemMessage (shown to the model, not blocking).

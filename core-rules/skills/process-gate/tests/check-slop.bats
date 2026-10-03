@@ -278,9 +278,12 @@ EOF
 linter_free_path() {
   local shim tool
   shim="$(mktemp -d "$BATS_TEST_TMPDIR/slop-tools.XXXXXX")" || return 1
-  for tool in bash git mktemp python3 jq dirname awk cut sort grep rm cat head; do
+  for tool in bash git mktemp jq dirname awk cut sort grep rm cat head; do
     ln -s "$(command -v "$tool")" "$shim/$tool" || return 1
   done
+  # A version-manager shim (pyenv) is itself a script that needs tr/sed, so it
+  # cannot run on this curated PATH; link the interpreter it resolves to.
+  ln -s "$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$shim/python3" || return 1
   printf '%s' "$shim"
 }
 

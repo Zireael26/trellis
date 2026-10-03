@@ -1,0 +1,53 @@
+# Expected (hook, lib) inventory for core-rules/codex/hooks (spec 055 R1.5).
+# One "<hook><TAB><lib>" row per library a Codex hook references. Maintained by
+# hand, independent of the hooks: hook-inventory.bats compares it with the
+# references it extracts, in both directions, so a reference added or dropped
+# without editing this file fails. Every lib listed must resolve both in place
+# (core-rules/codex/hooks/lib/, or core-rules/hooks/lib/ behind the R1.1 guard)
+# and deployed (.codex/hooks/lib/ and .pi/hooks/lib/ in the manifest).
+block-destructive.sh	deps.sh
+code-review-subagent.sh	autonomy.sh
+code-review-subagent.sh	code-reviewer.sh
+code-review-subagent.sh	deps.sh
+decision-receipt.sh	decision-receipt-core.sh
+hookspath-guard.sh	hookspath-check.sh
+inject-primer-index.sh	deps.sh
+post-compact-context.sh	deps.sh
+post-compact-context.sh	task-context.sh
+post-edit-verify.sh	action-normalize.sh
+post-edit-verify.sh	deps.sh
+pr-gate-shiftleft.sh	deps.sh
+primer-capture-nudge.sh	deps.sh
+propose-rules.sh	autonomy.sh
+propose-rules.sh	deps.sh
+reread-guard.sh	action-normalize.sh
+reread-guard.sh	autonomy.sh
+reread-guard.sh	deps.sh
+save-context-log.sh	deps.sh
+session-context.sh	autonomy.sh
+session-context.sh	deps.sh
+session-context.sh	hookspath-check.sh
+session-context.sh	task-context.sh
+session-context.sh	verification-receipt.sh
+skill-preload-guard.sh	skill-preload.sh
+skill-preload-guard.sh	skill-size.sh
+skill-size-preflight.sh	skill-preload.sh
+skill-size-preflight.sh	skill-size.sh
+skill-slash-guard.sh	skill-preload.sh
+skill-slash-guard.sh	skill-size.sh
+slop-tripwire.sh	action-normalize.sh
+slop-tripwire.sh	deps.sh
+slop-tripwire.sh	slop-patterns.sh
+spec-gate.sh	deps.sh
+spec-gate.sh	spec-gate-core.sh
+stamp-turn.sh	deps.sh
+stop-verify.sh	deps.sh
+stop-verify.sh	pm.sh
+stop-verify.sh	verification-receipt.sh
+track-read.sh	action-normalize.sh
+track-read.sh	deps.sh
+truncation-check.sh	deps.sh
+ui-verify.sh	deps.sh
+ui-verify.sh	ui-verify-core.sh
+wiki-skill-suggest.sh	action-normalize.sh
+wiki-skill-suggest.sh	deps.sh

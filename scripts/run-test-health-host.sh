@@ -1,119 +1,109 @@
 #!/usr/bin/env bash
-# Run the host-pinned weekly test-health audit through Claude Code.
+# Host-pinned weekly test-health audit. This standalone snapshot receives its
+# home, fleet, canonical checkout and stable launcher from launchd's plist.
 #
-# This runner deliberately has no Linux/Cowork fallback: the registered project
+# There is deliberately no Linux/Cowork fallback: the registered projects'
 # dependencies are hydrated for Darwin arm64, so any other kernel produces
-# meaningless test results. It holds an atomic macOS lock around the bounded
-# Claude invocation and changes to the canonical checkout before Claude starts
-# so that the canonical rules and prompt govern the audit.
-
+# meaningless results. Each fire re-materializes the task on the active release
+# and dispatches that prompt, never the raw scheduled-tasks template, whose
+# {{TASK_ROOT}}/{{OUTPUT_ROOT}} placeholders made the 2026-09-21 run halt.
 set -euo pipefail
 
-LABEL="com.trellis.test-health"
-# Defaults are derived, never hardcoded: this file is published to the public
-# mirror, so an operator path here both leaks a real home directory and pins
-# every other machine to this one. The runner ships inside the policy
-# checkout, so its own location is the authority.
-DEFAULT_TRELLIS_ROOT="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-DEFAULT_CLAUDE_BIN="$HOME/.local/bin/claude"
+LABEL=com.trellis.test-health
+TASK=test-health
 MAX_TURNS=100
 MAX_BUDGET_USD=25
-
-TRELLIS_ROOT="${TRELLIS_ROOT:-$DEFAULT_TRELLIS_ROOT}"
-CLAUDE_BIN="${CLAUDE_BIN:-$DEFAULT_CLAUDE_BIN}"
-PROMPT="$TRELLIS_ROOT/scheduled-tasks/test-health/prompt.md"
+CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
+TRELLIS_HOME="${TRELLIS_HOME:-$HOME/.trellis}"
+TRELLIS_FLEET="${TRELLIS_FLEET:-personal}"
+TRELLIS_ROOT="${TRELLIS_ROOT:-$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+TRELLIS_LAUNCHER="${TRELLIS_LAUNCHER:-$HOME/.local/bin/trellis}"
+MANIFEST="$TRELLIS_HOME/tasks/$TRELLIS_FLEET/$TASK/manifest.json"
+PROMPT="$TRELLIS_HOME/tasks/$TRELLIS_FLEET/$TASK/prompt.md"
 LOCK_FILE="${TEST_HEALTH_LOCK_FILE:-$HOME/Library/Caches/$LABEL.lock}"
 
-usage() {
-  cat <<'EOF'
-Usage: run-test-health-host.sh [--smoke]
-
-Runs the canonical test-health prompt on the Darwin arm64 host through a
-bounded non-interactive Claude invocation. --smoke verifies the host gate,
-canonical cwd, canonical prompt, and planned bounded command without invoking
-Claude or running any project tests.
-EOF
+refuse() {
+  printf 'test-health: refused (%s): %s\n' "$1" "$2" >&2
+  exit 1
 }
 
 host_gate() {
   local host
   host="$(uname -sm)"
-  if [ "$host" != "Darwin arm64" ]; then
+  if [ "$host" != 'Darwin arm64' ]; then
     printf 'info: test-health could not run: off-host (uname=%s); darwin node_modules cannot execute under this kernel\n' "$host" >&2
     return 1
   fi
 }
 
-validate_runtime() {
-  [ -d "$TRELLIS_ROOT" ] || {
-    printf 'test-health runner: canonical root missing: %s\n' "$TRELLIS_ROOT" >&2
-    exit 1
-  }
-  [ -r "$PROMPT" ] || {
-    printf 'test-health runner: canonical prompt missing: %s\n' "$PROMPT" >&2
-    exit 1
-  }
-  [ -x "$CLAUDE_BIN" ] || {
-    printf 'test-health runner: Claude binary is not executable: %s\n' "$CLAUDE_BIN" >&2
-    exit 1
-  }
+validate_home() {
+  case "$TRELLIS_HOME" in
+    /*) ;;
+    *) refuse home "TRELLIS_HOME must be absolute: $TRELLIS_HOME" ;;
+  esac
 }
 
-print_smoke() {
-  local prompt_hash
-  prompt_hash="$(/usr/bin/shasum -a 256 "$PROMPT")"
-  prompt_hash="${prompt_hash%% *}"
+validate_manifest() {
+  [ -f "$MANIFEST" ] && [ -r "$MANIFEST" ] || refuse manifest "$MANIFEST"
+  /usr/bin/jq -e '.status == "ready" and (.requirements.planned_errors | type == "array" and length == 0)' \
+    "$MANIFEST" >/dev/null 2>&1 || refuse manifest "$MANIFEST (status must be ready; requirements.planned_errors must be empty)"
+}
 
-  printf 'smoke: host preflight: Darwin arm64\n'
-  printf 'smoke: canonical cwd: %s\n' "$PWD"
-  printf 'smoke: canonical prompt: %s\n' "$PROMPT"
-  printf 'smoke: prompt sha256: %s\n' "$prompt_hash"
-  printf 'smoke: Claude dispatch: %s -p --permission-mode bypassPermissions --max-turns %s --max-budget-usd %s <contents of canonical prompt>\n' \
-    "$CLAUDE_BIN" "$MAX_TURNS" "$MAX_BUDGET_USD"
+validate_prompt() {
+  [ -f "$PROMPT" ] && [ -r "$PROMPT" ] || refuse prompt "$PROMPT"
+  if LC_ALL=C grep -qE '\{\{[^}]*\}\}' "$PROMPT"; then
+    refuse prompt "$PROMPT (unfilled placeholder)"
+  fi
+}
+
+usage() {
+  printf 'Usage: run-test-health-host.sh [--smoke]\n'
 }
 
 smoke=false
 case "${1:-}" in
-  "") ;;
+  '') ;;
   --smoke) smoke=true ;;
-  --help|-h)
-    usage
-    exit 0
-    ;;
-  *)
-    printf 'test-health runner: unknown option: %s\n' "$1" >&2
-    usage >&2
-    exit 2
-    ;;
+  --help|-h) usage; exit 0 ;;
+  *) refuse option "${1}" ;;
 esac
+[ "$#" -le 1 ] || refuse option 'too many arguments'
 
-# This must be the first audit preflight: do not resolve the prompt or project
-# files before proving that the Darwin-arm64 host is available.
-if ! host_gate; then
-  exit 3
+# The host gate precedes every task or checkout access.
+host_gate || exit 3
+validate_home
+
+if ! $smoke; then
+  mkdir -p "$(dirname "$LOCK_FILE")" || refuse lock "$LOCK_FILE"
+  if ! /usr/bin/shlock -f "$LOCK_FILE" -p "$$"; then
+    lock_owner="$(cat "$LOCK_FILE" 2>/dev/null || printf 'unknown')"
+    printf 'info: test-health skipped: another run is active (pid=%s)\n' "$lock_owner"
+    exit 0
+  fi
+  trap 'rm -f "$LOCK_FILE"' EXIT
+  materialize_err="$("$TRELLIS_LAUNCHER" task materialize --fleet "$TRELLIS_FLEET" "$TASK" \
+    --home "$TRELLIS_HOME" 2>&1 >/dev/null)" ||
+    refuse materialize "$TRELLIS_LAUNCHER: $(printf '%s' "$materialize_err" | tail -n 1)"
 fi
 
-validate_runtime
-cd "$TRELLIS_ROOT"
+validate_manifest
+validate_prompt
+cd "$TRELLIS_ROOT" 2>/dev/null || refuse cwd "$TRELLIS_ROOT"
 
 if $smoke; then
-  print_smoke
+  prompt_hash="$(/usr/bin/shasum -a 256 "$PROMPT")" || refuse prompt "$PROMPT (sha256 failed)"
+  printf '%s\n' "$MANIFEST" "$PROMPT" "${prompt_hash%% *}" 'placeholders: none unfilled'
   exit 0
 fi
 
-mkdir -p "$(dirname "$LOCK_FILE")"
-if ! /usr/bin/shlock -f "$LOCK_FILE" -p "$$"; then
-  lock_owner="$(cat "$LOCK_FILE" 2>/dev/null || printf 'unknown')"
-  printf 'info: test-health skipped: another run is active (pid=%s)\n' "$lock_owner"
-  exit 0
-fi
-trap 'rm -f "$LOCK_FILE"' EXIT
-
-# Keep the canonical prompt as the sole user prompt. Its read-only boundary
-# permits only the dated audit output, while this outer runner owns host gating,
-# non-overlap, cwd, and the hard Claude limits.
+[ -x "$CLAUDE_BIN" ] || refuse claude "$CLAUDE_BIN (not executable)"
+# A sentinel preserves trailing newlines in command substitution. The Claude
+# argument is thus byte-identical to the materialized prompt, not a trimmed
+# shell-substitution copy and never the raw release template.
+prompt_body="$(cat "$PROMPT" && printf '.')" || refuse prompt "$PROMPT (read failed)"
+prompt_body="${prompt_body%.}"
 "$CLAUDE_BIN" -p \
   --permission-mode bypassPermissions \
   --max-turns "$MAX_TURNS" \
   --max-budget-usd "$MAX_BUDGET_USD" \
-  "$(cat "$PROMPT")"
+  "$prompt_body"

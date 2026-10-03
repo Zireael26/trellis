@@ -16,6 +16,7 @@
 #       block     → {"decision":"block",...}; exit 2. The ONLY blocking path:
 #                   a visual tool IS present, the dev server IS up, yet the
 #                   capture produced no artifact.
+#   - Missing core: block with the repair line (spec 055 R1.3) — fail closed.
 #   - Fail-open: if the core emits nothing or unparseable output (infra
 #     failure), exit 0 — never block on a core failure.
 #
@@ -41,6 +42,13 @@ fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 
+# A missing decision core fails CLOSED (spec 055 R1.3): the gate cannot decide.
+CORE="$(dirname "${BASH_SOURCE[0]}")/lib/ui-verify-core.sh"
+if [ ! -f "$CORE" ]; then
+  jq -nc --arg reason "ui-verify degraded: core library missing at $CORE; run trellis doctor in $PROJECT_DIR" '{decision: "block", reason: $reason}'
+  exit 2
+fi
+
 # Source optional project-level hook config (UI_PORT, UI_PATH, UI_REGEX, …) with
 # auto-export on, so any UI_* it sets propagate into the core subprocess below.
 if [ -f "${PROJECT_DIR}/.claude/hooks/config.sh" ]; then
@@ -54,10 +62,9 @@ fi
 # The core ignores stdin; redirect from /dev/null so it never blocks on a tty.
 # Discard stderr and `|| true` so a core infra failure surfaces as empty output
 # (→ fail-open below), never a non-zero abort under `set -u`.
-CORE="$(dirname "${BASH_SOURCE[0]}")/lib/ui-verify-core.sh"
 VERDICT_JSON=$(bash "$CORE" "$PROJECT_DIR" </dev/null 2>/dev/null || true)
 
-# Fail-open: no output (missing/broken core) → never block.
+# Fail-open: no output (broken core) → never block.
 [ -n "$VERDICT_JSON" ] || exit 0
 
 VERDICT=$(printf '%s' "$VERDICT_JSON" | jq -r '.verdict // "skip"' 2>/dev/null)

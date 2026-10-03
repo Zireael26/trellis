@@ -1,0 +1,17 @@
+{"type":"session_meta","payload":{"cli_version":"0.157.1","cwd":"/synthetic/project","id":"synthetic-session","timestamp":"2026-01-01T00:00:00Z"}}
+{"type":"turn_context","payload":{"cwd":"/synthetic/project","model":"synthetic-model","turn_id":"synthetic-turn-1"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic-turn-1"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Synthetic guidance for a toy file."}],"id":"synthetic-dev"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Create an imaginary example."}],"id":"synthetic-user-1"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Earlier toy result. <!-- dod-receipt cmd=\"printf old\" exit=0 diff=\"+1/-0 (1 files)\" -->"}],"id":"synthetic-assistant-1"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"message"},"turn_id":"synthetic-turn-1"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{}}}}
+{"type":"turn_context","payload":{"cwd":"/synthetic/project","model":"synthetic-model","turn_id":"synthetic-turn-2"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic-turn-2"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Now revise the imaginary example."}],"id":"synthetic-user-2"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[],"id":"synthetic-reasoning"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"synthetic_tool","input":"invented input","call_id":"synthetic-call","status":"completed","id":"synthetic-call-item"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","output":"invented result","call_id":"synthetic-call","id":"synthetic-output-item"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Current toy result. <!-- dod-receipt cmd=\"printf current\" exit=0 diff=\"+2/-1 (1 files)\" --> <!-- follow-ups: none -->"}],"id":"synthetic-assistant-2"}}
+{"type":"response_item","payload":{"type":"function_call","role":"user","name":"synthetic_tool","arguments":"invented input","call_id":"synthetic-call-2","id":"synthetic-function-call-user"}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"message"},"turn_id":"synthetic-turn-2"}}

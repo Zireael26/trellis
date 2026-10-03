@@ -14,36 +14,83 @@ set -e
 
 # --- Trellis PR-flow guard ---
 # Git passes refs via stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
-# REUSE this loop to also pick the run-all MODE + RANGE:
+# and the remote name as $1. REUSE this loop to also pick the run-all MODE +
+# RANGE:
 #   - MODE=merge if any pushed ref targets refs/heads/main|master, else push.
-#   - RANGE=<remote_sha>..<local_sha> for the main-targeting ref; a new branch
-#     (all-zero remote_sha) leaves RANGE empty so run-all uses its own default.
+#   - Every pushed ref derives its own range, so the gate judges only what this
+#     push adds, never the branch's whole history:
+#       update      -> <remote_sha>..<local_sha>, when remote_sha is present
+#                      locally. A remote tip missing locally (remote ahead,
+#                      rewritten ref, shallow clone) would build an unresolvable
+#                      range -> run-diff resolves it to ZERO files -> the
+#                      security gate fails OPEN. So it derives nothing instead.
+#       new branch  -> <merge-base of local_sha and the remote's default
+#                      branch>..<local_sha>. The default branch is resolved
+#                      from refs/remotes/<remote>/HEAD, then <remote>/main, then
+#                      <remote>/master; if none resolves, nothing is derived.
+#       deletion    -> skipped; it adds nothing to judge.
+#   - run-all takes ONE range, so the refs are combined:
+#       a main/master-targeting ref's range wins (the merge boundary);
+#       otherwise the one distinct range every pushed ref agrees on is used;
+#       otherwise (two different ranges, or any ref that derived nothing)
+#       RANGE stays empty and run-all falls back to its own main..HEAD default
+#       -- the broader scan, so an ambiguous push fails closed, never open.
 MODE=push
 RANGE=""
+MAIN_RANGE=""
+MAIN_SEEN=0
+BRANCH_RANGE=""
+BRANCH_AMBIGUOUS=0
+REMOTE_NAME="${1:-origin}"
+
+# Echo the remote's default-branch ref, or nothing when it cannot be resolved.
+default_branch_ref() {
+  if head_ref=$(git symbolic-ref -q "refs/remotes/$REMOTE_NAME/HEAD" 2>/dev/null); then
+    printf '%s' "$head_ref"
+    return
+  fi
+  for candidate in main master; do
+    if git rev-parse -q --verify "refs/remotes/$REMOTE_NAME/$candidate^0" >/dev/null 2>&1; then
+      printf '%s' "refs/remotes/$REMOTE_NAME/$candidate"
+      return
+    fi
+  done
+}
+
+# Echo the range this ref adds, or nothing when it cannot be derived safely.
+# Every git call sits in an `if` so `set -e` can never abort the hook here.
+ref_range() {
+  ref_local="$1"
+  ref_remote="$2"
+  case "$ref_remote" in
+    *[!0]*)
+      if git cat-file -e "$ref_remote^{commit}" 2>/dev/null; then
+        printf '%s' "$ref_remote..$ref_local"
+      fi
+      ;;
+    *)
+      base_ref=$(default_branch_ref)
+      if [ -n "$base_ref" ] && base=$(git merge-base "$base_ref" "$ref_local^0" 2>/dev/null); then
+        printf '%s' "$base..$ref_local"
+      fi
+      ;;
+  esac
+}
+
 # local_ref is a positional placeholder for the 1st stdin field (unused here).
 # shellcheck disable=SC2034
 while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+  ref_derived=$(ref_range "$local_sha" "$remote_sha")
   case "$remote_ref" in
     refs/heads/main|refs/heads/master)
       # Target is the merge boundary: strict gate regardless of policy override.
       MODE=merge
-      case "$remote_sha" in
-        *[!0]*)
-          # Only build the range if the remote tip is present in the local
-          # object store. A non-zero remote_sha that is missing locally (remote
-          # ahead, force-pushed/rewritten ref, shallow clone) would otherwise
-          # build an unresolvable <remote_sha>..<local_sha> range -> run-diff
-          # resolves it to ZERO files -> the security gate fails OPEN. Leave
-          # RANGE empty in that case so run-all falls back to its main..HEAD
-          # default and actually scans the diff.
-          if git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
-            RANGE="$remote_sha..$local_sha"
-          else
-            RANGE=""
-          fi
-          ;;
-        *)      RANGE="" ;;
-      esac
+      MAIN_SEEN=1
+      MAIN_RANGE="$ref_derived"
       if [ "${TRELLIS_ALLOW_MAIN_PUSH:-0}" != "1" ]; then
         echo "[pre-push] Direct push to $remote_ref blocked by Trellis policy." >&2
         echo "[pre-push] Open a branch + PR. Emergency override: TRELLIS_ALLOW_MAIN_PUSH=1 git push" >&2
@@ -51,8 +98,26 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       fi
       echo "[pre-push] TRELLIS_ALLOW_MAIN_PUSH=1 set; allowing direct push to $remote_ref." >&2
       ;;
+    *)
+      if [ -z "$ref_derived" ]; then
+        BRANCH_AMBIGUOUS=1
+      elif [ -z "$BRANCH_RANGE" ]; then
+        BRANCH_RANGE="$ref_derived"
+      elif [ "$BRANCH_RANGE" != "$ref_derived" ]; then
+        BRANCH_AMBIGUOUS=1
+      fi
+      ;;
   esac
 done
+
+if [ "$MAIN_SEEN" = "1" ]; then
+  RANGE="$MAIN_RANGE"
+elif [ "$BRANCH_AMBIGUOUS" = "1" ]; then
+  RANGE=""
+  echo "[pre-push] could not derive one range for every pushed ref; gating run-all's default range instead." >&2
+else
+  RANGE="$BRANCH_RANGE"
+fi
 
 # --- spec-gate (mandatory-pipeline, spec 006) — LOAD-BEARING teeth ---
 # Blocks a push whose branch carries over-floor feature code with no spec triad,

@@ -1,6 +1,7 @@
 #!/bin/sh
 # The direct-entry shell performs one operation only: start a known Bash through
-# env -i. The clean Bash extracts and runs the launcher body, so BASH_ENV, ENV,
+# env -i (the heavy route first records the caller's environment as data, for
+# its wrapped command). The clean Bash extracts and runs the launcher body, so BASH_ENV, ENV,
 # exported functions, Git overrides, loader variables, and ambient PATH never
 # reach an evaluated launcher command.
 # shellcheck shell=bash
@@ -15,8 +16,17 @@
 # each prologue as `sh` to keep that guarantee, since this line removes it here.
 launcher_ssh_auth_sock=${SSH_AUTH_SOCK-}
 launcher_attach_caller_path=
-if [ "${1-}" = attach ]; then
-  launcher_attach_caller_path=${PATH-}
+# Every operator route that can attach a worktree forwards the caller PATH, so
+# its recorded toolchain is the operator's, never the sanitized control PATH.
+case "${1-}" in
+  attach|onboard|worktree|doctor) launcher_attach_caller_path=${PATH-} ;;
+esac
+# `trellis heavy` wraps an arbitrary workload that must see the caller's whole
+# environment. Carry it as data, never as shell text: the launcher only relays
+# the blob, and the heavy supervisor decodes it for the wrapped command alone.
+launcher_heavy_caller_env=
+if [ "${1-}" = heavy ]; then
+  launcher_heavy_caller_env="v1:$(/usr/bin/env -0 | /usr/bin/base64)"
 fi
 # shellcheck disable=SC2093  # nothing after this exec runs in the outer shell:
 # the trusted body below the marker is read as DATA by the re-exec'd bootstrap.
@@ -24,6 +34,7 @@ exec /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
   "SSH_AUTH_SOCK=$launcher_ssh_auth_sock" \
   "TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path" \
+  "TRELLIS_HEAVY_CALLER_ENV=$launcher_heavy_caller_env" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
   /bin/bash --noprofile --norc -c '
 set -u
@@ -55,7 +66,9 @@ eval "$launcher_body"
 # which made the attach-time toolchain capture record the system set it was
 # built to replace, leaving every gate stage at exit 127.
 launcher_attach_caller_path=${TRELLIS_ATTACH_CALLER_PATH:-${PATH-}}
-unset BASH_ENV ENV CDPATH TRELLIS_ATTACH_CALLER_PATH
+# Relayed only to the heavy route, and only as an opaque value.
+launcher_heavy_caller_env=${TRELLIS_HEAVY_CALLER_ENV-}
+unset BASH_ENV ENV CDPATH TRELLIS_ATTACH_CALLER_PATH TRELLIS_HEAVY_CALLER_ENV
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
 set -u
@@ -298,7 +311,9 @@ launcher_validate_machine_config() {
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema"])
+    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
+    # alone (spec 054), so a bad value disables only the heavy gate.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
     and ((has("$schema") | not) or (."$schema" | no_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -2297,9 +2312,13 @@ releases, snapshot_name, expected_digest, command, version = sys.argv[1:6]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 CARRIER = "scripts/trellis"
+# Every library a `TRELLIS_LIBS_PRELOADED`-guarded file skips sourcing must be
+# here, or the flag promises a definition nobody loaded. `surface-plan.sh` skips
+# `skill-roots.sh` on that flag, so Spec 049's table has to be preloaded too.
 LIBRARIES = (
     "scripts/lib/semver.sh",
     "scripts/lib/trellis-home.sh",
+    "scripts/lib/skill-roots.sh",
     "scripts/lib/release-store.sh",
     "scripts/lib/local-registry.sh",
     "scripts/lib/attachment.sh",
@@ -3030,6 +3049,37 @@ launcher_cleanup() {
   return "$rc"
 }
 
+# Forward HUP, INT or TERM to the heavy child as itself. Until the child has
+# acknowledged that its INT and QUIT dispositions are reset, a signal is only
+# queued (first one wins) and replayed as that same signal once it has: an INT
+# sent earlier would meet Bash's inherited ignore and be lost, and INT must
+# still end in 130 and HUP in 129.
+launcher_heavy_forward() {
+  launcher_heavy_forwarded=1
+  if [ "${launcher_heavy_ready:-0}" = 1 ]; then
+    kill -s "$1" "$launcher_heavy_child" 2>/dev/null
+  else
+    launcher_heavy_early="${launcher_heavy_early:-$1}"
+  fi
+}
+
+# Test hooks (spec 054), honoured only when the caller's environment carries
+# TRELLIS_HEAVY_TEST=1, read as data and never evaluated. Prints `pause` for
+# TRELLIS_HEAVY_TEST_PAUSE=launcher-startup (the child waits one second before
+# resetting INT, so a test can land a signal before the acknowledgement) and
+# `fail-ready` for TRELLIS_HEAVY_TEST_FAIL=launcher-ready (the child's
+# acknowledgement cannot be written); nothing otherwise.
+launcher_heavy_test_hook() {
+  local vars
+  vars="$(printf '%s' "${launcher_heavy_caller_env#v1:}" | /usr/bin/base64 -d 2>/dev/null | /usr/bin/tr '\000' '\n')" || return 0
+  printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST=1' || return 0
+  if printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'; then
+    printf 'pause\n'
+  elif printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST_FAIL=launcher-ready'; then
+    printf 'fail-ready\n'
+  fi
+}
+
 trap 'launcher_cleanup' EXIT
 trap 'launcher_cleanup; exit 129' HUP
 trap 'launcher_cleanup; exit 130' INT
@@ -3155,8 +3205,13 @@ launcher_main() {
   }
   ssh_auth_sock="$(launcher_verified_ssh_auth_sock)"
   attach_environment=("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
-  if [ "${1:-}" = attach ]; then
-    attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
+  case "${1:-}" in
+    attach|onboard|worktree|doctor)
+      attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
+      ;;
+  esac
+  if [ "${1:-}" = heavy ]; then
+    attach_environment+=("TRELLIS_HEAVY_CALLER_ENV=$launcher_heavy_caller_env")
   fi
   if [ "${1:-}" = release ] || [ "${1:-}" = upgrade ]; then
     set -o pipefail
@@ -3170,6 +3225,64 @@ launcher_main() {
         /bin/bash --noprofile --norc -s -- "$@"
     child_status=$?
     set +o pipefail
+  elif [ "${1:-}" = heavy ]; then
+    # A heavy run can last an hour, and a trapped signal is deferred while Bash
+    # waits on a foreground child. Run it in the background (keeping stdin) and
+    # forward HUP, INT and TERM, so the supervisor tears its workload down now
+    # rather than after the workload finishes on its own.
+    # Bash starts a background child with INT and QUIT ignored, and an ignored
+    # INT is simply lost. perl restores their default dispositions before the
+    # dispatcher starts, then acknowledges by creating a ready file in this
+    # command's private scratch directory; forwarding is held until then.
+    launcher_heavy_child=
+    launcher_heavy_ready=0
+    launcher_heavy_early=
+    launcher_heavy_forwarded=0
+    launcher_heavy_ready_file="$command_scratch/heavy-child-ready"
+    trap 'launcher_heavy_forward HUP' HUP
+    trap 'launcher_heavy_forward INT' INT
+    trap 'launcher_heavy_forward TERM' TERM
+    /usr/bin/perl -e '
+      my ($ready, $hook) = splice(@ARGV, 0, 2);
+      if ($hook eq "pause") { print STDERR "trellis: test pause launcher-startup\n"; sleep 1; }
+      $SIG{INT} = $SIG{QUIT} = "DEFAULT";
+      $ready .= "/missing/heavy-child-ready" if $hook eq "fail-ready";
+      # Without an acknowledgement the launcher would hold every signal for the
+      # whole run, so failing to write it ends the child before exec.
+      my $fh;
+      unless (open($fh, ">", $ready) and close($fh)) {
+        print STDERR "trellis: could not acknowledge heavy child readiness: $!\n";
+        exit 5;
+      }
+      exec { $ARGV[0] } @ARGV;
+      exit 127;
+    ' "$launcher_heavy_ready_file" "$(launcher_heavy_test_hook)" \
+      /usr/bin/env -i \
+      "HOME=$HOME" "TRELLIS_HOME=$home" \
+      "TRELLIS_VERIFIED_PAYLOAD=$payload" "TRELLIS_VERIFIED_RELEASE_VERSION=$version" \
+      "TRELLIS_VERIFIED_SSH_AUTH_SOCK=$ssh_auth_sock" \
+      "TMPDIR=$command_scratch" \
+      "${attach_environment[@]}" \
+      /bin/bash --noprofile --norc "$cli" "$@" <&0 &
+    launcher_heavy_child=$!
+    while [ ! -e "$launcher_heavy_ready_file" ] && kill -0 "$launcher_heavy_child" 2>/dev/null; do
+      /bin/sleep 0.01
+    done
+    launcher_heavy_ready=1
+    # Replay only to a child that is still there: once it is gone its pid may
+    # already belong to someone else.
+    if [ -n "$launcher_heavy_early" ] && kill -0 "$launcher_heavy_child" 2>/dev/null; then
+      kill -s "$launcher_heavy_early" "$launcher_heavy_child" 2>/dev/null
+    fi
+    while :; do
+      launcher_heavy_forwarded=0
+      wait "$launcher_heavy_child"
+      child_status=$?
+      [ "$launcher_heavy_forwarded" = 1 ] || break
+    done
+    trap 'launcher_cleanup; exit 129' HUP
+    trap 'launcher_cleanup; exit 130' INT
+    trap 'launcher_cleanup; exit 143' TERM
   else
     /usr/bin/env -i \
       "HOME=$HOME" "TRELLIS_HOME=$home" \

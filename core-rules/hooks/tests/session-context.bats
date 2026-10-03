@@ -170,3 +170,83 @@ EOF
   log_len=$(printf '%s' "$ctx" | awk '/context-log.md \(previous session\)/{flag=1;next} /Unresolved gotchas/{flag=0} flag' | wc -c)
   [ "$log_len" -gt 1000 ]
 }
+
+# --- spec 055 R4.1/R4.2: core.hooksPath drift line ----------------------------
+
+# A private TRELLIS_HOME whose owner record for PROJECT_DIR enables git hooks
+# with a managed dispatcher path; the local core.hooksPath starts at that path.
+hookspath_fixture() {
+  local previous="${1:-null}" root checkout worktree
+  root="$(cd "$PROJECT_DIR" && pwd -P)"
+  HP_HOME="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/trellis-home"
+  checkout="$(printf '%s' "$root/.git" | shasum -a 256 | awk '{print $1}')"
+  worktree="$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')"
+  HP_MANAGED="$HP_HOME/state/git-hooks/$checkout"
+  mkdir -p "$HP_HOME/state/attachments/$checkout" "$HP_MANAGED"
+  jq -n --arg managed "$HP_MANAGED" --argjson previous "$previous" \
+    '{git_hooks: {enabled: true, managed_hooks_path: $managed, previous_hooks_path: $previous, pre_push_source: "core-rules/githooks/pre-push"}}' \
+    > "$HP_HOME/state/attachments/$checkout/$worktree.json"
+  git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
+}
+
+# Run <hook> with the fixture home into $ctx; the git config must be
+# byte-identical afterwards (R4.2).
+hookspath_ctx() {
+  local hook="$1" before
+  before="$(shasum -a 256 "$PROJECT_DIR/.git/config")"
+  ctx="$(extract_ctx "$(printf '%s' '{"source":"startup"}' | TRELLIS_HOME="$HP_HOME" bash "$hook")")"
+  [ "$(shasum -a 256 "$PROJECT_DIR/.git/config")" = "$before" ] || { echo "git config changed"; return 1; }
+}
+
+@test "R4.1: each core.hooksPath drift warns with trellis doctor --fix and no git config command" {
+  local value
+  hookspath_fixture
+  for value in ".husky/_" "$HP_HOME/state/git-hooks/other"; do
+    git -C "$PROJECT_DIR" config --local core.hooksPath "$value"
+    hookspath_ctx "$HOOK"
+    [[ "$ctx" == *"core.hooksPath is \"$value\""* ]] || { echo "$value: $ctx"; false; }
+    [[ "$ctx" == *'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
+    [[ "$ctx" != *'git config'* ]] || { echo "$ctx"; false; }
+  done
+  git -C "$PROJECT_DIR" config --local core.hooksPath .husky/_
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *husky*prepare* ]] || { echo "$ctx"; false; }
+  # A duplicated managed value is drift as well.
+  git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
+  git -C "$PROJECT_DIR" config --local --add core.hooksPath "$HP_MANAGED"
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *'2 values'*'trellis doctor --fix'* ]] || { echo "$ctx"; false; }
+  [[ "$ctx" != *'git config'* ]] || { echo "$ctx"; false; }
+  # A trailing empty value is the one git honours, which turns the hooks off.
+  git -C "$PROJECT_DIR" config --local --replace-all core.hooksPath "$HP_MANAGED"
+  git -C "$PROJECT_DIR" config --local --add core.hooksPath ""
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *"2 values (\"$HP_MANAGED\", \"\")"*'trellis doctor --fix'* ]] || { echo "$ctx"; false; }
+}
+
+@test "R4.1: the recorded previous value .husky/_ is still drift" {
+  hookspath_fixture '".husky/_"'
+  git -C "$PROJECT_DIR" config --local core.hooksPath .husky/_
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *'core.hooksPath is ".husky/_"'*'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
+  [[ "$ctx" != *'git config'* ]]
+}
+
+@test "R4.1: the managed value alone gives no line" {
+  hookspath_fixture
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" != *'core.hooksPath'* ]] || { echo "$ctx"; false; }
+}
+
+@test "R4.1: the Codex copy warns in place through the declared runtime" {
+  export TRELLIS_ROOT
+  TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  hookspath_fixture
+  git -C "$PROJECT_DIR" config --local core.hooksPath .husky/_
+  hookspath_ctx "$CODEX_HOOK"
+  [[ "$ctx" == *'core.hooksPath is ".husky/_"'*'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
+  [[ "$ctx" != *'git config'* ]]
+  git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
+  hookspath_ctx "$CODEX_HOOK"
+  [[ "$ctx" != *'core.hooksPath'* ]] || { echo "$ctx"; false; }
+}

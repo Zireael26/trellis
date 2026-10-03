@@ -34,6 +34,7 @@ The report has these sections — summarize them for the user, most actionable f
 - **Build caches** — per cache dir: `[delete]` (stale past `cache_ttl_days`), `[skip]` (younger, or a build is currently running in that project), with sizes.
 - **Worktrees** — per linked worktree: `[delete]` (passes the configured recoverability and safety predicate), `[candidate]` (manual review; never auto-reaped), or `[skip]` (main checkout or unsafe), with the full verdict. Default recoverability is merged or pushed; `--safe-only` narrows deletion to merged, non-detached trees.
 - **Package stores** — best-effort `pnpm store` / `npm cache` reclaim estimate (may be 0).
+- **Docker** (when the `docker` scope runs) — anonymous-volume counts and the unattached volume IDs (report-only; the janitor never deletes volumes), BuildKit cache reclaimable, and image count.
 - **Total** — reclaimable-now bytes (stale caches + fully-gated worktrees).
 
 Exit codes: `0` success, `1` a scan or prune error occurred, `2` bad arguments.
@@ -74,6 +75,8 @@ In attended use, only add `--yes` after explicit approval of the previewed plan;
 - It never touches a project whose build is currently running (the cache scan detects an active `next`/`vite`/`turbo`/`webpack`/`tsc` build and skips that project's caches).
 - The default LaunchAgent runs `--report` only. `scripts/install-disk-janitor-launchd.sh --with-apply` separately installs the opt-in nightly `--safe-only` worktree agent; uninstall it before rollback. Other destructive reclaim remains attended.
 - It isolates per-project failures: a project that errors mid-scan is reported as `skipped` and the run continues.
+- It never deletes Docker volumes, in any mode or with any flag. The `docker` scope lists unattached (`Links == 0`) anonymous volume IDs under a report-only heading, because an unattached volume can still hold data; its only mutation is the BuildKit cache prune. Removing a volume is an operator action under PROTOCOL §10.
+- `trellis launchd` refuses to install, and `trellis doctor` reports an error, while any `~/Library/LaunchAgents/org.trellis.disk-janitor*.plist` differs from the installer's exact arguments and schedule. A renamed agent (for example `.disabled-<date>`) is reported as disabled.
 
 ## Config keys (`trellis.config.json` → `disk_janitor`)
 

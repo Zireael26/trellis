@@ -1749,3 +1749,148 @@ deferral_owner() {
 
   [ "$status" -eq 4 ]
 }
+
+# --- spec 055 R2.4 / A2.3: attach refuses a control-only toolchain ------------
+
+attach_with_caller_path() {
+  run env "TRELLIS_ATTACH_CALLER_PATH=$1" \
+    "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$PROJECT"
+}
+
+@test "attach refuses every spelling of a control-only caller PATH and records nothing" {
+  ln -s /usr/bin "$SANDBOX/usr-bin-link"
+  for value in \
+    '/usr/bin:/bin:/usr/sbin:/sbin' '/bin:/usr/bin' '/usr/bin::/bin:' '/usr/bin/../bin' \
+    "$SANDBOX/usr-bin-link" ':::' '   '; do
+    attach_with_caller_path "$value"
+    [ "$status" -eq 5 ] || { printf 'value=[%s] status=%s\n%s\n' "$value" "$status" "$output"; false; }
+    printf '%s\n' "$output" | grep -F "sanitized control PATH; run trellis attach $PROJECT from your shell" >/dev/null ||
+      { printf 'value=[%s]\n%s\n' "$value" "$output"; false; }
+    [ -z "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print 2>/dev/null)" ] ||
+      { printf 'value=[%s] recorded an owner\n' "$value"; false; }
+  done
+}
+
+@test "attach refuses a caller PATH with a relative entry" {
+  mkdir -p "$SANDBOX/real-bin"
+  attach_with_caller_path "$SANDBOX/real-bin:relative-bin"
+  [ "$status" -eq 5 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  printf '%s\n' "$output" | grep -F "relative entry" >/dev/null || { printf '%s\n' "$output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print 2>/dev/null)" ]
+}
+
+@test "attach records a real toolchain from the forwarded caller PATH" {
+  mkdir -p "$SANDBOX/real-bin"
+  real="$(canonical_dir "$SANDBOX/real-bin")"
+  attach_with_caller_path "$real:/usr/bin:/bin"
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  jq -e --arg real "$real" '.toolchain_path == [$real,"/usr/bin","/bin"]' "$owner" >/dev/null ||
+    { jq -c '.toolchain_path' "$owner"; false; }
+}
+
+# --- spec 055 R2.6 / A2.5: attach --refresh-toolchain -------------------------
+
+refresh_fixture() {
+  mkdir -p "$SANDBOX/old-bin" "$SANDBOX/new-bin"
+  OLD_BIN="$(canonical_dir "$SANDBOX/old-bin")"
+  NEW_BIN="$(canonical_dir "$SANDBOX/new-bin")"
+  attach_with_caller_path "$OLD_BIN:/usr/bin:/bin"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+  REFRESH_OWNER="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  REFRESH_MANAGED="$(managed_hooks_path)"
+  # The record a non-attach route used to write: the sanitized control PATH.
+  jq -cS '.toolchain_path = ["/usr/bin","/bin","/usr/sbin","/sbin"]' "$REFRESH_OWNER" > "$SANDBOX/owner.next"
+  mv -f "$SANDBOX/owner.next" "$REFRESH_OWNER"
+  chmod 600 "$REFRESH_OWNER"
+  cp -p "$REFRESH_OWNER" "$SANDBOX/owner.before"
+  git -C "$PROJECT" config --local --get-all core.hooksPath > "$SANDBOX/hooks.before"
+}
+
+run_refresh() {
+  local caller="$1"
+  shift
+  run env "TRELLIS_ATTACH_CALLER_PATH=$caller" "$@" \
+    "$ATTACH" attach --refresh-toolchain --home "$TRELLIS_HOME" "$PROJECT"
+}
+
+assert_refresh_changed_nothing() {
+  cmp -s "$REFRESH_OWNER" "$SANDBOX/owner.before" || {
+    printf 'owner record changed\n'; diff "$SANDBOX/owner.before" "$REFRESH_OWNER"; return 1
+  }
+  [ "$(fixture_mode "$REFRESH_OWNER")" = 600 ]
+  [ -z "$(find "$(dirname "$REFRESH_OWNER")" -name '*.tmp.*' -print)" ] || { echo 'stray temp beside the owner'; return 1; }
+}
+
+@test "refresh-toolchain replaces only toolchain_path and the gate then runs" {
+  refresh_fixture
+  run_refresh "$NEW_BIN:/usr/bin:/bin"
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  jq -e --arg new "$NEW_BIN" '.toolchain_path == [$new,"/usr/bin","/bin"]' "$REFRESH_OWNER" >/dev/null ||
+    { jq -c '.toolchain_path' "$REFRESH_OWNER"; false; }
+  # Every byte except the toolchain value is identical.
+  jq -cS --slurpfile before "$SANDBOX/owner.before" '.toolchain_path = $before[0].toolchain_path' \
+    "$REFRESH_OWNER" > "$SANDBOX/owner.rebuilt"
+  cmp "$SANDBOX/owner.rebuilt" "$SANDBOX/owner.before"
+  [ "$(fixture_mode "$REFRESH_OWNER")" = 600 ]
+  printf '%s\n' 'refs/heads/x deadbeef refs/heads/x abcdef' > "$SANDBOX/refs"
+  run_managed_pre_push "$REFRESH_MANAGED" "$SANDBOX/refs" 0 0
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+}
+
+@test "refresh-toolchain refuses a local core.hooksPath other than the managed path and changes nothing" {
+  refresh_fixture
+  for value in .husky/_ "$SANDBOX/elsewhere"; do
+    git -C "$PROJECT" config --local core.hooksPath "$value"
+    run_refresh "$NEW_BIN:/usr/bin:/bin"
+    [ "$status" -ne 0 ] || { printf 'value=%s accepted\n%s\n' "$value" "$output"; false; }
+    printf '%s\n' "$output" | grep -F 'trellis doctor --fix' >/dev/null || { printf '%s\n' "$output"; false; }
+    assert_refresh_changed_nothing
+    [ "$(git -C "$PROJECT" config --local --get-all core.hooksPath)" = "$value" ]
+  done
+}
+
+@test "refresh-toolchain refuses a duplicated core.hooksPath and changes nothing" {
+  refresh_fixture
+  git -C "$PROJECT" config --local --add core.hooksPath "$REFRESH_MANAGED"
+  git -C "$PROJECT" config --local --get-all core.hooksPath > "$SANDBOX/hooks.dup"
+  run_refresh "$NEW_BIN:/usr/bin:/bin"
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F 'trellis doctor --fix' >/dev/null || { printf '%s\n' "$output"; false; }
+  assert_refresh_changed_nothing
+  git -C "$PROJECT" config --local --get-all core.hooksPath | cmp - "$SANDBOX/hooks.dup"
+}
+
+@test "refresh-toolchain refuses a control-only caller PATH and changes nothing" {
+  refresh_fixture
+  for value in '/usr/bin:/bin:/usr/sbin:/sbin' ':::'; do
+    run_refresh "$value"
+    [ "$status" -eq 5 ] || { printf 'value=[%s] status=%s\n%s\n' "$value" "$status" "$output"; false; }
+    printf '%s\n' "$output" | grep -F "sanitized control PATH; run trellis attach --refresh-toolchain $PROJECT from your shell" >/dev/null ||
+      { printf '%s\n' "$output"; false; }
+    assert_refresh_changed_nothing
+  done
+}
+
+@test "refresh-toolchain refuses an unattached worktree and writes nothing" {
+  refresh_fixture
+  linked="$SANDBOX/unattached linked worktree"
+  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q -b refresh-unattached "$linked"
+  linked="$(canonical_dir "$linked")"
+  run env "TRELLIS_ATTACH_CALLER_PATH=$NEW_BIN:/usr/bin:/bin" \
+    "$ATTACH" attach --refresh-toolchain --home "$TRELLIS_HOME" "$linked"
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F "not attached: $linked" >/dev/null || { printf '%s\n' "$output"; false; }
+  [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print | wc -l | tr -d ' ')" -eq 1 ]
+  assert_refresh_changed_nothing
+  git -C "$PROJECT" worktree remove --force "$linked"
+}
+
+@test "refresh-toolchain restores the original record byte for byte on an injected post-write failure" {
+  refresh_fixture
+  run_refresh "$NEW_BIN:/usr/bin:/bin" ATTACHMENT_TEST_REFRESH_POST_CHECK_FAIL=1
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F 'post-check failure injected' >/dev/null || { printf '%s\n' "$output"; false; }
+  printf '%s\n' "$output" | grep -F 'the original record was restored' >/dev/null || { printf '%s\n' "$output"; false; }
+  assert_refresh_changed_nothing
+}

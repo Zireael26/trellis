@@ -52,8 +52,14 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "track-read"
 
-__ta_lib="$(dirname "${BASH_SOURCE[0]}")/lib/action-normalize.sh"
-[ -f "$__ta_lib" ] || __ta_lib="$(dirname "${BASH_SOURCE[0]}")/../../hooks/lib/action-normalize.sh"
+# Sibling first; the in-place fallback applies only inside the declared
+# runtime's Codex tree (spec 055 R1.1), never a project-controlled hooks/lib/.
+__h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+__h_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+__ta_lib="$__h_dir/lib/action-normalize.sh"
+if [ ! -f "$__ta_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
+  __ta_lib="$__h_dir/../../hooks/lib/action-normalize.sh"
+fi
 [ -f "$__ta_lib" ] || exit 0
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"

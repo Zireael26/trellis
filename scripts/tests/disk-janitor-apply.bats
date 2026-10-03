@@ -16,8 +16,9 @@
 #
 # We always pass `</dev/null` to apply runs so a stray tty can never feed the
 # y/N prompt, and `--yes` only where we WANT the destructive path to run.
-# `--scopes` is pinned per test so the host-global `stores` scope never runs;
-# the Docker test shadows the Docker CLI with a hermetic fixture.
+# `--scopes` is pinned per test so the host-global `stores` scope never runs.
+# Docker apply behavior (BuildKit prune only; volumes are never deleted) is
+# covered by disk-janitor-volume-safety.bats with a hermetic Docker stub.
 #
 # Paths resolve relative to this file (../.. = worktree root) — no hardcoded
 # absolute paths (those leak into the public mirror).
@@ -1397,111 +1398,4 @@ EOF
   [[ "$output" == *"skipped (plan changed): $wt"* ]] || { echo "$output"; false; }
   [ -f "$wt/late-uncommitted.txt" ]
   [ -d "$wt" ]
-}
-
-@test "Docker apply deletes only its exact planned anonymous volume IDs" {
-  local fake_bin="$SANDBOX/docker-bin" log="$SANDBOX/docker.log"
-  local volume_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  mkdir -p "$fake_bin"
-  cat > "$fake_bin/docker" <<'EOF'
-#!/bin/sh
-case "${1:-}:${2:-}" in
-  info:) exit 0 ;;
-  version:--format) printf '23.0.0\n' ;;
-  system:df)
-    if [ "${3:-}" = "-v" ]; then
-      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
-    else
-      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
-    fi
-    ;;
-  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
-  buildx:prune) printf 'buildx:%s\n' "$*" >> "$DJ_DOCKER_LOG" ;;
-  volume:inspect) printf '%s\n' "${5:-}" ;;
-  ps:-a) : ;;
-  volume:rm) printf 'rm:%s\n' "${3:-}" >> "$DJ_DOCKER_LOG" ;;
-  volume:prune) printf 'broad-prune\n' >> "$DJ_DOCKER_LOG" ;;
-  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
-esac
-EOF
-  chmod +x "$fake_bin/docker"
-
-  PATH="$fake_bin:$PATH" DJ_DOCKER_LOG="$log" DJ_DOCKER_ID_ONE="$volume_id" \
-    run_dj --apply --yes --scopes docker </dev/null
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"docker volume rm $volume_id"* ]] || { echo "$output"; false; }
-
-  run cat "$log"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"rm:$volume_id"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"buildx:buildx prune"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"broad-prune"* ]] || { echo "$output"; false; }
-}
-
-@test "Docker apply exits nonzero when an exact planned volume refusal is not an attachment race" {
-  local fake_bin="$SANDBOX/docker-bin"
-  local volume_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-  mkdir -p "$fake_bin"
-  cat > "$fake_bin/docker" <<'EOF'
-#!/bin/sh
-case "${1:-}:${2:-}" in
-  info:) exit 0 ;;
-  version:--format) printf '23.0.0\n' ;;
-  system:df)
-    if [ "${3:-}" = "-v" ]; then
-      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
-    else
-      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
-    fi
-    ;;
-  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
-  buildx:prune) : ;;
-  volume:inspect) printf '%s\n' "${5:-}" ;;
-  ps:-a) : ;;
-  volume:rm) exit 1 ;;
-  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
-esac
-EOF
-  chmod +x "$fake_bin/docker"
-
-  PATH="$fake_bin:$PATH" DJ_DOCKER_ID_ONE="$volume_id" \
-    run_dj --apply --yes --scopes docker </dev/null
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"REFUSED/failed planned Docker volume removal: $volume_id"* ]] || { echo "$output"; false; }
-}
-
-@test "Docker apply treats only a proven post-plan attachment as a benign remove race" {
-  local fake_bin="$SANDBOX/docker-bin" race="$SANDBOX/volume-attached"
-  local volume_id="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-  mkdir -p "$fake_bin"
-  cat > "$fake_bin/docker" <<'EOF'
-#!/bin/sh
-case "${1:-}:${2:-}" in
-  info:) exit 0 ;;
-  version:--format) printf '23.0.0\n' ;;
-  system:df)
-    if [ "${3:-}" = "-v" ]; then
-      printf '{"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' "$DJ_DOCKER_ID_ONE"
-    else
-      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
-    fi
-    ;;
-  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
-  buildx:prune) : ;;
-  volume:inspect) printf '%s\n' "${5:-}" ;;
-  ps:-a)
-    if [ -f "$DJ_DOCKER_RACE" ]; then
-      printf '%s\n' 'container-now-attached'
-    fi
-    ;;
-  volume:rm) : > "$DJ_DOCKER_RACE"; exit 1 ;;
-  *) printf 'unexpected docker command: %s\n' "$*" >&2; exit 72 ;;
-esac
-EOF
-  chmod +x "$fake_bin/docker"
-
-  PATH="$fake_bin:$PATH" DJ_DOCKER_ID_ONE="$volume_id" DJ_DOCKER_RACE="$race" \
-    run_dj --apply --yes --scopes docker </dev/null
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipped planned Docker volume (benign attachment race): $volume_id"* ]] || { echo "$output"; false; }
 }

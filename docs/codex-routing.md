@@ -37,7 +37,7 @@ This ladder supersedes the temporary 2026-07-10 `xhigh`-only operating-band susp
 **Exception tiers** — above the band, opt-in per unit:
 
 - **`max`** — retired from automatic direct-dispatch policy on 2026-07-30. The former recipe validators rejected it before those recipes were retired. This does not override an explicit user choice supported by the current host.
-- **`ultra`** — very difficult units that genuinely decompose. Mechanism (source-verified 2026-07-10): ultra sends `max` effort on the wire plus a proactive-delegation prompt — subagent count is the model's choice, bounded by the CLI's `features.multi_agent_v2.max_concurrent_threads_per_session` (default 4 = main + 3 subagents; CLI warns at ≥8). The recorded check covered Sol and Terra; do not extrapolate that historical mode mapping to Astra or a different installed host.
+- **`ultra`** — very difficult units that genuinely decompose. Mechanism (source-verified 2026-07-10): ultra sends `max` effort on the wire plus a proactive-delegation prompt — subagent count is the model's choice, bounded by the CLI's `features.multi_agent_v2.max_concurrent_threads_per_session` (default 4 = main + 3 subagents; CLI warns at ≥8). The recorded check covered legacy OpenAI worker lanes; do not extrapolate that historical mode mapping to Astra or a different installed host.
 
 `ultra` requires a named justification for a Trellis-initiated direct dispatch, is never its default, and is invocable only where the installed host exposes it. Automatic routes retain the house band; user-selected session effort follows the host.
 

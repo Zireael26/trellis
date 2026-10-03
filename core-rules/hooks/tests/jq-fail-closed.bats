@@ -54,6 +54,9 @@ discover_jq_required_hooks() {
   done | sort -u
 }
 
+# The hooks run in place from this checkout, as the rendered commands do; the
+# Codex shared-lib fallback is bound to TRELLIS_ROOT (spec 055 R1.1).
+HOOKS_RUNTIME="$(cd "$HOOKS_DIR/../.." && pwd -P)"
 HOOKS=()
 while IFS= read -r _hook; do
   HOOKS+=("$_hook")
@@ -125,7 +128,7 @@ EOS
   PATH_BACKUP="$PATH"
   failed=()
   for h in "${HOOKS[@]}"; do
-    PATH="$jq_free_path" run_with_stderr "$h" '{}'
+    PATH="$jq_free_path" TRELLIS_ROOT="$HOOKS_RUNTIME" run_with_stderr "$h" '{}'
     if [ "$status" -eq 0 ] || ! [[ "$stderr" == *"install jq"* ]]; then
       failed+=("$h:rc=$status")
     fi
@@ -149,7 +152,7 @@ EOS
   export TRELLIS_NO_JQ_DEGRADE=1
   failed=()
   for h in "${HOOKS[@]}"; do
-    PATH="$jq_free_path" run_with_stderr "$h" '{}'
+    PATH="$jq_free_path" TRELLIS_ROOT="$HOOKS_RUNTIME" run_with_stderr "$h" '{}'
     if [ "$status" -ne 0 ] || ! [[ "$stderr" == *"TRELLIS_NO_JQ_DEGRADE=1"* ]]; then
       failed+=("$h:rc=$status")
     fi

@@ -38,9 +38,12 @@ event_for() {
 
 invoke_hook() {
   local hook="$1" input="$2" tool_path="${3:-$PATH}" project="${4:-$PROJECT}"
+  # TRELLIS_ROOT names the tree the hooks run in place from, as the rendered
+  # command does; the Codex hook's shared-lib fallback is bound to it.
   printf '%s' "$input" | /usr/bin/env \
     HOME="$TEST_HOME" \
     TRELLIS_HOME="$TEST_TRELLIS_HOME" \
+    TRELLIS_ROOT="$REPO_ROOT" \
     CLAUDE_PROJECT_DIR="$project" \
     CODEX_PROJECT_DIR="$project" \
     GIT_CONFIG_NOSYSTEM=1 \

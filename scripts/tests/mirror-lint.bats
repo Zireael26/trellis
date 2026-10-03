@@ -708,3 +708,83 @@ JSON
 
   [ "$status" -eq 0 ]
 }
+
+# --- Spec 053 C6: the always-loaded pi web-search extension -----------------
+# One file, four exact whole tokens. Same pairing discipline as the 047 block:
+# the positives prove the allowance exists, the negatives prove it is neither
+# path-wide nor a prefix class.
+
+SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
+
+# The public mirror withholds the extension until its security review approves
+# (payload_no_publish in sync-to-template.sh), so the two cases that lint the
+# real file skip there. In the instance checkout the file is tracked and they run.
+require_search_ext() {
+  [ -f "$REPO_ROOT/$SEARCH_EXT" ] || skip "$SEARCH_EXT is withheld from this checkout"
+}
+
+@test "053: the tracked web-search extension publishes at its own path" {
+  require_search_ext
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  cp "$REPO_ROOT/$SEARCH_EXT" "$MIRROR/$SEARCH_EXT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "053: every allowed token passes inside the extension path" {
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  printf 'async function searchAntigravity() {}\nlet antigravityError = null;\n' \
+    > "$MIRROR/$SEARCH_EXT"
+  printf 'const p = "Google Antigravity";\nconst t = "ANTIGRAVITY";\n' \
+    >> "$MIRROR/$SEARCH_EXT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "053: the same extension fails at any other path" {
+  require_search_ext
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  cp "$REPO_ROOT/$SEARCH_EXT" "$MIRROR/core-rules/pi/extensions/other-search.ts"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"core-rules/pi/extensions/other-search.ts: stale 'antigravity'"* ]]
+}
+
+@test "053: an ANTIGRAVITY_ env name fails inside the extension path" {
+  # No prefix class: the 047 adapter's env names are not allowed here.
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  printf 'const u = process.env.ANTIGRAVITY_BASE_URL;\n' > "$MIRROR/$SEARCH_EXT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+}
+
+@test "053: an unenumerated compound fails inside the extension path" {
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  printf 'function fetchAntigravity() {}\n' > "$MIRROR/$SEARCH_EXT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+}
+
+@test "053: the retired harness spelling still fails inside the extension path" {
+  mkdir -p "$MIRROR/core-rules/pi/extensions"
+  printf '// The AntiGravity harness was retired.\n' > "$MIRROR/$SEARCH_EXT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+}

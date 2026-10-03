@@ -113,6 +113,9 @@ PY_HARNESS
   run_fence -C "$FIXTURE_ROOT/repo" write-tree
   [ "$status" -eq 97 ] || { echo "$output"; false; }
   [ ! -s "$GIT_LOG" ]
+  run_fence -C "$FIXTURE_ROOT/repo" mktag
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [ ! -s "$GIT_LOG" ]
 }
 
 @test "worktree remove routed to a common dir outside the fixture is refused" {
@@ -192,14 +195,17 @@ PY_HARNESS
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(wc -l < "$GIT_LOG" | tr -d ' ')" -eq 2 ]
 
-  # hash-object -w and write-tree write objects, so they require repository
-  # identity proof even though neither updates refs, config, or the worktree.
+  # hash-object -w, write-tree and mktag write objects, so they require
+  # repository identity proof even though none updates refs, config, or the
+  # worktree.
   : > "$GIT_LOG"
   run_fence -C "$FIXTURE_ROOT/repo" hash-object -w --stdin
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   run_fence -C "$FIXTURE_ROOT/repo" write-tree
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(wc -l < "$GIT_LOG" | tr -d ' ')" -eq 8 ]
+  run_fence -C "$FIXTURE_ROOT/repo" mktag
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$GIT_LOG" | tr -d ' ')" -eq 12 ]
 }
 
 @test "installer ignores hostile inherited Python pin and installs with caller PATH Python" {

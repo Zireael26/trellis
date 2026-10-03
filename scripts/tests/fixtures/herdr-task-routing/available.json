@@ -1,6 +1,17 @@
 {
   "reports": [
     {
+      "provider": "anthropic",
+      "limits": [
+        {
+          "id": "session",
+          "amount": {
+            "remainingFraction": 0.9
+          }
+        }
+      ]
+    },
+    {
       "provider": "openai-codex",
       "limits": [
         {"id": "shared", "amount": {"remainingFraction": 0.9}}

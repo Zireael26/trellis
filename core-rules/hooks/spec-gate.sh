@@ -5,14 +5,54 @@
 #   (hook)  : Claude Stop hook early-warning. On a block verdict it emits the
 #             Claude block JSON + exit 2; otherwise exit 0.
 #
-# Both modes call the SAME pure verdict engine (`spec-gate-core.sh`) — a function
-# of git/filesystem state only, byte-identical to the Codex twin
-# (core-rules/codex/hooks/spec-gate.sh). Parity by construction: the deterministic
-# state decides, not the model.
+# Both twins call the SAME pure verdict engine (`spec-gate-core.sh`) — a function
+# of git/filesystem state only. Their gate/mark prefix is byte-identical; their
+# Stop emitters differ by harness contract (Claude exit 2, Codex exit 0).
+# Parity by construction: the deterministic state decides, not the model.
 
-DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
-# shellcheck source=lib/spec-gate-core.sh
-. "$DIR/lib/spec-gate-core.sh"
+# The core resolves from this script's own resolved directory, never the caller's
+# cwd (spec 055 R1.1). A deployed hooks dir carries it as a sibling. Run in place
+# from the payload, core-rules/codex/hooks/lib/ does not, so the fallback to the
+# shared core-rules/hooks/lib/ applies only when this directory IS the declared
+# runtime's Codex tree. A project path that merely ends in core-rules/codex/hooks
+# gets no fallback, so it can never source a project-controlled file.
+# Claude Stop block contract: JSON + exit 2. Set outside the shared prefix below.
+_SG_STOP_BLOCK_EXIT=2
+DIR=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+_sg_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
+_sg_core="$DIR/lib/spec-gate-core.sh"
+if [ ! -f "$_sg_core" ] && [ -n "$_sg_rt" ] && [ "$DIR" = "$_sg_rt/core-rules/codex/hooks" ]; then
+  _sg_core="$DIR/../../hooks/lib/spec-gate-core.sh"
+fi
+if [ -f "$_sg_core" ]; then
+  # shellcheck source=lib/spec-gate-core.sh
+  . "$_sg_core"
+else
+  # No verdict engine: fail CLOSED in every mode (spec 055 R1.3). A silent exit 0
+  # here is how the Codex pipeline block went missing.
+  _sg_missing="spec-gate degraded: core library missing at $_sg_core; run trellis doctor in $(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  case "${1:-}" in
+    --gate|--mark|--mark-emergency)
+      echo "[spec-gate] BLOCKED: $_sg_missing" >&2
+      exit 1 ;;
+  esac
+  _sg_input=$(cat 2>/dev/null || true)
+  if command -v jq >/dev/null 2>&1 \
+    && [ "$(printf '%s' "$_sg_input" | jq -r '.stop_hook_active // false' 2>/dev/null)" = "true" ]; then
+    exit 0
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    printf '{"decision":"block","reason":%s}\n' "$(printf '%s' "[spec-gate] $_sg_missing" | jq -Rs .)"
+  else
+    # No jq: escape by hand so a path with a quote, backslash or control byte
+    # still yields one valid JSON object.
+    _sg_r="[spec-gate] $_sg_missing"
+    _sg_r=${_sg_r//\\/\\\\}; _sg_r=${_sg_r//\"/\\\"}
+    _sg_r=${_sg_r//$'\n'/\\n}; _sg_r=${_sg_r//$'\r'/\\r}; _sg_r=${_sg_r//$'\t'/\\t}
+    printf '{"decision":"block","reason":"%s"}\n' "$(printf '%s' "$_sg_r" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
+  fi
+  exit "$_SG_STOP_BLOCK_EXIT"
+fi
 
 # --- marker-writer mode (used by /surgical) ---------------------------------
 # Writes the size-capped-work declaration marker for THIS branch so a

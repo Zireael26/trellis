@@ -275,6 +275,11 @@ def policy_identity(cfg, agent):
     return identity
 
 
+# Catalog harness -> launcher. `launcher` is optional (artifacts written before
+# spec 052 omit it), but when present it must be the catalog-derived value.
+LAUNCHERS = {"pi": "pi", "claude-code": "apex"}
+
+
 def policy_candidate(cfg, role, entry):
     if not isinstance(entry, dict):
         return False
@@ -291,10 +296,15 @@ def policy_candidate(cfg, role, entry):
         )
         and entry.get("model") == identity[1]
         and entry.get("provider") == identity[2]
+        and (
+            "launcher" not in entry
+            or entry["launcher"]
+            == LAUNCHERS.get(cfg["agents"][agent].get("harness"))
+        )
     )
 
 
-CANDIDATE_FIELDS = ("agent", "model", "provider", "remaining", "note")
+CANDIDATE_FIELDS = ("agent", "model", "provider", "launcher", "remaining", "note")
 VERDICT_ROLES = {"reviewer", "security_reviewer", "merge_reviewer", "refuter"}
 SINGLE_VERDICT_ROLES = ("reviewer", "security_reviewer", "merge_reviewer")
 
@@ -445,7 +455,7 @@ try:
         raise ValueError(
             "resolved implementer family does not match deciding scope"
         )
-    verdict_families = set()
+    verdict_families = {}
     for role in SINGLE_VERDICT_ROLES:
         chosen = roles[role]["chosen"]
         if chosen is None:
@@ -453,9 +463,24 @@ try:
         family = families.get(chosen.get("agent"))
         if not nonempty(family) or family == implementer_family:
             raise ValueError("chosen verdict shares the implementer family")
-        if family in verdict_families:
-            raise ValueError("chosen verdict family is duplicated")
-        verdict_families.add(family)
+        verdict_families[role] = family
+    if (
+        verdict_families.get("security_reviewer") is not None
+        and verdict_families.get("security_reviewer") == verdict_families.get("reviewer")
+    ):
+        raise ValueError("security_reviewer shares the reviewer family")
+    # Spec 052 rules 1 and 2 bind every eligible verdict fallback, not only
+    # the chosen row.
+    for role in SINGLE_VERDICT_ROLES:
+        for entry in roles[role]["trail"]:
+            family = families.get(entry.get("agent"))
+            if not nonempty(family) or family == implementer_family:
+                raise ValueError("verdict trail shares the implementer family")
+            if (
+                role == "security_reviewer"
+                and family == verdict_families.get("reviewer")
+            ):
+                raise ValueError("security_reviewer trail shares the reviewer family")
     resolved = roles["refuter"]
     policy_required = role_specs["refuter"].get("required_seats")
     required = resolved["required_seats"]
@@ -476,14 +501,17 @@ try:
         family = families.get(entry.get("agent"))
         if not nonempty(family):
             raise ValueError("refuter trail family is unmapped")
-        if family == implementer_family or family in verdict_families:
-            raise ValueError("refuter trail reuses a reserved family")
-        if family in seen_families:
+        if family == implementer_family:
+            raise ValueError("refuter trail reuses the implementer family")
+        # Spec 052 rule 3: a refuter seat never echoes the reviewer's family.
+        if family == verdict_families.get("reviewer"):
+            raise ValueError("refuter trail reuses the reviewer family")
+        # Every eligible entry is checked; only the first distinct families
+        # up to the quorum become seats.
+        if family in seen_families or len(derived_seats) >= required:
             continue
         derived_seats.append(entry)
         seen_families.add(family)
-        if len(derived_seats) >= required:
-            break
     if len(seats) != len(derived_seats):
         raise ValueError("refuter seats do not match the eligible family prefix")
     seat_families = set()

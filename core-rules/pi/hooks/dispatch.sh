@@ -117,7 +117,7 @@ append_task_context() {
 }
 
 run_hook() {
-  local name="$1" required="$2" output rc hook_context hook_reason stderr
+  local name="$1" required="$2" output rc hook_context hook_reason stderr parsed_block=false
   if [ ! -x "$HOOKS/$name" ]; then
     capability=unknown
     if [ "$required" = true ]; then decision=deny; elif [ "$decision" = allow ]; then decision=warn; fi
@@ -129,18 +129,27 @@ run_hook() {
   stderr=$(<"$stderr_file")
   hook_context=$(printf '%s' "$output" | jq -rs '[.[]? | objects | .hookSpecificOutput.additionalContext | strings] | join("\n\n")' 2>/dev/null || true)
   hook_reason=$(printf '%s' "$output" | jq -rs '[.[]? | objects | (.reason, .hookSpecificOutput.permissionDecisionReason) | strings] | join("\n")' 2>/dev/null || true)
-  if [ -n "$hook_context" ]; then contexts="${contexts}${contexts:+$'\n\n'}$hook_context"; fi
-  if [ -n "$hook_reason" ]; then messages="${messages}${messages:+$'\n'}$name: $hook_reason"; fi
-  if [ -n "$stderr" ]; then
-    [ "$required" != true ] || capability=unknown
-    messages="${messages}${messages:+$'\n'}$name stderr: $stderr"
-    [ "$decision" != allow ] || decision=warn
-  fi
-  if [ -n "$output" ] && [ -z "$hook_context$hook_reason" ]; then messages="${messages}${messages:+$'\n'}$name stdout: $output"; fi
   if { [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; } && printf '%s' "$output" | jq -e -s '
     any(.[]? | objects; .decision == "block" or
       (.hookSpecificOutput | objects | .hookEventName == "PreToolUse" and .permissionDecision == "deny"))
   ' >/dev/null 2>&1; then
+    parsed_block=true
+  fi
+  if [ -n "$hook_context" ]; then contexts="${contexts}${contexts:+$'\n\n'}$hook_context"; fi
+  if [ -n "$hook_reason" ]; then messages="${messages}${messages:+$'\n'}$name: $hook_reason"; fi
+  if [ -n "$stderr" ]; then
+    # Codex tool blocks exit 2 with a stderr reason. That is enforcement, not
+    # an infrastructure diagnostic; avoid repeating an identical parsed reason.
+    if [ "$rc" -eq 2 ] && [ "$parsed_block" = true ]; then
+      [ "$stderr" = "$hook_reason" ] || messages="${messages}${messages:+$'\n'}$name stderr: $stderr"
+    else
+      [ "$required" != true ] || capability=unknown
+      messages="${messages}${messages:+$'\n'}$name stderr: $stderr"
+      [ "$decision" != allow ] || decision=warn
+    fi
+  fi
+  if [ -n "$output" ] && [ -z "$hook_context$hook_reason" ]; then messages="${messages}${messages:+$'\n'}$name stdout: $output"; fi
+  if [ "$parsed_block" = true ]; then
     if [ "$required" = true ]; then decision=deny; elif [ "$decision" = allow ]; then decision=warn; fi
   elif [ "$rc" -ne 0 ]; then
     capability=unknown

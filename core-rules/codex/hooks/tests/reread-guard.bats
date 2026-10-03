@@ -58,6 +58,9 @@ setup() {
   # at the wrong root and break the relative-path cases.
   unset CLAUDE_PROJECT_DIR
   unset TRELLIS_HARNESS
+  # The hooks run in place from this tree, as the rendered hooks.json does; their
+  # shared-lib fallback is bound to TRELLIS_ROOT (spec 055 R1.1).
+  export TRELLIS_ROOT="$(cd "$HOOKS_DIR/../../.." && pwd -P)"
   STATE_DIR="$PROJECT_DIR/.codex/.reread-state"
   KEY="$(printf '%s' "$TP" | shasum -a 256 | awk '{print $1}' | cut -c1-16)"
   mkdir -p "$STATE_DIR"
