@@ -6,6 +6,13 @@
 #   - TRELLIS_REVIEW_IN_PROGRESS=1: exit 0 immediately (nested-review guard).
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).
 #   - Pure chat / no edits: exit 0 (skip).
+#   - Receipt trigger (C01): the DoD receipt is owed only when this turn
+#     mutated the tree, judged against the turn-entry baseline turn-baseline.sh
+#     records at UserPromptSubmit. Unchanged → no receipt demand; changed, or a
+#     missing/unreadable/uncomputable baseline → receipt required. A turn that
+#     committed and left the tree clean still owes one, and in a project that
+#     registers turn-baseline.sh so does a clean turn with no usable baseline.
+#     Todos and checks are not narrowed.
 #   - Runs checks in order. On any failure, emit
 #     {"decision":"block","reason":"<step>: <sliced output>"} and exit 2.
 #   - Error slicing: typecheck/lint → first 30 lines; tests → last 30 lines.
@@ -97,6 +104,56 @@ cd "$PROJECT_DIR" 2>/dev/null || exit 0
 # emit_block fires both before and after the subtree cd). A clean pass removes it.
 STATE_FILE="${PROJECT_DIR}/.claude/.fail-counter"
 
+# --- Turn-entry baseline (C01). Consumed here, before anything else runs, and
+# replaced on exit by a carry of the end state (see below).
+# TURN_STATE: same | changed | unknown. Only "same" waives the receipt (inside
+# _se_receipt_gate). In an armed project (turn-baseline.sh registered) unknown
+# counts as changed on every path, including a clean tree after a commit.
+# TURN_RANGE_FILES carries the paths a committing turn changed, or a non-doc
+# sentinel when that range is unknown.
+TURN_STATE=unknown
+TURN_RANGE_FILES=""
+__se_blocked=0
+if command -v git >/dev/null 2>&1; then
+  __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
+  __se_key=""
+  [ -z "$__se_sid" ] || __se_key=$(_se_state_key "" "$__se_sid") || __se_key=""
+  __se_consumed=0
+  if [ -n "$__se_key" ] && __se_sdir=$(_se_turn_state_dir "$PROJECT_DIR"); then
+    if [ -f "$__se_sdir/claude.$__se_key" ]; then
+      __se_consumed=1
+      __se_baseline=$(cat "$__se_sdir/claude.$__se_key" 2>/dev/null) || __se_baseline=""
+      rm -f "$__se_sdir/claude.$__se_key" || __se_baseline=""
+      __se_nonces=$(_se_turn_nonce_take "$__se_sdir" "claude.$__se_key")
+      if __se_now=$(_se_tree_fingerprint "$PROJECT_DIR"); then
+        TURN_STATE=$(_se_turn_baseline_state "$__se_baseline" "$__se_now" "$__se_nonces")
+      fi
+      if [ "$TURN_STATE" = "changed" ]; then
+        if ! TURN_RANGE_FILES=$(_se_turn_range_files "$PROJECT_DIR" "${__se_now%% *}" "$__se_baseline"); then
+          # Unreadable committed range: count it as a code change, never as docs.
+          TURN_RANGE_FILES=".trellis-turn-range-unreadable"
+        fi
+      fi
+    fi
+    # Carry: when this evaluation passes (exit 0 with no block, advisory
+    # included), the end state becomes the next turn's baseline, so a turn
+    # that starts with no prompt compares against it. Never after a block: the
+    # next Stop then finds no baseline and reads unknown, so a re-Stop with no
+    # change still owes the receipt. Only where the mechanism is live, so an
+    # unattached project gets no state written.
+    if [ "$__se_consumed" = "1" ] || _se_turn_baseline_armed "$PROJECT_DIR" claude; then
+      trap '[ "$?" -eq 0 ] && [ "$__se_blocked" = "0" ] \
+        && _se_turn_carry_write "$__se_sdir" "claude.$__se_key" "$PROJECT_DIR"' EXIT
+    fi
+  fi
+  if [ "$TURN_STATE" = "unknown" ] && _se_turn_baseline_armed "$PROJECT_DIR" claude; then
+    # Missing, unreadable or uncomputable baseline: whatever the turn did,
+    # including commits that left the tree clean, is unknown, never docs.
+    TURN_STATE=changed
+    TURN_RANGE_FILES=".trellis-turn-range-unknown"
+  fi
+fi
+
 # _se_changed_files — echo the full set of files changed this turn, one per line:
 # tracked diff-vs-HEAD UNION untracked (not-yet-`git add`ed). Mirrors the union
 # in _se_find_subtree. cwd-independent (git -C PROJECT_DIR) so it's stable on
@@ -137,6 +194,9 @@ emit_block() {
   fi
   mkdir -p "${PROJECT_DIR}/.claude" 2>/dev/null || true
   printf '%s %s\n' "$fileset_hash" "$count" > "$STATE_FILE" 2>/dev/null || true
+
+  # A blocked Stop never carries its end state forward (C01).
+  __se_blocked=1
 
   local reason="${step}: ${output}"
   if [ "$count" -ge 2 ]; then
@@ -189,6 +249,80 @@ _se_find_subtree() {
   printf '%s' "$common"
 }
 
+# _se_receipt_gate — Step 5, the receipts gate (structural done-detection).
+# Called at Step 5 on a dirty tree, and from Guard 2 for a turn that committed
+# and left the tree clean (C01). Returns only when no receipt is owed; every
+# other path exits (pass, advisory or emit_block).
+_se_receipt_gate() {
+  # C01: a turn that matched its entry baseline mutated nothing → no receipt.
+  # "unknown" (no, unreadable or uncomputable baseline) keeps the demand.
+  [ "$TURN_STATE" = "same" ] && return 0
+  if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
+    # Doc-only skip: every changed file has a doc extension (.md/.mdx/.rst/.txt).
+    # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
+    # logic, but over the diff-UNION-untracked set (a turn that only Writes new
+    # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
+    # The set includes paths this turn committed (TURN_RANGE_FILES, C01).
+    NONDOC_COUNT=$({ _se_changed_files; printf '%s\n' "$TURN_RANGE_FILES"; } \
+      | grep -v '^$' \
+      | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
+      | awk 'END{print NR}')
+    if [ "$NONDOC_COUNT" != "0" ]; then
+      # Read transcript path from the Stop envelope. Missing or absent file → the
+      # receipt is unverifiable in this harness (e.g. Codex / no transcript_path):
+      # fail OPEN with an advisory rather than block.
+      TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
+      if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
+        rm -f "$STATE_FILE"
+        jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no transcript_path in this harness envelope); state your DoD receipt to the user."}'
+        exit 0
+      fi
+
+      # Turn-scoping (load-bearing): a receipt from a PRIOR turn must not satisfy
+      # THIS turn. The transcript is JSONL. Emit one role per input line (1:1 map,
+      # robust to malformed lines via fromjson? // "null"), find the LAST user-role
+      # line, and search ONLY lines after it. No user line → scope whole file.
+      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
+        | grep -n '^user$' | tail -1 | cut -d: -f1)
+      # Canonical marker: <!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->
+      # ERE matches the fields IN ORDER and requires FILLED values, not just field
+      # names: `exit=[0-9]` (a digit must follow, rejecting the literal `exit=<int>`)
+      # and `diff=.*\+[0-9]` (a `+<digit>` must appear, rejecting `+N/-M`). Without
+      # this, the unfilled template the block message prints below would itself
+      # satisfy the gate. Anchoring on `\+[0-9]` (not the quote char) is agnostic to
+      # JSONL-escaped (\") vs unescaped (") quoting. See CLAUDE.md:43.
+      # Follow-ups marker (spec 012): <!-- follow-ups: <count> --> or
+      # <!-- follow-ups: none -->, emitted alongside the DoD receipt. The ERE
+      # requires a FILLED value (`none` or digits) after the literal
+      # `follow-ups: `, so the warn message's deliberately-unfilled template
+      # `<count-or-none>` can never satisfy it (`<` follows the colon-space —
+      # same tightening trick as `exit=[0-9]` above). Distinct literals mean no
+      # cross-collision with dod-receipt parsing in either direction, and the
+      # marker carries no quote characters, so it is immune to JSONL
+      # \"-escaping differences by construction.
+      FOLLOWUPS_RE='<!-- follow-ups: (none|[0-9]+) -->'
+      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
+           | grep -Eq '<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'; then
+        rm -f "$STATE_FILE"
+        # Follow-ups nudge (spec 012 D4): receipt present — re-scan the SAME
+        # turn-scoped window for the follow-ups marker. Present → silent pass,
+        # byte-identical to pre-012 behaviour. Absent → NON-BLOCKING advisory.
+        # Warn stays warn: never emit_block, never exit 2, on this path.
+        # dod-receipt spans are stripped first (perl non-greedy; the transcript is
+        # JSONL so a receipt quoting the marker inside cmd="…" would otherwise
+        # false-satisfy the scan — 012 review F1).
+        if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+          exit 0
+        fi
+        jq -nc --arg m 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->' '{additionalContext: $m}'
+        exit 0
+      fi
+      emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):
+<!-- dod-receipt cmd="<verification command>" exit=<int> diff="+N/-M (K files)" -->'
+    fi
+  fi
+}
+
 # --- Step 1: TodoWrite check (runs before the dirty-tree skip — pure-chat turns
 # can close todos via TodoWrite without touching files; receipts-required must
 # still hold). ---
@@ -223,7 +357,12 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 ${WORKTREE_STATUS}"
   fi
   if [ -z "$WORKTREE_STATUS" ]; then
-    # Nothing changed this turn → treat as pure chat and skip checks.
+    # Nothing changed this turn → treat as pure chat and skip checks. C01: a
+    # turn that is not "same" (it committed, or its baseline is unknown in an
+    # armed project) still goes to the receipt gate; checks stay skipped.
+    if [ "$TURN_STATE" = "changed" ]; then
+      _se_receipt_gate
+    fi
     exit 0
   fi
 fi
@@ -406,72 +545,12 @@ if [ -n "$TEST_CMD" ]; then
 fi
 
 # --- Step 5: Receipts gate — structural done-detection. -----------------------
-# Reached only on a dirty tree (pure-chat clean-tree skip already exited) with no
-# open todos (TodoWrite check already blocked) and all configured checks passed.
+# Reached on a dirty tree (the clean-tree skip already exited, except for a
+# committing turn, which Guard 2 sends straight to the gate) with no open todos
+# (TodoWrite check already blocked) and all configured checks passed.
 # Runs even when CHECKS_RUN==0: a code change with no toolchain STILL needs a
 # receipt. Placed BEFORE the CHECKS_RUN==0 advisory so it gates that path too.
-if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
-  # Doc-only skip: every changed file has a doc extension (.md/.mdx/.rst/.txt).
-  # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
-  # logic, but over the diff-UNION-untracked set (a turn that only Writes new
-  # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
-  NONDOC_COUNT=$(_se_changed_files \
-    | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
-    | awk 'END{print NR}')
-  if [ "$NONDOC_COUNT" != "0" ]; then
-    # Read transcript path from the Stop envelope. Missing or absent file → the
-    # receipt is unverifiable in this harness (e.g. Codex / no transcript_path):
-    # fail OPEN with an advisory rather than block.
-    TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
-    if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
-      rm -f "$STATE_FILE"
-      jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no transcript_path in this harness envelope); state your DoD receipt to the user."}'
-      exit 0
-    fi
-
-    # Turn-scoping (load-bearing): a receipt from a PRIOR turn must not satisfy
-    # THIS turn. The transcript is JSONL. Emit one role per input line (1:1 map,
-    # robust to malformed lines via fromjson? // "null"), find the LAST user-role
-    # line, and search ONLY lines after it. No user line → scope whole file.
-    LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
-      | grep -n '^user$' | tail -1 | cut -d: -f1)
-    # Canonical marker: <!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->
-    # ERE matches the fields IN ORDER and requires FILLED values, not just field
-    # names: `exit=[0-9]` (a digit must follow, rejecting the literal `exit=<int>`)
-    # and `diff=.*\+[0-9]` (a `+<digit>` must appear, rejecting `+N/-M`). Without
-    # this, the unfilled template the block message prints below would itself
-    # satisfy the gate. Anchoring on `\+[0-9]` (not the quote char) is agnostic to
-    # JSONL-escaped (\") vs unescaped (") quoting. See CLAUDE.md:43.
-    # Follow-ups marker (spec 012): <!-- follow-ups: <count> --> or
-    # <!-- follow-ups: none -->, emitted alongside the DoD receipt. The ERE
-    # requires a FILLED value (`none` or digits) after the literal
-    # `follow-ups: `, so the warn message's deliberately-unfilled template
-    # `<count-or-none>` can never satisfy it (`<` follows the colon-space —
-    # same tightening trick as `exit=[0-9]` above). Distinct literals mean no
-    # cross-collision with dod-receipt parsing in either direction, and the
-    # marker carries no quote characters, so it is immune to JSONL
-    # \"-escaping differences by construction.
-    FOLLOWUPS_RE='<!-- follow-ups: (none|[0-9]+) -->'
-    if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
-         | grep -Eq '<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'; then
-      rm -f "$STATE_FILE"
-      # Follow-ups nudge (spec 012 D4): receipt present — re-scan the SAME
-      # turn-scoped window for the follow-ups marker. Present → silent pass,
-      # byte-identical to pre-012 behaviour. Absent → NON-BLOCKING advisory.
-      # Warn stays warn: never emit_block, never exit 2, on this path.
-      # dod-receipt spans are stripped first (perl non-greedy; the transcript is
-      # JSONL so a receipt quoting the marker inside cmd="…" would otherwise
-      # false-satisfy the scan — 012 review F1).
-      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
-        exit 0
-      fi
-      jq -nc --arg m 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->' '{additionalContext: $m}'
-      exit 0
-    fi
-    emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):
-<!-- dod-receipt cmd="<verification command>" exit=<int> diff="+N/-M (K files)" -->'
-  fi
-fi
+_se_receipt_gate
 
 # --- Pass / no-check advisory ---
 if [ "$CHECKS_RUN" -eq 0 ]; then

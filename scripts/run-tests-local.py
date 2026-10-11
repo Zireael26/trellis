@@ -11,6 +11,15 @@ TRELLIS_LOCAL_GATE_RUNNER/RECEIPT/DEADLINE/TERM_GRACE remain hermetic test
 seams. TRELLIS_LOCAL_GATE_RESERVE scales the cleanup reserve in tests;
 TRELLIS_GATE_STATE_DIR isolates durable quarantine records in tests. Production
 uses 7200 seconds, a 60-second reserve, and a 5-second TERM grace.
+
+Spec 066 process: START provenance precedes admission and the first planner;
+<aggregate>.provenance.jsonl retains caller and effective fenced shard snapshots
+without changing the timing TSV. Active release is the read-only config pointer,
+not a source VERSION inference or a certification of the installed payload.
+
+Spec 067 P1h: after verified-empty teardown, a failing shard's output and timing
+rows are copied to <state>/failed-shards/<token>/ before the run root is deleted;
+`--runs-reap` prunes those entries after seven days.
 """
 
 from __future__ import annotations
@@ -33,11 +42,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+# The read-only helper import must not write bytecode into the checkout.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from receipt_provenance import safe_capture, emit
+
 SHARD_COUNT = 8
 GLOBAL_DEADLINE_SECONDS = 7200.0
 TEARDOWN_RESERVE_SECONDS = 60.0
 TERM_GRACE_SECONDS = 5.0
 RECEIPT_HEADER = "ordinal\tstage\telapsed_seconds\texit"
+FAILED_SHARD_RETENTION_SECONDS = 7 * 24 * 3600.0
 
 
 class ContainmentError(Exception):
@@ -733,6 +748,52 @@ def _delete_empty_record(path: Path, data: Dict[str, Any]) -> None:
     _fsync_directory(path.parent)
 
 
+def _retain_failed_shards(state: RunState, data: Dict[str, Any], shards: Sequence[Dict[str, Any]]) -> None:
+    """Copy each failing shard's TAP and timing rows out of the run root.
+
+    Called only after verified-empty teardown has reaped every leader, so no
+    live process holds what is kept; a passing shard keeps nothing. Retention is
+    evidence only: a copy failure is reported and never changes the verdict.
+    """
+    kept = state.root / "failed-shards" / data["token"]
+    for entry in shards:
+        if entry["process"] is not None and entry["process"].returncode == 0:
+            continue
+        try:
+            _private_directory(kept.parent)
+            _private_directory(kept)
+            for source in (entry["output"], entry["receipt"]):
+                if source.is_file() and not source.is_symlink():
+                    shutil.copyfile(str(source), str(kept / source.name))
+            print("run-tests-local: retained failing shard {}/8 output: {}".format(
+                entry["shard"], kept / entry["output"].name), flush=True)
+        except (ContainmentError, OSError) as exc:
+            print("run-tests-local: could not retain failing shard {}/8 output: {}".format(
+                entry["shard"], exc), file=sys.stderr)
+
+
+def _prune_failed_shards(state: RunState) -> None:
+    """Reap drops retained failing-shard output older than seven days.
+
+    Only owner-private <token> directories directly under failed-shards are
+    candidates; a symlink or foreign entry is left alone. A prune failure is
+    reported and never changes the reap verdict.
+    """
+    kept = state.root / "failed-shards"
+    cutoff = time.time() - FAILED_SHARD_RETENTION_SECONDS
+    try:
+        if kept.is_symlink() or not kept.is_dir():
+            return
+        for entry in sorted(kept.iterdir()):
+            info = entry.lstat()
+            if (re.fullmatch(r"[0-9a-f]{32}", entry.name) and stat.S_ISDIR(info.st_mode)
+                    and info.st_uid == os.getuid() and info.st_mtime < cutoff):
+                shutil.rmtree(entry)
+                print("run-tests-local: pruned failing shard output older than 7 days: {}".format(entry))
+    except OSError as exc:
+        print("run-tests-local: could not prune failing shard output: {}".format(exc), file=sys.stderr)
+
+
 def _receipt(data: Dict[str, Any], survivors: int, retained: bool) -> None:
     entries = data.get("unreadable_excluded", [])
     for entry in entries:
@@ -1022,6 +1083,22 @@ def main(argv: Sequence[str]) -> int:
         return 70 if corrupt else 1 if records else 0
 
     root = Path(__file__).resolve().parent.parent
+    aggregate = None
+    configured = os.environ.get("TRELLIS_LOCAL_GATE_RECEIPT")
+    if not argv:
+        # START precedes admission; a configured receipt retains refusals too.
+        # Tool/release probes are read-only; no Trellis command is invoked.
+        provenance = safe_capture(root, [sys.executable, str(Path(__file__).resolve()), *argv])
+        try:
+            if configured:
+                aggregate = _resolve_path(root, configured)
+        except (OSError, ValueError, RuntimeError):
+            provenance["provenance_sidecar"] = "unavailable: receipt allocation failed"
+        emit(provenance, aggregate)
+    # Bounded START probes are outside the productive/cleanup deadline budget.
+    # Keep the wall/monotonic admission clocks paired for containment accounting.
+    started_us = time.time_ns() // 1000
+    started = time.monotonic()
     try:
         deadline = _positive_float("TRELLIS_LOCAL_GATE_DEADLINE", GLOBAL_DEADLINE_SECONDS)
         if deadline > GLOBAL_DEADLINE_SECONDS:
@@ -1033,8 +1110,6 @@ def main(argv: Sequence[str]) -> int:
     except ValueError as exc:
         print("run-tests-local: {}".format(exc), file=sys.stderr)
         return 64
-    started_us = time.time_ns() // 1000
-    started = time.monotonic()
     deadline_at = started + deadline
     productive_at = deadline_at - reserve
     state = None
@@ -1044,6 +1119,8 @@ def main(argv: Sequence[str]) -> int:
         # unavailable. No source failure can make a durable record disappear.
         for path in state.records():
             _read_record(path)
+        if argv == ["--runs-reap"]:
+            _prune_failed_shards(state)
         if argv == ["--runs-reap"] and not state.records():
             state.close()
             return 0
@@ -1069,13 +1146,12 @@ def main(argv: Sequence[str]) -> int:
         return 70
 
     runner = _resolve_path(root, os.environ.get("TRELLIS_LOCAL_GATE_RUNNER", "scripts/run-tests.sh"))
-    configured = os.environ.get("TRELLIS_LOCAL_GATE_RECEIPT")
-    aggregate = _resolve_path(root, configured) if configured else None
     run_root = Path(data["run_root"])
     environment = os.environ.copy()
     # TRELLIS_TEST_TSV is runner-owned: an outer gate's shard exports it, and a
     # nested runner must not hand that receipt path to its own planner.
     environment.pop("TRELLIS_TEST_TSV", None)
+    environment.pop("TRELLIS_TEST_PROVENANCE_RECEIPT", None)
     environment["TRELLIS_GATE_RUN_ID"] = data["token"]
     environment["TMPDIR"] = str(run_root / "tmp")
     environment["TRELLIS_GATE_STATE_DIR"] = str(run_root / "state")
@@ -1102,10 +1178,14 @@ def main(argv: Sequence[str]) -> int:
         if productive_at <= time.monotonic():
             raise _DeadlineExit()
         signal.setitimer(signal.ITIMER_REAL, productive_at - time.monotonic())
-        if aggregate is None:
+        if not configured:
+            # Allocate once, only after admission; unbound refusals leave no files.
             fd, name = tempfile.mkstemp(prefix="trellis-run-tests-aggregate-", suffix=".tsv")
             os.close(fd)
             aggregate = Path(name)
+            emit(provenance, aggregate, stderr=False)
+        if aggregate is None:
+            raise ValueError("timing receipt unavailable")
         planner_output = run_root / "planner.out"
         with planner_output.open("wb") as stream:
             planner = _spawn(data, record_path, sentinel_fd, processes,
@@ -1141,6 +1221,7 @@ def main(argv: Sequence[str]) -> int:
             with output_path.open("wb") as stream:
                 shard_environment = environment.copy()
                 shard_environment["TRELLIS_TEST_TSV"] = str(receipt_path)
+                shard_environment["TRELLIS_TEST_PROVENANCE_RECEIPT"] = str(aggregate)
                 try:
                     entry["process"] = _spawn(data, record_path, sentinel_fd, processes,
                         ["bash", str(runner), "--scope=local", "--shard={}/8".format(shard)],
@@ -1197,6 +1278,7 @@ def main(argv: Sequence[str]) -> int:
                 # Only after two verified-empty scans may leaders be reaped.
                 for process in processes:
                     process.wait()
+                _retain_failed_shards(state, data, shards)
                 _delete_empty_record(record_path, data)
         except (OSError, ContainmentError, _DeadlineExit) as exc:
             survivors = max(1, survivors)

@@ -86,7 +86,7 @@ bats scripts/tests/process-gate-runner-resolution.bats	5
 bats scripts/tests/release-payload-commit.bats	62
 bats scripts/tests/release-snapshot-predicate.bats	1
 bats scripts/tests/release-store-verify.bats	23
-bats scripts/tests/release-store.bats	727
+bats scripts/tests/release-store.bats	3914
 bats scripts/tests/release-tag-consumers.bats	90
 bats scripts/tests/rollout-hooks-part1.bats	263
 bats scripts/tests/rollout-hooks-part2.bats	324

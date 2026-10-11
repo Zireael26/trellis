@@ -50,7 +50,9 @@ WORKTREE_HOOKS="$REPO_ROOT/core-rules/hooks"
 SHARED_FIXTURE="$BATS_TEST_DIRNAME/fixtures/shared-infra"
 # The repo's configured canonical clone — what doctor must NOT print when run
 # against a fixture (proves the $TRELLIS_CONFIG override took effect).
-LIVE_CANON="$(CDPATH= cd "$REPO_ROOT" && pwd -P)"
+# Consumed by the doctor-fix-part1.bats suite that loads this helper.
+# shellcheck disable=SC2034
+LIVE_CANON="$(CDPATH='' cd "$REPO_ROOT" && pwd -P)"
 
 CANON_SKILLS="process-gate security-gate aeo-gate clarify spec plan tasks analyze execute brainstorming orchestrate debrief writing wiki-maintain wiki-skill-propose"
 CANON_COMMANDS="primer primer-refresh primer-check explore autonomy surgical"
@@ -72,6 +74,9 @@ setup() {
   chmod 700 "$FIXTURE_TRELLIS_HOME"
   DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
+  # A fixture attach must not leave a detached post-attach job that repairs
+  # core.hooksPath behind a test's back. attach-postjob.bats unsets this.
+  export TRELLIS_ATTACH_POSTJOB=off
 }
 
 teardown() {
@@ -156,7 +161,7 @@ add_canonical_hooks() {
 # all canonical augmentation (templates, hooks) so nothing is left uncommitted.
 git_init_canonical_main() {
   (
-    cd "$CANON"
+    cd "$CANON" || return 1
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name  "test"
@@ -215,7 +220,7 @@ build_healthy_project() {
 EOF
   printf '{ "hooks": {} }\n' > "$hp/.claude/settings.json"
   (
-    cd "$hp"
+    cd "$hp" || return 1
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name  "test"
@@ -382,7 +387,7 @@ add_linked_worktree() {
   # Ensure there is at least one commit in the project (needed for git worktree
   # add). We commit only CLAUDE.md so the .claude/ symlinks stay untracked.
   (
-    cd "$hp"
+    cd "$hp" || return 1
     git add CLAUDE.md 2>/dev/null || true
     git commit -q -m "init" --allow-empty 2>/dev/null || true
     git worktree add -q "$WT_PATH" HEAD
@@ -484,14 +489,14 @@ EOF
   done
   # Shared task and verification primitives are explicit manifest link sources.
   # Keep this minimal payload complete before its immutable tree is sealed.
-  for primitive in task-context.sh task-state.py verification-bash.py; do
+  for primitive in task-context.sh task-state.py verification-bash.py guard-supervise.pl; do
     cp "$REPO_ROOT/core-rules/hooks/lib/$primitive" "$repo/core-rules/hooks/lib/$primitive" || return 1
   done
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/codex/hooks/fixture.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/codex/hooks/lib/fixture.sh"
   chmod 755 "$repo/core-rules/codex/hooks/fixture.sh" "$repo/core-rules/codex/hooks/lib/fixture.sh"
   (
-    cd "$repo"
+    cd "$repo" || return 1
     git init -q -b main
     git config user.email fixture@example.invalid
     git config user.name fixture
@@ -503,9 +508,13 @@ EOF
   )
   run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis" release install 1.2.3 --remote "$repo"
+  # Bats run sets status and output in the calling shell.
+  # shellcheck disable=SC2154
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     "$PORTABLE_ACCOUNT_HOME/.local/bin/trellis" release verify 1.2.3
+  # Bats run sets status and output in the calling shell.
+  # shellcheck disable=SC2154
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 

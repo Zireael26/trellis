@@ -29,7 +29,7 @@ release_fixture_seal_repo() {
   release_fixture_git "$home" -C "$repo" config tag.gpgSign false || return 1
   release_fixture_git "$home" -C "$repo" config core.autocrlf false || return 1
   release_fixture_git "$home" -C "$repo" add -A || return 1
-  release_fixture_git "$home" -C "$repo" -c core.hooksPath=/dev/null commit -qm "release $version" || return 1
+  release_fixture_git "$home" -C "$repo" commit -qm "release $version" || return 1
   release_fixture_git "$home" -C "$repo" tag -a "v$version" -m "release $version" || return 1
 }
 
@@ -55,6 +55,7 @@ release_fixture_bootstrap() {
 
   cp "$REPO_ROOT/scripts/trellis" "$bootstrap/scripts/trellis" || return 1
   cp "$REPO_ROOT/scripts/release.sh" "$bootstrap/scripts/release.sh" || return 1
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$bootstrap/scripts/attach-project.sh" || return 1
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$bootstrap/scripts/trellis-launcher.sh" || return 1
   cp -R "$REPO_ROOT/scripts/lib" "$bootstrap/scripts/lib" || return 1
   chmod 755 "$bootstrap/scripts/trellis" "$bootstrap/scripts/release.sh" "$bootstrap/scripts/trellis-launcher.sh" || return 1
@@ -75,6 +76,24 @@ release_fixture_bootstrap() {
     fleets: {personal: {discovery_roots: [$root]}}
   }' > "$trellis_home/config.json" || return 1
   chmod 600 "$trellis_home/config.json" || return 1
+}
+
+# release_fixture_seal_executed_files <repo>
+#
+# The managed post-checkout hook hash-checks every payload file its reconcile
+# runs (trellis_verify_release_executed) and refuses a release that lacks one.
+# Copy those files into a minimal release source so the hook passes against
+# it. The list is read from attachment.sh so the fixture cannot drift from the
+# hook; a file the source already has (its no-op seed) is kept.
+release_fixture_seal_executed_files() {
+  local repo="$1" path count=0
+  while IFS= read -r path; do
+    count=$((count + 1))
+    [ ! -e "$repo/$path" ] || continue
+    mkdir -p "$repo/${path%/*}" || return 1
+    cp "$REPO_ROOT/$path" "$repo/$path" || return 1
+  done < <(sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//')
+  [ "$count" -gt 0 ]
 }
 
 # release_fixture_install <user_home> <trellis_home> <version> <repo>

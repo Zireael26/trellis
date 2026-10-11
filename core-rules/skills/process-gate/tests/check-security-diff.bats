@@ -2,9 +2,10 @@
 # Tests for check-security-diff.sh — the adapter to security-gate/run-diff.sh.
 #
 # This is a thin adapter: its whole job is to locate run-diff.sh and pass its
-# exit code through verbatim (0 pass / 2 warn / 1 fail), with two non-blocking
-# escape hatches — SECURITY_GATE_SKIP=1 (deliberate skip -> pass/0) and an
-# absent security-gate (warn-skip -> 2, never fail). We therefore stub
+# exit code through verbatim (0 pass / 2 warn / 1 fail) when the child printed
+# the matching `Overall:` verdict; no verdict, or a disagreeing one, FAILs.
+# SECURITY_GATE_SKIP=1 is never a pass: an unperformed scan reports BLOCKED in
+# every mode. An unavailable gate FAILs. We stub
 # run-diff.sh in the fixture tree (mirroring how check-secrets plants its
 # allowlist) so the passthrough can be exercised without semgrep/gitleaks/a
 # baseline. The stub echoes its argv so we can assert --no-llm is added iff
@@ -13,22 +14,23 @@
 # Exit codes: 0=pass, 1=fail, 2=warn (per pg_exit_code / run-diff contract).
 
 setup() {
-  # SCRIPT is overridable (PG_TEST_SCRIPT) so the red-green driver case can point
-  # the SAME 644-non-executable run-diff scenario at a pre-fix (-x) copy of the
-  # script under a full scripts/ tree — see the "RED driver" @test at the bottom
-  # ("pre-fix -x located-run-diff predicate warn-skips the 644 file (fail-OPEN)").
-  # That case sed-flips the copy's predicate -f -> -x, exports PG_TEST_SCRIPT,
-  # AND reassigns SCRIPT (setup() runs before the @test body, so the export alone
-  # cannot re-derive SCRIPT). Default is the on-disk script; normal runs are
-  # unaffected.
-  SCRIPT="${PG_TEST_SCRIPT:-$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-security-diff.sh}"
+  # Isolate the adapter from the real sibling security-gate, so absence and
+  # locator mutations cannot accidentally fall back to a host/payload scanner.
+  SOURCE_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
+  ADAPTER="$BATS_TEST_TMPDIR/adapter"
+  mkdir -p "$ADAPTER/scripts/lib"
+  cp "$SOURCE_SCRIPTS/check-security-diff.sh" "$ADAPTER/scripts/"
+  cp "$SOURCE_SCRIPTS/lib/common.sh" "$SOURCE_SCRIPTS/lib/diff-base.sh" "$ADAPTER/scripts/lib/"
+  SCRIPT="${PG_TEST_SCRIPT:-$ADAPTER/scripts/check-security-diff.sh}"
   PROJECT_DIR="$(mktemp -d)"
   (
-    cd "$PROJECT_DIR"
+    cd "$PROJECT_DIR" || exit 1
     git init -q -b main
     git config user.email "test@example.com"
     git config user.name  "test"
     git commit --allow-empty -q -m "init"
+    # run_check gates HEAD~1..HEAD; its base must resolve for config to load.
+    git commit --allow-empty -q -m "change"
   )
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   unset CODEX_PROJECT_DIR
@@ -43,14 +45,22 @@ teardown() {
 }
 
 # Plant a stub run-diff.sh under the project's security-gate skill. The stub
-# echoes a marker + its argv, then exits with the requested code.
+# echoes a marker + its argv and the verdict run-diff prints for that rc, then
+# exits with the requested code. A fourth argument overrides the verdict line
+# ("none" prints none).
 stub_run_diff() {
-  local rc="$1" dir="${2:-.claude}" mode="${3:-755}"
+  local rc="$1" dir="${2:-.claude}" mode="${3:-755}" verdict="${4:-}"
   local d="$PROJECT_DIR/$dir/skills/security-gate/scripts"
+  if [ -z "$verdict" ]; then
+    case "$rc" in 0) verdict=MERGEABLE ;; 2) verdict="NEEDS CHANGES" ;; *) verdict=BLOCKED ;; esac
+  fi
+  local line="Overall: $verdict"
+  [ "$verdict" != none ] || line=""
   mkdir -p "$d"
   cat > "$d/run-diff.sh" <<EOF
 #!/usr/bin/env bash
 echo "STUB-RUN-DIFF argv: \$*"
+echo "$line"
 exit $rc
 EOF
   chmod "$mode" "$d/run-diff.sh"
@@ -85,13 +95,13 @@ run_check() {
   [[ "$output" == *"STUB-RUN-DIFF"* ]]
 }
 
-# --- warn-skip when absent ---
+# --- fail closed when absent (adapter has no sibling payload in this fixture) ---
 
-@test "warn-skip: security-gate not installed -> warn (exit 2), not fail" {
-  # No stub planted.
+@test "missing security-gate in both project and payload -> fail (exit 1)" {
   run_check
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"security-gate not installed"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"security-gate unavailable"* ]]
+  [[ "$output" != *"skipped"* ]]
 }
 
 # --- HIGH-1/HIGH-3 regression: located-but-non-executable run-diff.sh ---
@@ -105,13 +115,9 @@ run_check() {
 # RUNDIFF stays empty, and the script warn-skips (rc 2, "security-gate not
 # installed") — fail-OPEN: a Critical secret in the diff slips the merge gate.
 #
-# We assert on BOTH the rc (1, the gate's own rc — not the warn-skip rc 2) AND
-# the absence of the "not installed" finding text, so this case cannot pass
-# against the -x version. The "RED driver" @test at the bottom of this file
-# ("pre-fix -x located-run-diff predicate warn-skips the 644 file (fail-OPEN)")
-# drives this exact scenario against a pre-fix (-x) copy via PG_TEST_SCRIPT and
-# asserts the inverse outcome — proving these assertions genuinely discriminate
-# -x from -f rather than passing tautologically.
+# The invocation marker distinguishes a real security FAIL from a missing-gate
+# FAIL. The locator mutation below proves -x loses that marker; absence must
+# still fail closed, never restore the old warn-skip.
 @test "located run-diff.sh present but non-executable (644) is still invoked (real rc passes through), not warn-skipped" {
   # Narrative fidelity: stage a file carrying a fake secret in the diff. The
   # stub ignores argv content — rc 1 IS the simulated Critical finding — but a
@@ -133,12 +139,71 @@ run_check() {
 
 # --- SECURITY_GATE_SKIP ---
 
-@test "SECURITY_GATE_SKIP=1 -> pass (exit 0), run-diff not invoked" {
-  stub_run_diff 1   # would fail if invoked
-  run bash -c "cd '$PROJECT_DIR' && SECURITY_GATE_SKIP=1 '$SCRIPT' --range=HEAD~1..HEAD"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipped"* ]] || { echo "$output"; false; }
+@test "push mode SECURITY_GATE_SKIP=1 -> BLOCKED (exit 1), never a pass" {
+  stub_run_diff 0
+  run bash -c "cd '$PROJECT_DIR' && PG_MODE=push SECURITY_GATE_SKIP=1 '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" != *"STUB-RUN-DIFF"* ]]
+}
+
+@test "merge mode SECURITY_GATE_SKIP=1 -> BLOCKED (exit 1), run-diff not invoked" {
+  stub_run_diff 0
+  run bash -c "cd '$PROJECT_DIR' && PG_MODE=merge SECURITY_GATE_SKIP=1 '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"STUB-RUN-DIFF"* ]]
+}
+
+@test "SECURITY_GATE_SKIP=1 with PG_MODE unset is merge mode -> BLOCKED" {
+  stub_run_diff 0
+  run bash -c "cd '$PROJECT_DIR' && SECURITY_GATE_SKIP=1 '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+}
+
+# --- a verdict is required, not just an exit code ---
+
+@test "run-diff rc 0 without an Overall line fails (push mode)" {
+  stub_run_diff 0 .claude 755 none
+  run bash -c "cd '$PROJECT_DIR' && PG_MODE=push '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"without an Overall verdict"* ]] || { echo "$output"; false; }
+}
+
+@test "run-diff rc 0 without an Overall line fails (merge mode)" {
+  stub_run_diff 0 .claude 755 none
+  run bash -c "cd '$PROJECT_DIR' && PG_MODE=merge '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "a silent fallback run-diff under .agents fails" {
+  stub_run_diff 0 .agents 755 none
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "run-diff rc 0 with Overall: BLOCKED fails" {
+  stub_run_diff 0 .claude 755 BLOCKED
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"reported Overall: BLOCKED"* ]] || { echo "$output"; false; }
+}
+
+@test "two Overall lines are not one verdict and fail" {
+  local d="$PROJECT_DIR/.claude/skills/security-gate/scripts"
+  mkdir -p "$d"
+  printf '#!/usr/bin/env bash\necho "Overall: BLOCKED"\necho "Overall: MERGEABLE"\nexit 0\n' > "$d/run-diff.sh"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "an exported set function cannot forge the adapter's pass" {
+  stub_run_diff 1
+  run env 'BASH_FUNC_set%%=() { printf "\nOverall: MERGEABLE\n"; exit 0; }' \
+    bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"STUB-RUN-DIFF"* ]] || { echo "$output"; false; }
 }
 
 # --- .agents fallback ---
@@ -155,25 +220,25 @@ run_check() {
 # In the repository that authors the gate, the skill IS the tree: a linked
 # worktree has no seeded .claude/skills and no .agents, so this hard gate used to
 # downgrade itself to a non-blocking warn on exactly the checkout where the gate
-# is being changed. Last in the resolution order, so an installed copy still wins.
+# is being changed. Last among project fallbacks; the executing payload wins.
 
 @test "fallback: run-diff under core-rules/ is found when neither harness dir exists" {
   stub_run_diff 0 "core-rules-marker"
   rm -rf "$PROJECT_DIR/core-rules-marker"
   local d="$PROJECT_DIR/core-rules/skills/security-gate/scripts"
   mkdir -p "$d"
-  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\nexit 0\n' > "$d/run-diff.sh"
+  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\necho "Overall: MERGEABLE"\nexit 0\n' > "$d/run-diff.sh"
   chmod 755 "$d/run-diff.sh"
   run_check
   [ "$status" -eq 0 ]
   grep -Fq 'STUB-CORE-RULES' <<<"$output"
 }
 
-@test "precedence: an installed .claude copy still wins over the in-tree one" {
+@test "fallback precedence: .claude wins over project in-tree when payload is absent" {
   stub_run_diff 0 ".claude"
   local d="$PROJECT_DIR/core-rules/skills/security-gate/scripts"
   mkdir -p "$d"
-  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\nexit 1\n' > "$d/run-diff.sh"
+  printf '#!/usr/bin/env bash\necho "STUB-CORE-RULES argv: $*"\necho "Overall: BLOCKED"\nexit 1\n' > "$d/run-diff.sh"
   chmod 755 "$d/run-diff.sh"
   run_check
   [ "$status" -eq 0 ]
@@ -199,20 +264,9 @@ run_check() {
   [[ "$output" != *"--no-llm"* ]]
 }
 
-# --- RED driver: pre-fix (-x) located-run-diff predicate fails OPEN on a 644 file ---
-#
-# This is the CI-enforced RED half (DL-P7-08 item 2) of the green 644 case above:
-# it drives the IDENTICAL 644-non-executable run-diff scenario against a pre-fix
-# COPY of the gate whose locator predicate is sed-flipped from [ -f "$cand" ]
-# back to [ -x "$cand" ]. Against that copy the 644 (non-exec) run-diff.sh fails
-# the -x test, RUNDIFF stays empty, and the gate warn-skips (rc 2, "not
-# installed", stub never invoked) — the fail-OPEN: a Critical secret slips an
-# ALWAYS-HARD merge gate. By ASSERTING that buggy outcome (rc 2 + "not installed"
-# + no STUB-RUN-DIFF marker) this case stays green while proving the on-disk -f
-# fix is what makes the green 644 case pass. It is the exact inverse of that case,
-# so the two together demonstrate the assertions discriminate -x from -f and are
-# not tautological (DL-P5-11 red-green mandate).
-@test "RED driver: pre-fix -x located-run-diff predicate warn-skips the 644 file (fail-OPEN)" {
+# Locator mutation: the 644 positive control loses its invocation under -x.
+# Even this rejected candidate must now FAIL, not restore the old warn-skip.
+@test "RED driver: -x locator rejects the 644 file but missing gate now fails closed" {
   # 1) Copy the WHOLE scripts/ tree (check-security-diff.sh + lib/common.sh + the
   #    rest) into a fresh mktemp -d so the copy's SKILL_DIR/lib/common.sh source
   #    resolves. A bare single-file copy would crash command-not-found at the
@@ -220,7 +274,7 @@ run_check() {
   #    -x/-f locator we are testing.
   local SRC COPY GATE
   SRC="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
-  COPY="$(mktemp -d)"
+  COPY="$(mktemp -d "$BATS_TEST_TMPDIR/adapter-copy.XXXXXX")"
   cp -R "$SRC" "$COPY/"                 # -> $COPY/scripts/{check-security-diff.sh,lib/common.sh,...}
   GATE="$COPY/scripts/check-security-diff.sh"
 
@@ -245,8 +299,7 @@ run_check() {
   export PG_TEST_SCRIPT="$GATE"
   SCRIPT="$PG_TEST_SCRIPT"
 
-  # 4) The SAME 644 run-diff scenario as the green case: a real secret staged in
-  #    the diff, a located-but-mode-644 (non-exec) run-diff.sh returning FAIL.
+  # 4) The same 644 run-diff scenario as the green invocation control.
   ( cd "$PROJECT_DIR" \
     && printf 'aws_secret_access_key = AKIAIOSFODNN7EXAMPLE\n' > leak.env \
     && git add leak.env \
@@ -257,11 +310,11 @@ run_check() {
 
   run_check
 
-  # 5) Assert RED against the pre-fix copy — the exact inverse of the green case:
-  [ "$status" -eq 2 ]                                  # warn-skip rc (NOT the gate's own rc 1)
-  [[ "$output" == *"not installed"* ]] || { echo "$output"; false; }  # downgraded to a warn-skip ...
-  [[ "$output" == *"skipped"* ]] || { echo "$output"; false; }  # ... fail-OPEN
-  [[ "$output" != *"STUB-RUN-DIFF"* ]] || { echo "$output"; false; }  # the 644 script was NEVER invoked
+  # The locator mutation loses the scan, but cannot reopen a warn-skip path.
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"security-gate unavailable"* ]]
+  [[ "$output" != *"skipped"* ]]
+  [[ "$output" != *"STUB-RUN-DIFF"* ]]
 
   # Glob-free cleanup on a verified-nonempty full path (mirrors teardown; never a
   # glob on a possibly-empty var, which would trip the rm safety prompt).

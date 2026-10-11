@@ -25,7 +25,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "block-destructive: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
-_se_require_jq "block-destructive"
+_se_require_jq "block-destructive" block
 
 COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 

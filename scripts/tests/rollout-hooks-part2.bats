@@ -111,6 +111,9 @@ build_installed_release() {
     "$SOURCE/core-rules/hooks" \
     "$SOURCE/core-rules/codex/hooks" \
     "$SOURCE/core-rules/githooks" \
+    "$SOURCE/core-rules/pi/extensions" \
+    "$SOURCE/core-rules/pi/hooks" \
+    "$SOURCE/core-rules/skills/process-gate/scripts/lib" \
     "$SOURCE/scripts"
   cp "$REPO/core-rules/CLAUDE.md" "$SOURCE/core-rules/CLAUDE.md"
   cp "$REPO/core-rules/templates/claude-settings.local.json" \
@@ -118,6 +121,10 @@ build_installed_release() {
   cp "$REPO/core-rules/templates/codex-hooks.local.json" \
     "$SOURCE/core-rules/templates/codex-hooks.local.json"
   cp "$REPO/core-rules/githooks/pre-push" "$SOURCE/core-rules/githooks/pre-push"
+  cp "$REPO/core-rules/pi/extensions/trellis.ts" "$SOURCE/core-rules/pi/extensions/"
+  cp "$REPO/core-rules/pi/hooks/dispatch.sh" "$SOURCE/core-rules/pi/hooks/"
+  cp "$REPO/core-rules/skills/process-gate/scripts/lib/pi-artifacts.py" \
+    "$SOURCE/core-rules/skills/process-gate/scripts/lib/"
   cp "$REPO/core-rules/hooks/"*.sh "$SOURCE/core-rules/hooks/"
   cp -R "$REPO/core-rules/hooks/lib" "$SOURCE/core-rules/hooks/"
   cp "$REPO/core-rules/codex/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"
@@ -125,7 +132,7 @@ build_installed_release() {
   cp "$REPO/scripts/attach-project.sh" "$REPO/scripts/seed-inheritance-symlinks.sh" \
     "$REPO/scripts/trellis" "$REPO/scripts/release.sh" "$REPO/scripts/trellis-launcher.sh" "$SOURCE/scripts/"
   cp -R "$REPO/scripts/lib" "$SOURCE/scripts/lib"
-  chmod 755 "$SOURCE/core-rules/githooks/pre-push" \
+  chmod 755 "$SOURCE/core-rules/githooks/pre-push" "$SOURCE/core-rules/pi/hooks/dispatch.sh" \
     "$SOURCE/core-rules/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"*.sh \
     "$SOURCE/scripts/attach-project.sh" "$SOURCE/scripts/seed-inheritance-symlinks.sh" \
     "$SOURCE/scripts/trellis" "$SOURCE/scripts/release.sh" "$SOURCE/scripts/trellis-launcher.sh"
@@ -156,6 +163,8 @@ build_installed_release() {
     "pi": {
       "links": [
         {"source": "core-rules/CLAUDE.md", "destination": ".pi/rules/trellis.md"},
+        {"source": "core-rules/pi/extensions/trellis.ts", "destination": ".pi/extensions/trellis.ts"},
+        {"source": "core-rules/pi/hooks/dispatch.sh", "destination": ".pi/hooks/dispatch.sh", "executable": true},
         {"source_children": "core-rules/codex/hooks", "destination_dir": ".pi/hooks", "entry_type": "file", "suffix": ".sh", "executable": true},
         {"source_children": "core-rules/codex/hooks/lib", "destination_dir": ".pi/hooks/lib", "entry_type": "file", "suffix": ".sh", "executable": true}
       ],
@@ -243,6 +252,11 @@ make_divergent_runner() {
   cp "$REPO/scripts/rollout-hooks.sh" "$REPO/scripts/sync-hooks.sh" \
      "$REPO/scripts/sync-codex-hooks.sh" "$RUNNER/scripts/"
   cp -R "$REPO/scripts/lib" "$RUNNER/scripts/lib"
+  # health-checks.sh resolves its validator beside the executing scripts tree,
+  # not in the installed release. Move that dependency with the wrapper too.
+  mkdir -p "$RUNNER/core-rules/skills/process-gate/scripts/lib"
+  cp "$REPO/core-rules/skills/process-gate/scripts/lib/pi-artifacts.py" \
+    "$RUNNER/core-rules/skills/process-gate/scripts/lib/"
   chmod 755 "$RUNNER/scripts/rollout-hooks.sh" "$RUNNER/scripts/sync-hooks.sh" \
     "$RUNNER/scripts/sync-codex-hooks.sh"
   for hook in "$SOURCE"/core-rules/hooks/*.sh; do
@@ -440,6 +454,8 @@ donor_target_absent() {
   grep -qF "verified: installed immutable attachment $VERSION for pi" <<<"$output"
   grep -qF 'verified=1 failed=0 report-only=0' <<<"$output"
   [ -L "$PI_PROJECT/.pi/rules/trellis.md" ]
+  [ -L "$PI_PROJECT/.pi/extensions/trellis.ts" ]
+  [ -L "$PI_PROJECT/.pi/hooks/dispatch.sh" ]
   [ ! -e "$PI_PROJECT/.claude/hooks" ]
 }
 

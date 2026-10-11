@@ -55,6 +55,7 @@ ensure_release_launcher() {
   printf '0.0.0\n' > "$bootstrap/core-rules/VERSION"
   printf '# bootstrap\n' > "$bootstrap/core-rules/CLAUDE.md"
   cp "$REPO_ROOT/scripts/release.sh" "$bootstrap/scripts/release.sh"
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$bootstrap/scripts/attach-project.sh"
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$bootstrap/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$bootstrap/scripts/lib"
   (CDPATH= cd "$bootstrap" && git init -q -b main && \
@@ -109,6 +110,7 @@ JSON
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/seed-inheritance-symlinks.sh"
   chmod 755 "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
   cp "$REPO_ROOT/scripts/release.sh" "$repo/scripts/release.sh" || return 1
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh" || return 1
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib" || return 1
   ln -s core-rules/CLAUDE.md "$repo/AGENTS.md"
@@ -316,11 +318,12 @@ JSON
   attach_portable_project "$project" personal 1.6.0
   destination="$project/.claude/settings.local.json"
   [ -f "$destination" ]
-  jq -e '.permissions.deny == []' "$destination" >/dev/null
+  deny_a="$(jq -c '.permissions.deny' "$template_a")"
+  jq -e --argjson want "$deny_a" '.permissions.deny == $want' "$destination" >/dev/null
 
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.6.1 --project template-drop --fleet personal
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"left in place (no longer in template): .claude/settings.local.json"* ]] || { echo "$output"; false; }
   [[ "$output" == *'"permissions","deny"'* ]] || { echo "$output"; false; }
-  jq -e '.permissions.deny == []' "$destination" >/dev/null
+  jq -e --argjson want "$deny_a" '.permissions.deny == $want' "$destination" >/dev/null
 }

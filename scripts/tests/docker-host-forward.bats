@@ -14,6 +14,7 @@ setup() {
   RECORD="$ROOT/hook-env"
   mkdir -p "$PROJECT" "$PRIOR" "$MANAGED"
   git init -q "$PROJECT"
+  git -C "$PROJECT" config --local core.hooksPath "$MANAGED"
   cat > "$ROOT/project-hook" <<SH
 #!/bin/sh
 printf 'DOCKER_HOST=%s\\n' "\${DOCKER_HOST-__UNSET__}" > "$RECORD"
@@ -41,11 +42,25 @@ prepare_pre_push() {
   carrier="$payload/core-rules/githooks/pre-push"
   release="${payload%/payload}"
   mkdir -p "$(dirname "$carrier")" "$TRELLIS_HOME/state/attachments" "$ROOT/bin" "$ROOT/tmp"
-  printf '#!/bin/sh\n[ "${DOCKER_HOST+x}" != x ] || exit 41\n' > "$carrier"
+  # Recording stub, always green: the gate payload must observe the caller's
+  # DOCKER_HOST exactly (set stays set, empty stays empty, unset stays
+  # absent), so it records rather than refuses. Prior-hook assertions keep
+  # reading $RECORD; gate assertions read $ROOT/gate-env.
+  cat > "$carrier" <<GATE
+#!/bin/sh
+printf 'DOCKER_HOST=%s\\n' "\${DOCKER_HOST-__UNSET__}" > "$ROOT/gate-env"
+exit 0
+GATE
   chmod 700 "$carrier"
+  # The pre-push dispatcher runs the deferred attachment checks first: the
+  # fixture payload must carry an executable postjob, as real releases do.
+  mkdir -p "$payload/scripts/lib" || return 1
+  printf '#!/bin/sh\nexit 0\n' > "$payload/scripts/lib/attach-postjob.sh" || return 1
+  chmod 700 "$payload/scripts/lib/attach-postjob.sh" || return 1
   carrier_oid="$(git hash-object "$carrier")" || return 1
-  jq -n --arg oid "$carrier_oid" \
-    '{schema_version:1,version:"1.2.3",tag:"v1.2.3",commit:"0000000000000000000000000000000000000000",remote:"fixture",tree:[{path:"core-rules/githooks/pre-push",mode:"100755",oid:$oid}]}' \
+  postjob_oid="$(git hash-object "$payload/scripts/lib/attach-postjob.sh")" || return 1
+  jq -n --arg oid "$carrier_oid" --arg postjob_oid "$postjob_oid" \
+    '{schema_version:1,version:"1.2.3",tag:"v1.2.3",commit:"0000000000000000000000000000000000000000",remote:"fixture",tree:[{path:"core-rules/githooks/pre-push",mode:"100755",oid:$oid},{path:"scripts/lib/attach-postjob.sh",mode:"100755",oid:$postjob_oid}]}' \
     > "$release/release.json"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
   printf '%s\n' "$(_attachment_hooks_pre_push_dispatcher_body "$payload" 'core-rules/githooks/pre-push' "$manifest")" > "$MANAGED/pre-push"
@@ -77,7 +92,9 @@ prepare_pre_push() {
     "$TRELLIS_HOME/releases" "$release" "$payload" "$payload/core-rules" \
     "$payload/core-rules/githooks" "$MANAGED" "$ROOT/bin" "$PRIOR"
   chmod 400 "$release/release.json"
-  chmod 500 "$carrier" "$payload/core-rules/githooks" "$payload/core-rules" "$payload" "$release"
+  chmod 500 "$carrier" "$payload/scripts/lib/attach-postjob.sh" \
+    "$payload/core-rules/githooks" "$payload/core-rules" \
+    "$payload/scripts/lib" "$payload/scripts" "$payload" "$release"
   printf 'refs/heads/main deadbeef refs/heads/main abcdef\n' > "$ROOT/refs"
 }
 
@@ -141,4 +158,54 @@ assert_hook_env() {
 @test "passthrough shim drops DOCKER_CONTEXT even alongside DOCKER_HOST" {
   run_shim DOCKER_HOST=unix:///fixture/colima.sock DOCKER_CONTEXT=desktop-linux
   assert_hook_env unix:///fixture/colima.sock
+}
+
+@test "render context reports missing launcher with path" {
+  local fake_home="$ROOT/fake-home-missing"
+  mkdir -p "$fake_home"
+  run env HOME="$fake_home" bash -c 'source "$1" && attachment_contextual_render_context "$2"' _ "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME"
+  [ "$status" -eq "$TRELLIS_EX_UNAVAILABLE" ] || return 1
+  [[ "$output" == *"launcher missing at"* ]] || return 1
+  [[ "$output" == *"$fake_home/.local/bin/trellis"* ]] || return 1
+}
+
+@test "render context reports non-executable launcher with path" {
+  local fake_home="$ROOT/fake-home-nonexec"
+  mkdir -p "$fake_home/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$fake_home/.local/bin/trellis"
+  chmod 644 "$fake_home/.local/bin/trellis"
+  run env HOME="$fake_home" bash -c 'source "$1" && attachment_contextual_render_context "$2"' _ "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME"
+  [ "$status" -eq "$TRELLIS_EX_STATE" ] || return 1
+  [[ "$output" == *"not executable"* ]] || return 1
+  [[ "$output" == *"$fake_home/.local/bin/trellis"* ]] || return 1
+}
+
+run_gate() {
+  prepare_pre_push || return 1
+  rm -f "$ROOT/gate-env"
+  run /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
+    "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
+    "TMPDIR=$ROOT/tmp" "$@" \
+    /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$PROJECT" "$MANAGED/pre-push" "$ROOT/refs"
+}
+
+assert_gate_env() {
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  grep -Fx "DOCKER_HOST=$1" "$ROOT/gate-env"
+}
+
+@test "gate payload receives DOCKER_HOST when the caller sets it" {
+  run_gate DOCKER_HOST=unix:///fixture/colima.sock
+  assert_gate_env unix:///fixture/colima.sock
+}
+
+@test "gate payload keeps unset DOCKER_HOST unset" {
+  run_gate
+  assert_gate_env __UNSET__
+}
+
+@test "gate payload receives an explicitly empty DOCKER_HOST as empty" {
+  run_gate DOCKER_HOST=
+  assert_gate_env ''
 }

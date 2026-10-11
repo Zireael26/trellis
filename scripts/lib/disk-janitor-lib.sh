@@ -2285,3 +2285,170 @@ dj_reap_phantom_worktree() {
   fi
   return "$result"
 }
+
+# ===========================================================================
+# scope F: pi temp files and orphan pi worktrees (host-global)
+# ===========================================================================
+
+# dj_pi_owner_paths <trellis_home> <out_file>
+# Write every absolute path named anywhere in an attachment owner record
+# (<home>/state/attachments/*/*.json) to <out_file>, one per line. Non-zero
+# when the directory or any record cannot be read or parsed: the caller must
+# then treat every pi entry as owned.
+dj_pi_owner_paths() {
+  local dir="$1/state/attachments" out="$2" f
+  local -a records=()
+  : >"$out" || return 1
+  [ -e "$dir" ] || [ -L "$dir" ] || return 0
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 1
+  for f in "$dir"/*/*.json; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    records+=("$f")
+  done
+  [ "${#records[@]}" -gt 0 ] || return 0
+  jq -r '.. | strings | select(startswith("/"))' "${records[@]}" >"$out" 2>/dev/null
+}
+
+# dj_pi_path_owned <path> <owner_paths_file>
+# return 0 when an owner record names <path> or anything under it.
+dj_pi_path_owned() {
+  awk -v p="$1" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }' "$2"
+}
+
+# dj_pi_listed <git-dir> <path>
+# Ask the repository at <git-dir> whether it registers <path> as a linked
+# worktree.
+#   0 it does
+#   1 it does not
+#   2 the query failed
+dj_pi_listed() {
+  local gitdir="$1" want="$2" listed line wt first=1
+  listed="$(git --git-dir="$gitdir" worktree list --porcelain 2>/dev/null)" || return 2
+  while IFS= read -r line; do
+    case "$line" in worktree\ *) wt="${line#worktree }" ;; *) continue ;; esac
+    if [ "$first" -eq 1 ]; then first=0; continue; fi
+    if [ "$wt" = "$want" ] || [ "$(dj__abspath "$wt")" = "$want" ]; then
+      return 0
+    fi
+  done <<EOF
+$listed
+EOF
+  return 1
+}
+
+# dj_pi_entry_fresh <path> <ttl_days>
+#   0 something under <path> (or <path> itself) changed within ttl_days
+#   1 nothing did
+#   2 the walk failed (unreadable content): age unknown
+# Age is the newest content, not the top-level mtime: a long-lived directory
+# whose files are still being written is fresh. Links are never followed.
+dj_pi_entry_fresh() {
+  local hit
+  hit="$(find "$1" -mmin "-$(( $2 * 1440 ))" -print -quit 2>/dev/null)" || return 2
+  [ -n "$hit" ]
+}
+
+# dj_file_bytes <path>
+# Apparent size of a regular file in bytes (a sparse file counts in full), or
+# nothing when it cannot be read.
+dj_file_bytes() {
+  local n
+  n="$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null)" || n=""
+  case "$n" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$n"
+}
+
+# dj_pi_entry_verdict <entry> <ttl_days> <owner_paths_file|""> <lsof_snapshot>
+#                     <spill_ttl_days> <spill_max_bytes>
+# Print "<verdict>\t<kind>\t<detail>" for one direct child of a pi root, where
+# verdict is reclaimable, skip or candidate and kind is pi-spill-log,
+# pi-worktree or pi-temp. The pi scope is report-only: reclaimable means the
+# operator may remove it by hand, and nothing here deletes. A spill log (a
+# regular file named pi-bash-*.log, pi's bash tool output) is reclaimable once
+# older than spill_ttl_days or larger than spill_max_bytes, whatever the owner
+# records say, but never while lsof shows an open handle on it. A worktree (a
+# .git file, or a pi-agent-* name) is reclaimable only as an aged orphan: no
+# owner record names it and its parent repository does not register it. A
+# repository (a .git directory) is a registered checkout and is never listed.
+# Anything that cannot be decided is a candidate. An empty owner-paths
+# argument means the owner records could not be read.
+dj_pi_entry_verdict() {
+  local entry="$1" ttl="$2" owners="$3" snapshot="$4" spill_ttl="$5" spill_max="$6"
+  local real kind=pi-temp why="" line gitdir rc reason size
+  real="$(dj__abspath "$entry")"
+  if [ -L "$entry" ]; then
+    printf 'skip\t%s\ta symlink; never listed\n' "$kind"
+    return 0
+  fi
+  case "$(basename "$entry")" in
+    pi-bash-*.log)
+      if [ ! -L "$entry" ] && [ -f "$entry" ]; then
+        kind=pi-spill-log
+        if size="$(dj_file_bytes "$entry")" && [ "$size" -gt "$spill_max" ]; then
+          why="spill log over $((spill_max / 1073741824)) GiB"
+        else
+          if dj_pi_entry_fresh "$entry" "$spill_ttl"; then rc=0; else rc=$?; fi
+          case "$rc" in
+            0) printf 'skip\t%s\tfresh — modified within %sd\n' "$kind" "$spill_ttl"; return 0 ;;
+            2) printf 'candidate\t%s\tage unknown (unreadable)\n' "$kind"; return 0 ;;
+          esac
+          why="spill log older than ${spill_ttl}d"
+        fi
+        if reason="$(dj_worktree_in_use "$real" "$snapshot")"; then
+          printf 'candidate\t%s\tin use (%s)\n' "$kind" "$reason"
+          return 0
+        fi
+        printf 'reclaimable\t%s\t%s\n' "$kind" "$why"
+        return 0
+      fi
+      ;;
+  esac
+  case "$(basename "$entry")" in pi-agent-*) kind=pi-worktree ;; esac
+  if [ ! -L "$entry" ] && [ -f "$entry/.git" ]; then kind=pi-worktree; fi
+  if [ -z "$owners" ]; then
+    printf 'candidate\t%s\towner records unreadable; ownership unknown\n' "$kind"
+    return 0
+  fi
+  if dj_pi_path_owned "$entry" "$owners" || dj_pi_path_owned "$real" "$owners"; then
+    printf 'skip\t%s\tan attachment owner record names it\n' "$kind"
+    return 0
+  fi
+  if [ ! -L "$entry" ] && [ -f "$entry/.git" ]; then
+    gitdir=""
+    if IFS= read -r line <"$entry/.git"; then
+      case "$line" in "gitdir: "/*/worktrees/*) gitdir="${line#gitdir: }" ;; esac
+    fi
+    if [ -z "$gitdir" ]; then
+      printf 'candidate\t%s\tunreadable .git file; registration unknown\n' "$kind"
+      return 0
+    fi
+    if [ -d "${gitdir%/worktrees/*}" ]; then
+      if dj_pi_listed "${gitdir%/worktrees/*}" "$real"; then rc=0; else rc=$?; fi
+    else
+      rc=1
+    fi
+    case "$rc" in
+      0) printf 'skip\t%s\tregistered with its parent repository\n' "$kind"; return 0 ;;
+      2) printf 'candidate\t%s\tparent repository could not be queried\n' "$kind"; return 0 ;;
+    esac
+    why="orphan worktree (no repository registers it, no owner record)"
+  elif [ ! -L "$entry" ] && [ -d "$entry/.git" ]; then
+    printf 'skip\t%s\ta repository (registered checkout); never listed\n' "$kind"
+    return 0
+  elif [ "$kind" = pi-worktree ]; then
+    printf 'candidate\t%s\tpi worktree without a .git file; registration unknown\n' "$kind"
+    return 0
+  fi
+  if dj_pi_entry_fresh "$entry" "$ttl"; then rc=0; else rc=$?; fi
+  case "$rc" in
+    0) printf 'skip\t%s\tfresh — modified within %sd\n' "$kind" "$ttl"; return 0 ;;
+    2) printf 'candidate\t%s\tage unknown (unreadable content)\n' "$kind"; return 0 ;;
+  esac
+  if reason="$(dj_worktree_in_use "$real" "$snapshot")"; then
+    printf 'candidate\t%s\tin use (%s)\n' "$kind" "$reason"
+    return 0
+  fi
+  printf 'reclaimable\t%s\t%s older than %sd\n' "$kind" "${why:-temp file}" "$ttl"
+}

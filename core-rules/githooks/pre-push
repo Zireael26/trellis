@@ -1,51 +1,146 @@
 #!/usr/bin/env sh
 # Trellis canonical pre-push — the cross-harness merge gate (DL-P7-03).
-# 1. Blocks direct pushes to main/master (Trellis PR-flow policy).
-#    Override for emergencies: TRELLIS_ALLOW_MAIN_PUSH=1 git push
+# 1. Blocks direct pushes to the policy protected branch (else main/master;
+#    Trellis PR-flow policy).
+#    Owner-only break-glass (agents must not set it; stop and report):
+#    TRELLIS_ALLOW_MAIN_PUSH=1 git push
 # 2. Invokes the process-gate aggregator (run-all.sh) in the right mode:
-#    merge (strict) when a ref targets main/master, else push (PR-shape
+#    merge (strict) when a ref targets template.branch, else push (PR-shape
 #    downgrade). run-all wraps tests + secrets + security-diff + analyze etc.,
 #    so this hook no longer carries standalone typecheck/test/security blocks.
 #
 # POSIX sh: no bashisms (no arrays, no [[ ]], no 'local'). The bash gate
-# scripts are invoked via `bash`.
+# scripts are invoked via `bash -p`, which imports no exported function and
+# reads no BASH_ENV/ENV.
 
 set -e
+
+# Every bash this hook starts (the gate, spec-gate, the authority check) runs
+# without an inherited startup file: a caller's BASH_ENV/ENV could otherwise
+# run before the gate and print a verdict of its own.
+unset BASH_ENV ENV
+
+# Real offline pnpm 11.23.0 coverage in process-gate-runner-resolution.bats:
+# "error" rejects a stale install without running prepare; unset auto-installs.
+# Never auto-install while verifying.
+export HUSKY=0
+export pnpm_config_verify_deps_before_run=error
+
+# Arm before ref policy, runtime validation, hashing or sidecar parsing can exit.
+# Early failures may not have a usable payload; the carrier's own common.sh is
+# then the fallback. Missing check code still fails closed.
+PROJECT_ROOT=""
+GIT_COMMON_DIR=""
+MANAGED_SIDECAR=""
+MANAGED_PAYLOAD=""
+managed_hooks_postcheck() {
+  postcheck_rc=${1:-$?}
+  trap - 0 HUP INT TERM
+  # A relative home is refused by managed discovery, not checked as authority.
+  case "${TRELLIS_HOME:-${HOME:-}/.trellis}" in
+    /*) ;;
+    *) exit "$postcheck_rc" ;;
+  esac
+  if [ -n "$GIT_COMMON_DIR" ]; then
+    if [ -z "$MANAGED_SIDECAR" ]; then
+      # Only the failure path uses Python hashing: it does not admit the gate
+      # without the normal hash tools, but still identifies authority to check.
+      postcheck_id=$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$GIT_COMMON_DIR") || {
+        echo "[pre-push] cannot identify managed hook authority — blocking (fail-closed)." >&2
+        [ "$postcheck_rc" -ge 128 ] || postcheck_rc=1
+        exit "$postcheck_rc"
+      }
+      MANAGED_SIDECAR="${TRELLIS_HOME:-${HOME:-}/.trellis}/state/git-hooks/$postcheck_id/release-payload"
+    fi
+    postcheck_managed=${MANAGED_SIDECAR%/release-payload}
+    if [ -d "$postcheck_managed" ]; then
+      # Direct husky runs can supply a symlinked home or trailing slash.
+      postcheck_managed=$(CDPATH='' cd "$postcheck_managed" && pwd -P) || {
+        [ "$postcheck_rc" -ge 128 ] || postcheck_rc=1
+        exit "$postcheck_rc"
+      }
+      postcheck_common="${0%/*}/../skills/process-gate/scripts/lib/common.sh"
+      if [ -n "$MANAGED_PAYLOAD" ]; then
+        postcheck_common="$MANAGED_PAYLOAD/core-rules/skills/process-gate/scripts/lib/common.sh"
+      fi
+      if ! bash -p -c '. "$1"; pg_check_managed_hooks_path "$2" "$3"' _ \
+        "$postcheck_common" "$PROJECT_ROOT" "$postcheck_managed" >&2; then
+        echo "[pre-push] managed hook authority changed or could not be checked — blocking (fail-closed)." >&2
+        [ "$postcheck_rc" -ge 128 ] || postcheck_rc=1
+      fi
+    fi
+  fi
+  exit "$postcheck_rc"
+}
+trap managed_hooks_postcheck 0
+trap 'managed_hooks_postcheck 129' HUP
+trap 'managed_hooks_postcheck 130' INT
+trap 'managed_hooks_postcheck 143' TERM
 
 # --- Trellis PR-flow guard ---
 # Git passes refs via stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
 # and the remote name as $1. REUSE this loop to also pick the run-all MODE +
-# RANGE:
-#   - MODE=merge if any pushed ref targets refs/heads/main|master, else push.
+# RANGE. It runs after runner discovery (classify_refs below): a first push
+# resolves through the selected runner's diff-base.sh.
+#   - MODE=merge if any pushed ref targets a protected branch, else push.
+#     Protected = main, master, the remote default tree's template.branch and
+#     the pushed tree's: a pushed tree can add protection, never remove it.
 #   - Every pushed ref derives its own range, so the gate judges only what this
 #     push adds, never the branch's whole history:
 #       update      -> <remote_sha>..<local_sha>, when remote_sha is present
 #                      locally. A remote tip missing locally (remote ahead,
 #                      rewritten ref, shallow clone) would build an unresolvable
 #                      range -> run-diff resolves it to ZERO files -> the
-#                      security gate fails OPEN. So it derives nothing instead.
-#       new branch  -> <merge-base of local_sha and the remote's default
+#                      security gate fails OPEN. So the push is refused (R33).
+#       new branch  -> the shared resolver with the pushed ref and head, so a
+#                      stacked branch gates only its own work. A parent base
+#                      not on the push remote gates the remote-default range
+#                      instead (R31). No remote default (as for a tag), or a
+#                      base that is not an ancestor of local_sha, refuses.
+#       new tag     -> <merge-base of local_sha and the remote's default
 #                      branch>..<local_sha>. The default branch is resolved
 #                      from refs/remotes/<remote>/HEAD, then <remote>/main, then
-#                      <remote>/master; if none resolves, nothing is derived.
+#                      <remote>/master; no default or no merge-base refuses.
 #       deletion    -> skipped; it adds nothing to judge.
 #   - run-all takes ONE range, so the refs are combined:
-#       a main/master-targeting ref's range wins (the merge boundary);
-#       otherwise the one distinct range every pushed ref agrees on is used;
-#       otherwise (two different ranges, or any ref that derived nothing)
-#       RANGE stays empty and run-all falls back to its own main..HEAD default
-#       -- the broader scan, so an ambiguous push fails closed, never open.
+#       the one distinct range every pushed BRANCH update agrees on is used,
+#       a protected-target ref included (R38: it no longer wins over another
+#       branch's range, which would then go ungated). Tags and deletes never
+#       count toward branch ambiguity.
+#       R31: gate the branch plus every tag range not inside the branch range;
+#       tag-only pushes gate each tag range in turn and skip spec-gate. Refuse
+#       any underivable tag before running gates; never fall back to a checkout
+#       scan for tags. Branches retain R4's refusal for differing ranges or an
+#       unresolved default. Spec-gate, AEO and run-all share the selected
+#       branch range, and spec-gate gets that branch's --ref/--head, never a
+#       tag. A tag-only push has no branch range: AEO falls back to its default.
 MODE=push
 RANGE=""
 MAIN_RANGE=""
 MAIN_SEEN=0
+MAIN_BLOCKED=0
 BRANCH_RANGE=""
 BRANCH_AMBIGUOUS=0
+AMBIGUOUS_WHY=""
+AMBIGUOUS_OTHER=""
+TAG_RANGES=""
+TAG_ONLY=0
+BRANCH_SEEN=0
+REFS_SEEN=0
+TAG_UNDERIVABLE=""
+BRANCH_UNDERIVABLE=""
+UNDERIVABLE_WHY="its remote tip is not local; fetch first"
+UNSUPPORTED_REF=""
 REMOTE_NAME="${1:-origin}"
+GATE_REF=""
+GATE_HEAD=""
+RECEIPT=""
+GATE_UNPUSHED=""
 
 # Echo the remote's default-branch ref, or nothing when it cannot be resolved.
 default_branch_ref() {
-  if head_ref=$(git symbolic-ref -q "refs/remotes/$REMOTE_NAME/HEAD" 2>/dev/null); then
+  if head_ref=$(git symbolic-ref -q "refs/remotes/$REMOTE_NAME/HEAD" 2>/dev/null) &&
+     git rev-parse -q --verify "$head_ref^0" >/dev/null 2>&1; then
     printf '%s' "$head_ref"
     return
   fi
@@ -57,11 +152,36 @@ default_branch_ref() {
   done
 }
 
+# Read project policy from commit $1's tree, then the immutable runtime.
+# A missing project field falls through just as it does in the resolver.
+ref_policy() {
+  command -v jq >/dev/null 2>&1 || return 0
+  for policy_file in .trellis.json .trellis.config.json; do
+    if policy_branch=$(git show "$1:$policy_file" 2>/dev/null | jq -r '.template.branch // empty' 2>/dev/null); then
+      if [ -n "$policy_branch" ]; then
+        printf '%s' "$policy_branch"
+        return
+      fi
+    fi
+  done
+  if [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+    jq -r '.template.branch // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null || true
+  fi
+}
+
+# The resolver reads template.branch from the remote default's tree, never
+# from the pushed tree or the session worktree: a pushed policy could otherwise
+# pick a first push's base and narrow its range (BGSEC-6).
+resolve_ref() {
+  bash -p "$DIFFBASE" resolve "$@"
+}
+
 # Echo the range this ref adds, or nothing when it cannot be derived safely.
 # Every git call sits in an `if` so `set -e` can never abort the hook here.
 ref_range() {
-  ref_local="$1"
-  ref_remote="$2"
+  ref_name="$1"
+  ref_local="$2"
+  ref_remote="$3"
   case "$ref_remote" in
     *[!0]*)
       if git cat-file -e "$ref_remote^{commit}" 2>/dev/null; then
@@ -69,55 +189,210 @@ ref_range() {
       fi
       ;;
     *)
-      base_ref=$(default_branch_ref)
-      if [ -n "$base_ref" ] && base=$(git merge-base "$base_ref" "$ref_local^0" 2>/dev/null); then
-        printf '%s' "$base..$ref_local"
+      if [ "$4" = tag ]; then
+        # R31: a new tag's range is derived exactly as 1.3.11 R4 does.
+        base_ref=$(default_branch_ref)
+        if [ -n "$base_ref" ] && base=$(git merge-base "$base_ref" "$ref_local^0" 2>/dev/null); then
+          printf '%s' "$base..$ref_local"
+        fi
+      elif [ -z "$(default_branch_ref)" ]; then
+        # R4: still refused, even where the resolver would use a local base.
+        :
+      elif resolved=$(resolve_ref --ref "$ref_name" --head "$ref_local" --format=kv); then
+        ref_source=$(printf '%s\n' "$resolved" | sed -n 's/^DB_SOURCE=//p')
+        ref_parent=$(printf '%s\n' "$resolved" | sed -n 's/^DB_BASE_REF=//p')
+        resolved=$(printf '%s\n' "$resolved" | sed -n 's/^DB_RANGE=//p')
+        ref_unpushed=""
+        # R31 over T9: a base the push remote lacks, from any resolver source,
+        # would carry its commits ungated, so gate the remote-default range.
+        # A default-source base is marked with a leading ':' (never in a ref).
+        if [ -z "$(git for-each-ref --count=1 --contains "${resolved%%..*}" "refs/remotes/$REMOTE_NAME/" 2>/dev/null)" ]; then
+          ref_unpushed=" $ref_parent"
+          [ "$ref_source" != default ] || ref_unpushed=" :$ref_parent"
+          resolved=$(git merge-base "$(default_branch_ref)" "$ref_local" 2>/dev/null)..$ref_local || resolved=""
+        fi
+        # R35: the resolver's no-merge-base fallback is a tree diff; refuse it.
+        if mb=$(git merge-base "${resolved%%..*}" "$ref_local" 2>/dev/null) &&
+           [ "$mb" = "${resolved%%..*}" ]; then
+          printf '%s%s' "$resolved" "$ref_unpushed"
+        fi
       fi
       ;;
   esac
 }
 
-# local_ref is a positional placeholder for the 1st stdin field (unused here).
-# shellcheck disable=SC2034
+# Containment only, not admission: a tag range inside the gated branch range
+# (tag under its tip, branch base under the tag base) adds no new commits. Peel
+# annotated tags; a failed check keeps the separate tag gate.
+tag_reachable() {
+  tag_commit=$(git rev-parse -q --verify "$1^{commit}" 2>/dev/null) || return 1
+  git merge-base --is-ancestor "$tag_commit" "$2" 2>/dev/null
+}
+
+# Classify every pushed ref, then refuse or select the range. Called once
+# runner discovery and the runtime check have set DIFFBASE and TRELLIS_ROOT.
+classify_refs() {
+# The protected branch comes from the remote default's tree (the base side);
+# without one, main/master and the pushed tree's policy still apply.
+BASE_POLICY=""
+base_policy_ref=$(default_branch_ref)
+[ -z "$base_policy_ref" ] || BASE_POLICY=$(ref_policy "$base_policy_ref")
 while read -r local_ref local_sha remote_ref remote_sha; do
+  REFS_SEEN=1
   case "$local_sha" in
     *[!0]*) ;;
     *) continue ;;
   esac
-  ref_derived=$(ref_range "$local_sha" "$remote_sha")
+  ref_kind=tag
   case "$remote_ref" in
-    refs/heads/main|refs/heads/master)
+    refs/heads/*) BRANCH_SEEN=1; ref_kind=branch ;;
+    refs/tags/*) ;;
+    *) UNSUPPORTED_REF="$remote_ref" ;;
+  esac
+  if [ ! -f "$DIFFBASE" ]; then
+    echo "[pre-push] diff-base resolver missing; restore the process-gate skill." >&2
+    exit 1
+  fi
+  ref_policy_branch=$(ref_policy "$local_sha")
+  ref_derived=$(ref_range "$local_ref" "$local_sha" "$remote_sha" "$ref_kind")
+  ref_unpushed=""
+  case "$ref_derived" in
+    *" "*)
+      ref_unpushed="${ref_derived#* }"
+      ref_derived="${ref_derived%% *}"
+      case "$ref_unpushed" in
+        :*) echo "[pre-push] resolved base ${ref_unpushed#:} is not on $REMOTE_NAME; gating from $REMOTE_NAME's default branch instead" >&2 ;;
+        *) echo "[pre-push] parent branch $ref_unpushed is not on $REMOTE_NAME; push it first to gate only this branch's commits" >&2 ;;
+      esac
+      ;;
+  esac
+  ref_class="$remote_ref"
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master|"refs/heads/$BASE_POLICY"|"refs/heads/$ref_policy_branch") ref_class=protected ;;
+  esac
+  case "$ref_class" in
+    protected)
       # Target is the merge boundary: strict gate regardless of policy override.
       MODE=merge
+      # R38: a second protected target on another range is never dropped.
+      if [ "$MAIN_SEEN" = 1 ] && [ "$MAIN_RANGE" != "$ref_derived" ]; then
+        BRANCH_AMBIGUOUS=1
+        AMBIGUOUS_WHY="branches"
+        AMBIGUOUS_OTHER="$MAIN_RANGE"
+      fi
       MAIN_SEEN=1
       MAIN_RANGE="$ref_derived"
+      MAIN_REF="$local_ref"
+      MAIN_HEAD="$local_sha"
+      MAIN_REMOTE="$remote_sha"
+      MAIN_UNPUSHED="$ref_unpushed"
       if [ "${TRELLIS_ALLOW_MAIN_PUSH:-0}" != "1" ]; then
         echo "[pre-push] Direct push to $remote_ref blocked by Trellis policy." >&2
-        echo "[pre-push] Open a branch + PR. Emergency override: TRELLIS_ALLOW_MAIN_PUSH=1 git push" >&2
-        exit 1
+        echo "[pre-push] Open a branch + PR. Agents: stop and report; do not bypass. Break-glass is owner only; agents must not set this: TRELLIS_ALLOW_MAIN_PUSH=1" >&2
+        MAIN_BLOCKED=1
+      else
+        echo "[pre-push] TRELLIS_ALLOW_MAIN_PUSH=1 set; allowing direct push to $remote_ref." >&2
+        [ -n "$ref_derived" ] || BRANCH_UNDERIVABLE="$remote_ref"
       fi
-      echo "[pre-push] TRELLIS_ALLOW_MAIN_PUSH=1 set; allowing direct push to $remote_ref." >&2
+      ;;
+    refs/tags/*)
+      # Tags never feed the branch range or force branch ambiguity.
+      # Keep every derived range, including tags outside the pushed branch.
+      if [ -n "$ref_derived" ]; then
+        TAG_RANGES="${TAG_RANGES:+$TAG_RANGES }$remote_ref:$ref_derived"
+      else
+        TAG_UNDERIVABLE="$remote_ref"
+      fi
       ;;
     *)
-      if [ -z "$ref_derived" ]; then
-        BRANCH_AMBIGUOUS=1
-      elif [ -z "$BRANCH_RANGE" ]; then
-        BRANCH_RANGE="$ref_derived"
-      elif [ "$BRANCH_RANGE" != "$ref_derived" ]; then
-        BRANCH_AMBIGUOUS=1
+      if [ -n "$ref_derived" ]; then
+        if [ -z "$BRANCH_RANGE" ]; then
+          BRANCH_RANGE="$ref_derived"
+          BRANCH_REF="$local_ref"
+          BRANCH_HEAD="$local_sha"
+          BRANCH_REMOTE="$remote_sha"
+          BRANCH_UNPUSHED="$ref_unpushed"
+        elif [ "$BRANCH_RANGE" != "$ref_derived" ]; then
+          BRANCH_AMBIGUOUS=1
+          AMBIGUOUS_WHY="branches"
+          AMBIGUOUS_OTHER="$ref_derived"
+        fi
+      else
+        # Nothing derivable for this branch update. A new ref with no remote
+        # default is case (ii) below; with one, the resolver found no
+        # merge-base (R35). An update whose tip is missing locally is refused
+        # below (R33).
+        case "$remote_sha" in
+          *[!0]*) BRANCH_UNDERIVABLE="$remote_ref" ;;
+          *)
+            if [ -z "$(default_branch_ref)" ]; then
+              BRANCH_AMBIGUOUS=1
+              AMBIGUOUS_WHY="default"
+            else
+              BRANCH_UNDERIVABLE="$remote_ref"
+              UNDERIVABLE_WHY="no merge-base with the remote default"
+            fi
+            ;;
+        esac
       fi
       ;;
   esac
 done
 
-if [ "$MAIN_SEEN" = "1" ]; then
+if [ -n "$UNSUPPORTED_REF" ]; then
+  echo "[pre-push] unsupported ref $UNSUPPORTED_REF: push branches or tags only" >&2
+  exit 1
+fi
+
+# Validate all tags before any gate: even a later underivable range refuses
+# the entire push, whether tag-only or branch+tag, without a checkout fallback.
+if [ -n "$TAG_UNDERIVABLE" ]; then
+  echo "[pre-push] tag $TAG_UNDERIVABLE range cannot be derived; fetch its remote tip or set the remote default (git remote set-head $REMOTE_NAME -a)." >&2
+  exit 1
+fi
+
+if [ -n "$BRANCH_UNDERIVABLE" ]; then
+  echo "[pre-push] cannot derive the range for $BRANCH_UNDERIVABLE: $UNDERIVABLE_WHY" >&2
+  exit 1
+fi
+
+# R38: the protected range must not hide another branch update's range.
+if [ "$MAIN_SEEN" = "1" ] && [ -n "$BRANCH_RANGE" ] && [ "$BRANCH_RANGE" != "$MAIN_RANGE" ]; then
+  BRANCH_AMBIGUOUS=1
+  AMBIGUOUS_WHY="branches"
+  AMBIGUOUS_OTHER="$MAIN_RANGE"
+fi
+if [ "$MAIN_SEEN" = "1" ] && [ "$BRANCH_AMBIGUOUS" = "0" ]; then
   RANGE="$MAIN_RANGE"
+  GATE_REF="$MAIN_REF"
+  GATE_HEAD="$MAIN_HEAD"
+  GATE_UNPUSHED="$MAIN_UNPUSHED"
 elif [ "$BRANCH_AMBIGUOUS" = "1" ]; then
-  RANGE=""
-  echo "[pre-push] could not derive one range for every pushed ref; gating run-all's default range instead." >&2
+  # Fail closed, and only for the two branch cases above. The message names
+  # which case fired and its remedy; the push is refused here, before run-all.
+  if [ "$AMBIGUOUS_WHY" = "branches" ]; then
+    echo "[pre-push] two or more branch updates derive different ranges (${BRANCH_RANGE:-$MAIN_RANGE} vs $AMBIGUOUS_OTHER); refusing to gate a partial range. Push branches one at a time." >&2
+  else
+    echo "[pre-push] a branch update's range cannot be derived because the remote default does not resolve; set it with: git remote set-head $REMOTE_NAME -a" >&2
+  fi
+  exit 1
+elif [ "$BRANCH_SEEN" = "0" ] && [ -n "$TAG_RANGES" ]; then
+  # Tag-only push (no branch updates to lead): gate each tag range in turn.
+  TAG_ONLY=1
 else
   RANGE="$BRANCH_RANGE"
+  if [ -n "$RANGE" ]; then
+    GATE_REF="$BRANCH_REF"
+    GATE_HEAD="$BRANCH_HEAD"
+    GATE_UNPUSHED="$BRANCH_UNPUSHED"
+  fi
 fi
+# No ref lines at all (direct invocation, up-to-date push) keeps the default gate.
+if [ "$REFS_SEEN" = "1" ] && [ "$BRANCH_SEEN" = "0" ] && [ -z "$TAG_RANGES" ]; then
+  echo "[pre-push] no new commits to gate (deletes only)."
+  exit 0
+fi
+}
 
 # --- spec-gate (mandatory-pipeline, spec 006) — LOAD-BEARING teeth ---
 # Blocks a push whose branch carries over-floor feature code with no spec triad,
@@ -130,17 +405,6 @@ fi
 # broken anchor silently downgrade its policy: it must resolve to a runtime
 # directory carrying the policy snapshot before the gate can run.
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
-if [ -n "$PROJECT_ROOT" ]; then
-  TRELLIS_RUNTIME="$PROJECT_ROOT/.trellis/runtime"
-  if [ -e "$TRELLIS_RUNTIME" ] || [ -L "$TRELLIS_RUNTIME" ]; then
-    if [ ! -d "$TRELLIS_RUNTIME" ] || [ ! -f "$TRELLIS_RUNTIME/trellis.config.json" ]; then
-      echo "[pre-push] attached Trellis runtime is corrupt: $TRELLIS_RUNTIME must resolve to a directory containing trellis.config.json." >&2
-      exit 1
-    fi
-    TRELLIS_ROOT="$TRELLIS_RUNTIME"
-    export TRELLIS_ROOT
-  fi
-fi
 
 SPECGATE=""
 if [ -f .claude/hooks/spec-gate.sh ]; then
@@ -149,14 +413,6 @@ elif [ -f .codex/hooks/spec-gate.sh ]; then
   SPECGATE=.codex/hooks/spec-gate.sh
 elif [ -f .agents/hooks/spec-gate.sh ]; then
   SPECGATE=.agents/hooks/spec-gate.sh
-fi
-if [ -n "$SPECGATE" ]; then
-  if bash "$SPECGATE" --gate; then
-    :
-  else
-    echo "[pre-push] spec-gate blocked this push (mandatory pipeline). Resolve per the remedies above, or override for a true emergency with /surgical --emergency." >&2
-    exit 1
-  fi
 fi
 
 # --- AEO gate (spec 033) — instance-only, disabled-default, warn-only ---
@@ -170,18 +426,12 @@ elif [ -f .codex/hooks/lib/aeo-gate-warn.sh ]; then
 elif [ -f .agents/hooks/lib/aeo-gate-warn.sh ]; then
   AEOGATE=.agents/hooks/lib/aeo-gate-warn.sh
 fi
-if [ -n "$AEOGATE" ]; then
-  AEO_GATE_RANGE="${RANGE:-origin/main..HEAD}" bash "$AEOGATE" || true
-fi
-
-echo "[pre-push] Trellis verification starting (mode=$MODE)..."
 
 # --- process-gate merge gate ---
-# Keep the installed project-local paths first. A source-repository worktree can
-# then use the tracked skill copy. An attached-project worktree has no tracked
-# copy, so its final fallback derives the main checkout from the shared Git
-# COMMON dir. `--git-common-dir` is load-bearing here: unlike `--git-dir`, it
-# returns the same common directory from every linked worktree.
+# Managed hooks select the runner from the dispatcher's release-payload sidecar,
+# never from project links through .trellis/runtime: an accidental retarget to
+# an older release must run the current bypass checker. Raw source checkouts
+# retain installed/tracked paths and the shared Git COMMON-dir fallback.
 RUNALL=""
 RUNALL_MISSES=""
 
@@ -206,12 +456,64 @@ try_runall() {
 "
 }
 
-try_runall "$PROJECT_ROOT/.claude/skills/process-gate/scripts/run-all.sh"
-[ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/.agents/skills/process-gate/scripts/run-all.sh"
-[ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/core-rules/skills/process-gate/scripts/run-all.sh"
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || printf '')
+MANAGED_SIDECAR=""
+if [ -n "$GIT_COMMON_DIR" ]; then
+  case "$GIT_COMMON_DIR" in
+    /*) ;;
+    *) GIT_COMMON_DIR="$PROJECT_ROOT/$GIT_COMMON_DIR" ;;
+  esac
+  GIT_COMMON_DIR=$(CDPATH='' cd "$GIT_COMMON_DIR" && pwd -P)
+  MANAGED_CHECKOUT_ID=$(printf '%s' "$GIT_COMMON_DIR" | shasum -a 256 2>/dev/null) ||
+    MANAGED_CHECKOUT_ID=$(printf '%s' "$GIT_COMMON_DIR" | sha256sum 2>/dev/null) || {
+      echo "[pre-push] cannot hash Git common directory: shasum or sha256sum is required." >&2
+      exit 1
+    }
+  MANAGED_CHECKOUT_ID=${MANAGED_CHECKOUT_ID%% *}
+  MANAGED_SIDECAR="${TRELLIS_HOME:-${HOME:-}/.trellis}/state/git-hooks/$MANAGED_CHECKOUT_ID/release-payload"
+fi
 
-if [ -z "$RUNALL" ]; then
-  GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null || printf '')
+MANAGED_RELEASE=0
+if { [ -n "$MANAGED_SIDECAR" ] && { [ -e "$MANAGED_SIDECAR" ] || [ -L "$MANAGED_SIDECAR" ]; }; } ||
+   { [ -n "$PROJECT_ROOT" ] && { [ -e "$PROJECT_ROOT/.trellis/runtime" ] || [ -L "$PROJECT_ROOT/.trellis/runtime" ]; }; }; then
+  MANAGED_RELEASE=1
+  case "${TRELLIS_HOME:-${HOME:-}/.trellis}" in
+    /*) ;;
+    *) echo "[pre-push] TRELLIS_HOME must be an absolute path for managed attachments: ${TRELLIS_HOME:-${HOME:-}/.trellis}" >&2; exit 1 ;;
+  esac
+fi
+if [ -n "$MANAGED_SIDECAR" ] && { [ -e "$MANAGED_SIDECAR" ] || [ -L "$MANAGED_SIDECAR" ]; }; then
+  if ! MANAGED_PAYLOAD=$(python3 -I -c '
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd) as sidecar:
+    if not stat.S_ISREG(os.fstat(sidecar.fileno()).st_mode):
+        sys.exit(1)
+    lines = sidecar.read().splitlines()
+if len(lines) != 1 or not lines[0] or not os.path.isabs(lines[0]):
+    sys.exit(1)
+payload = lines[0]
+if (any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in payload)
+        or os.path.realpath(payload) != payload or not os.path.isdir(payload)):
+    sys.exit(1)
+print(payload)
+' "$MANAGED_SIDECAR" 2>/dev/null); then
+    echo "[pre-push] managed release-payload sidecar is unavailable or invalid: $MANAGED_SIDECAR" >&2
+    exit 1
+  fi
+  TRELLIS_ROOT="$MANAGED_PAYLOAD"
+  export TRELLIS_ROOT
+  try_runall "$MANAGED_PAYLOAD/core-rules/skills/process-gate/scripts/run-all.sh"
+elif [ "$MANAGED_RELEASE" = 1 ]; then
+  RUNALL_MISSES="  - ${MANAGED_SIDECAR:-<managed release-payload>}: attached checkout's managed release-payload sidecar not found
+"
+else
+  try_runall "$PROJECT_ROOT/.claude/skills/process-gate/scripts/run-all.sh"
+  [ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/.agents/skills/process-gate/scripts/run-all.sh"
+  [ -n "$RUNALL" ] || try_runall "$PROJECT_ROOT/core-rules/skills/process-gate/scripts/run-all.sh"
+fi
+
+if [ -z "$RUNALL" ] && [ "$MANAGED_RELEASE" = 0 ]; then
   if [ -n "$GIT_COMMON_DIR" ]; then
     case "$GIT_COMMON_DIR" in
       /*) ;;
@@ -228,44 +530,171 @@ if [ -z "$RUNALL" ]; then
   fi
 fi
 
+# Policy and runtime failures also leave through the already-armed post-check.
+if [ -n "$PROJECT_ROOT" ]; then
+  TRELLIS_RUNTIME="$PROJECT_ROOT/.trellis/runtime"
+  if [ -e "$TRELLIS_RUNTIME" ] || [ -L "$TRELLIS_RUNTIME" ]; then
+    if [ ! -d "$TRELLIS_RUNTIME" ] || [ ! -f "$TRELLIS_RUNTIME/trellis.config.json" ]; then
+      echo "[pre-push] attached Trellis runtime is corrupt: $TRELLIS_RUNTIME must resolve to a directory containing trellis.config.json." >&2
+      exit 1
+    fi
+    if [ -z "$MANAGED_PAYLOAD" ]; then
+      TRELLIS_ROOT="$TRELLIS_RUNTIME"
+      export TRELLIS_ROOT
+    fi
+  fi
+fi
+
+DIFFBASE="${RUNALL%/*}/lib/diff-base.sh"
+classify_refs
+[ "$MAIN_BLOCKED" = 0 ] || exit 1
+
+# The policy and the derived-range receipt share the selected pushed identity.
+if [ -n "$RANGE" ]; then
+  if [ "$MAIN_SEEN" = 1 ]; then
+    receipt_remote="$MAIN_REMOTE"
+  else
+    receipt_remote="$BRANCH_REMOTE"
+  fi
+  case "$receipt_remote" in
+    *[!0]*) RECEIPT=$(resolve_ref --ref "$GATE_REF" --head "$GATE_HEAD" --range "$RANGE" --format=receipt) || exit 1 ;;
+    *) RECEIPT=$(resolve_ref --ref "$GATE_REF" --head "$GATE_HEAD" --format=receipt) || exit 1 ;;
+  esac
+  if [ -n "$GATE_UNPUSHED" ]; then
+    receipt_base=$(printf '%.12s' "${RANGE%%..*}")
+    case "$GATE_UNPUSHED" in
+      :*) receipt_why="base ${GATE_UNPUSHED#:}" ;;
+      *) receipt_why="parent $GATE_UNPUSHED" ;;
+    esac
+    RECEIPT="diff-base: $receipt_base $(default_branch_ref | sed 's|^refs/remotes/||') via default ($receipt_why not on $REMOTE_NAME) range=$receipt_base..$(printf '%.12s' "${RANGE##*..}") head=${GATE_REF#refs/heads/}"
+  fi
+fi
+
+echo "[pre-push] Trellis verification starting (mode=$MODE)..."
+[ -z "$RECEIPT" ] || printf '%s\n' "$RECEIPT"
+
+# Run gate subprocesses only after installing the managed authority post-check.
+if [ -n "$SPECGATE" ] && [ "$TAG_ONLY" = "1" ]; then
+  # R31: a tag-only push integrates no branch; run-all gates each tag range.
+  echo "[pre-push] spec-gate: skipped (tag-only push)"
+elif [ -n "$SPECGATE" ]; then
+  set -- --gate
+  if [ -n "$GATE_REF" ]; then
+    set -- "$@" --ref "$GATE_REF" --head "$GATE_HEAD"
+  fi
+  if [ -n "$RANGE" ]; then
+    set -- "$@" --range "$RANGE"
+  fi
+  if bash -p "$SPECGATE" "$@"; then
+    :
+  else
+    echo "[pre-push] spec-gate blocked this push (mandatory pipeline). Resolve per the remedies above, or override for a true emergency with /surgical --emergency." >&2
+    exit 1
+  fi
+fi
+if [ -n "$AEOGATE" ]; then
+  AEO_GATE_RANGE="${RANGE:-origin/main..HEAD}" bash -p "$AEOGATE" || true
+fi
+
 if [ -z "$RUNALL" ]; then
   echo "[pre-push] process-gate runner not found; refusing push because the gate produced no safety verdict. Candidates tried:" >&2
   printf '%s' "$RUNALL_MISSES" >&2
   exit 1
 fi
 
-# Build args without arrays: --mode always, --range only when derived.
-set -- --mode="$MODE"
-if [ -n "$RANGE" ]; then
-  set -- "$@" --range="$RANGE"
+# One gate run with the given range (empty only when stdin had no refs) and an
+# optional --target=main for the main/master range. `set --` inside a
+# function touches only the function's own positional params. Returns 0 when
+# the push may proceed, 1 when it is blocked.
+run_gate_range() {
+  [ -n "$1" ] || [ "$REFS_SEEN" = "0" ] || { echo "[pre-push] internal: refusing to gate an empty range" >&2; return 1; }
+  # Save the range and target before `set --` rebinds $1 below.
+  gate_range="$1"
+  gate_target="${2:-}"
+  set -- --mode="$MODE"
+  [ -z "$gate_range" ] || set -- "$@" --range="$gate_range"
+  [ -z "$gate_target" ] || set -- "$@" "$gate_target"
+  # Capture rc without tripping `set -e`: commands in an `if` test are exempt,
+  # so a WARN (2) or BLOCK (1) is captured instead of aborting the hook early.
+  # The verdict goes through an unlinked file (fd 3 writes, fd 4 reads back) so
+  # run-all stays this shell's direct child: a passing rc must come with exactly
+  # one matching Overall line in one process-gate verdict block (nested gate
+  # output under Findings is not counted), or no verdict was rendered.
+  gate_out=$(mktemp "${TMPDIR:-/tmp}/pre-push-gate.XXXXXX") || {
+    echo "[pre-push] cannot create the gate output file — blocking (fail-closed)." >&2
+    return 1
+  }
+  # shellcheck disable=SC2094  # one file on purpose: written via fd 3, read back via fd 4
+  exec 3>"$gate_out" 4<"$gate_out"
+  rm -f "$gate_out"
+  if bash -p "$RUNALL" "$@" >&3; then
+    gate_rc=0
+  else
+    gate_rc=$?
+  fi
+  gate_out=$(cat <&4)
+  exec 3>&- 4<&-
+  printf '%s\n' "$gate_out"
+  case "$gate_rc" in
+    0) gate_verdict='Overall: MERGEABLE' ;;
+    2) gate_verdict='Overall: NEEDS CHANGES' ;;
+    *) gate_verdict='' ;;
+  esac
+  if [ -n "$gate_verdict" ]; then
+    gate_overall=$(printf '%s\n' "$gate_out" | awk '
+      /^## process-gate verdict/ { headers++; inside = 1; next }
+      /^## Findings$/ { inside = 0 }
+      inside && /^Overall:/ { print }
+      END { if (headers != 1) print "verdict headers: " headers }')
+    if [ "$gate_overall" != "$gate_verdict" ]; then
+      echo "[pre-push] process-gate exited rc=$gate_rc without exactly one '$gate_verdict' verdict line — blocking (fail-closed)." >&2
+      return 1
+    fi
+  fi
+  # Fail-closed rc mapping: only the two known-good codes pass; ANYTHING else
+  # (including an unexpected rc from a crash/kill) blocks. This is the live
+  # merge boundary — the default MUST be to block, never to pass.
+  case "$gate_rc" in
+    0)
+      echo "[pre-push] process-gate ok"
+      return 0
+      ;;
+    2)
+      echo "[pre-push] process-gate NEEDS CHANGES (warn) — not blocking this push." >&2
+      return 0
+      ;;
+    1)
+      echo "[pre-push] process-gate BLOCKED — resolve findings above. Gate-config or security changes go through a PR. Agents: stop and report; never set a gate bypass." >&2
+      return 1
+      ;;
+    *)
+      echo "[pre-push] process-gate exited rc=$gate_rc (unexpected) — blocking (fail-closed)." >&2
+      return 1
+      ;;
+  esac
+}
+
+# Branch first (or the existing default path when there are no tags).
+if [ "$TAG_ONLY" != "1" ]; then
+  if [ "$MAIN_SEEN" = "1" ]; then
+    run_gate_range "$RANGE" --target=main || exit 1
+  else
+    run_gate_range "$RANGE" || exit 1
+  fi
 fi
 
-# Capture rc without tripping `set -e`: commands in an `if` test are exempt,
-# so a WARN (2) or BLOCK (1) is captured instead of aborting the hook early.
-if bash "$RUNALL" "$@"; then
-  rc=0
-else
-  rc=$?
-fi
-
-# Fail-closed rc mapping: only the two known-good codes pass; ANYTHING else
-# (including an unexpected rc from a crash/kill) blocks. This is the live merge
-# boundary — the default MUST be to block, never to pass.
-case "$rc" in
-  0)
-    echo "[pre-push] process-gate ok"
-    exit 0
-    ;;
-  2)
-    echo "[pre-push] process-gate NEEDS CHANGES (warn) — not blocking this push." >&2
-    exit 0
-    ;;
-  1)
-    echo "[pre-push] process-gate BLOCKED — resolve findings above. Emergency override is per-gate (e.g. TRELLIS_ALLOW_MAIN_PUSH=1 / SECURITY_GATE_SKIP=1), justified in gotchas.md." >&2
-    exit 1
-    ;;
-  *)
-    echo "[pre-push] process-gate exited rc=$rc (unexpected) — blocking (fail-closed)." >&2
-    exit 1
-    ;;
-esac
+# Tag-only: every range. Branch+tag: omit only tag ranges inside the gated
+# branch range; all other ranges run separately, in stdin order, each with its
+# own receipt. Warns continue; the first block refuses the push. Tag names reach
+# only the resolver's receipt, never spec-gate --ref.
+for tag_entry in $TAG_RANGES; do
+  trange="${tag_entry#*:}"
+  if [ "$TAG_ONLY" != "1" ] && [ -n "$RANGE" ] &&
+     tag_reachable "${trange##*..}" "${RANGE##*..}" &&
+     tag_reachable "${RANGE%%..*}" "${trange%%..*}"; then
+    continue
+  fi
+  resolve_ref --ref "${tag_entry%%:*}" --head "${trange##*..}" --range "$trange" --format=receipt || exit 1
+  run_gate_range "$trange" || exit 1
+done
+exit 0

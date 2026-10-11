@@ -308,10 +308,9 @@ hook from that payload in a deliberately small environment with no `BASH_ENV`,
 no `ENV`, no exported functions, no inherited Git loader or config variables,
 and Git configured only by two command-scoped entries. `PROJECT_ROOT` MUST be an
 absolute canonical directory; anything else is a usage error, and an
-unresolvable one is unavailable. Claude Code has four routes — `session-context`,
-`post-compact-context`, `inject-primer-index`, `skill-size-preflight` — and
-Codex has the first three; an unsupported route is refused rather than
-defaulted. A project's `.trellis/runtime` anchor is consequently data that
+unresolvable one is unavailable. Claude Code and Codex each have three routes —
+`session-context`, `post-compact-context`, `inject-primer-index`; an unsupported
+route is refused rather than defaulted. A project's `.trellis/runtime` anchor is consequently data that
 diagnosis reads, never a hook source anything executes.
 
 ## 9. Detach, recovery, and relink

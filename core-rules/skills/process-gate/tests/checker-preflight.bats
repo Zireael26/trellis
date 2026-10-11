@@ -50,6 +50,7 @@ EOF
   cp "$REAL_SCRIPTS/run-all.sh" "$stub/scripts/run-all.sh"
   cp "$REAL_SCRIPTS/check-slop.sh" "$stub/scripts/check-slop.sh"
   cp "$REAL_SCRIPTS/lib/common.sh" "$stub/scripts/lib/common.sh"
+  cp "$REAL_SCRIPTS/lib/diff-base.sh" "$stub/scripts/lib/diff-base.sh"
 
   local checker
   for checker in check-pr.sh check-secrets.sh check-bypass.sh check-tests.sh \
@@ -57,9 +58,16 @@ EOF
     printf '#!/bin/bash\nexit 0\n' > "$stub/scripts/$checker"
   done
   printf '%s\n' '{"gate_profiles":{"anti_slop":{"posture":"advisory"}}}' > "$project/.trellis.json"
+  # run-all loads gate config from the range base, so the project is a repo
+  # where HEAD~1 resolves, and the PATH carries what that needs (no jq).
+  git -C "$project" init -q -b main
+  git -C "$project" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false \
+    commit --allow-empty -qm one
+  git -C "$project" -c user.email=t@example.com -c user.name=t -c commit.gpgsign=false \
+    commit --allow-empty -qm two
 
   local utility
-  for utility in bash dirname head awk; do
+  for utility in bash dirname head awk git env mktemp rm mkdir sed cat; do
     ln -s "$(type -P "$utility")" "$BIN/$utility"
   done
   mv "$BIN/jq" "$BIN/jq.masked"

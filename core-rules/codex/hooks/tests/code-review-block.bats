@@ -401,19 +401,21 @@ setup() {
 }
 
 # =========================================================================
-# 4b. Fail-open (empty findings): a clean triggering diff (no secret/debugger)
-# runs the REAL rung-3, which returns {"findings":[]} → exit 0, no block, no
-# advisory context.
+# 4b. No LLM reviewer (claude-less PATH, no override): a clean triggering diff
+# runs the REAL rung-3, which returns {"status":"degraded","findings":[]} →
+# exit 0, no block, no advisory context, the review is reported unmet, and no
+# marker is minted (trellis-lean H2).
 # =========================================================================
-@test "completed: legacy real-core findings-only envelope writes a marker" {
+@test "unmet: real-core deterministic fallback without an LLM writes no marker" {
   setup_triggering_repo_clean
 
   run_hook
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" != *'systemMessage'* ]]
-  marker_count=$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
-  [ "$marker_count" -eq 1 ]
+  [[ "$stderr" == *'cross-family review unmet'* ]] || { echo "$stderr"; false; }
+  [ ! -d "$PROJECT_DIR/.codex" ] ||
+    [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
 }
 
 # =========================================================================

@@ -2,8 +2,9 @@
 """Build the spec 052 SC7 crafted-artifact fixture set.
 
 One fixture set runs through every place that enforces verdict independence:
-the resolver (`family_collapse` over each case's `roles`), both SessionStart
-hook copies, and `hooks/lib/code-reviewer.sh`. Every artifact is internally
+the resolver (`family_collapse` over each case's `roles`) and
+`hooks/lib/code-reviewer.sh`. The SessionStart hooks plant the same set to prove
+none is adopted at startup. Every artifact is internally
 consistent -- trails, seats, chosen rows, degraded lists, and the policy SHA
 all agree -- so an accept/reject verdict isolates the independence layout.
 
@@ -140,7 +141,10 @@ def cases(cfg, policy_bytes, workspace, pane, nonce):
             workspace, pane, nonce, **kw,
         )
 
-    healthy_seats = ["gemini", "grok", "opus"]
+    # Grok retired 2026-10-08: beside a producer and a reviewer in two of the
+    # four remaining families, only two refuter families are left, so a
+    # healthy panel is 2/3 and the refuter is DEGRADED in every artifact.
+    healthy_seats = ["gemini", "opus"]
     out = []
 
     def add(case, expect, implementer, why, artifact, resolver=True):
@@ -148,33 +152,28 @@ def cases(cfg, policy_bytes, workspace, pane, nonce):
 
     add("a", "accept", "cheap-2",
         "merge reviewer sol-xhigh shares the reviewer sol's family (openai)",
-        art("cheap-2", "sol", "security-reviewer", "sol-xhigh", healthy_seats))
+        art("cheap-2", "sol", "opus", "sol-xhigh", healthy_seats))
     add("b", "accept", "luna",
-        "refuter seats grok and opus share the security (xai) and merge "
-        "(anthropic) families",
-        art("luna", "cheap-2", "security-reviewer", "opus", healthy_seats))
+        "refuter seat opus shares the security and merge family (anthropic)",
+        art("luna", "cheap-2", "opus", "opus", healthy_seats))
     add("c", "reject", "cheap-2",
         "security reviewer sol-xhigh shares the reviewer sol's family",
         art("cheap-2", "sol", "sol-xhigh", "opus", healthy_seats))
     add("d-reviewer", "reject", "luna",
         "reviewer sol shares the producer luna's family",
-        art("luna", "sol", "security-reviewer", "opus", healthy_seats))
+        art("luna", "sol", "opus", "opus", healthy_seats))
     add("d-merge", "reject", "luna",
         "merge reviewer sol-xhigh shares the producer luna's family",
-        art("luna", "cheap-2", "security-reviewer", "sol-xhigh",
-            healthy_seats))
+        art("luna", "cheap-2", "opus", "sol-xhigh", healthy_seats))
     add("d-refuter", "reject", "luna",
         "refuter seat sol shares the producer luna's family",
-        art("luna", "cheap-2", "security-reviewer", "opus",
-            ["gemini", "grok", "sol"]))
+        art("luna", "cheap-2", "opus", "opus", ["gemini", "opus", "sol"]))
     add("e", "reject", "luna",
         "refuter seat cheap-2 shares the reviewer cheap-2's family (meta)",
-        art("luna", "cheap-2", "security-reviewer", "opus",
-            ["gemini", "grok", "cheap-2"]))
+        art("luna", "cheap-2", "opus", "opus", ["gemini", "opus", "cheap-2"]))
     add("f", "reject", "luna",
         "refuter seats cheap-2 and cheap are both family meta",
-        art("luna", "gemini", "security-reviewer", "opus",
-            ["cheap-2", "grok", "cheap"]))
+        art("luna", "gemini", "opus", "opus", ["cheap-2", "opus", "cheap"]))
     # 1.3.4 layout: every verdict family distinct from every other, so the
     # merge reviewer had no candidate and the refuter one seat. No launcher
     # field, as in an artifact written before spec 052.
@@ -182,17 +181,15 @@ def cases(cfg, policy_bytes, workspace, pane, nonce):
         "merge_reviewer": [
             ("opus", "verdict-family-in-use"),
             ("sol-xhigh", "same-family"),
-            ("grok", "verdict-family-in-use"),
         ],
         "refuter": [
-            ("grok", "verdict-family-in-use"),
             ("cheap-2", "verdict-family-in-use"),
             ("sol", "same-family"),
-            ("opus", "no-report"),
+            ("opus", "verdict-family-in-use"),
             ("cheap", "verdict-family-in-use"),
         ],
     }
-    old = art("luna", "cheap-2", "security-reviewer", None, ["gemini"],
+    old = art("luna", "cheap-2", "opus", None, ["gemini"],
               launcher=False, refusals=old_refusals)
     assert old["degraded_roles"] == ["merge_reviewer", "refuter"]
     add("g", "accept", "luna",
@@ -200,42 +197,39 @@ def cases(cfg, policy_bytes, workspace, pane, nonce):
         old)
     # Launcher binding (SC4): optional, but when present it is the catalog
     # harness's value and a chosen row agrees with its trail.
-    forged = art("luna", "cheap-2", "security-reviewer", "opus", healthy_seats)
+    forged = art("luna", "cheap-2", "opus", "opus", healthy_seats)
     forged["roles"]["merge_reviewer"]["chosen"]["launcher"] = "pi"
     forged["roles"]["merge_reviewer"]["trail"][0]["launcher"] = "pi"
     add("h-launcher-forged", "reject", "luna",
         "the opus merge row claims launcher pi; its catalog harness is "
         "claude-code", forged)
-    split = art("luna", "cheap-2", "security-reviewer", "opus", healthy_seats)
+    split = art("luna", "cheap-2", "opus", "opus", healthy_seats)
     del split["roles"]["merge_reviewer"]["trail"][0]["launcher"]
     add("h-launcher-split", "reject", "luna",
         "the opus merge chosen row says apex but its trail entry has no "
         "launcher", split)
     # Every eligible verdict fallback obeys the rules, not only the chosen row.
-    add("i-fallbacks-ok", "accept", "luna",
-        "eligible fallbacks in allowed families: reviewer gemini, security "
-        "opus, merge grok",
-        art("luna", ["cheap-2", "gemini"], ["security-reviewer", "opus"],
-            ["opus", "grok"], healthy_seats))
+    add("i-fallbacks-ok", "accept", "cheap-2",
+        "eligible fallbacks in allowed families: reviewer sol, security opus "
+        "and sol-xhigh behind astra, merge sol-xhigh",
+        art("cheap-2", ["gemini", "sol"], ["astra", "opus", "sol-xhigh"],
+            ["opus", "sol-xhigh"], ["sol", "opus"]))
     add("i-reviewer-trail", "reject", "luna",
         "reviewer cheap-2 is chosen but sol, the producer's family, is an "
         "eligible fallback",
-        art("luna", ["cheap-2", "sol"], "security-reviewer", "opus",
-            healthy_seats))
+        art("luna", ["cheap-2", "sol"], "opus", "opus", healthy_seats))
     add("i-security-trail", "reject", "cheap-2",
         "security reviewer's eligible fallback sol-xhigh shares the "
         "reviewer sol's family",
-        art("cheap-2", "sol", ["security-reviewer", "sol-xhigh"], "opus",
-            healthy_seats))
+        art("cheap-2", "sol", ["opus", "sol-xhigh"], "opus", healthy_seats))
     add("i-merge-trail", "reject", "luna",
         "merge reviewer's eligible fallback sol-xhigh shares the producer's "
         "family",
-        art("luna", "cheap-2", "security-reviewer", ["opus", "sol-xhigh"],
-            healthy_seats))
+        art("luna", "cheap-2", "opus", ["opus", "sol-xhigh"], healthy_seats))
     add("e-late", "reject", "luna",
-        "three valid refuter seats followed by an eligible entry in the "
-        "reviewer's family",
-        art("luna", "cheap-2", "security-reviewer", "opus",
+        "valid refuter seats followed by an eligible entry in the reviewer's "
+        "family",
+        art("luna", "cheap-2", "opus", "opus",
             healthy_seats + ["cheap-2"], healthy_seats))
     unbound = json.loads(json.dumps(old))
     unbound["roles_policy"]["roles_sha256"] = hashlib.sha256(

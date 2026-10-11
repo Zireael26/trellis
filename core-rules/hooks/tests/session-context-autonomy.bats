@@ -8,6 +8,8 @@ AUTONOMY_HELPER="$HOOKS_DIR/lib/autonomy.sh"
 CODEX_AUTONOMY_HELPER="$(dirname "$HOOKS_DIR")/codex/hooks/lib/autonomy.sh"
 
 setup() {
+  # Never read the operator's ~/.trellis.
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   setup_project_dir
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"

@@ -9,6 +9,7 @@ LOCAL_FLEET_FIXTURES="$REPO_ROOT/scripts/tests/fixtures/local-fleets"
 ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 REGISTRY_LIB="$REPO_ROOT/scripts/lib/local-registry.sh"
 load helpers/payload-fixture
+load helpers/group-plan
 # release.sh admits a TMPDIR candidate only when it is a private mode-0700
 # `.cmd.*` child of THAT home's command scratch root, the shape the stable
 # launcher builds. This suite drives the installed payload by pathname, so it
@@ -21,38 +22,98 @@ provision_command_scratch() {
   export TMPDIR="$scratch"
 }
 
+setup_file() {
+  GROUP_PLAN_RELEASE_CACHE="$(cd "$BATS_FILE_TMPDIR" && pwd -P)/group-plan-releases"
+  export GROUP_PLAN_RELEASE_CACHE
+  group_plan_build_release_cache "$GROUP_PLAN_RELEASE_CACHE" || return 1
+  # Keep one real, fully adopted 1.3.6 -> 1.3.7/8/9 baseline. Its pathname is
+  # stable so copying it back never rebases owner IDs, Git worktree bindings,
+  # contextual render hashes, hooks or historical restoration snapshots.
+  (
+    SANDBOX="$GROUP_PLAN_RELEASE_CACHE/machine"
+    mkdir -p "$SANDBOX" || return 1
+    initialize_release_store_machine || return 1
+    group_plan_build_group history || return 1
+    group_plan_assert_no_journal || return 1
+    cp -Rp "$SANDBOX" "$GROUP_PLAN_RELEASE_CACHE/baseline" || return 1
+    find "$SANDBOX" -depth -type d -exec chmod u+w {} \; || return 1
+    rm -rf "$SANDBOX"
+  )
+}
+
+teardown_file() {
+  [ -d "${GROUP_PLAN_RELEASE_CACHE:-}" ] || return 0
+  find "$GROUP_PLAN_RELEASE_CACHE" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
+  rm -rf "$GROUP_PLAN_RELEASE_CACHE"
+}
+
 setup() {
-  SANDBOX="$(mktemp -d)"
-  SANDBOX="$(cd "$SANDBOX" && pwd -P)"
+  # Fixture attaches must not leave a detached post-attach job behind: it
+  # re-asserts a husky-reset core.hooksPath and takes the checkout lock while
+  # the case stages operator state and adopts. run-tests.sh sets this too; the
+  # suite must not depend on its runner. attach-postjob.bats covers the job.
+  export TRELLIS_ATTACH_POSTJOB=off
+  GROUP_PLAN_CASE_LOCK_HELD=false
+  case "$BATS_TEST_DESCRIPTION" in
+    'group plan ('*)
+      # File-local cases may be scheduled in parallel by Bats. Lease the fixed
+      # working pathname until teardown; the baseline itself is never mutated.
+      # R10 holder-liveness wait (see helpers/group-plan.bash): no try cap
+      # while the holder is alive; fail fast on stale/malformed, never break.
+      group_plan_case_lease_acquire || return 1
+      SANDBOX="$GROUP_PLAN_RELEASE_CACHE/machine"
+      cp -Rp "$GROUP_PLAN_RELEASE_CACHE/baseline" "$SANDBOX" || return 1
+      release_store_machine_paths
+      ;;
+    *)
+      SANDBOX="$(mktemp -d)"
+      SANDBOX="$(cd "$SANDBOX" && pwd -P)"
+      initialize_release_store_machine
+      ;;
+  esac
+  RELEASE_PROCESS_PID_A=""
+  RELEASE_PROCESS_PID_B=""
+  RELEASE_PROCESS_STATUS=""
+}
+
+release_store_machine_paths() {
   TRELLIS_HOME_FIX="$SANDBOX/trellis-home"
-  mkdir -p "$TRELLIS_HOME_FIX"
+  OPERATOR_HOME="$SANDBOX/operator-home"
+  export HOME="$OPERATOR_HOME"
   provision_command_scratch "$TRELLIS_HOME_FIX"
+  RELEASE_TEST_STORE_BARRIER="$SANDBOX/release-store-barrier"
+  RELEASE_TEST_ADOPTION_BARRIER="$SANDBOX/adoption-barrier"
+  RELEASE_TEST_HOOK_BARRIER="$SANDBOX/hook-swap-barrier"
+  RELEASE="$TRELLIS_HOME_FIX/releases/0.0.0/payload/scripts/release.sh"
+  export TRELLIS_VERIFIED_PAYLOAD="$TRELLIS_HOME_FIX/releases/0.0.0/payload"
+  export TRELLIS_VERIFIED_RELEASE_VERSION="0.0.0"
+  export TRELLIS_VERIFIED_SSH_AUTH_SOCK=""
+}
+
+initialize_release_store_machine() {
+  TRELLIS_HOME_FIX="$SANDBOX/trellis-home"
+  mkdir -p "$TRELLIS_HOME_FIX" || return 1
+  provision_command_scratch "$TRELLIS_HOME_FIX" || return 1
   # attach derives its trusted local SessionStart render context from the
   # operator launcher at $HOME/.local/bin/trellis, and the isolated gate hands
   # every suite an empty private HOME. Install the launcher the way the sibling
   # attachment suites do, or every render-bearing manifest fails to attach.
   OPERATOR_HOME="$SANDBOX/operator-home"
-  mkdir -p "$OPERATOR_HOME/.local/bin"
-  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$OPERATOR_HOME/.local/bin/trellis"
-  chmod 755 "$OPERATOR_HOME/.local/bin/trellis"
+  mkdir -p "$OPERATOR_HOME/.local/bin" || return 1
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$OPERATOR_HOME/.local/bin/trellis" || return 1
+  chmod 755 "$OPERATOR_HOME/.local/bin/trellis" || return 1
   export HOME="$OPERATOR_HOME"
   RELEASE_TEST_STORE_BARRIER="$SANDBOX/release-store-barrier"
   RELEASE_TEST_ADOPTION_BARRIER="$SANDBOX/adoption-barrier"
   RELEASE_TEST_HOOK_BARRIER="$SANDBOX/hook-swap-barrier"
-  bootstrap_repo="$(build_release_repo "0.0.0" annotated "0.0.0" bootstrap-fixture)"
+  bootstrap_repo="$(build_release_repo "0.0.0" annotated "0.0.0" bootstrap-fixture)" || return 1
   TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c \
     '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
     release-store-bootstrap "$RELEASE_STORE_LIB" "0.0.0" "$bootstrap_repo" || {
       echo 'could not install test bootstrap release'
-      false
+      return 1
     }
-  RELEASE="$TRELLIS_HOME_FIX/releases/0.0.0/payload/scripts/release.sh"
-  export TRELLIS_VERIFIED_PAYLOAD="$TRELLIS_HOME_FIX/releases/0.0.0/payload"
-  export TRELLIS_VERIFIED_RELEASE_VERSION="0.0.0"
-  export TRELLIS_VERIFIED_SSH_AUTH_SOCK=""
-  RELEASE_PROCESS_PID_A=""
-  RELEASE_PROCESS_PID_B=""
-  RELEASE_PROCESS_STATUS=""
+  release_store_machine_paths
 }
 
 teardown() {
@@ -65,6 +126,9 @@ teardown() {
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
     rm -rf "$SANDBOX"
+  fi
+  if [ "${GROUP_PLAN_CASE_LOCK_HELD:-false}" = true ]; then
+    group_plan_case_lease_release
   fi
 }
 
@@ -126,6 +190,44 @@ plan_matches_old() {
   if [ "$release_fixture_plan_matches_old_seen" = false ]; then
     release_fixture_plan_matches_old_seen=true
     release_fixture_wait "$release_fixture_adoption_barrier" after-plan-validation || return "$?"
+  fi
+}
+
+eval "$(declare -f apply_plan | /usr/bin/sed '1s/^apply_plan /release_fixture_original_apply_plan /')"
+apply_plan() {
+  release_fixture_original_apply_plan "$@" || return "$?"
+  if [ "$(printf '%s\n' "$1" | jq -r '.binding.git_common_dir + "/info/exclude"')" = "$(cat "$release_fixture_adoption_barrier/owner.target" 2>/dev/null)" ] &&
+    [ ! -f "$release_fixture_adoption_barrier/owner-after-publish.ready" ]; then
+    printf '%s\n' "$(release_fixture_self_pid)" > "$release_fixture_adoption_barrier/owner-after-publish.pid"
+    release_fixture_wait "$release_fixture_adoption_barrier" owner-after-publish || return "$?"
+  fi
+}
+
+# Marks the first time a checkout-lock step meets a held lock (reclaim or
+# acquire answers 3), so a test can release its holder only after that.
+release_fixture_note_lock_busy() {
+  if [ "$1" -eq 3 ] && [ -d "$release_fixture_adoption_barrier" ] && [ ! -L "$release_fixture_adoption_barrier" ]; then
+    : > "$release_fixture_adoption_barrier/checkout-lock-busy.ready" || return 5
+  fi
+  return "$1"
+}
+eval "$(declare -f attachment_checkout_lock_reclaim | /usr/bin/sed '1s/^attachment_checkout_lock_reclaim /release_fixture_original_checkout_lock_reclaim /')"
+attachment_checkout_lock_reclaim() {
+  release_fixture_original_checkout_lock_reclaim "$@"
+  release_fixture_note_lock_busy "$?"
+}
+eval "$(declare -f attachment_checkout_lock_acquire | /usr/bin/sed '1s/^attachment_checkout_lock_acquire /release_fixture_original_checkout_lock_acquire /')"
+attachment_checkout_lock_acquire() {
+  release_fixture_original_checkout_lock_acquire "$@"
+  release_fixture_note_lock_busy "$?"
+}
+
+eval "$(declare -f adoption_publish_render | /usr/bin/sed '1s/^adoption_publish_render /release_fixture_original_publish_render /')"
+adoption_publish_render() {
+  release_fixture_original_publish_render "$@" || return "$?"
+  if [ "$2" = forward ] && [ "$(printf '%s\n' "$1" | jq -r '.destination')" = "$(cat "$release_fixture_adoption_barrier/exclude.target" 2>/dev/null)" ]; then
+    printf '%s\n' "$(release_fixture_self_pid)" > "$release_fixture_adoption_barrier/exclude-after-publish.pid"
+    release_fixture_wait "$release_fixture_adoption_barrier" exclude-after-publish || return "$?"
   fi
 }
 
@@ -200,6 +302,7 @@ exit 0
 EOF
   chmod 755 "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
   cp "$REPO_ROOT/scripts/release.sh" "$repo/scripts/release.sh"
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   fixture="${4:-}"
@@ -242,12 +345,27 @@ retag_release_repo() {
 }
 
 wait_for_release_barrier() {
-  local ready_file="$1" tries=0
-  while [ ! -f "$ready_file" ] && [ "$tries" -lt 200 ]; do
+  local ready_file="$1" process_id="$2" log="$3" started_at=$SECONDS beat_at=$SECONDS
+  # Bounded by the release process's own liveness, not a fixed try cap: under
+  # load a live process can take minutes to plan, and a 20 s cap turned that
+  # into a red test (P1g, R39). An early exit still fails at once, with the
+  # refusal retained in TAP; a hung process is left to the harness deadline,
+  # as for the group-plan case lease (R10), with a heartbeat at least every
+  # 60 s of wall clock so it is never silent (R39 Q2).
+  while [ ! -f "$ready_file" ]; do
+    if ! kill -0 "$process_id" 2>/dev/null; then
+      [ ! -f "$ready_file" ] || return 0
+      printf 'release process exited before barrier: %s\n' "$ready_file" >&2
+      [ ! -f "$log" ] || cat "$log" >&2
+      return 1
+    fi
+    if [ $((SECONDS - beat_at)) -ge 60 ]; then
+      beat_at=$SECONDS
+      printf 'waiting for release barrier %s: release pid %s alive (elapsed %ss)\n' \
+        "$ready_file" "$process_id" "$((SECONDS - started_at))" >&2
+    fi
     sleep 0.1
-    tries=$((tries + 1))
   done
-  [ -f "$ready_file" ]
 }
 
 wait_for_release_process() {
@@ -423,6 +541,217 @@ GENERATOR
   [ -z "$(find "$TRELLIS_HOME_FIX/state/git-hooks" -name '*.release-adopt.*' -print)" ]
 }
 
+@test "group plan (u): historical adoption reconciles all owners and fresh checkout add succeeds" {
+  group_plan_setup_group history
+  cp "$GROUP_PLAN_OWNER" "$SANDBOX/original.owner"
+  group_plan_adopt
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add -b gp-new "$3"' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  local owner harness leaf managed hash before
+  owner="$(owner_for_root "$GROUP_PLAN_NEW")"
+  hash="$(jq -r '.exclude_block_hash' "$owner")"
+  for owner in "$TRELLIS_HOME_FIX"/state/attachments/*/*.json; do
+    jq -e --arg hash "$hash" '.release == "1.3.10" and .exclude_block_hash == $hash
+      and .exclude.managed_block_sha256 == $hash and .status == "committed"' "$owner"
+    [ "$(readlink "$(jq -r '.worktree_root' "$owner")/.trellis/runtime")" = "$TRELLIS_HOME_FIX/releases/1.3.10/payload" ]
+    [ "$(registry_release_for_root "$(jq -r '.worktree_root' "$owner")")" = 1.3.10 ]
+  done
+  jq -e --slurpfile old "$SANDBOX/original.owner" '
+    .exclude.before_base64 == $old[0].exclude.before_base64
+    and .exclude.before_sha256 == $old[0].exclude.before_sha256
+    and .exclude.managed_by_attachment == $old[0].exclude.managed_by_attachment' "$GROUP_PLAN_OWNER"
+  for harness in claude codex pi; do
+    for leaf in hooks/hookspath-guard.sh hooks/lib/hookspath-check.sh; do
+      [ -L "$GROUP_PLAN_NEW/.$harness/$leaf" ] && [ -e "$GROUP_PLAN_NEW/.$harness/$leaf" ]
+      grep -Fx "/.$harness/$leaf" "$GROUP_PLAN_EXCLUDE"
+    done
+  done
+  [ ! -e "$GROUP_PLAN_MAIN/.pi/hooks/hookspath-guard.sh" ] # No existing-root leaf migration.
+  [ "$(tail -c 31 "$GROUP_PLAN_EXCLUDE")" = '# external tail without newline' ]
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$GROUP_PLAN_OWNER")"
+  [ "$(git -C "$GROUP_PLAN_NEW" config --local --get-all core.hooksPath)" = "$managed" ]
+  [ "$(git -C "$GROUP_PLAN_NEW" config --get core.hooksPath)" = "$managed" ]
+  [ "$(git -C "$GROUP_PLAN_NEW" config --local --get-all core.hooksPath | wc -l | tr -d ' ')" -eq 1 ]
+  jq -e '[.projects[].checkouts[].harnesses] | all(. == ["claude","codex","pi"])' "$TRELLIS_HOME_FIX/registry.json"
+  [ -z "$(git -C "$GROUP_PLAN_NEW" status --porcelain)" ]
+  [ -z "$(git -C "$GROUP_PLAN_MAIN" status --porcelain)" ]
+  [ -z "$(git -C "$GROUP_PLAN_SIBLING" status --porcelain)" ]
+  before="$(group_plan_state)"
+  group_plan_sync "$GROUP_PLAN_NEW"
+  [ "$status" -eq 0 ] && [ ! -s "$SANDBOX/sync.err" ]
+  [ "$(group_plan_state)" = "$before" ]
+  group_plan_assert_no_journal
+}
+
+@test "group plan (t): stale existing-tree sync and quiet seeding name exclude cause on stderr" {
+  group_plan_setup_group
+  payload_fixture_git -C "$GROUP_PLAN_MAIN" worktree add --detach "$GROUP_PLAN_NEW"
+  local before stderr mode
+  before="$(group_plan_state)"
+  for mode in sync quiet; do
+    if [ "$mode" = sync ]; then group_plan_sync "$GROUP_PLAN_NEW"; else
+      run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'exec bash "$1" --target "$2" --quiet 2>"$3"' _ \
+        "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$GROUP_PLAN_NEW" "$SANDBOX/sync.err"
+    fi
+    [ "$status" -eq 3 ]
+    [ -s "$SANDBOX/sync.err" ]
+    stderr="$(cat "$SANDBOX/sync.err")"
+    [[ "$stderr" == *'stale owned exclude plan'*'info/exclude'*'checkout '*"$GROUP_PLAN_NEW"*'release 1.3.9'*'recorded '*'live '*'desired '*'hookspath-guard.sh'*'remedy:'* ]]
+    [ "$(group_plan_state)" = "$before" ]
+    [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
+    ! owner_for_root "$GROUP_PLAN_NEW"
+    [ -z "$(registry_release_for_root "$GROUP_PLAN_NEW")" ]
+    group_plan_assert_no_journal
+  done
+}
+
+@test "group plan (t): invalid donor and owned-artifact sync refusals are distinct" {
+  group_plan_setup_group
+  payload_fixture_git -C "$GROUP_PLAN_MAIN" worktree add --detach "$GROUP_PLAN_NEW"
+  rm "$GROUP_PLAN_MAIN/.claude/rules/trellis.md" "$GROUP_PLAN_SIBLING/.claude/rules/trellis.md"
+  local before
+  before="$(group_plan_state)"
+  group_plan_sync "$GROUP_PLAN_NEW"
+  [ "$status" -eq 4 ]
+  grep -F 'invalid donor ownership' "$SANDBOX/sync.err"
+  grep -F 'state/attachments/' "$SANDBOX/sync.err"
+  grep -F 'remedy:' "$SANDBOX/sync.err"
+  group_plan_sync "$GROUP_PLAN_MAIN"
+  [ "$status" -eq 3 ]
+  grep -F 'owned-artifact refusal' "$SANDBOX/sync.err"
+  grep -F '.claude/rules/trellis.md' "$SANDBOX/sync.err"
+  [ "$(group_plan_state)" = "$before" ]
+  group_plan_assert_no_journal
+}
+
+@test "group plan (u): stale pre-add refuses before branch or tree and no-checkout stays deferred" {
+  group_plan_setup_group
+  local before
+  before="$(group_plan_state)"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add -b gp-blocked "$3"' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'stale owned exclude plan'*'remedy:'* ]]
+  [ ! -e "$GROUP_PLAN_NEW" ]
+  ! git -C "$GROUP_PLAN_MAIN" show-ref --verify refs/heads/gp-blocked
+  [ "$(group_plan_state)" = "$before" ]
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add --no-checkout -b gp-deferred "$3"' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  [ "$status" -eq 0 ] && [ -d "$GROUP_PLAN_NEW" ] && [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
+  group_plan_assert_no_journal
+}
+
+@test "group plan (u): same-version stale recorded bytes still reconcile" {
+  group_plan_setup_group
+  group_plan_adopt
+  [ "$status" -eq 0 ]
+  # Reproduce old recorded bytes at the already-selected version (unchanged manifests).
+  python3 - "$TRELLIS_HOME_FIX" "$SANDBOX/stale.exclude" "$GROUP_PLAN_EXCLUDE" <<'PY'
+import base64, hashlib, json, pathlib, sys
+home, stale, live = map(pathlib.Path, sys.argv[1:])
+data = stale.read_bytes()
+start = data.index(b'# --- Trellis local attachment exclude block ---\n')
+end = data.index(b'# --- end Trellis local attachment exclude block ---\n') + len(b'# --- end Trellis local attachment exclude block ---\n')
+block = data[start:end]
+for path in (home / 'state/attachments').glob('*/*.json'):
+    owner = json.loads(path.read_text())
+    owner['exclude'].update(managed_block_base64=base64.b64encode(block).decode(),
+                           managed_block_sha256=hashlib.sha256(block).hexdigest())
+    owner['exclude_block_hash'] = hashlib.sha256(block).hexdigest()
+    path.write_text(json.dumps(owner))
+live.write_bytes(data)
+PY
+  group_plan_adopt
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Fx '/.pi/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
+  group_plan_assert_no_journal
+}
+
+@test "group plan (u): duplicate tamper disagreement negation and divergent deferrals refuse without publication" {
+  group_plan_setup_group
+  local kind before
+  cp "$GROUP_PLAN_EXCLUDE" "$SANDBOX/exclude.good"
+  cp "$GROUP_PLAN_OWNER" "$SANDBOX/owner.good"
+  for kind in duplicate tamper disagreement negation divergent; do
+    case "$kind" in
+      duplicate) cat "$SANDBOX/exclude.good" >> "$GROUP_PLAN_EXCLUDE" ;;
+      tamper) python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.write_bytes(p.read_bytes().replace(b"/.trellis/runtime",b"/.trellis/tampered"))' "$GROUP_PLAN_EXCLUDE" ;;
+      disagreement) jq '.exclude.managed_block_sha256 = ("a" * 64) | .exclude_block_hash = ("a" * 64)' "$SANDBOX/owner.good" > "$GROUP_PLAN_OWNER" ;;
+      negation) printf '!.pi/hooks/hookspath-guard.sh\n' > "$GROUP_PLAN_MAIN/.gitignore"; git -C "$GROUP_PLAN_MAIN" add .gitignore ;;
+      divergent) rm "$GROUP_PLAN_SIBLING/.claude/primers/INDEX.md" ;;
+    esac
+    before="$(group_plan_state)"
+    group_plan_adopt
+    [ "$status" -eq 3 ] || { echo "$kind: $output"; false; }
+    [ -n "$output" ]
+    [ "$(group_plan_state)" = "$before" ]
+    cmp "$SANDBOX/stale.exclude" "$GROUP_PLAN_EXCLUDE" || [ "$kind" = duplicate ] || [ "$kind" = tamper ]
+    cp "$SANDBOX/exclude.good" "$GROUP_PLAN_EXCLUDE"
+    cp "$SANDBOX/owner.good" "$GROUP_PLAN_OWNER"
+    git -C "$GROUP_PLAN_MAIN" reset -q -- .gitignore
+    rm -f "$GROUP_PLAN_MAIN/.gitignore"
+    git -C "$GROUP_PLAN_SIBLING" restore .claude/primers/INDEX.md
+    group_plan_assert_no_journal
+  done
+}
+
+@test "group plan (u): exclude CAS race preserves competing external bytes without publication" {
+  group_plan_setup_group
+  mkdir "$RELEASE_TEST_ADOPTION_BARRIER"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.3.10 --project group-plan > "$SANDBOX/adopt.log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.ready" \
+    "$RELEASE_PROCESS_PID_A" "$SANDBOX/adopt.log"
+  printf '\n# concurrent external bytes\n' >> "$GROUP_PLAN_EXCLUDE"
+  local before
+  before="$(group_plan_state)"
+  : > "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.release"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  [ "$RELEASE_PROCESS_STATUS" -eq 3 ] || { cat "$SANDBOX/adopt.log"; false; }
+  grep -Fx '# concurrent external bytes' "$GROUP_PLAN_EXCLUDE"
+  ! grep -F 'adopted:' "$SANDBOX/adopt.log"
+  [ "$(group_plan_state)" = "$before" ]
+  group_plan_assert_no_journal
+}
+
+@test "group plan (u): signal rollback and crash recovery preserve group exclude hashes" {
+  group_plan_setup_group
+  local signal before
+  mkdir "$RELEASE_TEST_ADOPTION_BARRIER"
+  printf '%s\n' "$GROUP_PLAN_EXCLUDE" > "$RELEASE_TEST_ADOPTION_BARRIER/exclude.target"
+  : > "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.release"
+  before="$(group_plan_state)"
+  for signal in TERM OWNER-TERM KILL; do
+    if [ "$signal" = OWNER-TERM ]; then
+      mv "$RELEASE_TEST_ADOPTION_BARRIER/exclude.target" "$RELEASE_TEST_ADOPTION_BARRIER/owner.target"
+    fi
+    env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.3.10 --project group-plan > "$SANDBOX/adopt.log" 2>&1 &
+    RELEASE_PROCESS_PID_A=$!
+    local phase=exclude-after-publish
+    [ "$signal" = TERM ] || phase=owner-after-publish
+    wait_for_release_barrier "$RELEASE_TEST_ADOPTION_BARRIER/$phase.ready" \
+      "$RELEASE_PROCESS_PID_A" "$SANDBOX/adopt.log"
+    local kill_signal="$signal"
+    [ "$signal" != OWNER-TERM ] || kill_signal=TERM
+    kill -"$kill_signal" "$(cat "$RELEASE_TEST_ADOPTION_BARRIER/$phase.pid")"
+    wait_for_release_process "$RELEASE_PROCESS_PID_A"
+    [ "$RELEASE_PROCESS_STATUS" -ne 0 ]
+    rm -f "$RELEASE_TEST_ADOPTION_BARRIER/$phase.ready"
+    if [ "$signal" != KILL ]; then
+      [ "$(group_plan_state)" = "$before" ]
+      group_plan_assert_no_journal
+    else
+      : > "$RELEASE_TEST_ADOPTION_BARRIER/owner-after-publish.release"
+      group_plan_adopt
+      [ "$status" -eq 0 ] || { echo "$output"; false; }
+      grep -Fx '/.pi/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
+      group_plan_assert_no_journal
+    fi
+  done
+}
+
 @test "adoption preserves current hooks when target hook generation fails" {
   assert_malformed_hook_adoption_preserves_current_release failure
 }
@@ -532,6 +861,161 @@ GENERATOR
   [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
   [ "$(registry_release_for_root "$project")" = "$version_b" ]
   jq -e '.effortLevel == "medium" and .unrelated == "still-local"' "$destination" >/dev/null
+}
+
+@test "explicit-json adoption re-renders missing and changed owned keys in a multi-owner checkout" {
+  local version_a=1.6.4 version_b=1.6.5 repo project sibling root destination owner mode
+  local payload_a payload_b main_owner sibling_owner
+
+  repo="$(build_explicit_json_release_repo "$version_a" medium)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_explicit_json_release_repo "$version_b" high)"
+  install_release "$version_b" "$repo"
+  payload_b="$RELEASE_DIR/payload"
+
+  project="$SANDBOX/explicit-json-group"
+  sibling="$SANDBOX/explicit-json-sibling"
+  make_portable_project "$project" explicit-json-group
+  attach_portable_project "$project" personal "$version_a"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_portable_project "$sibling" personal "$version_a"
+  main_owner="$(owner_for_root "$project")"
+  sibling_owner="$(owner_for_root "$sibling")"
+  # Two distinct owners in one checkout force the shared-exclude planner;
+  # attach both before introducing repairable owned-key drift.
+  [ "$main_owner" != "$sibling_owner" ]
+  [ "$(dirname "$main_owner")" = "$(dirname "$sibling_owner")" ]
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_a" ]
+    jq -e --arg version "$version_a" '.release == $version and .status == "committed"
+      and any(.renders[]; .path == ".claude/settings.local.json"
+        and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))' "$owner" >/dev/null
+  done
+
+  destination="$project/.claude/settings.local.json"
+  jq 'del(.effortLevel) | .unrelated = "keep-main"' "$destination" > "$destination.next"
+  mv "$destination.next" "$destination"
+  chmod 600 "$destination"
+  destination="$sibling/.claude/settings.local.json"
+  jq '.effortLevel = "low" | .unrelated = "keep-sibling"' "$destination" > "$destination.next"
+  mv "$destination.next" "$destination"
+  chmod 600 "$destination"
+  jq -e 'has("effortLevel") | not' "$project/.claude/settings.local.json" >/dev/null
+  jq -e '.effortLevel == "low"' "$sibling/.claude/settings.local.json" >/dev/null
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --project explicit-json-group
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'re-rendered owned JSON key: .claude/settings.local.json ["effortLevel"] (missing)'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *'re-rendered owned JSON key: .claude/settings.local.json ["effortLevel"] (changed)'* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" == *"adopted: personal/explicit-json-group"* ]] || { echo "$output"; false; }
+
+  jq -e '.effortLevel == "medium" and .unrelated == "keep-main"' "$project/.claude/settings.local.json" >/dev/null
+  jq -e '.effortLevel == "medium" and .unrelated == "keep-sibling"' "$sibling/.claude/settings.local.json" >/dev/null
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    destination="$root/.claude/settings.local.json"
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_b" ]
+    [ "$(registry_release_for_root "$root")" = "$version_b" ]
+    jq -e --arg version "$version_b" '.release == $version and .status == "committed"
+      and any(.renders[]; .path == ".claude/settings.local.json"
+        and any(.owned_keys[]; .path == ["effortLevel"] and .value == "medium"))
+      and any(.artifacts[]; .path == ".claude/settings.local.json"
+        and (.sha256 | test("^[a-f0-9]{64}$")))' "$owner" >/dev/null
+    case "$(uname -s)" in
+      Darwin) mode="$(stat -f '%Lp' "$destination")" ;;
+      *) mode="$(stat -c '%a' "$destination")" ;;
+    esac
+    [ "$mode" = 600 ]
+  done
+  [ "$(jq -r '.exclude_block_hash' "$main_owner")" = "$(jq -r '.exclude_block_hash' "$sibling_owner")" ]
+  group_plan_assert_no_journal
+}
+
+build_retiring_release_repo() {
+  local version="$1" repo manifest
+  repo="$(build_release_repo "$version")" || return 1
+  printf '# retired agent\n' > "$repo/core-rules/retired.md" || return 1
+  manifest="$repo/core-rules/inheritance-manifest.json"
+  jq '.harnesses.codex.links += [{source:"core-rules/retired.md",destination:".codex/hooks/retired.md"}]' \
+    "$manifest" > "$manifest.tmp" || return 1
+  mv "$manifest.tmp" "$manifest" || return 1
+  retag_release_repo "$repo" "$version" || return 1
+  printf '%s\n' "$repo"
+}
+
+# Each attach spawns a detached post-attach job that takes the checkout lock
+# for short steps; adopt does not wait for it. Settle on its recorded verdict.
+wait_for_attachment_statuses() {
+  [ "${TRELLIS_ATTACH_POSTJOB:-}" != off ] || return 0
+  local count="$1" tries=0
+  until [ "$(jq -s '[.[] | select(.state | IN("ok","failed","blocked-by-journal"))] | length' \
+      "$TRELLIS_HOME_FIX"/state/attachment-status/*/*.json 2>/dev/null)" = "$count" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 3000 ] || { echo 'post-attach jobs did not settle'; return 1; }
+    sleep 0.1
+  done
+}
+
+@test "group adoption retires an owned leaf the new release dropped and restores it on interruption" {
+  local version_a=1.9.4 version_b=1.9.5 repo project sibling root owner payload_a barrier adopt_log hook_swap_pid
+  local -a owners_before=()
+  repo="$(build_retiring_release_repo "$version_a")"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_release_repo "$version_b")"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/retiring-group"
+  sibling="$SANDBOX/retiring-sibling"
+  make_portable_project "$project" retiring-group
+  attach_portable_project "$project" personal "$version_a"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_portable_project "$sibling" personal "$version_a"
+  wait_for_attachment_statuses 2
+  for root in "$project" "$sibling"; do
+    [ "$(readlink "$root/.codex/hooks/retired.md")" = ../../.trellis/runtime/core-rules/retired.md ]
+    owners_before+=("$(cat "$(owner_for_root "$root")")")
+  done
+
+  # An interrupted adopt puts every retired link back with its recorded target.
+  barrier="$RELEASE_TEST_HOOK_BARRIER"
+  adopt_log="$SANDBOX/retiring-adopt.log"
+  mkdir "$barrier"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    bash "$RELEASE" adopt "$version_b" --project retiring-group > "$adopt_log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
+  [ ! -e "$project/.codex/hooks/retired.md" ] && [ ! -L "$project/.codex/hooks/retired.md" ]
+  hook_swap_pid="$(cat "$barrier/hook-swap-after-exchange.pid")"
+  kill -TERM "$hook_swap_pid"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  [ "$RELEASE_PROCESS_STATUS" -ne 0 ] || { cat "$adopt_log"; false; }
+  RELEASE_PROCESS_PID_A=""
+  rm -rf "$barrier"
+  for root in "$project" "$sibling"; do
+    [ "$(readlink "$root/.codex/hooks/retired.md")" = ../../.trellis/runtime/core-rules/retired.md ]
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_a" ]
+  done
+  [ "$(cat "$(owner_for_root "$project")")" = "${owners_before[0]}" ]
+  [ "$(cat "$(owner_for_root "$sibling")")" = "${owners_before[1]}" ]
+  group_plan_assert_no_journal
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project retiring-group
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    [ ! -e "$root/.codex/hooks/retired.md" ] && [ ! -L "$root/.codex/hooks/retired.md" ]
+    jq -e --arg version "$version_b" '.release == $version
+      and all(.artifacts[]; .path != ".codex/hooks/retired.md")
+      and any(.artifacts[]; .path == ".agents/rules/trellis.md")' "$owner" >/dev/null
+    [ -z "$(git -C "$root" status --porcelain)" ] || { git -C "$root" status --porcelain; false; }
+  done
+  ! grep -Fx '/.codex/hooks/retired.md' "$project/.git/info/exclude"
+  group_plan_assert_no_journal
 }
 
 @test "explicit-json adoption names an absent render target and changes nothing" {
@@ -721,7 +1205,7 @@ GENERATOR
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project identity-drift > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/after-plan-validation.ready"
+  wait_for_release_barrier "$barrier/after-plan-validation.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   jq '.project_id = "other-project"' "$project/.trellis.json" > "$project/.trellis.json.next"
   mv "$project/.trellis.json.next" "$project/.trellis.json"
   : > "$barrier/after-plan-validation.release"
@@ -755,7 +1239,7 @@ GENERATOR
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project registry-drift > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/after-plan-validation.ready"
+  wait_for_release_barrier "$barrier/after-plan-validation.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   jq --arg project "$project_key" --arg checkout "$checkout" '
     .projects[$project].checkouts[$checkout].harnesses = ["claude"]
   ' "$registry" > "$registry.next"
@@ -787,7 +1271,7 @@ GENERATOR
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project owner-drift > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/after-plan-validation.ready"
+  wait_for_release_barrier "$barrier/after-plan-validation.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   jq '.project_id = "other-project"' "$owner" > "$owner.next"
   chmod 600 "$owner.next"
   mv "$owner.next" "$owner"
@@ -817,7 +1301,7 @@ GENERATOR
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project namespace-drift > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/after-plan-validation.ready"
+  wait_for_release_barrier "$barrier/after-plan-validation.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   mv "$project/.trellis" "$original_trellis"
   mkdir "$project/.trellis"
   ln -s "$ADOPTION_PAYLOAD_A" "$project/.trellis/runtime"
@@ -891,7 +1375,7 @@ GENERATOR
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project hook-interruption > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready"
+  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   for _ in {1..50}; do
     [ -d "$managed" ] && [ ! -L "$managed" ]
     [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
@@ -1226,6 +1710,54 @@ add_empty_worktrees_checkout() {
   grep -qF 'unavailable checkout inventory row swept by the adoption selector: personal/bulk-unavailable-checkout' <<<"$output"
   # Per-row continuation: the healthy target still adopts.
   grep -qF 'adopted: personal/bulk-checkout-guarded' <<<"$output"
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+}
+
+stage_checkout_lock_holder() {
+  local project="$1" pid="$2" common
+  common="$(cd "$project" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/attachment.sh"
+    _attachment_test_stage_checkout_lock "$2" "$3" "$4" "$5"' _ \
+    "$REPO_ROOT" "$TRELLIS_HOME_FIX" "$(registry_sha256_text "$common")" "$common" "$pid"
+}
+
+@test "adoption waits out a brief checkout-lock holder and names a lasting one" {
+  install_adoption_releases
+  project="$SANDBOX/lock-held-healthy"
+  make_portable_project "$project" lock-held-healthy
+  TRELLIS_ATTACH_POSTJOB=off attach_portable_project "$project" personal "$ADOPTION_VERSION_A"
+
+  # The detached post-attach job takes the checkout lock for brief steps right
+  # after every attach. An adopt landing in that window exited 3 with no
+  # message, failing a healthy target. The holder lives until adopt has met
+  # the held lock, then goes away the way the job does.
+  sleep 300 &
+  holder=$!
+  stage_checkout_lock_holder "$project" "$holder"
+  mkdir "$RELEASE_TEST_ADOPTION_BARRIER"
+  : > "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.release"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --all > "$SANDBOX/adopt.log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$RELEASE_TEST_ADOPTION_BARRIER/checkout-lock-busy.ready" \
+    "$RELEASE_PROCESS_PID_A" "$SANDBOX/adopt.log"
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  rm -rf "$RELEASE_TEST_ADOPTION_BARRIER"
+  [ "$RELEASE_PROCESS_STATUS" -eq 0 ] || { cat "$SANDBOX/adopt.log"; false; }
+  grep -qF 'adopted: personal/lock-held-healthy' "$SANDBOX/adopt.log"
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+
+  # The wait is bounded: a holder that outlives it is refused by name, and the
+  # target keeps its release.
+  sleep 30 &
+  holder=$!
+  stage_checkout_lock_holder "$project" "$holder"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_A" --all
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  grep -qF 'another Trellis operation still holds the checkout lock' <<<"$output"
   [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
 }
 
@@ -1846,7 +2378,7 @@ resolved_policy_markers() {
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" install "1.5.0" --remote "$repo" > "$install_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/install-before-publish.ready"
+  wait_for_release_barrier "$barrier/install-before-publish.ready" "$RELEASE_PROCESS_PID_A" "$install_log"
 
   foreign_release="$TRELLIS_HOME_FIX/releases/1.5.0"
   mkdir "$foreign_release"
@@ -1871,7 +2403,7 @@ resolved_policy_markers() {
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" install "1.5.4" --remote "$repo" > "$first_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/install-before-publish.ready"
+  wait_for_release_barrier "$barrier/install-before-publish.ready" "$RELEASE_PROCESS_PID_A" "$first_log"
 
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" install "1.5.4" --remote "$repo" > "$second_log" 2>&1 &
@@ -1901,7 +2433,7 @@ resolved_policy_markers() {
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "1.5.1" --runtime-anchor "$project/.trellis/runtime" > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/adopt-before-publish.ready"
+  wait_for_release_barrier "$barrier/adopt-before-publish.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
 
   printf 'project-owned runtime\n' > "$project/.trellis/runtime"
   : > "$barrier/adopt-before-publish.release"
@@ -1930,7 +2462,7 @@ resolved_policy_markers() {
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "1.5.2" --runtime-anchor "$project/.trellis/runtime" > "$first_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
-  wait_for_release_barrier "$barrier/adopt-before-publish.ready"
+  wait_for_release_barrier "$barrier/adopt-before-publish.ready" "$RELEASE_PROCESS_PID_A" "$first_log"
 
   env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
     bash "$RELEASE" adopt "1.5.3" --runtime-anchor "$project/.trellis/runtime" > "$second_log" 2>&1 &
@@ -1946,6 +2478,48 @@ resolved_policy_markers() {
   RELEASE_PROCESS_PID_A=""
   [ "$(readlink "$project/.trellis/runtime")" = "$release_a/payload" ]
   [ ! -e "$project/.trellis/.runtime.lock" ]
+}
+
+@test "release barrier waits for a live release process past the old fixed cap" {
+  # P1g (R39): under load a live release process can need longer than any fixed
+  # cap to reach its barrier. Inversion: a 200-poll (20 s) cap fails this wait.
+  sleep 600 &
+  RELEASE_PROCESS_PID_A=$!
+  local polls=0
+  sleep() {
+    polls=$((polls + 1))
+    [ "$polls" -lt 300 ] || : > "$SANDBOX/late.ready"
+  }
+  run wait_for_release_barrier "$SANDBOX/late.ready" "$RELEASE_PROCESS_PID_A" "$SANDBOX/late.log"
+  unset -f sleep
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  kill "$RELEASE_PROCESS_PID_A"
+  wait "$RELEASE_PROCESS_PID_A" 2>/dev/null || true
+  rm -f "$SANDBOX/late.ready"
+  printf 'adopt refused\n' > "$SANDBOX/late.log"
+  # An exited release process still fails at once, with its log in TAP.
+  run wait_for_release_barrier "$SANDBOX/late.ready" "$RELEASE_PROCESS_PID_A" "$SANDBOX/late.log"
+  RELEASE_PROCESS_PID_A=""
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"release process exited before barrier"*"adopt refused"* ]]
+}
+
+@test "release barrier wait heartbeats with the release pid and elapsed seconds" {
+  # P1g (R39 Q2 condition): the uncapped barrier wait must not hang silently.
+  # Each stubbed poll costs 100 s of wall clock; the barrier opens at poll 5.
+  sleep 600 &
+  RELEASE_PROCESS_PID_A=$!
+  local polls=0
+  sleep() {
+    polls=$((polls + 1))
+    SECONDS=$((SECONDS + 100))
+    [ "$polls" -lt 5 ] || : > "$SANDBOX/slow.ready"
+  }
+  run wait_for_release_barrier "$SANDBOX/slow.ready" "$RELEASE_PROCESS_PID_A" "$SANDBOX/slow.log"
+  unset -f sleep
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" =~ "release pid $RELEASE_PROCESS_PID_A alive (elapsed "([0-9]+)"s)" ]] || { echo "$output"; false; }
+  [ "${BASH_REMATCH[1]}" -ge 60 ]
 }
 
 @test "a detached or excluded checkout inventory row is reported, not silently skipped" {

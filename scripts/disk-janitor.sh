@@ -89,7 +89,11 @@ Usage:
   disk-janitor.sh --project ID             Limit to one local-registry project
                                            identity; multiple clones are refused.
   disk-janitor.sh --scopes caches,worktrees,stores,docker,releases
-                                           Limit scopes (default: all five).
+                                           Limit scopes (default: these five).
+  disk-janitor.sh --scopes pi              Opt-in, report-only: pi temp files,
+                                           spill logs and orphan pi worktrees
+                                           (never in the default set; --apply
+                                           refuses it).
   disk-janitor.sh --help                   Show this help.
 
 Modes (escalating):
@@ -165,6 +169,19 @@ Scopes:
               Fresh snapshots, live-owner snapshots, and malformed owner records
               are skipped; aged snapshots without a live owner are reaped with
               their exact owner sidecar.
+  pi          Host-global, opt-in, REPORT-ONLY in 1.3.12: --apply refuses it
+              and nothing under a pi root is ever deleted; remove what it
+              lists by hand. Direct children of $TRELLIS_PI_TMPDIR (else
+              $TMPDIR/pi), of $HOME/.pi-worktrees, and of the legacy
+              TRELLIS_HOME/pi-worktrees whose newest content is older than 3
+              days are listed as reclaimable. A worktree is listed only as an
+              orphan: no attachment owner record names it and its parent
+              repository's `git worktree list` does not register it. A
+              repository (a .git directory), unreadable owner records, a
+              failed query, or a live cwd/open handle keep the entry off the
+              list. pi's bash spill logs (pi-bash-*.log) are listed after 1
+              day, or at any age once over 1 GiB, unless lsof shows an open
+              handle or cannot run.
 
 Exit codes: 0 success, 1 scan/prune error, 2 bad arguments, 3 identity conflict.
 EOF
@@ -245,11 +262,11 @@ validate_scopes() {
   IFS=','
   for s in $SCOPES; do
     case "$s" in
-      caches|worktrees|stores|docker|releases) ;;
+      caches|worktrees|stores|docker|releases|pi) ;;
       "") ;;
       *)
         IFS="$ifs_save"
-        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases)" >&2
+        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases, pi)" >&2
         exit 2
         ;;
     esac
@@ -257,6 +274,12 @@ validate_scopes() {
   IFS="$ifs_save"
 }
 validate_scopes
+# The pi scope is report-only in 1.3.12 (release-owner ruling after the
+# security review): a race-safe deleting pi janitor is a 1.3.13 item.
+if [ "$MODE" = "apply" ] && scope_enabled pi; then
+  echo "disk-janitor: pi scope is report-only in 1.3.12; run --report or --dry-run with --scopes pi and remove what it lists by hand" >&2
+  exit 2
+fi
 
 # Header tag so every mode's banner shows when the unattended-safe worktree
 # restriction is active (the nightly apply LaunchAgent runs with --safe-only).
@@ -328,6 +351,12 @@ fi
 # defaults (reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; ceilings 25/80).
 REAP_PUSHED_WORKTREES="$(cfg_bool '.disk_janitor.reap_pushed_worktrees' true)"
 EPHEMERAL_TMP_TTL_DAYS="$(cfg_num '.disk_janitor.ephemeral_tmp_ttl_days' 2)"
+# pi scope: owner ruling of 2026-10-08, a fixed 3 days for temp files and
+# orphan worktrees alike. Spill logs: release-owner requirement after the
+# 2026-10-08 disk-full incident, 1 day, or any age over 1 GiB.
+PI_TMP_TTL_DAYS=3
+PI_SPILL_TTL_DAYS=1
+PI_SPILL_MAX_BYTES=1073741824
 WORKTREE_COUNT_CEILING="$(cfg_num '.disk_janitor.worktree_count_ceiling' 25)"
 WORKTREE_TOTAL_GB_CEILING="$(cfg_num '.disk_janitor.worktree_total_gb_ceiling' 80)"
 
@@ -361,7 +390,8 @@ REGISTRY_SNAPSHOT_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-registry.XXXXXX")"
 TARGETS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-targets.XXXXXX")"
 VOLUMES_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-volumes.XXXXXX")"
 DOCKER_VOLUME_IDS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-docker-volumes.XXXXXX")"
-trap 'rm -f "$PLAN_TMP" "$LSOF_SNAPSHOT_TMP" "$REGISTRY_SNAPSHOT_TMP" "$TARGETS_TMP" "$VOLUMES_TMP" "$DOCKER_VOLUME_IDS_TMP"' EXIT
+PI_OWNER_PATHS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-pi-owners.XXXXXX")"
+trap 'rm -f "$PLAN_TMP" "$LSOF_SNAPSHOT_TMP" "$REGISTRY_SNAPSHOT_TMP" "$TARGETS_TMP" "$VOLUMES_TMP" "$DOCKER_VOLUME_IDS_TMP" "$PI_OWNER_PATHS_TMP"' EXIT
 
 EXIT_STATUS=0
 REGISTRY_STATE_ERRORS=0
@@ -623,7 +653,7 @@ done < <(jq -c '.entries[]' "$REGISTRY_SNAPSHOT_TMP")
 # One bounded host-wide lsof snapshot feeds every linked-worktree predicate.
 # Failure is recorded in the snapshot itself; dj_worktree_in_use interprets that
 # marker as "in use" so a broken safety check can only close the reap gate.
-if scope_enabled worktrees; then
+if scope_enabled worktrees || scope_enabled pi; then
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
 fi
 
@@ -1026,6 +1056,101 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Scope F: pi temp files and orphan pi worktrees (host-global, opt-in).
+# pi-subagents creates worktrees under os.tmpdir(), so pi runs with TMPDIR at
+# $HOME/.pi-worktrees (TRELLIS_HOME/pi-worktrees before 1.3.12) and its own
+# process temp files, the bash spill logs among them, land there too; the
+# shell commands it runs use TRELLIS_PI_TMPDIR, the system temp dir plus /pi.
+# A janitor started from inside pi inherits TMPDIR=<worktree root>, so a temp
+# root under a worktree root is not scanned twice.
+# ---------------------------------------------------------------------------
+# pi_root <root> <anchor> <rel>: print the physical path of <root> when it is a
+# real directory at exactly <anchor>/<rel> (any path strictly under <anchor>
+# when <rel> is empty) and no component below the anchor is a symlink: the
+# logical and physical paths must agree below it. The anchor's own ancestry may
+# hold links (macOS /var). A root or anchor that resolves to / or to HOME is
+# refused, however it is spelled ($HOME/., $HOME//, a/../b).
+pi_root() {
+  local root="$1" anchor="$2" want="$3" lanchor panchor lroot proot rel phome
+  case "$root" in /*) ;; *) return 1 ;; esac
+  case "$anchor" in /*) ;; *) return 1 ;; esac
+  lanchor="$(CDPATH='' cd -L -- "$anchor" 2>/dev/null && pwd -L)" || return 1
+  panchor="$(CDPATH='' cd -P -- "$anchor" 2>/dev/null && pwd -P)" || return 1
+  lroot="$(CDPATH='' cd -L -- "$root" 2>/dev/null && pwd -L)" || return 1
+  proot="$(CDPATH='' cd -P -- "$root" 2>/dev/null && pwd -P)" || return 1
+  phome="$(CDPATH='' cd -P -- "${HOME:-/}" 2>/dev/null && pwd -P)" || phome=/
+  [ "$panchor" != / ] || return 1
+  case "$lroot" in "$lanchor"/?*) rel="${lroot#"$lanchor"/}" ;; *) return 1 ;; esac
+  [ -z "$want" ] || [ "$rel" = "$want" ] || return 1
+  [ "$proot" = "$panchor/$rel" ] || return 1
+  case "$proot" in /|"$phome") return 1 ;; esac
+  printf '%s\n' "$proot"
+}
+
+PI_SCAN_NOTES=""
+PI_WORKTREE_ROOT=""
+if [ -n "${HOME:-}" ]; then
+  PI_WORKTREE_ROOT="$(pi_root "${HOME%/}/.pi-worktrees" "$HOME" .pi-worktrees)" ||
+    { PI_WORKTREE_ROOT=""; PI_SCAN_NOTES="${PI_SCAN_NOTES}\$HOME/.pi-worktrees missing, symlinked or outside HOME; not scanned. "; }
+fi
+PI_LEGACY_ROOT="$(pi_root "$TRELLIS_HOME/pi-worktrees" "$TRELLIS_HOME" pi-worktrees)" || PI_LEGACY_ROOT=""
+[ "$PI_LEGACY_ROOT" != "$PI_WORKTREE_ROOT" ] || PI_LEGACY_ROOT=""
+# The temp root lies strictly under TMPDIR, which is never HOME or /, and
+# outside both worktree roots.
+PI_TEMP_ROOT=""
+pi_tmp_anchor="$(CDPATH='' cd -P -- "${TMPDIR:-/}" 2>/dev/null && pwd -P)" || pi_tmp_anchor=/
+if [ "$pi_tmp_anchor" != / ] &&
+  [ "$pi_tmp_anchor" != "$(CDPATH='' cd -P -- "${HOME:-/}" 2>/dev/null && pwd -P)" ]; then
+  PI_TEMP_ROOT="$(pi_root "${TRELLIS_PI_TMPDIR:-${TMPDIR%/}/pi}" "$TMPDIR" "")" || PI_TEMP_ROOT=""
+fi
+case "$PI_TEMP_ROOT/" in
+  "${PI_WORKTREE_ROOT:-/nonexistent}"/*|"${PI_LEGACY_ROOT:-/nonexistent}"/*) PI_TEMP_ROOT="" ;;
+esac
+PI_OWNERS=""
+PI_RECLAIMABLE_BYTES=0
+
+# pi_load_owners — (re)read the owner records; PI_OWNERS is empty when they
+# cannot be read, which makes every pi entry a candidate.
+pi_load_owners() {
+  if dj_pi_owner_paths "$TRELLIS_HOME" "$PI_OWNER_PATHS_TMP"; then
+    PI_OWNERS="$PI_OWNER_PATHS_TMP"
+  else
+    PI_OWNERS=""
+  fi
+}
+
+scan_pi() {
+  local root entry row verdict kind detail tab nl
+  tab="$(printf '\t')"
+  nl="$(printf '\nx')"; nl="${nl%x}"
+  pi_load_owners
+  [ -n "$PI_OWNERS" ] || PI_SCAN_NOTES="${PI_SCAN_NOTES}attachment owner records unreadable; every entry but spill logs kept. "
+  [ -n "$PI_TEMP_ROOT" ] || PI_SCAN_NOTES="${PI_SCAN_NOTES}no pi temp root (TRELLIS_PI_TMPDIR/TMPDIR unset or relative, HOME or /, outside TMPDIR, under a symlink, or inside a worktree root). "
+  for root in "$PI_WORKTREE_ROOT" "$PI_LEGACY_ROOT" "$PI_TEMP_ROOT"; do
+    [ -n "$root" ] || continue
+    if [ ! -d "$root" ] || [ -L "$root" ] || [ ! -O "$root" ]; then
+      PI_SCAN_NOTES="${PI_SCAN_NOTES}$root unavailable, symlinked or not owned by this account. "
+      continue
+    fi
+    for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      case "$entry" in
+        *"$tab"*|*"$nl"*)
+          PI_SCAN_NOTES="${PI_SCAN_NOTES}an entry under $root has a tab or newline in its name; left intact. "
+          continue
+          ;;
+      esac
+      row="$(dj_pi_entry_verdict "$entry" "$PI_TMP_TTL_DAYS" "$PI_OWNERS" "$LSOF_SNAPSHOT_TMP" \
+        "$PI_SPILL_TTL_DAYS" "$PI_SPILL_MAX_BYTES")"
+      IFS="$tab" read -r verdict kind detail <<EOF
+$row
+EOF
+      plan_row pi "$verdict" "$kind" "$entry" "$(dj_dir_bytes "$entry")" "$root" "$detail"
+    done
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Scope E: Docker (host-global; scan exactly once, never inside scan_project).
 # The liveness probe is deliberately only `docker info`: no `open`, Desktop
 # helper, or other command that could start Docker Desktop is ever invoked.
@@ -1228,6 +1353,9 @@ fi
 if scope_enabled releases; then
   scan_release_staging
 fi
+if scope_enabled pi; then
+  scan_pi
+fi
 
 STORES_PLAN=""
 if scope_enabled stores; then
@@ -1258,6 +1386,7 @@ WT_CANDIDATE_BYTES="$(sum_bytes worktrees candidate)"
 RELEASE_STAGING_DELETE_BYTES="$(sum_bytes releases delete)"
 RELEASE_STAGING_ALL_BYTES="$(sum_bytes releases '*')"
 RELEASE_STAGING_DELETE_COUNT="$(awk -F'\t' '$1=="releases" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")"
+PI_RECLAIMABLE_BYTES="$(sum_bytes pi reclaimable)"
 # A phantom registration occupies Git metadata, not a directory, so it has
 # 0 B. Apply must key on planned rows as well as reclaimable bytes.
 WT_DELETE_COUNT="$(awk -F'\t' '$1=="worktrees" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")"
@@ -1297,6 +1426,19 @@ CEILING_BYTES=$((CACHE_CEILING_GB * 1024 * 1024 * 1024))
 # console copy, a real fd for the audit file). Same body for both so they never
 # drift.
 # ---------------------------------------------------------------------------
+# print_pi_rows — the pi scope's plan, shared by report and dry-run.
+print_pi_rows() {
+  local scope verdict kind path bytes repo detail
+  echo "== pi temp files and orphan pi worktrees (host-global, REPORT-ONLY: remove by hand; older than ${PI_TMP_TTL_DAYS}d; spill logs older than ${PI_SPILL_TTL_DAYS}d or over 1 GiB) =="
+  echo "  roots: ${PI_WORKTREE_ROOT:-<none>} ${PI_LEGACY_ROOT:-<none>} ${PI_TEMP_ROOT:-<none>}"
+  [ -z "$PI_SCAN_NOTES" ] || echo "  note: $PI_SCAN_NOTES"
+  while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
+    [ "$scope" = "pi" ] || continue
+    printf '  [%s] %s (%s) — %s: %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$kind" "$detail"
+  done <"$PLAN_TMP"
+  printf '  reclaimable by hand (aged pi temp files, spill logs + orphan pi worktrees): %s\n' "$(dj_human_bytes "$PI_RECLAIMABLE_BYTES")"
+}
+
 render_report() {
   local line scope verdict kind path bytes repo detail
   local fleet project_id checkout_id worktree_id common owner_root
@@ -1401,6 +1543,11 @@ INNER
     done <"$PLAN_TMP"
     printf '  planned release-staging bytes (aged orphaned): %s\n' "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
     printf '  release-staging footprint scanned: %s\n' "$(dj_human_bytes "$RELEASE_STAGING_ALL_BYTES")"
+    echo
+  fi
+  # --- pi --- (host-global, opt-in)
+  if scope_enabled pi; then
+    print_pi_rows
     echo
   fi
 
@@ -1520,6 +1667,10 @@ if [ "$MODE" = "dry-run" ]; then
     awk -F'\t' '$1=="releases" && $2!="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail fleet project_id checkout_id common owner_root; do
       printf '    %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
     done
+    echo
+  fi
+  if scope_enabled pi; then
+    print_pi_rows
     echo
   fi
 
@@ -1886,8 +2037,6 @@ if scope_enabled releases; then
   fi
   echo
 fi
-
-
 # --- stores --- report-only even under --apply (no store-prune in this release).
 if scope_enabled stores; then
   echo "== Package stores =="

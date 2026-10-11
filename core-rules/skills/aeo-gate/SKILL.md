@@ -79,10 +79,10 @@ bash core-rules/skills/aeo-gate/scripts/run-diff.sh \
   --marker-file <path> \
   --marker '<marker>' \
   --baseline <accepted-baseline.json> \
-  --range origin/main..HEAD
+  [--range <base>..<head>]
 ```
 
-Diff records affected page files, repeats mapping and deterministic probes, and emits new, unchanged, and resolved fingerprints. The internal result is `PASS`, `REGRESSION`, or `INDETERMINATE`; the rollout adapter always exits `0` after a valid invocation and prints `AEO GATE (WARN ONLY)`.
+Without `--range`, the process-gate diff-base resolver picks the range, as `run-all.sh` does (spec 067). Diff records affected page files, repeats mapping and deterministic probes, and emits new, unchanged, and resolved fingerprints. The internal result is `PASS`, `REGRESSION`, or `INDETERMINATE`; the rollout adapter always exits `0` after a valid invocation and prints `AEO GATE (WARN ONLY)`.
 
 ## Mode 3: Deep review
 

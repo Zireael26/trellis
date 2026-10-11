@@ -11,6 +11,15 @@ is_local_template_only_hook() {
   esac
 }
 
+# Retired from every manifest by 1.3.12 (E-15). The scripts stay as shims; the
+# registration test below asserts they are absent.
+is_retired_registration_hook() {
+  case "$1" in
+    skill-size-preflight.sh|truncation-check.sh|propose-rules.sh|primer-capture-nudge.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 @test "canonical hook README lists every shipped Claude hook script" {
   local script base
   while IFS= read -r script; do
@@ -22,6 +31,47 @@ is_local_template_only_hook() {
   done < <(find "$ROOT/core-rules/hooks" -maxdepth 1 -type f -name '*.sh' | sort)
 }
 
+# spec 1.3.12 (E-15): these hooks keep their scripts but are no longer
+# registered in any manifest. Adding one back needs this list edited.
+@test "retired hook registrations are absent and the kept guards and tripwire remain" {
+  local manifest name
+  for manifest in core-rules/templates/claude-settings.local.json core-rules/templates/claude-settings.json \
+    core-rules/templates/codex-hooks.local.json core-rules/codex/hooks.json; do
+    for name in skill-size-preflight truncation-check propose-rules primer-capture-nudge; do
+      jq -e --arg name "$name" '
+        [.hooks[][]?.hooks[]?.command | select(contains($name))] | length == 0
+      ' "$ROOT/$manifest" >/dev/null || {
+        echo "retired hook still registered in $manifest: $name"
+        return 1
+      }
+    done
+  done
+  while IFS='|' read -r manifest name; do
+    jq -e --arg name "/$name.sh" '
+      [.hooks[][]?.hooks[]?.command | select(contains($name))] | length == 1
+    ' "$ROOT/$manifest" >/dev/null || {
+      echo "kept hook not wired exactly once in $manifest: $name"
+      return 1
+    }
+  done <<'EOF'
+core-rules/templates/claude-settings.local.json|slop-tripwire
+core-rules/templates/claude-settings.local.json|pr-gate-shiftleft
+core-rules/templates/claude-settings.local.json|block-destructive
+core-rules/templates/claude-settings.local.json|reread-guard
+core-rules/templates/claude-settings.local.json|skill-preload-guard
+core-rules/templates/claude-settings.local.json|skill-slash-guard
+core-rules/templates/claude-settings.json|slop-tripwire
+core-rules/templates/claude-settings.json|pr-gate-shiftleft
+core-rules/templates/claude-settings.json|skill-preload-guard
+core-rules/templates/codex-hooks.local.json|slop-tripwire
+core-rules/templates/codex-hooks.local.json|pr-gate-shiftleft
+core-rules/templates/codex-hooks.local.json|block-destructive
+core-rules/templates/codex-hooks.local.json|reread-guard
+core-rules/codex/hooks.json|slop-tripwire
+core-rules/codex/hooks.json|pr-gate-shiftleft
+EOF
+}
+
 @test "legacy Claude settings wire every hook not declared local-template-only" {
   local script base
   while IFS= read -r script; do
@@ -31,8 +81,9 @@ is_local_template_only_hook() {
     # each attached project's canonical settings.
     [ "$base" = "herdr-foreman-session.sh" ] && continue
     is_local_template_only_hook "$base" && continue
+    is_retired_registration_hook "$base" && continue
     jq -e --arg base "$base" \
-      '[.hooks[][]?.hooks[]?.command | select(endswith("/" + $base))] | length == 1' \
+      '[.hooks[][]?.hooks[]?.command | select(endswith("/" + $base) or endswith("/" + $base + "\""))] | length == 1' \
       "$ROOT/core-rules/templates/claude-settings.json" >/dev/null || {
         echo "missing or duplicate canonical hook wiring: $base"
         return 1
@@ -243,6 +294,9 @@ _check_rendered_roots() {
   local re='^TRELLIS_ROOT="([^"]+)" "([^"]+)"$'
   # The advisory hookspath-guard form (spec 055 R4.4): a missing script exits 0.
   local guarded_re='^h="([^"]+)"; \[ -f "\$h" \] \|\| exit 0; TRELLIS_ROOT="([^"]+)" "\$h"$'
+  # Bright-line guards start through the sh entry and guard-supervise.pl (B0-5);
+  # the supervisor and the guard must both come from the same runtime.
+  local supervised_re="^TRELLIS_ROOT=\"([^\"]+)\" /bin/sh -c '[^']*' guard-supervise \"([^\"]+)/core-rules/hooks/lib/guard-supervise\\.pl\" (claude|codex) [a-z-]+ \"([^\"]+)\"$"
   while IFS= read -r cmd; do
     [[ "$cmd" == *".trellis/runtime/core-rules/"* ]] || continue
     count=$((count + 1))
@@ -250,6 +304,8 @@ _check_rendered_roots() {
       root_expr="${BASH_REMATCH[1]}" path_expr="${BASH_REMATCH[2]}"
     elif [[ "$cmd" =~ $guarded_re ]]; then
       path_expr="${BASH_REMATCH[1]}" root_expr="${BASH_REMATCH[2]}"
+    elif [[ "$cmd" =~ $supervised_re ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
+      root_expr="${BASH_REMATCH[1]}" path_expr="${BASH_REMATCH[4]}"
     else
       echo "no TRELLIS_ROOT prefix: $cmd"
       return 1
@@ -284,7 +340,7 @@ _render_template() {
   ln -s "$tmp/payload-a" "$project/.trellis/runtime"
   ln -s "$tmp/payload-b" "$other/.trellis/runtime"
 
-  for entry in claude-settings.local.json:20 codex-hooks.local.json:18; do
+  for entry in claude-settings.local.json:18 codex-hooks.local.json:16; do
     name="${entry%%:*}" out="$tmp/rendered-$name"
     _render_template "$ROOT/core-rules/templates/$name" "core-rules/templates/$name" > "$out"
     count="$(_check_rendered_roots "$out" "$project")" || { echo "$name: $count"; false; }
@@ -310,4 +366,29 @@ _render_template() {
 
   # pi runs its deployed .pi/hooks copies with the same binding.
   grep -qF 'TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi "$HOOKS/$name"' "$ROOT/core-rules/pi/hooks/dispatch.sh"
+}
+
+@test "the contextual renderer pins three SessionStart launcher routes per harness and refuses a retired fourth" {
+  local tmp name routes
+  tmp="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+  RENDER_HOME="$tmp/home" RENDER_TRELLIS_HOME="$tmp/trellis-home"
+  mkdir -p "$RENDER_HOME/.local/bin" "$RENDER_TRELLIS_HOME"
+  printf '#!/bin/sh\n' > "$RENDER_HOME/.local/bin/trellis"
+  chmod +x "$RENDER_HOME/.local/bin/trellis"
+
+  for name in claude-settings.local.json codex-hooks.local.json; do
+    routes="$(jq -r '.hooks.SessionStart[].hooks[].command
+      | capture("__TRELLIS_LAUNCHER__ hook (?<r>[a-z-]+) ").r' "$ROOT/core-rules/templates/$name" | tr '\n' ' ')"
+    [ "$routes" = "session-context post-compact-context inject-primer-index " ] || { echo "$name: $routes"; false; }
+    _render_template "$ROOT/core-rules/templates/$name" "core-rules/templates/$name" > "$tmp/ok-$name"
+    jq -e '[.. | strings | select(contains("__TRELLIS_"))] | length == 0' "$tmp/ok-$name" >/dev/null
+
+    # A pre-1.3.12 template still carries skill-size-preflight; this release's
+    # renderer must refuse it rather than render a route its dispatcher drops.
+    jq '.hooks.SessionStart[0].hooks += [.hooks.SessionStart[0].hooks[0]
+        | .command |= sub(" hook session-context "; " hook skill-size-preflight ")]' \
+      "$ROOT/core-rules/templates/$name" > "$tmp/retired-$name"
+    run _render_template "$tmp/retired-$name" "core-rules/templates/$name"
+    [ "$status" -ne 0 ] || { echo "$name: retired fourth route rendered"; false; }
+  done
 }

@@ -290,7 +290,7 @@ EOF
   done
   # Shared task and verification primitives are explicit manifest link sources.
   # Keep this minimal payload complete before its immutable tree is sealed.
-  for primitive in task-context.sh task-state.py verification-bash.py; do
+  for primitive in task-context.sh task-state.py verification-bash.py guard-supervise.pl; do
     cp "$REPO_ROOT/core-rules/hooks/lib/$primitive" "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$primitive" || return 1
   done
   printf '#!/usr/bin/env bash\nexit 0\n' \

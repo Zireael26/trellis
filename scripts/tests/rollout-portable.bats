@@ -28,11 +28,13 @@ make_release() {
   for path in attach-project.sh registry.sh release.sh trellis trellis-launcher.sh; do
     cp "$REPO_ROOT/scripts/$path" "$source/scripts/$path"
   done
+  # Match the attachment planner's real payload dependency closure.
   for path in \
     attachment.sh \
     local-registry.sh \
     release-store.sh \
     semver.sh \
+    skill-roots.sh \
     surface-plan.sh \
     trellis-home.sh \
     trellis.machine.schema.json \

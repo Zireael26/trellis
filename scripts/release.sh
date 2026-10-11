@@ -217,6 +217,11 @@ else
   . "$SCRIPT_DIR/lib/local-registry.sh"
   # shellcheck source=lib/attachment.sh
   . "$SCRIPT_DIR/lib/attachment.sh"
+  # Share the strict exclude parser and legitimate per-root deferral planner.
+  # shellcheck source=attach-project.sh
+  if [ -f "$SCRIPT_DIR/attach-project.sh" ]; then
+    . "$SCRIPT_DIR/attach-project.sh"
+  fi
 fi
 
 release_err() {
@@ -320,6 +325,7 @@ Usage:
   trellis release list
   trellis release locate VERSION
   trellis release verify [VERSION]
+  trellis release reap-tmp [--fix]
   trellis release adopt VERSION --project ID [--fleet NAME]
   trellis release adopt VERSION --fleet NAME
   trellis release adopt VERSION --all
@@ -332,6 +338,10 @@ TRELLIS_HOME/config.json. It fetches annotated vVERSION and verifies its
 immutable payload. Managed adoption uses only strict local-registry rows and
 attachment ownership. It never guesses project paths; unavailable rows are
 reported and are never changed.
+
+reap-tmp lists leaked .tmp.* scratch in TRELLIS_HOME/releases and writes
+nothing; --fix removes the entries older than 1 h whose owner process is dead,
+or older than 24 h when no owner was recorded.
 EOF
 }
 
@@ -590,17 +600,69 @@ resolve_verified_adoption_target() {
 }
 
 owner_replacement() {
-  local original="$1" replacement="$2" version="$3" payload="$4"
-  jq --arg version "$version" --arg payload "$payload" '
+  local original="$1" replacement="$2" version="$3" payload="$4" retired="$5"
+  jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" '
     if ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink")] | length) != 1
     then error("missing owned runtime anchor")
     else .release = $version
       | .artifacts |= map(if .path == ".trellis/runtime" then .target = $payload else . end)
+      | .artifacts |= map(.path as $path | select(any($retired[]; .path == $path) | not))
     end
   ' "$original" > "$replacement" || return "$TRELLIS_EX_STATE"
   chmod 600 "$replacement" || return "$TRELLIS_EX_UNAVAILABLE"
   _attachment_owner_json_valid "$replacement" || return "$TRELLIS_EX_STATE"
 }
+
+# A release can retire a native leaf (1.3.12 drops grok-ro/rw). A group adopt
+# re-plans the shared exclude from the new release, so an owned link the new
+# plan no longer selects would dangle untracked in every checkout. Only exact
+# owned symlinks retire; renders and deferred project files are left alone.
+adoption_retired_leaves() {
+  local owner="$1" payload="$2" selection="$3" surfaces harness
+  local -a harnesses=()
+  # Without the planner a single-owner adopt keeps its exclude block, which
+  # still covers the leaf; a group adopt refuses at exclude planning.
+  command -v surface_plan_emit >/dev/null 2>&1 || { printf '[]\n'; return 0; }
+  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
+  jq -c --argjson surfaces "$surfaces" '
+    [$surfaces.artifacts[].destination] as $planned
+    | [.artifacts[] | select(.kind == "symlink" and .path != ".trellis/runtime")
+       | .path as $path | select(($planned | index($path)) == null) | {path,target}]
+  ' "$owner" || return "$TRELLIS_EX_STATE"
+}
+
+# Forward unlinks only a name verified as the exact recorded link after it
+# was renamed aside; rollback recreates it only where nothing else stands.
+adoption_retire_leaf() (
+  local root="$1" leaf="$2" direction="$3" path target parent base held
+  path="$(printf '%s\n' "$leaf" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  target="$(printf '%s\n' "$leaf" | jq -r '.target')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$path" || return "$TRELLIS_EX_CONFLICT"
+  parent="$(dirname "$root/$path")" || return "$TRELLIS_EX_STATE"
+  base="$(basename "$path")" || return "$TRELLIS_EX_STATE"
+  CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
+  [ "$(pwd -P)" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
+  case "$direction" in
+    forward)
+      _attachment_symlink_matches "./$base" "$target" || return "$TRELLIS_EX_CONFLICT"
+      held="./.${base}.release-adopt.$$"
+      [ ! -e "$held" ] && [ ! -L "$held" ] || return "$TRELLIS_EX_CONFLICT"
+      mv -- "./$base" "$held" || return "$TRELLIS_EX_UNAVAILABLE"
+      if ! { [ -L "$held" ] && _attachment_symlink_matches "$held" "$target"; }; then
+        mv -- "$held" "./$base"
+        return "$TRELLIS_EX_CONFLICT"
+      fi
+      rm -- "$held" || return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+    rollback)
+      _attachment_symlink_matches "./$base" "$target" && return 0
+      [ ! -e "./$base" ] && [ ! -L "./$base" ] || return "$TRELLIS_EX_CONFLICT"
+      ln -s -- "$target" "./$base" || return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+)
 
 replace_owned_file() (
   local destination="$1" expected="$2" replacement="$3" parent base actual_parent temporary=''
@@ -1125,7 +1187,7 @@ adoption_publish_render() (
 preflight_target() {
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0
+  local renders='[]' render render_plan index=0 retired
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
   binding="$(printf '%s\n' "$target" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
@@ -1142,7 +1204,8 @@ preflight_target() {
   old_owner="$work/$number.old.json"
   new_owner="$work/$number.new.json"
   cp "$owner" "$old_owner" && chmod 600 "$old_owner" || return "$TRELLIS_EX_UNAVAILABLE"
-  owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" || return "$?"
+  retired="$(adoption_retired_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
+  owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" || return "$?"
   while IFS= read -r render; do
     index=$((index + 1))
     render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload")" || return "$?"
@@ -1174,11 +1237,11 @@ preflight_target() {
     --arg new_version "$new_version" --arg new_payload "$new_payload" \
     --arg root_identity "$root_identity" --arg trellis_identity "$trellis_identity" \
     --arg hooks "$hooks" --arg managed "$managed" --arg hook_authority "$hook_authority" \
-    --argjson renders "$renders" \
+    --argjson renders "$renders" --argjson retired "$retired" \
     '{row:$row,binding:$binding,identity:$identity,owner:$owner,old_owner:$old_owner,new_owner:$new_owner,
       old_version:$old_version,old_payload:$old_payload,new_version:$new_version,new_payload:$new_payload,
       root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed,
-      hook_authority:$hook_authority,renders:$renders}'
+      hook_authority:$hook_authority,renders:$renders,retired:$retired}'
 }
 
 plan_matches_old() {
@@ -1239,7 +1302,7 @@ plan_matches_old() {
 
 apply_plan() {
   local plan="$1" root root_identity trellis_identity owner old_owner new_owner new_version old_payload new_payload verified_new_payload
-  local planned_render drift_count
+  local planned_render drift_count leaf
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
   root_identity="$(printf '%s\n' "$plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
@@ -1261,12 +1324,15 @@ apply_plan() {
   runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload" || return "$?"
   release_store_adopt_runtime_anchor_pinned \
     "$new_version" "$root" "$root_identity" "$trellis_identity" "$old_payload" >/dev/null || return "$?"
-  replace_owned_file "$owner" "$old_owner" "$new_owner"
+  replace_owned_file "$owner" "$old_owner" "$new_owner" || return "$?"
+  while IFS= read -r leaf; do
+    adoption_retire_leaf "$root" "$leaf" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
 }
 
 rollback_plan() {
   local plan="$1" root root_identity trellis_identity owner old_owner new_owner old_version old_payload new_payload
-  local planned_render destination source source_hash source_mode candidate candidate_hash candidate_mode
+  local planned_render destination source source_hash source_mode candidate candidate_hash candidate_mode leaf
   local rc=0 one index
   local -a render_lines=()
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
@@ -1299,6 +1365,12 @@ rollback_plan() {
   else
     rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
+
+  while IFS= read -r leaf; do
+    adoption_retire_leaf "$root" "$leaf" rollback
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
 
   while IFS= read -r planned_render; do
     [ -n "$planned_render" ] && render_lines+=("$planned_render")
@@ -1509,12 +1581,193 @@ adopt_group_require_uniform() {
   return "$TRELLIS_EX_CONFLICT"
 }
 
+# Plan one common-file CAS and update every replacement owner, not just the
+# manager. The snapshots keep original pre-attach restoration bytes untouched.
+adoption_exclude_plan() {
+  local home="$1" plans="$2" payload="$3" work="$4" common="$5" checkout="$6"
+  local plan owner surfaces first='' selection block="$work/exclude.block" path="$common/info/exclude" mode
+  command -v attach_owner_surface_plan >/dev/null 2>&1 || {
+    release_err 'group exclude planner unavailable; use the verified 1.3.10 CLI to adopt'
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  while IFS= read -r plan; do
+    owner="$(printf '%s\n' "$plan" | jq -r '.old_owner')" || return "$TRELLIS_EX_STATE"
+    selection="$(printf '%s\n' "$plan" | jq -c '.binding.harnesses')" || return "$TRELLIS_EX_STATE"
+    surfaces="$(attach_owner_surface_plan "$owner" "$payload" "$selection")" || return "$?"
+    attach_exclude_effective_preflight "$(jq -r '.worktree_root' "$owner")" "$surfaces" || return "$?"
+    attach_exclude_block "$surfaces" > "$work/exclude.next" || return "$?"
+    if [ -n "$first" ] && ! cmp -s "$block" "$work/exclude.next"; then
+      release_err 'divergent group exclude deferrals; align project-authored leaves or whole-group detach/fresh attach'
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+    cp "$work/exclude.next" "$block" || return "$TRELLIS_EX_UNAVAILABLE"
+    first=true
+  done < "$plans"
+  # Exact recorded/live block and complete owner coverage are checked before
+  # deriving replacements; a manifest/version equality never skips this step.
+  owner="$(jq -rs '.[0].old_owner' "$plans")" || return "$TRELLIS_EX_STATE"
+  _attachment_canonical_file "$path" || return "$TRELLIS_EX_CONFLICT"
+  cp "$path" "$work/exclude.source" || return "$TRELLIS_EX_UNAVAILABLE"
+  attach_decode_base64 "$(jq -r '.exclude.managed_block_base64' "$owner")" > "$work/exclude.old-block" || return "$?"
+  attach_shared_exclude_state "$home" "$checkout" "$common" "$work/exclude.old-block" \
+    "$work/exclude.source" "$work/exclude.candidate" adoption >/dev/null || return "$?"
+  mode="0$(_attachment_mode "$path")" || return "$TRELLIS_EX_UNAVAILABLE"
+  python3 - "$plans" "$home/state/attachments/$checkout" "$work" <<'PY'
+import base64, hashlib, json, pathlib, sys
+plans_path, owners_dir, work = map(pathlib.Path, sys.argv[1:])
+plans = [json.loads(line) for line in plans_path.read_text().splitlines()]
+expected = {p['owner'] for p in plans}
+if expected != {str(p) for p in owners_dir.glob('*.json')}:
+    sys.exit('trellis release: every committed group owner must participate; restore unavailable siblings first')
+old = (work / 'exclude.old-block').read_bytes()
+new = (work / 'exclude.block').read_bytes()
+live = (work / 'exclude.source').read_bytes()
+if sum(json.loads(pathlib.Path(p['old_owner']).read_text())['exclude']['managed_by_attachment'] for p in plans) != 1:
+    sys.exit('trellis release: shared exclude requires exactly one manager')
+# The strict parser above establishes the unique exact old block boundaries.
+after = live.replace(old, new, 1)
+(work / 'exclude.candidate').write_bytes(after)
+sha = lambda b: hashlib.sha256(b).hexdigest()
+b64 = lambda b: base64.b64encode(b).decode()
+for p in plans:
+    path = pathlib.Path(p['new_owner'])
+    owner = json.loads(path.read_text())
+    owner['exclude'].update(managed_block_base64=b64(new), managed_block_sha256=sha(new),
+                           after_base64=b64(after), after_sha256=sha(after), after_exists=True)
+    owner['exclude_block_hash'] = sha(new)
+    path.write_text(json.dumps(owner, sort_keys=True) + '\n')
+PY
+  [ "$?" -eq 0 ] || return "$TRELLIS_EX_CONFLICT"
+  chmod "${mode#0}" "$work/exclude.source" "$work/exclude.candidate" || return "$TRELLIS_EX_UNAVAILABLE"
+  jq -cn --arg destination "$path" --arg path_identity "$(_attachment_fs_identity "$path")" \
+    --arg source "$work/exclude.source" --arg candidate "$work/exclude.candidate" \
+    --arg source_identity "$(_attachment_fs_identity "$work/exclude.source")" \
+    --arg candidate_identity "$(_attachment_fs_identity "$work/exclude.candidate")" \
+    --arg source_sha256 "$(_attachment_hash "$work/exclude.source")" \
+    --arg candidate_sha256 "$(_attachment_hash "$work/exclude.candidate")" \
+    --arg source_mode "$mode" --arg candidate_mode "$mode" '$ARGS.named' > "$work/exclude.json"
+}
+
+adoption_exclude_rollback() {
+  local work="$1" plan path source candidate
+  [ -f "$work/exclude.json" ] || return 0
+  plan="$(jq -c . "$work/exclude.json")" || return "$TRELLIS_EX_STATE"
+  path="$(printf '%s\n' "$plan" | jq -r '.destination')"
+  source="$(printf '%s\n' "$plan" | jq -r '.source')"
+  candidate="$(printf '%s\n' "$plan" | jq -r '.candidate')"
+  cmp -s "$path" "$source" && return 0
+  cmp -s "$path" "$candidate" || return "$TRELLIS_EX_CONFLICT"
+  adoption_publish_render "$plan" rollback
+}
+
+# The detached post-attach job holds the checkout lock for brief steps right
+# after every attach; an adopt landing in that window waits it out and refuses,
+# naming the lock, only when the bounded wait runs out.
+adoption_checkout_lock_wait() {
+  local common="$3" rc
+  attachment_checkout_lock_wait "$@" && return 0
+  rc=$?
+  [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
+    release_err "another Trellis operation still holds the checkout lock for $common; retry adoption when it finishes"
+  return "$rc"
+}
+
+# A durable private plan survives SIGKILL. Registry CAS is the commit record:
+# retry adoption finishes a fully published group, otherwise rolls it back.
+# No registry snapshot is replayed, so unrelated concurrent writes survive.
+recover_adoptions() (
+  local home="$1" selector="$2" fleet="$3" project="$4" work first checkout common plan owner version current all_new snapshot
+  [ -e "$home/state/release-adoptions" ] || [ -L "$home/state/release-adoptions" ] || return 0
+  _attachment_canonical_dir "$home/state/release-adoptions" &&
+    release_entry_private_directory "$home/state/release-adoptions" || return "$TRELLIS_EX_STATE"
+  for work in "$home"/state/release-adoptions/*; do
+    [ -d "$work" ] && [ ! -L "$work" ] || continue
+    _attachment_canonical_dir "$work" && release_entry_private_directory "$work" || return "$TRELLIS_EX_STATE"
+    [ -z "$(find "$work" -type l -print)" ] || return "$TRELLIS_EX_STATE"
+    [ -f "$work/binding.json" ] && [ ! -L "$work/binding.json" ] || {
+      release_err "incomplete adoption plan: $work; preserve it for inspection"
+      return "$TRELLIS_EX_STATE"
+    }
+    first="$(jq -c '{row:.,binding:.}' "$work/binding.json")" || return "$TRELLIS_EX_STATE"
+    case "$selector" in
+      project) [ "$(printf '%s\n' "$first" | jq -r '.row.project_id')" = "$project" ] || continue ;;
+    esac
+    if [ "$selector" != all ]; then
+      [ "$(printf '%s\n' "$first" | jq -r '.row.fleet')" = "$fleet" ] || continue
+    fi
+    checkout="$(printf '%s\n' "$first" | jq -r '.binding.checkout_id')"
+    common="$(printf '%s\n' "$first" | jq -r '.binding.git_common_dir')"
+    [ "$work" = "$home/state/release-adoptions/$checkout" ] || return "$TRELLIS_EX_STATE"
+    adoption_checkout_lock_wait "$home" "$checkout" "$common" || return "$?"
+    trap '_attachment_checkout_lock_release >/dev/null 2>&1 || true' EXIT
+    if [ ! -f "$work/ready" ]; then
+      rm -rf "$work" || return "$TRELLIS_EX_UNAVAILABLE"
+      _attachment_checkout_lock_release || return "$?"
+      trap - EXIT
+      continue
+    fi
+    jq -e --arg common "$common" --arg work "$work" '
+      .destination == ($common + "/info/exclude") and .source == ($work + "/exclude.source")
+      and .candidate == ($work + "/exclude.candidate")' "$work/exclude.json" >/dev/null || return "$TRELLIS_EX_STATE"
+    first="$(jq -cs '.[0]' "$work/plans.jsonl")" || return "$TRELLIS_EX_STATE"
+    version="$(printf '%s\n' "$first" | jq -r '.new_version')"
+    current="$(jq -r --arg key "$(printf '%s\n' "$first" | jq -r '.row.project_key')" --arg id "$checkout" \
+      '.projects[$key].checkouts[$id].release' "$home/registry.json")" || return "$TRELLIS_EX_STATE"
+    jq -e --slurpfile plans "$work/plans.jsonl" '
+      . as $state | all($plans[]; . as $p | .binding as $b
+        | $state.projects[$p.row.project_key].checkouts[$b.checkout_id] as $c
+        | $c.git_common_dir == $b.git_common_dir and $c.root == $b.checkout_root
+          and ($c.harnesses | sort) == $b.harnesses
+          and $c.worktrees[$b.worktree_id].root == $b.root
+          and $c.worktrees[$b.worktree_id].attachment_id == $b.attachment_id)
+    ' "$home/registry.json" >/dev/null || return "$TRELLIS_EX_CONFLICT"
+    all_new=true
+    while IFS= read -r plan; do
+      owner="$(printf '%s\n' "$plan" | jq -r '.owner')"
+      [ "$owner" = "$home/state/attachments/$checkout/$(printf '%s\n' "$plan" | jq -r '.binding.worktree_id').json" ] || return "$TRELLIS_EX_STATE"
+      for snapshot in old_owner new_owner; do
+        snapshot="$(printf '%s\n' "$plan" | jq -r --arg key "$snapshot" '.[$key]')"
+        [ "$(dirname "$snapshot")" = "$work" ] && _attachment_canonical_file "$snapshot" || return "$TRELLIS_EX_STATE"
+      done
+      _attachment_owner_json_valid "$(printf '%s\n' "$plan" | jq -r '.old_owner')" &&
+        _attachment_owner_json_valid "$(printf '%s\n' "$plan" | jq -r '.new_owner')" || return "$TRELLIS_EX_STATE"
+      [ "$(payload_for "$(printf '%s\n' "$plan" | jq -r '.old_version')")" = "$(printf '%s\n' "$plan" | jq -r '.old_payload')" ] &&
+        [ "$(payload_for "$(printf '%s\n' "$plan" | jq -r '.new_version')")" = "$(printf '%s\n' "$plan" | jq -r '.new_payload')" ] || return "$TRELLIS_EX_STATE"
+      cmp -s "$owner" "$(printf '%s\n' "$plan" | jq -r '.new_owner')" &&
+        attachment_verify_adoption "$home" "$owner" >/dev/null &&
+        runtime_anchor_matches_payload "$(jq -r '.worktree_root' "$owner")/.trellis/runtime" \
+          "$(printf '%s\n' "$plan" | jq -r '.new_payload')" || all_new=false
+      if [ "$(printf '%s\n' "$plan" | jq -r '.hooks')" = true ]; then
+        hook_payload_matches "$(printf '%s\n' "$plan" | jq -r '.managed')" \
+          "$(printf '%s\n' "$plan" | jq -r '.new_payload')" "$(jq -r '.worktree_root' "$owner")" || all_new=false
+      fi
+    done < "$work/plans.jsonl"
+    if [ "$current" = "$version" ] && [ "$all_new" = true ] &&
+      cmp -s "$common/info/exclude" "$work/exclude.candidate"; then
+      : # Fully published, including the same-version reconciliation case.
+    else
+      [ "$current" = "$(printf '%s\n' "$first" | jq -r '.old_version')" ] || {
+        release_err "adoption recovery binding drift: $work; preserve journal and restore exact state"
+        return "$TRELLIS_EX_CONFLICT"
+      }
+      jq -c 'select(.hooks == "true")' "$work/plans.jsonl" > "$work/recovery-hooks"
+      rollback_group_hooks "$work/recovery-hooks" && rollback_plans "$work/plans.jsonl" &&
+        adoption_exclude_rollback "$work" || return "$?"
+    fi
+    rm -rf "$work" || return "$TRELLIS_EX_UNAVAILABLE"
+    _attachment_checkout_lock_release || return "$?"
+    trap - EXIT
+  done
+)
+
 adopt_group() (
   local home="$1" version="$2" payload="$3" rows="$4" work="$5"
   local plans="$work/plans.jsonl" changed="$work/changed.jsonl" changed_hooks="$work/changed-hooks.jsonl"
   local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state dropped_key
   local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
+  local durable=false exclude_applied=false
+  local -a group_owners=()
 
   adopt_group_cleanup() {
     local status="${1:-$?}" cleanup_rc=0 one
@@ -1523,7 +1776,7 @@ adopt_group() (
     [ "$cleanup_started" = true ] && return "$status"
     cleanup_started=true
 
-    if [ "$committed" != true ] && [ "$lock_held" = true ]; then
+    if [ "$committed" != true ] && [ "$lock_held" = true ] && [ -f "$work/ready" ]; then
       if [ -n "$active_hook_plan" ]; then
         rollback_hook_plan "$active_hook_plan"
         one=$?
@@ -1541,6 +1794,18 @@ adopt_group() (
       rollback_plans "$changed"
       one=$?
       [ "$one" -eq 0 ] || cleanup_rc="$(max_status "$cleanup_rc" "$one")"
+      # A signal can arrive after CAS publication but before its caller records
+      # success. Recognize the exact candidate, as crash recovery does; never
+      # roll back competing external bytes after an unsuccessful CAS.
+      if [ "$exclude_applied" = true ] ||
+        cmp -s "$common/info/exclude" "$work/exclude.candidate"; then
+        adoption_exclude_rollback "$work"
+        one=$?
+        [ "$one" -eq 0 ] || cleanup_rc="$(max_status "$cleanup_rc" "$one")"
+      fi
+    fi
+    if [ "$durable" = true ] && [ "$cleanup_rc" -eq 0 ]; then
+      rm -rf "$work" || cleanup_rc="$TRELLIS_EX_UNAVAILABLE"
     fi
 
     if [ "$lock_held" = true ]; then
@@ -1562,6 +1827,28 @@ adopt_group() (
     exit "$?"
   }
 
+  IFS= read -r first < "$rows" || return "$TRELLIS_EX_STATE"
+  checkout="$(printf '%s\n' "$first" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
+  common="$(printf '%s\n' "$first" | jq -r '.git_common_dir')" || return "$TRELLIS_EX_STATE"
+  adoption_checkout_lock_wait "$home" "$checkout" "$common" || return "$?"
+  lock_held=true
+  trap 'adopt_group_exit "$?"' EXIT
+  trap 'adopt_group_signal' HUP INT TERM
+  # Spec 066 (u) migrates shared excludes, not ordinary single-owner adopts.
+  # Count all owner records under the checkout lock, not just selected rows:
+  # an unavailable sibling must not turn a real group into a singleton bypass.
+  group_owners=("$home/state/attachments/$checkout"/*.json)
+  if [ "${#group_owners[@]}" -gt 1 ]; then
+    work="$home/state/release-adoptions/$checkout"
+    mkdir -p "$home/state/release-adoptions" || return "$TRELLIS_EX_UNAVAILABLE"
+    _attachment_canonical_dir "$home/state/release-adoptions" || return "$TRELLIS_EX_STATE"
+    chmod 700 "$home/state/release-adoptions" || return "$TRELLIS_EX_UNAVAILABLE"
+    mkdir -m 700 "$work" || { release_err "pending adoption: retry release adopt to recover $work"; return "$TRELLIS_EX_CONFLICT"; }
+    durable=true
+    printf '%s\n' "$first" > "$work/binding.json" || return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  plans="$work/plans.jsonl"; changed="$work/changed.jsonl"; changed_hooks="$work/changed-hooks.jsonl"
+  : > "$changed"; : > "$changed_hooks"
   : > "$plans" || return "$TRELLIS_EX_UNAVAILABLE"
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -1579,14 +1866,14 @@ adopt_group() (
   : > "$changed" || return "$TRELLIS_EX_UNAVAILABLE"
   : > "$changed_hooks" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  IFS= read -r first < "$plans" || return "$TRELLIS_EX_STATE"
-  checkout="$(printf '%s\n' "$first" | jq -r '.binding.checkout_id')" || return "$TRELLIS_EX_STATE"
-  common="$(printf '%s\n' "$first" | jq -r '.binding.git_common_dir')" || return "$TRELLIS_EX_STATE"
-  attachment_checkout_lock_reclaim "$home" "$checkout" "$common" || return "$?"
-  attachment_checkout_lock_acquire "$home" "$checkout" "$common" || return "$?"
-  lock_held=true
-  trap 'adopt_group_exit "$?"' EXIT
-  trap 'adopt_group_signal' HUP INT TERM
+  if [ "$durable" = true ]; then
+    adoption_exclude_plan "$home" "$plans" "$payload" "$work" "$common" "$checkout" || {
+      rc=$?
+      release_err "group exclude planning refused for checkout $checkout ($common/info/exclude); remedy: restore exact committed exclude ownership and compatible root deferrals before retrying"
+      return "$rc"
+    }
+  fi
+  : > "$work/ready" || return "$TRELLIS_EX_UNAVAILABLE"
 
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
@@ -1599,6 +1886,15 @@ adopt_group() (
     [ -n "$plan" ] || continue
     plan_matches_old "$home" "$plan" || return "$?"
   done < "$plans"
+
+  if [ "$durable" = true ]; then
+    adoption_publish_render "$(jq -c . "$work/exclude.json")" forward || {
+      rc=$?
+      release_err "shared exclude CAS refused for $common/info/exclude; remedy: preserve concurrent bytes and retry adoption from verified state"
+      return "$rc"
+    }
+    exclude_applied=true
+  fi
 
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
@@ -1623,8 +1919,14 @@ adopt_group() (
     fi
   done < "$plans"
 
-  update_group_registry "$home" "$plans" "$version" || return "$?"
-  committed=true
+  # Do not let a catchable signal roll back owners after registry publication.
+  # SIGKILL still leaves the durable plan and registry CAS commit record.
+  trap '' HUP INT TERM
+  update_group_registry "$home" "$plans" "$version"
+  rc=$?
+  [ "$rc" -ne 0 ] || committed=true
+  trap 'adopt_group_signal' HUP INT TERM
+  [ "$rc" -eq 0 ] || return "$rc"
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
     while IFS= read -r planned_render; do
@@ -1684,8 +1986,8 @@ adopt_registry() (
   groups="$(mktemp "${TMPDIR:-/tmp}/trellis.release.groups.XXXXXX")" || { rm -f "$inventory" "$selected" "$rejected"; return "$TRELLIS_EX_UNAVAILABLE"; }
   trap 'rm -f "$inventory" "$selected" "$rejected" "$groups"' EXIT INT TERM
 
-  local_registry_list_json "$home" > "$inventory" || return "$?"
   if [ "$selector" = project ] && [ -z "$fleet" ]; then
+    local_registry_list_json "$home" > "$inventory" || return "$?"
     local fleet_count
     fleet_count="$(jq -r --arg project "$project" '[.entries[]? | select(.project_id == $project) | .fleet] | unique | length' "$inventory")" || return "$TRELLIS_EX_STATE"
     case "$fleet_count" in
@@ -1694,6 +1996,10 @@ adopt_registry() (
       *) release_err "project selector is ambiguous across fleets: $project"; return "$TRELLIS_EX_CONFLICT" ;;
     esac
   fi
+  # Recovery must use the resolved fleet, just like row selection. Refuse an
+  # ambiguous project before touching its journals, then list post-recovery state.
+  recover_adoptions "$home" "$selector" "$fleet" "$project" || return "$?"
+  local_registry_list_json "$home" > "$inventory" || return "$?"
   select_rows "$inventory" "$selector" "$fleet" "$project" "$selected" "$rejected" || return "$?"
 
   # A registry state error is a property of the REGISTRY, not of the adoption
@@ -1851,6 +2157,23 @@ run_list() {
   release_store_list
 }
 
+run_reap_tmp() {
+  local mode=dry-run home
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --fix)
+        [ "$mode" = dry-run ] || { usage_error 'reap-tmp accepts one --fix'; return $?; }
+        mode=fix
+        ;;
+      *) usage_error "unknown reap-tmp option: $1"; return $? ;;
+    esac
+    shift
+  done
+  home="$(release_home)" || return "$?"
+  export TRELLIS_HOME="$home"
+  release_store_reap_tmp "$mode"
+}
+
 run_adopt() {
   local version='' project='' fleet='' anchor='' all=false selector='' arg home
   local project_seen=false fleet_seen=false anchor_seen=false
@@ -1954,6 +2277,7 @@ release_command_main() {
     list) shift; run_list "$@" ;;
     locate) shift; run_locate "$@" ;;
     verify) shift; run_verify "$@" ;;
+    reap-tmp) shift; run_reap_tmp "$@" ;;
     adopt) shift; run_adopt "$@" ;;
     help|--help|-h) usage ;;
     *) usage_error "unknown command: $1" ;;

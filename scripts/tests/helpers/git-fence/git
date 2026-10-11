@@ -312,6 +312,9 @@ for arg in remaining:
             refuse("missing worktree option value: " + arg)
     elif arg.startswith(("--reason=", "--track=")):
         continue
+    elif arg[:2] in {"-b", "-B"} and len(arg) > 2:
+        # Attached branch value (-bname): a ref name, never a path to fence.
+        continue
     elif arg in {"-f", "--force", "-q", "--quiet", "--detach", "--lock", "--checkout", "--no-checkout", "--guess-remote", "--no-guess-remote", "--orphan", "--no-track"}:
         continue
     elif arg.startswith("-"):
@@ -711,7 +714,7 @@ case "$SUBCOMMAND" in
       require_fenced_repo "git tag mutation"
     fi
     ;;
-  annotate|blame|cat-file|check-attr|check-ignore|check-mailmap|check-ref-format|column|describe|diff|diff-files|diff-index|diff-tree|for-each-ref|grep|help|log|ls-files|ls-remote|ls-tree|merge-base|name-rev|rev-list|rev-parse|show|show-branch|status|version|whatchanged)
+  annotate|blame|cat-file|check-attr|check-ignore|check-mailmap|check-ref-format|column|describe|diff|diff-files|diff-index|diff-tree|for-each-ref|grep|help|log|ls-files|ls-remote|ls-tree|merge-base|name-rev|rev-list|rev-parse|show|show-branch|show-ref|status|version|whatchanged)
     # Known inspection-only commands may read the source checkout. The runner
     # exports GIT_OPTIONAL_LOCKS=0 so status-like commands cannot refresh its
     # index as a side effect.

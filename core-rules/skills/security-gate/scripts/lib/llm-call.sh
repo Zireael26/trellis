@@ -10,6 +10,18 @@
 # (prompt + input) to stdin. Replace this script if a project needs to talk
 # direct to a provider API — interface stays the same.
 
+# Inherited shell functions never answer for a tool. Every command name can be
+# shadowed, `builtin` included, but an assignment cannot: POSIXLY_CORRECT turns
+# on POSIX mode, where the special builtins `unset` and `set` are found before
+# functions, so the first purge cannot be intercepted (see run-diff.sh).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset -f llm timeout gtimeout
+builtin unset _sg_fn
+
 set -euo pipefail
 
 PROMPT="${1:?prompt-path required}"
@@ -26,7 +38,8 @@ if [ "${PROVIDER}" = "none" ]; then
   exit 2
 fi
 
-if ! command -v llm >/dev/null 2>&1; then
+LLM_BIN="$(builtin type -P llm)" || LLM_BIN=""
+if [ -z "$LLM_BIN" ]; then
   echo "warn: llm CLI not found on PATH — skipping triage" >&2
   : > "$OUT"
   exit 2
@@ -50,10 +63,10 @@ fi
 SYSTEM_PROMPT="$(cat "$PROMPT")"
 
 # Honor `timeout` when available (GNU coreutils / brew).
-if command -v timeout >/dev/null 2>&1; then
-  RUNNER=(timeout --preserve-status "$TIMEOUT")
-elif command -v gtimeout >/dev/null 2>&1; then
-  RUNNER=(gtimeout --preserve-status "$TIMEOUT")
+if TIMEOUT_BIN="$(builtin type -P timeout)"; then
+  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
+elif TIMEOUT_BIN="$(builtin type -P gtimeout)"; then
+  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
 else
   echo "warn: neither timeout nor gtimeout is available — refusing to invoke llm without a deadline" >&2
   : > "$OUT"
@@ -68,7 +81,7 @@ if ! DIAGNOSTIC="$(umask 077; mktemp "$DIAGNOSTIC_TEMPLATE")"; then
   : > "$OUT"
   exit 2
 fi
-CMD=("${RUNNER[@]}" llm prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
+CMD=("${RUNNER[@]}" "$LLM_BIN" prompt -m "$MODEL" -s "$SYSTEM_PROMPT")
 
 # SAFETY: SECURITY_GATE_LLM_TIMEOUT_S, default 120 seconds per the env contract above, bounds external provider I/O.
 if ! "${CMD[@]}" < "$INPUT" > "$OUT" 2>"$DIAGNOSTIC"; then

@@ -14,10 +14,12 @@
 #            {diff, autonomy_level, decisions_log}  OR (if not JSON) a raw
 #            unified diff. Tolerant: jq present → parse; else raw diff.
 #   stdout : EXACTLY one line of JSON with a findings array. Built-in LLM
-#            success includes status=completed; deterministic-only and legacy
-#            override envelopes may omit status. A failed rung 2 includes
-#            status=degraded with deterministic fallback findings. The CALLER
-#            decides block/allow.
+#            success includes status=completed; legacy override envelopes may
+#            omit status. Any rung-2 route that fails or is unavailable (pi
+#            absent or failing inside Herdr, claude absent or failing outside)
+#            includes status=degraded with deterministic fallback findings. Only
+#            the recursion-guarded nested run emits a bare deterministic
+#            envelope. The CALLER decides block/allow.
 #   exit   : The built-in ladder exits 0 after deterministic fallback; a rung-1
 #            exec propagates the operator reviewer's status. Rung-2 infra failure
 #            (claude error/timeout, perl missing, unparseable output) stays
@@ -976,8 +978,10 @@ main() {
   # Herdr the Claude Code/Codex `claude -p` rung remains. A failed claude rung
   # falls through to rung 3 and is carried in the output envelope so callers
   # do not record that fallback as a completed LLM review. Herdr pi fail-closed
-  # (no valid deciding artifact / no pi) is the intended deterministic path,
-  # not a degraded LLM attempt.
+  # (no valid deciding artifact / no pi) still falls to the deterministic rung,
+  # but that is no cross-family review either: every route that reaches rung 3
+  # without a completed LLM verdict is marked degraded, so the caller never
+  # mints the idempotency marker for it.
   local review_degraded=0 verdict
   if [ "${TRELLIS_REVIEW_IN_PROGRESS:-0}" != "1" ]; then
     if [ "${HERDR_ENV:-}" = "1" ]; then
@@ -986,7 +990,10 @@ main() {
           printf '%s\n' "$verdict"
           return 0
         fi
+      else
+        echo "code-reviewer: review degraded: pi is not on PATH inside Herdr; deterministic fallback will be used" >&2
       fi
+      review_degraded=1
     elif command -v claude >/dev/null 2>&1; then
       if verdict="$(llm_review "$INPUT")"; then
         # Uniform framing with rung 3 / emit_empty: exactly one newline-terminated
@@ -994,6 +1001,9 @@ main() {
         printf '%s\n' "$verdict"
         return 0
       fi
+      review_degraded=1
+    else
+      echo "code-reviewer: review degraded: no reviewer CLI (claude) on PATH; deterministic fallback will be used" >&2
       review_degraded=1
     fi
   fi

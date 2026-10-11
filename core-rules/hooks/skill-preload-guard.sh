@@ -9,9 +9,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/skill-preload.sh disable=SC1091
 . "$HOOK_DIR/lib/skill-preload.sh"
 
+# Exit 2 is Claude's blocking code; exit 1 would let the Skill load.
 if ! command -v jq >/dev/null 2>&1; then
-  printf '%s\n' 'skill-preload-guard: jq required but not found' >&2
-  exit 1
+  printf '%s\n' 'skill-preload-guard: jq required but not found; refusing' >&2
+  exit 2
 fi
 if ! printf '%s' "$INPUT" | jq -e '
   .hook_event_name == "PreToolUse"

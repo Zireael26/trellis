@@ -25,6 +25,7 @@ from aeo_gate.capture import (
     normalize_output_dir,
     validate_local_ollama_model,
 )
+from aeo_gate.cli import default_range, parser
 from aeo_gate.deep import run_deep
 from aeo_gate.delta import validate_accepted_baseline
 from aeo_gate.diff import run_diff, warn_only_verdict
@@ -1240,6 +1241,28 @@ class MappingAndDiffTests(unittest.TestCase):
             verdict = warn_only_verdict(result)
             self.assertIn("REGRESSION", verdict)
             self.assertIn("merge_policy=non-blocking", verdict)
+
+    def test_diff_default_range_is_the_shared_resolver_range(self):
+        # Inversion: a fixed origin/main..HEAD default differs on a stacked branch.
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            self._git(checkout, "init", "-q", "-b", "main")
+            self._git(checkout, "config", "user.email", "test@example.test")
+            self._git(checkout, "config", "user.name", "AEO Test")
+            self._git(checkout, "commit", "-q", "--allow-empty", "-m", "m0")
+            self._git(checkout, "checkout", "-q", "-b", "feature/a")
+            self._git(checkout, "commit", "-q", "--allow-empty", "-m", "a1")
+            parent_tip = self._git(checkout, "rev-parse", "HEAD").strip()
+            self._git(checkout, "checkout", "-q", "-b", "feature/b")
+            self._git(checkout, "commit", "-q", "--allow-empty", "-m", "b1")
+            head = self._git(checkout, "rev-parse", "HEAD").strip()
+            self._git(checkout, "config", "branch.feature/b.trellisParent", "feature/a")
+            self._git(checkout, "config", "branch.feature/b.trellisBase", parent_tip)
+            self.assertEqual(default_range(checkout), f"{parent_tip}..{head}")
+        required = ["--project", "p", "--url", "https://example.test"]
+        required += ["--checkout", ".", "--output", "o", "--marker-file", "m"]
+        required += ["--marker", "m", "--baseline", "b.json"]
+        self.assertIsNone(parser().parse_args(["diff", *required]).range)
 
     def _git(self, checkout: Path, *args: str) -> str:
         return subprocess.run(

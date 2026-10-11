@@ -346,7 +346,9 @@ commit_runtime_transition_and_check() {
 }
 
 @test "invalid or stale range fails closed" {
-  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=refs/heads/does-not-exist..HEAD"
+  # The base must resolve (gate config loads from it); the stale end is the
+  # row's own fail-closed path.
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD..refs/heads/does-not-exist"
 
   [ "$status" -eq 1 ]
   [[ "$output" == *"ADR: unable to enumerate trigger paths"* ]]

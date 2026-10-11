@@ -172,7 +172,7 @@ rewrite_manifest() {
   jq -e '
     def marker_count($marker): split($marker) | length - 1;
     (.hooks.SessionStart[0].hooks | map(.command)) as $commands
-    | ($commands | length) == 4
+    | ($commands | length) == 3
     and all($commands[];
       startswith("/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook ")
       and contains(" claude \"$CLAUDE_PROJECT_DIR\"")

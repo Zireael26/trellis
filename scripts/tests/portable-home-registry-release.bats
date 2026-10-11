@@ -294,7 +294,7 @@ teardown() {
 # project selector. Current T4-only release.sh intentionally rejects --project;
 # this assertion is deliberately not skipped so the missing selector API fails.
 @test "registry-selected release adoption changes no runtime without an explicit adoption request" {
-  local project release_a release_b tracked_before
+  local project release_a release_b tracked_before owner exclude_before exclude_hash
   project="$MACHINE_A_ROOT/adoption project"
   make_project "$project" portable-adoption
 
@@ -313,10 +313,18 @@ teardown() {
   release_b="$(release_payload "$MACHINE_A_HOME" 1.2.4)"
   [ "$(readlink "$project/.trellis/runtime")" = "$release_a" ]
 
+  # A singleton retains its attach-time excludes, including snapshot metadata.
+  # External bytes added since attach must not trigger group-plan publication.
+  owner="$(find "$MACHINE_A_HOME/state/attachments" -type f -name '*.json' -print)"
+  exclude_before="$(jq -cS '{exclude,exclude_block_hash}' "$owner")"
+  printf '\n# external singleton adoption bytes\n' >> "$project/.git/info/exclude"
+  exclude_hash="$(sha256_file "$project/.git/info/exclude")"
   run_release "$MACHINE_A_HOME" adopt 1.2.4 --project portable-adoption
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(readlink "$project/.trellis/runtime")" = "$release_b" ]
   [ "$(git -C "$project" ls-files -s)" = "$tracked_before" ]
+  [ "$(jq -cS '{exclude,exclude_block_hash}' "$owner")" = "$exclude_before" ]
+  [ "$(sha256_file "$project/.git/info/exclude")" = "$exclude_hash" ]
 }
 
 @test "a moved policy worktree relinks the recorded runtime without changing project identity" {

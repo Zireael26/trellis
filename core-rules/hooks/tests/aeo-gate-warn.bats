@@ -48,6 +48,13 @@ run_hook() {
   run bash -c 'cd "$1" && bash "$2"' _ "$REPO" "$HOOK"
 }
 
+link_python3() {
+  # The real interpreter, never a PATH shim: pyenv's python3 is a bash script
+  # that cannot start on a PATH without bash (R44). The hook itself still
+  # resolves python3 from PATH; only the test's link target changes.
+  ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$1/python3"
+}
+
 @test "disabled-default gate is byte-silent and does not invoke runner" {
   write_config false
   run_hook
@@ -159,12 +166,25 @@ EOF
   [[ "$output" == *"exceeded 1s wall-clock budget"* ]]
 }
 
+@test "stripped-PATH python3 is a real interpreter even behind a bash-script shim" {
+  # P1i (R44): a pyenv shim is a bash script; linked onto a PATH without bash
+  # it dies with "env: bash: No such file or directory".
+  mkdir -p "$BATS_TEST_TMPDIR/shims" "$BATS_TEST_TMPDIR/bare-bin"
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(python3 -c 'import sys; print(sys.executable)')" \
+    >"$BATS_TEST_TMPDIR/shims/python3"
+  chmod +x "$BATS_TEST_TMPDIR/shims/python3"
+  (PATH="$BATS_TEST_TMPDIR/shims:$PATH"; link_python3 "$BATS_TEST_TMPDIR/bare-bin")
+  run env PATH="$BATS_TEST_TMPDIR/bare-bin" /bin/bash -c 'python3 --version'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Python "* ]]
+}
+
 @test "configured gate without jq warns exactly once" {
   write_config true
   mkdir -p "$BATS_TEST_TMPDIR/no-jq-bin"
   ln -s /usr/bin/dirname "$BATS_TEST_TMPDIR/no-jq-bin/dirname"
   ln -s "$(command -v git)" "$BATS_TEST_TMPDIR/no-jq-bin/git"
-  ln -s "$(command -v python3)" "$BATS_TEST_TMPDIR/no-jq-bin/python3"
+  link_python3 "$BATS_TEST_TMPDIR/no-jq-bin"
   run env PATH="$BATS_TEST_TMPDIR/no-jq-bin" /bin/bash -c '
     ! command -v jq && python3 --version && git -C "$1" rev-parse --show-toplevel
   ' _ "$REPO"
@@ -176,5 +196,44 @@ EOF
   [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]
   [[ "$output" == *"status=INDETERMINATE"* ]] || { echo "$output"; false; }
   [[ "$output" == *"jq unavailable"* ]] || { echo "$output"; false; }
+  [ ! -e "$CALLS" ]
+}
+
+@test "without AEO_GATE_RANGE the runner gets the diff-base resolver's range" {
+  # Inversion: an origin/main..HEAD default has no origin here, so the git
+  # range is unavailable and the runner is never called.
+  write_config true
+  git -C "$REPO" checkout -qb feature/a
+  printf 'a\n' >>"$REPO/page.tsx"
+  git -C "$REPO" commit -qam a1
+  local atip head
+  atip=$(git -C "$REPO" rev-parse HEAD)
+  git -C "$REPO" checkout -qb feature/b
+  printf 'b\n' >>"$REPO/page.tsx"
+  git -C "$REPO" commit -qam b1
+  head=$(git -C "$REPO" rev-parse HEAD)
+  git -C "$REPO" config branch.feature/b.trellisParent feature/a
+  git -C "$REPO" config branch.feature/b.trellisBase "$atip"
+  cat >"$RUNNER" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in --range) printf '%s\n' "$2" >"$AEO_TEST_CALLS"; shift 2 ;; *) shift ;; esac
+done
+printf 'AEO warn-only: status=PASS; merge_policy=non-blocking\n'
+SH
+  unset AEO_GATE_RANGE
+  export TRELLIS_ROOT="$BATS_TEST_DIRNAME/../../.."
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CALLS")" = "$atip..$head" ] || { echo "$output"; cat "$CALLS"; false; }
+}
+
+@test "without AEO_GATE_RANGE or a resolver the gate is indeterminate and never runs" {
+  write_config true
+  unset AEO_GATE_RANGE TRELLIS_ROOT
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]
+  [[ "$output" == *"reason=diff-base resolver unavailable"* ]] || { echo "$output"; false; }
   [ ! -e "$CALLS" ]
 }

@@ -11,6 +11,8 @@ HOOK="$HOOKS_DIR/session-context.sh"
 CODEX_HOOK="$CODEX_HOOKS_DIR/session-context.sh"
 
 setup() {
+  # Never read the operator's ~/.trellis; hookspath_ctx overrides per call.
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   setup_project_dir
 }
 
@@ -249,4 +251,69 @@ hookspath_ctx() {
   git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
   hookspath_ctx "$CODEX_HOOK"
   [[ "$ctx" != *'core.hooksPath'* ]] || { echo "$ctx"; false; }
+}
+
+# --- 1.3.12 A4: deferred attachment checks status ------------------------------
+
+# The hookspath fixture's owner gains an attachment ID; the status file is the
+# job's, keyed to that ID and to the owner record's digest.
+status_fixture() {
+  local root checkout worktree tmp
+  hookspath_fixture
+  root="$(cd "$PROJECT_DIR" && pwd -P)"
+  checkout="$(printf '%s' "$root/.git" | shasum -a 256 | awk '{print $1}')"
+  worktree="$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')"
+  ST_OWNER="$HP_HOME/state/attachments/$checkout/$worktree.json"
+  tmp="$(jq '.attachment_id = "6f1c2a4e-0d7b-4c39-9a51-2b8e7f3d1c05"' "$ST_OWNER")"
+  printf '%s\n' "$tmp" > "$ST_OWNER"
+  ST_FILE="$HP_HOME/state/attachment-status/$checkout/$worktree.json"
+  mkdir -p "${ST_FILE%/*}"
+}
+
+# write_session_status <state> [age-seconds] [owner-sha256]
+write_session_status() {
+  local sha="${3:-$(shasum -a 256 "$ST_OWNER" | awk '{print $1}')}"
+  jq -n --arg state "$1" --arg sha "$sha" --argjson at "$(( $(date +%s) - ${2:-0} ))" '
+    {schema_version:1,state:$state,checkout_id:"c",worktree_id:"w",
+     attachment_id:"6f1c2a4e-0d7b-4c39-9a51-2b8e7f3d1c05",owner_sha256:$sha,updated_at:$at,checks:[],
+     failure:(if $state == "failed" then {check:"exclude",code:3,remedy:"restore the recorded exclude block"}
+              elif $state == "blocked-by-journal" then {check:"journal",code:3,remedy:"trellis recover /x"}
+              else null end)}' > "$ST_FILE"
+}
+
+@test "A4: FAILED and blocked attachment checks give one WARN line with the remedy, in both copies" {
+  local hook
+  export TRELLIS_ROOT
+  TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  status_fixture
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    write_session_status failed
+    hookspath_ctx "$hook"
+    [[ "$ctx" == *'Trellis attachment checks FAILED in this worktree (exclude)'*'restore the recorded exclude block'* ]] || { echo "$hook: $ctx"; false; }
+    [ "$(printf '%s\n' "$ctx" | grep -c 'Trellis attachment checks')" -eq 1 ]
+    write_session_status blocked-by-journal
+    hookspath_ctx "$hook"
+    [[ "$ctx" == *'Trellis attachment checks are blocked'*'trellis recover /x'* ]] || { echo "$hook: $ctx"; false; }
+  done
+}
+
+@test "A4: stale and long-PENDING checks warn; fresh PENDING, ok and a missing status stay silent" {
+  status_fixture
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" != *'Trellis attachment checks'* ]] || { echo "missing: $ctx"; false; }
+  write_session_status ok
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" != *'Trellis attachment checks'* ]] || { echo "ok: $ctx"; false; }
+  write_session_status pending 30
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" != *'Trellis attachment checks'* ]] || { echo "fresh pending: $ctx"; false; }
+  write_session_status pending 7200
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *'Trellis attachment checks have been pending for 120 min'*'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
+  write_session_status running 7200
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *'Trellis attachment checks have been running for 120 min'* ]] || { echo "$ctx"; false; }
+  write_session_status ok 0 "$(printf '0%.0s' $(seq 64))"
+  hookspath_ctx "$HOOK"
+  [[ "$ctx" == *'Trellis attachment checks are stale'*'`trellis doctor --fix`'* ]] || { echo "stale: $ctx"; false; }
 }

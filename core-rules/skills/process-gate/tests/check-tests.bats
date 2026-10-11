@@ -9,8 +9,10 @@
 # Approach mirrors the sibling process-gate bats (check-secrets.bats /
 # check-analyze.bats / check-security-diff.bats): a throwaway fixture dir under
 # mktemp -d, CLAUDE_PROJECT_DIR pointed at it, and the script invoked via
-# `run bash -c "cd ... && SCRIPT"`. check-tests.sh takes no --range; it reads
-# PROJECT_DIR + PROCESS_GATE_*_CMD.
+# `run bash -c "cd ... && SCRIPT --range=HEAD~1..HEAD"`. The range feeds the
+# mutation spot-check and names the base gate config loads from, so the fixture
+# is a repo with two empty commits; merge mode refuses without one (R1). It
+# also reads PROJECT_DIR + PROCESS_GATE_*_CMD.
 #
 # Exit codes: 0=pass, 2=warn, 1=fail(BLOCK).
 
@@ -22,6 +24,13 @@ setup() {
   SCRIPT="${PG_TEST_SCRIPT:-$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-tests.sh}"
   COMMON="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/lib/common.sh"
   PROJECT_DIR="$(mktemp -d)"
+  # Spec 067: a run without --range resolves its diff base through the shared
+  # resolver, which needs a checkout. Seed one (main, no remote: HEAD..HEAD).
+  git init -q -b main "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit --allow-empty -qm base
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit --allow-empty -qm head
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   unset CODEX_PROJECT_DIR TRELLIS_ROOT
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
@@ -51,7 +60,7 @@ teardown() {
 }
 
 run_gate() {
-  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
 }
 
 # make_mutation_fixture <js|python|go>
@@ -303,7 +312,7 @@ make_toolbox() {
   printf '%s\n' '# just docs' > "$PROJECT_DIR/README.md"
   # Export the failing cmd so the inner `bash -c` child inherits it; the
   # detected value short-circuits auto-detect and feeds run_check directly.
-  run bash -c "cd '$PROJECT_DIR' && export PROCESS_GATE_TYPECHECK_CMD='false' && '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && export PROCESS_GATE_TYPECHECK_CMD='false' && '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 1 ]
 }
 
@@ -321,7 +330,7 @@ make_toolbox() {
   make_toolbox "$tb"
   # Sanity: go really is invisible under this PATH.
   PATH="$tb" command -v go >/dev/null 2>&1 && { echo "go leaked into toolbox PATH"; false; }
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT' --range=HEAD~1..HEAD"
   [ -n "$tb" ] && [ -d "$tb" ] && rm -rf "$tb"
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
@@ -352,7 +361,7 @@ make_toolbox() {
   make_toolbox "$tb" go
   PATH="$tb" command -v go >/dev/null 2>&1 || { echo "go missing from toolbox"; false; }
   PATH="$tb" command -v golangci-lint >/dev/null 2>&1 && { echo "golangci-lint leaked"; false; }
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT' --range=HEAD~1..HEAD"
   [ -n "$tb" ] && [ -d "$tb" ] && rm -rf "$tb"
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
@@ -373,7 +382,7 @@ make_toolbox() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$shim/python"
   chmod +x "$shim/python"
   # Put the shim FIRST so it shadows any real python; keep coreutils reachable.
-  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$SCRIPT' --range=HEAD~1..HEAD"
   [ -n "$shim" ] && [ -d "$shim" ] && rm -rf "$shim"
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
@@ -412,7 +421,7 @@ JSON
   PATH="$tb" command -v jq   >/dev/null 2>&1 && { echo "jq leaked";   false; }
   PATH="$tb" command -v node >/dev/null 2>&1 && { echo "node leaked"; false; }
   PATH="$tb" command -v npm  >/dev/null 2>&1 || { echo "npm missing"; false; }
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT' --range=HEAD~1..HEAD"
   [ -n "$tb" ] && [ -d "$tb" ] && rm -rf "$tb"
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
@@ -495,7 +504,7 @@ JSON
   PATH="$tb" command -v jq   >/dev/null 2>&1 && { echo "jq leaked";   false; }
   PATH="$tb" command -v node >/dev/null 2>&1 && { echo "node leaked"; false; }
   PATH="$tb" command -v npm  >/dev/null 2>&1 || { echo "npm missing"; false; }
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' '$SCRIPT' --range=HEAD~1..HEAD"
   local found=no; [ -f "$marker" ] && found=yes
   [ -n "$tb" ] && [ -d "$tb" ] && rm -rf "$tb"
   # The fixed scope DETECTED the later test script → `npm run test` was built+run.
@@ -524,7 +533,7 @@ JSON
   skill_dir="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   tree="$(mktemp -d)"
   mkdir -p "$tree/scripts/lib"
-  cp "$skill_dir/scripts/lib/common.sh" "$tree/scripts/lib/common.sh"
+  cp "$skill_dir/scripts/lib/common.sh" "$skill_dir/scripts/lib/diff-base.sh" "$tree/scripts/lib/"
   # Collapse the three per-target guarded lines back to the pre-fix
   # unconditional build: replace each
   #   if grep -qE '^vet:'  Makefile 2>/dev/null; then PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-make vet}"; fi
@@ -557,10 +566,10 @@ JSON
 
   # RED: pre-fix reconstruction built make vet/make lint unconditionally → each
   # "No rule to make target" exits 2 → worst=fail → BLOCK.
-  run bash -c "cd '$PROJECT_DIR' && '$tree/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && '$tree/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local rec_status="$status"
   # GREEN: the fixed script builds only make test (declared) → vet/lint warn-skip.
-  run bash -c "cd '$PROJECT_DIR' && '$skill_dir/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && '$skill_dir/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local fixed_status="$status"
 
   [ -n "$tree" ] && [ -d "$tree" ] && rm -rf "$tree"
@@ -590,7 +599,7 @@ JSON
   skill_dir="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   tree="$(mktemp -d)"
   mkdir -p "$tree/scripts/lib"
-  cp "$skill_dir/scripts/lib/common.sh" "$tree/scripts/lib/common.sh"
+  cp "$skill_dir/scripts/lib/common.sh" "$skill_dir/scripts/lib/diff-base.sh" "$tree/scripts/lib/"
   # Strip the per-tool runnable-probe suffix → reconstruct config-presence-only
   # (pre-DL-P7-07) Python defaulting. The braces remain (valid bash).
   sed -E 's/ && \$PY_RUN (mypy|ruff|pytest) --version >\/dev\/null 2>&1//' \
@@ -610,11 +619,11 @@ JSON
   # setup indirection — which lets the WHOLE suite be re-pointed at a pre-fix
   # copy — is exercised by running this .bats file with PG_TEST_SCRIPT set; this
   # @test pins the reconstruction's RED self-containedly, no host/temp copy.)
-  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$tree/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$tree/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local rec_status="$status"
 
   # And the REAL (fixed) script against the identical fixture+env (GREEN).
-  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$skill_dir/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$shim:$PATH' '$skill_dir/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local fixed_status="$status"
 
   [ -n "$tree" ]  && [ -d "$tree" ]  && rm -rf "$tree"
@@ -641,7 +650,7 @@ JSON
     PROCESS_GATE_TYPECHECK_CMD='sleep 5' \
     PROCESS_GATE_LINT_CMD='true' \
     PROCESS_GATE_TEST_CMD='sleep 3' \
-    '$SCRIPT'"
+    '$SCRIPT' --range=HEAD~1..HEAD"
 
   # typecheck is killed at its own 1 s ceiling → hard fail, reported as a timeout.
   [ "$status" -eq 1 ] || { echo "$output"; false; }
@@ -828,7 +837,7 @@ JSON
 @test "a hanging declared test command is killed at the ceiling and reported as a timeout" {
   printf '%s' '{"name":"x","scripts":{"test":"sleep 120"}}' > "$PROJECT_DIR/package.json"
 
-  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=2 PROCESS_GATE_TEST_CMD='sleep 120' PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=2 PROCESS_GATE_TEST_CMD='sleep 120' PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true '$SCRIPT' --range=HEAD~1..HEAD"
 
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"exceeded 2s and was killed"* ]] || { echo "$output"; false; }
@@ -839,7 +848,7 @@ JSON
 }
 
 @test "a hanging typecheck is bounded by the check ceiling, not the test ceiling" {
-  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TEST_TIMEOUT=900 PROCESS_GATE_TYPECHECK_CMD='sleep 120' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TEST_TIMEOUT=900 PROCESS_GATE_TYPECHECK_CMD='sleep 120' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT' --range=HEAD~1..HEAD"
 
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"typecheck"* && "$output" == *"exceeded 2s and was killed"* ]] ||
@@ -847,7 +856,7 @@ JSON
 }
 
 @test "a passing command still passes through the bounded runner with its output" {
-  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=30 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='echo ran-under-timeout' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TEST_TIMEOUT=30 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='echo ran-under-timeout' '$SCRIPT' --range=HEAD~1..HEAD"
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" != *"was killed"* ]] || { echo "$output"; false; }
@@ -860,7 +869,7 @@ JSON
   PATH="$tb" command -v timeout >/dev/null 2>&1 && { rm -rf "$tb"; echo "timeout leaked"; false; }
 
   local marker="$PROJECT_DIR/ran"
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_TYPECHECK_CMD=': > $marker' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_TYPECHECK_CMD=': > $marker' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$SCRIPT' --range=HEAD~1..HEAD"
   local gate_status="$status" gate_output="$output"
   rm -rf "$tb"
 
@@ -879,7 +888,7 @@ JSON
 # coverage through run_with_timeout at the check ceiling and warns naming the
 # command and its status (nonzero or 124/142).
 @test "coverage: a failing coverage command warns and names its status" {
-  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='exit 7' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='exit 7' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"coverage"* ]] || { echo "$output"; false; }
   [[ "$output" == *"exited 7"* ]] || { echo "$output"; false; }
@@ -892,7 +901,7 @@ JSON
 # defect, same convention as the hanging-declared-check cases above); the RED
 # receipt bounds it with an outer `timeout` instead of waiting it out.
 @test "coverage: a hanging coverage command is killed at the ceiling and warned" {
-  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='sleep 600' '$SCRIPT'"
+  run bash -c "cd '$PROJECT_DIR' && PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true PROCESS_GATE_COVERAGE_CMD='sleep 600' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"coverage"* && "$output" == *"exceeded 2s and was killed"* ]] || { echo "$output"; false; }
   # A ceiling firing must not read as an ordinary nonzero exit.
@@ -1013,7 +1022,7 @@ SH
 
   tree="$(mktemp -d)"
   mkdir -p "$tree/scripts/lib"
-  cp "$skill_dir/scripts/lib/common.sh" "$tree/scripts/lib/common.sh"
+  cp "$skill_dir/scripts/lib/common.sh" "$skill_dir/scripts/lib/diff-base.sh" "$tree/scripts/lib/"
   # `elif` since spec 054 put the heavy-slot branch in front of this one.
   sed -e 's/^\( *\)\(el\)*if \[ -n "\$PG_TIMEOUT_RUNNER" \]; then$/\1\2if command -v timeout >\/dev\/null 2>\&1; then/' \
       -e 's/out="\$(run_with_timeout "\$limit" bash -c "\$cmd" 2>&1)"; rc=\$?/out="$(timeout "$limit" bash -c "$cmd" 2>\&1)"; rc=$?/' \
@@ -1026,10 +1035,10 @@ SH
   # RED: the reconstruction has no fallback, so under the stub PATH the
   # sleeping check runs the full sleep unbounded (else-branch) — no kill
   # message, only the once-only unbounded warn.
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$tree/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$tree/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local rec_status="$status" rec_output="$output"
   # GREEN: the fixed script kills via the perl fallback at the 2 s ceiling.
-  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$skill_dir/scripts/check-tests.sh'"
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tb' PROCESS_GATE_CHECK_TIMEOUT=2 PROCESS_GATE_TYPECHECK_CMD='sleep 6' PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true '$skill_dir/scripts/check-tests.sh' --range=HEAD~1..HEAD"
   local fixed_status="$status" fixed_output="$output"
 
   rm -rf "$tb" "$tree"

@@ -84,8 +84,12 @@ bootstrap_release_admin() {
   chmod 755 "$HOME/.local/bin/trellis"
   cp "$REPO_ROOT/scripts/trellis" "$bootstrap/scripts/trellis"
   cp "$REPO_ROOT/scripts/release.sh" "$bootstrap/scripts/release.sh"
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$bootstrap/scripts/attach-project.sh"
+  # The verified release bundle regenerates managed dispatchers with its own
+  # launcher's scratch emitters, not the installed launcher under HOME.
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$bootstrap/scripts/trellis-launcher.sh" || return 1
   cp -R "$REPO_ROOT/scripts/lib" "$bootstrap/scripts/lib"
-  chmod 755 "$bootstrap/scripts/trellis" "$bootstrap/scripts/release.sh"
+  chmod 755 "$bootstrap/scripts/trellis" "$bootstrap/scripts/release.sh" "$bootstrap/scripts/trellis-launcher.sh" || return 1
   mkdir -p "$bootstrap/core-rules"
   printf '0.0.0\n' > "$bootstrap/core-rules/VERSION"
   (
@@ -116,7 +120,7 @@ bootstrap_release_admin() {
 }
 
 make_release() {
-  local release="$1" repo="$SANDBOX/release-source"
+  local release="$1" growth="${2:-}" repo="$SANDBOX/release-source"
   mkdir -p "$repo/core-rules/husky" "$repo/core-rules/githooks" "$repo/scripts"
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
   cat > "$repo/core-rules/husky/pre-push" <<'SH'
@@ -138,6 +142,21 @@ SH
 exit 0
 SH
   chmod 755 "$repo/core-rules/husky/pre-push" "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
+  # Post-checkout hash-checks every payload file its reconcile runs and refuses
+  # a release that lacks one. The stub seed stays the reconcile; these copies
+  # only satisfy that check.
+  local path
+  while IFS= read -r path; do
+    [ "$path" != scripts/seed-inheritance-symlinks.sh ] || continue
+    mkdir -p "$repo/${path%/*}"
+    cp "$REPO_ROOT/$path" "$repo/$path"
+  done < <(sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//')
+  # Pre-push runs the payload's deferred attachment checks before the carrier
+  # and refuses a payload without them. This stub reports ok; the real checks
+  # are covered by attach-postjob.bats.
+  mkdir -p "$repo/scripts/lib"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/lib/attach-postjob.sh"
+  chmod 755 "$repo/scripts/lib/attach-postjob.sh"
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
   "schema_version": 1,
@@ -157,6 +176,18 @@ SH
   }
 }
 JSON
+  if [ "$growth" = native-growth ]; then
+    printf '# newly selected native leaf\n' > "$repo/core-rules/native-added.md"
+    jq '.harnesses.codex.links += [{source:"core-rules/native-added.md",destination:".codex/hooks/native-added.md"}]' \
+      "$repo/core-rules/inheritance-manifest.json" > "$repo/core-rules/manifest.next"
+    mv "$repo/core-rules/manifest.next" "$repo/core-rules/inheritance-manifest.json"
+  elif [ "$growth" = native-retired ]; then
+    # The release retires the codex rules leaf, as 1.3.12 retired grok-ro/rw.
+    printf '# newly selected native leaf\n' > "$repo/core-rules/native-added.md"
+    jq '.harnesses.codex.links = [{source:"core-rules/native-added.md",destination:".codex/hooks/native-added.md"}]' \
+      "$repo/core-rules/inheritance-manifest.json" > "$repo/core-rules/manifest.next"
+    mv "$repo/core-rules/manifest.next" "$repo/core-rules/inheritance-manifest.json"
+  fi
   printf '%s\n' "$release" > "$repo/core-rules/VERSION"
   (
     cd "$repo" || exit 1
@@ -204,7 +235,6 @@ make_contextual_release() {
     core-rules/hooks/session-context.sh \
     core-rules/hooks/post-compact-context.sh \
     core-rules/hooks/inject-primer-index.sh \
-    core-rules/hooks/skill-size-preflight.sh \
     core-rules/codex/hooks/session-context.sh \
     core-rules/codex/hooks/post-compact-context.sh \
     core-rules/codex/hooks/inject-primer-index.sh; do
@@ -290,7 +320,6 @@ poison_context_runtime() {
     core-rules/hooks/session-context.sh \
     core-rules/hooks/post-compact-context.sh \
     core-rules/hooks/inject-primer-index.sh \
-    core-rules/hooks/skill-size-preflight.sh \
     core-rules/codex/hooks/session-context.sh \
     core-rules/codex/hooks/post-compact-context.sh \
     core-rules/codex/hooks/inject-primer-index.sh; do
@@ -362,6 +391,9 @@ setup() {
   mkdir -p "$HOME" "$TRELLIS_HOME"
   export HOME="$(canonical_dir "$HOME")"
   export TRELLIS_HOME="$(canonical_dir "$TRELLIS_HOME")"
+  # No detached post-attach job may outlive a test: its release verify scratch
+  # races the scratch assertions and teardown. attach-postjob.bats covers it.
+  export TRELLIS_ATTACH_POSTJOB=off
   bootstrap_release_admin
   make_release 1.2.3
   make_project
@@ -430,7 +462,7 @@ run_managed_pre_push() {
   [ -f "$codex_settings" ]
   jq -e --arg home "$TRELLIS_HOME" --arg user_home "$CONTEXT_OS_HOME" --arg launcher "$CONTEXT_LAUNCHER" '
     [.hooks.SessionStart[].hooks[].command] as $commands
-    | ($commands | length) == 4
+    | ($commands | length) == 3
     and all($commands[];
       startswith("/usr/bin/env -i HOME=")
       and contains("TRELLIS_HOME=") and contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
@@ -515,7 +547,6 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
   expected="$(
-    printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
@@ -621,6 +652,529 @@ SH
   grep -Fx '*.project-local' "$PROJECT/.git/info/exclude"
   [ "$before" != "$first_exclude" ]
   [ -z "$(git -C "$PROJECT" status --porcelain)" ]
+}
+
+# A -> full detach -> manager-first B, including retained inventory. Seed the
+# field failure only after real B publication: owners/anchors B, registry A.
+reconcile_drift_fixture() {
+  local absent id
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  RECONCILE_SIBLING="$SANDBOX/reconcile sibling"
+  git -C "$PROJECT" worktree add -q -b reconcile-sibling "$RECONCILE_SIBLING"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$RECONCILE_SIBLING"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run "$ATTACH" detach --home "$TRELLIS_HOME" --all-worktrees "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  make_release 1.2.4
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.4 "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.4 "$RECONCILE_SIBLING"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # Select by root rather than JSON formatting.
+  RECONCILE_OWNER="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print | while IFS= read -r id; do
+    [ "$(jq -r '.worktree_root' "$id")" != "$PROJECT" ] || printf '%s\n' "$id"
+  done)"
+  RECONCILE_CHECKOUT="$(jq -r '.checkout_id' "$RECONCILE_OWNER")"
+  RECONCILE_JOURNAL="$TRELLIS_HOME/state/attachment-journals/reconcile-$(jq -r '.attachment_id' "$RECONCILE_OWNER").json"
+  absent="$SANDBOX/retained unavailable tree"
+  id="$(printf '%s' "$absent" | shasum -a 256 | cut -d ' ' -f 1)"
+  jq --arg checkout "$RECONCILE_CHECKOUT" --arg absent "$absent" --arg id "$id" '
+    .projects["personal/fixture-project"].checkouts[$checkout].release = "1.2.3"
+    | .projects["personal/fixture-project"].checkouts[$checkout].worktrees[$id] = {root:$absent}
+    | .projects["personal/fixture-project"].metadata.keep = "unrelated"
+  ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/stale registry"
+  chmod 600 "$SANDBOX/stale registry"
+  mv "$SANDBOX/stale registry" "$TRELLIS_HOME/registry.json"
+}
+
+reconcile_attach() {
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.4 "$PROJECT"
+}
+
+# Count the real primitives, including calls made in command substitutions.
+# Drive reconcile directly so attach's separate local-owner preflight is not
+# mistaken for a second group verification.
+reconcile_counted_registry() {
+  run env RECONCILE_VERIFY_LOG="$SANDBOX/reconcile.verify" RECONCILE_LOCATE_LOG="$SANDBOX/reconcile.locate" bash -c '
+    . "$1"
+    definition="$(declare -f attachment_verify)"
+    eval "${definition/attachment_verify /real_attachment_verify }"
+    attachment_verify() {
+      printf "%s\n" "$2" >> "$RECONCILE_VERIFY_LOG"
+      real_attachment_verify "$@"
+    }
+    definition="$(declare -f release_store_locate)"
+    eval "${definition/release_store_locate /real_release_store_locate }"
+    release_store_locate() {
+      printf "%s\n" "$1" >> "$RECONCILE_LOCATE_LOG"
+      real_release_store_locate "$@"
+    }
+    identity="$(local_registry_identity_for_root "$3")" || exit "$?"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    common="$(printf "%s\n" "$identity" | jq -r .git_common_dir)"
+    attachment_checkout_lock_acquire "$2" "$checkout" "$common" || exit "$?"
+    _attachment_install_checkout_lock_traps
+    attach_reconcile_owner_registry "$2" "$4" "$identity"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT" "$RECONCILE_OWNER"
+}
+
+@test "exact-owner reconcile verifies each live owner and release only once" {
+  reconcile_drift_fixture
+  reconcile_counted_registry
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$SANDBOX/reconcile.verify" | tr -d ' ')" -eq 2 ]
+  [ "$(sort -u "$SANDBOX/reconcile.verify" | wc -l | tr -d ' ')" -eq 2 ]
+  [ "$(wc -l < "$SANDBOX/reconcile.locate" | tr -d ' ')" -eq 2 ]
+  jq -e --arg checkout "$RECONCILE_CHECKOUT" '.projects["personal/fixture-project"].checkouts[$checkout].release == "1.2.4"' "$TRELLIS_HOME/registry.json"
+  [ ! -e "$RECONCILE_JOURNAL" ]
+}
+
+reconcile_exposed_verifier() {
+  run bash -c '
+    . "$1"
+    identity="$(local_registry_identity_for_root "$3")" || exit "$?"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    common="$(printf "%s\n" "$identity" | jq -r .git_common_dir)"
+    attachment_checkout_lock_acquire "$2" "$checkout" "$common" || exit "$?"
+    _attachment_install_checkout_lock_traps
+    snapshot="$(jq -c --arg checkout "$checkout" '\''.projects["personal/fixture-project"].checkouts[$checkout]'\'' "$2/registry.json")"
+    attach_reconcile_verify_group "$2" "$4" "$identity" "$snapshot"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT" "$RECONCILE_OWNER"
+}
+
+@test "exposed reconcile group verifier still refuses sibling artifact and release drift" {
+  local before sibling target
+  reconcile_drift_fixture
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  reconcile_exposed_verifier
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  target="$(readlink "$RECONCILE_SIBLING/.claude/rules/trellis.md")"
+  rm "$RECONCILE_SIBLING/.claude/rules/trellis.md"
+  reconcile_exposed_verifier
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"non-exact owner"* ]] || { echo "$output"; return 1; }
+  ln -s "$target" "$RECONCILE_SIBLING/.claude/rules/trellis.md"
+  sibling="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print | grep -Fv "$RECONCILE_OWNER")"
+  jq '.release = "1.2.3"' "$sibling" > "$SANDBOX/mixed owner"
+  chmod 600 "$SANDBOX/mixed owner"
+  mv "$SANDBOX/mixed owner" "$sibling"
+  reconcile_exposed_verifier
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"mixed live releases"* ]] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ]
+  [ ! -e "$RECONCILE_JOURNAL" ]
+}
+
+@test "exposed reconcile group verifier refuses without the existing checkout lock" {
+  run bash -c '. "$1"; unset _ATTACHMENT_CHECKOUT_LOCK_HOLDER; attach_reconcile_verify_group "$2" unused "{}" "{}"' _ "$ATTACH" "$TRELLIS_HOME"
+  [ "$status" -eq 3 ]
+}
+
+@test "exact-owner reconcile aligns release only and second attach is a physical no-op" {
+  local owner_hash owner_identity exclude_hash registry_before registry_identity root owner
+  reconcile_drift_fixture
+  owner_hash="$(sha256_file "$RECONCILE_OWNER")"
+  owner_identity="$(fixture_dev_ino "$RECONCILE_OWNER")"
+  exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")"
+  registry_before="$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")"
+  reconcile_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")" = "$registry_before" ] || return 1
+  jq -e --arg checkout "$RECONCILE_CHECKOUT" '.projects["personal/fixture-project"].checkouts[$checkout].release == "1.2.4"' "$TRELLIS_HOME/registry.json" || return 1
+  for root in "$PROJECT" "$RECONCILE_SIBLING"; do
+    [ "$(readlink "$root/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.2.4/payload" ]
+    [ -z "$(git -C "$root" status --porcelain)" ]
+  done
+  [ "$(sha256_file "$RECONCILE_OWNER")" = "$owner_hash" ]
+  [ "$(fixture_dev_ino "$RECONCILE_OWNER")" = "$owner_identity" ]
+  [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_hash" ]
+  registry_identity="$(fixture_dev_ino "$TRELLIS_HOME/registry.json")"
+  reconcile_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(fixture_dev_ino "$TRELLIS_HOME/registry.json")" = "$registry_identity" ] || return 1
+  [ ! -e "$RECONCILE_JOURNAL" ] || return 1
+  # Manager transfer and the last owner still detach normally after reconcile.
+  run "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  jq -e '.release == "1.2.4" and .exclude.managed_by_attachment == true' "$owner"
+  run "$ATTACH" detach --home "$TRELLIS_HOME" "$RECONCILE_SIBLING"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)" ]
+}
+
+@test "exact-owner reconcile refuses non-exact owners and foreign UUIDs without writes" {
+  local before owner_before link target
+  reconcile_drift_fixture
+  link="$PROJECT/.claude/rules/trellis.md"
+  target="$(readlink "$link")"
+  rm "$link"
+  ln -s "$SANDBOX/foreign" "$link"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  owner_before="$(sha256_file "$RECONCILE_OWNER")"
+  reconcile_attach
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"live artifacts disagree with recorded inventory"* ]] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ] || return 1
+  [ "$(sha256_file "$RECONCILE_OWNER")" = "$owner_before" ] || return 1
+  [ "$(readlink "$link")" = "$SANDBOX/foreign" ] || return 1
+  [ ! -e "$RECONCILE_JOURNAL" ] || return 1
+  rm "$link"
+  ln -s "$target" "$link"
+  jq --arg checkout "$RECONCILE_CHECKOUT" --arg worktree "$(jq -r '.worktree_id' "$RECONCILE_OWNER")" '
+    .projects["personal/fixture-project"].checkouts[$checkout].worktrees[$worktree].attachment_id = "11111111-1111-4111-8111-111111111111"
+  ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/foreign registry"
+  chmod 600 "$SANDBOX/foreign registry"
+  mv "$SANDBOX/foreign registry" "$TRELLIS_HOME/registry.json"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  reconcile_attach
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"foreign registry binding"* ]] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ] || return 1
+  [ "$(sha256_file "$RECONCILE_OWNER")" = "$owner_before" ] || return 1
+  [ ! -e "$RECONCILE_JOURNAL" ] || return 1
+}
+
+@test "exact-owner reconcile accepts adopted historical inventory without materializing new leaves" {
+  local owner before owner_identity registry_before registry_identity
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  make_release 1.2.4 native-growth || return 1
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$HOME/.local/bin/trellis" release adopt 1.2.4 --project fixture-project
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '.release == "1.2.4"' "$owner" || return 1
+  jq -e '.projects["personal/fixture-project"].checkouts | all(.release == "1.2.4")' "$TRELLIS_HOME/registry.json" || return 1
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.2.4/payload" ] || return 1
+  [ ! -e "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  [ ! -L "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  before="$(sha256_file "$owner")"
+  owner_identity="$(fixture_dev_ino "$owner")"
+  registry_before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  registry_identity="$(fixture_dev_ino "$TRELLIS_HOME/registry.json")"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.4 "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$owner")" = "$before" ] || return 1
+  [ "$(fixture_dev_ino "$owner")" = "$owner_identity" ] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$registry_before" ] || return 1
+  [ "$(fixture_dev_ino "$TRELLIS_HOME/registry.json")" = "$registry_identity" ] || return 1
+  [ ! -e "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  [ ! -L "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  [ -z "$(git -C "$PROJECT" status --porcelain)" ] || return 1
+  [ -z "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)" ] || return 1
+}
+
+reconcile_adopted_group_state() {
+  local path hash identity
+  for path in "$TRELLIS_HOME/registry.json" "$PROJECT/.git/info/exclude" "$TRELLIS_HOME"/state/attachments/*/*.json; do
+    hash="$(sha256_file "$path")" || return 1
+    identity="$(fixture_dev_ino "$path")" || return 1
+    printf '%s\t%s\t%s\n' "$path" "$hash" "$identity" || return 1
+  done
+}
+
+# The integration (u) test covers fresh add with migrated shared excludes.
+# This branch also needs a real group adopt -> existing-worktree attach retry
+# through this fixture's sealed bootstrap bundle, not just private inventories.
+@test "exact-owner reconcile accepts adopted group inventory and sibling attach is a physical no-op" {
+  local sibling root before managed registry_before exclude_hash
+  make_release 1.3.9 || return 1
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.3.9 "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  sibling="$SANDBOX/adopted sibling"
+  git -C "$PROJECT" worktree add -q -b adopted-sibling "$sibling" || return 1
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.3.9 "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -s '.' "$TRELLIS_HOME"/state/attachments/*/*.json > "$SANDBOX/prior-group.json" || return 1
+  jq -e 'length == 2 and all(.release == "1.3.9")' "$SANDBOX/prior-group.json" || return 1
+  cp "$PROJECT/.git/info/exclude" "$SANDBOX/prior-exclude" || return 1
+  registry_before="$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")" || return 1
+  make_release 1.3.10 native-growth || return 1
+  run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$HOME/.local/bin/trellis" release adopt 1.3.10 --project fixture-project
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # Spec 066 (u): migrate only release/runtime and shared-exclude snapshots.
+  # Build exact expected owners from the prior records and bytes, independently
+  # of the product planner. native-growth adds exactly this one native leaf.
+  python3 - "$SANDBOX" "$TRELLIS_HOME/releases/1.3.10/payload" <<'PYTHON' || return 1
+import base64, hashlib, json, pathlib, sys
+sandbox, payload = map(pathlib.Path, sys.argv[1:])
+owners = json.loads((sandbox / "prior-group.json").read_text())
+live = (sandbox / "prior-exclude").read_bytes()
+block = base64.b64decode(owners[0]["exclude"]["managed_block_base64"], validate=True)
+native_lines = b"/.codex/hooks/native-added.md\n"
+runtime_line = b"/.trellis/runtime\n"
+if native_lines in block or block.count(runtime_line) != 1 or live.count(block) != 1:
+    sys.exit("prior exclude must contain one runtime line/block and no new native leaf")
+for owner in owners:
+    if (base64.b64decode(owner["exclude"]["managed_block_base64"], validate=True) != block
+            or base64.b64decode(owner["exclude"]["after_base64"], validate=True) != live):
+        sys.exit("prior owners must agree with the shared live exclude bytes")
+new_block = block.replace(runtime_line, native_lines + runtime_line, 1)
+after = live.replace(block, new_block, 1)
+b64 = lambda data: base64.b64encode(data).decode()
+sha = lambda data: hashlib.sha256(data).hexdigest()
+for owner in owners:
+    owner["release"] = "1.3.10"
+    for artifact in owner["artifacts"]:
+        if artifact["path"] == ".trellis/runtime":
+            artifact["target"] = str(payload)
+    owner["exclude"].update(after_base64=b64(after), after_sha256=sha(after),
+                            managed_block_base64=b64(new_block), managed_block_sha256=sha(new_block))
+    owner["exclude_block_hash"] = sha(new_block)
+(sandbox / "expected-group.json").write_text(json.dumps(owners))
+(sandbox / "expected-exclude").write_bytes(after)
+PYTHON
+  run diff -u "$SANDBOX/expected-exclude" "$PROJECT/.git/info/exclude"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")" || return 1
+  jq -s -e --slurpfile expected "$SANDBOX/expected-group.json" --arg hash "$exclude_hash" '
+    sort_by(.worktree_root) == ($expected[0] | sort_by(.worktree_root))
+    and all(.exclude.after_sha256 == $hash)' "$TRELLIS_HOME"/state/attachments/*/*.json || return 1
+  [ "$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")" = "$registry_before" ] || return 1
+  jq -e '.projects["personal/fixture-project"].checkouts | length == 1 and all(.release == "1.3.10" and .harnesses == ["claude","codex"] and (.worktrees | length == 2))' "$TRELLIS_HOME/registry.json" || return 1
+  before="$(reconcile_adopted_group_state)" || return 1
+  managed="$(git -C "$PROJECT" config --local --get core.hooksPath)" || return 1
+  for root in "$PROJECT" "$sibling"; do
+    [ "$(readlink "$root/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.3.10/payload" ] || return 1
+    [ ! -e "$root/.codex/hooks/native-added.md" ] || return 1
+    [ ! -L "$root/.codex/hooks/native-added.md" ] || return 1
+    run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.3.10 "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e "$root/.codex/hooks/native-added.md" ] || return 1
+    [ ! -L "$root/.codex/hooks/native-added.md" ] || return 1
+    [ "$(git -C "$root" config --local --get-all core.hooksPath)" = "$managed" ] || return 1
+    [ -z "$(git -C "$root" status --porcelain)" ] || return 1
+  done
+  [ "$(reconcile_adopted_group_state)" = "$before" ] || return 1
+  [ -z "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)" ] || return 1
+}
+
+# Real sealed releases, but private owner copies: exercise the inventory reader
+# independently of live ownership verification (covered by the next test).
+reconcile_inventory_check() {
+  run bash -c '. "$1"; attach_reconcile_owner_surfaces "$2" "$3" "$4" "$5"' _ \
+    "$ATTACH" "$TRELLIS_HOME" "$1" "$2" "$3"
+}
+
+@test "exact-owner reconcile inventory checks keep selection targets and fresh plans strict" {
+  # A failed status check on the left of && does not stop Bats; later
+  # successful checks can hide an accepted inventory. Guard both assertions.
+  local owner current before
+  run_attach --harness codex
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  make_release 1.2.4 native-growth
+  current="$TRELLIS_HOME/releases/1.2.4/payload"
+  jq --arg payload "$current" '.release = "1.2.4" | .artifacts |= map(
+    if .path == ".trellis/runtime" then .target = $payload else . end)' "$owner" > "$SANDBOX/adopted.inventory"
+  before="$(sha256_file "$owner")"
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' recorded
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' full
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'new tree inventory disagrees with full current plan'* ]] || { echo "$output"; return 1; }
+  # Adding a nonempty harness must not be accepted as a historical subset.
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["claude","codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'bound registry selection has no complete current/historical inventory match'* ]] || { echo "$output"; return 1; }
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["claude"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'recorded leaf/kind/target disagrees with bound registry selection'* ]] || { echo "$output"; return 1; }
+  # Preserve paths/kinds and the current runtime: only target membership
+  # can reject this otherwise complete historical inventory.
+  jq '.artifacts |= map(if .path == ".agents/rules/trellis.md" then .target = "foreign" else . end)' \
+    "$SANDBOX/adopted.inventory" > "$SANDBOX/foreign.inventory"
+  reconcile_inventory_check "$SANDBOX/foreign.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'recorded leaf/kind/target disagrees with bound registry selection'* ]] || { echo "$output"; return 1; }
+  jq '.artifacts |= map(select(.path != ".agents/rules/trellis.md"))' \
+    "$SANDBOX/adopted.inventory" > "$SANDBOX/incomplete.inventory"
+  reconcile_inventory_check "$SANDBOX/incomplete.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'bound registry selection has no complete current/historical inventory match'* ]] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$owner")" = "$before" ]
+  # A substituted historical payload is never a completeness witness.
+  chmod u+w "$TRELLIS_HOME/releases/1.2.3/payload/core-rules/CLAUDE.md"
+  printf '# tampered historical source\n' >> "$TRELLIS_HOME/releases/1.2.3/payload/core-rules/CLAUDE.md"
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'bound registry selection has no complete current/historical inventory match'* ]] || { echo "$output"; return 1; }
+}
+
+@test "exact-owner reconcile accepts a leaf the adopted release retired only with an older witness" {
+  local owner current before
+  run_attach --harness codex
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  make_release 1.2.4 native-retired
+  current="$TRELLIS_HOME/releases/1.2.4/payload"
+  jq --arg payload "$current" '.release = "1.2.4" | .artifacts |= map(
+    if .path == ".trellis/runtime" then .target = $payload else . end)' "$owner" > "$SANDBOX/adopted.inventory"
+  before="$(sha256_file "$owner")"
+  # .agents/rules/trellis.md is absent from 1.2.4; 1.2.3 witnesses it exactly.
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' recorded
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' full
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'new tree inventory disagrees with full current plan'* ]] || { echo "$output"; return 1; }
+  # An adoption that retired the link records the witness minus exactly that leaf.
+  jq '.artifacts |= map(select(.path != ".agents/rules/trellis.md"))' \
+    "$SANDBOX/adopted.inventory" > "$SANDBOX/retired.inventory"
+  reconcile_inventory_check "$SANDBOX/retired.inventory" '["codex"]' recorded
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  # The witness still pins the retired leaf's target and admits no foreign leaf.
+  jq '.artifacts |= map(if .path == ".agents/rules/trellis.md" then .target = "foreign" else . end)' \
+    "$SANDBOX/adopted.inventory" > "$SANDBOX/foreign.inventory"
+  reconcile_inventory_check "$SANDBOX/foreign.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'recorded leaf/kind/target disagrees with bound registry selection'* ]] || { echo "$output"; return 1; }
+  jq '.artifacts += [.artifacts[] | select(.path == ".agents/rules/trellis.md") | .path = ".agents/rules/foreign.md"]' \
+    "$SANDBOX/adopted.inventory" > "$SANDBOX/extra.inventory"
+  reconcile_inventory_check "$SANDBOX/extra.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'recorded leaf/kind/target disagrees with bound registry selection'* ]] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$owner")" = "$before" ]
+  # Without a verified older witness a retired leaf is indistinguishable from a foreign one.
+  chmod u+w "$TRELLIS_HOME/releases/1.2.3/payload/core-rules/CLAUDE.md"
+  printf '# tampered historical source\n' >> "$TRELLIS_HOME/releases/1.2.3/payload/core-rules/CLAUDE.md"
+  reconcile_inventory_check "$SANDBOX/adopted.inventory" '["codex"]' recorded
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'recorded leaf/kind/target disagrees with bound registry selection'* ]] || { echo "$output"; return 1; }
+}
+
+@test "exact-owner reconcile refuses missing recorded live artifacts without writes" {
+  local before owner_before
+  reconcile_drift_fixture
+  rm "$PROJECT/.claude/rules/trellis.md"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  owner_before="$(sha256_file "$RECONCILE_OWNER")"
+  reconcile_attach
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'live artifacts disagree with recorded inventory'* ]]
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ]
+  [ "$(sha256_file "$RECONCILE_OWNER")" = "$owner_before" ]
+  [ ! -e "$RECONCILE_JOURNAL" ]
+}
+
+@test "exact-owner reconcile refuses mixed live releases with a whole-group remedy" {
+  local sibling before
+  reconcile_drift_fixture
+  sibling="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print | grep -Fv "$RECONCILE_OWNER")"
+  jq '.release = "1.2.3"' "$sibling" > "$SANDBOX/mixed owner"
+  chmod 600 "$SANDBOX/mixed owner"
+  mv "$SANDBOX/mixed owner" "$sibling"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  reconcile_attach
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"mixed live releases"*"detach/attach the whole checkout group"* ]] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ] || return 1
+  [ ! -e "$RECONCILE_JOURNAL" ]
+}
+
+@test "exact-owner reconcile recovery rolls forward before and after registry publication" {
+  local phase
+  reconcile_drift_fixture
+  for phase in reconcile-prepared reconcile-registry; do
+    run env ATTACHMENT_FAULT_PHASE="$phase" "$ATTACH" attach --home "$TRELLIS_HOME" --release 1.2.4 "$PROJECT"
+    [ "$status" -eq 5 ] || { echo "$output"; return 1; }
+    jq -e '.status == "reconciling" and .expected.release == "1.2.3" and .after.release == "1.2.4"' "$RECONCILE_JOURNAL" || return 1
+    run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    jq -e --arg checkout "$RECONCILE_CHECKOUT" '.projects["personal/fixture-project"].checkouts[$checkout].release == "1.2.4"' "$TRELLIS_HOME/registry.json" || return 1
+    [ ! -e "$RECONCILE_JOURNAL" ] || return 1
+    # Restore drift only for the second fault, never as a recovery operation.
+    if [ "$phase" = reconcile-prepared ]; then
+      jq --arg checkout "$RECONCILE_CHECKOUT" '.projects["personal/fixture-project"].checkouts[$checkout].release = "1.2.3"' "$TRELLIS_HOME/registry.json" > "$SANDBOX/stale again"
+      chmod 600 "$SANDBOX/stale again"
+      mv "$SANDBOX/stale again" "$TRELLIS_HOME/registry.json"
+    fi
+  done
+}
+
+@test "exact-owner reconcile preserves an unrelated publication after planning" {
+  reconcile_drift_fixture
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attachment_write_json)"
+    eval "${definition/_attachment_write_json /real_write_json }"
+    _attachment_write_json() {
+      real_write_json "$@" || return "$?"
+      case "$1" in */reconcile-*.json)
+        jq '\''.projects["personal/fixture-project"].metadata.concurrent = "survives"'\'' "$TRELLIS_HOME/registry.json" > "$TRELLIS_HOME/next.json"
+        chmod 600 "$TRELLIS_HOME/next.json"
+        mv "$TRELLIS_HOME/next.json" "$TRELLIS_HOME/registry.json" ;;
+      esac
+    }
+    attach_cmd_attach --home "$2" --release 1.2.4 "$3"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.projects["personal/fixture-project"].metadata.concurrent == "survives"' "$TRELLIS_HOME/registry.json"
+}
+
+@test "exact-owner reconcile refuses a selected-checkout CAS race before publication" {
+  reconcile_drift_fixture
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attachment_write_json)"
+    eval "${definition/_attachment_write_json /real_write_json }"
+    _attachment_write_json() {
+      real_write_json "$@" || return "$?"
+      case "$1" in */reconcile-*.json)
+        jq '\''.projects["personal/fixture-project"].checkouts[].harnesses = ["claude"]'\'' "$TRELLIS_HOME/registry.json" > "$TRELLIS_HOME/next.json"
+        chmod 600 "$TRELLIS_HOME/next.json"
+        mv "$TRELLIS_HOME/next.json" "$TRELLIS_HOME/registry.json" ;;
+      esac
+    }
+    attach_cmd_attach --home "$2" --release 1.2.4 "$3"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"checkout snapshot conflict before publication"* ]] || return 1
+  jq -e --arg checkout "$RECONCILE_CHECKOUT" '.projects["personal/fixture-project"].checkouts[$checkout].release == "1.2.3"' "$TRELLIS_HOME/registry.json" || return 1
+}
+
+@test "exact-owner reconcile recovery refuses a tampered old-release journal" {
+  local before
+  reconcile_drift_fixture
+  run env ATTACHMENT_FAULT_PHASE=reconcile-prepared "$ATTACH" attach --home "$TRELLIS_HOME" --release 1.2.4 "$PROJECT"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  jq '.owner.release = "1.2.3" | .after.release = "1.2.3"' "$RECONCILE_JOURNAL" > "$SANDBOX/tampered journal"
+  chmod 600 "$SANDBOX/tampered journal"
+  mv "$SANDBOX/tampered journal" "$RECONCILE_JOURNAL"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"stale or invalid reconcile journal"* ]] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ] || return 1
+  [ -f "$RECONCILE_JOURNAL" ]
+}
+
+@test "exact-owner reconcile does not normalize unrelated retired harness rows" {
+  local before
+  reconcile_drift_fixture
+  jq --arg root "$SANDBOX/absent unrelated root" --arg id "$(printf '%s' "$SANDBOX/absent unrelated common" | shasum -a 256 | cut -d ' ' -f 1)" '
+    .projects["personal/unrelated"] = {fleet:"personal",project_id:"unrelated",status:"unavailable",metadata:{},checkouts:{($id):{root:$root,git_common_dir:($root+"/common"),harnesses:["omp"],worktrees:{}}}}
+  ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/legacy registry"
+  chmod 600 "$SANDBOX/legacy registry"
+  mv "$SANDBOX/legacy registry" "$TRELLIS_HOME/registry.json"
+  before="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  reconcile_attach
+  [ "$status" -eq 4 ] || return 1
+  [[ "$output" == *"registry failed schema-aware validation"* ]] || return 1
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ] || return 1
+  [ ! -e "$RECONCILE_JOURNAL" ]
+}
+
+@test "exact-owner reconcile detects a false-success registry writer before rc0" {
+  reconcile_drift_fixture
+  run bash -c '
+    . "$1"
+    local_registry_write_locked_bound_rows() { return 0; }
+    attach_cmd_attach --home "$2" --release 1.2.4 "$3"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ] || return 1
+  [[ "$output" == *"registry postcondition failed"* ]] || return 1
+  [ -f "$RECONCILE_JOURNAL" ] || return 1
 }
 
 @test "collision preflight leaves every destination and exclude byte untouched" {
@@ -1875,7 +2429,8 @@ assert_refresh_changed_nothing() {
 @test "refresh-toolchain refuses an unattached worktree and writes nothing" {
   refresh_fixture
   linked="$SANDBOX/unattached linked worktree"
-  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q -b refresh-unattached "$linked"
+  git -C "$PROJECT" worktree add --no-checkout -q -b refresh-unattached "$linked"
+  git -C "$linked" read-tree -mu HEAD
   linked="$(canonical_dir "$linked")"
   run env "TRELLIS_ATTACH_CALLER_PATH=$NEW_BIN:/usr/bin:/bin" \
     "$ATTACH" attach --refresh-toolchain --home "$TRELLIS_HOME" "$linked"

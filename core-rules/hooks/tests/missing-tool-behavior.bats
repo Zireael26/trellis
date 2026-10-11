@@ -2,6 +2,11 @@
 
 load helpers
 
+setup() {
+  # Never read the operator's ~/.trellis.
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
+}
+
 make_path_without() {
   local missing="$1" out cmd source
   out="$BATS_TEST_TMPDIR/path-without-$missing"

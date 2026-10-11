@@ -6,7 +6,9 @@ setup_file() {
   export SOURCE="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
   : "${TRELLIS_CONFORMANCE_TEST_ROOT:?caller must supply a new retained directory outside source}"
   export EVIDENCE="$TRELLIS_CONFORMANCE_TEST_ROOT"
-  export PYTHON="$(command -v python3)"
+  # The real interpreter, never a PATH shim: the missing-dependency case runs
+  # under an empty PATH where a pyenv bash shim cannot start (R44).
+  export PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
   "$PYTHON" - "$SOURCE" "$EVIDENCE" <<'PY'
 import importlib.util
 from pathlib import Path

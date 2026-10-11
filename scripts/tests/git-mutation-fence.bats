@@ -418,6 +418,10 @@ moved = inside / "moved"
 guarded("worktree", "move", str(local), str(moved))
 guarded("worktree", "remove", "moved")
 assert not moved.exists()
+guarded("worktree", "add", "-battached-branch", str(inside / "attached-tree"), "HEAD")
+assert (inside / "attached-tree" / "file").read_text() == "sentinel\n"
+guarded("worktree", "add", "-Battached-outside", str(outside / "attached-out"), "HEAD", expected=97)
+assert not (outside / "attached-out").exists()
 guarded("worktree", "add", "--unknown-option", str(inside / "bad"), expected=97)
 guarded("worktree", "add", "--", str(outside / "new"), expected=97)
 assert not (outside / "new").exists()

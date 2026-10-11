@@ -1248,7 +1248,7 @@
           "type": "array",
           "items": { "$ref": "#/$defs/userExplicitJsonRender" }
         },
-        "operation": { "enum": ["attach", "relink", "restore"] },
+        "operation": { "enum": ["attach", "relink", "restore", "repair"] },
         "original_owner": {
           "oneOf": [
             { "type": "null" },
@@ -1321,6 +1321,26 @@
               "original_owner": { "$ref": "#/$defs/userOwnership" },
               "next_owner": { "$ref": "#/$defs/userPlan" },
               "owner_override": { "$ref": "#/$defs/userOwnership" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operation": { "const": "repair" } },
+            "required": ["operation"]
+          },
+          "then": {
+            "properties": {
+              "original_owner": { "$ref": "#/$defs/userOwnership" },
+              "next_owner": { "type": "null" },
+              "owner_override": { "$ref": "#/$defs/userOwnership" },
+              "renders": { "maxItems": 0 },
+              "artifacts": {
+                "items": {
+                  "properties": { "kind": { "const": "symlink" } },
+                  "not": { "anyOf": [{ "required": ["restore"] }, { "required": ["replace"] }] }
+                }
+              }
             }
           }
         }

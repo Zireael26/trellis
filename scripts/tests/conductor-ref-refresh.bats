@@ -78,7 +78,7 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "sol",
-    reviewerAgent: "grok",
+    reviewerAgent: "gemini",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -89,7 +89,7 @@ json_assert() {
   }')"
   run_recipe "$args"
   json_assert "!r.error && r.result.routing_status === \"routed\" && r.result.auto_execute_hold === false && r.result.reviews.length === 1 && r.result.executions.length === 1 && r.result.executions[0].pr_url === \"https://github.com/example/repo/pull/7\""
-  json_assert "(() => { const s=r.prompts.find(p=>p.opts.label===\"spec:alpha\"); const rv=r.prompts.find(p=>p.opts.label===\"review:alpha\"); const ex=r.prompts.find(p=>p.opts.label===\"execute:alpha\"); return s && rv && ex && s.opts.agentType === \"sol\" && rv.opts.agentType === \"grok\" && ex.opts.agentType === \"sol\" && !(\"agent\" in s.opts) && !(\"agent\" in rv.opts) && !(\"agent\" in ex.opts); })()"
+  json_assert "(() => { const s=r.prompts.find(p=>p.opts.label===\"spec:alpha\"); const rv=r.prompts.find(p=>p.opts.label===\"review:alpha\"); const ex=r.prompts.find(p=>p.opts.label===\"execute:alpha\"); return s && rv && ex && s.opts.agentType === \"sol\" && rv.opts.agentType === \"gemini\" && ex.opts.agentType === \"sol\" && !(\"agent\" in s.opts) && !(\"agent\" in rv.opts) && !(\"agent\" in ex.opts); })()"
 }
 
 @test "conductor auto-execution with same-family routing holds as DEGRADED" {
@@ -145,7 +145,7 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "ox-alpha",
-    reviewerAgent: "grok",
+    reviewerAgent: "gemini",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -155,7 +155,7 @@ json_assert() {
     }
   }')"
   run_recipe "$args1"
-  json_assert "!r.error && r.result.routing_status === \"routed\" && (()=>{const s=r.prompts.find(p=>p.opts.label===\"spec:alpha\"); const rv=r.prompts.find(p=>p.opts.label===\"review:alpha\"); const ex=r.prompts.find(p=>p.opts.label===\"execute:alpha\"); return s.opts.agentType === \"ox-alpha\" && rv.opts.agentType === \"grok\" && ex.opts.agentType === \"ox-alpha\" && !(\"agent\" in s.opts) && !(\"agent\" in rv.opts);})()"
+  json_assert "!r.error && r.result.routing_status === \"routed\" && (()=>{const s=r.prompts.find(p=>p.opts.label===\"spec:alpha\"); const rv=r.prompts.find(p=>p.opts.label===\"review:alpha\"); const ex=r.prompts.find(p=>p.opts.label===\"execute:alpha\"); return s.opts.agentType === \"ox-alpha\" && rv.opts.agentType === \"gemini\" && ex.opts.agentType === \"ox-alpha\" && !(\"agent\" in s.opts) && !(\"agent\" in rv.opts);})()"
 
   # routing object
   args2="$(jq -nc --arg sha "$SHA" '{
@@ -164,7 +164,7 @@ json_assert() {
     registryPath: "/private/tasks/personal/conductor/snapshot.json",
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
-    routing: {author: {agent:"cheap", family:"meta"}, reviewer: {agent:"grok", family:"xai"}},
+    routing: {author: {agent:"cheap", family:"meta"}, reviewer: {agent:"gemini", family:"google"}},
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -174,7 +174,7 @@ json_assert() {
     }
   }')"
   run_recipe "$args2"
-  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"grok\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"cheap\" && r.prompts.find(p=>p.opts.label===\"spec:alpha\").opts.agentType === \"cheap\""
+  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"gemini\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"cheap\" && r.prompts.find(p=>p.opts.label===\"spec:alpha\").opts.agentType === \"cheap\""
 
   # resolver-fed structure
   args3="$(jq -nc --arg sha "$SHA" '{
@@ -183,7 +183,7 @@ json_assert() {
     registryPath: "/private/tasks/personal/conductor/snapshot.json",
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
-    roles: {implementer: {chosen:{agent:"sol", model:"openai-codex/gpt-5.6-sol:xhigh", provider:"openai-codex"}}, reviewer: {chosen:{agent:"grok", model:"xai-oauth/grok-4.6:xhigh", provider:"xai-oauth"}}},
+    roles: {implementer: {chosen:{agent:"sol", model:"openai-codex/gpt-5.6-sol:xhigh", provider:"openai-codex"}}, reviewer: {chosen:{agent:"gemini", model:"antigravity/gemini-3.8-flash:high", provider:"antigravity"}}},
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -193,7 +193,7 @@ json_assert() {
     }
   }')"
   run_recipe "$args3"
-  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"grok\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"sol\""
+  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"gemini\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"sol\""
 
   # unknown family also holds
   local unknownArgs
@@ -223,8 +223,8 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "custom-author",
-    reviewerAgent: "grok",
-    routing: {author: {agent:"custom-author", family:"custom"}, reviewer: {agent:"grok", family:"xai"}},
+    reviewerAgent: "gemini",
+    routing: {author: {agent:"custom-author", family:"custom"}, reviewer: {agent:"gemini", family:"google"}},
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -246,7 +246,7 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "sol",
-    reviewerAgent: "grok",
+    reviewerAgent: "gemini",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -256,7 +256,7 @@ json_assert() {
     }
   }')"
   run_recipe "$routedArgs"
-  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"spec:alpha\").opts.agentType === \"sol\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"grok\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"sol\""
+  json_assert "!r.error && r.result.routing_status === \"routed\" && r.prompts.find(p=>p.opts.label===\"spec:alpha\").opts.agentType === \"sol\" && r.prompts.find(p=>p.opts.label===\"review:alpha\").opts.agentType === \"gemini\" && r.prompts.find(p=>p.opts.label===\"execute:alpha\").opts.agentType === \"sol\""
 
   # propose-only Auto-spec must inherit (no agentType) even with routed agents absent
   proposeArgs="$(jq -nc --arg sha "$SHA" '{
@@ -273,7 +273,7 @@ json_assert() {
   run_recipe "$proposeArgs"
   json_assert "!r.error && r.result.routing_status === \"inherit\" && r.result.auto_execute_hold === false && r.result.reviews.length === 0 && (()=>{const s=r.prompts.find(p=>p.opts.label===\"spec:alpha\"); return s && !(\"agentType\" in s.opts);})()"
 
-  # family-mismatch: known agent sol is openai but claimed as xai => DEGRADED
+  # family-mismatch: known agent sol is openai but claimed as anthropic => DEGRADED
   mismatchArgs="$(jq -nc --arg sha "$SHA" '{
     today: "2026-07-14",
     backlogPath: "/private/tasks/personal/conductor/backlog.json",
@@ -281,8 +281,8 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "sol",
-    reviewerAgent: "grok",
-    authorFamily: "xai",
+    reviewerAgent: "gemini",
+    authorFamily: "anthropic",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -304,7 +304,7 @@ json_assert() {
     authorAgent: "sol",
     reviewerAgent: "luna",
     authorFamily: "openai",
-    reviewerFamily: "xai",
+    reviewerFamily: "anthropic",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},

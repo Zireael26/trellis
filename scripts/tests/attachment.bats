@@ -356,6 +356,40 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "item8 r3: attachment and doctor reject managed hooksPath plus a trailing empty value" {
+  prepare_plan all
+  attachment_commit "$TRELLIS_HOME" "$JOURNAL"
+  prepare_managed_hooks
+  source "$BATS_TEST_DIRNAME/../lib/health-checks.sh"
+  local managed="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID"
+
+  # Pin normal single-value behavior at every reader caller before adding drift.
+  run _attachment_hooks_current_path "$PROJECT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$managed" ]
+  run _attachment_hooks_authority "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 0 ]
+  [ "$output" = managed ]
+  run attachment_verify "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 0 ]
+  run hc_portable_hooks_path "$TRELLIS_HOME" "$PROJECT" "$CHECKOUT_ID" "$OWNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"core.hooksPath matches the Trellis managed dispatcher"* ]] || { echo "$output"; false; }
+
+  git -C "$PROJECT" config --local --add core.hooksPath ''
+  [ "$(git -C "$PROJECT" config --local --get-all core.hooksPath | wc -l | tr -d ' ')" -eq 2 ]
+  run _attachment_hooks_current_path "$PROJECT"
+  [ "$status" -eq 3 ]
+  run _attachment_hooks_authority "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 3 ]
+  run attachment_verify "$TRELLIS_HOME" "$OWNER"
+  [ "$status" -eq 3 ]
+  run hc_portable_hooks_path "$TRELLIS_HOME" "$PROJECT" "$CHECKOUT_ID" "$OWNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"core.hooksPath matches the Trellis managed dispatcher"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"multiple local core.hooksPath values in "*"; the Trellis managed dispatcher is $managed — restore with: git config --replace-all core.hooksPath $managed"* ]] || { echo "$output"; false; }
+}
+
 @test "verification accepts authentic dispatchers from an older payload and rejects tampered bytes" {
   local current_post current_pre older_post older_pre
   RELEASE="1.2.2"
@@ -848,6 +882,43 @@ EOF
   [ ! -e "$JOURNAL" ]
 }
 
+# Inversion: the pending artifact carries ~1.3 MB of content_base64. Passed as
+# `jq --argjson pending`, exec fails E2BIG on macOS; the failed substitution
+# reads as "no journaled stage removal" and recovery only reaches the same end
+# state by a later path, printing `Argument list too long` on the way.
+@test "recovery finishes a journaled stage removal for a pending artifact over ARG_MAX" {
+  content="$ROOT/large-content.txt"
+  head -c 1000000 /dev/zero | tr '\0' x > "$content"
+  base64 < "$content" | tr -d '\n' > "$ROOT/large-content.b64"
+  jq -n \
+    --arg fleet "$FLEET" --arg project_id "$PROJECT_ID" \
+    --arg checkout_id "$CHECKOUT_ID" --arg worktree_id "$WORKTREE_ID" \
+    --arg attachment_id "$ATTACHMENT_ID" --arg root "$PROJECT" --arg release "$RELEASE" \
+    --arg sha256 "$(sha256_file "$content")" --rawfile content "$ROOT/large-content.b64" \
+    '{schema_version:1,status:"prepared",fleet:$fleet,project_id:$project_id,
+      checkout_id:$checkout_id,worktree_id:$worktree_id,attachment_id:$attachment_id,
+      project_root:$root,worktree_root:$root,release:$release,
+      artifacts:[{path:"attached.txt",kind:"file",content_base64:$content,sha256:$sha256,mode:"0644"}]}' > "$PLAN"
+  chmod 600 "$PLAN"
+  attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+  [ "$(jq -c '.pending' "$JOURNAL" | wc -c)" -lt 1048576 ]
+  stage=$(pending_stage_path)
+  stage_pending_file "$stage"
+  [ "$(jq -c '.pending' "$JOURNAL" | wc -c)" -gt 1048576 ]
+  cp "$content" "$stage"
+  record_stage_identity "$stage"
+  _attachment_set_removal_intent "$JOURNAL" "$stage"
+
+  run attachment_recover "$TRELLIS_HOME" "$JOURNAL"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *'Argument list too long'* ]] || { echo "$output"; false; }
+  [ ! -e "$stage" ]
+  [ ! -e "$PROJECT/attached.txt" ]
+  [ ! -e "$JOURNAL" ]
+  [ ! -e "$OWNER" ]
+}
+
 @test "ordinary injected phases roll back incomplete transactions" {
   phase=1
   while [ "$phase" -le 3 ]; do
@@ -1146,4 +1217,77 @@ EOF
   [ "$status" -eq 3 ]
   [ -f "$PROJECT/original-parent/attached.txt" ]
   [ -f "$ROOT/external/attached.txt" ]
+}
+
+# Two acquirers both pass the "link absent" check, then reach `ln` one after
+# the other: the first publishes its holder link, the second must refuse busy.
+# Without no-dereference, the second `ln` follows the first link into the
+# holder directory, creates its entry there and reports success.
+lock_rendezvous() {
+  local kind=$1 work
+  work="$(mktemp -d "$BATS_TEST_TMPDIR/rendezvous.XXXXXX")"
+  work="$(canonical_dir "$work")"
+  env T="$work" KIND="$kind" LIB="$BATS_TEST_DIRNAME/../lib/attachment.sh" bash </dev/null <<'SH'
+. "$LIB"
+home="$T/home"; common="$T/common"; mkdir "$home" "$common"; chmod 700 "$home"
+_attachment_prepare_state "$home" || exit 1
+checkout=$(_attachment_hash_text "$common")
+worktree=$(_attachment_hash_text "$T/worktree")
+case "$KIND" in
+  checkout) link=$(_attachment_checkout_lock_path "$home" "$checkout") ;;
+  transaction) link=$(_attachment_lock_path "$home" "$checkout" "$worktree") ;;
+  user) link=$(_attachment_user_lock_path "$home") ;;
+esac
+worker() (
+  role=$1
+  ln() {
+    : > "$T/ready-$role"
+    until [ -f "$T/go-$role" ]; do sleep 0.02; done
+    command ln "$@"
+  }
+  case "$KIND" in
+    checkout) _attachment_checkout_lock_acquire "$home" "$checkout" "$common"; rc=$?
+      holder=${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-} ;;
+    transaction) _attachment_lock_acquire "$home" "$checkout" "$worktree" "00000000-0000-4000-8000-00000000000$2"; rc=$?
+      holder=${_ATTACHMENT_LOCK_HOLDER:-} ;;
+    user) _attachment_user_lock_acquire "$home" "00000000-0000-4000-8000-00000000000$2"; rc=$?
+      holder=${_ATTACHMENT_USER_LOCK_HOLDER:-} ;;
+  esac
+  printf '%s %s\n' "$rc" "$holder" > "$T/result-$role"
+  until [ -f "$T/stop" ]; do sleep 0.05; done
+)
+wait_for() { local n=0; until [ -f "$1" ] || [ "$n" -ge 500 ]; do sleep 0.02; n=$((n + 1)); done; [ -f "$1" ]; }
+worker A 1 & a=$!
+worker B 2 & b=$!
+trap ': > "$T/stop"; wait "$a" "$b" 2>/dev/null' EXIT
+wait_for "$T/ready-A" && wait_for "$T/ready-B" || { echo 'rendezvous failed'; exit 1; }
+: > "$T/go-A"; wait_for "$T/result-A" || exit 1
+: > "$T/go-B"; wait_for "$T/result-B" || exit 1
+read -r rc_a holder_a < "$T/result-A"
+read -r rc_b holder_b < "$T/result-B"
+printf 'A=%s B=%s\n' "$rc_a" "$rc_b"
+printf 'target=%s holderA=%s\n' "$(readlink "$link")" "$(basename "$holder_a")"
+printf 'entries=%s\n' "$(ls -A "$holder_a" | tr '\n' ' ')"
+SH
+}
+
+assert_one_lock_winner() {
+  run lock_rendezvous "$1"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "${lines[0]}" = 'A=0 B=3' ] || { echo "$output"; return 1; }
+  [[ "${lines[1]}" =~ ^target=(.+)\ holderA=(.+)$ ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ] ||
+    { echo "$output"; return 1; }
+  [ "${lines[2]}" = 'entries=owner.json ' ] || { echo "$output"; return 1; }
+}
+
+@test "checkout lock: acquirers that meet at ln get one winner and a busy refusal" {
+  assert_one_lock_winner checkout
+}
+
+@test "transaction lock: acquirers that meet at ln get one winner and a busy refusal" {
+  assert_one_lock_winner transaction
+}
+
+@test "user lock: acquirers that meet at ln get one winner and a busy refusal" {
+  assert_one_lock_winner user
 }

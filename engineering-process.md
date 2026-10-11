@@ -299,8 +299,8 @@ The launcher verifies the active release, then the payload's dispatcher resolves
 verified payload in a deliberately small environment: no `BASH_ENV`, no `ENV`,
 no exported functions, no inherited Git loader or config variables, and Git
 configured only by two command-scoped entries. Claude Code receives
-`session-context`, `post-compact-context`, `inject-primer-index`, and
-`skill-size-preflight`; Codex receives the first three. An unsupported route is
+`session-context`, `post-compact-context`, and `inject-primer-index`; Codex
+receives the same three. An unsupported route is
 a usage error, not a fallback. The project's `.trellis/runtime` anchor is
 therefore something diagnosis reads, never a hook source anything executes.
 

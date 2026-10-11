@@ -31,6 +31,13 @@ if ! command -v trellis_jq >/dev/null 2>&1; then
   unset _HC_LIB_DIR
 fi
 
+if ! command -v semver_compare >/dev/null 2>&1; then
+  _HC_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  # shellcheck source=semver.sh
+  . "$_HC_LIB_DIR/semver.sh"
+  unset _HC_LIB_DIR
+fi
+
 # Status-code constants (exported so doctor.sh can reference by name).
 HC_OK=0
 HC_ERROR=1
@@ -59,13 +66,23 @@ hc_container_runtime_rows() {
   if [ -e "$app" ] && { [ -z "$resolved" ] || [ "${resolved#"$app"/}" = "$resolved" ]; }; then
     printf '%s\t%s\n' "$HC_INFO" 'docker-desktop-dormant'
   fi
+  # The active context is resolved once for both WARN rows below: the colima
+  # drift row needs it only when colima exists, while the hooks-visibility row
+  # needs it on any machine with a docker CLI and no exported host.
+  if [ -n "$docker_cli" ] && [ "${DOCKER_HOST+x}" != x ]; then
+    context="$(docker context show 2>/dev/null)" || context=""
+  fi
   if ! command -v colima >/dev/null 2>&1; then
     printf '%s\t%s\n' "$HC_INFO" 'colima-not-installed'
-  elif [ "${DOCKER_HOST+x}" != x ] && [ -n "$docker_cli" ]; then
-    context="$(docker context show 2>/dev/null)" || context=""
-    if [ "$context" != colima ]; then
-      printf '%s\t%s\n' "$HC_WARN" 'docker-context-not-colima'
-    fi
+  elif [ -n "$docker_cli" ] && [ "${DOCKER_HOST+x}" != x ] && [ "$context" != colima ]; then
+    printf '%s\t%s\n' "$HC_WARN" 'docker-context-not-colima'
+  fi
+  # Sits alongside docker-context-not-colima (which pins the colima-fleet drift
+  # expectation above): any non-default context is invisible to managed hooks,
+  # which run with a private HOME, so only an exported DOCKER_HOST reaches the
+  # gate. Overlap on a drifted colima machine intentionally reports both rows.
+  if [ -n "$docker_cli" ] && [ "${DOCKER_HOST+x}" != x ] && [ "$context" != default ]; then
+    printf '%s\t%s\n' "$HC_WARN" "docker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is '$context'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format '{{.Endpoints.docker.Host}}')"
   fi
 }
 
@@ -188,10 +205,16 @@ hc_changelog_latest_version() {
     | sed 's/^v//'
 }
 
-# Compare two semver-ish strings. Prints the higher per `sort -V`. If equal,
-# prints the value itself.
+# Compare two SemVer strings. Prints the higher; equal precedence prints the
+# first value. Invalid inputs return nonzero without output.
 hc_higher_version() {
-  printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1
+  local comparison
+  comparison="$(semver_compare "$1" "$2")" || return "$?"
+  if [ "$comparison" = -1 ]; then
+    printf '%s\n' "$2"
+  else
+    printf '%s\n' "$1"
+  fi
 }
 
 # ===========================================================================
@@ -1737,6 +1760,39 @@ hc_portable_active_cli_release() {
 }
 
 
+# Leaked release scratch (spec 067 §6.3, R6): `.tmp.*` entries under the
+# release store, split reapable now / not yet. Read-only; only
+# `trellis release reap-tmp --fix` removes them. Deliberate deltas from §6.3:
+# the row always prints, so a leak stays visible below the thresholds, and a
+# refused entry also WARNs because it needs an operator's eyes. Bytes cover the
+# classifiable entries only, and sizing stops past the 1 GiB threshold.
+hc_release_tmp_scratch() {
+  local home="$1" summary entries bytes reapable reapable_bytes refused capped message bytes_text reapable_text
+  summary="$(TRELLIS_HOME="$home" release_store_reap_tmp summary 1073741824 2>/dev/null)" || true
+  read -r entries bytes reapable reapable_bytes refused capped <<EOF
+$summary
+EOF
+  case "${entries:-}:${bytes:-}:${reapable:-}:${reapable_bytes:-}:${refused:-}:${capped:-}" in
+    *[!0-9:]*|*::*|:*|*:)
+      echo "release scratch: .tmp.* entries under the release store could not be measured — run trellis release reap-tmp"
+      return "$HC_WARN"
+      ;;
+  esac
+  bytes_text="$bytes bytes"
+  reapable_text="$reapable_bytes bytes"
+  if [ "$capped" = 1 ]; then
+    bytes_text="over $bytes bytes (sizing stopped past 1 GiB)"
+    reapable_text="at least $reapable_bytes bytes"
+  fi
+  message="release scratch: $entries .tmp.* entries, $bytes_text; $reapable reapable now ($reapable_text), $((entries - reapable - refused)) not yet, $refused refused"
+  if [ "$entries" -gt 50 ] || [ "$bytes" -gt 1073741824 ] || [ "$refused" -gt 0 ]; then
+    echo "$message — review with trellis release reap-tmp, then remove with --fix"
+    return "$HC_WARN"
+  fi
+  echo "$message"
+  return "$HC_OK"
+}
+
 # Owner files are local authority.  Verify their canonical private ancestry
 # before inspecting even an absent final file so a symlinked state subtree is
 # never accepted as an inert attachment.
@@ -2264,6 +2320,12 @@ hc_portable_hooks_path() {
     if current="$(_attachment_hooks_current_path "$root" 2>/dev/null)"; then
       [ -n "$current" ] || current='<unset>'
     else
+      if [ "$?" -eq 3 ]; then
+        root_display="$(hc_diagnostic_escape "$root")" || return "$HC_ERROR"
+        printf 'git hook authority: multiple local core.hooksPath values in %s; the Trellis managed dispatcher is %s — restore with: git config --replace-all core.hooksPath %s\n' \
+          "$root_display" "$expected_display" "$expected_display"
+        return "$HC_ERROR"
+      fi
       current='<unavailable>'
     fi
     current_display="$(hc_diagnostic_escape "$current")" || return "$HC_ERROR"
@@ -2673,12 +2735,14 @@ _hc_adopt_husky_rollback_report() {
   return 3
 }
 
-# hc_hooks_path_fix <home> <root> <owner> <dry-run:true|false> [adopt-husky:true|false]
+# hc_hooks_path_fix <home> <root> <owner> <dry-run:true|false> [adopt-husky:true|false] [lock-held:true|false]
 # Returns 0 repaired (or, under dry-run, planned), 1 refused with nothing
 # changed, 2 failed after the write and restored, 3 failed after the write and
-# not restored, 4 nothing to repair. Prints one line per outcome.
+# not restored, 4 nothing to repair. Prints one line per outcome. lock-held
+# true means the caller already holds this checkout's lock (the attach
+# post-job, which decides contention itself rather than reporting a refusal).
 hc_hooks_path_fix() {
-  local home="$1" root="$2" owner="$3" dry_run="${4:-false}" adopt="${5:-false}" enabled managed values rc identity checkout common
+  local home="$1" root="$2" owner="$3" dry_run="${4:-false}" adopt="${5:-false}" held="${6:-false}" enabled managed values rc identity checkout common
   enabled="$(jq -r '.git_hooks.enabled // false' "$owner" 2>/dev/null)" || return 4
   [ "$enabled" = true ] || return 4
   managed="$(jq -r '.git_hooks.managed_hooks_path // empty' "$owner" 2>/dev/null)" || return 4
@@ -2691,6 +2755,10 @@ hc_hooks_path_fix() {
     { _hc_hooks_path_refuse "$root" 'the checkout identity could not be read' 'run trellis doctor and resolve the identity row first'; return 1; }
   checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return 1
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')" || return 1
+  if [ "$held" = true ]; then
+    _hc_hooks_path_fix_locked "$home" "$root" "$owner" "$dry_run" "$checkout" "$managed" "$adopt"
+    return "$?"
+  fi
   attachment_checkout_lock_reclaim "$home" "$checkout" "$common" >/dev/null 2>&1
   if ! attachment_checkout_lock_acquire "$home" "$checkout" "$common" >/dev/null 2>&1; then
     _hc_hooks_path_refuse "$root" 'another Trellis writer holds the checkout lock' 'let it finish, then run trellis doctor --fix again'
@@ -2829,6 +2897,93 @@ hc_portable_toolchain_provenance() {
   return "$HC_WARN"
 }
 
+# Spec 1.3.11: the gate payload runs with the recorded toolchain PATH, so a
+# docker reachable in the caller's shell is unreachable inside hooks when its
+# directory is absent from the record. WARN naming the caller directory with
+# the refresh remedy; otherwise stay silent (HC_OK, no text). An unreadable
+# record is reported by the ownership rows, not here.
+hc_portable_docker_toolchain() {
+  local root="$1" owner="$2" caller_docker="" caller_dir="" actual="" recorded="" entry="" root_display
+  caller_docker="$(command -v docker 2>/dev/null)" || caller_docker=""
+  [ -n "$caller_docker" ] || return "$HC_OK"
+  case "$caller_docker" in /*) ;; *) return "$HC_OK" ;; esac
+  caller_dir="$(dirname "$caller_docker")" || return "$HC_OK"
+  actual="$(CDPATH='' cd "$caller_dir" 2>/dev/null && pwd -P)" || actual="$caller_dir"
+  recorded="$(jq -r '.toolchain_path[]? // empty' "$owner" 2>/dev/null)" || return "$HC_OK"
+  [ -n "$recorded" ] || return "$HC_OK"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if [ "$entry" = "$actual" ]; then
+      return "$HC_OK"
+    fi
+  done <<< "$recorded"
+  root_display="$(hc_diagnostic_escape "$root")" || return "$HC_ERROR"
+  echo "docker-not-on-recorded-toolchain: docker resolves at $caller_docker on the caller PATH, but its directory $actual is not in the recorded toolchain PATH for $root_display, so the gate cannot reach docker; run trellis attach --refresh-toolchain $root_display"
+  return "$HC_WARN"
+}
+
+# Spec 1.3.11 / Spec 067 P1d-3 (T14): the shared diff-base resolver derives its
+# base from the policy branch, else the remote default. Resolution follows
+# default_branch_ref in
+# core-rules/{githooks,husky}/pre-push (refs/remotes/origin/HEAD, then
+# origin/main, then origin/master), except that the declared policy
+# template.branch is tried first, as db_defbranch does in diff-base.sh.
+# WARN when the checkout has an origin remote but nothing resolves
+# (remote-default-unresolved). INFO (not WARN) when origin/HEAD differs from
+# policy template.branch (remote-default-not-protected): it blocks nothing.
+# Silent otherwise, and silent whenever git cannot answer, which the
+# ownership rows already report.
+hc_portable_remote_default() {
+  local root="$1" head_target="" candidate="" resolved="" toplevel="" policy="" f head_branch="" missing_refs=""
+  git -C "$root" config --get remote.origin.url >/dev/null 2>&1 || return "$HC_OK"
+
+  toplevel="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || toplevel="$root"
+  if [ -n "${DB_POLICY_OVERRIDE:-}" ]; then
+    policy="$DB_POLICY_OVERRIDE"
+  elif command -v jq >/dev/null 2>&1; then
+    for f in "$toplevel/.trellis.json" "$toplevel/.trellis.config.json" "$root/.trellis.json" "$root/.trellis.config.json"; do
+      [ -f "$f" ] || continue
+      policy="$(jq -r '.template.branch // empty' "$f" 2>/dev/null)" || continue
+      [ -n "$policy" ] && break
+    done
+    if [ -z "$policy" ] && [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/trellis.config.json" ]; then
+      policy="$(jq -r '.template.branch // empty' "$TRELLIS_ROOT/trellis.config.json" 2>/dev/null)" || policy=""
+    fi
+  fi
+  policy="${policy:-main}"
+  policy="${policy#refs/heads/}"
+  policy="${policy#refs/remotes/origin/}"
+
+  if head_target=$(git -C "$root" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) && [ -n "$head_target" ]; then
+    if git -C "$root" rev-parse -q --verify "$head_target^{commit}" >/dev/null 2>&1; then
+      resolved="$head_target"
+    fi
+  fi
+
+  if [ -n "$resolved" ]; then
+    head_branch="${resolved#refs/remotes/origin/}"
+    head_branch="${head_branch#refs/heads/}"
+    if [ "$head_branch" != "$policy" ]; then
+      echo "remote-default-not-protected: origin/HEAD resolves to $resolved, which differs from policy template.branch '$policy'; the shared diff-base resolver prefers the policy branch — remedy: git remote set-head origin $policy"
+      return "$HC_INFO"
+    fi
+    return "$HC_OK"
+  fi
+
+  for candidate in "$policy" main master; do
+    if git -C "$root" rev-parse -q --verify "refs/remotes/origin/$candidate^0" >/dev/null 2>&1; then
+      return "$HC_OK"
+    fi
+  done
+
+  missing_refs="refs/remotes/origin/HEAD, origin/main and origin/master"
+  if [ "$policy" != main ] && [ "$policy" != master ]; then
+    missing_refs="refs/remotes/origin/HEAD, origin/$policy, origin/main and origin/master"
+  fi
+  echo "remote-default-unresolved: no remote default resolves for origin ($missing_refs are all missing); the pre-push gate cannot derive a base — remedy: git remote set-head origin -a"
+  return "$HC_WARN"
+}
+
 # Spec 055 R2.7: caller-PATH forwarding lives in the launcher, which `configure`
 # never replaces once one differs. WARN when the installed launcher is not
 # byte-identical to the active release's scripts/trellis-launcher.sh; otherwise
@@ -2845,6 +3000,99 @@ hc_launcher_currency() {
     return "$HC_OK"
   fi
   echo "launcher currency: the installed launcher $(hc_diagnostic_escape "$installed") is not identical to release $release's scripts/trellis-launcher.sh, so caller PATH forwarding is not guaranteed; reinstall it (docs/UPGRADING.md, \"Reinstalling the launcher\")"
+  return "$HC_WARN"
+}
+
+# Claude Code 2.1.294 fixed prompt-hook fail-open and the hook skip on a matcher
+# failure, both of which let a PreToolUse guard's decision lapse. WARN below it,
+# stay silent at or above it, INFO when the installed version can't be read.
+HC_CLAUDE_CODE_MIN_VERSION=2.1.294
+hc_claude_code_version() {
+  local version
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "claude-code version: unreadable (claude not found on PATH); the $HC_CLAUDE_CODE_MIN_VERSION hook fail-open fixes are unverified"
+    return "$HC_INFO"
+  fi
+  version="$(claude --version </dev/null 2>/dev/null | head -n 1 | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')" || version=""
+  if [ -z "$version" ]; then
+    echo "claude-code version: unreadable (claude --version gave no X.Y.Z); the $HC_CLAUDE_CODE_MIN_VERSION hook fail-open fixes are unverified"
+    return "$HC_INFO"
+  fi
+  [ "$(hc_higher_version "$version" "$HC_CLAUDE_CODE_MIN_VERSION")" = "$version" ] && return "$HC_OK"
+  echo "claude-code version: $version is below $HC_CLAUDE_CODE_MIN_VERSION, which fixed prompt-hook fail-open and the hook skip on a matcher failure; update Claude Code"
+  return "$HC_WARN"
+}
+
+# The recommended pi setup (AGENT_PI_SETUP.md) supports pi 1.1.0 and above.
+# WARN below it, or when pi is missing but a registered checkout selects the pi
+# harness; INFO when pi is missing and unselected, or its version can't be read
+# (including a `pi --version` that outlives the timeout); silent at or above it.
+HC_PI_MIN_VERSION=1.1.0
+HC_PI_VERSION_TIMEOUT_SECONDS=10
+hc_pi_version() {
+  local registry="${1:-}" version
+  if ! command -v pi >/dev/null 2>&1; then
+    if [ -f "$registry" ] &&
+       jq -e 'any(.projects[]?.checkouts[]?.harnesses[]?; . == "pi")' "$registry" >/dev/null 2>&1; then
+      echo "pi version: pi not found on PATH, but a registered checkout selects the pi harness; install pi $HC_PI_MIN_VERSION or later (AGENT_PI_SETUP.md step 1)"
+      return "$HC_WARN"
+    fi
+    echo "pi version: pi not found on PATH and no registered checkout selects the pi harness"
+    return "$HC_INFO"
+  fi
+  version="$(perl -e 'alarm shift; exec @ARGV' "$HC_PI_VERSION_TIMEOUT_SECONDS" pi --version </dev/null 2>/dev/null \
+    | head -n 1 | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')" || version=""
+  if [ -z "$version" ]; then
+    echo "pi version: unreadable (pi --version gave no X.Y.Z within ${HC_PI_VERSION_TIMEOUT_SECONDS}s); the $HC_PI_MIN_VERSION floor is unverified"
+    return "$HC_INFO"
+  fi
+  [ "$(hc_higher_version "$version" "$HC_PI_MIN_VERSION")" = "$version" ] && return "$HC_OK"
+  echo "pi version: $version is below $HC_PI_MIN_VERSION, the floor of the recommended pi setup; update pi (AGENT_PI_SETUP.md step 1)"
+  return "$HC_WARN"
+}
+
+# The bright-line PreToolUse guards are registered as `perl guard-supervise.pl`.
+# Without perl that command cannot start, and Claude Code treats the failure as
+# a non-blocking error, so the guarded tool call runs. ERROR, silent when found.
+hc_guard_supervisor_perl() {
+  command -v perl >/dev/null 2>&1 && return "$HC_OK"
+  echo "guard supervisor: perl not found on PATH; the bright-line PreToolUse guards (guard-supervise.pl) cannot run, and Claude Code lets the guarded tool calls through — install perl"
+  return "$HC_ERROR"
+}
+
+# WARN when a bright-line guard registration is not stall-safe: not started
+# through guard-supervise.pl, a client timeout below 30 s, or a supervisor file
+# that is not there (the entry would then deny every guarded call). Rendered
+# settings change only on detach + attach; `release adopt` never rewrites them.
+# A legacy direct-copy .claude/settings.json is checked too.
+hc_guard_registrations() {
+  local root="$1" file rows found="" guard timeout sup path problem bad
+  for file in .claude/settings.local.json .claude/settings.json .codex/hooks.json; do
+    [ -f "$root/$file" ] || continue
+    if ! rows="$(jq -r '
+      .hooks.PreToolUse[]?.hooks[]?
+      | select((.command // "") | test("/(block-destructive|reread-guard|skill-preload-guard)\\.sh"))
+      | [(.command | capture("/(?<g>[a-z-]+)\\.sh") | .g), (.timeout // "unset"),
+         (.command | capture("guard-supervise \"(?<p>[^\"]+)\"") | .p) // ""] | @tsv' "$root/$file" 2>/dev/null)"; then
+      found="${found:+$found; }$file: unreadable"
+      continue
+    fi
+    while IFS=$'\t' read -r guard timeout sup; do
+      [ -n "$guard" ] || continue
+      problem="" bad=false
+      case "$timeout" in ''|*[!0-9]*) bad=true ;; *) [ "$timeout" -ge 30 ] || bad=true ;; esac
+      if [ -z "$sup" ]; then
+        problem=", unsupervised"
+      else
+        path="${sup//\$\{CODEX_PROJECT_DIR:-\$\{CLAUDE_PROJECT_DIR:-\$PWD\}\}/$root}"
+        path="${path//\$CLAUDE_PROJECT_DIR/$root}"
+        [ -f "$path" ] || problem=", supervisor missing"
+      fi
+      [ -z "$problem" ] && [ "$bad" = false ] || found="${found:+$found; }$file: $guard (timeout $timeout$problem)"
+    done <<< "$rows"
+  done
+  [ -n "$found" ] || return "$HC_OK"
+  echo "guard registration not stall-safe: $found — re-render it with detach + attach"
   return "$HC_WARN"
 }
 
@@ -2878,6 +3126,17 @@ hc_portable_owner_without_runtime_exact() {
 
 HC_PORTABLE_OWNER_STATE=""
 HC_PORTABLE_OWNER_HOOKS_ONLY=false
+# Pi symlink owners record literal targets; the shared validator also checks
+# resolved bytes against release.json and validates literal parent modes.
+hc_portable_pi_artifacts() {
+  local owner="$1" root="$2" payload="$3" source_root
+  jq -e 'any((.artifacts + (.pre_existing // []))[]; .path | startswith(".pi/"))' \
+    "$owner" >/dev/null 2>&1 || return 0
+  source_root="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)" || return 1
+  python3 -I "$source_root/core-rules/skills/process-gate/scripts/lib/pi-artifacts.py" \
+    "$root" "$payload" .pi/extensions/trellis.ts .pi/hooks/dispatch.sh < "$owner"
+}
+
 hc_portable_owner() {
   local home="$1" owner="$2" root="$3" fleet="$4" project_id="$5"
   local checkout_id="$6" worktree_id="$7" attachment_id="$8" release="$9"
@@ -2974,6 +3233,11 @@ hc_portable_owner() {
   if ! _attachment_verify_owner_artifacts "$owner" "$home"; then
     HC_PORTABLE_OWNER_STATE="conflict"
     echo "attachment ownership: a Trellis-owned artifact is missing, modified, or escapes its recorded state"
+    return "$HC_ERROR"
+  fi
+  if ! hc_portable_pi_artifacts "$owner" "$root" "$expected_runtime"; then
+    HC_PORTABLE_OWNER_STATE="conflict"
+    echo "attachment ownership: owner-recorded Pi artifacts could not be verified"
     return "$HC_ERROR"
   fi
   if ! hc_portable_managed_hooks "$home" "$owner"; then

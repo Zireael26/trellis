@@ -48,32 +48,55 @@ _sg_policy_files() {
   [ -n "${TRELLIS_ROOT:-}" ] && printf '%s\n' "$TRELLIS_ROOT/trellis.config.json"
 }
 
+# Object reads are pinned to the requested commit. Marker/session files remain
+# checkout state; only committed project policy and interview artifacts move.
+sg_ref_file() {
+  local dir="$1" head="$2" path="$3" entry
+  entry=$(git -C "$dir" ls-tree "$head" -- "$path" 2>/dev/null) || return 1
+  case "$entry" in
+    *" blob "*) git -C "$dir" show "$head:$path" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+# SG_OBJECT_* are dynamically scoped to one sg_verdict; other callers read disk.
+sg_policy_json() {
+  case "${1##*/}" in
+    .trellis.json|.trellis.config.json)
+      if [ -n "${SG_OBJECT_HEAD:-}" ]; then
+        sg_ref_file "$SG_OBJECT_DIR" "$SG_OBJECT_HEAD" "${1##*/}"; return
+      fi ;;
+  esac
+  [ -f "$1" ] || return 1
+  printf '%s\n' "$(< "$1")"
+}
+
 # Echoes TAB-separated: "<value>\t<status>\t<file>"
 #   status: ok | disabled | malformed | nojq
 # `null` means the field was absent. A status of `ok` with `null` means that a
 # valid block was present but did not declare this field, so its caller applies
 # the field's built-in fallback.
 _sg_resolve_block_field() {
-  local root="$1" block="$2" field="$3" extra="${4:-}" f match="" value=""
+  local root="$1" block="$2" field="$3" extra="${4:-}" f json match="" value=""
   if ! command -v jq >/dev/null 2>&1; then printf 'null\tnojq\t\n'; return; fi
   while IFS= read -r f; do
-    [ -f "$f" ] || continue
+    json=$(sg_policy_json "$f") || continue
     # A present unparseable or non-object config is malformed => fail closed.
-    if ! jq -e 'type == "object"' "$f" >/dev/null 2>&1; then
+    if ! jq -e 'type == "object"' <<<"$json" >/dev/null 2>&1; then
       printf 'null\tmalformed\t\n'; return
     fi
-    if ! jq -e --arg b "$block" 'has($b)' "$f" >/dev/null 2>&1; then
+    if ! jq -e --arg b "$block" 'has($b)' <<<"$json" >/dev/null 2>&1; then
       continue
     fi
-    if ! jq -e --arg b "$block" '.[$b] | type == "object"' "$f" >/dev/null 2>&1; then
+    if ! jq -e --arg b "$block" '.[$b] | type == "object"' <<<"$json" >/dev/null 2>&1; then
       printf 'null\tmalformed\t\n'; return
     fi
-    if [ -n "$extra" ] && ! jq -e --arg b "$block" ".[\$b] | ( $extra )" "$f" >/dev/null 2>&1; then
+    if [ -n "$extra" ] && ! jq -e --arg b "$block" ".[\$b] | ( $extra )" <<<"$json" >/dev/null 2>&1; then
       printf 'null\tmalformed\t\n'; return
     fi
     [ -n "$match" ] || match="$f"
-    if jq -e --arg b "$block" --arg k "$field" '.[$b] | has($k)' "$f" >/dev/null 2>&1; then
-      value=$(jq -r --arg b "$block" --arg k "$field" '.[$b][$k]' "$f" 2>/dev/null)
+    if jq -e --arg b "$block" --arg k "$field" '.[$b] | has($k)' <<<"$json" >/dev/null 2>&1; then
+      value=$(jq -r --arg b "$block" --arg k "$field" '.[$b][$k]' <<<"$json" 2>/dev/null)
       printf '%s\tok\t%s\n' "$value" "$f"
       return
     fi
@@ -165,6 +188,7 @@ EOF
 }
 
 # --- protected branch + diff baseline ---------------------------------------
+# Optional fallback is empty for the resolver, main for the protected-branch guard.
 sg_protected_branch() {
   local root="$1" out b status file
   local validation='
@@ -178,17 +202,99 @@ EOF
   if [ "$status" = ok ] && [ -n "$b" ] && [ "$b" != null ]; then
     printf '%s' "$b"
   else
-    printf 'main'
+    printf '%s' "${2-main}"
   fi
 }
 
-# Echoes the merge-base SHA against the protected branch, or empty on failure.
-# Uses local refs only (no network fetch in a hook): origin/<b> then <b>.
+# Resolver candidates match the process-gate runner layouts, including the
+# common checkout for linked worktrees. The core's sibling skill covers payload
+# execution and deployed .claude/hooks/lib -> .claude/skills installations.
+sg_find_resolver() {
+  local dir="$1" root="$2" candidate
+  for candidate in \
+    "${TRELLIS_ROOT:+$TRELLIS_ROOT/core-rules/skills/process-gate/scripts/lib/diff-base.sh}" \
+    "$_sg_lib_dir/../../skills/process-gate/scripts/lib/diff-base.sh" \
+    "$dir/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$dir/.agents/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$dir/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$root/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$root/.agents/skills/process-gate/scripts/lib/diff-base.sh"; do
+    [ -f "$candidate" ] || continue
+    printf '%s' "$candidate"; return 0
+  done
+  return 1
+}
+
+# Echoes TAB-separated base / exact range / receipt. No network in a hook.
+# Resolve in the target checkout, without changing a sourced caller's cwd.
+sg_resolve_diff() (
+  local dir="$1" range="${2:-}" ref="${3:-}" head="${4:-}" root resolver rc
+  root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
+  resolver=$(sg_find_resolver "$dir" "$root") || return 2
+  # shellcheck source=/dev/null
+  . "$resolver"
+  cd -- "$dir" || return 1
+  # The resolver reads template.branch from the base, never from the head tree
+  # or the worktree, so the range under test cannot pick its own base.
+  if db_resolve --range="$range" --ref="$ref" --head="$head"; then rc=0; else rc=$?; fi
+  printf '%s\t%s\t%s' "${DB_BASE_SHA:--}" "${DB_RANGE:--}" "$(db_receipt)"
+  return "$rc"
+)
+
+# Compatibility API for /surgical: new markers bind the resolver base. The
+# old protected-branch argument is retained, but policy belongs to the resolver.
 sg_merge_base() {
-  local dir="$1" b="$2" base=""
-  base=$(git -C "$dir" merge-base HEAD "origin/$b" 2>/dev/null) && { printf '%s' "$base"; return; }
-  base=$(git -C "$dir" merge-base HEAD "$b" 2>/dev/null) && { printf '%s' "$base"; return; }
+  local resolved base
+  resolved=$(sg_resolve_diff "$1" "${3:-}") || return 1
+  base=${resolved%%$'\t'*}
+  [ -n "$base" ] || return 1
+  printf '%s' "$base"
+}
+
+# 1.3.10 binding ONLY: retained for existing markers in 1.3.12a/1.3.12
+# (spec 067 6.1.7). Never used to derive a verdict or write a new marker.
+sg_legacy_merge_base() {
+  local dir="$1" b="$2" head="${3:-HEAD}" base=""
+  base=$(git -C "$dir" merge-base "$head" "origin/$b" 2>/dev/null) && { printf '%s' "$base"; return; }
+  base=$(git -C "$dir" merge-base "$head" "$b" 2>/dev/null) && { printf '%s' "$base"; return; }
   printf ''
+}
+
+# Shared CLI parsing keeps both harness prefixes identical. Missing resolver
+# blocks --gate even when policy would otherwise disable the pipeline.
+sg_gate_args() {
+  shift
+  SG_REQUEST_RANGE=""; SG_REQUEST_REF=""; SG_REQUEST_HEAD=""
+  local option value
+  while [ "$#" -gt 0 ]; do
+    option=${1%%=*}
+    case "$1" in
+      --range=*|--ref=*|--head=*) value=${1#*=} ;;
+      --range|--ref|--head) shift; value=${1:-} ;;
+      *) printf '[spec-gate] BLOCKED: unknown gate argument: %s\n' "$1" >&2; return 1 ;;
+    esac
+    [ -n "$value" ] || { printf '[spec-gate] BLOCKED: %s requires a value\n' "$option" >&2; return 1; }
+    case "$option" in
+      --range) SG_REQUEST_RANGE="$value" ;;
+      --ref) SG_REQUEST_REF="$value" ;;
+      --head) SG_REQUEST_HEAD="$value" ;;
+    esac
+    shift
+  done
+  local root
+  root=$(_se_repo_root "$PWD" 2>/dev/null || printf '%s' "$PWD")
+  sg_find_resolver "$PWD" "$root" >/dev/null || {
+    printf '[spec-gate] BLOCKED: diff-base resolver missing; restore the process-gate skill\n' >&2
+    return 1
+  }
+}
+
+# Include one receipt in the reason, before the human verdict text. Dynamic
+# scope keeps SG_RECEIPT local to sg_verdict, including sourced callers.
+sg_result() {
+  printf '%s\t' "$1"
+  [ -z "${SG_RECEIPT:-}" ] || printf '%s\n' "$SG_RECEIPT"
+  printf '%s' "$2"
 }
 
 # A path excluded from the "gated" (feature-code) diff. Deterministic + shared
@@ -225,11 +331,11 @@ sg_is_excluded_path() {
 }
 
 # Echoes the net gated diff size (added+deleted, excluded paths removed) for the
-# branch vs merge-base. Echoes "-1" if the diff cannot be computed (fail-open).
+# exact resolved range. Echoes "-1" if the diff cannot be computed (fail-open).
 sg_compute_gated_diff() {
-  local dir="$1" base="$2" total=0 adds dels relp numstat
-  [ -n "$base" ] || { printf '%s' "-1"; return; }
-  if ! numstat=$(git -C "$dir" diff --numstat "$base"...HEAD 2>/dev/null); then
+  local dir="$1" range="$2" total=0 adds dels relp numstat
+  [ -n "$range" ] || { printf '%s' "-1"; return; }
+  if ! numstat=$(git -C "$dir" diff --numstat "$range" 2>/dev/null); then
     printf '%s' "-1"; return
   fi
   while IFS=$'\t' read -r adds dels relp; do
@@ -249,8 +355,8 @@ EOF
 # check. Merely existing on main does NOT count. Empty with status 0 means no
 # qualifying triad; status 2 means git/grep discovery failed.
 sg_triad_in_range() {
-  local dir="$1" base="$2" paths changed d f grep_status complete
-  if ! paths=$(git -C "$dir" diff --name-only "$base"...HEAD 2>/dev/null); then
+  local dir="$1" range="$2" head="${3:-}" paths changed d f grep_status complete
+  if ! paths=$(git -C "$dir" diff --name-only "$range" 2>/dev/null); then
     return 2
   fi
   if changed=$(printf '%s\n' "$paths" | grep -E '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$' 2>/dev/null); then
@@ -276,7 +382,7 @@ sg_triad_in_range() {
         esac
       fi
     done
-    if [ "$complete" = true ] && sg_nontemplate_ok "$dir/$d"; then
+    if [ "$complete" = true ] && sg_nontemplate_ok "$dir/$d" "$dir" "$head" "$d"; then
       printf '%s' "$d"; return
     fi
   done
@@ -285,12 +391,18 @@ sg_triad_in_range() {
 
 # Each triad file must exceed a min size and carry no unfilled placeholder token.
 sg_nontemplate_ok() {
-  local tdir="$1" f bytes
+  local tdir="$1" dir="${2:-}" head="${3:-}" rel="${4:-}" f bytes text
   for f in spec.md plan.md tasks.md; do
-    [ -f "$tdir/$f" ] || return 1
-    bytes=$(wc -c < "$tdir/$f" 2>/dev/null | tr -d ' ')
+    if [ -n "$head" ]; then
+      text=$(sg_ref_file "$dir" "$head" "$rel/$f") || return 1
+      bytes=$(git -C "$dir" cat-file -s "$head:$rel/$f" 2>/dev/null) || return 1
+    else
+      [ -f "$tdir/$f" ] || return 1
+      text=$(< "$tdir/$f")
+      bytes=$(wc -c < "$tdir/$f" 2>/dev/null | tr -d ' ')
+    fi
     [ "${bytes:-0}" -ge "$SG_TEMPLATE_MIN_BYTES" ] || return 1
-    grep -qE '<NNN>|<slug>|TODO-SPEC|SCAFFOLD-PLACEHOLDER' "$tdir/$f" && return 1
+    printf '%s\n' "$text" | grep -qE '<NNN>|<slug>|TODO-SPEC|SCAFFOLD-PLACEHOLDER' && return 1
   done
   return 0
 }
@@ -302,18 +414,29 @@ sg_autonomy_level() {
   # Never repeat project/runtime lookup here: the shared resolver is the
   # cross-harness authority for precedence, session overrides, and ceilings.
   type _se_resolve_autonomy >/dev/null 2>&1 || { printf '3'; return; }
-  _se_resolve_autonomy "$root"
+  if [ -n "${SG_OBJECT_HEAD:-}" ]; then
+    _se_resolve_autonomy "$root" sg_policy_json
+  else
+    _se_resolve_autonomy "$root"
+  fi
   printf '%s' "${AUTONOMY_LEVEL:-3}"
 }
 
 # L1-3: real interview => clarify.md in the triad OR an explicit spec-waiver.
 # L4-5: agent self-answers => a decisions-log entry for this branch.
 sg_interview_artifact_ok() {
-  local dir="$1" root="$2" tdir="$3" branch="$4" lvl
+  local dir="$1" root="$2" tdir="$3" branch="$4" head="${5:-}" lvl
   lvl=$(sg_autonomy_level "$root")
   if [ "$lvl" -ge 4 ]; then
+    if [ -n "$head" ]; then
+      sg_ref_file "$dir" "$head" decisions-log.md | grep -qF "$branch"; return
+    fi
     [ -f "$root/decisions-log.md" ] && grep -qF "$branch" "$root/decisions-log.md" && return 0
     return 1
+  fi
+  if [ -n "$head" ]; then
+    sg_ref_file "$dir" "$head" "$tdir/clarify.md" >/dev/null && return 0
+    sg_ref_file "$dir" "$head" .claude/spec-waiver >/dev/null; return
   fi
   [ -f "$dir/$tdir/clarify.md" ] && return 0
   [ -f "$root/.claude/spec-waiver" ] && return 0
@@ -324,7 +447,7 @@ sg_interview_artifact_ok() {
 # Marker file lines: branch / worktree_root / merge_base / head / session / mode / reason
 # mode: surgical | emergency. Honored only on full bind match. Emits audit lines.
 sg_valid_marker() {
-  local dir="$1" root="$2" base="$3" diff="$4" ceiling="$5" branch="$6"
+  local dir="$1" root="$2" base="$3" diff="$4" ceiling="$5" branch="$6" head="${7:-}"
   local marker="$root/.claude/session-surgical" log="$root/.claude/spec-gate-audit.log"
   [ -f "$marker" ] || return 1
   local m_branch m_wt m_base m_mode m_reason wt
@@ -332,8 +455,15 @@ sg_valid_marker() {
   m_base=$(sed -n '3p' "$marker");   m_mode=$(sed -n '6p' "$marker")
   m_reason=$(sed -n '7p' "$marker")
   wt=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
-  # Full-bind match: same branch, same worktree, same merge-base. Else stale.
-  [ "$m_branch" = "$branch" ] && [ "$m_wt" = "$wt" ] && [ "$m_base" = "$base" ] || return 1
+  # Branch/worktree binding is unchanged; only the base has a release-limited
+  # compatibility allowance. An unrelated (or empty) base never qualifies.
+  [ "$m_branch" = "$branch" ] && [ "$m_wt" = "$wt" ] || return 1
+  [ -n "$m_base" ] || return 1
+  if [ "$m_base" != "$base" ]; then
+    local legacy
+    legacy=$(sg_legacy_merge_base "$dir" "$(sg_protected_branch "$root")" "$head")
+    [ -n "$legacy" ] && [ "$m_base" = "$legacy" ] || return 1
+  fi
   local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
   if [ "$m_mode" = "emergency" ]; then
     # SAFETY: An emergency override is valid only after its audit record is appended.
@@ -360,7 +490,7 @@ sg_write_marker() {
   branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
   [ -n "$branch" ] && [ "$branch" != "HEAD" ] || return 1
   wt="$dir"
-  base=$(sg_merge_base "$dir" "$(sg_protected_branch "$root")")
+  base=$(sg_merge_base "$dir" "$(sg_protected_branch "$root")") || return 1
   head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
   mkdir -p "$root/.claude" 2>/dev/null || return 1
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
@@ -370,46 +500,76 @@ sg_write_marker() {
 
 # --- the verdict ------------------------------------------------------------
 # Echoes "<verdict>\t<reason>"  verdict in: pass | block | advisory
+# sg_verdict dir [range [ref [head]]]; explicit identity pins object content.
 # Pure function of state. Callers map verdict to their output shape.
 sg_verdict() {
   local dir; dir=$(git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null) || { printf 'advisory\tnot-a-git-worktree'; return; }
   local root; root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
+  local branch protected base diff range resolved rc SG_RECEIPT=""
+  local ref="${3:-${SG_REQUEST_REF:-}}" head="${4:-${SG_REQUEST_HEAD:-}}"
+  local SG_OBJECT_DIR="$dir" SG_OBJECT_HEAD=""
+  if [ -n "$ref" ]; then
+    branch=${ref#refs/heads/}
+    git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || { sg_result block invalid-ref; return; }
+    head=${head:-refs/heads/$branch}
+  else
+    branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  fi
+  if [ -n "$ref" ] || [ -n "$head" ]; then
+    SG_OBJECT_HEAD=$(git -C "$dir" rev-parse --verify "$head^{commit}" 2>/dev/null) || { sg_result block invalid-head; return; }
+    head="$SG_OBJECT_HEAD"
+  fi
+  if resolved=$(sg_resolve_diff "$dir" "${2:-${SG_REQUEST_RANGE:-}}" "$ref" "$head"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ -n "$resolved" ]; then
+    IFS=$'\t' read -r base range SG_RECEIPT <<EOF
+$resolved
+EOF
+  fi
+
   local cfg enabled floor ceiling cfgst
   cfg=$(sg_resolve_cfg "$root"); read -r enabled floor ceiling cfgst <<EOF
 $cfg
 EOF
   case "$cfgst" in
-    disabled) printf 'pass\tdisabled'; return ;;
-    nojq)     printf 'advisory\tjq-absent-cannot-evaluate'; return ;;
-    malformed) printf 'block\tmandatory_pipeline config present but malformed — fix trellis.config.json'; return ;;
+    disabled) sg_result pass disabled; return ;;
+    nojq)     sg_result advisory jq-absent-cannot-evaluate; return ;;
+    malformed) sg_result block 'mandatory_pipeline config present but malformed — fix trellis.config.json'; return ;;
   esac
-  [ "$enabled" = "true" ] || { printf 'pass\tdisabled'; return; }
+  [ "$enabled" = "true" ] || { sg_result pass disabled; return; }
 
-  local branch protected base diff
-  branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
-  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || { printf 'advisory\tdetached-or-unknown-branch'; return; }
+  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || { sg_result advisory detached-or-unknown-branch; return; }
   protected=$(sg_protected_branch "$root")
-  [ "$branch" = "$protected" ] && { printf 'pass\ton-protected-branch'; return; }
-  base=$(sg_merge_base "$dir" "$protected")
-  diff=$(sg_compute_gated_diff "$dir" "$base")
-  [ "$diff" = "-1" ] && { printf 'advisory\tcannot-compute-diff-baseline'; return; }
-  [ "$diff" -le "$floor" ] && { printf 'pass\tsub-floor(%s<=%s)' "$diff" "$floor"; return; }
+  [ "$branch" = "$protected" ] && { sg_result pass on-protected-branch; return; }
+  if [ "$rc" -eq 2 ]; then
+    sg_result advisory 'diff-base resolver missing'; return
+  fi
+  if [ "$rc" -ne 0 ]; then
+    sg_result block 'cannot-resolve-diff-base'; return
+  fi
+  diff=$(sg_compute_gated_diff "$dir" "$range")
+  [ "$diff" = "-1" ] && { sg_result advisory 'cannot-compute-diff-baseline'; return; }
+  [ "$diff" -le "$floor" ] && { sg_result pass "sub-floor($diff<=$floor)"; return; }
 
-  # Over the floor: need triad-in-range (+interview) OR a valid marker.
+  # Option 1 (spec 067): only B's range qualifies. An inherited parent triad
+  # or a tasks-only tick never substitutes for B's own triad (+interview).
   local tdir
-  if ! tdir=$(sg_triad_in_range "$dir" "$base"); then
-    printf 'advisory\tcannot-discover-spec-triad'; return
+  if ! tdir=$(sg_triad_in_range "$dir" "$range" "$SG_OBJECT_HEAD"); then
+    sg_result advisory 'cannot-discover-spec-triad'; return
   fi
   if [ -n "$tdir" ]; then
-    if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch"; then
-      printf 'pass\tspec-triad(%s)+interview' "$tdir"; return
+    if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch" "$SG_OBJECT_HEAD"; then
+      sg_result pass "spec-triad($tdir)+interview"; return
     fi
-    printf 'block\tspec triad %s present but the interview artifact is missing (clarify.md / spec-waiver at L1-3, decisions-log entry at L4-5)' "$tdir"; return
+    sg_result block "spec triad $tdir present but the interview artifact is missing (clarify.md / spec-waiver at L1-3, decisions-log entry at L4-5)"; return
   fi
-  if sg_valid_marker "$dir" "$root" "$base" "$diff" "$ceiling" "$branch"; then
-    printf 'pass\tsurgical-marker'; return
+  if sg_valid_marker "$dir" "$root" "$base" "$diff" "$ceiling" "$branch" "$SG_OBJECT_HEAD"; then
+    sg_result pass 'surgical-marker'; return
   fi
-  printf 'block\t%s gated lines over floor %s with no in-range spec triad and no valid surgical declaration' "$diff" "$floor"
+  sg_result block "$diff gated lines over floor $floor with no in-range spec triad and no valid surgical declaration"
 }
 
 # Human-facing remedy message (shared by all callers).

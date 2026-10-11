@@ -95,7 +95,7 @@ NODE
   enabled="$(printf '%s\n' "$args" | jq -c '
     .autoExecuteTopN = 1
     | .authorAgent = "sol"
-    | .reviewerAgent = "grok"
+    | .reviewerAgent = "gemini"
     | .__agentOutputByLabel["review:alpha"] = {id:"alpha", reviewed:true, ready:true, notes:"approved"}
     | .__agentOutputByLabel["execute:alpha"] = {
         id:"alpha",
@@ -106,7 +106,7 @@ NODE
       }
   ')"
   _run_recipe "$CONDUCTOR_RECIPE" "$enabled"
-  _json_assert "!r.error && (() => { const spec = r.prompts.find((entry) => entry.opts.label === 'spec:alpha'); const review = r.prompts.find((entry) => entry.opts.label === 'review:alpha'); const execute = r.prompts.find((entry) => entry.opts.label === 'execute:alpha'); return r.result.reviews.length === 1 && r.result.executions.length === 1 && r.result.executions[0].pr_url.endsWith('/pull/7') && spec.opts.agentType === 'sol' && review.opts.agentType === 'grok' && execute.opts.agentType === 'sol' && review.prompt.includes('independent CONDUCTOR spec reviewer') && execute.prompt.includes('Run the Trellis execute pipeline') && execute.prompt.includes('[HOLD]') && execute.prompt.includes('Never merge') && execute.prompt.includes('normal permission mode') && execute.prompt.includes('Do not request or enable a scheduler-wide permission bypass') && !r.prompts.some((entry) => 'agent' in entry.opts || 'permissionMode' in entry.opts || 'permission_mode' in entry.opts); })()"
+  _json_assert "!r.error && (() => { const spec = r.prompts.find((entry) => entry.opts.label === 'spec:alpha'); const review = r.prompts.find((entry) => entry.opts.label === 'review:alpha'); const execute = r.prompts.find((entry) => entry.opts.label === 'execute:alpha'); return r.result.reviews.length === 1 && r.result.executions.length === 1 && r.result.executions[0].pr_url.endsWith('/pull/7') && spec.opts.agentType === 'sol' && review.opts.agentType === 'gemini' && execute.opts.agentType === 'sol' && review.prompt.includes('independent CONDUCTOR spec reviewer') && execute.prompt.includes('Run the Trellis execute pipeline') && execute.prompt.includes('[HOLD]') && execute.prompt.includes('Never merge') && execute.prompt.includes('normal permission mode') && execute.prompt.includes('Do not request or enable a scheduler-wide permission bypass') && !r.prompts.some((entry) => 'agent' in entry.opts || 'permissionMode' in entry.opts || 'permission_mode' in entry.opts); })()"
 
   held="$(printf '%s\n' "$enabled" | jq -c '.__agentOutputByLabel.rank.ranked[0].safe = "manual"')"
   _run_recipe "$CONDUCTOR_RECIPE" "$held"

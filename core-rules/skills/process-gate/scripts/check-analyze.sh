@@ -23,7 +23,7 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # exit 1 -> BLOCKED. Disable -e so the only reachable exits are explicit 0/2.
 set +e
 
-pg_load_config
+pg_load_config "$@" || exit 2  # this gate never exits 1; run-all blocks on config
 RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
 

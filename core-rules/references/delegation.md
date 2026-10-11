@@ -213,7 +213,8 @@ fan-outs exist to feed.
 
 The rules themselves — full-height Apex on the left 40%, up to four foremen
 filling the right 60% as a 2x2 on demand, overflow only after all four slots fill,
-visible panes over headless whenever the operator wants to watch, preserved focus,
+the HARD owner rule that all delegated agent work uses visible Herdr panes (only
+harness-native subagents and Dynamic Workflow agents are exempt), preserved focus,
 closing completed owned panes (never unrelated operator panes), and a finished
 tab being a held resource like a pane — are stated once, in
 [`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).

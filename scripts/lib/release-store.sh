@@ -765,10 +765,17 @@ release_store_verify_path_body() (
   # A read-only store parent reports unavailable rather than falling back
   # outside the store.
   tmpdir="$(release_store_mktemp_dir "${release_canon%/*}/.tmp.$version.verify.XXXXXX")" || return 5
+  # rm never follows a symlink it removes; tmpdir is this subshell's own mktemp.
   cleanup_verify() {
     [ -n "${tmpdir:-}" ] && [ -d "$tmpdir" ] && rm -rf "$tmpdir"
+    [ -n "${tmpdir:-}" ] && rm -f "$tmpdir.owner.json"
   }
   trap cleanup_verify EXIT INT TERM
+  # The same sibling owner record exec snapshots carry, so a SIGKILLed verify
+  # is reapable by pid after 1 h (release_store_reap_tmp). Without one it still
+  # falls under the 24 h rule, so a failed write degrades loudly, not fatally.
+  release_store_write_snapshot_owner "$tmpdir" ||
+    release_store_err "verify scratch has no owner record; reap-tmp keeps it 24 h: $tmpdir"
 
   manifest_paths="$tmpdir/manifest.paths"
   fs_paths="$tmpdir/fs.paths"
@@ -2197,6 +2204,343 @@ release_store_remove_owned_snapshots() {
     fi
   done
   return "$rc"
+}
+
+# release_store_reap_tmp dry-run|fix|summary [CAP_BYTES]
+#
+# The supported reaper for leaked `.tmp.*` scratch in the release store (spec
+# 067 §6.3, ruling R6). Candidates are the direct `.tmp.*` children of the
+# canonical releases dir, where every producer allocates its scratch: scratch
+# directories, and `<d>.owner.json` files whose `<d>` is gone. A nested
+# `.tmp.*` name is never a candidate: inside scratch it goes with its parent,
+# inside an installed release it is release content. Age is the newer mtime of
+# a directory and its owner file.
+#
+#   valid owner record:    reap at age > 1 h once the owner is dead (no such
+#                          pid, or a live pid with a different process birth)
+#   no readable record:    reap at age > 24 h
+#   orphaned owner file:   reap at age > 1 h
+#
+# Anything indeterminate counts as alive. A symlinked or non-directory
+# candidate, or a symlinked owner file, is refused and never touched. `fix`
+# re-classifies each candidate immediately before removing it, removes the
+# directory descriptor-relative without following links, then its owner file,
+# and logs one `removed` line per entry. `dry-run` writes nothing. `summary`
+# prints `ENTRIES BYTES REAPABLE REAPABLE_BYTES REFUSED CAPPED` for doctor;
+# once BYTES passes CAP_BYTES the remaining entries are counted and classified
+# but not sized (CAPPED=1, so BYTES is a lower bound). Refused entries are
+# counted but never sized.
+#
+# Status: 0, or 4 when an entry was refused or a removal failed.
+release_store_reap_tmp() {
+  local mode="${1:-}" cap="${2:-0}" raw_releases releases python_bin birth_program
+  case "$mode" in
+    dry-run|fix|summary) ;;
+    *)
+      release_store_err "reap-tmp mode must be dry-run, fix, or summary"
+      return 2
+      ;;
+  esac
+  case "$cap" in
+    ''|*[!0-9]*)
+      release_store_err "reap-tmp byte cap must be a whole number"
+      return 2
+      ;;
+  esac
+  raw_releases="$(release_store_releases_dir)" || return $?
+  if [ ! -e "$raw_releases" ] && [ ! -L "$raw_releases" ]; then
+    if [ "$mode" = summary ]; then
+      printf '0 0 0 0 0 0\n'
+    else
+      printf 'reap-tmp: total entries=0 bytes=0 (no release store)\n'
+    fi
+    return 0
+  fi
+  releases="$(release_store_canonical_releases_dir)" || return $?
+  command -v python3 >/dev/null 2>&1 || {
+    release_store_err "python3 with descriptor-relative filesystem support is required for reap-tmp"
+    return 5
+  }
+  python_bin="$(command -v python3)" || return 5
+  birth_program="$(release_store_process_birth_python)" || return 5
+  # The sink reads each owner's live birth through the shared reader, never
+  # around it: export the reader so the embedded Python reaches the one
+  # definition even where it cannot spell the ps invocation itself.
+  export -f release_store_process_birth release_store_process_birth_python 2>/dev/null || {
+    release_store_err "reap-tmp requires an exporting shell for the shared birth reader"
+    return 5
+  }
+  "$python_bin" -I - "$releases" "$mode" "$birth_program" "$cap" "${BASH:-bash}" release_store_process_birth <<'PY'
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+
+releases, mode, birth_program = sys.argv[1:4]
+cap = int(sys.argv[4])
+birth_bash, birth_func = sys.argv[5:7]
+HOUR, DAY = 3600, 86400
+SUFFIX = ".owner.json"
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+class Refused(Exception):
+    pass
+
+
+def lstat_at(fd, name):
+    try:
+        return os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def same(a, b):
+    return a is not None and b is not None and (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def open_dir(parent_fd, name, expected):
+    fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd)
+    if not same(os.fstat(fd), expected):
+        os.close(fd)
+        raise Refused("directory changed while opening")
+    return fd
+
+
+def walk(fd, device, remove):
+    """Allocated bytes below fd; with remove, unlink everything bottom-up."""
+    total = 0
+    if remove:
+        os.fchmod(fd, 0o700)  # snapshots and stages are sealed read-only
+    for name in os.listdir(fd):
+        st = lstat_at(fd, name)
+        if st is None:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            if st.st_dev != device:
+                raise Refused("contains a mount point")
+            child = open_dir(fd, name, st)
+            try:
+                total += walk(child, device, remove)
+            finally:
+                os.close(child)
+            if remove:
+                os.rmdir(name, dir_fd=fd)
+        elif remove:
+            os.unlink(name, dir_fd=fd)
+        total += st.st_blocks * 512
+    return total
+
+
+def read_owner(fd, name):
+    """(stat, record); record is None when absent, unreadable or malformed."""
+    st = lstat_at(fd, name)
+    if st is None:
+        return None, None
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused("owner file is a symlink or not a regular file")
+    try:
+        owner_fd = os.open(name, os.O_RDONLY | O_NOFOLLOW, dir_fd=fd)
+        try:
+            data = os.read(owner_fd, 4097) if same(os.fstat(owner_fd), st) else b""
+        finally:
+            os.close(owner_fd)
+        record = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError):
+        return st, None
+    if (
+        isinstance(record, dict)
+        and sorted(record) == ["pid", "process_birth", "schema_version"]
+        and type(record["schema_version"]) is int
+        and record["schema_version"] == 1
+        and type(record["pid"]) is int
+        and 0 < record["pid"] <= 2147483647
+        and isinstance(record["process_birth"], str)
+        and record["process_birth"].strip()
+    ):
+        return st, record
+    return st, None
+
+
+def owner_alive(record):
+    """Alive only when the pid exists with the recorded birth; unsure is alive."""
+    pid = record["pid"]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    if sys.platform == "darwin":
+        argv = [sys.executable, "-I", "-c", birth_program, str(pid)]
+        try:
+            result = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=dict(os.environ, LC_ALL="C"), timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if result.returncode == 3:
+            return False
+        birth = result.stdout.decode("utf-8", "replace").strip()
+        if result.returncode != 0 or not birth:
+            return True
+        return birth == record["process_birth"].strip()
+    # Every other platform reads through the shared shell reader: the token
+    # acquisition stays one definition, owned by release_store_process_birth.
+    argv = [birth_bash, "-c", '"$1" "$2"', "birth", birth_func, str(pid)]
+    try:
+        result = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=dict(os.environ, LC_ALL="C"), timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    birth = result.stdout.decode("utf-8", "replace").strip()
+    if result.returncode != 0 or not birth:
+        return True
+    return birth == record["process_birth"].strip()
+
+
+def classify(fd, name, now):
+    """(kind, reap, owner_state, age, entry_stat, owner_stat) or None if gone."""
+    if name.endswith(SUFFIX):
+        if lstat_at(fd, name[: -len(SUFFIX)]) is not None:
+            return None  # a companion; its directory is the candidate
+        st = lstat_at(fd, name)
+        if st is None:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused("owner file is a symlink or not a regular file")
+        age = now - st.st_mtime
+        return "orphan-owner", age > HOUR, "orphan", age, None, st
+    st = lstat_at(fd, name)
+    if st is None:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused("symlinked candidate")
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused("not a directory")
+    if st.st_dev != root_stat.st_dev:
+        raise Refused("on another device")
+    owner_stat, record = read_owner(fd, name + SUFFIX)
+    age = now - max(st.st_mtime, owner_stat.st_mtime if owner_stat else 0)
+    if record is None:
+        state = "none" if owner_stat is None else "unreadable"
+        return "dir", age > DAY, state, age, st, owner_stat
+    alive = owner_alive(record)
+    return "dir", (not alive) and age > HOUR, "alive" if alive else "dead", age, st, owner_stat
+
+
+def size(fd, name, entry_stat, owner_stat):
+    total = owner_stat.st_blocks * 512 if owner_stat is not None else 0
+    if entry_stat is not None:
+        child = open_dir(fd, name, entry_stat)
+        try:
+            total += entry_stat.st_blocks * 512 + walk(child, root_stat.st_dev, False)
+        finally:
+            os.close(child)
+    return total
+
+
+def unchanged(first, again):
+    """The fresh verdict still reaps the same directory and owner file."""
+    if again is None or not again[1] or again[0] != first[0]:
+        return False
+    for before, after in ((first[4], again[4]), (first[5], again[5])):
+        if (before is None) != (after is None):
+            return False
+        if before is not None and not same(before, after):
+            return False
+    return True
+
+
+def remove(fd, name, entry_stat, owner_stat):
+    owner_name = name + SUFFIX if entry_stat is not None else name
+    if entry_stat is not None:
+        child = open_dir(fd, name, entry_stat)
+        try:
+            walk(child, root_stat.st_dev, True)
+        finally:
+            os.close(child)
+        if not same(lstat_at(fd, name), entry_stat):
+            raise Refused("directory changed before final removal")
+        os.rmdir(name, dir_fd=fd)
+    # Directory first, then its owner file: an interrupted reap leaves an
+    # orphan the next run collects, never an ownerless live-looking directory.
+    if owner_stat is not None:
+        if not same(lstat_at(fd, owner_name), owner_stat):
+            raise Refused("owner file changed before removal")
+        os.unlink(owner_name, dir_fd=fd)
+
+
+if not O_DIRECTORY or not O_NOFOLLOW or os.path.realpath(releases) != releases:
+    sys.stderr.write("trellis release: reap-tmp requires a canonical releases dir and no-follow opens\n")
+    raise SystemExit(4)
+root_fd = os.open(releases, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+root_stat = os.fstat(root_fd)
+if not same(root_stat, os.lstat(releases)):
+    sys.stderr.write("trellis release: releases dir changed while opening\n")
+    raise SystemExit(4)
+
+totals = {"entries": 0, "bytes": 0, "reapable": 0, "reapable_bytes": 0, "refused": 0, "failed": 0, "capped": 0}
+for name in sorted(os.listdir(root_fd)):
+    if not name.startswith(".tmp."):
+        continue
+    try:
+        found = classify(root_fd, name, time.time())
+        if found is None:
+            continue
+        kind, reap, state, age, entry_stat, owner_stat = found
+        if cap and totals["bytes"] > cap:
+            nbytes = 0  # past the caller's threshold: count, do not walk
+            totals["capped"] = 1
+        else:
+            nbytes = size(root_fd, name, entry_stat, owner_stat)
+    except FileNotFoundError:
+        continue  # its owner removed it while we looked
+    except (Refused, OSError, RecursionError) as error:
+        totals["entries"] += 1
+        totals["refused"] += 1
+        if mode != "summary":
+            print("reap-tmp: refused %s (%s)" % (name, error))
+        continue
+    totals["entries"] += 1
+    totals["bytes"] += nbytes
+    label = "keep"
+    if reap and mode == "fix":
+        try:
+            # TOCTOU: decide again from fresh state immediately before removal.
+            again = classify(root_fd, name, time.time())
+            if not unchanged(found, again):
+                print("reap-tmp: kept %s %s (changed since scan)" % (kind, name))
+                continue
+            remove(root_fd, name, entry_stat, owner_stat)
+        except (Refused, OSError, RecursionError) as error:
+            totals["failed"] += 1
+            sys.stderr.write("trellis release: reap-tmp could not remove %s: %s\n" % (name, error))
+            continue
+        label = "removed"
+    elif reap:
+        label = "reapable"
+    if reap:
+        totals["reapable"] += 1
+        totals["reapable_bytes"] += nbytes
+    if mode != "summary":
+        print("reap-tmp: %s %s %s age=%ds owner=%s bytes=%d" % (label, kind, name, age, state, nbytes))
+os.close(root_fd)
+
+if mode == "summary":
+    print("%(entries)d %(bytes)d %(reapable)d %(reapable_bytes)d %(refused)d %(capped)d" % totals)
+elif mode == "fix":
+    print("reap-tmp: total entries=%(entries)d bytes=%(bytes)d removed=%(reapable)d removed_bytes=%(reapable_bytes)d refused=%(refused)d failed=%(failed)d" % totals)
+else:
+    print("reap-tmp: total entries=%(entries)d bytes=%(bytes)d reapable=%(reapable)d reapable_bytes=%(reapable_bytes)d refused=%(refused)d (dry-run: nothing removed; --fix removes the reapable entries)" % totals)
+raise SystemExit(4 if totals["refused"] or totals["failed"] else 0)
+PY
 }
 
 release_store_snapshot_verified_release() (

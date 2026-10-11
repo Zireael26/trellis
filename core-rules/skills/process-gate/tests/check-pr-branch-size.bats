@@ -101,12 +101,18 @@ write_bulk() {
     git add -A && git commit -q -m "feat: bulk"
   )
 
+  # A missing base now fails at config load (gate config loads from the base);
+  # a missing end still reaches every git read below.
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=missing-base..HEAD"
   [ "$status" -eq 1 ]
-  grep -Fq 'unable to enumerate commit subjects for range missing-base..HEAD' <<<"$output"
-  grep -Fq 'unable to compute diff stats for range missing-base..HEAD' <<<"$output"
-  grep -Fq 'unable to enumerate changed files for range missing-base..HEAD' <<<"$output"
-  grep -Fq 'unable to enumerate added files for range missing-base..HEAD' <<<"$output"
+  grep -Fq 'process-gate cannot resolve the base of range missing-base..HEAD' <<<"$output"
+
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD..missing-head"
+  [ "$status" -eq 1 ]
+  grep -Fq 'unable to enumerate commit subjects for range HEAD..missing-head' <<<"$output"
+  grep -Fq 'unable to compute diff stats for range HEAD..missing-head' <<<"$output"
+  grep -Fq 'unable to enumerate changed files for range HEAD..missing-head' <<<"$output"
+  grep -Fq 'unable to enumerate added files for range HEAD..missing-head' <<<"$output"
 }
 
 @test "branch: running outside a repository fails closed" {
@@ -117,7 +123,7 @@ write_bulk() {
   rm -rf "$outside_dir"
 
   [ "$status" -eq 1 ]
-  grep -Fq 'unable to determine current branch' <<<"$output"
+  grep -Fq 'process-gate cannot resolve the base of range HEAD~1..HEAD' <<<"$output"
 }
 
 @test "size: oversized range with no ADR fails" {

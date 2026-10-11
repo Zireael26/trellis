@@ -93,11 +93,11 @@ assert_output_contains() {
   local shape expected_agent expected_effort
   for row in \
     "scan gemini high" \
-    "mechanical-coding luna max" \
+    "mechanical-coding haiku-xhigh xhigh" \
     "bounded-review cheap-2 xhigh" \
     "deep-work sol high" \
     "hard-work sol-xhigh xhigh" \
-    "security-review security-reviewer xhigh" \
+    "security-review astra high" \
     "merge-review opus high"; do
     read -r shape expected_agent expected_effort <<<"$row"
     run --separate-stderr classify_with "$AVAILABLE" "$shape"
@@ -199,14 +199,19 @@ assert_output_contains() {
 }
 
 @test "metered no-report routes refuse before declared prepaid fallback" {
-  run --separate-stderr classify_with "$NO_REPORT" scan
+  # Haiku is unmetered and would otherwise serve the scout rung between gemini
+  # and cheap-2. Refuse it via disabledCredentials so the metered -> prepaid
+  # fallback is still the route exercised.
+  jq -c '.disabledCredentials = ((.disabledCredentials // []) + [{"provider": "anthropic"}])' \
+    "$NO_REPORT" >"$BATS_TEST_TMPDIR/no-report-anthropic-off.json"
+  run --separate-stderr classify_with "$BATS_TEST_TMPDIR/no-report-anthropic-off.json" scan
   assert_status 0
   assert_json
   assert_field '.chosen_agent' cheap-2
   assert_field '.provider' opencode-go-2
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e '
-    .trail == ["gemini:no-report:-", "cheap-2:prepaid:-"]
+    .trail == ["gemini:no-report:-", "haiku:disabled:0.0", "cheap-2:prepaid:-"]
   ' >/dev/null; then
     printf 'metered no-report route was not refused before unmetered fallback:\n%s\n' \
       "$output" >&2
@@ -232,10 +237,14 @@ assert_output_contains() {
 }
 
 @test "automatic routes accept a declared prepaid route without a report" {
-  # `implementer` is luna -> sol -> cheap-2 -> ..., so metered no-report candidates
-  # refuse first and the prepaid one wins: the property is "prepaid is reached
-  # only after metered routes refuse", not "prepaid can serve a verdict role".
-  run --separate-stderr classify_with "$NO_REPORT" mechanical-coding
+  # `implementer` is haiku-xhigh -> haiku -> luna -> sol -> cheap-2 -> ..., so
+  # metered no-report candidates refuse first and the prepaid one wins: the
+  # property is "prepaid is reached only after metered routes refuse", not
+  # "prepaid can serve a verdict role". Both unmetered Haiku rungs are refused
+  # via disabledCredentials so the metered -> prepaid path is still exercised.
+  jq -c '.disabledCredentials = ((.disabledCredentials // []) + [{"provider": "anthropic"}])' \
+    "$NO_REPORT" >"$BATS_TEST_TMPDIR/no-report-anthropic-off.json"
+  run --separate-stderr classify_with "$BATS_TEST_TMPDIR/no-report-anthropic-off.json" mechanical-coding
   assert_status 0
   assert_json
   assert_field '.chosen_agent' cheap-2
@@ -244,6 +253,8 @@ assert_output_contains() {
   assert_field '.fallback_used' true
   if ! printf '%s' "$output" | jq -e '
     .trail == [
+      "haiku-xhigh:disabled:0.0",
+      "haiku:disabled:0.0",
       "luna:no-report:-",
       "sol:no-report:-",
       "cheap-2:prepaid:-"
@@ -269,8 +280,8 @@ assert_output_contains() {
     --actual-model opencode-go/deepseek-v4-flash:max
   assert_status 4
   assert_json
-  assert_field '.chosen_agent' luna
-  assert_field '.reasoning_effort' max
+  assert_field '.chosen_agent' haiku-xhigh
+  assert_field '.reasoning_effort' xhigh
   assert_field '.actual_model' 'opencode-go/deepseek-v4-flash:max'
   assert_field '.runtime_match' false
   assert_field '.dispatchable' true
@@ -287,14 +298,14 @@ assert_output_contains() {
     printf 'producer-family exclusion was absent from trail:\n%s\n' "$output" >&2
     false
   fi
-  run --separate-stderr classify_with "$AVAILABLE" security-review --producer-agent grok
+  run --separate-stderr classify_with "$AVAILABLE" security-review --producer-agent sol
   assert_status 0
   assert_json
-  assert_field '.producer_family' xai
+  assert_field '.producer_family' openai
   assert_field '.chosen_agent' opus
   assert_field '.fallback_used' true
-  if ! printf '%s' "$output" | jq -e 'any(.trail[]; . == "security-reviewer:same-family")' >/dev/null; then
-    printf 'security verdict did not exclude the xai producer family:\n%s\n' "$output" >&2
+  if ! printf '%s' "$output" | jq -e 'any(.trail[]; . == "astra:same-family")' >/dev/null; then
+    printf 'security verdict did not exclude the openai producer family:\n%s\n' "$output" >&2
     false
   fi
 
@@ -324,13 +335,17 @@ usage = json.load(open(usage_path))
 rr.auth_probe_passes = lambda candidate, cache: True
 
 roles, degraded = rr.resolve(cfg, usage, "luna", today="2026-08-22")
-assert degraded == []
+# Grok retired: beside an OpenAI producer and a Meta reviewer only Google and
+# Anthropic remain, so the refuter is 2/3 and says so.
+assert degraded == ["refuter"]
 assert roles["merge_reviewer"]["chosen"]["agent"] == "opus"
-# Refuter seats reuse the security (xai) and merge (anthropic) families but
-# never the reviewer's (meta).
+# Astra shares the producer's family, so Opus takes the security seat.
+assert roles["security_reviewer"]["chosen"]["agent"] == "opus"
+# The opus refuter seat reuses the security and merge family (anthropic) but
+# no seat takes the reviewer's (meta).
 assert roles["reviewer"]["chosen"]["agent"] == "cheap-2"
 assert [seat["agent"] for seat in roles["refuter"]["seats"]] == [
-    "gemini", "grok", "opus",
+    "gemini", "opus",
 ]
 assert ("cheap-2", "verdict-family-in-use") in [
     (row["agent"], row["reason"]) for row in roles["refuter"]["refusals"]
@@ -353,7 +368,7 @@ assert (roles["security_reviewer"]["refusals"][0]["agent"],
         roles["security_reviewer"]["refusals"][0]["reason"]) == (
     "cheap-2", "verdict-family-in-use"
 )
-assert roles["security_reviewer"]["chosen"]["agent"] == "security-reviewer"
+assert roles["security_reviewer"]["chosen"]["agent"] == "opus"
 assert roles["merge_reviewer"]["chosen"]["agent"] == "cheap-2"
 assert rr.family_collapse(cfg, roles, "luna") == []
 roles["security_reviewer"]["chosen"] = roles["merge_reviewer"]["chosen"]
@@ -363,8 +378,10 @@ assert any("reviewer and security_reviewer" in finding
 # Claude output cannot use Opus as any verdict seat; Sol reviews it instead.
 claude_cfg = json.load(open(roles_path))
 roles, degraded = rr.resolve(claude_cfg, usage, "opus", today="2026-08-22")
-assert degraded == []
+assert degraded == ["refuter"]
+assert roles["security_reviewer"]["chosen"]["agent"] == "astra"
 assert roles["merge_reviewer"]["chosen"]["agent"] == "sol-xhigh"
+assert [seat["agent"] for seat in roles["refuter"]["seats"]] == ["gemini", "sol"]
 assert all(
     row["agent"] != "opus"
     for role in rr.VERDICT_ROLES
@@ -437,7 +454,7 @@ PY
   assert_status 0
   assert_json
   assert_field '.usage_source' openusage:live
-  assert_field '.roles.implementer.chosen.agent' luna
+  assert_field '.roles.implementer.chosen.agent' haiku-xhigh
   [ ! -e "$LEGACY_HOME/.omp/agent/roles-resolved.json" ]
   [ ! -e "$LEGACY_HOME/.trellis/state/roles-resolved.json" ]
 }
@@ -586,6 +603,7 @@ assert rr.misrouted({
 })
 assert [candidate["agent"] for candidate in resolved["trail"]] == [
     "gemini",
+    "haiku",
     "cheap-2",
 ]
 assert all(
@@ -626,11 +644,11 @@ count, findings = rr.panel_families(cfg, ["cheap", "luna", "sol"])
 assert count == 2
 assert findings and "one prior" in findings[0]
 
-count, findings = rr.panel_families(cfg, ["grok", "cheap"])
+count, findings = rr.panel_families(cfg, ["gemini", "cheap"])
 assert count == 2
 assert findings == []
 
-count, findings = rr.panel_families(cfg, ["grok", "unmapped-seat"])
+count, findings = rr.panel_families(cfg, ["gemini", "unmapped-seat"])
 assert count == 1
 assert findings and "cannot be counted" in findings[0]
 print("independent")
@@ -712,6 +730,16 @@ with tempfile.TemporaryDirectory() as home:
     os.makedirs(os.path.dirname(resolver_path))
     shutil.copyfile(source_resolver, resolver_path)
     shutil.copyfile(source_roles, roles_path)
+    # This test pins an OpenAI (luna) implementer and its verdict seats; drop the
+    # unmetered Haiku rungs (unit H) from the payload so luna stays the head.
+    with open(roles_path) as handle:
+        payload_roles = json.load(handle)
+    for role_spec in payload_roles["roles"].values():
+        role_spec["chain"] = [
+            row for row in role_spec["chain"] if row["agent"] not in ("haiku", "haiku-xhigh")
+        ]
+    with open(roles_path, "w") as handle:
+        json.dump(payload_roles, handle, indent=2)
     with open(roles_path, "rb") as policy:
         policy_bytes = policy.read()
     cfg = json.loads(policy_bytes)
@@ -764,7 +792,7 @@ with tempfile.TemporaryDirectory() as home:
         "implementer_provider": provider,
         "implementer_family": "openai",
         "cross_family_enforced": True,
-        "verdict_families_distinct": True,
+        "verdict_families_distinct": False,
         "herdr_workspace_id": "fixture-workspace",
         "herdr_pane_id": "fixture-pane",
     }
@@ -774,20 +802,22 @@ with tempfile.TemporaryDirectory() as home:
         model,
         provider,
     )
-    assert scoped["approval_ready"] is True
+    # Grok retired: Google and Anthropic are the only refuter families left
+    # beside an OpenAI producer and a Meta reviewer, so the panel is 2/3.
+    assert scoped["approval_ready"] is False
     assert scoped["family_collapse"] == []
-    assert scoped["degraded_roles"] == []
-    assert scoped["degraded_verdict_roles"] == []
+    assert scoped["degraded_roles"] == ["refuter"]
+    assert scoped["degraded_verdict_roles"] == ["refuter"]
     assert scoped["roles"]["reviewer"]["chosen"]["agent"] == "cheap-2"
-    assert scoped["roles"]["security_reviewer"]["chosen"]["agent"] == "security-reviewer"
+    assert scoped["roles"]["security_reviewer"]["chosen"]["agent"] == "opus"
     merge = scoped["roles"]["merge_reviewer"]
     assert merge["chosen"]["agent"] == "opus"
     refuter = scoped["roles"]["refuter"]
     assert refuter["required_seats"] == 3
     assert [row["agent"] for row in cfg["roles"]["refuter"]["chain"]] == [
-        "gemini", "grok", "cheap-2", "sol", "opus", "cheap",
+        "gemini", "cheap-2", "sol", "opus", "cheap",
     ]
-    assert [seat["agent"] for seat in refuter["seats"]] == ["gemini", "grok", "opus"]
+    assert [seat["agent"] for seat in refuter["seats"]] == ["gemini", "opus"]
     assert refuter["chosen"]["agent"] == "gemini"
     assert [(row["agent"], row["reason"]) for row in refuter["refusals"]] == [
         ("cheap-2", "verdict-family-in-use"),
@@ -834,7 +864,7 @@ with tempfile.TemporaryDirectory() as home:
 
     # A selector that is configured in policy but does not match the live
     # implementer row clears the artifact rather than publishing stale authority.
-    sys.argv = [sys.argv[0], "--implementer", "grok", "--json"]
+    sys.argv = [sys.argv[0], "--implementer", "sol", "--json"]
     with contextlib.redirect_stdout(io.StringIO()):
         try:
             rr.main()
@@ -880,6 +910,19 @@ with tempfile.TemporaryDirectory() as home:
     os.makedirs(os.path.dirname(resolver_path))
     shutil.copyfile(source_resolver, resolver_path)
     shutil.copyfile(source_roles, roles_path)
+    # Haiku is unmetered and leads the implementer chain, so a Codex quota flip
+    # could never dislodge it. Drop its rungs from this payload so the Luna flip
+    # stays the route under test (disabling the anthropic credential would also
+    # refuse opus). test_roster_resolves.sh covers the Haiku routes.
+    with open(roles_path) as handle:
+        payload_roles = json.load(handle)
+    for role_spec in payload_roles["roles"].values():
+        role_spec["chain"] = [
+            row for row in role_spec["chain"]
+            if row["agent"] not in ("haiku", "haiku-xhigh")
+        ]
+    with open(roles_path, "w") as handle:
+        json.dump(payload_roles, handle, indent=2)
     with open(os.path.join(trellis_home, "config.json"), "w") as config:
         json.dump({"active_cli_release": "1.2.3"}, config)
     os.environ.update({
@@ -1157,7 +1200,9 @@ for malformed in (
     {"reports": [None, {"provider": "opencode", "limits": {}}]},
 ):
     roles, _ = rr.resolve(cfg, malformed, today="2026-08-22")
-    chosen = roles["implementer"]["chosen"]
+    # The foreman chain (sol-xhigh, then prepaid cheap-2) holds no unmetered
+    # Haiku rung, so a malformed report still falls through to prepaid there.
+    chosen = roles["foreman"]["chosen"]
     assert chosen["agent"] == "cheap-2"
     assert chosen["remaining"] is None
     assert chosen["note"] == "prepaid"
@@ -1359,9 +1404,15 @@ spec = importlib.util.spec_from_file_location("rr", resolver_path)
 rr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rr)
 cfg = json.load(open(roles_path))
+# The panel is pinned for an OpenAI (luna) implementer; drop the unmetered
+# Haiku rungs (unit H) so discovery keeps luna.
+for role_spec in cfg["roles"].values():
+    role_spec["chain"] = [
+        row for row in role_spec["chain"] if row["agent"] not in ("haiku", "haiku-xhigh")
+    ]
 good = [sys.executable, "-c", "import os; assert not os.isatty(0); print('credential-value')"]
 bad = [sys.executable, "-c", "print('failed-credential'); raise SystemExit(1)"]
-# Leave meta and xai available to this panel; refuse the Claude fallback too.
+# Leave meta available to this panel; refuse the Claude fallback too.
 # Every auth call is a local subprocess.
 for role_name, role in cfg["roles"].items():
     for candidate in role["chain"]:
@@ -1382,7 +1433,7 @@ refuter = roles["refuter"]
 assert refuter["required_seats"] == 3
 # Every single verdict role fails auth, so no reviewer family is reserved.
 assert roles["reviewer"]["chosen"] is None
-assert [seat["agent"] for seat in refuter["seats"]] == ["grok", "cheap-2"], "failed auth admitted or surviving seats lost"
+assert [seat["agent"] for seat in refuter["seats"]] == ["cheap-2"], "failed auth admitted or surviving seats lost"
 assert len(refuter["seats"]) < refuter["required_seats"]
 assert [(row["agent"], row["reason"]) for row in refuter["refusals"]] == [
     ("gemini", "auth-probe-failed"),
@@ -1391,7 +1442,7 @@ assert [(row["agent"], row["reason"]) for row in refuter["refusals"]] == [
 ]
 assert "refuter" in degraded
 assert refuter["chosen"]["agent"] == refuter["seats"][0]["agent"]
-assert {cfg["agents"][seat["agent"]]["family"] for seat in refuter["seats"]} == {"meta", "xai"}
+assert {cfg["agents"][seat["agent"]]["family"] for seat in refuter["seats"]} == {"meta"}
 assert rr.family_collapse(cfg, roles, "luna") == []
 assert all(
     seat["eligible"] and seat["reason"] == "eligible"
@@ -1411,7 +1462,7 @@ with tempfile.TemporaryDirectory() as home:
     receipt = json.loads(captured.getvalue())
     assert receipt["approval_ready"] is False
     assert "refuter" in receipt["degraded_verdict_roles"]
-    assert [seat["agent"] for seat in receipt["roles"]["refuter"]["seats"]] == ["grok", "cheap-2"]
+    assert [seat["agent"] for seat in receipt["roles"]["refuter"]["seats"]] == ["cheap-2"]
     assert not os.path.exists(rr.OUT)
 print("degraded")
 PY
@@ -1442,18 +1493,18 @@ for name, facts in agents.items():
         assert facts["effort"] == "max", f"Luna entry {name} below max"
     if "gpt-6-astra" in facts["model"]:
         assert facts["effort"] in ("medium", "high"), f"Astra entry {name} above high"
-assert agents["astra"]["capabilities"] == ["hard-work"]
+assert agents["astra"]["capabilities"] == ["hard-work", "security-review"]
 
 chains = {
-    "foreman": ["sol-xhigh", "cheap-2", "cheap", "muse-meta", "cheap-1", "grok"],
-    "implementer": ["luna", "sol", "cheap-2", "muse-meta", "cheap-1"],
-    "hard_implementer": ["sol-xhigh", "muse-meta", "grok"],
-    "deep_worker": ["sol", "cheap-2", "luna", "muse-meta", "cheap-1"],
-    "scout": ["gemini", "cheap-2", "luna", "cheap"],
+    "foreman": ["sol-xhigh", "cheap-2", "cheap", "muse-meta", "cheap-1"],
+    "implementer": ["haiku-xhigh", "haiku", "luna", "sol", "cheap-2", "muse-meta", "cheap-1"],
+    "hard_implementer": ["sol-xhigh", "muse-meta"],
+    "deep_worker": ["sol", "haiku-xhigh", "cheap-2", "luna", "muse-meta", "cheap-1"],
+    "scout": ["gemini", "haiku", "cheap-2", "luna", "cheap"],
     "reviewer": ["cheap-2", "gemini", "sol", "cheap"],
-    "security_reviewer": ["security-reviewer", "opus", "sol-xhigh"],
-    "merge_reviewer": ["opus", "sol-xhigh", "grok"],
-    "refuter": ["gemini", "grok", "cheap-2", "sol", "opus", "cheap"],
+    "security_reviewer": ["astra", "opus", "sol-xhigh"],
+    "merge_reviewer": ["opus", "sol-xhigh"],
+    "refuter": ["gemini", "cheap-2", "sol", "opus", "cheap"],
 }
 actual = {
     role: [row["agent"] for row in spec["chain"]]
@@ -1461,7 +1512,9 @@ actual = {
 }
 assert actual == chains, actual
 for role, chain in actual.items():
-    assert "astra" not in chain and "sol-max" not in chain, role
+    # Astra's one automatic seat is security_reviewer (Grok retired 2026-10-08).
+    assert "sol-max" not in chain, role
+    assert "astra" not in chain or role == "security_reviewer", role
     if "cheap" in chain and "cheap-2" in chain:
         assert chain.index("cheap-2") < chain.index("cheap"), role
 print("pinned")
@@ -1482,28 +1535,43 @@ spec.loader.exec_module(rr)
 cfg = json.load(open(roles_path))
 healthy = json.load(open(usage_path))
 rr.auth_probe_passes = lambda candidate, cache: True
+# The matrix pins the seats for an openai producer. Haiku (unmetered, ahead of
+# Luna) would make the producer anthropic, and disabling the anthropic
+# credential would also refuse opus, so drop the Haiku rungs from this cfg;
+# test_roster_resolves.sh covers the Haiku routes.
+for role_spec in cfg["roles"].values():
+    role_spec["chain"] = [
+        row for row in role_spec["chain"] if row["agent"] not in ("haiku", "haiku-xhigh")
+    ]
 
 ROLES = ("foreman", "implementer", "hard_implementer", "deep_worker", "scout",
          "reviewer", "security_reviewer", "merge_reviewer")
 HEALTHY = dict(zip(ROLES, ("sol-xhigh", "luna", "sol-xhigh", "sol", "gemini",
-                           "cheap-2", "security-reviewer", "opus")))
+                           "cheap-2", "opus", "opus")))
 # provider -> (per-role overrides of HEALTHY, refuter seats, degraded roles)
 MATRIX = {
-    None: ({}, ["gemini", "grok", "opus"], []),
+    # Grok retired: beside an OpenAI producer and a Meta reviewer only Google
+    # and Anthropic can refute, so no healthy row reaches 3/3.
+    None: ({}, ["gemini", "opus"], ["refuter"]),
     "openai-codex": (
         {"foreman": "cheap-2", "implementer": "cheap-2",
          "hard_implementer": "muse-meta", "deep_worker": "cheap-2",
          "reviewer": "gemini"},
-        ["grok", "opus"], ["refuter"],
+        ["opus"], ["refuter"],
     ),
-    "antigravity": ({"scout": "cheap-2"}, ["grok", "opus"], ["refuter"]),
-    "xai": ({"security_reviewer": "opus"}, ["gemini", "opus"], ["refuter"]),
-    "anthropic": ({"merge_reviewer": "grok"}, ["gemini", "grok"], ["refuter"]),
-    "opencode": ({}, ["gemini", "grok", "opus"], []),
+    "antigravity": ({"scout": "cheap-2"}, ["opus"], ["refuter"]),
+    # No route is xai any more, so an xai outage changes nothing.
+    "xai": ({}, ["gemini", "opus"], ["refuter"]),
+    # Anthropic down beside an OpenAI producer: Astra and Sol share the
+    # producer's family, so no security or merge seat remains.
+    "anthropic": ({"security_reviewer": None, "merge_reviewer": None},
+                  ["gemini"],
+                  ["security_reviewer", "merge_reviewer", "refuter"]),
+    "opencode": ({}, ["gemini", "opus"], ["refuter"]),
     # cheap-2 down: Gemini reviews, so the free Meta route may take a seat.
-    "opencode-go-2": ({"reviewer": "gemini"}, ["grok", "opus", "cheap"], []),
-    "opencode-go": ({}, ["gemini", "grok", "opus"], []),
-    "meta": ({}, ["gemini", "grok", "opus"], []),
+    "opencode-go-2": ({"reviewer": "gemini"}, ["opus", "cheap"], ["refuter"]),
+    "opencode-go": ({}, ["gemini", "opus"], ["refuter"]),
+    "meta": ({}, ["gemini", "opus"], ["refuter"]),
 }
 for provider, (overrides, seats, expected_degraded) in MATRIX.items():
     usage = copy.deepcopy(healthy)
@@ -1525,7 +1593,8 @@ for provider, (overrides, seats, expected_degraded) in MATRIX.items():
     assert rr.family_collapse(cfg, roles) == [], provider
     for role, resolved in roles.items():
         agents = [row["agent"] for row in resolved["trail"]]
-        assert "astra" not in agents and "sol-max" not in agents, (provider, role)
+        assert "sol-max" not in agents, (provider, role)
+        assert "astra" not in agents or role == "security_reviewer", (provider, role)
         if "cheap" in agents and "cheap-2" in agents:
             assert agents.index("cheap-2") < agents.index("cheap"), (provider, role)
 print("matrix")
@@ -1534,7 +1603,7 @@ PY
   assert_output_contains 'matrix'
 }
 
-@test "SC6 every catalog implementer resolves without DEGRADED when healthy" {
+@test "SC6 every catalog implementer resolves every single verdict seat when healthy" {
   run --separate-stderr "$PYTHON" - "$RESOLVER" \
     "$REPO_ROOT/core-rules/skills/herdr-foreman/roles.json" "$AVAILABLE" <<'PY'
 import importlib.util, json, sys
@@ -1549,7 +1618,11 @@ rr.auth_probe_passes = lambda candidate, cache: True
 
 for implementer, facts in cfg["agents"].items():
     roles, degraded = rr.resolve(cfg, usage, implementer, today="2026-08-22")
-    assert degraded == [], (implementer, degraded)
+    # Grok retired 2026-10-08: four families remain, so after the producer's
+    # and the reviewer's only two can refute. The refuter is 2/3 for every
+    # producer and says so; no other role degrades.
+    assert degraded == ["refuter"], (implementer, degraded)
+    assert len(roles["refuter"]["seats"]) == 2, implementer
     assert rr.family_collapse(cfg, roles, implementer) == [], implementer
     verdict_agents = [
         roles[role]["chosen"]["agent"]
@@ -1561,26 +1634,31 @@ for implementer, facts in cfg["agents"].items():
     ), (implementer, verdict_agents)
     if facts["family"] == "openai":
         assert verdict_agents == [
-            "cheap-2", "security-reviewer", "opus", "gemini", "grok", "opus",
+            "cheap-2", "opus", "opus", "gemini", "opus",
         ], (implementer, verdict_agents)
-    if implementer == "opus":
-        assert "opus" not in verdict_agents
+    else:
+        # Astra (high) is the security reviewer of all non-OpenAI output.
+        assert roles["security_reviewer"]["chosen"]["agent"] == "astra", implementer
+    if facts["family"] == "anthropic":
+        assert verdict_agents == [
+            "cheap-2", "astra", "sol-xhigh", "gemini", "sol",
+        ], (implementer, verdict_agents)
 
-# Must-degrade: Google exhausted beside an OpenAI implementer leaves 2/3.
+# Google exhausted beside an OpenAI implementer leaves 1/3.
 usage["reports"] = [
     r for r in usage["reports"] if r["provider"] != "antigravity"
 ] + [{"provider": "antigravity",
       "limits": [{"id": "window", "status": "exhausted"}]}]
 roles, degraded = rr.resolve(cfg, usage, "luna", today="2026-08-22")
 assert degraded == ["refuter"], degraded
-assert [seat["agent"] for seat in roles["refuter"]["seats"]] == ["grok", "opus"]
+assert [seat["agent"] for seat in roles["refuter"]["seats"]] == ["opus"]
 print("every-implementer")
 PY
   assert_status 0
   assert_output_contains 'every-implementer'
 }
 
-@test "SC6 a Google outage beside an OpenAI implementer reports refuter 2/3 loudly" {
+@test "SC6 a Google outage beside an OpenAI implementer reports refuter 1/3 loudly" {
   run --separate-stderr "$PYTHON" - "$RESOLVER" "$AVAILABLE" "$LEGACY_HOME" <<'PY'
 import contextlib, importlib.util, io, json, os, sys
 
@@ -1596,16 +1674,26 @@ usage["reports"] = [
 rr._load_selected_usage = lambda *args: (usage, "fixture")
 rr.auth_probe_passes = lambda candidate, cache: True
 rr.OUT = os.path.join(home, "roles-resolved.json")
+# "Beside an OpenAI implementer": drop the unmetered Haiku rungs (unit H) so
+# discovery keeps luna, whose opus merge seat the assertion pins.
+cfg = json.load(open(rr.ROLES))
+for role_spec in cfg["roles"].values():
+    role_spec["chain"] = [
+        row for row in role_spec["chain"] if row["agent"] not in ("haiku", "haiku-xhigh")
+    ]
+rr.ROLES = os.path.join(home, "roles-sc6.json")
+with open(rr.ROLES, "w") as policy:
+    json.dump(cfg, policy)
 sys.argv = [resolver_path]
 with contextlib.redirect_stdout(io.StringIO()) as captured:
     rr.main()
 output = captured.getvalue()
-assert "DEGRADED: refuter has 2/3 independent seats" in output, output
+assert "DEGRADED: refuter has 1/3 independent seats" in output, output
 assert "| merge_reviewer | `opus` | anthropic/claude-opus-5-5:high | apex |" in output, output
 print(output)
 PY
   assert_status 0
-  assert_output_contains 'refuter has 2/3'
+  assert_output_contains 'refuter has 1/3'
 }
 
 @test "SC8 a reordered roles object resolves identically" {
@@ -1631,15 +1719,15 @@ reordered["roles"] = {
     for name in verdict + [n for n in names if n not in verdict]
 }
 assert list(reordered["roles"]) != names
-for implementer in (None, "luna", "cheap-2", "opus"):
+for implementer in (None, "haiku-xhigh", "luna", "cheap-2", "opus"):
     base = rr.resolve(cfg, usage, implementer, today="2026-08-22")
     moved = rr.resolve(reordered, usage, implementer, today="2026-08-22")
     assert json.dumps(base) == json.dumps(moved), implementer
     assert rr.family_collapse(cfg, base[0], implementer) == \
         rr.family_collapse(reordered, moved[0], implementer) == []
-roles, _ = rr.resolve(reordered, usage, today="2026-08-22")
+roles, _ = rr.resolve(reordered, usage, "luna", today="2026-08-22")
 assert [seat["agent"] for seat in roles["refuter"]["seats"]] == [
-    "gemini", "grok", "opus",
+    "gemini", "opus",
 ]
 print("order-independent")
 PY
@@ -1677,8 +1765,8 @@ PY
 
 @test "SC4 catalog harness is required and limited to pi or claude-code" {
   local policy="$BATS_TEST_TMPDIR/roles.json"
-  for mutation in 'del cfg["agents"]["grok"]["harness"]' \
-    'cfg["agents"]["grok"]["harness"] = "codex"'; do
+  for mutation in 'del cfg["agents"]["gemini"]["harness"]' \
+    'cfg["agents"]["gemini"]["harness"] = "codex"'; do
     run --separate-stderr "$PYTHON" - "$RESOLVER" \
       "$REPO_ROOT/core-rules/skills/herdr-foreman/roles.json" "$mutation" <<'PY'
 import importlib.util, json, sys
@@ -1692,7 +1780,7 @@ exec(mutation)
 try:
     rr.hydrate_catalog(cfg)
 except rr.CatalogError as error:
-    assert "agents.grok" in str(error), error
+    assert "agents.gemini" in str(error), error
     print("refused")
 else:
     raise AssertionError("catalog with a bad harness was accepted")
@@ -1765,33 +1853,43 @@ PY
 }
 
 @test "SC7b the refuter quorum recuses the finding author's family" {
-  # Reviewer-authored finding: no healthy seat shares Meta, so none is recused.
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok,opus --finding-author cheap-2
+  # Reviewer-authored finding: no seat shares Meta, so none is recused.
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,sol,opus --finding-author cheap-2
   assert_status 0
   assert_output_contains 'recused: none; eligible votes: 3'
 
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok,opus \
-    --finding-author security-reviewer
+  # Security-authored (Astra, openai) finding: the Sol seat is recused.
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,sol,opus \
+    --finding-author astra
   assert_status 0
-  assert_output_contains 'recused: grok; eligible votes: 2'
+  assert_output_contains 'recused: sol; eligible votes: 2'
 
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok,opus --finding-author nobody
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,sol,opus --finding-author nobody
   assert_status 2
   [[ "$stderr" == *"unknown --finding-author agent 'nobody'"* ]]
 
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok --finding-author grok
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,opus --finding-author opus
   assert_status 1
-  assert_output_contains 'recused: grok; eligible votes: 1'
+  assert_output_contains 'recused: opus; eligible votes: 1'
   [[ "$stderr" == *"a dismissal needs 2"* ]]
 
-  run --separate-stderr "$PYTHON" "$RESOLVER" --finding-author grok
+  run --separate-stderr "$PYTHON" "$RESOLVER" --finding-author opus
   assert_status 2
   [[ "$stderr" == *"--finding-author requires --panel"* ]]
 
   # Without --finding-author, --panel keeps its distinct-family semantics.
-  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok,opus
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,sol,opus
   assert_status 0
   [ "$output" = 'panel: 3 seats -> 3 distinct families' ]
+
+  # Grok is retired (2026-10-08): it is no catalog agent, so it can neither
+  # author a finding nor count as an independent seat.
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,opus --finding-author grok
+  assert_status 2
+  [[ "$stderr" == *"unknown --finding-author agent 'grok'"* ]]
+  run --separate-stderr "$PYTHON" "$RESOLVER" --panel gemini,grok,opus
+  assert_status 1
+  [[ "$stderr" == *"panel seat 'grok' has no entry in agents"* ]]
 }
 
 @test "conductor AGENT_FAMILIES maps every roles.json catalog agent to its family" {
@@ -1809,6 +1907,10 @@ wrong = {
     if table.get(agent) != facts["family"]
 }
 assert not wrong, f"conductor families disagree with roles.json: {wrong}"
+# Grok retired 2026-10-08: no conductor agent maps to xai, and the
+# security-reviewer pi agent now runs Astra (openai).
+assert "grok" not in table and "xai" not in table.values(), table
+assert table["security-reviewer"] == "openai", table
 print(f"{len(cfg['agents'])} agents mapped")
 PY
   assert_status 0

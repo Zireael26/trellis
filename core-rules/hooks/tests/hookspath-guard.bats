@@ -123,6 +123,63 @@ ctx() { printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext // 
   [ "$(shasum -a 256 "$PROJECT/.git/config")" = "$before" ]
 }
 
+# --- Round 5: checkout-wide authority in linked worktrees ---------------------
+
+linked_hooks_fixture() {
+  git -C "$PROJECT" -c user.name=test -c user.email=test@example.com \
+    -c commit.gpgsign=false commit --allow-empty -qm fixture
+  git -C "$PROJECT" worktree add -q --detach "$TMP/linked-worktree" HEAD
+  PROJECT="$TMP/linked-worktree"
+  worktree="$(printf '%s' "$PROJECT" | shasum -a 256 | awk '{print $1}')"
+  printf '{"git_hooks":{"enabled":false}}\n' \
+    > "$TRELLIS_HOME/state/attachments/$checkout/$worktree.json"
+  export CLAUDE_PROJECT_DIR="$PROJECT"
+}
+
+@test "R5: linked-worktree husky reset gets the main owner's advisory" {
+  linked_hooks_fixture
+  rmdir "$MANAGED"
+  git -C "$PROJECT" config --local core.hooksPath .husky/_
+  run_guard 'pnpm install'
+  [ "$status" -eq 0 ]
+  [[ "$(ctx)" == *'core.hooksPath is ".husky/_"'* ]] || { echo "$output"; false; }
+  [[ "$(ctx)" == *"$MANAGED"* ]]
+  [[ "$(ctx)" == *'`trellis doctor --fix`'* ]]
+}
+
+@test "R5: linked-worktree managed hooksPath stays silent" {
+  linked_hooks_fixture
+  run_guard 'pnpm install'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
+  [ -s "$GIT_LOG" ]
+}
+
+@test "R5: managed directory alone detects linked-worktree drift" {
+  linked_hooks_fixture
+  main_worktree="$(printf '%s' "$TMP/project" | shasum -a 256 | awk '{print $1}')"
+  rm "$TRELLIS_HOME/state/attachments/$checkout/$main_worktree.json"
+  git -C "$PROJECT" config --local core.hooksPath .husky/_
+  run_guard 'pnpm install'
+  [ "$status" -eq 0 ]
+  [[ "$(ctx)" == *"$MANAGED"* ]] || { echo "$output"; false; }
+  git -C "$PROJECT" config --local core.hooksPath "$MANAGED"
+  run_guard 'pnpm install'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "R5: disabled hooks in a truly unmanaged checkout stay silent" {
+  printf '{"git_hooks":{"enabled":false}}\n' \
+    > "$TRELLIS_HOME/state/attachments/$checkout/$worktree.json"
+  rmdir "$MANAGED"
+  git -C "$PROJECT" config --local core.hooksPath .husky/_
+  run_guard 'pnpm install'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
+  [ -s "$GIT_LOG" ]
+}
+
 # --- R4.4 rollback sequence ---------------------------------------------------
 
 # Render both local templates, then point .trellis/runtime at a payload that

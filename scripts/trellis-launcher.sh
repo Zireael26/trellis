@@ -2323,6 +2323,13 @@ LIBRARIES = (
     "scripts/lib/local-registry.sh",
     "scripts/lib/attachment.sh",
 )
+# The current CLI's optional attach surface supplies the group-exclude planner.
+# Old/minimal payloads without it still support ordinary release commands; a
+# real group adoption keeps release.sh's explicit unavailable-planner refusal.
+EXCLUDE_PLANNER = (
+    "scripts/lib/surface-plan.sh",
+    "scripts/attach-project.sh",
+)
 RELEASE_TARGET = "scripts/release.sh"
 UPGRADE_TARGET = "scripts/upgrade.sh"
 UPGRADE_BODY_MARKER = b"# -- trellis upgrade body --\n"
@@ -2528,8 +2535,9 @@ try:
     except (UnicodeDecodeError, json.JSONDecodeError):
         state("snapshot release record is malformed")
 
+    planner_sources = EXCLUDE_PLANNER if EXCLUDE_PLANNER[-1] in tree else ()
     sources = {}
-    for relative in (CARRIER,) + LIBRARIES + TARGETS:
+    for relative in (CARRIER,) + LIBRARIES + planner_sources + TARGETS:
         expected = tree.get(relative)
         if expected is None:
             if command == "upgrade" and relative == UPGRADE_TARGET:
@@ -2573,7 +2581,7 @@ try:
     def emit(payload):
         output.extend((b"\n", payload, b"" if payload.endswith(b"\n") else b"\n"))
 
-    for relative in LIBRARIES:
+    for relative in LIBRARIES + planner_sources:
         emit(sources[relative])
     if command == "upgrade":
         # The release body is a preloaded command surface here: it defines

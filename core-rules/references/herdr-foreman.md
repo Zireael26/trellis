@@ -20,6 +20,15 @@ Renaming the apex grants nobody Git rights: a worker or foreman commits only whe
 explicit work order delegates that bounded action, and the apex owns every commit
 otherwise.
 
+`SubagentWorkflow` is off in the user's global `~/.pi/agent/subagents.json`.
+`foreman-start.sh` turns it on for the foreman's worktree only, by rewriting
+`<worktree>/.pi/subagents.json` to exactly `workflowsEnabled: true` and
+`toolDescriptionMode: "compact"` before pi starts; branch-supplied keys are
+dropped, and a write failure aborts the start. Before that, `core-rules/pi/lib/validate-project-pi.sh` refuses any
+`.pi` content the protected base has not approved (B0-6); every Trellis pi
+launcher runs it. A pi apex that needs workflows writes the same file in its
+own cwd before it starts. A running pane keeps the tools it started with.
+
 ## Rules
 
 1. **Cross-family verification is mandatory.** Reviewer, security reviewer, and refuters must not share a model family with the implementer. The resolver enforces it (`--implementer <agent>`); a foreman that cannot satisfy it reports `DEGRADED` rather than self-certifying.
@@ -48,12 +57,68 @@ to review:
   overflow-move call sites so the operator's focused pane and active tab do not
   change. `--tab <label>` prefers an existing labelled tab with room, then the
   caller's tab with room, and labels a new tab only when both are full or unavailable.
-- Prefer visible panes when the operator needs to watch the work; reserve
-  headless runs for throwaway bounded work.
+- **HARD RULE (owner): all delegated agent work runs in a visible Herdr pane** —
+  workers, reviewers, consults, foremen, research, and one-shot `pi -p`/`codex exec`.
+  Only harness-native subagents (Claude Code Agent tool, in-process Plan subagents)
+  and Dynamic Workflow agents are exempt. No hidden model CLIs in background
+  shells, `nohup`, orphaned processes, or Python/shell supervisors.
+  Non-model jobs (process-gate runs, test suites) are outside this rule.
 - Close each owned foreman or worker pane as soon as its output is accepted,
   superseded, or abandoned; never close unrelated operator panes. In a review panel, close reviewers before starting the judge: the
   judge reads their persisted reports, not live sessions. Close the panel's tab
   when the workstream finishes.
+
+## pi launch forms (1.1.0 and above)
+
+Verified on pi 1.0 (2026-10-02) and unchanged on 1.1.0, the supported floor
+([pi setup guide](../../AGENT_PI_SETUP.md), step 1).
+
+Reviewer / one-shot form — in a visible pane, including bounded print requests:
+
+```sh
+P=$(herdr pane split "$HERDR_PANE_ID" --direction right --cwd <dir> | jq -r .result.pane.pane_id)
+herdr pane run "$P" 'bash -c "set -o pipefail; pi -p --model <provider/model:effort> --no-tools --no-approve -nc \"\$(cat bundle.md)\" < /dev/null | tee out.md"; echo "ONESHOT-DONE rc=$?"'
+herdr pane wait-output "$P" --regex 'ONESHOT-DONE rc=[0-9]+' --source recent   # apex waits in its harness's background-wait, not a model process
+herdr pane close "$P"   # after reading out.md
+```
+
+Record each such pane wherever the session tracks its workers before dispatch,
+then close it once its output is read. The same visible-pane form applies to
+`codex exec`. `pipefail` preserves a failing model command's exit code through
+`tee`; the marker reports the inner Bash's status. The escaped `\$` defers bundle
+expansion to that inner Bash, and `\"` preserves the bundle as one prompt argument.
+
+- `-p` runs a print request with the explicitly selected `--model`.
+- `--no-tools` empties the tool registry, so MCP and codemode cannot re-enable tools.
+- `--no-approve` skips cwd project `.pi/` resources (global `defaultProjectTrust` is
+  `always`). It is not a sandbox; user-level extensions still load.
+- `-nc` turns off `AGENTS.md`/`CLAUDE.md` discovery, which otherwise loads whatever the
+  trust setting, so repository instructions stay out of the review. User-level
+  extensions and skills can still add context.
+- `< /dev/null` closes non-TTY stdin; print mode otherwise reads to EOF without a timeout.
+
+Foremen and implementers never pass `-nc`/`--no-context-files` or `--no-rules`:
+they must ingest the worktree's CLAUDE.md/Trellis layer. Automated runs state the
+project-trust decision explicitly (`--no-approve` or that the worktree's project
+resources are intended); never silently add `--approve`.
+
+Pi 1.0 defaults to fullscreen. `herdr pane read --source visible` reads it
+(verified 2026-10-02); no `--tui-mode regular` is needed.
+
+Gemini 3.8 Flash tool use depends on the pi-antigravity version a pane loaded at
+start. Under 0.7.0, both codemode-only and control failed with 20/20
+`MALFORMED_FUNCTION_CALL`; under 0.9.0 the same synthetic read/grep/find/ls fixture
+ran 16/16 correct with no malformed calls
+([ADR](../../docs/adr/2026-10-02-pi-1.0-adoption.md)). `~/.pi/agent/settings.json`
+shows the installed version, not what a running pane loaded: a pane started before
+0.9.0 was installed (2026-10-03, about 03:30 IST) still runs 0.7.0 and stays
+`--no-tools` until restarted. Re-probe with that fixture before relying on Gemini
+tools for other tool shapes, and after any later pi-antigravity upgrade.
+Codemode is not a default for any role; opt in per unit with `--tools …,codemode`,
+with Sol multi-file batch edits the best fit. Sol missed the pilot bar
+(≥20% fewer tokens, or lower wall time); Luna's 2.4% wall drop meets its letter,
+but Luna never invoked codemode, so it shows no codemode benefit. See the [ADR](../../docs/adr/2026-10-02-pi-1.0-adoption.md)
+for the A/B results.
 
 ## Precedent
 

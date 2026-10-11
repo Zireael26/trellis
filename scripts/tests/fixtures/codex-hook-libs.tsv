@@ -47,6 +47,7 @@ stop-verify.sh	verification-receipt.sh
 track-read.sh	action-normalize.sh
 track-read.sh	deps.sh
 truncation-check.sh	deps.sh
+turn-baseline.sh	deps.sh
 ui-verify.sh	deps.sh
 ui-verify.sh	ui-verify-core.sh
 wiki-skill-suggest.sh	action-normalize.sh

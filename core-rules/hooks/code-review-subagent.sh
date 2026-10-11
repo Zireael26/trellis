@@ -262,7 +262,8 @@ fi
 
 # Parse exactly one JSON object. `fromjson?` turns malformed reviewer text into
 # an empty result without leaking parser internals; the caller emits one bounded,
-# stable degradation below. A missing status is the legacy completed envelope.
+# stable degradation below. A missing status is completed only for a rung-1
+# operator override (legacy); otherwise it is incomplete.
 if VALIDATED_FINDINGS=$(printf '%s' "$FINDINGS" | jq -Rces '
     fromjson?
     | select(type == "object")
@@ -279,7 +280,11 @@ else
   exit 0
 fi
 FINDINGS="$VALIDATED_FINDINGS"
-COMPLETION_STATUS=$(printf '%s' "$FINDINGS" | jq -r '.status // "completed"')
+# A missing status counts as completed only for a rung-1 operator override
+# (legacy override envelopes may omit it). The built-in ladder always states its
+# status, so anything else without one is not a completed review.
+if [ -n "${CODE_REVIEWER_CMD:-}" ]; then STATUS_DEFAULT=completed; else STATUS_DEFAULT=incomplete; fi
+COMPLETION_STATUS=$(printf '%s' "$FINDINGS" | jq -r --arg d "$STATUS_DEFAULT" '.status // $d')
 
 CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "critical") | "- \(.file):\(.line // "?") \(.msg)"' | head -10)
 if [ -n "$CRITICAL" ]; then
@@ -308,6 +313,7 @@ if [ "$CR_TRUNCATED" -eq 1 ]; then
   printf '%s\n' "code-review-subagent: review incomplete: diff (${FULL_BYTES} bytes) exceeds the 200000-byte reviewer payload cap; only the prefix was reviewed, no marker written — will re-review on the next Stop" >&2
 fi
 if [ "$COMPLETION_STATUS" != "completed" ]; then
+  [ "$CR_TRUNCATED" -eq 1 ] || printf '%s\n' "code-review-subagent: cross-family review unmet (status=${COMPLETION_STATUS}); no marker written — will re-review on the next Stop" >&2
   exit 0
 fi
 if ! mkdir -p "$REPO_ROOT/.claude"; then

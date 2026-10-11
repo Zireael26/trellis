@@ -53,7 +53,7 @@ EOF
 session_hook_path() {
   local payload_root="$1" hook_name="$2" harness="$3"
   case "$harness:$hook_name" in
-    claude:session-context|claude:post-compact-context|claude:inject-primer-index|claude:skill-size-preflight)
+    claude:session-context|claude:post-compact-context|claude:inject-primer-index)
       printf '%s/core-rules/hooks/%s.sh\n' "$payload_root" "$hook_name"
       ;;
     codex:session-context|codex:post-compact-context|codex:inject-primer-index)
@@ -122,6 +122,9 @@ run_session_hook() {
     printf 'trellis: hook requires NAME, HARNESS, and PROJECT_ROOT\n' >&2
     exit 2
   }
+  # Retired in 1.3.12, but settings rendered by 1.3.11 and earlier still call
+  # it. Answer with a silent no-op so those projects keep starting cleanly.
+  [ "$harness:$hook_name" != claude:skill-size-preflight ] || exit 0
   project_root="$(session_project_root "$project_root")"
   rc=$?
   [ "$rc" -eq 0 ] || exit "$rc"

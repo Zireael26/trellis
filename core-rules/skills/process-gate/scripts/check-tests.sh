@@ -8,7 +8,18 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
 . "$SKILL_DIR/scripts/lib/common.sh"
 
-pg_load_config
+# Doubt runs the full battery: when the range base does not resolve there is no
+# base-side config to load, so fall back to defaults with a notice instead of
+# failing closed. Every other config failure still exits: a range must not
+# loosen the gate that judges it.
+if ! pg_load_config "$@"; then
+  case "${PG_CONFIG_ERROR:-}" in
+    *"cannot resolve the base of range "*)
+      printf 'process-gate: notice (docs-only: full tests — %s)\n' "${PG_CONFIG_ERROR:-unresolvable range}" >&2
+      ;;
+    *) exit 1 ;;
+  esac
+fi
 RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
 cd "$PROJECT_DIR"
@@ -171,6 +182,202 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
   fi
 fi
 
+# Docs-only Tests path (C08, Sol's FOLD-GATE rule). The test battery is
+# narrowed only when every path touched by every commit in the range is a
+# passive Markdown record that the project's docs-only policy allows and does
+# not deny, and that clears the built-in floor below. The policy is read from
+# Git objects at the range's base, never from the range or the checkout: a
+# candidate cannot widen its own exemption. Doubt runs the full battery: an
+# unresolvable range, a non-ancestor start, a merge commit, an empty range, an
+# unreadable or malformed policy, or any unknown path. Typecheck and lint still
+# run; the battery is replaced by the policy's optional `tests` command.
+PG_DOCS_POLICY_PATHS=(
+  ".agents/skills/process-gate-local/docs-only-tests.policy"
+  ".claude/skills/process-gate-local/docs-only-tests.policy"
+)
+docs_only_files=""
+docs_only_cmd=""
+docs_only_reason=""
+DOCS_ALLOW=()
+DOCS_DENY=()
+
+# Built-in floor, applied before and regardless of any policy. A path must be
+# made of ordinary components (no dot-directories, spaces, controls or leading
+# dashes), end in .md, and name no behaviour-bearing file or namespace. The
+# deny half matches case-insensitively, so case aliases cannot slip through.
+PG_DOCS_SAFE_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$'
+PG_DOCS_FLOOR_RE=(
+  '(^|/)(core-rules|scripts|bin|hooks|skills|commands|agents|prompts|templates|tests?|__tests__|fixtures?|__fixtures__|testdata|__snapshots__|baselines?|spec|secrets?|credentials?)/'
+  '(^|/)(SKILL|CLAUDE|AGENTS|GEMINI|CODEX|README|SETUP|INSTALL|prompt|targets)\.md$'
+  '(^|/)[^/]*(VERSION|UPGRADING|secret|credential)[^/]*$'
+)
+
+pg_docs_path_ok() {
+  local p="$1" re rc=0
+  [[ "$p" =~ $PG_DOCS_SAFE_RE ]] || { docs_only_reason="$p: not an ordinary path"; return 1; }
+  [[ "$p" == *.md ]] || { docs_only_reason="$p: not a .md record"; return 1; }
+  shopt -s nocasematch
+  for re in "${PG_DOCS_FLOOR_RE[@]}"; do
+    if [[ "$p" =~ $re ]]; then rc=1; break; fi
+  done
+  shopt -u nocasematch
+  [ "$rc" -eq 0 ] || { docs_only_reason="$p: behaviour-bearing path"; return 1; }
+  rc=1
+  for re in ${DOCS_ALLOW[@]+"${DOCS_ALLOW[@]}"}; do
+    if [[ "$p" =~ $re ]]; then rc=0; break; fi
+  done
+  [ "$rc" -eq 0 ] || { docs_only_reason="$p: not on the docs-only allowlist"; return 1; }
+  for re in ${DOCS_DENY[@]+"${DOCS_DENY[@]}"}; do
+    if [[ "$p" =~ $re ]]; then docs_only_reason="$p: denied by the docs-only policy"; return 1; fi
+  done
+}
+
+# A passive text blob: no NUL byte, not an LFS pointer.
+pg_docs_blob_ok() {
+  local sha="$1" size text head
+  size="$(git cat-file -s "$sha" 2>/dev/null)" || return 1
+  text="$(git cat-file blob "$sha" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d '[:space:]')" || return 1
+  [ "$size" = "$text" ] || return 1
+  head="$(git cat-file blob "$sha" 2>/dev/null | LC_ALL=C head -c 40 || true)"
+  case "$head" in "version https://git-lfs"*) return 1 ;; esac
+}
+
+# Read `git diff-tree -z --raw` entries on stdin. Prints the first reason a
+# path is ineligible and returns 1; returns 0 when every entry is eligible.
+pg_docs_entries() {
+  local meta path path2 src dst dsha status
+  while IFS= read -r -d '' meta; do
+    IFS= read -r -d '' path || { echo "truncated diff entry"; return 1; }
+    # meta is ":<srcmode> <dstmode> <srcsha> <dstsha> <status>"
+    read -r src dst _ dsha status <<<"${meta#:}"
+    path2=""
+    case "$status" in
+      A|M|D) ;;
+      R*|C*) IFS= read -r -d '' path2 || { echo "truncated diff entry"; return 1; } ;;
+      *) echo "$path: change type $status"; return 1 ;;
+    esac
+    case "$src:$dst" in
+      000000:100644|100644:000000|100644:100644) ;;
+      *) echo "$path${path2:+ -> $path2}: mode $src -> $dst"; return 1 ;;
+    esac
+    pg_docs_path_ok "$path" || { echo "$docs_only_reason"; return 1; }
+    if [ -n "$path2" ]; then
+      pg_docs_path_ok "$path2" || { echo "$docs_only_reason"; return 1; }
+    fi
+    if [ "$dst" = 100644 ] && ! pg_docs_blob_ok "$dsha"; then
+      echo "${path2:-$path}: binary or LFS blob"; return 1
+    fi
+  done
+  return 0
+}
+
+# pg_docs_read_policy <base> -> 0 loaded, 1 unreadable/malformed, 3 absent.
+pg_docs_read_policy() {
+  local base="$1" p mode body="" found="" b line kw rest n=0 rc
+  for p in "${PG_DOCS_POLICY_PATHS[@]}"; do
+    mode="$(git ls-tree "$base" -- "$p" 2>/dev/null | awk '{print $1}')" ||
+      { docs_only_reason="cannot list $p at the base"; return 1; }
+    [ -n "$mode" ] || continue
+    [ "$mode" = 100644 ] || { docs_only_reason="policy $p is not a regular file at the base"; return 1; }
+    b="$(git cat-file blob "$base:$p" 2>/dev/null)" ||
+      { docs_only_reason="cannot read policy $p at the base"; return 1; }
+    if [ -n "$found" ] && [ "$b" != "$body" ]; then
+      docs_only_reason="policies $found and $p differ at the base"; return 1
+    fi
+    found="$p"; body="$b"
+  done
+  [ -n "$found" ] || return 3
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ""|\#*) continue ;; esac
+    kw="${line%%[[:space:]]*}"
+    rest="${line#"$kw"}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    case "$kw" in
+      allow|deny)
+        if [ -z "$rest" ]; then
+          docs_only_reason="policy $found: line $n: empty pattern"; return 1
+        fi
+        if [ "$kw" = allow ] && [[ "$rest" != ^*\$ ]]; then
+          docs_only_reason="policy $found: line $n: allow pattern must be anchored ^...\$"; return 1
+        fi
+        # =~ itself returns 2 for a regex that does not compile.
+        rc=0
+        # shellcheck disable=SC2319
+        [[ "" =~ $rest ]] || rc=$?
+        if [ "$rc" -eq 2 ]; then
+          docs_only_reason="policy $found: line $n: invalid regex"; return 1
+        fi
+        if [ "$kw" = allow ]; then DOCS_ALLOW+=("$rest"); else DOCS_DENY+=("$rest"); fi
+        ;;
+      tests)
+        if [ -z "$rest" ] || [ -n "$docs_only_cmd" ]; then
+          docs_only_reason="policy $found: line $n: one non-empty tests command allowed"; return 1
+        fi
+        docs_only_cmd="$rest"
+        ;;
+      *) docs_only_reason="policy $found: line $n: unknown keyword '$kw'"; return 1 ;;
+    esac
+  done <<<"$body"
+}
+
+# Sets docs_only_files (the net changed-path count) when the range narrows.
+# Silent when no range or no base policy; a notice for every other fallback.
+pg_docs_only_eval() {
+  local base head c commits why n rc
+  # Sourced for the P1a resolver functions only; it sets no shell options.
+  # shellcheck source=lib/diff-base.sh
+  . "$SKILL_DIR/scripts/lib/diff-base.sh" || return 1
+  db_resolve --range="$RANGE" || return 1
+  base="$DB_BASE_SHA"; head="$DB_HEAD_SHA"
+  case "$RANGE" in
+    *...*) base="$(git merge-base "$base" "$head" 2>/dev/null)" || return 1 ;;
+  esac
+  rc=0; pg_docs_read_policy "$base" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) return 1 ;;
+    *) docs_only_note "$docs_only_reason"; return 1 ;;
+  esac
+  # db_anc is the resolver's reviewed ancestry probe (release-tag-consumers.bats).
+  if ! db_anc "$base" "$head"; then
+    docs_only_note "range start is not an ancestor of its end"; return 1
+  fi
+  if ! commits="$(git rev-list "$base..$head" 2>/dev/null)"; then
+    docs_only_note "cannot list the commits in $RANGE"; return 1
+  fi
+  if [ -z "$commits" ]; then
+    docs_only_note "no commits in $RANGE"; return 1
+  fi
+  if [ -n "$(git rev-list --min-parents=2 "$base..$head" 2>/dev/null || echo unreadable)" ]; then
+    docs_only_note "merge commit in $RANGE"; return 1
+  fi
+  for c in $commits; do
+    if ! why="$(git diff-tree -r -z --raw --no-abbrev -M --no-commit-id "$c" | pg_docs_entries)"; then
+      docs_only_note "${why:-cannot read commit $c}"; return 1
+    fi
+  done
+  n="$(git diff --no-renames --name-only -z "$base" "$head" | LC_ALL=C tr -cd '\000' | wc -c | tr -d '[:space:]')" ||
+    { docs_only_note "cannot count the changed paths"; return 1; }
+  if [ "${n:-0}" -eq 0 ]; then
+    docs_only_note "no changed paths in $RANGE"; return 1
+  fi
+  docs_only_files="$n"
+}
+
+docs_only_note() {
+  printf 'process-gate: notice (docs-only: full tests — %s)\n' "$1" >&2
+}
+
+if [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
+  pg_docs_only_eval || true
+  if [ -n "$docs_only_files" ]; then
+    PROCESS_GATE_TEST_CMD="$docs_only_cmd"
+  fi
+fi
+
 # Two ceilings, because `run_check` drives typecheck, lint AND tests through one
 # code path. A project whose battery legitimately runs for hours has to raise the
 # test ceiling, and while there was only one variable that raise silently removed
@@ -255,7 +462,8 @@ pg_heavy_preflight() {
   fi
   printf 'process-gate: notice (heavy-gate-unavailable: %s)\n' "$reason" >&2
 }
-if [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
+# A narrowed range's tests command is light: it never waits for a heavy slot.
+if [ -n "${PROCESS_GATE_TEST_CMD:-}" ] && [ -z "$docs_only_files" ]; then
   pg_heavy_preflight
 fi
 
@@ -324,7 +532,10 @@ run_check() {
 
 run_check "typecheck" "${PROCESS_GATE_TYPECHECK_CMD:-}"
 run_check "lint"      "${PROCESS_GATE_LINT_CMD:-}"
-run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
+# Narrowed with no policy tests command: the battery is skipped, not undeclared.
+if [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
+  run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
+fi
 
 # Optional: coverage. Routed through run_with_timeout at the check ceiling like
 # the declared checks above — a hung reporter must be killed, never unbounded —
@@ -333,8 +544,9 @@ run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
 # shares PROCESS_GATE_CHECK_TIMEOUT, not PROCESS_GATE_TEST_TIMEOUT.
 # SAFETY: the coverage command always runs under the CHECK_TIMEOUT ceiling (or
 # the once-only unbounded warn when no runner exists), so a hung reporter is
-# killed at the ceiling exactly like a hung declared check.
-if [ -n "${PROCESS_GATE_COVERAGE_CMD:-}" ]; then
+# killed at the ceiling exactly like a hung declared check. A narrowed range
+# skips it with the battery it reports on.
+if [ -n "${PROCESS_GATE_COVERAGE_CMD:-}" ] && [ -z "$docs_only_files" ]; then
   set +e
   if [ -n "$PG_TIMEOUT_RUNNER" ]; then
     cov_out="$(run_with_timeout "$PROCESS_GATE_CHECK_TIMEOUT" bash -c "$PROCESS_GATE_COVERAGE_CMD" 2>&1)"; cov_rc=$?
@@ -378,7 +590,7 @@ fi
 # checkout is never edited. Unsupported/inconclusive/surviving probes WARN; they
 # never turn a passing baseline into a hard failure.
 mutation_result=""
-if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ]; then
+if [ "${PROCESS_GATE_MUTATION_SPOTCHECK:-0}" = "1" ] && [ "$worst" != "fail" ] && [ -z "$docs_only_files" ]; then
   mutation_timeout="${PROCESS_GATE_MUTATION_TIMEOUT:-30}"
   mutation_skip=""
   mutation_target=""
@@ -744,5 +956,7 @@ case "$worst" in
     for f in ${findings[@]+"${findings[@]}"}; do pg_finding "$f"; done
     ;;
 esac
+# run-all.sh carries this exact line into the verdict; keep its shape.
+[ -z "$docs_only_files" ] || pg_finding "Tests: narrowed (docs-only: $docs_only_files files)"
 
 pg_exit_code "$worst"

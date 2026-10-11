@@ -54,17 +54,12 @@ For projects using Firebase, statically analyze `firestore.rules` and `storage.r
 
 ## Wiring
 
-Each validator script is referenced from the project's `security-gate-local/local.config.sh`:
+Each validator script is referenced from the project's `security-gate-local/local.config.sh`. The diff gate parses that file as data (SKILL.md § "Project-local configuration"), so the list is one whitespace-separated string, not a Bash array; an array line BLOCKS as `security-gate local config is not data`:
 
 ```bash
 SECURITY_GATE_STACK_PROFILE="unity-game"
-SECURITY_GATE_STACK_VALIDATORS=(
-  "scripts/check-asset-hashes.sh"
-  "scripts/check-save-signature.sh"
-  "scripts/check-il2cpp-tamper.sh"
-  "scripts/check-iap-server-validation.sh"
-  "scripts/check-firestore-rules.sh"   # optional, only when Firebase rules exist
-)
+# check-firestore-rules.sh is optional, only when Firebase rules exist.
+SECURITY_GATE_STACK_VALIDATORS="scripts/check-asset-hashes.sh scripts/check-save-signature.sh scripts/check-il2cpp-tamper.sh scripts/check-iap-server-validation.sh scripts/check-firestore-rules.sh"
 ```
 
 The canonical baseline runner (`scripts/run-baseline.sh`) does NOT yet auto-load `SECURITY_GATE_STACK_VALIDATORS` — that's deferred to a follow-up phase to keep the canonical engine OSS-only. Until then, the project runs its validators as a wrapping shell script:

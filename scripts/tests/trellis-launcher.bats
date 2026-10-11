@@ -241,6 +241,13 @@ printf 'trusted-primer:%s:%s git-dir=%s git-work-tree=%s fsmonitor=%s hooks=%s n
   "${GIT_CONFIG_NOSYSTEM-unset}" "${GIT_CONFIG_GLOBAL-unset}"
 EOF
       chmod 755 "$PAYLOAD/core-rules/hooks/inject-primer-index.sh"
+      # Still on disk for project-local opt-in; the retired route must not run it.
+      cat > "$PAYLOAD/core-rules/hooks/skill-size-preflight.sh" <<'EOF'
+#!/bin/bash
+: > "$CLAUDE_PROJECT_DIR/preflight-ran"
+printf 'scanned discoverable skills\n'
+EOF
+      chmod 755 "$PAYLOAD/core-rules/hooks/skill-size-preflight.sh"
       ;;
     *)
       printf 'unknown release fixture: %s\n' "$fixture" >&2
@@ -732,6 +739,29 @@ EOF
   assert_no_execution_snapshot
 }
 
+# Projects rendered by 1.3.11 and earlier still register skill-size-preflight.
+# The active dispatcher answers that retired route with a silent no-op so a
+# project left on an older release does not fail every session.
+@test "SessionStart answers the retired skill-size-preflight route with a silent no-op" {
+  make_release 1.2.3 session-primer
+  mkdir -p "$SANDBOX/projects/valid"
+
+  run_launcher hook skill-size-preflight claude "$SANDBOX/projects/valid"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/projects/valid/preflight-ran" ]
+  assert_no_execution_snapshot
+
+  run_launcher hook skill-size-preflight codex "$SANDBOX/projects/valid"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'unsupported SessionStart hook route: codex/skill-size-preflight'* ]] || { echo "$output"; false; }
+
+  run_launcher hook truncation-check claude "$SANDBOX/projects/valid"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'unsupported SessionStart hook route: claude/truncation-check'* ]] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/projects/valid/preflight-ran" ]
+}
+
 @test "SessionStart drops inherited Git execution controls before the verified hook" {
   make_release 1.2.3 session-primer
   mkdir -p "$SANDBOX/projects/valid"
@@ -745,7 +775,7 @@ EOF
 }
 @test "SessionStart templates route every start hook through the clean stable launcher" {
   local expected
-  for name in session-context post-compact-context inject-primer-index skill-size-preflight; do
+  for name in session-context post-compact-context inject-primer-index; do
     run jq -r --arg name "$name" '.hooks.SessionStart[0].hooks[].command | select(contains("hook " + $name + " claude "))' \
       "$REPO_ROOT/core-rules/templates/claude-settings.local.json"
     [ "$status" -eq 0 ] || { echo "$output"; false; }

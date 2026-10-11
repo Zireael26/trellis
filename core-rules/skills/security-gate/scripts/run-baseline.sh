@@ -117,7 +117,7 @@ SEMGREP_RC=0; OSV_RC=0; GITLEAKS_RC=0; GARAK_RC=0; GARAK_USED=0
 TOTAL_STAGES=3
 [ "$PROFILE" = "web-rag-llm" ] && TOTAL_STAGES=4
 echo "[1/$TOTAL_STAGES] Semgrep…";  bash "$SKILL_DIR/scripts/lib/semgrep.sh"  "$PROJECT_DIR" "$PROFILE" "$SEMGREP_OUT"  || SEMGREP_RC=$?
-echo "[2/$TOTAL_STAGES] OSV…";      bash "$SKILL_DIR/scripts/lib/osv.sh"      "$PROJECT_DIR" "$OSV_OUT"               || OSV_RC=$?
+echo "[2/$TOTAL_STAGES] OSV…";      bash "$SKILL_DIR/scripts/lib/osv.sh"      "$PROJECT_DIR" "$OSV_OUT" --status "$WORK/osv.status" || OSV_RC=$?
 echo "[3/$TOTAL_STAGES] Gitleaks…"; bash "$SKILL_DIR/scripts/lib/gitleaks.sh" "$PROJECT_DIR" "$GITLEAKS_RAW_OUT"      || GITLEAKS_RC=$?
 :> "$GARAK_OUT"
 if [ "$PROFILE" = "web-rag-llm" ]; then

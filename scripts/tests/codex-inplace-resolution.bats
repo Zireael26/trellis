@@ -24,6 +24,11 @@ setup() {
   mkdir -p "$PAYLOAD/core-rules/codex"
   cp -R "$REPO/core-rules/codex/hooks" "$PAYLOAD/core-rules/codex/hooks"
   cp -R "$REPO/core-rules/hooks" "$PAYLOAD/core-rules/hooks"
+  # spec-gate takes its diff base from the process-gate resolver, which every
+  # release payload ships beside the hooks.
+  mkdir -p "$PAYLOAD/core-rules/skills/process-gate/scripts/lib"
+  cp "$REPO/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$PAYLOAD/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
   printf '%s\n' '{ "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true, "spec_required_diff_lines": 80, "surgical_max_diff_lines": 400 } }' \
     > "$PAYLOAD/trellis.config.json"
   INPLACE="$PAYLOAD/core-rules/codex/hooks"

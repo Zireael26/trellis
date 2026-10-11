@@ -9,9 +9,13 @@
 #   - Reads the existing .claude primer index, or the manifest-rendered .agents
 #     index for a Codex-only attachment. Existing shared primer authority wins.
 #   - For each primer file: parses `pinned_to:` frontmatter + Entry points
-#     section, runs `git rev-list --count <pinned>..HEAD -- <entry-paths>`,
-#     buckets FRESH (0) / WARM (1-10) / STALE (11+). Verifies each entry
-#     path exists.
+#     section, verifies each entry path exists, then runs
+#     `git diff-tree --name-only <pinned> HEAD -- <entry-paths>`: FRESH when the
+#     entry points are identical at the pin and HEAD, CHANGED when they differ,
+#     UNKNOWN when git fails.
+#     No commit-graph walk at startup (lean C04: `rev-list --count` per primer
+#     hit the 5 s timeout on deep histories); /primer-check gives the
+#     WARM/STALE commit count on demand.
 #   - Emits Codex SessionStart hookSpecificOutput additionalContext.
 #   - Output trimmed to ≤ 1500 chars. Never blocks. Exit 0 always.
 #   - Skips silently if neither primer INDEX.md exists (opt-in projects).
@@ -134,18 +138,18 @@ while IFS= read -r line; do
           status="MISSING_PATHS"
           detail=$(printf '%s' "$missing" | awk '{print $1; if (NF>1) print "+"NF-1" more"}' | tr '\n' ' ')
         else
-          # Count commits touching entry points since pinned SHA.
+          # Compare the entry-point trees at the pin and HEAD: two tree
+          # lookups, never a commit-graph walk. Exit status says only whether git
+          # failed (--quiet would fold "differ" and "error" into nonzero).
           __path_arr=()
           while IFS= read -r __p; do
             __path_arr+=("$__p")
           done <<< "$paths"
-          if count=$(git -C "$REPO_ROOT" rev-list --count "${pinned}..HEAD" -- "${__path_arr[@]}" 2>/dev/null); then
-            if [ "$count" -eq 0 ]; then
+          if __changed=$(git -C "$REPO_ROOT" diff-tree --name-only -r "$pinned" HEAD -- "${__path_arr[@]}" 2>/dev/null); then
+            if [ -z "$__changed" ]; then
               status="FRESH"
-            elif [ "$count" -le 10 ]; then
-              status="WARM"; detail="${count} commits"
             else
-              status="STALE"; detail="${count} commits → /primer-refresh"
+              status="CHANGED"; detail="entry points differ from pin; /primer-check for drift size"
             fi
           else
             status="UNKNOWN"

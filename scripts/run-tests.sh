@@ -36,6 +36,14 @@
 #
 # Every stage runs even if an earlier one fails; the exit code is the number of
 # failed stages, so one red suite cannot hide behind another.
+# START and fenced provenance are JSON lines on stderr and in a timing receipt's
+# .provenance.jsonl sidecar. --list/--plan never capture or write a receipt.
+# Capture failures never stop the runner.
+# Each run gets a private fence root holding TMPDIR, the Git config and shims,
+# and TRELLIS_HOME, so a test run never reads the operator's ~/.trellis and need
+# not be serialized against live Trellis operations, which keep their own lock.
+# scripts/tests/test-fencing.bats enforces the TRELLIS_HOME half.
+# The local wrapper binds a durable sidecar via TRELLIS_TEST_PROVENANCE_RECEIPT.
 
 set -uo pipefail
 
@@ -43,6 +51,43 @@ RUN_TESTS_DIR="${BASH_SOURCE[0]%/*}"
 [ "$RUN_TESTS_DIR" != "${BASH_SOURCE[0]}" ] || RUN_TESTS_DIR=.
 ROOT="$(CDPATH='' cd "$RUN_TESTS_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
+
+# Fixture attaches must not leave detached post-attach jobs racing teardown.
+# Safe to skip: pre-push runs the deferred checks inline when no status is
+# recorded. attach-postjob.bats unsets this to exercise the spawn.
+export TRELLIS_ATTACH_POSTJOB=off
+
+# START precedes argument validation, fence setup and any planner/test. Inventory
+# interfaces never probe tools or bind a sidecar, even with inherited receipts.
+CAPTURE_PROVENANCE=1
+for arg in "$@"; do
+  case "$arg" in --list|--plan) CAPTURE_PROVENANCE=0 ;; esac
+done
+capture_runner_provenance() {
+  local phase="$1" record='' reason='python3 not found'
+  shift
+  if command -v python3 >/dev/null 2>&1; then
+    reason='provenance helper failed'
+    record="$(python3 "$ROOT/scripts/lib/receipt_provenance.py" \
+      "$ROOT" "$phase" "$PROVENANCE_RECEIPT" "$BASH" "$0" "$@" 2>/dev/null)" || record=''
+  fi
+  if [ -z "$record" ]; then
+    # Fixed strings only: valid JSON even with no JSON-capable tool on PATH.
+    record="$(printf '{"phase":"%s","provenance":"unavailable","reason":"%s"}' "$phase" "$reason")"
+    if [ -n "$PROVENANCE_RECEIPT" ]; then
+      if ! (umask 077; printf '%s\n' "$record" >> "$PROVENANCE_RECEIPT.provenance.jsonl") 2>/dev/null; then
+        record="$(printf '{"phase":"%s","provenance":"unavailable","reason":"%s","provenance_sidecar":"unavailable: write failed"}' "$phase" "$reason")"
+      fi
+    fi
+  fi
+  printf '%s\n' "$record" >&2 || true
+}
+if [ "$CAPTURE_PROVENANCE" -eq 1 ]; then
+  PROVENANCE_RECEIPT="${TRELLIS_TEST_PROVENANCE_RECEIPT:-${TRELLIS_TEST_TSV:-}}"
+  capture_runner_provenance start "$@"
+fi
+# Runner-owned binding: fenced capture uses the private shell variable, not env.
+unset TRELLIS_TEST_PROVENANCE_RECEIPT
 
 # shellcheck source=scripts/lib/test-suites.sh
 . "$ROOT/scripts/lib/test-suites.sh"
@@ -90,7 +135,7 @@ fi
 # Clearing fixes the normal fixture path; the wrapper is the fail-loud backstop
 # for a bad cd, empty path, upward discovery, or a test that reintroduces GIT_DIR.
 install_test_git_fence() {
-  local temp_parent fence_root fence_name launcher_dir real_git real_mktemp real_python
+  local temp_parent fence_root fence_name launcher_dir real_git real_mktemp real_python real_python_exe
   local static_git="$ROOT/scripts/tests/helpers/git-fence/git"
   local static_mktemp="$ROOT/scripts/tests/helpers/git-fence/mktemp"
 
@@ -142,6 +187,16 @@ install_test_git_fence() {
   real_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_mktemp")" || return 1
   static_git="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_git")" || return 1
   static_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_mktemp")" || return 1
+  # A pyenv-style python3 is a bash script: ~0.2 s per exec (every fenced Git
+  # call pays it several times over) and dead on a PATH without bash, which
+  # stripped-PATH hook tests construct. Pin the true binary behind the shim.
+  real_python_exe="$("$real_python" -c 'import sys; print(sys.executable)' 2>/dev/null)" || real_python_exe=""
+  if [ -n "$real_python_exe" ]; then
+    real_python_exe="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python_exe" 2>/dev/null)" || real_python_exe=""
+  fi
+  if [ -n "$real_python_exe" ] && [ -f "$real_python_exe" ] && [ -x "$real_python_exe" ]; then
+    real_python="$real_python_exe"
+  fi
   if [ ! -x "$real_python" ]; then
     printf 'run-tests: could not resolve the Python executable\n' >&2
     return 1
@@ -221,12 +276,16 @@ EOF
   # from TMPDIR. Point it at this shard's distinct fence root so every Bats
   # fixture is inside the security boundary by construction.
   TMPDIR="$fence_root"
+  # Hooks resolve Trellis state as $TRELLIS_HOME, else $HOME/.trellis. Point it
+  # into the fence (not created; a fresh machine has none) so no stage reads the
+  # operator's live state. HOME stays: tool caches and credentials hang off it.
+  TRELLIS_HOME="$fence_root/trellis-home"
   GIT_CONFIG_GLOBAL="$fence_root/global.gitconfig"
   GIT_CONFIG_NOSYSTEM=1
   GIT_OPTIONAL_LOCKS=0
   PATH="$launcher_dir:$PATH"
   export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP
-  export TRELLIS_TEST_REAL_PYTHON TMPDIR
+  export TRELLIS_TEST_REAL_PYTHON TMPDIR TRELLIS_HOME
   export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_OPTIONAL_LOCKS PATH
 
   # The argument to rm is deliberately a validated basename, never an absolute
@@ -261,6 +320,8 @@ if [ "$LIST" -eq 0 ] && [ "$PLAN" -eq 0 ]; then
     [ -n "$git_config_var" ] && unset "$git_config_var"
   done < <(compgen -A variable GIT_CONFIG_VALUE_ || true)
   install_test_git_fence || exit 1
+  # Freeze the effective fenced toolchain before planning or running a stage.
+  capture_runner_provenance fenced "$@"
 
   # These suites require caller-owned evidence roots outside the source tree.
   # Bind defaults inside this shard's fresh Git fence, after installation so
@@ -285,6 +346,8 @@ if [ "$LIST" -eq 0 ] && [ "$PLAN" -eq 0 ]; then
   mkdir -p "$(dirname "$TRELLIS_TEST_TSV")"
   # Timing receipt schema: ordinal<TAB>stage<TAB>elapsed_seconds<TAB>exit.
   printf 'ordinal\tstage\telapsed_seconds\texit\n' > "$TRELLIS_TEST_TSV"
+  # Stages (including nested runners) must not inherit this runner's receipt.
+  export -n TRELLIS_TEST_TSV
 fi
 
 FAILED=0

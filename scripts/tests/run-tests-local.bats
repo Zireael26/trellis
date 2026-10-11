@@ -120,6 +120,16 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('observations', os.environ['FAKE_GATE_MODULE'])
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
+# Inversion: removing/delaying START emission must refuse the planner itself,
+# not merely leave an end-of-run report without tool versions.
+provenance = Path(os.environ['TRELLIS_LOCAL_GATE_RECEIPT'] + '.provenance.jsonl')
+start = json.loads(provenance.read_text().splitlines()[0])
+assert start['phase'] == 'start'
+assert start['timestamp'] and start['head'] and start['command']
+assert start['path'] and 'active_trellis_release' in start
+assert set(start['tools']) == {'bash', 'bats', 'jq', 'git', 'node', 'pnpm'}
+for tool in start['tools'].values():
+    assert tool['path'] and tool['version']
 run_root = Path(os.environ['TMPDIR']).parent
 assert str(run_root) == os.path.realpath(run_root)
 assert stat.S_IMODE(run_root.stat().st_mode) == 0o700
@@ -1003,6 +1013,47 @@ start_wrapper() {
   assert_empty
 }
 
+@test "a failing shard keeps its TAP and timing rows after verified-empty teardown" {
+  # Inversion (P1h, R40): teardown deletes the failing shard's output with the
+  # run root, so naming its failing test costs a full re-run.
+  FAKE_MODE=fail run_wrapper
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  local kept
+  kept="$(find "$SANDBOX/state/failed-shards" -type f | sort)"
+  [ "$(printf '%s\n' "$kept" | wc -l | tr -d ' ')" -eq 2 ] || { echo "$kept"; false; }
+  [[ "$kept" == "$SANDBOX/state/failed-shards/"*"/shard-3.out"$'\n'"$SANDBOX/state/failed-shards/"*"/shard-3.tsv" ]]
+  grep -qx 'fake-shard-3' "$SANDBOX"/state/failed-shards/*/shard-3.out
+  grep -qx $'3\tfake-stage-3\t3\t0' "$SANDBOX"/state/failed-shards/*/shard-3.tsv
+  [ "$(stat -f '%Lp' "$SANDBOX"/state/failed-shards/*)" = 700 ]
+  [[ "$output" == *"retained failing shard 3/8 output: $SANDBOX/state/failed-shards/"*"/shard-3.out"*"survivors=0 record=deleted"* ]]
+  assert_empty
+}
+
+@test "a passing run retains no shard output" {
+  # Inversion: retention copies every shard, or keeps the run root.
+  run_wrapper
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/state/failed-shards" ]
+  [[ "$output" != *"retained failing shard"* ]]
+  assert_empty
+}
+
+@test "reap prunes retained failing-shard output older than seven days" {
+  # Inversion (P1h follow-up): retained output grows without bound, or reap
+  # also drops fresh evidence.
+  local old="$SANDBOX/state/failed-shards/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  local new="$SANDBOX/state/failed-shards/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  mkdir -m 700 "$SANDBOX/state" "$SANDBOX/state/failed-shards" "$old" "$new"
+  printf 'not ok 1 old\n' > "$old/shard-1.out"
+  printf 'not ok 1 new\n' > "$new/shard-1.out"
+  touch -t "$(date -v-8d +%Y%m%d%H%M.%S)" "$old"
+  touch -t "$(date -v-1d +%Y%m%d%H%M.%S)" "$new"
+  run bash "$REPO_ROOT/scripts/gate-runs.sh" reap
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$old" ]
+  grep -qx 'not ok 1 new' "$new/shard-1.out"
+}
+
 @test "empty stage plan fails before any shard launches" {
   # Inversion: eight total rows with no stages produce a passing empty gate.
   FAKE_MODE=empty-plan run_wrapper
@@ -1525,6 +1576,7 @@ PY
   run env -u TRELLIS_STAGE_WEIGHTS_TSV TRELLIS_TEST_TSV="$SANDBOX/list.tsv" \
     bash "$REPO_ROOT/scripts/run-tests.sh" --scope=local --shard=1/1 --list
   [ "$status" -eq 0 ]; [ ! -e "$SANDBOX/list.tsv" ]
+  [ ! -e "$SANDBOX/list.tsv.provenance.jsonl" ]
   [[ "$output" == *"shellcheck (CI scope, severity=warning)"* ]]
   printf '%s\n' "$output" | sort > "$baseline"
   : > "$combined"
@@ -1532,6 +1584,7 @@ PY
     run env -u TRELLIS_STAGE_WEIGHTS_TSV TRELLIS_TEST_TSV="$SANDBOX/list-$shard.tsv" \
       bash "$REPO_ROOT/scripts/run-tests.sh" --scope=local --shard="$shard/8" --list
     [ "$status" -eq 0 ]; [ ! -e "$SANDBOX/list-$shard.tsv" ]; [ -n "$output" ]
+    [ ! -e "$SANDBOX/list-$shard.tsv.provenance.jsonl" ]
     printf '%s\n' "$output" >> "$combined"
   done
   [ "$(sort "$combined")" = "$(cat "$baseline")" ]
@@ -1628,7 +1681,18 @@ PY
 }
 
 inventory_fixture() {
-  local fixture="$SANDBOX/git-fixture" i
+  local i
+  # Fixture repositories must live inside the suite runner's git-mutation
+  # fence or every git init is refused. The ownership-boundary tests need
+  # SANDBOX itself under /tmp, so only this git fixture moves — and only
+  # when the fence is active.
+  if [ -n "${TRELLIS_TEST_GIT_FENCE_ROOT:-}" ]; then
+    GIT_FIXTURE="$TRELLIS_TEST_GIT_FENCE_ROOT/git-fixture"
+  else
+    GIT_FIXTURE="$SANDBOX/git-fixture"
+  fi
+  local fixture="$GIT_FIXTURE"
+  rm -rf "$fixture"
   mkdir -p "$fixture/scripts/tests"
   git -C "$fixture" init -q
   git -C "$fixture" config user.name Fixture
@@ -1669,14 +1733,14 @@ SH
 
 check_inventory() {
   run bash -c 'cd "$1" && bash "$2/scripts/check-gate-inventory.sh" "$3" "$4" "$5"' \
-    fixture "$SANDBOX/git-fixture" "$REPO_ROOT" "$BASE" "$HEAD_SHA" "$SANDBOX/inventory.tsv"
+    fixture "$GIT_FIXTURE" "$REPO_ROOT" "$BASE" "$HEAD_SHA" "$SANDBOX/inventory.tsv"
 }
 
 @test "immutable inventory equivalence passes the exact four-part split" {
   # Inversion: wrong ordinal/stage mapping, base read from dirty checkout, or lost names.
   inventory_fixture
   # Poison the working copy: only immutable git-show inputs may count.
-  printf '@test "dirty decoy" { true; }\n' > "$SANDBOX/git-fixture/scripts/tests/doctor-fix-part1.bats"
+  printf '@test "dirty decoy" { true; }\n' > "$GIT_FIXTURE/scripts/tests/doctor-fix-part1.bats"
   check_inventory
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == "inventory: PASS "* ]]
@@ -1708,9 +1772,9 @@ PY
 @test "inventory rejects changed doctor test multiset with the same count" {
   # Inversion: equal name counts conceal a removed assertion identity/replacement.
   inventory_fixture
-  printf '@test "test 1" {\n true\n}\n' > "$SANDBOX/git-fixture/scripts/tests/doctor-fix-part4.bats"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: changed names'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  printf '@test "test 1" {\n true\n}\n' > "$GIT_FIXTURE/scripts/tests/doctor-fix-part4.bats"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: changed names'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"@test name multiset changed"* ]]
 }
@@ -1720,7 +1784,7 @@ PY
   local mode fixture
   for mode in gate config; do
     inventory_fixture
-    fixture="$SANDBOX/git-fixture"
+    fixture="$GIT_FIXTURE"
     if [ "$mode" = gate ]; then
       mkdir -p "$fixture/core-rules/skills/process-gate"
       printf weakened > "$fixture/core-rules/skills/process-gate/check.sh"
@@ -1743,9 +1807,9 @@ PY
 @test "inventory permits only the timeout default and documented comment refresh" {
   # Inversion: a legitimate 7260 default is rejected or an unrelated config edit passes.
   inventory_fixture
-  printf '# Updated deadline documentation\nPROCESS_GATE_TEST_CMD="python3 scripts/run-tests-local.py"\nPROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-7260}"\n' > "$SANDBOX/git-fixture/.claude/skills/process-gate-local/local.config.sh"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: timeout default'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  printf '# Updated deadline documentation\nPROCESS_GATE_TEST_CMD="python3 scripts/run-tests-local.py"\nPROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-7260}"\n' > "$GIT_FIXTURE/.claude/skills/process-gate-local/local.config.sh"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: timeout default'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
@@ -1755,7 +1819,7 @@ PY
   local mode fixture
   for mode in common blocks loader; do
     inventory_fixture
-    fixture="$SANDBOX/git-fixture"
+    fixture="$GIT_FIXTURE"
     case "$mode" in
       common) printf '# changed helper\n' >> "$fixture/scripts/tests/doctor-fix-common.bash" ;;
       blocks) printf '#!/usr/bin/env bats\nload doctor-fix-common\n@test "test 4" {\n  false\n}\n' > "$fixture/scripts/tests/doctor-fix-part4.bats" ;;
@@ -1779,12 +1843,12 @@ PY
   FIXTURE_SETUP_FILE=1 inventory_fixture
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"uses setup_file/teardown_file"* ]]
-  mv "$SANDBOX/git-fixture" "$SANDBOX/setup-file-fixture"
+  mv "$GIT_FIXTURE" "$SANDBOX/setup-file-fixture"
   inventory_fixture
-  mkdir -p "$SANDBOX/git-fixture/core-rules/hooks/tests"
-  printf '@test "weakened" { true; }\n' > "$SANDBOX/git-fixture/core-rules/hooks/tests/changed.bats"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: unrelated assertions'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  mkdir -p "$GIT_FIXTURE/core-rules/hooks/tests"
+  printf '@test "weakened" { true; }\n' > "$GIT_FIXTURE/core-rules/hooks/tests/changed.bats"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: unrelated assertions'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"test file outside the split changed"* ]]
 }
@@ -1792,17 +1856,17 @@ PY
 @test "inventory allows the release-payload scan to change only by the checker's one-prefix pair" {
   # Inversion: allow the whole release-payload test file, so a weakened A3.3 scan passes.
   FIXTURE_PAYLOAD_SCAN=1 inventory_fixture
-  local scan="$SANDBOX/git-fixture/scripts/tests/release-payload-commit.bats"
+  local scan="$GIT_FIXTURE/scripts/tests/release-payload-commit.bats"
   printf '6\tbats scripts/tests/release-payload-commit.bats\t1\t0\n' >> "$SANDBOX/inventory.tsv"
   sed -i '' "s#^SCAN_EXEMPT_PAIRS='core-rules/hooks/lib/spec-gate-core.sh|specs/\$#&\\
 scripts/check-gate-inventory.sh|scripts/tests/#" "$scan"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: pair only'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: pair only'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   printf '# weakened scan\n' >> "$scan"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: weakened scan'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: weakened scan'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"test file outside the split changed"* ]]
 }
@@ -1810,9 +1874,9 @@ scripts/check-gate-inventory.sh|scripts/tests/#" "$scan"
 @test "inventory rejects an unrelated added head stage despite a complete aggregate" {
   # Inversion: complete head evidence hides changes to the base canonical inventory.
   inventory_fixture
-  printf "printf 'unrelated stage\\n'\n" >> "$SANDBOX/git-fixture/scripts/run-tests.sh"
-  git -C "$SANDBOX/git-fixture" add .; git -C "$SANDBOX/git-fixture" commit -qm 'test: extra stage'
-  HEAD_SHA="$(git -C "$SANDBOX/git-fixture" rev-parse HEAD)"
+  printf "printf 'unrelated stage\\n'\n" >> "$GIT_FIXTURE/scripts/run-tests.sh"
+  git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: extra stage'
+  HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   printf '6\tunrelated stage\t1\t0\n' >> "$SANDBOX/inventory.tsv"
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"changed beyond the four-part doctor split"* ]]

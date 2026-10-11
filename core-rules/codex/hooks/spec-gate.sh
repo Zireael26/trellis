@@ -54,11 +54,16 @@ else
   exit "$_SG_STOP_BLOCK_EXIT"
 fi
 
+# --gate accepts the carrier's exact range; no resolver means no safety verdict.
+if [ "${1:-}" = "--gate" ]; then
+  sg_gate_args "$@" || exit 1
+fi
+
 # --- marker-writer mode (used by /surgical) ---------------------------------
 # Writes the size-capped-work declaration marker for THIS branch so a
 # subsequent push takes the surgical route. --mark-emergency writes an
 # any-size emergency marker (audit-logged at gate time). No verdict needed.
-if [ "$1" = "--mark" ] || [ "$1" = "--mark-emergency" ]; then
+if [ "${1:-}" = "--mark" ] || [ "${1:-}" = "--mark-emergency" ]; then
   mode=surgical
   [ "$1" = "--mark-emergency" ] && mode=emergency
   reason=${2:-"declared via /surgical"}
@@ -71,12 +76,18 @@ if [ "$1" = "--mark" ] || [ "$1" = "--mark-emergency" ]; then
   exit 1
 fi
 
-verdict_line=$(sg_verdict "$PWD")
+verdict_line=$(sg_verdict "$PWD" "${SG_REQUEST_RANGE:-}" "${SG_REQUEST_REF:-}" "${SG_REQUEST_HEAD:-}")
 verdict=${verdict_line%%$'\t'*}
 reason=${verdict_line#*$'\t'}
 
 # --- pre-push CLI mode (harness-neutral teeth) ------------------------------
-if [ "$1" = "--gate" ]; then
+if [ "${1:-}" = "--gate" ]; then
+  # The shared core embeds the receipt in its reason (also visible in Stop JSON).
+  case "$reason" in
+    diff-base:*)
+      printf '%s\n' "${reason%%$'\n'*}"
+      reason=${reason#*$'\n'} ;;
+  esac
   case "$verdict" in
     block)
       echo "[spec-gate] BLOCKED: $reason" >&2

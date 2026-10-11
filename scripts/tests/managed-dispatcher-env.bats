@@ -31,6 +31,22 @@ prepare_managed_home() {
   set +u
 }
 
+# Pre-push runs the payload's deferred attachment checks before the gate, and a
+# payload without them refuses. These fixtures test the gate, so the checks are
+# a stub that reports ok. Call it after every other tree addition: it replaces
+# any recorded entry for the path, so the stub is what the manifest seals.
+stub_attach_postjob() {
+  local payload="$1" release_json="$2" path=scripts/lib/attach-postjob.sh oid
+  mkdir -p "$payload/scripts/lib" || return 1
+  printf '#!/bin/bash\nexit 0\n' > "$payload/$path" || return 1
+  chmod 700 "$payload/$path" || return 1
+  oid="$(git hash-object "$payload/$path")" || return 1
+  jq --arg path "$path" --arg oid "$oid" \
+    '.tree = ([.tree[] | select(.path != $path)] + [{path:$path,mode:"100755",oid:$oid}])' \
+    "$release_json" > "$release_json.next" || return 1
+  mv "$release_json.next" "$release_json"
+}
+
 prepare_actual_pre_push_fixture() {
   local managed_home="$ROOT/managed_home"
   local managed="$managed_home/state/git-hooks/test-id"
@@ -54,6 +70,7 @@ prepare_actual_pre_push_fixture() {
     "$caller_bin" "$recorded_bin" "$FIXTURE_PROJECT" "$FIXTURE_HOME_DIR" "$FIXTURE_TMP_DIR"
   git config --file "$FIXTURE_HOME_DIR/.gitconfig" user.email delegated@example.invalid
   git init -q "$FIXTURE_PROJECT"
+  git -C "$FIXTURE_PROJECT" config --local core.hooksPath "$managed"
   common="$(git -C "$FIXTURE_PROJECT" rev-parse --git-common-dir)" || return 1
   case "$common" in /*) ;; *) common="$FIXTURE_PROJECT/$common" ;; esac
   common="$(CDPATH= cd "$common" && pwd -P)" || return 1
@@ -118,6 +135,7 @@ SH
   jq -n --arg oid "$carrier_oid" \
     '{schema_version:1,version:"1.2.3",tag:"v1.2.3",commit:"0000000000000000000000000000000000000000",remote:"fixture",tree:[{path:"core-rules/githooks/pre-push",mode:"100755",oid:$oid}]}' \
     > "$release/release.json"
+  stub_attach_postjob "$payload" "$release/release.json" || return 1
   chmod 600 "$release/release.json"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")"
 
@@ -163,11 +181,31 @@ SH
   chmod 400 "$release/release.json"
   chmod 500 \
     "$carrier" \
+    "$payload/scripts/lib/attach-postjob.sh" \
+    "$payload/scripts/lib" \
+    "$payload/scripts" \
     "$payload/core-rules/githooks" \
     "$payload/core-rules" \
     "$payload" \
     "$release"
   printf '%s\n' 'refs/heads/main deadbeef refs/heads/main abcdef' > "$FIXTURE_REFS"
+}
+
+# Post-checkout hash-checks every payload file its reconcile runs and refuses a
+# release that lacks one. The fixture seed stays the reconcile; these copies
+# only satisfy that check. The fixtures seal every payload file at mode 500, so
+# each records as 100755.
+add_executed_payload_files() {
+  local payload="$1" release_json="$2" path oid entries='[]'
+  while IFS= read -r path; do
+    [ "$path" != scripts/seed-inheritance-symlinks.sh ] || continue
+    mkdir -p "$payload/${path%/*}" || return 1
+    cp "$REPO_ROOT/$path" "$payload/$path" || return 1
+    oid="$(git hash-object "$payload/$path")" || return 1
+    entries="$(jq -c --arg path "$path" --arg oid "$oid" '. + [{path:$path,mode:"100755",oid:$oid}]' <<<"$entries")" || return 1
+  done < <(sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//')
+  jq --argjson more "$entries" '.tree += $more' "$release_json" > "$release_json.next" || return 1
+  mv "$release_json.next" "$release_json"
 }
 
 prepare_path_stage_fixture() {
@@ -196,6 +234,7 @@ prepare_path_stage_fixture() {
   worktree="$(_attachment_hash_text "$PATH_STAGE_PROJECT")" || return 1
   managed="$managed_home/state/git-hooks/$checkout"
   owner="$managed_home/state/attachments/$checkout/$worktree.json"
+  git -C "$PATH_STAGE_PROJECT" config --local core.hooksPath "$managed"
   PATH_POST_DISPATCHER="$managed/post-checkout"
   PATH_PRE_DISPATCHER="$managed/pre-push"
   mkdir -p "$managed" "$(dirname "$owner")"
@@ -257,6 +296,8 @@ SH
         {path:"scripts/seed-inheritance-symlinks.sh",mode:"100755",oid:$seed_oid}
       ]
     }' > "$release/release.json"
+  add_executed_payload_files "$payload" "$release/release.json" || return 1
+  stub_attach_postjob "$payload" "$release/release.json" || return 1
   chmod 600 "$release/release.json"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
 
@@ -832,6 +873,7 @@ prepare_scratch_fixture() {
   worktree="$(_attachment_hash_text "$SCRATCH_PROJECT")" || return 1
   managed="$managed_home/state/git-hooks/$checkout"
   owner="$managed_home/state/attachments/$checkout/$worktree.json"
+  git -C "$SCRATCH_PROJECT" config --local core.hooksPath "$managed"
   SCRATCH_PRE_DISPATCHER="$managed/pre-push"
   SCRATCH_POST_DISPATCHER="$managed/post-checkout"
   mkdir -p "$managed" "$(dirname "$owner")"
@@ -884,6 +926,8 @@ CONTROL
         {path:"scripts/seed-inheritance-symlinks.sh",mode:"100755",oid:$seed_oid}
       ]
     }' > "$release/release.json"
+  add_executed_payload_files "$payload" "$release/release.json" || return 1
+  stub_attach_postjob "$payload" "$release/release.json" || return 1
   chmod 600 "$release/release.json"
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
 
@@ -932,6 +976,165 @@ run_scratch_pre_push() {
     "TEMP=${1:-$SCRATCH_CALLER_TMP}" \
     /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
     _ "$SCRATCH_PROJECT" "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_REFS"
+}
+
+# Extend and re-seal the existing private fixture, keeping code and manifest
+# paired. No attach/sync/recover/adopt commands or user-global state are needed.
+prepare_item8_carrier_fixture() {
+  SCRATCH_CARRIER_BODY="$(<"$1")" prepare_scratch_fixture
+  local release="$SCRATCH_RELEASES/1.2.3" payload="$SCRATCH_RELEASES/1.2.3/payload"
+  local scripts=core-rules/skills/process-gate/scripts file oid manifest
+  chmod -R u+w "$release"
+  mkdir -p "$payload/$scripts/lib"
+  # The carrier classifies refs only through the runner's diff-base.sh, as
+  # a real release payload ships it; common.sh backs the hooksPath post-check.
+  for file in run-all.sh lib/common.sh lib/diff-base.sh; do
+    cp "$REPO_ROOT/$scripts/$file" "$payload/$scripts/$file"
+    oid="$(git hash-object "$payload/$scripts/$file")"
+    jq --arg path "$scripts/$file" --arg oid "$oid" '.tree += [{path:$path,mode:"100755",oid:$oid}]' \
+      "$release/release.json" > "$release/release.json.tmp"
+    mv "$release/release.json.tmp" "$release/release.json"
+  done
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")"
+  printf '%s\n' "$(_attachment_hooks_pre_push_dispatcher_body "$payload" core-rules/githooks/pre-push "$manifest")" \
+    > "$SCRATCH_PRE_DISPATCHER"
+  chmod 400 "$release/release.json"
+  find "$payload" -type f -exec chmod 500 {} \;
+  find "$payload" -type d -exec chmod 500 {} \;
+  chmod 500 "$release"
+}
+
+@test "item8 r2: prior rewrite followed by blocked main prints carrier restore command" {
+  local fixture_root="$ROOT" managed
+  for twin in githooks husky; do
+    ROOT="$fixture_root/$twin"
+    mkdir -p "$ROOT"
+    prepare_item8_carrier_fixture "$REPO_ROOT/core-rules/$twin/pre-push"
+    managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
+    printf '#!/bin/bash\ngit config core.hooksPath .husky/_\n' > "$ROOT/scratch-prior-hooks/pre-push"
+    run_scratch_pre_push
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    [[ "$output" == *"Direct push to refs/heads/main blocked"* ]]
+    # Require the carrier's finding, not just the dispatcher's safety net.
+    [[ "$output" == *"core.hooksPath: local path"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
+  done
+  ROOT="$fixture_root"
+}
+
+@test "item8 r2: dispatcher checks drift after prior and available or unavailable carrier" {
+  prepare_scratch_fixture
+  local managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
+  printf '#!/bin/bash\ngit config core.hooksPath .husky/_\nexit 23\n' > "$ROOT/scratch-prior-hooks/pre-push"
+  for carrier in available unavailable; do
+    git -C "$SCRATCH_PROJECT" config core.hooksPath "$managed"
+    if [ "$carrier" = unavailable ]; then
+      printf 'invalid-source\n' > "$managed/pre-push-source"
+    fi
+    run_scratch_pre_push
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    [[ "$output" == *"trellis pre-push: core.hooksPath"* ]]
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
+    if [ "$carrier" = unavailable ]; then
+      [[ "$output" == *"managed immutable release carrier is unavailable"* ]]
+    else
+      [ -f "$SCRATCH_WITNESS/carrier.txt" ]
+      rm "$SCRATCH_WITNESS/carrier.txt"
+    fi
+  done
+}
+
+@test "item8 r2b: dispatcher worktree remedy clears override and restores effective authority" {
+  prepare_scratch_fixture
+  local managed="${SCRATCH_PRE_DISPATCHER%/pre-push}" clear restore
+  git -C "$SCRATCH_PROJECT" config extensions.worktreeConfig true
+  git -C "$SCRATCH_PROJECT" config --worktree core.hooksPath .husky/_
+  run_scratch_pre_push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  clear="$(printf '%s\n' "$output" | awk '/clear worktree override with: / {sub(/^.*clear worktree override with: /, ""); print; exit}')"
+  restore="$(printf '%s\n' "$output" | awk '/restore with: / {sub(/^.*restore with: /, ""); print; exit}')"
+  [ "$clear" = 'git config --worktree --unset core.hooksPath' ] || { echo "$output"; false; }
+  [ "$restore" = "$(printf 'git config --replace-all core.hooksPath %q' "$managed")" ]
+  [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
+  run bash -c 'cd "$1" && eval "$2" && eval "$3"' _ "$SCRATCH_PROJECT" "$clear" "$restore"
+  [ "$status" -eq 0 ]
+  run_scratch_pre_push
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
+}
+
+@test "item8 r3: dispatcher duplicate-value remedy restores authority and passes" {
+  prepare_scratch_fixture
+  local managed="${SCRATCH_PRE_DISPATCHER%/pre-push}" restore
+  for extra in "$managed" ''; do
+    git -C "$SCRATCH_PROJECT" config --local --add core.hooksPath "$extra"
+    run_scratch_pre_push
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    restore="$(printf '%s\n' "$output" | awk '/restore with: / {sub(/^.*restore with: /, ""); print; exit}')"
+    [ "$restore" = "$(printf 'git config --replace-all core.hooksPath %q' "$managed")" ]
+    [ "$(git -C "$SCRATCH_PROJECT" config --local --get-all core.hooksPath | wc -l | tr -d ' ')" -eq 2 ]
+    run bash -c 'cd "$1" && eval "$2"' _ "$SCRATCH_PROJECT" "$restore"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    run_scratch_pre_push
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$(git -C "$SCRATCH_PROJECT" config --local --get-all core.hooksPath | wc -l | tr -d ' ')" -eq 1 ]
+    [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
+  done
+}
+
+@test "item8 r2b: HUP INT TERM dispatcher checks carrier drift and cleans scratch" {
+  local fixture_root="$ROOT" managed expected
+  for signal in HUP INT TERM; do
+    ROOT="$fixture_root/$signal"
+    mkdir -p "$ROOT"
+    case "$signal" in HUP) expected=129 ;; INT) expected=130 ;; TERM) expected=143 ;; esac
+    SCRATCH_CARRIER_BODY='git config core.hooksPath .husky/_
+kill -'"$signal"' "$PPID"
+exit 0' prepare_scratch_fixture
+    managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
+    run_scratch_pre_push
+    [ "$status" -eq "$expected" ] || { echo "signal=$signal status=$status"; echo "$output"; false; }
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
+    [ -z "$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)" ]
+  done
+  ROOT="$fixture_root"
+}
+
+@test "item8 r2: dispatcher rejects shared drift hidden by matching worktree config" {
+  prepare_scratch_fixture
+  local managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
+  git -C "$SCRATCH_PROJECT" config extensions.worktreeConfig true
+  git -C "$SCRATCH_PROJECT" config --worktree core.hooksPath "$managed"
+  git -C "$SCRATCH_PROJECT" config --local core.hooksPath .husky/_
+  run_scratch_pre_push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+  [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
+  [ "$(git -C "$SCRATCH_PROJECT" config --local --get core.hooksPath)" = .husky/_ ]
+}
+
+@test "item8 r2: prior husky hook runs with pnpm error guard and without HUSKY zero" {
+  prepare_scratch_fixture
+  local managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
+  cat > "$ROOT/scratch-prior-hooks/pre-push" <<'PRIOR'
+#!/bin/bash
+# Model husky's skip check, then pnpm 11's stale-dependency handling.
+[ "${HUSKY:-}" != 0 ] || exit 0
+printf 'PRIOR_GUARDS=%s|%s|%s\n' "${HUSKY-__UNSET__}" "${pnpm_config_verify_deps_before_run-__UNSET__}" "${npm_config_verify_deps_before_run-__UNSET__}"
+if [ "${pnpm_config_verify_deps_before_run:-}" = error ]; then
+  printf 'prior pnpm: stale dependencies\n'
+  exit 7
+fi
+git config core.hooksPath .husky/_
+PRIOR
+  HUSKY=0 run_scratch_pre_push
+  [ "$status" -eq 7 ] || { echo "$output"; false; }
+  [[ "$output" == *"PRIOR_GUARDS=__UNSET__|error|__UNSET__"* ]]
+  [[ "$output" == *"prior pnpm: stale dependencies"* ]]
+  [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
 }
 
 @test "generated dispatcher embeds the launcher command scratch emitters byte-exactly" {

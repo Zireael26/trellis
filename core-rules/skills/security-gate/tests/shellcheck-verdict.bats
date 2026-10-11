@@ -30,7 +30,7 @@ JSON
   # the ShellCheck stage. osv never runs — no manifest is in the diff.
   cat > "$BIN/semgrep" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--version" ]; then echo "1.157.0"; else echo '{"results":[]}'; fi
+if [ "${1:-}" = "--version" ]; then echo "1.157.0"; else echo '{"results":[],"errors":[],"paths":{"scanned":[]}}'; fi
 SH
   cat > "$BIN/gitleaks" <<'SH'
 #!/usr/bin/env bash

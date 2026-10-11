@@ -4,7 +4,660 @@ All notable changes to Trellis are documented here.
 
 The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project uses Conventional Commits. Portable Trellis releases use semantic versions and annotated immutable tags. Earlier dated entries remain as historical records.
 
-## [Unreleased]
+## [1.3.12] - 2026-10-10
+
+**Highlights.** 1.3.12 makes everyday turns faster and the hook set smaller,
+and moves the gates' trust anchor to the protected base. `gh pr create` no
+longer runs the full process gate; it records the PR base, and the full gate
+runs once, at push. A Stop asks for a DoD receipt only when the turn actually
+changed the tree. A docs-only range can narrow the Tests row under a policy
+read from the base. pi's reread and read-credit checks run in-process
+instead of spawning the dispatcher on every tool call. Attach publishes its artifacts from one
+process (200 artifacts: 179.3 s down to 0.90 s), hands its slower checks to a
+background job, and a new worktree reuses its sibling's verified render.
+SessionStart no longer probes live usage or walks history: a Herdr session
+start with a hung usage feed drops from 20.9 s to 0.6 s, and the primer index
+from 0.63 s to 0.40 s. Four advisory hooks and pi's computer-use and
+session-messaging tooling are gone from the default install, and the public
+mirror now carries the pi 1.1.0 setup guide. On the
+security side, both gates now read their own configuration from the range
+base as data, a change to that configuration needs the repository owner's
+approval at merge, required scanners must complete, bright-line guards can no
+longer be timed out into an allow, and pi refuses to start over
+branch-controlled project configuration. Adopting 1.3.12 needs a detach and
+fresh attach of each checkout group; see `docs/UPGRADING.md`
+(`1.3.11` → `1.3.12` adoption).
+
+### Added
+
+- **Claude Haiku 5.5 on the pi roster, ahead of Luna.** New pi agents `haiku`,
+  `haiku-xhigh` and the read-only `haiku-ro` are brief-bound: named files, a
+  yield under 2K tokens. `haiku-xhigh` and `haiku` now head the implementer
+  chain, `haiku` follows Gemini as scout, and `haiku-xhigh` follows Sol as deep
+  worker. Haiku sits in no verdict chain, so independence rule 1 keeps Opus off
+  Haiku-produced work. A catalog entry may now declare `metered: unmetered`;
+  such a route skips provider usage reports, but a disabled credential still
+  refuses it. `sonnet` is an exact operator selection only.
+
+- **A shared diff-base resolver (spec 067).**
+  `process-gate/scripts/lib/diff-base.sh` decides which base a branch is
+  judged against, in this order: an explicit range used verbatim, the cached
+  PR base, the parent recorded when the branch was created, an upstream that
+  names another branch, a merge-base refined by fork-point, and the remote
+  default last. Every consumer prints one receipt line naming what it judged:
+  `diff-base: <base> <ref> via <source> (<reason>) range=<a>..<b> head=<branch>`.
+  `run-all.sh`, the security diff, the AEO adapter and `accept-branch.sh` all
+  use it, and `run-all.sh` gains `--base=<ref>` (gates
+  `merge-base(<ref>, HEAD)..HEAD`). The managed `post-checkout` dispatcher,
+  `scripts/worktree.sh` and `new-feature.sh --from` record a new branch's
+  creation base, never overwriting an existing record. Operators can inspect
+  or correct the record with `diff-base.sh show`, `set <parent-ref>` and
+  `clear`; `diff-base.sh sync` caches the PR base from `gh` and is kept off
+  every gate path.
+
+- **`trellis release reap-tmp [--fix]`.** Lists leaked `.tmp.*` release
+  scratch under `TRELLIS_HOME/releases`; `--fix` removes dead-owner scratch
+  older than 1 h and ownerless scratch older than 24 h, re-checking each entry
+  just before removal. Links, mount points, anything outside the releases
+  directory and anything inside an installed release are refused. `doctor`
+  reports the count and size.
+
+- **Docs-only ranges can narrow the Tests row (C08).** A project opts in with
+  `docs-only-tests.policy` in its `process-gate-local` directory. The policy is
+  read from the range base, never from the range or the checkout. When every
+  path in every commit of the range is a passive Markdown record that the
+  policy allows and the built-in floor admits, the battery is skipped or
+  replaced by the policy's `tests` command, and the verdict says
+  `Tests: narrowed (docs-only: N files)`. Any doubt runs the full battery.
+  Trellis ships its own policy for its docs, spec and top-level Markdown.
+
+- **`disk-janitor.sh --scopes pi` (report-only).** An opt-in scope that lists
+  stale pi state: temp files older than 3 days, aged orphan worktrees (no
+  attachment owner record and not registered with their repository), and pi's
+  bash spill logs (`pi-bash-*.log`) older than 1 day or over 1 GiB. Nothing in
+  use (per `lsof`) is listed. In 1.3.12 `--apply` refuses this scope and
+  nothing under a pi root is deleted; remove what it lists by hand.
+
+- **Failing test shards keep their output.** `run-tests-local` copies a
+  failing shard's TAP and timing rows to `<state>/failed-shards/<token>/`
+  (mode 0700) and prints the path, so a failure can be named without a full
+  re-run. `--runs-reap` prunes those copies after 7 days.
+
+- **An operator surface for the deferred attachment checks (A4).** `doctor`
+  gains an `attachment checks` row per worktree (ok, not recorded, stale,
+  pending or running, FAILED with the failing check and its remedy, or blocked
+  by an unfinished Trellis operation), and `doctor --fix` runs the checks
+  synchronously. `SessionStart` prints one warning line when a worktree's
+  checks FAILED or are blocked. The managed `pre-push` refuses while the
+  checks are FAILED or blocked by a pending journal or adoption marker, passes
+  on `ok`, and otherwise runs the read-only checks inline.
+
+- **New `doctor` rows.** A Claude Code version row warns below 2.1.294; a
+  missing `perl` is an ERROR; a bright-line guard registration that is not
+  supervised, is shorter than 30 s, or names a missing supervisor is a WARN; a
+  pi version row is described under Changed.
+
+### Changed
+
+- **`pr-gate-shiftleft` records the PR base and no longer runs the gate (C03).**
+  On `gh pr create` the hook now only records a literal `--base` as the
+  branch's PR base for the resolver and prints
+  `pr-gate-shiftleft: recorded PR base <base>; the full process gate runs at push`.
+  It never runs process-gate, so creating a PR no longer waits on a full gate
+  run. The managed `pre-push` gate remains the authoritative local check. The
+  `PR_GATE_SHIFTLEFT_*` runner, range and timeout overrides are gone.
+
+- **The DoD receipt is demanded only when the turn changed the tree (C01).**
+  A new `UserPromptSubmit` hook, `turn-baseline.sh` (Claude Code and Codex),
+  fingerprints HEAD, the index and every changed or untracked path at the
+  start of a turn, outside the worktree under `TRELLIS_HOME`. `stop-verify`
+  compares the end state against it and skips the receipt demand when nothing
+  changed. A changed tree, a commit that left the tree clean, or a missing or
+  unreadable baseline still demands the receipt. Todos and
+  typecheck/lint/test are not narrowed. Requires Claude Code 2.1.294 or later
+  and Codex 0.116.0 or later. Two accepted residuals are documented in
+  `core-rules/hooks.md` and `docs/UPGRADING.md`.
+
+- **The recommended pi setup supports pi 1.1.0 and above.** `AGENT_PI_SETUP.md`
+  installs `@earendil-works/pi-coding-agent@1.1.0` (was 0.87.1), and its step 1
+  check accepts 1.1.0 or later. `settings.json` turns off pi's built-in MCP
+  client (`"extensions": ["-builtin:mcp"]`). Step 6 has the foreman launcher
+  write the project `.pi/subagents.json` that turns workflows on; the
+  interactive `pi()` refuses a hand-written one. The 0.85.x compaction patches
+  are marked legacy. `trellis doctor` gains a pi version row: WARN below 1.1.0
+  or when pi is missing but a registered checkout selects the pi harness, INFO
+  when pi is neither installed nor selected or its version is unreadable
+  (`pi --version` runs with stdin closed and a 10 s timeout).
+- **The pi web-search extension publishes to the public mirror.** The spec 056
+  hold on `core-rules/pi/extensions/trellis-web-search.ts` is lifted after the
+  spec 053 C7 cross-family re-review, so it leaves `payload_no_publish` and
+  `delist_prune`. Its tests under `core-rules/pi/extensions/tests` stay
+  withheld because the mirror lint rejects them. A new check fails if the
+  tracked extension is ever on `trellis-web-search.blocked.sha256`.
+- **The pi 1.1.0 setup guide publishes to the public mirror.** The spec 053 C7
+  hold on `AGENT_PI_SETUP.md`, `docs/PI-COMPUTER-USE.md` and
+  `docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md` is lifted, so all three join the
+  sync allowlist. `scripts/pi-guide-parity.sh`, which the guide names,
+  publishes with it; its bats suite stays withheld. The guide's web-search
+  text now describes the 056 extension: credential from pi's model registry,
+  no fallback provider, a 20-call default budget and a 90 s deadline.
+- **Pi no longer carries computer use or session messaging (C20).** The
+  recommended pi setup installs no MCP adapter, no `cua` server, no
+  `mcp.json` and no session-messaging (intercom) package; its step 5 has four
+  OAuth logins. The `trellis-computer-use` pi skill is now a routing rule: a
+  unit that needs a browser page or a desktop app goes to Codex CLI in a Herdr
+  pane or to Claude Code. `SubagentWorkflow` is off in the global pi
+  settings; `foreman-start.sh` turns it on for the foreman's worktree only by
+  writing exactly `{"workflowsEnabled": true, "toolDescriptionMode": "compact"}`
+  to `<worktree>/.pi/subagents.json`. It refuses to write through a symlinked
+  or hardlinked `.pi` path or over a tracked file.
+
+- **pi's durable worktree root moves to `~/.pi-worktrees`; command temp files
+  go to `$TMPDIR/pi`.** pi writes its bash spill logs to the same temp root as
+  its subagent worktrees, and a recursive search over `~/.trellis` once read
+  its own growing spill log until the disk filled. The interactive `pi()` and
+  `foreman-start.sh` now use `~/.pi-worktrees` (created 0700; a symlinked or
+  foreign-owned root is refused) and pass a private `$TMPDIR/pi` as
+  `TRELLIS_PI_TMPDIR`, which the guide's `settings.json` `shellCommandPrefix`
+  makes the `TMPDIR` of each command pi runs. A `TMPDIR` of `/`, a path
+  inside either pi worktree root, or a path inside the checkout falls back to
+  the per-user temp dir; a `TMPDIR` that is the home directory itself is
+  refused and pi does not start. Worktrees under the pre-1.3.12 root `~/.trellis/pi-worktrees` stay where
+  they are until their work is merged.
+
+- **Pi required native checks run before action in-process.** Existing-file
+  edit/overwrite reread checks and successful read/mutation credit no longer
+  spawn the dispatcher. The no-op pre-read spawn is gone; runtime, dispatcher,
+  parent-policy and skill-manifest checks remain fail-closed. Skill manifests
+  exceeding 65,536 bytes or invalid UTF-8 refuse before native read or slash
+  expansion. Restart/new-turn boundaries require fresh read credit; the pi
+  in-process reread guard no longer honors `TRELLIS_REREAD_OVERRIDE`.
+- **Pi refuses unmediated MCP/local/unknown tools and PowerShell.** Pure builtin
+  searches remain available; ambiguous/multi-target mutation envelopes refuse
+  until a complete adapter exists. Exact Agent/SubagentWorkflow retain their
+  parent-policy gate, but child extension loading is not proven by this unit.
+  Child sessions must load Trellis independently; `isolated:true` is forbidden.
+  Bash writes remain outside structured reread coverage. See
+  `docs/pi-dispatch-parity.md` for these residuals and child skill preloads.
+  Destructive Bash/user-bash checks remain pre-action and process-backed;
+  post-action lint and other advisories retain their existing behavior.
+- **Push mode never gates only the last commit.** With no `--range` or
+  `--base`, push mode gates the base the resolver derives. When it cannot
+  derive one, it keeps 1.3.11's superset fallback, every commit not on the
+  local `main` (else `master`), receipted `via fallback`; with neither branch
+  the run refuses before any check. The `HEAD~1..HEAD` fallback is removed in
+  every mode, including a security diff run without process-gate beside it.
+  Merge mode accepts `--base` as well as `--range` and still refuses with
+  neither.
+
+- **spec-gate judges the pushed commit.** Given `--ref`/`--head`, spec-gate
+  reads branch identity, merge-base, the spec triad, `decisions-log.md` and
+  project policy from that commit's objects, not the working tree, and its
+  audit line names the commit. The managed `pre-push` passes the pushed
+  branch; a push of tags alone skips spec-gate.
+
+- **The managed `pre-push` ranges stacked and multi-ref pushes more strictly.**
+  - A first push whose resolved parent branch is not on the push remote gates
+    the range from the remote default instead, names the parent in the
+    receipt, and prints a hint to push the parent first.
+  - With `TRELLIS_ALLOW_MAIN_PUSH=1`, a push of `main` beside another branch
+    on a different range now refuses before any gate (in 1.3.11 main's range
+    won).
+  - Protected targets are `main`, `master`, the `template.branch` of the remote
+    default's tree and that of the pushed tree. A pushed tree can add
+    protection but never remove it.
+  - Block messages name `TRELLIS_ALLOW_MAIN_PUSH` as owner-only break-glass and
+    tell agents to stop and report; the BLOCKED line no longer suggests any
+    gate bypass.
+
+- **`doctor` compares the remote default with the policy branch.** The
+  `remote-default` row is now `remote-default-not-protected`: INFO (never
+  WARN) when `origin/HEAD` differs from the project's `template.branch`
+  (default `main`), silent when they match, with the remedy
+  `git remote set-head origin <policy>`. `remote-default-unresolved` stays a
+  WARN and now lists `origin/<policy>` for a non-`main` policy.
+
+- **SessionStart no longer probes or walks history (C04).** The Herdr
+  `herdr-foreman-session` hook no longer runs the role resolver or its live
+  usage and credential probes, and never adopts a cached roster: a cached
+  `roles-resolved.json` for this pane is removed, one scoped to another pane is
+  left alone, and the roles are reported undecided with the exact resolver
+  command to run in the pane. The visible-pane rule line is unchanged and
+  still first. With a hung usage feed, the hook's SessionStart time drops from
+  20.9 s to 0.6 s. `inject-primer-index` compares each primer's entry-point
+  trees at its pinned commit and at HEAD (FRESH, CHANGED or UNKNOWN when git
+  fails) instead of counting commits since the pin; `/primer-check` still
+  sizes drift as WARM or STALE on demand. It drops from 0.63 s to 0.40 s.
+
+- **Grok is retired from the herdr-foreman roster; Astra takes security
+  review.** xAI has returned 403 since 2026-10-07. The `grok` and xai
+  `security-reviewer` catalog agents, every chain row naming Grok, and the
+  `grok-ro` and `grok-rw` pi agents are removed, and `xai` is no longer declared
+  unmetered. `security_reviewer` now opens on Astra (`gpt-6-astra`, high,
+  never xhigh), then Opus, then Sol xhigh; the `security-reviewer` pi agent now
+  pins Astra at high. Gemini 3.8 Flash at high keeps its refuter seat.
+  **The refuter role is now permanently degraded:** it still requires three
+  seats (`required_seats` stays 3), but with four model families left only two
+  can sit beside any producer, so it reports `DEGRADED: refuter has 2/3` and
+  `approval_ready` is false. Changing the seat count, or adding a fifth family,
+  is deferred. Details are in `docs/adr/2026-10-08-retire-grok.md`.
+
+- **Faster attach and new worktrees (workstream A).** End-to-end attach and
+  new-worktree latency on real projects is measured in the 1.3.12 final
+  report.
+  - **A3, one-process commit (journal v2):** attach's commit phase publishes
+    every remaining artifact from one `python3 -I` process through the same
+    pinned stage, identity and claim steps, and appends each transition to a
+    progress log under `state/attachment-progress` instead of rewriting the
+    journal. Committing 200 artifacts dropped from 179.3 s to 0.90 s. Commit,
+    rollback and recover fold the log back into the v1 journal shape under the
+    transaction lock, so a folded journal reads under any release; a release
+    without v2 refuses a marked journal instead of rolling back a prefix it
+    cannot see. For a v2 journal, the delegated-recovery binding
+    `--expected-journal-sha256` is the SHA-256 of
+    `trellis-attachment-journal-v2\n<journal sha256>\n<progress-log sha256, or none>\n`;
+    a v1 journal is still bound by its own digest. Residuals are listed in
+    `docs/UPGRADING.md`.
+  - **A2:** attach and the worktree wrapper no longer repeat the group pass
+    and the release lookups (five release lookups per attach down to two). A
+    stale exclude is diagnosed only when a delegated attach fails, and a new
+    worktree's attachment is checked after it is added, so a missing runtime
+    or owner falls back to seeding or refuses loudly.
+  - **A4, deferred attachment checks:** attach hands its slower checks
+    (hooksPath reassertion, full release verify, owner artifacts, exclude
+    block, toolchain, registry) to one detached job per worktree and returns.
+    The job records `pending`, `running`, `ok`, `failed` or
+    `blocked-by-journal` in
+    `$TRELLIS_HOME/state/attachment-status/<checkout>/<worktree>.json`; a
+    status recorded for an earlier attachment state reads as stale. See the
+    operator surface under Added.
+  - **A5b, new-worktree fast path:** a new worktree reuses the rendered leaves
+    and owner metadata of a verified sibling worktree of the same checkout,
+    publishing them through the locked registry API, and falls back to the
+    full attach on any doubt, including a stale donor render or an exact
+    repair binding.
+  - **A1:** the managed `post-checkout` skips file checkouts and verifies only
+    the payload files the attach actually executes (now including the
+    fast-path and post-attach helpers), and refuses when one is missing. Its
+    read-only check reads ACL entries rather than the `+` in the mode column,
+    so a write ACL hidden behind a macOS extended attribute is caught.
+
+### Fixed
+
+- **Shell parse errors no longer block the Semgrep diff scan.** Syntax,
+  partial-parsing and lexical errors for paths in the ShellCheck scope are
+  counted visibly and left to ShellCheck, the shell SAST engine. Non-shell
+  parse errors, other scanner errors and missing covered targets still block.
+
+- **The release-tag consumer review covers the 1.3.11 notes.** The 1.3.11
+  CHANGELOG and UPGRADING text describing the pre-push ref refusal matched the
+  consumer patterns that the A3.8 check pins, which left that check red on
+  `main` after the cut. Both lines are reviewed as prose and pinned.
+
+- **Codex spec-gate reads autonomy from the pushed commit.** 1.3.12's
+  project-policy reader was added to the Claude Code copy of
+  `lib/autonomy.sh` only, so a Codex-deployed spec-gate still read autonomy
+  from the worktree's `.trellis.json`. The Codex copy is now identical to the
+  Claude Code copy and honours the spec-gate policy reader.
+
+- **Prerelease releases order by semver precedence (R27).** Exact-owner
+  reconcile split versions on dots and failed on a prerelease id such as
+  `1.3.12-a`, so a prerelease runtime never found its historical inventory and
+  refused. The legacy doctor pin check ranked `1.3.12-a` above `1.3.12`. Both
+  now use semver precedence.
+
+- **Release-store waits follow the holder's liveness (R39).** A case-lease
+  waiter that sees its holder exit between two reads now retries and takes the
+  lease instead of failing as stale, and release barriers wait as long as the
+  release process lives instead of a fixed 20 s cap. Both waits print the
+  holder pid and elapsed seconds at least every 60 s of wall clock.
+
+- **Test suites no longer read the real `~/.trellis` (LB-8).** `run-tests.sh`
+  exports a fenced `TRELLIS_HOME`, the suites that run SessionStart hooks set
+  their own, and a guard suite fails when a suite reaches the real home.
+
+### Removed
+
+- **Four advisory hooks are unregistered (E-15).** `skill-size-preflight`
+  (Claude Code `SessionStart`), `truncation-check` (`PostToolUse`),
+  `propose-rules` and `primer-capture-nudge` (`Stop`) are dropped from every
+  Claude Code and Codex manifest and template. The scripts stay in the
+  payload for project-local opt-in. For compatibility, the 1.3.12 dispatcher
+  still answers the Claude Code `skill-size-preflight` SessionStart route as a
+  silent no-op, so a project still rendered by an earlier release does not
+  error at session start; any other unknown route is refused. Because every
+  release through 1.3.11 renders that route, an active 1.3.12 refuses
+  `trellis attach --release 1.3.11` (or earlier) without writing anything;
+  attach an older release with that release's own CLI. The Skill size budget is still enforced at use by
+  `skill-preload-guard` and `skill-slash-guard`. The pi dispatcher is
+  unchanged.
+
+- **`SECURITY_GATE_SKIP` is no longer honoured.** process-gate reports
+  `SECURITY_GATE_SKIP=1` as BLOCKED in every mode, because a scan that did not
+  run is not a verdict.
+
+- **The pi MCP adapter patch.** `apply-pi-mcp-adapter-patch.py` and its patch
+  file are gone with the computer-use profile.
+
+- **The unused `pg_diff_stats` helper.** It turned a failed `git diff` into a
+  successful zero-size measurement and had no caller.
+
+### Security
+
+- **security-gate diff mode takes its configuration from the range base, as
+  data (B0-3).**
+  - Both `security-gate-local/local.config.sh` files, root `.gitleaks.toml`,
+    `.gitleaksignore`, `osv-scanner.toml` and the baseline are read from the
+    range base, never the worktree. `local.config.sh` is parsed as data
+    (`SECURITY_GATE_*` and `LLM_*` literals only); anything else BLOCKS with
+    `security-gate local config is not data`.
+  - Scanner engines must be absolute binaries outside the project; inherited
+    shell functions are purged; gate Python runs isolated (`python3 -I`); the
+    gate and `osv.sh` start under `bash -p`.
+  - A base `.gitleaks.toml` that extends another file BLOCKS, and so does any
+    base `.gitleaks.toml` without Python 3.11's `tomllib`.
+  - A range that changes gate config is scanned with the base copies. In push
+    mode the verdict notes it. In merge mode it is BLOCKED unless the
+    repository owner has posted `gate-config-approved: <head SHA>` on the one
+    open PR for that head; agents never post that line. There is no
+    environment override.
+  - Gate config is: the scanner inputs above plus root `.semgrepignore`
+    (never loaded in diff mode, but a change to it counts), the agent-loader
+    paths
+    `**/.pi/**`, `**/.agents/agents/**`, `**/.agents/workflows/**`,
+    `**/.agents/skills/**` and `**/.trellis/**`, `**/.trellis.json`,
+    `**/.envrc` and `**/.env*` (matched by path only; never read), both
+    `process-gate-local` trees, the deprecated
+    `.claude/skills/process-gate/local.config.sh` and any
+    `secrets-allowlist.txt`. Paths match
+    after NFKC normalisation and case folding, and any changed path that
+    contains a non-ASCII byte is gate config.
+
+- **process-gate takes its configuration from the range base, as data (B0-4).**
+  `process-gate-local/local.config.sh` is parsed as data from the range base
+  (`PROCESS_GATE_*` literals and arrays only); anything else BLOCKS with
+  `process-gate local config is not data`. The secrets allowlist is read from
+  the base, so a range cannot allowlist its own secret. Stack validators and
+  the helpers named in `PROCESS_GATE_VALIDATOR_DEPS` are copied out of the
+  base into a private trusted root (`PG_TRUSTED_ROOT`) and run from there,
+  with cwd set to the checkout under test and `PROCESS_GATE_PROJECT_DIR` set
+  to its absolute path. A gate-config change follows the same owner-approval
+  rule as the security gate. A push that targets `main`/`master` passes
+  `--target=main`, and any gate-config change in it is BLOCKED, approved or
+  not: it must merge through its PR. Every bash the gate starts runs under
+  `bash -p` with `BASH_ENV` and `ENV` cleared.
+
+- **Required scanners must complete (B0-1).** Each diff scan prints a status
+  line per engine (`<engine>: ran= exit= parsed= scanned=`). A required
+  scanner that is not installed, exits abnormally, emits malformed or partial
+  output, or does not cover every changed target now BLOCKS its row
+  (`<engine> did not complete: <reason>`) instead of passing. OSV coverage is
+  bounded to tracked sources and checked for workspace and ancestor-lockfile
+  membership (Cargo workspace members and excludes, Go `go.sum`, every JS
+  lockfile); a Yarn Classic member manifest that relies on an ancestor
+  `yarn.lock` BLOCKS.
+
+- **The diff base comes only from the base side (BGSEC-A6).** The resolver
+  reads `template.branch` from the remote default's tree (else the local
+  `main`/`master`), never from the checkout under test, and refuses a value
+  that does not name a real branch instead of narrowing the range. spec-gate
+  resolves from the base policy, never the head tree. On a first push, the
+  managed `pre-push` gates from the remote default whenever the resolved base
+  is not on the push remote, and says so.
+
+- **Bright-line guards cannot be timed out into an allow (B0-5).** Claude Code
+  lets a `PreToolUse` command hook that hits its timeout fall through to the
+  normal permission flow. `block-destructive`, `reread-guard` and
+  `skill-preload-guard` are now registered at 30 s through a sanitising `sh`
+  entry and a supervisor, `lib/guard-supervise.pl`, which denies on its own
+  20 s budget, on a signal, on an exec failure, on an unexpected exit, and on
+  output that is not exactly one valid decision. Bright-line guards refuse
+  without `jq`. The pi dispatcher runs its required guards through the same
+  supervisor. The rendered `.claude/settings.local.json` adds a
+  `permissions.deny` backstop for the plain destructive `rm`, force-push and
+  `git reset --hard` forms.
+
+- **pi refuses to start over branch-controlled project configuration (B0-6).**
+  Every Trellis pi launcher first runs `core-rules/pi/lib/validate-project-pi.sh`,
+  which refuses anything pi or pi-subagents would load from `<cwd>/.pi` or
+  `<cwd>/.agents` that the protected base has not approved: untracked or
+  branch-modified settings, extensions, skills, prompts, agents or
+  `subagents.json`, and any symlink or hardlink there. Launchers take the home
+  directory from the account's passwd entry and run the validator with a
+  clean environment.
+
+- **An unmet cross-family review never mints the review marker (B0-2).** Any
+  reviewer route that fails or is unavailable now reports
+  `"status":"degraded"`, and the Claude Code and Codex Stop hooks treat a
+  missing status as completed only for an operator override. An unmet review
+  writes no marker, so the next Stop retries it.
+
+## [1.3.11] - 2026-10-08
+
+### Fixed
+
+- **Secrets allowlist moves to project-owned `process-gate-local` (G1).**
+  `check-secrets.sh` read `$PROJECT_DIR/.claude/skills/process-gate/secrets-allowlist.txt`,
+  but that directory is linked read-only to the release runtime at attach time, so a
+  project keeping an allowlist there could not attach at all (exit `3`:
+  `attachment destination is project-owned`). The allowlist is now read from the
+  project-owned overlay `<dir>/secrets-allowlist.txt`, resolved like `run-all.sh`
+  resolves local validators (`.agents/skills/process-gate-local` or
+  `.claude/skills/process-gate-local`, active harness first). The legacy
+  `.claude/skills/process-gate` path (and its `.agents` twin) is still honoured
+  read-only with a one-line stderr deprecation notice naming both paths; when both
+  exist the overlay wins and the legacy file is ignored, with the same notice.
+  See `docs/UPGRADING.md` (`1.3.10` → `1.3.11` adoption).
+
+- **Attach names a missing or non-executable launcher (G2).**
+  `attachment_contextual_render_context` returned `5` (`TRELLIS_EX_UNAVAILABLE`)
+  with no message when `$HOME/.local/bin/trellis` was missing, and `4`
+  (`TRELLIS_EX_STATE`) when it was not executable. Each now emits exactly one
+  diagnostic line via `_attachment_diag` naming the expected path and the remedy
+  (`docs/UPGRADING.md` "Reinstalling the launcher"). Return codes are unchanged.
+
+- **An exported `DOCKER_HOST` now reaches the process-gate payload (A).**
+  The managed dispatcher carried the caller's `DOCKER_HOST` only to prior
+  hooks and passthrough shims; `trellis_run_gate_payload` ran the gate under
+  `env -i` without it, so a pre-push gate running `docker` could not reach a
+  context-based daemon (colima) even with `DOCKER_HOST` exported. The gate
+  payload now receives it exactly when the caller had it set (empty-but-set
+  stays set, unset stays absent), reusing the same set/unset pair as the
+  prior-hook path and never exporting it into the control-plane process.
+
+- **`doctor` warns about Docker reachability in hooks (B).**
+  New host-level `docker-host-unset-for-hooks` (docker CLI on `PATH`,
+  `DOCKER_HOST` unset, active context not `default`, with the export remedy)
+  sits alongside the unchanged colima-fleet `docker-context-not-colima` row,
+  and new per-row `docker-not-on-recorded-toolchain` warns when `docker`
+  resolves on the caller `PATH` but not on the recorded toolchain `PATH` the
+  gate runs with, naming the missing directory. See `docs/UPGRADING.md`
+  (`1.3.10` → `1.3.11` adoption, "Docker inside managed hooks").
+
+- **Merge mode refuses without an explicit range (fail-closed).**
+  `run-all.sh --mode=merge` defaulted to `main..HEAD`, else `master..HEAD`,
+  else `HEAD~1..HEAD`, so a scratch clone with no local `main`/`master`
+  gated only the last commit while reporting a merge verdict. Merge mode now
+  refuses without `--range` (exit `1`, `merge mode requires --range/--base`,
+  before any check); `pg_parse_range` can no longer return `HEAD~1..HEAD` in
+  merge mode either. Exit `1` is the BLOCKED code deliberately: the pre-push
+  mapping lets exit `2` through as warn, so only `1` fails an ambiguous push
+  closed. Push mode and explicit-`--range` invocations are unchanged. See
+  `docs/UPGRADING.md` (`1.3.10` → `1.3.11` adoption).
+
+- **A multi-ref push gates every new commit it carries.**
+  The managed pre-push derived one range per pushed ref but fell back to
+  run-all's default `main..HEAD` when the refs disagreed, so a push from a
+  checkout with a stale local `main` (52 commits behind) swept already-merged
+  code into the gate. Each branch range is now derived from what the push adds,
+  every tag range not covered by a pushed branch tip is gated in turn (tag-only
+  pushes gate each tag in turn), and the hook refuses instead of guessing:
+  two non-main branch updates with different ranges (a main-targeting ref's
+  range wins over other branches), a branch whose remote tip is not local
+  (`fetch first`), a new branch with no resolvable remote default or no
+  merge-base with it, an underivable tag, and any ref update outside
+  `refs/heads/*` and `refs/tags/*` (deleting such a ref is allowed). A push that
+  only deletes refs gates nothing; a run with no ref lines on stdin (a direct
+  invocation) keeps the default gate. Caveat: a new branch is still ranged from
+  its merge-base with the remote-tracking default (`refs/remotes/origin/HEAD`,
+  else `origin/main` or `origin/master`); if that ref is stale the range
+  over-includes merged commits, which over-gates but never under-gates. Fetch
+  before pushing.
+
+- **The secrets allowlist is read from the gated commit.**
+  `check-secrets.sh` reads the project allowlist from the gated head's git
+  object, not the working tree, so an uncommitted allowlist edit cannot clear a
+  finding in the pushed range.
+
+## [1.3.10] - 2026-10-07
+
+### Fixed
+
+- **The stable launcher bundles the group exclude planner; reinstall it after installing
+  1.3.10.** The launcher's verified `release` and `upgrade` bundle now also loads
+  `scripts/lib/surface-plan.sh` and `scripts/attach-project.sh` from the active CLI payload
+  when that payload ships them. `release install` and `configure` never replace a differing
+  installed launcher, so on a machine still running the 1.3.9 launcher, adopting a real
+  checkout group refuses with `group exclude planner unavailable; use the verified 1.3.10 CLI
+  to adopt` (exit 5); singleton adoption is unaffected. This is a launcher change: after
+  activating 1.3.10, reinstall `~/.local/bin/trellis` from the release payload and confirm it
+  with `grep -c`; see [UPGRADING.md](docs/UPGRADING.md#139--1310-adoption).
+
+- **`usage-federation.bats` T48 runs foreman-start in a private worktree (spec 066, defect l).**
+  T48 passed the checkout root as the worktree argument, so a full gate left about 19
+  untracked `.agents/agents/*.md` files in the gated clone. It now uses a per-case worktree
+  and asserts the root's porcelain status is unchanged.
+
+- **All owner-recorded Pi auxiliaries fail closed (1.3.10 item s).**
+  Check-bypass and doctor share presence, ownership and content-hash checks for
+  required/advisory hooks, helpers and dormant executables. Symlink bytes must
+  match the sealed release's Git blob hashes; files retain recorded SHA-256.
+  Literal parent directories are checked separately for real-directory type,
+  owner rwx, no group/world write, setuid or sticky bits, and no redirected
+  parents (setgid is allowed). Project-authored Pi leaf deferrals fail closed,
+  including native registrations, and report "deferred to project file — " with
+  a repair hint: move the project file aside, then detach and attach again.
+
+- **Security scans fail closed in unattached clones (1.3.10 item q).**
+  Process-gate runs the executing payload's security skill first; project copies
+  are fallbacks only. A missing security-gate skill or baseline now FAILs instead
+  of warn-skipping, including at pre-push for attached projects. Run
+  `run-baseline.sh` before adopting 1.3.10; see [UPGRADING.md](docs/UPGRADING.md#1310-security-baseline-prerequisite).
+  Commit the generated baseline JSON so clones and worktrees see it.
+  Bypass's pre-attachment warning, the explicit security override and missing
+  scanner-binary behaviour are unchanged; the latter is a separate follow-up.
+
+- **Fail-closed gate fixtures match the runner and installed payload.** Pi
+  attachment tests isolate global Git signing policy; tag-push fixtures install
+  security-gate and commit its baseline; moved rollout fixtures carry the shared
+  Pi validator and seal both native registrations without relaxing assertions.
+
+- **Adopted checkout groups can add fresh worktrees (spec 066, t/u).** Adoption
+  reconciles the exact shared managed exclude block and every owner's hashes,
+  preserving external bytes and original detach restoration data, even at the
+  already-selected version. Incompatible deferrals, tamper and competing writes
+  refuse; interrupted group publication is recovered by retrying adoption.
+  Pre-add checks reject predictable stale plans before Git creation; sync and
+  quiet reconciliation print distinct actionable exclude/donor/artifact reasons.
+  Existing roots' missing native leaves still require whole-group detach/attach.
+  Per spec 066 §2.5(u), every owner's managed block gains the selected release's
+  new native-leaf entries and current hashes, while those leaves are not
+  materialized in existing roots. A checkout with one owner record adopts without
+  group exclude planning. A pending group adoption blocks `attach`, `worktree sync`
+  and `worktree add` until `release adopt` is retried with the same selector; a
+  `--project` selector without `--fleet` resolves its fleet before recovery, and an
+  ambiguous one refuses before any journal is touched. A signal after the
+  shared-exclude publication restores the prior bytes, and planning or publication
+  refusals name the exclude file and a remedy.
+
+- **Exact-owner idempotent attach reconciles stale registry releases (spec 066 r).**
+  When every live sibling has exact ownership at the same release, attach aligns
+  only the checkout registry release under checkout/registry locks, preserving
+  UUIDs, harnesses, retained unavailable inventory and unrelated writes. Journaled
+  recovery rolls forward; foreign bindings, modified owners and mixed live
+  releases refuse with named reasons. A second attach makes no registry write.
+  The harness selection is read from the checkout's registry binding, not inferred
+  from owned paths, so a bound harness with no owned artifacts still reconciles.
+  An adopted sibling whose recorded inventory is the complete plan of an older
+  installed release for the same harnesses is accepted (adoption does not add
+  native leaves); a newly attached tree must match the full current plan, and an
+  arbitrary subset, foreign leaf or changed target refuses. A retried attach
+  finishes an interrupted managed-hook installation before reconciling.
+
+- **Release-bound test receipts capture provenance at START (spec 066, process).**
+  `run-tests-local.py` and direct/shard `run-tests.sh` record UTC timestamp, exact
+  head/argv, bash/bats/jq/git/Node/pnpm executable paths and versions, the read-only
+  active CLI release pointer and caller PATH before setup/planning. Shards also
+  record the effective fenced PATH before tests. JSONL sidecars preserve the timing
+  TSV schema and retain START on setup failure, red, timeout or signal; missing
+  tools/releases are explicit, not inferred from end-of-run state. Inventory
+  `--list`/`--plan` never probe or write sidecars, and runner-owned receipt
+  bindings do not leak into nested stages. Probes preserve PATH shim identity,
+  use stdout only, and stay killable with the caller's group. Unavailable Python
+  or failed capture emits degraded provenance without replacing existing exits.
+
+- **`check-bypass.bats` fixtures pass the public-mirror lint.** Two fixtures named a launcher
+  under a fixture home's `.local/` directory, which the mirror's absolute-path lint reads as a home
+  directory for a user called `.local`, so `trellis mirror` refused to publish 1.3.9. They now
+  use `/fixture/user-home/`.
+
+- `trellis relink --user` restores missing, already-owned symlinks through the
+  attachment journal before relinking or release activation. Repairs verify the
+  recorded release and HOME safety boundaries, preserve the committed owner,
+  and refuse modified destinations or missing sources. Diagnostics distinguish
+  missing user destinations from modified ones. Repair recovery discards pinned
+  links/stages and re-plans, including after another external deletion; non-signal
+  repair failures do not leave a blocking journal.
+  **1.3.9 → 1.3.10 caveat:** an interrupted activation can leave a repair journal
+  the still-active 1.3.9 runtime cannot recover. Run
+  `"$TRELLIS_HOME/releases/1.3.10/payload/scripts/attach-project.sh" relink --user --home "$TRELLIS_HOME" --release 1.3.10`
+  directly, then retry `trellis configure --release 1.3.10`. Interruption diagnostics
+  print the exact release-specific remedy; see [UPGRADING.md](docs/UPGRADING.md#139--1310-user-surface-activation).
+
+## [1.3.9] - 2026-10-03
+
+### Fixed
+
+- **The managed dispatcher and doctor close the remaining hook-authority gaps (item 8,
+  dispatcher).** Prior hooks run with `pnpm_config_verify_deps_before_run=error` (without
+  skipping the operator's husky hook). After both the prior hook and the carrier, including when
+  the carrier is unavailable, the generated pre-push dispatcher checks that the local setting is
+  exactly one literal managed path and the effective value matches, and fails hard on drift
+  with the same restore commands. Doctor's local reader keeps a trailing empty value, so a
+  managed value plus an empty one is no longer reported as current, and doctor now names multiple
+  local `core.hooksPath` values with an exact `git config --replace-all` remedy.
+
+- **A guarded push no longer disarms the managed hooks (item 8, carrier).** The managed pre-push
+  (`core-rules/githooks/pre-push` and its byte-identical husky twin) runs verification with
+  `HUSKY=0` and `pnpm_config_verify_deps_before_run=error`, so on pnpm 11 a stale
+  `node_modules` fails instead of running `prepare: husky`. That install used to rewrite the
+  shared `core.hooksPath` to `.husky/_` and leave the next push unguarded. For managed
+  attachments, the carrier checks hook authority on every exit once its post-check is armed,
+  including early exits and HUP/INT/TERM: the local setting must be exactly one literal managed
+  path and the effective value must match, or the push fails hard, printing a command restoring
+  the same owner-recorded path that doctor's repair writes and, for worktree overrides, the
+  command to clear them. Relative `TRELLIS_HOME` is refused for managed attachments.
+
+- **`check-bypass.sh` distinguishes local attachment from a portable manifest.**
+  Reads this worktree's owner record under `TRELLIS_HOME` (default `~/.trellis`)
+  instead of assuming `.trellis.json` means Claude is attached. A manifest-only
+  clone or CI checkout now warns `not attached`; an attached checkout requires
+  its declared harnesses' registrations. Claude accepts hooks in either settings
+  file and Codex accepts its rendered `.codex/hooks.json`, but all owner-recorded
+  hook events, matchers and commands must match (or the recorded file hash must
+  match); an arbitrary surviving command cannot mask stripped hooks. Every
+  attached harness pins the owner-recorded runtime anchor. Pi also pins surface
+  parents and requires recorded symlinks to resolve to their recorded files
+  inside the runtime payload; regular-file artifacts must match recorded hashes.
+  Empty, stripped, replaced or deleted registrations still fail, including
+  tampering alongside another valid harness. Git discovery ignores exported
+  identity variables; project roots must match the owner-recorded worktree path,
+  and a nested Git toplevel cannot hide an attached ancestor. Invalid or lost
+  ownership and missing expectation baselines fail closed; private owner records
+  are opened without following symlinks and must have mode 0600. Regression
+  fixtures isolate the Trellis home and cover ownership identity, per-harness
+  registration, resolved Pi targets and pre-attachment warnings while preserving
+  the unattached Claude cases.
 
 ## [1.3.8] - 2026-10-03
 
@@ -70,6 +723,15 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Changed
 
+- **Visible Herdr panes are mandatory for delegated agent work.** Workers, reviewers,
+  consults, foremen, research, and one-shot `pi -p`/`codex exec` use visible panes;
+  only harness-native subagents and Dynamic Workflow agents are exempt. Inject
+  the owner rule before SessionStart degradation and document registered one-shot
+  panes with exit-preserving output capture and teardown.
+- **Pi 1.0 launch forms and adoption.** Document the context-safe reviewer command,
+  worktree context/trust rules, fullscreen capture, opt-in codemode/Durable decisions, and
+  Gemini 3.8 Flash tool use (0.7.0 panes `--no-tools`; on pi-antigravity 0.9.0 the synthetic
+  read-only fixture ran 16/16 correct with tools) in the [adoption ADR](docs/adr/2026-10-02-pi-1.0-adoption.md).
 - **The stable launcher relays the caller's environment to `trellis heavy` only.** Every other
   route still starts under `env -i`; the heavy route carries `env -0` as an opaque blob that only
   the supervisor decodes, for the wrapped command, so PATH entries, `DOCKER_HOST` and the rest

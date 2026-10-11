@@ -70,6 +70,8 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 cat "$OSV_FIXTURE_FILE"
+root="$(cd "${!#}" && pwd)" || exit 2
+printf 'Scanned %s/package-lock.json file and found 1 packages\n' "$root" >&2
 # OSV-Scanner uses 1 to mean vulnerabilities were found.
 exit 1
 SH

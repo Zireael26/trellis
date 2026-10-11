@@ -10,16 +10,17 @@
 #   - <repo-root>/specs/<NNN>-<slug>/ directory.
 #   - <repo-root>/specs/<NNN>-<slug>/spec.md (template copy with slug + date filled).
 #   - New branch feature/<slug>, checked out from the repo's default branch
-#     (main or master). Override with --no-branch to skip branch creation.
+#     (main or master), or --from <parent>. --no-branch skips branch creation.
 #
 # Refuses to run if:
 #   - Working tree is dirty (any unstaged or untracked files).
-#   - Current branch is not main/master (unless --no-branch).
+#   - Current branch is not main/master (unless --from or --no-branch).
 #   - spec.md already exists at the target path.
 #
 # Usage:
 #   new-feature.sh <slug>                  # default: branch + spec
 #   new-feature.sh <slug> --no-branch      # only create the directory; stay on current branch
+#   new-feature.sh <slug> --from feature/a # stack on an explicit parent
 #   new-feature.sh -h
 
 set -euo pipefail
@@ -35,10 +36,21 @@ TEMPLATE="$SKILL_DIR/references/spec-template.md"
 
 NO_BRANCH=false
 SLUG=""
+FROM=""
 
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
+  arg="$1"
   case "$arg" in
     --no-branch) NO_BRANCH=true ;;
+    --from)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "--from requires a parent ref" >&2
+        exit 2
+      fi
+      FROM="$2"; shift ;;
+    --from=*)
+      FROM="${arg#--from=}"
+      [ -n "$FROM" ] || { echo "--from requires a parent ref" >&2; exit 2; } ;;
     --help|-h)
       sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -56,10 +68,15 @@ for arg in "$@"; do
       fi
       ;;
   esac
+  shift
 done
 
+if $NO_BRANCH && [ -n "$FROM" ]; then
+  echo "--from cannot be combined with --no-branch" >&2
+  exit 2
+fi
 if [ -z "$SLUG" ]; then
-  echo "usage: new-feature.sh <slug> [--no-branch]" >&2
+  echo "usage: new-feature.sh <slug> [--no-branch | --from <parent>]" >&2
   exit 2
 fi
 
@@ -86,7 +103,7 @@ fi
 
 # Branch guard (unless --no-branch)
 CURRENT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
-if ! $NO_BRANCH; then
+if ! $NO_BRANCH && [ -z "$FROM" ]; then
   case "$CURRENT_BRANCH" in
     main|master) ;;
     *)
@@ -94,6 +111,15 @@ if ! $NO_BRANCH; then
       exit 1
       ;;
   esac
+fi
+
+PARENT="${FROM:-$CURRENT_BRANCH}"
+if [ "$PARENT" = HEAD ]; then PARENT="$CURRENT_BRANCH"; fi
+if ! $NO_BRANCH; then
+  BASE="$(git -C "$REPO_ROOT" rev-parse --verify "$PARENT^{commit}" 2>/dev/null)" || {
+    echo "unknown parent ref: $PARENT" >&2
+    exit 1
+  }
 fi
 
 # Pick next NNN
@@ -130,7 +156,16 @@ if ! $NO_BRANCH; then
     echo "branch already exists: $BRANCH" >&2
     exit 1
   fi
-  git -C "$REPO_ROOT" checkout -b "$BRANCH" >/dev/null
+  git -C "$REPO_ROOT" checkout -b "$BRANCH" "$PARENT" >/dev/null
+  if ! git -C "$REPO_ROOT" config --local --get "branch.$BRANCH.trellisParent" >/dev/null 2>&1; then
+    if git -C "$REPO_ROOT" config --local "branch.$BRANCH.trellisBase" "$BASE" &&
+       git -C "$REPO_ROOT" config --local "branch.$BRANCH.trellisSource" new-feature &&
+       git -C "$REPO_ROOT" config --local "branch.$BRANCH.trellisParent" "$PARENT"; then
+      :
+    else
+      echo "new-feature: warning: could not record branch creation base; use diff-base.sh set <parent>." >&2
+    fi
+  fi
   echo "branch: $BRANCH"
 fi
 

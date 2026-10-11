@@ -31,7 +31,7 @@ JSON
   # the OSV stage, which runs only when a manifest/lockfile is in the diff.
   cat > "$BIN/semgrep" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--version" ]; then echo "1.157.0"; else echo '{"results":[]}'; fi
+if [ "${1:-}" = "--version" ]; then echo "1.157.0"; else echo '{"results":[],"errors":[],"paths":{"scanned":[]}}'; fi
 SH
   cat > "$BIN/gitleaks" <<'SH'
 #!/usr/bin/env bash
@@ -81,6 +81,8 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 cat "$OSV_FIXTURE_FILE"
+root="${!#}"
+printf 'Scanned %s/uv.lock file and found 1 packages\n' "$root" >&2
 # OSV-Scanner uses 1 to mean vulnerabilities were found.
 exit 1
 SH

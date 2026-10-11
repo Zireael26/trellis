@@ -46,7 +46,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "reread-guard: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
-_se_require_jq "reread-guard"
+_se_require_jq "reread-guard" block
 
 # Source the shared autonomy resolver. It owns canonical project, legacy
 # project, immutable runtime, and built-in precedence.

@@ -555,6 +555,7 @@ libless_skill_dir() {
   mkdir -p "$LIBLESS/scripts/lib"
   cp "$REAL_SCRIPTS/check-slop.sh" "$LIBLESS/scripts/check-slop.sh"
   cp "$REAL_SCRIPTS/lib/common.sh" "$LIBLESS/scripts/lib/common.sh"
+  cp "$REAL_SCRIPTS/lib/diff-base.sh" "$LIBLESS/scripts/lib/diff-base.sh"
   chmod +x "$LIBLESS/scripts/check-slop.sh"
 }
 
@@ -639,6 +640,7 @@ stub_skill_dir() {
   mkdir -p "$STUB/scripts/lib"
   cp "$REAL_SCRIPTS/run-all.sh"    "$STUB/scripts/run-all.sh"
   cp "$REAL_SCRIPTS/lib/common.sh" "$STUB/scripts/lib/common.sh"
+  cp "$REAL_SCRIPTS/lib/diff-base.sh" "$STUB/scripts/lib/diff-base.sh"
   cp "$REAL_SCRIPTS/check-slop.sh" "$STUB/scripts/check-slop.sh"
   local name
   for name in check-pr.sh check-secrets.sh check-bypass.sh check-tests.sh \

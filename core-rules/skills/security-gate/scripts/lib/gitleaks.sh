@@ -3,13 +3,27 @@
 # Emits normalized JSONL with bucket=findings|historical_findings.
 # Usage: gitleaks.sh <project-dir> <out-jsonl>
 
+# Inherited shell functions never answer for a tool. Every command name can be
+# shadowed, `builtin` included, but an assignment cannot: POSIXLY_CORRECT turns
+# on POSIX mode, where the special builtins `unset` and `set` are found before
+# functions, so the first purge cannot be intercepted (see run-diff.sh).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset -f gitleaks python3
+builtin unset _sg_fn
+
 set -euo pipefail
 
 PROJECT_DIR="${1:?project-dir required}"
 OUT="${2:?out-jsonl required}"
 
-if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "warn: gitleaks not installed — skipping secrets stage" >&2
+GITLEAKS_BIN="$(builtin type -P gitleaks)" || GITLEAKS_BIN=""
+PYTHON3_BIN="$(builtin type -P python3)" || PYTHON3_BIN=""
+if [ -z "$GITLEAKS_BIN" ] || [ -z "$PYTHON3_BIN" ]; then
+  echo "warn: gitleaks or python3 not installed — skipping secrets stage" >&2
   : > "$OUT"
   exit 2
 fi
@@ -36,7 +50,7 @@ if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   CURRENT_SOURCE="$WORK/current-tree"
   mkdir -p "$CURRENT_SOURCE"
   git -C "$PROJECT_DIR" ls-files --cached --others --exclude-standard -z > "$WORK/all-current-files"
-  python3 - "$PROJECT_DIR" "$WORK/all-current-files" "$WORK/current-files" <<'PY'
+  "$PYTHON3_BIN" -I - "$PROJECT_DIR" "$WORK/all-current-files" "$WORK/current-files" <<'PY'
 import os, sys
 root, source_path, output_path = sys.argv[1:]
 with open(source_path, "rb") as source, open(output_path, "wb") as output:
@@ -54,7 +68,7 @@ fi
 
 # Gitleaks exits 1 when leaks are found; that is a successful scanner run.
 CURRENT_RC=0
-gitleaks detect \
+"$GITLEAKS_BIN" detect \
   --source "$CURRENT_SOURCE" \
   --no-git \
   --report-format json \
@@ -65,7 +79,7 @@ gitleaks detect \
   >/dev/null 2>"$CURRENT_ERR" || CURRENT_RC=$?
 
 HISTORY_RC=0
-gitleaks detect \
+"$GITLEAKS_BIN" detect \
   --source "$PROJECT_DIR" \
   --report-format json \
   --report-path "$RAW_HISTORY" \
@@ -109,7 +123,7 @@ fi
 
 NORMALIZED="$WORK/normalized.jsonl"
 NORMALIZE_RC=0
-python3 - "$RAW_CURRENT" "$RAW_HISTORY" "$CURRENT_SOURCE" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
+"$PYTHON3_BIN" -I - "$RAW_CURRENT" "$RAW_HISTORY" "$CURRENT_SOURCE" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
 import hashlib
 import json
 import os

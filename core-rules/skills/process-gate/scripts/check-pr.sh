@@ -8,7 +8,7 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
 . "$SKILL_DIR/scripts/lib/common.sh"
 
-pg_load_config
+pg_load_config "$@" || exit 1
 RANGE="$(pg_parse_range "$@")"
 
 worst="pass"

@@ -63,6 +63,7 @@ legacy_mirror_removed() {
 TARGET=""
 QUIET=0
 VERIFY_ONLY=0
+PRE_ADD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -75,6 +76,8 @@ while [ $# -gt 0 ]; do
       QUIET=1; shift ;;
     --verify-only)
       VERIFY_ONLY=1; shift ;;
+    --pre-add)
+      PRE_ADD=1; shift ;;
     --help)
       usage; exit 0 ;;
     -*)
@@ -103,6 +106,27 @@ if ! git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1; then
   echo "error: target is not inside a git repo: $TARGET" >&2
   exit 1
 fi
+
+if [ "$PRE_ADD" -eq 1 ]; then
+  TARGET="$(git -C "$TARGET" rev-parse --show-toplevel)"
+  TARGET="$(cd "$TARGET" && pwd -P)"
+fi
+
+# Diagnose an exclude refusal using the invoking (newer) code. A recorded
+# release's older attach payload can reject a stale plan without explaining it.
+seed_exclude_diagnostic() (
+  local script_dir="$1" source_owner="$2" payload="$3" harnesses_json="$4"
+  # shellcheck disable=SC2034  # root is read by attach_exclude_preflight via dynamic scope
+  local home="$5" checkout="$6" common="$7" release="$8" root="$9"
+  local surfaces scratch
+  set +e
+  . "$script_dir/attach-project.sh"
+  surfaces="$(attach_owner_surface_plan "$source_owner" "$payload" "$harnesses_json")" || return "$?"
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/trellis.worktree-plan.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  trap 'rm -rf "$scratch"' EXIT
+  attach_exclude_preflight "$home" "$checkout" "$common" \
+    "$scratch/before" "$scratch/after" "$surfaces" >/dev/null
+)
 
 # ---------------------------------------------------------------------------
 # The only mode: reconcile from local attachment state. The direct-link
@@ -197,6 +221,10 @@ attachment_reconcile() {
   # A registry can exist for another project/fleet without opting this clone
   # in. It must not cause project mutation or an emitted warning.
   [ "$registration" != null ] || return 0
+  if [ -d "$home/state/release-adoptions/$checkout" ]; then
+    printf 'trellis worktree: pending group adoption for %s (%s); remedy: retry release adopt with the same selector to recover before sync/add\n' "$TARGET" "$checkout" >&2
+    return "$TRELLIS_EX_CONFLICT"
+  fi
   fleet="$(printf '%s\n' "$registration" | jq -r '.fleet')" || return "$TRELLIS_EX_STATE"
   project_id="$(printf '%s\n' "$registration" | jq -r '.project_id')" || return "$TRELLIS_EX_STATE"
   release="$(printf '%s\n' "$registration" | jq -r '.release // empty')" || return "$TRELLIS_EX_STATE"
@@ -261,7 +289,7 @@ attachment_reconcile() {
   # A target row with an attachment ID is an explicit repair request. A new
   # worktree may inherit this checkout's attachment only from a fully verified
   # sibling, never from scalar registry metadata alone.
-  if [ -z "$attachment_id" ]; then
+  if [ -z "$attachment_id" ] || [ "$PRE_ADD" -eq 1 ]; then
     donor_ok=0
     while IFS=$'\t' read -r donor_worktree donor_root donor_attachment; do
       [ -n "$donor_worktree" ] && [ -n "$donor_root" ] && [ -n "$donor_attachment" ] || continue
@@ -305,24 +333,48 @@ attachment_reconcile() {
     done < <(printf '%s\n' "$registration" | jq -r --arg worktree "$worktree" '
       .checkout.worktrees
       | to_entries[]
-      | select(.key != $worktree and (.value.attachment_id? | type == "string"))
+      | select((.value.attachment_id? | type == "string"))
       | [.key, .value.root, .value.attachment_id] | @tsv
     ')
-    [ "$donor_ok" -eq 1 ] || return "$TRELLIS_EX_STATE"
+    [ "$donor_ok" -eq 1 ] || {
+      printf 'trellis worktree: invalid donor ownership in %s/state/attachments/%s for %s; remedy: restore a verified committed sibling before sync/add\n' "$home" "$checkout" "$TARGET" >&2
+      return "$TRELLIS_EX_STATE"
+    }
   fi
   while IFS= read -r harness; do
     [ -n "$harness" ] || continue
     attach_args+=("--harness" "$harness")
   done < <(printf '%s\n' "$harnesses_json" | jq -r '.[]')
+  # Pre-add has no target yet: check the donor plan before creating a tree or
+  # branch. An ordinary seed leaves the exclude preflight to the recorded
+  # payload; only its refusal needs the newer invoking code's diagnosis.
+  if [ "$PRE_ADD" -eq 1 ]; then
+    seed_exclude_diagnostic "$script_dir" "$donor_owner" "$payload" "$harnesses_json" \
+      "$home" "$checkout" "$common" "$release" "$TARGET" || return "$?"
+    return 0
+  fi
+  if [ -n "$attachment_id" ]; then
+    if attachment_verify "$home" "$owner"; then :; else
+      rc=$?
+      printf 'trellis worktree: owned-artifact refusal at %s for %s; remedy: restore exact recorded artifacts before sync\n' "$owner" "$TARGET" >&2
+      return "$rc"
+    fi
+  fi
   if [ "$QUIET" -eq 1 ]; then
     TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
       --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
-      "${attach_args[@]}" "$TARGET" >/dev/null
+      "${attach_args[@]}" "$TARGET" >/dev/null || rc=$?
   else
     TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
       --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
-      "${attach_args[@]}" "$TARGET"
+      "${attach_args[@]}" "$TARGET" || rc=$?
   fi
+  rc="${rc:-0}"
+  if [ "$rc" -eq "$TRELLIS_EX_CONFLICT" ]; then
+    seed_exclude_diagnostic "$script_dir" "${donor_owner:-$owner}" "$payload" "$harnesses_json" \
+      "$home" "$checkout" "$common" "$release" "$TARGET" || :
+  fi
+  return "$rc"
 }
 
 attachment_reconcile

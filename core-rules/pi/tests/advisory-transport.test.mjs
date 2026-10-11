@@ -194,7 +194,8 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
     { capability_status: 'unsupported', decision: 'warn', reason: 'unsupported observation' },
   ]) {
     f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: 'stderr sentinel', code: 0 });
-    await f.handlers.get('tool_call')(call, f.ctx);
+    // Reads no longer cross the process boundary; exercise its errors on shell.
+    await f.handlers.get('tool_call')({ toolCallId: 'shell-errors', toolName: 'bash', input: { command: 'pwd' } }, f.ctx);
   }
   assert.equal(f.notifications.length, 3);
 });

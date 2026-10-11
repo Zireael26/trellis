@@ -12,7 +12,14 @@ load helpers
 CORE_LIB="$HOOKS_DIR/lib/verification-receipt.sh"
 
 setup() {
+  # Never read the operator's ~/.trellis.
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   setup_project_dir
+  # Receipts bind physical roots. macOS 27's bare `mktemp -d` ignores TMPDIR
+  # for the per-user /var/folders dir, reached through the /var symlink, so
+  # pin the fixture to its physical path whatever the host's mktemp returns.
+  PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   FAKE_BIN="$BATS_TEST_TMPDIR/fake-bin"
   FAKE_STATE="$BATS_TEST_TMPDIR/fake-state"
   mkdir -p "$FAKE_BIN" "$FAKE_STATE"

@@ -30,14 +30,21 @@ CONSUMER_ALLOWLIST='scripts/lib/release-store.sh|2|b842673ff8b25bae|installer: f
 scripts/trellis-launcher.sh|2|056f774f16eb9aa8|launcher bootstrap install: the same explicit tag refspec as the store
 scripts/sync-to-template.sh|2|85c7d99542690d3c|mirror: fetches the installed tag by explicit refspec and main beside it (R3.6)
 scripts/release-payload-commit.sh|4|44ff032b8536bb6b|identity gate: resolves refs/tags/<tag>; is-ancestor checks the approved commit against the fetched origin/main, never the tag
+core-rules/githooks/pre-push|3|8997fa86b330e05b|gate dispatch: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
+core-rules/husky/pre-push|3|cb331fcaea38dc04|husky twin: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
+core-rules/skills/process-gate/scripts/lib/diff-base.sh|1|f2894e8dac5d879b|is-ancestor between two commits for base refinement, no tag involved
 scripts/verify-conductor-spec-inventory.mjs|2|b24ec11275dc1812|is-ancestor between main refs, no tag involved
-scripts/tests/helpers/git-fence/git|4|f570cf69b7be8b52|test fence: parses --depth and ls-remote as argv shapes, fetches nothing
+scripts/tests/helpers/git-fence/git|4|37ec6942f05001b9|test fence: parses --depth and ls-remote as argv shapes, fetches nothing
 scripts/tests/helpers/payload-fixture.bash|3|638b0793f379ead0|fixture: pushes fixture tags by explicit refspec; checks refs/tags/v1.3.6 exists before git show
+scripts/tests/pre-push-range.bats|11|9958d6726e67e317|fixtures: simulated tag ref updates exercise per-tag ranges, branch containment, fail-closed underivable ranges and the unsupported-ref refusal in both carriers
+scripts/tests/pre-push-diff-base.bats|3|2d82a0e5e490f878|fixtures: simulated tag ref updates prove a tag-only push skips spec-gate and a branch+tag push hands spec-gate the branch, never the tag
 scripts/tests/sync-to-template-dry-run.bats|2|8fbb38a541f590d7|fixture: pushes a fixture tag by explicit refspec
 scripts/tests/release-payload-commit.bats|1|652b7a5664ff9f9c|fixture: points the fixture tag ref at a hand-built tag object so --verify-tag reads its header
-.github/workflows/bats.yml|1|853d9f8327f7e952|CI: fetches the v1.3.6 tag by explicit refspec, depth 1, for the old-installer probe (A3.4)
-docs/UPGRADING.md|1|046f0c4b010111c0|prose: git describe on main no longer names the newest release, which is cosmetic
+scripts/tests/user-surface.bats|1|506af448a3090479|fixture: checks the v1.3.9 release tag exists before archiving its shipped runtime
+.github/workflows/bats.yml|2|5d6f3d57d87a557c|CI: fetches the v1.3.6 and v1.3.9 tags by explicit refspec, depth 1, for old-runtime probes
+CHANGELOG.md|1|b1337350f0392162|prose: the 1.3.11 pre-push notes name the refs/heads/* and refs/tags/* refusal; no consumer
+docs/UPGRADING.md|3|b6deba7648e8cf62|prose: tag refs classify push ranges, not release discovery; git describe on main no longer names the newest release, which is cosmetic; the 1.3.11 unsupported-ref refusal names refs/tags/*
 AGENT_PI_SETUP.md|1|d115d46558230798|npm list --depth=0, not git
 specs/043-pi-harness-adoption/guide/SETUP.md|1|cba8efcdb8435007|npm list --depth=0, not git
 specs/019-claude-5-alignment/audit/E-rollout-surface.md|1|5d5738a672fdf831|audit prose: an ls-remote run once by hand
@@ -189,14 +196,33 @@ overlay_hits() {
 # so the Tests row takes its own undeclared-command path. One stack validator is
 # configured only to record the range the aggregator hands every gate. The
 # instance's own suite is not what this proves: check-tests runs it on the
-# working tree on every push, whatever ref is pushed. No security-gate is
-# installed here, so the Security (diff) row reports a skip, not a scan.
+# working tree on every push, whatever ref is pushed. The real security-gate
+# has a committed empty baseline for this clean fixture: a deletions-only range
+# is an empty scan, not a missing-gate or missing-baseline skip. The gate reads
+# the baseline from the range base, so TAG_FIXTURE_BASELINE=0 leaves it out of
+# that commit. Process-gate config is read at the range base too, so it is
+# committed there; $1 is an optional extra config line.
 tag_push_setup() {
   local hooks="$BATS_TEST_TMPDIR/hooks" gate_local
   WORK="$BATS_TEST_TMPDIR/work"
   REMOTE="$BATS_TEST_TMPDIR/remote.git"
   GATED_RANGE="$BATS_TEST_TMPDIR/gated-range"
   payload_fixture_source "$WORK" 7.7.7
+  if [ "${TAG_FIXTURE_BASELINE:-1}" = 1 ]; then
+    mkdir -p "$WORK/audits"
+    printf '{"schema":"security-gate.baseline.v2","findings":[],"historical_findings":[]}\n' \
+      > "$WORK/audits/2026-01-01-baseline-work.json"
+    payload_fixture_git -C "$WORK" add audits
+  fi
+  gate_local="$WORK/.claude/skills/process-gate-local"
+  mkdir -p "$gate_local"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" > %q\n' "$GATED_RANGE" > "$gate_local/record-range.sh"
+  printf 'PROCESS_GATE_STACK_PROFILE=range-probe\nPROCESS_GATE_STACK_VALIDATORS=(record-range.sh)\n%s' \
+    "${1:+$1
+}" > "$gate_local/local.config.sh"
+  payload_fixture_git -C "$WORK" add .claude/skills/process-gate-local
+  payload_fixture_git -C "$WORK" commit -qm 'commit security baseline and gate config'
+  PAYLOAD_FIXTURE_RELEASE="$(payload_fixture_git -C "$WORK" rev-parse HEAD)"
   payload_fixture_git init -q --bare "$REMOTE"
   payload_fixture_git -C "$WORK" remote add origin "$REMOTE"
   payload_fixture_git -C "$WORK" push -q origin main
@@ -206,14 +232,13 @@ tag_push_setup() {
   run payload_fixture_tool "$WORK" --verify-tag v7.7.7 "$PAYLOAD_FIXTURE_RELEASE"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  gate_local="$WORK/.claude/skills/process-gate-local"
-  mkdir -p "$hooks" "$gate_local"
+  mkdir -p "$hooks"
   cp "$REPO_ROOT/core-rules/githooks/pre-push" "$hooks/pre-push"
   chmod 755 "$hooks/pre-push"
   cp -R "$REPO_ROOT/core-rules/skills/process-gate" "$WORK/.claude/skills/process-gate"
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" > %q\n' "$GATED_RANGE" > "$gate_local/record-range.sh"
-  printf 'PROCESS_GATE_STACK_PROFILE=range-probe\nPROCESS_GATE_STACK_VALIDATORS=(record-range.sh)\n' \
-    > "$gate_local/local.config.sh"
+  cp -R "$REPO_ROOT/core-rules/skills/security-gate" "$WORK/.claude/skills/security-gate"
+  mkdir -p "$WORK/.claude/skills/security-gate-local"
+  printf 'SECURITY_GATE_PROJECT_NAME=work\n' > "$WORK/.claude/skills/security-gate-local/local.config.sh"
   printf '/.claude/\n' >> "$WORK/.git/info/exclude"
   HOOKS="$hooks"
 }
@@ -222,7 +247,7 @@ tag_push_setup() {
 # Harness project variables are dropped so the gate judges the fixture, not the
 # checkout running this suite.
 tag_push() {
-  run env -u CLAUDE_PROJECT_DIR -u CODEX_PROJECT_DIR GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  run env -u CLAUDE_PROJECT_DIR -u CODEX_PROJECT_DIR -u SECURITY_GATE_SKIP GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
     git -c core.hooksPath="$HOOKS" -C "$WORK" push origin v7.7.7
 }
 
@@ -235,6 +260,8 @@ tag_push_passed() {
   [ "$status" -eq 0 ] || { echo "push exited $status"; return 1; }
   [[ "$output" == *'[pre-push] Trellis verification starting (mode=push)'* ]] || { echo 'the hook did not run'; return 1; }
   [[ "$output" == *'## process-gate verdict (mode=push)'* ]] || { echo 'no gate verdict'; return 1; }
+  printf '%s\n' "$output" | grep -Eq '^Security \(diff\):.*✅ pass$' ||
+    { echo 'the real security diff did not pass'; return 1; }
   printf '%s\n' "$output" | grep -Eqx 'Overall: (MERGEABLE|NEEDS CHANGES)' ||
     { echo 'the verdict is neither MERGEABLE nor NEEDS CHANGES'; return 1; }
   [ "$(cat "$GATED_RANGE" 2>/dev/null)" = "--range=$PAYLOAD_FIXTURE_RELEASE..$tag_object" ] ||
@@ -254,13 +281,23 @@ tag_push_passed() {
 }
 
 @test "A3.8 a BLOCKED gate verdict on the payload tag push fails the proof" {
-  tag_push_setup
-  printf 'PROCESS_GATE_TEST_CMD=false\n' >> "$WORK/.claude/skills/process-gate-local/local.config.sh"
+  tag_push_setup 'PROCESS_GATE_TEST_CMD=false'
   tag_push
   [[ "$output" == *'Overall: BLOCKED'* ]] || { echo "$output"; false; }
+  printf '%s\n' "$output" | grep -Eq '^Security \(diff\):.*✅ pass$'
   run tag_push_passed
   [ "$status" -ne 0 ] || { echo 'a blocked push passed the proof'; false; }
   [[ "$output" == 'push exited 1' ]] || { echo "$output"; false; }
+  run payload_fixture_git --git-dir="$REMOTE" rev-parse -q --verify refs/tags/v7.7.7
+  [ "$status" -ne 0 ]
+}
+
+@test "A3.8 a payload tag push without its security baseline is blocked" {
+  TAG_FIXTURE_BASELINE=0 tag_push_setup
+  tag_push
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  grep -qF 'baseline required (BLOCKED)' <<<"$output"
+  printf '%s\n' "$output" | grep -Eq '^Security \(diff\):.*❌ fail$'
   run payload_fixture_git --git-dir="$REMOTE" rev-parse -q --verify refs/tags/v7.7.7
   [ "$status" -ne 0 ]
 }

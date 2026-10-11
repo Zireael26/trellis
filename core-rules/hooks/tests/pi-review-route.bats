@@ -121,7 +121,7 @@ make_deciding_reviewer_state() {
   local workspace="${3:-fixture-workspace}"
   local pane="${4:-fixture-pane}"
   local state="$home/.trellis/state/roles-resolved.json"
-  local implementer="${5:-luna}"
+  local implementer="${5:-haiku-xhigh}"  # the default roster's implementer head (unit H)
   local resolver
   resolver="$(make_active_release_resolver "$home")"
 
@@ -185,7 +185,7 @@ assert_pi_reviewer_fail_closed() {
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$path_backup"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'{"findings":[]}'* ]] || { echo "GOT:[$output]"; false; }
+  [[ "${lines[${#lines[@]}-1]}" == '{"status":"degraded","findings":[]}' ]] || { echo "GOT:[$output]"; false; }
   grep -q RAN_PI "$marker" && { echo "pi should not have run"; false; }
   [ ! -s "$TOMBSTONE" ] || { cat "$TOMBSTONE"; false; }
   rm -rf "$stub_dir" "$claude_dir"
@@ -248,7 +248,7 @@ EOF
   export PATH="$PATH_BACKUP"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'{"findings":[]}'* ]] || { echo "GOT:[$output]"; false; }
+  [[ "${lines[${#lines[@]}-1]}" == '{"status":"degraded","findings":[]}' ]] || { echo "GOT:[$output]"; false; }
   grep -q RAN_PI "$MARKER" && { echo "pi should not have run"; false; }
   [ ! -s "$TOMBSTONE" ] || { cat "$TOMBSTONE"; false; }
   rm -rf "$FAKE_HOME" "$STUB_DIR" "$CLAUDE_DIR"
@@ -457,16 +457,23 @@ PY
   teardown_tombstone
 }
 
-@test "herdr session hook writes ~/.trellis/state/roles-resolved.json" {
+# Lean C04: SessionStart neither runs the resolver nor adopts a cached roster.
+# Even a deciding artifact the real resolver wrote earlier in this pane carries
+# no origin attestation, so the hook removes it and reports the roles undecided;
+# no resolver copy, release or project, runs.
+@test "herdr session hook removes this pane's cached ~/.trellis/state/roles-resolved.json without resolving or adopting" {
   FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
-  RELEASE_RESOLVER="$(make_active_release_resolver "$FAKE_HOME")"
+  STATE="$(make_deciding_reviewer_state "$FAKE_HOME")"
+  RELEASE_RESOLVER="$FAKE_HOME/.trellis/releases/1.2.3/payload/core-rules/skills/herdr-foreman/scripts/resolve-roles.py"
+  RESOLVER_MARKER="$(mktemp "$BATS_TMPDIR/resolverran.XXXXXX")"
+  printf 'open(%s, "a").write("release\\n")\nraise SystemExit(93)\n' "'$RESOLVER_MARKER'" >"$RELEASE_RESOLVER"
   POISON_PROJECT="$(mktemp -d "$BATS_TMPDIR/poisonproject.XXXXXX")"
   POISON_RESOLVER="$POISON_PROJECT/.claude/skills/herdr-foreman/scripts/resolve-roles.py"
   mkdir -p "$(dirname "$POISON_RESOLVER")"
-  printf 'raise SystemExit(91)\n' >"$POISON_RESOLVER"
+  printf 'open(%s, "a").write("poison\\n")\nraise SystemExit(91)\n' "'$RESOLVER_MARKER'" >"$POISON_RESOLVER"
   CLI_DIR="$(make_session_resolver_stubs)"
   ROLE_STATE="$FAKE_HOME/.trellis/state/roles-resolved.json"
-  POLICY="$FAKE_HOME/.trellis/releases/1.2.3/payload/core-rules/skills/herdr-foreman/roles.json"
+  [ "$STATE" = "$ROLE_STATE" ]
 
   run env -u CODE_REVIEWER_CMD \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
@@ -475,30 +482,14 @@ PY
     bash "$SESSION_HOOK"
 
   [ "$status" -eq 0 ]
-  [ -f "$RELEASE_RESOLVER" ]
-  [ -f "$ROLE_STATE" ] || { echo "release resolver was not selected: $output"; false; }
+  [ ! -s "$RESOLVER_MARKER" ] || { echo "a resolver ran at SessionStart: $(cat "$RESOLVER_MARKER")"; false; }
+  [[ "$output" == *"DEGRADED: SessionStart does not adopt a cached deciding roster;"* ]] || { echo "roles not reported undecided: $output"; false; }
+  [[ "$output" != *"Cached deciding roster ("* ]] || { echo "cached roster adopted: $output"; false; }
   [[ "$output" == *"pi foreman pane"* ]] || { echo "missing pi wording: $output"; false; }
   [[ "$output" == *"Existing pi panes"* ]] || { echo "missing pi panes: $output"; false; }
-  python3 - "$ROLE_STATE" "$POLICY" <<'PY'
-import hashlib, json, os, stat, sys
-state_path, policy_path = sys.argv[1:]
-mode = stat.S_IMODE(os.stat(state_path).st_mode)
-assert mode == 0o600, oct(mode)
-with open(policy_path, "rb") as source:
-    policy_bytes = source.read()
-with open(state_path, encoding="utf-8") as source:
-    artifact = json.load(source)
-assert artifact["roles_policy"] == {
-    "roles_sha256": hashlib.sha256(policy_bytes).hexdigest(),
-    "cache_ttl_seconds": json.loads(policy_bytes)["cache_ttl_seconds"],
-}
-scope = artifact["resolution_scope"]
-assert scope["herdr_workspace_id"] == "fixture-workspace"
-assert scope["herdr_pane_id"] == "fixture-pane"
-assert scope["implementer"] == "luna"
-assert artifact["family_collapse"] == []
-PY
+  [ ! -e "$ROLE_STATE" ] || { echo "this pane's cached roster was kept: $output"; false; }
   rm -rf "$FAKE_HOME" "$POISON_PROJECT" "$CLI_DIR"
+  rm -f "$RESOLVER_MARKER"
 }
 
 @test "code-review-subagent inside Herdr routes to pi, never claude" {

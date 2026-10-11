@@ -19,6 +19,7 @@ setup() {
   # Resolve through real path so /var vs /private/var cannot diverge
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
 
+  export TRELLIS_HOME="$SANDBOX/inert trellis home"
   ROOT="$SANDBOX/root"
   MAIN="$SANDBOX/main"
 
@@ -142,6 +143,112 @@ teardown() {
   [[ "$output" == *"worktree.sh"* ]] || { echo "$output"; false; }
   [[ "$output" == *"add"* ]] || { echo "$output"; false; }
   [[ "$output" == *"sync"* ]] || { echo "$output"; false; }
+}
+
+# Observe wrapper invocations separately from the managed post-checkout hook.
+# Both still use the real seeder and sealed payload; no hook is disabled.
+wrapper_counted_copy() {
+  COUNTED_WRAPPER_DIR="$T14_SANDBOX/counted wrapper"
+  export WRAPPER_SEED_LOG="$T14_SANDBOX/wrapper.seeds"
+  export WRAPPER_REAL_SEED="$REPO_ROOT/scripts/seed-inheritance-symlinks.sh"
+  : > "$WRAPPER_SEED_LOG"
+  mkdir -p "$COUNTED_WRAPPER_DIR"
+  cp "$SCRIPT" "$COUNTED_WRAPPER_DIR/worktree.sh"
+  cp -R "$REPO_ROOT/scripts/lib" "$COUNTED_WRAPPER_DIR/lib"
+  cat > "$COUNTED_WRAPPER_DIR/seed-inheritance-symlinks.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$WRAPPER_SEED_LOG"
+bash "$WRAPPER_REAL_SEED" "$@" || exit "$?"
+# Inject a fault after the read-only pre-add check to exercise Git's actual
+# post-checkout refusal, not just the wrapper's predictable pre-add refusal.
+if [ -n "${WRAPPER_TAMPER_RELEASE:-}" ]; then
+  chmod u+w "$WRAPPER_TAMPER_RELEASE"
+  printf '\n# post-preflight corruption\n' >> "$WRAPPER_TAMPER_RELEASE"
+  chmod 500 "$WRAPPER_TAMPER_RELEASE"
+fi
+if [ -n "${WRAPPER_DRIFT_HOOKS_ROOT:-}" ]; then
+  git -C "$WRAPPER_DRIFT_HOOKS_ROOT" config --local core.hooksPath "$WRAPPER_DRIFT_HOOKS_ROOT/.husky/_"
+fi
+SH
+  chmod 755 "$COUNTED_WRAPPER_DIR/seed-inheritance-symlinks.sh"
+}
+
+@test "wrapper add seeds only in post-checkout after one read-only pre-add call" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  wrapper_counted_copy
+  T14_WORKTREE="$T14_SANDBOX/counted worktree"
+
+  run bash -c 'cd "$1" && bash "$2" add -b t14-counted-wrapper "$3"' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
+  grep -- '--pre-add --quiet' "$WRAPPER_SEED_LOG"
+  [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
+  [ -L "$T14_WORKTREE/.trellis/runtime" ]
+  [ -L "$T14_WORKTREE/.claude/rules/trellis.md" ]
+}
+
+@test "wrapper add refuses readiness when hooksPath drifts after pre-add" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  wrapper_counted_copy
+  T14_WORKTREE="$T14_SANDBOX/drifted hook worktree"
+  export WRAPPER_DRIFT_HOOKS_ROOT="$T14_PROJECT"
+
+  run bash -c 'cd "$1" && bash "$2" add -b t14-hook-drift "$3"' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 2 ]
+  [ ! -e "$T14_WORKTREE/.trellis/runtime" ]
+  [ -z "$(t14_owner_for_root "$T14_WORKTREE" 2>/dev/null || true)" ]
+  [[ "$output" != *"worktree ready:"* ]]
+}
+
+@test "wrapper pre-add release refusal still creates no branch or worktree" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  wrapper_counted_copy
+  T14_WORKTREE="$T14_SANDBOX/refused worktree"
+  payload_attach="$TRELLIS_HOME/releases/1.2.3/payload/scripts/attach-project.sh"
+  chmod u+w "$payload_attach"
+  printf '\n# corruption\n' >> "$payload_attach"
+  chmod 500 "$payload_attach"
+
+  run bash -c 'cd "$1" && bash "$2" add -b t14-refused-wrapper "$3"' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+
+  [ "$status" -eq 4 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
+  [ ! -e "$T14_WORKTREE" ]
+  ! git -C "$T14_PROJECT" show-ref --verify --quiet refs/heads/t14-refused-wrapper
+}
+
+@test "wrapper propagates the managed post-checkout release refusal without reseeding" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  wrapper_counted_copy
+  T14_WORKTREE="$T14_SANDBOX/post-checkout refused worktree"
+  export WRAPPER_TAMPER_RELEASE="$TRELLIS_HOME/releases/1.2.3/payload/scripts/attach-project.sh"
+
+  run bash -c 'cd "$1" && bash "$2" add -b t14-hook-refused-wrapper "$3"' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
+  [[ "$output" != *"worktree ready:"* ]]
+  [ ! -e "$T14_WORKTREE/.trellis/runtime" ]
+  [ -z "$(t14_owner_for_root "$T14_WORKTREE" 2>/dev/null || true)" ]
 }
 
 @test "opted-in worktree add attaches from immutable release with registered project identity" {

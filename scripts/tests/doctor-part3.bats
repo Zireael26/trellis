@@ -290,7 +290,7 @@ EOF
   done
   # Shared task and verification primitives are explicit manifest link sources.
   # Keep this minimal payload complete before its immutable tree is sealed.
-  for primitive in task-context.sh task-state.py verification-bash.py; do
+  for primitive in task-context.sh task-state.py verification-bash.py guard-supervise.pl; do
     cp "$REPO_ROOT/core-rules/hooks/lib/$primitive" "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$primitive" || return 1
   done
   printf '#!/usr/bin/env bash\nexit 0\n' \
@@ -741,6 +741,58 @@ make_no_playwright_path() {
   [ "$(jq -r '.git_hooks.previous_hooks_path' "$owner")" = "$previous" ]
 }
 
+
+@test "portable doctor reports multiple local core.hooksPath values with an exact replace-all remedy" {
+  local expected expected_display root_display before remedy
+  build_portable_doctor_home
+  prepare_portable_attachment
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  git -C "$PORTABLE_PROJECT" config --local --add core.hooksPath ""
+  before="$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")"
+  expected_display="$(LC_ALL=C printf '%q' "$expected")"
+  root_display="$(LC_ALL=C printf '%q' "$PORTABLE_PROJECT")"
+  remedy="git config --replace-all core.hooksPath $expected_display"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"git hook authority: multiple local core.hooksPath values in $root_display; the Trellis managed dispatcher is $expected_display — restore with: $remedy"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"git hook authority: core.hooksPath is "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"run trellis doctor --fix"* ]] || { echo "$output"; false; }
+  [ "$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")" = "$before" ]
+}
+
+@test "portable doctor keeps single-value managed and drift core.hooksPath diagnostics unchanged" {
+  local expected expected_display root_display current current_display before diagnostic
+  build_portable_doctor_home
+  prepare_portable_attachment
+  expected="$PORTABLE_HOME/state/git-hooks/$PORTABLE_CHECKOUT_ID"
+  expected_display="$(LC_ALL=C printf '%q' "$expected")"
+  root_display="$(LC_ALL=C printf '%q' "$PORTABLE_PROJECT")"
+  before="$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")"
+
+  run_portable_doctor --project portable-fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"git hook authority: core.hooksPath matches the Trellis managed dispatcher at $expected_display"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"git config --replace-all core.hooksPath"* ]] || { echo "$output"; false; }
+  [ "$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")" = "$before" ]
+
+  for current in .husky/_ /custom; do
+    git -C "$PORTABLE_PROJECT" config --local core.hooksPath "$current"
+    before="$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")"
+    current_display="$(LC_ALL=C printf '%q' "$current")"
+    diagnostic="core.hooksPath is $current_display in $root_display; the Trellis managed dispatcher is $expected_display; run trellis doctor --fix"
+
+    run_portable_doctor --project portable-fixture
+
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    [[ "$output" == *"git hook authority: $diagnostic"* ]] || { echo "$output"; false; }
+    [[ "$output" != *"multiple local core.hooksPath values"* ]] || { echo "$output"; false; }
+    [[ "$output" != *"git config --replace-all core.hooksPath"* ]] || { echo "$output"; false; }
+    [ "$(portable_file_sha256 "$PORTABLE_PROJECT/.git/config")" = "$before" ]
+  done
+}
 
 @test "portable doctor reports when Husky reclaims core.hooksPath without repairing it" {
   local current diagnostic current_display root_display expected_display

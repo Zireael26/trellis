@@ -1,28 +1,16 @@
 #!/usr/bin/env bash
-# pr-gate-shiftleft.sh — Claude PreToolUse(Bash) advisory process-gate.
+# pr-gate-shiftleft.sh — Claude PreToolUse(Bash) recorder for `gh pr create`.
 # Source: Trellis / core-rules / hooks (Spec 005 C3 / T-P4d).
 #
 # Contract:
 #   - Reads a Claude PreToolUse JSON envelope from stdin.
 #   - Runs only when a shell command contains an actual `gh pr create`
 #     command (not prose such as `echo gh pr create` or `gh pr view`).
-#   - Invokes the project's process-gate pre-flight with the standard
-#     `--range=main..HEAD` interface.
-#   - Every result is advisory: output is additionalContext and this hook
-#     always exits 0 after a valid trigger. CI and branch protection remain
-#     authoritative; this hook never emits a deny decision.
-#   - The process-gate invocation has a portable perl-alarm process-group
-#     timeout. GNU `timeout`/`gtimeout` are deliberately not used.
-#
-# Runner resolution:
-#   PR_GATE_SHIFTLEFT_RUNNER (or PROCESS_GATE_RUNNER) may name a runner for
-#   tests/operator overrides. Otherwise the installed project skill is used:
-#   Claude prefers .claude/skills/process-gate, Codex prefers .agents first,
-#   and the other tree is a fallback.
-#
-# Budget:
-#   PR_GATE_SHIFTLEFT_TIMEOUT or PROCESS_GATE_SHIFTLEFT_TIMEOUT, default 90s.
-#   A timeout is advisory and exits 0; the child process group is terminated.
+#   - Records the literal --base on the resolved PR head branch as
+#     branch.<head>.trellisPrBase, the base cache read by diff-base.sh.
+#   - Never runs process-gate. The pre-push gate is the authoritative local
+#     check. On a recorded base it prints one stderr line; it never emits a
+#     deny decision and always exits 0.
 
 set -u
 
@@ -69,13 +57,15 @@ esac
 # conservative: only an actual logical command (or one of the explicit safe
 # wrappers below) can reach the `gh pr create` token sequence. Heredoc bodies
 # are skipped before lexical scanning, so prose copied into a PR body cannot
-# trigger the local process-gate.
+# record a PR base.
 _pg_has_gh_pr_create() {
   local input="$1"
   local line ch next next2
   local i line_len
   local quote="" comment=0 escape=0
-  local token="" token_started=0
+  local token="" token_started=0 token_literal=1
+  PG_WORDS=(); PG_LITERALS=(); PG_SEPS=(); PG_WORD_COUNT=0
+  PG_PR_START=0; PG_PR_END=-1; PG_CD_COUNT=0; PG_UNCERTAIN=0
   local redirection_target=0
   local stage=0 wrapper="" wrapper_skip=0
   local found=0
@@ -94,22 +84,29 @@ _pg_has_gh_pr_create() {
   local -a quoted_subshell_quotes=()
   local -a quoted_subshell_parens=()
 
-  # stage 0: command start; 1/2: gh/pr seen; 4: safe wrapper seen.
+  # stage 0: command start; 1/2: gh/pr seen; 3: PR flags; 4: safe wrapper.
   # A wrapper may be chained, but arbitrary commands/options never pass
   # through this state. This is what keeps `sudo echo gh pr create` inert.
   _pg_finish_word() {
-    local word="$token"
+    local word="$token" literal="$token_literal" index="$PG_WORD_COUNT"
     if [ "$redirection_target" -eq 1 ]; then
       if [ "$token_started" -eq 1 ]; then
         token=""
         token_started=0
         redirection_target=0
+        token_literal=1
       fi
       return 0
     fi
     [ "$token_started" -eq 1 ] || return 0
+    PG_WORDS[$index]="$word"; PG_LITERALS[$index]="$literal"
+    PG_WORD_COUNT=$((PG_WORD_COUNT + 1))
     token=""
     token_started=0
+    token_literal=1
+    if [ "$word" = cd ] && { [ "$stage" -eq 0 ] || [ "$stage" -eq 4 ]; }; then
+      PG_CD_COUNT=$((PG_CD_COUNT + 1))
+    fi
 
     case "$stage" in
       0)
@@ -139,7 +136,10 @@ _pg_has_gh_pr_create() {
         ;;
       2)
         if [ "$word" = "create" ]; then
+          [ "$found" -eq 0 ] || PG_UNCERTAIN=1
+          if [ "$found" -eq 0 ]; then PG_PR_START="$PG_WORD_COUNT"; fi
           found=1
+          stage=3
         else
           stage=-1
         fi
@@ -210,6 +210,14 @@ _pg_has_gh_pr_create() {
     esac
   }
 
+  _pg_boundary() {
+    _pg_finish_word
+    if [ "$stage" -eq 3 ] && [ "$PG_PR_END" -lt 0 ]; then PG_PR_END="$PG_WORD_COUNT"; fi
+    if [ "$1" != $'\n' ]; then
+      PG_SEPS[$PG_WORD_COUNT]="${PG_SEPS[$PG_WORD_COUNT]:-}$1"
+    fi
+  }
+
   while IFS= read -r line || [ -n "$line" ]; do
     line_count=$((line_count + 1))
     [ "$line_count" -le "$max_lines" ] || return 1
@@ -264,6 +272,7 @@ _pg_has_gh_pr_create() {
       elif [ "$quote" = '"' ]; then
         if [ "$ch" = '$' ] && [ "$next" = '(' ] &&
            [ "$quoted_subshell_depth" -lt "$max_quoted_subshell_depth" ]; then
+          PG_UNCERTAIN=1
           quoted_subshell_depth=$((quoted_subshell_depth + 1))
           quoted_subshell_quotes[$quoted_subshell_depth]="$quote"
           quoted_subshell_parens[$quoted_subshell_depth]=1
@@ -282,6 +291,7 @@ _pg_has_gh_pr_create() {
         case "$ch" in
           \\) escape=1 ;;
           '"') quote="" ;;
+          '$'|'`') token_literal=0; token="${token}${ch}" ;;
           *) token="${token}${ch}" ;;
         esac
         i=$((i + 1))
@@ -311,6 +321,7 @@ _pg_has_gh_pr_create() {
           _pg_finish_word
           ;;
         ';'|'&'|'|'|'('|')'|'{'|'}')
+          _pg_boundary "$ch"
           if [ "$ch" = '(' ] && [ "$quoted_subshell_depth" -gt 0 ]; then
             quoted_subshell_parens[$quoted_subshell_depth]=$((quoted_subshell_parens[$quoted_subshell_depth] + 1))
             _pg_finish_word
@@ -328,7 +339,6 @@ _pg_has_gh_pr_create() {
               redirection_target=0
             else
               _pg_finish_word
-              [ "$found" -eq 1 ] && return 0
               quote="${quoted_subshell_quotes[$quoted_subshell_depth]}"
               quoted_subshell_depth=$((quoted_subshell_depth - 1))
               stage=-1
@@ -428,6 +438,7 @@ _pg_has_gh_pr_create() {
           fi
           ;;
         *)
+          case "$ch" in '$'|'`'|'*'|'?'|'['|'~') token_literal=0 ;; esac
           token="${token}${ch}"
           token_started=1
           ;;
@@ -442,17 +453,17 @@ _pg_has_gh_pr_create() {
       token="${token}"$'\n'
       token_started=1
     else
-      _pg_finish_word
+      _pg_boundary $'\n'
       stage=0
       wrapper=""
       wrapper_skip=0
       redirection_target=0
       comment=0
     fi
-
-    [ "$found" -eq 1 ] && return 0
   done <<<"$input"
 
+  [ "$PG_PR_END" -ge 0 ] || PG_PR_END="$PG_WORD_COUNT"
+  [ -z "$quote" ] || PG_UNCERTAIN=1
   [ "$found" -eq 1 ]
 }
 
@@ -463,164 +474,95 @@ else
 fi
 [ "$TRIGGER" -eq 1 ] || exit 0
 
-# ---------------------------------------------------------------------------
-# run_with_timeout <seconds> <command> [args...]
-#
-# Keep this process-group shim in sync with hooks/lib/code-reviewer.sh and
-# hooks/propose-rules.sh. A direct SIGALRM only reaches the immediate child;
-# the fork + setsid child group also covers descendants of run-all.sh.
-# ---------------------------------------------------------------------------
-run_with_timeout() {
-  local secs="$1"
-  shift
-  if command -v perl >/dev/null 2>&1; then
-    perl -e '
-      use POSIX ();
-      my $secs = shift @ARGV;
-      my $pid = fork();
-      if (!defined $pid) { exec @ARGV; }
-      if ($pid == 0) { POSIX::setsid(); exec @ARGV or POSIX::_exit(127); }
-      $SIG{ALRM} = sub {
-        kill("TERM", -$pid); select(undef, undef, undef, 0.3);
-        kill("KILL", -$pid); waitpid($pid, 0);
-        exit(142);
-      };
-      # SAFETY: 90 s is the documented default process-gate budget (core-rules/hooks.md § pr-gate-shiftleft); status 142 remains advisory.
-      alarm $secs;
-      waitpid($pid, 0);
-      my $st = $?;
-      exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
-    ' "$secs" "$@"
-  else
-    printf '%s\n' 'pr-gate-shiftleft: Perl is unavailable; skipped the process-gate runner rather than running without a wall-clock cap (advisory degradation; CI remains authoritative).' >&2
-    return 1
-  fi
-}
-
 emit_advisory() {
   local msg="$1"
   jq -nc --arg msg "$msg" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$msg}}'
 }
 
-PROJECT_DIR="$(_se_project_dir)"
-if [ ! -d "$PROJECT_DIR" ]; then
-  emit_advisory "pr-gate-shiftleft: project directory is unavailable; process-gate was not run (advisory only; CI remains authoritative)."
-  exit 0
-fi
-
-# Resolve an explicit runner override first; this is useful for isolated
-# fixtures and preserves the same bash-invocation contract as pre-push.
-RUNNER="${PR_GATE_SHIFTLEFT_RUNNER:-${PROCESS_GATE_RUNNER:-}}"
-if [ -n "$RUNNER" ]; then
-  case "$RUNNER" in
-    /*) ;;
-    *) RUNNER="$PROJECT_DIR/$RUNNER" ;;
-  esac
-fi
-
-if [ -z "$RUNNER" ]; then
-  # Installed project-local paths win. The tracked source copy covers linked
-  # worktrees of this repository; attached-project worktrees fall back through
-  # the main checkout derived from Git's shared COMMON dir. `--git-dir` cannot
-  # substitute here because it identifies the linked worktree's own admin dir.
-  COMMON_DIR="$(git -C "$PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null || true)"
-  if [ -n "${CODEX_PROJECT_DIR:-}" ]; then
-    COMMON_HARNESS=".agents"
-    COMMON_ALT_HARNESS=".claude"
-  else
-    COMMON_HARNESS=".claude"
-    COMMON_ALT_HARNESS=".agents"
-  fi
-  COMMON_RUNNER=""
-  COMMON_ALT_RUNNER=""
-  if [ -n "$COMMON_DIR" ]; then
-    case "$COMMON_DIR" in
-      /*) ;;
-      *) COMMON_DIR="$PROJECT_DIR/$COMMON_DIR" ;;
+# Only literal flags from the triggering command can describe the PR.
+_pg_resolve_pr_head() {
+  local i="$PG_PR_START" word kind value literal dir="$PROJECT_DIR"
+  local head="" head_set=0 repo="" origin path=""
+  PR_BASE=""
+  [ "$PG_UNCERTAIN" -eq 0 ] || return 1
+  while [ "$i" -lt "$PG_PR_END" ]; do
+    word="${PG_WORDS[$i]}"; kind=""; value=""; literal="${PG_LITERALS[$i]}"
+    case "$word" in
+      --base|-B) kind=base ;;
+      --head|-H) kind="head"; head_set=1 ;;
+      --repo|-R) kind=repo ;;
+      --base=*) kind=base; value="${word#--base=}" ;;
+      -B?*) kind=base; value="${word#-B}" ;;
+      --head=*) kind="head"; head_set=1; value="${word#--head=}" ;;
+      -H?*) kind="head"; head_set=1; value="${word#-H}" ;;
+      --repo=*) kind=repo; value="${word#--repo=}" ;;
+      -R?*) kind=repo; value="${word#-R}" ;;
+      --title|-t|--body|-b|--body-file|-F|--reviewer|-r|--assignee|-a|--label|-l|--milestone|-m|--project|-p|--template|-T)
+        i=$((i + 2)); continue ;;
+      --) break ;;
     esac
-    MAIN_CHECKOUT="$(dirname "$COMMON_DIR")"
-    COMMON_RUNNER="$MAIN_CHECKOUT/$COMMON_HARNESS/skills/process-gate/scripts/run-all.sh"
-    COMMON_ALT_RUNNER="$MAIN_CHECKOUT/$COMMON_ALT_HARNESS/skills/process-gate/scripts/run-all.sh"
-  fi
-
-  if [ -n "${CODEX_PROJECT_DIR:-}" ]; then
-    CANDIDATES=(
-      "$PROJECT_DIR/.agents/skills/process-gate/scripts/run-all.sh"
-      "$PROJECT_DIR/.claude/skills/process-gate/scripts/run-all.sh"
-      "$PROJECT_DIR/core-rules/skills/process-gate/scripts/run-all.sh"
-    )
-  else
-    CANDIDATES=(
-      "$PROJECT_DIR/.claude/skills/process-gate/scripts/run-all.sh"
-      "$PROJECT_DIR/.agents/skills/process-gate/scripts/run-all.sh"
-      "$PROJECT_DIR/core-rules/skills/process-gate/scripts/run-all.sh"
-    )
-  fi
-  [ -z "$COMMON_RUNNER" ] || CANDIDATES+=("$COMMON_RUNNER" "$COMMON_ALT_RUNNER")
-
-  RUNNER_MISSES=""
-  for candidate in "${CANDIDATES[@]}"; do
-    if [ -f "$candidate" ]; then
-      RUNNER="$candidate"
-      break
+    if [ -n "$kind" ]; then
+      case "$word" in
+        --base|-B|--head|-H|--repo|-R)
+          i=$((i + 1))
+          if [ "$i" -lt "$PG_PR_END" ]; then
+            value="${PG_WORDS[$i]}"; literal="${PG_LITERALS[$i]}"
+          fi
+          ;;
+      esac
+      if [ "$literal" -eq 0 ] || [ -z "$value" ]; then
+        [ "$kind" = base ] || return 1
+        value=""
+      fi
+      case "$kind" in base) PR_BASE="$value" ;; head) head="$value" ;; repo) repo="$value" ;; esac
     fi
-    skill_dir="${candidate%/scripts/run-all.sh}"
-    if [ -L "$skill_dir" ] && [ ! -e "$skill_dir" ]; then
-      miss="process-gate skill symlink target is unavailable"
-    elif [ -L "$candidate" ] && [ ! -e "$candidate" ]; then
-      miss="broken runner symlink"
-    elif [ -e "$candidate" ]; then
-      miss="exists but is not a regular file"
-    else
-      miss="not found"
-    fi
-    RUNNER_MISSES+="  - ${candidate}: ${miss}"$'\n'
+    i=$((i + 1))
   done
-  if [ -z "$COMMON_RUNNER" ]; then
-    RUNNER_MISSES+="  - <main-checkout>/$COMMON_HARNESS/skills/process-gate/scripts/run-all.sh: git rev-parse --git-common-dir failed"$'\n'
-    RUNNER_MISSES+="  - <main-checkout>/$COMMON_ALT_HARNESS/skills/process-gate/scripts/run-all.sh: git rev-parse --git-common-dir failed"$'\n'
+  if [ "$PG_CD_COUNT" -gt 0 ]; then
+    [ "$PG_CD_COUNT" -eq 1 ] || return 1
+    [ "${PG_WORDS[0]}" = cd ] || return 1
+    [ -z "${PG_SEPS[0]:-}" ] || return 1
+    [ "${PG_LITERALS[1]:-0}" -eq 1 ] || return 1
+    [ "${PG_SEPS[2]:-}" = '&&' ] || return 1
+    dir="${PG_WORDS[1]}"
+    case "$dir" in /*) ;; *) dir="$PROJECT_DIR/$dir" ;; esac
   fi
-fi
+  if [ "$head_set" -eq 0 ]; then
+    for ((i=0; i<PG_PR_START; i++)); do
+      if [ "${PG_WORDS[$i]}" = git ] && [ "${PG_WORDS[$((i + 1))]:-}" = -C ]; then return 1; fi
+    done
+  fi
+  dir="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  PG_HEAD_DIR="$dir"
+  if [ "$head_set" -eq 1 ]; then
+    PG_HEAD_DIR=""
+    while IFS= read -r word; do
+      case "$word" in
+        'worktree '*) path="${word#worktree }" ;;
+        "branch refs/heads/$head") PG_HEAD_DIR="$path"; break ;;
+      esac
+    done < <(git -C "$dir" worktree list --porcelain 2>/dev/null)
+    [ -n "$PG_HEAD_DIR" ] || return 1
+  fi
+  PG_HEAD_BRANCH="$(git -C "$PG_HEAD_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null)" || return 1
+  if [ "$head_set" -eq 1 ]; then [ "$PG_HEAD_BRANCH" = "$head" ] || return 1; fi
+  if [ -n "$repo" ]; then
+    origin="$(git -C "$PG_HEAD_DIR" config --get remote.origin.url)" || return 1
+    origin="${origin#*://}"; origin="${origin#*@}"; origin="${origin/:/\/}"
+    origin="${origin%/}"; origin="${origin%.git}"
+    [ "$repo" = "$origin" ] || [ "$repo" = "${origin#*/}" ] || return 1
+  fi
+}
 
-if [ -z "$RUNNER" ]; then
-  emit_advisory "pr-gate-shiftleft: process-gate runner was not found; skipped local pre-flight (advisory only; CI and branch protection remain authoritative). Candidates tried:
-${RUNNER_MISSES}"
+PROJECT_DIR="$(_se_project_dir)"
+if ! _pg_resolve_pr_head; then
+  emit_advisory 'pr-gate-shiftleft: cannot resolve the PR head; advisory skipped'
   exit 0
 fi
-
-TIMEOUT="${PR_GATE_SHIFTLEFT_TIMEOUT:-${PROCESS_GATE_SHIFTLEFT_TIMEOUT:-90}}"
-case "$TIMEOUT" in
-  ''|*[!0-9]*) TIMEOUT=90 ;;
-esac
-RANGE="${PR_GATE_SHIFTLEFT_RANGE:-main..HEAD}"
-
-if ! command -v perl >/dev/null 2>&1; then
-  printf '%s\n' 'pr-gate-shiftleft: Perl is unavailable; skipped the process-gate runner rather than running without a wall-clock cap (advisory degradation; CI remains authoritative).' >&2
-  exit 0
+if [ -n "$PR_BASE" ] &&
+  git -C "$PG_HEAD_DIR" config "branch.$PG_HEAD_BRANCH.trellisPrBase" "$PR_BASE" 2>/dev/null; then
+  printf '%s\n' "pr-gate-shiftleft: recorded PR base $PR_BASE; the full process gate runs at push" >&2
 fi
 
-GATE_OUTPUT=""
-GATE_RC=0
-if GATE_OUTPUT="$(cd "$PROJECT_DIR" && run_with_timeout "$TIMEOUT" bash "$RUNNER" --range="$RANGE" 2>&1)"; then
-  GATE_RC=0
-else
-  GATE_RC=$?
-fi
-
-case "$GATE_RC" in
-  0)   RESULT="MERGEABLE" ;;
-  1)   RESULT="BLOCKED" ;;
-  2)   RESULT="NEEDS CHANGES" ;;
-  142) RESULT="TIMED OUT after ${TIMEOUT}s" ;;
-  *)   RESULT="FAILED (exit ${GATE_RC})" ;;
-esac
-
-MSG="pr-gate-shiftleft: process-gate ${RESULT} (advisory only; gh pr create is never blocked here; CI and branch protection remain authoritative)."
-if [ -n "$GATE_OUTPUT" ]; then
-  MSG="${MSG}
-
-${GATE_OUTPUT}"
-fi
-emit_advisory "$MSG"
 exit 0

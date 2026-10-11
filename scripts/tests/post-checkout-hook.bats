@@ -329,3 +329,262 @@ make_control_only_donor() {
   printf '%s\n' "$output" | grep -F "trellis attach --refresh-toolchain $T14_WORKTREE" >/dev/null ||
     { printf '%s\n' "$output"; false; }
 }
+
+# --- 1.3.12 A1: branch-flag guard and executed-file release check ------------
+#
+# Git passes 0 as post-checkout's third argument for a file checkout
+# (`git checkout -- <path>`, `git restore`). That changes no branch and adds no
+# worktree, so the dispatcher runs the prior hook but skips the reconcile. A
+# linked worktree made before the attach stays unattached until a reconcile
+# runs, which makes "did the reconcile run" observable from real git commands.
+
+add_unattached_worktree() {
+  T14_WORKTREE="$T14_SANDBOX/$1 worktree"
+  git -C "$T14_PROJECT" worktree add -q -b "$1" "$T14_WORKTREE"
+  t14_attach
+  [ "$?" -eq 0 ] || return 1
+  run t14_owner_for_root "$T14_WORKTREE"
+  [ "$status" -eq 1 ]
+}
+
+@test "a file checkout runs the prior hook but does not reconcile" {
+  marker="$T14_SANDBOX/file checkout prior"
+  write_prior_hook "$T14_PROJECT/.git/hooks" "$marker" 0
+  add_unattached_worktree t14-file-checkout
+  rm -f "$marker.args" "$marker.stdin"
+  printf 'changed\n' > "$T14_WORKTREE/README.md"
+
+  run git -C "$T14_WORKTREE" checkout -- README.md
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+
+  [ "$(cat "$T14_WORKTREE/README.md")" = fixture ]
+  [ "$(sed -n '3p' "$marker.args")" = 0 ] || { cat "$marker.args"; false; }
+  run t14_owner_for_root "$T14_WORKTREE"
+  [ "$status" -eq 1 ] || { printf 'file checkout reconciled: %s\n' "$output"; false; }
+}
+
+@test "a branch switch still reconciles" {
+  add_unattached_worktree t14-switch
+
+  run git -C "$T14_WORKTREE" switch -q -c t14-switch-next
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  [ -f "$linked_owner" ]
+}
+
+@test "a rebase still reconciles" {
+  base="$(git -C "$T14_PROJECT" symbolic-ref --short HEAD)"
+  add_unattached_worktree t14-rebase
+  printf 'rebased\n' > "$T14_WORKTREE/rebased.txt"
+  git -C "$T14_WORKTREE" add rebased.txt
+  git -C "$T14_WORKTREE" commit -qm 'fixture rebased change'
+  printf 'upstream\n' > "$T14_PROJECT/upstream.txt"
+  git -C "$T14_PROJECT" add upstream.txt
+  git -C "$T14_PROJECT" commit -qm 'fixture upstream change'
+
+  run git -C "$T14_WORKTREE" rebase -q "$base"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+
+  [ -f "$T14_WORKTREE/upstream.txt" ]
+  linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
+  [ -f "$linked_owner" ]
+}
+
+# Rewrites one sealed payload file and puts its read-only mode back, so only a
+# content check can catch it. The appended line touches $2 if anything runs it.
+tamper_payload_file() {
+  local file="$TRELLIS_HOME/releases/$T14_RELEASE/payload/$1" mode
+  mode="$(stat -f '%Lp' "$file" 2>/dev/null)" || mode="$(stat -c '%a' "$file")"
+  cat "$file" > "$T14_SANDBOX/tamper.${1##*/}"
+  chmod u+w "$(dirname "$file")" "$file"
+  printf '/usr/bin/touch %q\n' "$2" >> "$file"
+  chmod "$mode" "$file"
+  chmod a-w "$(dirname "$file")"
+}
+
+restore_payload_file() {
+  local file="$TRELLIS_HOME/releases/$T14_RELEASE/payload/$1" mode
+  mode="$(stat -f '%Lp' "$file" 2>/dev/null)" || mode="$(stat -c '%a' "$file")"
+  chmod u+w "$(dirname "$file")" "$file"
+  cat "$T14_SANDBOX/tamper.${1##*/}" > "$file"
+  chmod "$mode" "$file"
+  chmod a-w "$(dirname "$file")"
+}
+
+@test "post-checkout refuses a tampered executed file before the reconcile runs" {
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  for path in scripts/seed-inheritance-symlinks.sh scripts/lib/semver.sh \
+      scripts/lib/local-registry.sh scripts/attach-project.sh; do
+    marker="$T14_SANDBOX/executed tamper ran"
+    tamper_payload_file "$path" "$marker"
+
+    run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+      _ "$T14_PROJECT" "$managed/post-checkout"
+
+    [ "$status" -ne 0 ] || { printf '%s: status=%s\n%s\n' "$path" "$status" "$output"; false; }
+    [[ "$output" == *'attachment reconciliation failed'* ]] || { printf '%s\n%s\n' "$path" "$output"; false; }
+    [[ "$output" == *'managed release reconciliation payload is unavailable'* ]] ||
+      { printf '%s\n%s\n' "$path" "$output"; false; }
+    [ ! -e "$marker" ] || { printf 'tampered %s ran\n' "$path"; false; }
+    restore_payload_file "$path"
+  done
+}
+
+@test "a tampered non-executed file passes the post-checkout check and pre-push's full verify refuses it" {
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  tamper_payload_file core-rules/CLAUDE.md "$T14_SANDBOX/never runs"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  # The narrowed check lets the reconcile start; its own full release verify
+  # (release_store_locate) still refuses the changed file.
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" != *'managed release reconciliation payload is unavailable'* ]] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *'changed release content: core-rules/CLAUDE.md'* ]] || { printf '%s\n' "$output"; false; }
+
+  printf '%s\n' 'refs/heads/x deadbeef refs/heads/x abcdef' > "$T14_SANDBOX/refs"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$T14_PROJECT" "$managed/pre-push" "$T14_SANDBOX/refs"
+  [ "$status" -eq 1 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [[ "$output" == *'managed immutable release carrier is unavailable'* ]] || { printf '%s\n' "$output"; false; }
+}
+
+# The post-checkout check hashes a fixed list of payload files. Anything the
+# dispatcher, attach or worktree paths source, run (bash, python3, a helper
+# path) or load by file name must be on that list, or a hook would run a file
+# nobody checked. The walk starts at every scripts/ file
+# trellis_managed_payload_file lets a dispatcher run, plus attach-project.sh,
+# and follows every payload script or python helper a non-comment line names,
+# so a new helper on these paths fails here until it joins the list.
+# trellis-launcher.sh is read for two function bodies, never run, so it is
+# listed but not walked. health-checks.sh names two scripts that only doctor
+# runs (hc_conformance_passes runs the project's own conformance-check.sh,
+# hc_codex_plugin_surface runs check-codex-plugin-surface.sh); the walk skips
+# those two names there and fails if any walked file calls either check.
+executed_list() {
+  sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//'
+}
+
+dispatcher_scripts() {
+  sed -n '/^trellis_managed_payload_file() {$/,/^  esac$/p' "$REPO_ROOT/scripts/lib/attachment.sh" |
+    grep -oE 'scripts/[A-Za-z0-9_./-]+\.(sh|py)'
+}
+
+@test "the executed-file list covers every payload file the dispatcher, attach and worktree paths run" {
+  listed="$(executed_list)"
+  [ -n "$listed" ] || { echo 'no executed-file list in attachment.sh'; false; }
+  dispatcher_scripts | grep -qxF scripts/seed-inheritance-symlinks.sh ||
+    { echo 'no dispatcher allowlist in attachment.sh'; false; }
+  queue=()
+  while IFS= read -r root; do
+    queue+=("$root")
+  done < <(dispatcher_scripts; echo scripts/attach-project.sh)
+  seen=" "
+  while [ "${#queue[@]}" -gt 0 ]; do
+    file="${queue[0]}"
+    queue=("${queue[@]:1}")
+    case "$seen" in *" $file "*) continue ;; esac
+    seen="$seen$file "
+    printf '%s\n' "$listed" | grep -qxF "$file" || { echo "unlisted: $file"; false; }
+    [ "$file" != scripts/trellis-launcher.sh ] || continue
+    if grep -v '^[[:space:]]*#' "$REPO_ROOT/$file" |
+        grep -vE '^hc_(conformance_passes|codex_plugin_surface)\(\)' |
+        grep -qE '\bhc_(conformance_passes|codex_plugin_surface)\b'; then
+      echo "$file runs a doctor-only check"; false
+    fi
+    while IFS= read -r name; do
+      case "$file:$name" in
+        scripts/lib/health-checks.sh:conformance-check.sh|scripts/lib/health-checks.sh:check-codex-plugin-surface.sh) continue ;;
+      esac
+      for candidate in "scripts/$name" "scripts/lib/$name"; do
+        if [ -f "$REPO_ROOT/$candidate" ]; then
+          queue+=("$candidate")
+        fi
+      done
+    done < <(grep -v '^[[:space:]]*#' "$REPO_ROOT/$file" | grep -oE '[A-Za-z0-9_.-]+\.(sh|py)\b' | sort -u)
+  done
+  for name in semver.sh attach-project.sh skill-roots.sh trellis-launcher.sh \
+      attach-postjob.sh health-checks.sh disk-janitor-agents.sh attach-fastpath.py release-executed.py; do
+    [[ "$seen" == *"/$name "* ]] || { echo "walk missed $name: $seen"; false; }
+  done
+}
+
+# 1.3.12 A4 runs attach-postjob.sh from attach (the post-checkout reconcile
+# reaches it) and from the pre-push dispatcher; it sources the libraries below
+# and attach-project.sh. A5b's donor fast path runs attach-fastpath.py, which
+# loads release-executed.py.
+@test "the executed-file list carries the A4 and A5b files and everything attach-postjob.sh sources" {
+  listed="$(executed_list)"
+  for path in scripts/lib/attach-fastpath.py scripts/lib/release-executed.py \
+      scripts/lib/attach-postjob.sh scripts/lib/trellis-home.sh scripts/lib/semver.sh \
+      scripts/lib/release-store.sh scripts/lib/local-registry.sh scripts/lib/skill-roots.sh \
+      scripts/lib/surface-plan.sh scripts/lib/attachment.sh scripts/lib/health-checks.sh \
+      scripts/lib/disk-janitor-agents.sh scripts/attach-project.sh; do
+    printf '%s\n' "$listed" | grep -qxF "$path" || { echo "unlisted: $path"; false; }
+  done
+}
+
+@test "every listed executed file exists and each one missing refuses the reconcile" {
+  local -a paths=()
+  while IFS= read -r path; do
+    [ -f "$REPO_ROOT/$path" ] || { echo "listed but absent: $path"; false; }
+    paths+=("$path")
+  done < <(executed_list)
+
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  payload="$TRELLIS_HOME/releases/$T14_RELEASE/payload"
+  for path in "${paths[@]}"; do
+    dir="$payload/${path%/*}"
+    mode="$(stat -f '%Lp' "$dir" 2>/dev/null)" || mode="$(stat -c '%a' "$dir")"
+    chmod u+w "$dir"
+    mv "$payload/$path" "$T14_SANDBOX/missing"
+    chmod "$mode" "$dir"
+
+    run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+      _ "$T14_PROJECT" "$managed/post-checkout"
+
+    chmod u+w "$dir"
+    mv "$T14_SANDBOX/missing" "$payload/$path"
+    chmod "$mode" "$dir"
+    [ "$status" -ne 0 ] || { printf '%s: status=%s\n%s\n' "$path" "$status" "$output"; false; }
+    [[ "$output" == *'managed release reconciliation payload is unavailable'* ]] ||
+      { printf '%s\n%s\n' "$path" "$output"; false; }
+  done
+
+  # Every file back in place: the same run reconciles.
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+}
+
+# macOS prints "@" after the mode for a file with extended attributes, and that
+# hides the "+" an ACL would add, so a mode-column check misses an ACL that
+# grants write on a file that also carries an xattr. The content is unchanged,
+# so only the ACL check can refuse this.
+@test "post-checkout refuses an executed file with a write ACL hidden behind an xattr" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS ACLs'
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  file="$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/lib/semver.sh"
+  mode="$(stat -f '%Lp' "$file")"
+  chmod u+w "$file"
+  xattr -w com.trellis.fixture 1 "$file"
+  chmod "$mode" "$file"
+  chmod +a "$(id -un) allow write" "$file"
+  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  chmod -a# 0 "$file"
+
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *'managed release reconciliation payload is unavailable'* ]] || { printf '%s\n' "$output"; false; }
+}

@@ -17,10 +17,11 @@
 
 setup() {
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
-  STUB="$(mktemp -d)"
+  STUB="$(mktemp -d "$BATS_TEST_TMPDIR/process-gate.XXXXXX")"
   mkdir -p "$STUB/scripts/lib"
   cp "$REAL_SCRIPTS/run-all.sh"      "$STUB/scripts/run-all.sh"
   cp "$REAL_SCRIPTS/lib/common.sh"   "$STUB/scripts/lib/common.sh"
+  cp "$REAL_SCRIPTS/lib/diff-base.sh" "$STUB/scripts/lib/diff-base.sh"
   chmod +x "$STUB/scripts/run-all.sh"
 
   # One stub per run_gate idx. Each exits with STUB_RC_<idx> (default 0=pass).
@@ -74,13 +75,19 @@ EOF
 teardown() {
   [ -n "${STUB:-}" ] && [ -d "$STUB" ] && rm -rf "$STUB"
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
+  [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"
+  return 0
 }
 
 # run_all <mode> — invoke the staged aggregator from inside the fixture so the
 # default range resolves cleanly. Per-gate rc comes from STUB_RC_<idx> env.
+# Merge mode (the default) takes no default range since 1.3.11, so every
+# invocation below carries the range the old default resolved to in this
+# fixture (local main exists): --range=main..HEAD. Push invocations carry no
+# range; the diff-base resolver derives one from that local main.
 run_all() {
   local mode="$1"
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=$mode"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=$mode --range=main..HEAD"
 }
 
 # --- 9-gate render --------------------------------------------------------
@@ -110,7 +117,7 @@ run_all() {
 }
 
 @test "render: row 8 printing warn makes the verdict NEEDS CHANGES at rc 0" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_LEVEL_8='warn Anti-slop (posture=advisory)' '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && STUB_LEVEL_8='warn Anti-slop (posture=advisory)' '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
 }
@@ -127,10 +134,37 @@ run_all() {
   [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
 }
 
+# C08: a narrowed Tests row must never read as a full pass. The receipt line is
+# carried from check-tests.sh's own two-space finding into the verdict block,
+# and only that exact line counts: indented command output never does.
+@test "render: a narrowed Tests row prints its docs-only receipt in the verdict" {
+  cat > "$STUB/scripts/check-tests.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "pass Tests & coverage"
+echo "  Tests: narrowed (docs-only: 3 files)"
+EOF
+  run_all merge
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Overall: MERGEABLE"*"Tests: narrowed (docs-only: 3 files)"* ]] || { echo "$output"; false; }
+}
+
+@test "render: a full Tests row prints no narrowed receipt, even from command output" {
+  cat > "$STUB/scripts/check-tests.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "fail Tests & coverage"
+echo '  tests: `x` exited 1'
+echo "    Tests: narrowed (docs-only: 3 files)"
+exit 1
+EOF
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" != *$'\nTests: narrowed'* ]] || { echo "$output"; false; }
+}
+
 @test "render: findings loop also surfaces idx 6/7 labels when not MERGEABLE" {
   # Security (6) fails -> BLOCKED -> findings section renders. Analyze (7) warn
   # so its label shows in findings too.
-  STUB_RC_6=1 STUB_RC_7=2 run bash -c "cd '$PROJECT_DIR' && STUB_RC_6=1 STUB_RC_7=2 '$STUB/scripts/run-all.sh' --mode=merge"
+  STUB_RC_6=1 STUB_RC_7=2 run bash -c "cd '$PROJECT_DIR' && STUB_RC_6=1 STUB_RC_7=2 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"## Findings"* ]] || { echo "$output"; false; }
   [[ "$output" == *"### Security (diff)"* ]] || { echo "$output"; false; }
@@ -140,7 +174,7 @@ run_all() {
 # --- mode default (fail-closed) -------------------------------------------
 
 @test "mode: missing --mode defaults to merge (strict)" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh'"
+  run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --range=main..HEAD"
   # idx 0 (PR hygiene) fails; merge default => no downgrade => BLOCKED.
   [ "$status" -eq 1 ]
   [[ "$output" == *"mode=merge"* ]] || { echo "$output"; false; }
@@ -210,19 +244,19 @@ run_all() {
 # --- merge: strict, every FAIL blocks (incl PR-shape) ---------------------
 
 @test "merge: PR hygiene (idx 0) FAIL hard-blocks (no downgrade at merge) -> 1" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
 
 @test "merge: Docs discipline (idx 4) FAIL hard-blocks -> 1" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_RC_4=1 '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && STUB_RC_4=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
 
 @test "merge: Analyze (idx 7) FAIL hard-blocks -> 1" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_RC_7=1 '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && STUB_RC_7=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]]
 }
@@ -230,7 +264,7 @@ run_all() {
 # --- warn handling preserved ----------------------------------------------
 
 @test "any gate WARN (rc 2) -> NEEDS CHANGES 2 at both modes" {
-  run bash -c "cd '$PROJECT_DIR' && STUB_RC_1=2 '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && STUB_RC_1=2 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
 }
@@ -269,11 +303,135 @@ echo "unexpected output with no contract token"
 exit 3
 EOF
   chmod +x "$STUB/scripts/check-slop.sh"
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Anti-slop:"*"fail"* ]] || { echo "$output"; false; }
   [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+}
+
+# Real Security adapter + payload scanner; only unrelated rows stay stubbed.
+security_payload_fixture() {
+  mkdir -p "$STUB/bin" "$PROJECT_DIR/audits"
+  cp "$REAL_SCRIPTS/check-security-diff.sh" "$STUB/scripts/"
+  cp -R "$REAL_SCRIPTS/../../security-gate" "$BATS_TEST_TMPDIR/security-gate"
+  # .trellis.json and the baseline are security-gate config: they belong to the
+  # base (main), so the range under test carries only the lockfile.
+  printf '{"schema_version":1,"project_id":"security-fixture"}\n' > "$PROJECT_DIR/.trellis.json"
+  git -C "$PROJECT_DIR" add .trellis.json
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: trellis manifest'
+  # The diff gate dedupes against the range BASE's baseline, so it lands on main
+  # before the feature branch. SECURITY_FIXTURE_BASELINE=0 leaves the base without one.
+  if [ "${SECURITY_FIXTURE_BASELINE:-1}" = 1 ]; then
+    printf '{"findings":[]}\n' > "$PROJECT_DIR/audits/2026-01-01-baseline-project.json"
+    git -C "$PROJECT_DIR" add audits
+    git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: security baseline'
+  fi
+  printf '# fixture lock\n' > "$PROJECT_DIR/uv.lock"
+  git -C "$PROJECT_DIR" checkout -qb feature/security-fixture
+  git -C "$PROJECT_DIR" add .
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: lockfile'
+  export TRELLIS_HOME="$STUB/trellis-home" SECURITY_GATE_PROJECT_NAME=project
+  export SECURITY_GATE_STACK_PROFILE=web-next SECURITY_GATE_SHELLCHECK=0
+  export OSV_FIXTURE_FILE="$STUB/osv.json" OSV_RAN="$STUB/osv-ran"
+  unset SECURITY_GATE_SKIP
+  printf '{"results":[]}\n' > "$OSV_FIXTURE_FILE"
+  cat > "$STUB/bin/osv-scanner" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" != --version ] || { echo 'osv-scanner version 2.4.0'; exit 0; }
+printf 'scanned\n' > "$OSV_RAN"
+root="$(cd "${!#}" && pwd)" || exit 2
+# Recursive scans receive a root, not individual lockfile arguments. Emit
+# real-format receipts for every tracked dependency source under that root.
+while IFS= read -r -d '' manifest; do
+  case "${manifest##*/}" in
+    uv.lock|poetry.lock|Pipfile.lock|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|bun.lock|bun.lockb|Cargo.lock|go.mod|Gemfile.lock|requirements*.txt)
+      printf 'Scanned %s/%s file and found 1 packages\n' "$root" "$manifest" >&2
+      ;;
+  esac
+done < <(git -C "$root" ls-files -z --recurse-submodules)
+cat "$OSV_FIXTURE_FILE"
+EOF
+  cat > "$STUB/bin/semgrep" <<'EOF'
+#!/usr/bin/env bash
+printf '{"results":[]}\n'
+EOF
+  cat > "$STUB/bin/gitleaks" <<'EOF'
+#!/usr/bin/env bash
+while [ "$#" -gt 1 ]; do
+  if [ "$1" = --report-path ]; then printf '[]' > "$2"; break; fi
+  shift
+done
+EOF
+  chmod +x "$STUB/bin/"*
+  export PATH="$STUB/bin:$PATH"
+  [ ! -e "$PROJECT_DIR/.trellis/runtime" ]
+  [ ! -e "$TRELLIS_HOME/state/attachments" ]
+}
+
+@test "Security: unattached clone with seeded HIGH advisory fails the merge row" {
+  security_payload_fixture
+  jq -n --arg path "$PROJECT_DIR/uv.lock" '{results:[{source:{path:$path,type:"lockfile"},
+    packages:[{package:{name:"fixture",version:"1.0",ecosystem:"PyPI"},groups:[],
+      vulnerabilities:[{id:"FIXTURE-HIGH",summary:"seeded advisory",database_specific:{severity:"HIGH"}}]}]}]}' > "$OSV_FIXTURE_FILE"
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
+  [[ "$output" == *"osv/FIXTURE-HIGH"* ]]
+  [[ "$output" != *"skipped"* ]]
+  [ -f "$OSV_RAN" ]
+}
+
+@test "Security: tracked project warn-skip cannot shadow payload seeded HIGH advisory" {
+  security_payload_fixture
+  local project_gate="$PROJECT_DIR/.claude/skills/security-gate/scripts/run-diff.sh"
+  mkdir -p "$(dirname "$project_gate")"
+  printf '#!/usr/bin/env bash\necho PROJECT-SECURITY-STUB\nexit 2\n' > "$project_gate"
+  git -C "$PROJECT_DIR" add .claude
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: legacy project gate'
+  jq -n --arg path "$PROJECT_DIR/uv.lock" '{results:[{source:{path:$path,type:"lockfile"},
+    packages:[{package:{name:"fixture",version:"1.0",ecosystem:"PyPI"},groups:[],
+      vulnerabilities:[{id:"FIXTURE-HIGH",summary:"seeded advisory",database_specific:{severity:"HIGH"}}]}]}]}' > "$OSV_FIXTURE_FILE"
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
+  [[ "$output" == *"osv/FIXTURE-HIGH"* ]]
+  [[ "$output" != *"PROJECT-SECURITY-STUB"* && "$output" != *"skipped"* ]]
+  [ -f "$OSV_RAN" ]
+}
+
+@test "Security: clean unattached clone runs payload scanner and passes the row" {
+  security_payload_fixture
+  # Keep more than uv.lock in the range: a hard-coded single receipt is not
+  # a completed recursive scan when another dependency source changed.
+  mkdir -p "$PROJECT_DIR/deps"
+  printf '{"lockfileVersion":3,"packages":{}}\n' > "$PROJECT_DIR/deps/package-lock.json"
+  printf 'fixture==1.0\n' > "$PROJECT_DIR/deps/requirements.txt"
+  git -C "$PROJECT_DIR" add deps/package-lock.json deps/requirements.txt
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: more lockfiles'
+  run_all merge
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Security (diff):"*"✅ pass"* ]]
+  [ -f "$OSV_RAN" ]
+}
+
+@test "Security: missing project and payload scanner fails, never warn-skips" {
+  security_payload_fixture
+  rm "$BATS_TEST_TMPDIR/security-gate/scripts/run-diff.sh"
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
+  [[ "$output" == *"security-gate unavailable"* ]]
+  [[ "$output" != *"skipped"* ]]
+}
+
+@test "Security: absent baseline fails instead of warn-skipping the diff scan" {
+  SECURITY_FIXTURE_BASELINE=0 security_payload_fixture
+  run_all merge
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
+  [[ "$output" == *"no baseline JSON"* ]]
+  [[ "$output" != *"skipped"* ]]
 }
 
 @test "render: an off-contract first token from check-slop fails the row" {
@@ -283,9 +441,71 @@ echo "boom: something unexpected"
 exit 0
 EOF
   chmod +x "$STUB/scripts/check-slop.sh"
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Anti-slop:"*"fail"* ]] || { echo "$output"; false; }
   [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+}
+
+# --- merge mode requires an explicit range (1.3.11 fail-closed) --------------
+
+# A scratch clone: the only branch is a feature branch, no local main/master.
+# Two commits so HEAD~1..HEAD would be a strict subset of the branch.
+scratch_feature_repo() {
+  SCRATCH="$(mktemp -d)"
+  (
+    cd "$SCRATCH" || exit 1
+    git init -q -b feature
+    git config user.email "test@example.com"
+    git config user.name "test"
+    git commit --allow-empty -q -m "one"
+    git commit --allow-empty -q -m "two"
+  )
+  # The scratch clone is the project: gate config loads from its range base.
+  export CLAUDE_PROJECT_DIR="$SCRATCH"
+}
+
+@test "merge without --range refuses before any check runs" {
+  scratch_feature_repo
+  run bash -c "cd '$SCRATCH' && '$STUB/scripts/run-all.sh' --mode=merge"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'merge mode requires --range/--base'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'Overall:'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'[stub:'* ]] || { echo "$output"; false; }
+}
+
+@test "merge with an explicit --range proceeds past the refusal" {
+  scratch_feature_repo
+  first="$(git -C "$SCRATCH" rev-list --max-parents=0 HEAD)"
+  run bash -c "cd '$SCRATCH' && '$STUB/scripts/run-all.sh' --mode=merge --range='$first..HEAD'"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'Overall: MERGEABLE'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'merge mode requires'* ]] || { echo "$output"; false; }
+}
+
+@test "merge with --base alone, as pr-gate-shiftleft calls it, proceeds past the refusal" {
+  # Inversion: an R1 refusal that counts only --range=* refuses this (exit 1),
+  # and an argument guard without --base=* rejects it (exit 2).
+  scratch_feature_repo
+  first="$(git -C "$SCRATCH" rev-list --max-parents=0 HEAD)"
+  run bash -c "cd '$SCRATCH' && '$STUB/scripts/run-all.sh' --base='$first'"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'mode=merge'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'Overall: MERGEABLE'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'merge mode requires'* ]] || { echo "$output"; false; }
+}
+
+# Intent changed by coordinator ruling D1 (1.3.12-a): this case used to assert
+# 1.3.11's push fallbacks ("keeps its fallbacks and is not refused"), which
+# ended in HEAD~1..HEAD here. That gates one commit of a two-commit push and
+# under-gates it (R31). With no derivable base and no local main/master to
+# fall back to, push mode now refuses before any check runs.
+@test "push without --range on an underivable two-commit branch refuses, never HEAD~1..HEAD" {
+  scratch_feature_repo
+  run bash -c "cd '$SCRATCH' && '$STUB/scripts/run-all.sh' --mode=push"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'no diff base resolvable'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'Overall:'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'[stub:'* ]] || { echo "$output"; false; }
 }

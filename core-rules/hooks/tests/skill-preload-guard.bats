@@ -167,12 +167,15 @@ run_hook() {
 
 @test "canonical settings wire exact Skill and slash expansion matchers" {
   local settings="$HOOKS_DIR/../templates/claude-settings.json"
-  jq -e '
+  # B0-5 runs the guard through the guard-supervise.pl sh entry; the guard
+  # path is the supervisor's last, quoted argument (pinned in guard-supervise.bats).
+  local tail='guard-supervise "$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude skill-preload-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-preload-guard.sh"'
+  jq -e --arg tail "$tail" '
     any(.hooks.PreToolUse[];
-      .matcher == "Skill" and any(.hooks[]; .command | endswith("/skill-preload-guard.sh")))
+      .matcher == "Skill" and any(.hooks[]; .command | startswith("/bin/sh -c ") and endswith(" " + $tail)))
     and any(.hooks.UserPromptExpansion[];
       .matcher == ".*" and any(.hooks[]; .command | endswith("/skill-slash-guard.sh")))
-    and any(.hooks.SessionStart[].hooks[];
-      .command | endswith("/skill-size-preflight.sh"))
+    and (any(.hooks.SessionStart[].hooks[];
+      .command | contains("skill-size-preflight")) | not)
   ' "$settings" >/dev/null
 }

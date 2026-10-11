@@ -29,6 +29,7 @@ make_release() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/seed-inheritance-symlinks.sh"
   chmod 755 "$repo/core-rules/husky/pre-push" "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
+  release_fixture_seal_executed_files "$repo" || return 1
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
   "schema_version": 1,

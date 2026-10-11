@@ -474,7 +474,7 @@ function executePrompt(a) {
         + 'a real specs/NNN triad (each of spec/plan/tasks >=200 bytes, no scaffold markers). '
         + 'STOP at "triad + implementation + HOLD PR opened for review"; features are the human to approve.',
     '',
-    'Before opening the PR, run `process-gate --mode=merge` and require it GREEN (set gate_green).',
+    'Before opening the PR, run `process-gate --mode=merge --range=<base>..HEAD` and require it GREEN (set gate_green).',
     'Match surrounding style. Commit conventionally (subject <=72 chars, no comma in scope).',
     'Push with -u and open a **HOLD PR** (`gh pr create`, "[HOLD]" in title, "DO NOT MERGE without',
     'human review" in the body). Do NOT merge. Leave the worktree in place.',

@@ -8,9 +8,12 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
 . "$SKILL_DIR/scripts/lib/common.sh"
 
-pg_load_config
+pg_load_config "$@" || exit 1
 RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
+# The allowlist is gate config: read it at the range BASE (pg_load_config), so
+# a range cannot allowlist the secret it adds.
+GATED_BASE="$PG_CONFIG_BASE"
 
 # Patterns: name|regex (regex evaluated with grep -E on the diff added-lines stream)
 PATTERNS=(
@@ -27,17 +30,95 @@ PATTERNS=(
   "DB connection w/ password|(postgres|postgresql|mysql|mongodb|redis)://[^:@/]+:[^@/]+@"
 )
 
-# Allowlist (optional)
-ALLOWLIST="$PROJECT_DIR/.claude/skills/process-gate/secrets-allowlist.txt"
+# Allowlist (optional): project-owned overlay first, legacy fallback read-only.
+# Resolved the way run-all.sh resolves local validators (CODEX_PROJECT_DIR
+# prefers .agents, CLAUDE_PROJECT_DIR prefers .claude, else .agents first).
+# `.claude/skills/process-gate` is linked read-only to the release runtime at
+# attach time, so a project allowlist there refuses attach with exit 3; the
+# overlay `process-gate-local` is project-owned and never linked.
+OVERLAY_CANDIDATES=()
+LEGACY_CANDIDATES=()
+if [ -n "${CODEX_PROJECT_DIR:-}" ]; then
+  OVERLAY_CANDIDATES=(
+    "$PROJECT_DIR/.agents/skills/process-gate-local/secrets-allowlist.txt"
+    "$PROJECT_DIR/.claude/skills/process-gate-local/secrets-allowlist.txt"
+  )
+  LEGACY_CANDIDATES=(
+    "$PROJECT_DIR/.agents/skills/process-gate/secrets-allowlist.txt"
+    "$PROJECT_DIR/.claude/skills/process-gate/secrets-allowlist.txt"
+  )
+elif [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  OVERLAY_CANDIDATES=(
+    "$PROJECT_DIR/.claude/skills/process-gate-local/secrets-allowlist.txt"
+    "$PROJECT_DIR/.agents/skills/process-gate-local/secrets-allowlist.txt"
+  )
+  LEGACY_CANDIDATES=(
+    "$PROJECT_DIR/.claude/skills/process-gate/secrets-allowlist.txt"
+    "$PROJECT_DIR/.agents/skills/process-gate/secrets-allowlist.txt"
+  )
+else
+  OVERLAY_CANDIDATES=(
+    "$PROJECT_DIR/.agents/skills/process-gate-local/secrets-allowlist.txt"
+    "$PROJECT_DIR/.claude/skills/process-gate-local/secrets-allowlist.txt"
+  )
+  LEGACY_CANDIDATES=(
+    "$PROJECT_DIR/.agents/skills/process-gate/secrets-allowlist.txt"
+    "$PROJECT_DIR/.claude/skills/process-gate/secrets-allowlist.txt"
+  )
+fi
+# Only regular-file blobs at the range base are authority; a rejected path
+# that exists locally (untracked, excluded, symlinked or new in the range) warns
+# once. An allowlist present at the base but not a regular file, or reached
+# through a symlinked ancestor (symlink, tree, failed lookup), refuses the scan
+# rather than falling back.
+committed_allowlist() {
+  local candidate rel rc
+  for candidate in "$@"; do
+    rel="${candidate#"$PROJECT_DIR/"}"
+    rc=0
+    pg_base_path "$PROJECT_DIR" "$GATED_BASE" "$rel" || rc=$?
+    case "$rc" in
+      0) printf '%s' "$candidate"; return ;;
+      1) ;;
+      *)
+        printf 'check-secrets: allowlist %s at the range base is not a regular file, or is reached through a symlink; refusing scan\n' "$rel" >&2
+        return 1
+        ;;
+    esac
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      printf 'check-secrets: ignored allowlist %s (not a blob at the range base)\n' "$rel" >&2
+    fi
+  done
+}
+OVERLAY_ALLOWLIST="$(committed_allowlist "${OVERLAY_CANDIDATES[@]}")"
+LEGACY_ALLOWLIST="$(committed_allowlist "${LEGACY_CANDIDATES[@]}")"
 ALLOW_ENTRIES=()
-if [ -f "$ALLOWLIST" ]; then
+_cs_allow_source=""
+if [ -n "$OVERLAY_ALLOWLIST" ]; then
+  _cs_allow_source="$OVERLAY_ALLOWLIST"
+elif [ -n "$LEGACY_ALLOWLIST" ]; then
+  _cs_allow_source="$LEGACY_ALLOWLIST"
+fi
+if [ -n "$_cs_allow_source" ]; then
+  _cs_rel="${_cs_allow_source#"$PROJECT_DIR/"}"
+  _cs_content="$(git show "$GATED_BASE:$_cs_rel")" || exit 1
   while IFS= read -r line; do
     line="${line%%#*}"
     line="$(printf "%s" "$line" | awk '{$1=$1};1')"
     [ -z "$line" ] && continue
     ALLOW_ENTRIES+=("$line")
-  done < "$ALLOWLIST"
+  done <<< "$_cs_content"
 fi
+# Legacy fallback is read-only and deprecated: name both paths once on stderr.
+# When the overlay wins the legacy file is ignored but still noticed.
+if [ -n "$LEGACY_ALLOWLIST" ]; then
+  _cs_new_path="$OVERLAY_ALLOWLIST"
+  if [ -z "$_cs_new_path" ]; then
+    _cs_new_path="${OVERLAY_CANDIDATES[0]}"
+  fi
+  printf 'check-secrets: deprecated allowlist %s; move it to %s\n' "$LEGACY_ALLOWLIST" "$_cs_new_path" >&2
+fi
+unset _cs_rel _cs_content _cs_allow_source _cs_new_path
 
 is_allowed() {
   local file="$1" hit="$2"

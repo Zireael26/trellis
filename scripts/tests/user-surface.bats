@@ -313,6 +313,665 @@ teardown() {
   [ "$(sha256_file "$HOME/.claude/settings.json")" = "$first_settings_hash" ]
 }
 
+@test "same-release relink --user repairs a missing link without republishing ownership" {
+  local link owner owner_before owner_identity settings_before target
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner="$(user_owner_path)"
+  owner_before="$(sha256_file "$owner")"
+  owner_identity="$(file_identity "$owner")"
+  settings_before="$(sha256_file "$HOME/.claude/settings.json")"
+  target="$(readlink "$link")"
+  rm "$link"
+
+  user_attach
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "owned user destination is missing: $link"
+  [[ "$output" != *"was modified"* ]]
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$link" ]
+  [ "$(readlink "$link")" = "$target" ]
+  [ "$(sha256_file "$owner")" = "$owner_before" ]
+  [ "$(file_identity "$owner")" = "$owner_identity" ]
+  [ "$(file_mode "$owner")" = 600 ]
+  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+  [ ! -e "$(user_detach_journal_path)" ]
+
+  make_user_release 2.0.0
+  run "$USER_CLI" configure --source "$(make_configure_source)" \
+    --home "$TRELLIS_HOME" --release 2.0.0 --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.active_cli_release == "2.0.0"' "$TRELLIS_HOME/config.json" >/dev/null
+  jq -e '.release == "2.0.0"' "$owner" >/dev/null
+  [ "$(readlink "$link")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/templates/claude-user-output-style.md" ]
+}
+
+@test "relink --user refuses a dangling recorded source without repairing the missing link" {
+  local link owner source owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner="$(user_owner_path)"
+  source="core-rules/templates/absent.md"
+  jq --arg destination "$link" --arg source "$source" \
+    --arg target "$TRELLIS_HOME/releases/$USER_RELEASE/payload/$source" '
+      .artifacts |= map(if .destination == $destination then .source = $source | .target = $target else . end)
+    ' "$owner" > "$owner.next"
+  chmod 600 "$owner.next"
+  mv "$owner.next" "$owner"
+  owner_before="$(sha256_file "$owner")"
+  rm "$link"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$owner")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user refuses an unverified recorded payload even when its link source survives" {
+  local link owner_before source source_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  source="$(readlink "$link")"
+  source_before="$(sha256_file "$source")"
+  rm "$link"
+  chmod u+w "$TRELLIS_HOME/releases/$USER_RELEASE/payload/core-rules/VERSION"
+  printf 'tampered\n' > "$TRELLIS_HOME/releases/$USER_RELEASE/payload/core-rules/VERSION"
+  chmod a-w "$TRELLIS_HOME/releases/$USER_RELEASE/payload/core-rules/VERSION"
+
+  run "$(installed_attach "$USER_RELEASE")" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ "$(sha256_file "$source")" = "$source_before" ]
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user refuses a mutated link rather than treating it as missing" {
+  local link foreign owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  foreign="$SANDBOX/foreign dangling target"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+  ln -s "$foreign" "$link"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "owned user destination was modified: $link"
+  [[ "$output" != *"is missing"* ]]
+  [ "$(readlink "$link")" = "$foreign" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user preserves a replacement file at an owned link destination" {
+  local link owner_before replacement_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+  printf 'foreign file\n' > "$link"
+  replacement_before="$(sha256_file "$link")"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "owned user destination was modified: $link"
+  [ -f "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$link")" = "$replacement_before" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user preserves a replacement directory at an owned link destination" {
+  local link owner_before replacement_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+  mkdir "$link"
+  printf 'foreign directory content\n' > "$link/keep"
+  replacement_before="$(sha256_file "$link/keep")"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "owned user destination was modified: $link"
+  [ -d "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$link/keep")" = "$replacement_before" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user refuses a missing link beneath an unsafe parent" {
+  local link parent outside owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  parent="${link%/*}"
+  outside="$SANDBOX/foreign output styles"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+  mv "$parent" "$outside"
+  ln -s "$outside" "$parent"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -ne 0 ]
+  [ "$(readlink "$parent")" = "$outside" ]
+  [ ! -e "$outside/fixture.md" ]
+  [ ! -L "$outside/fixture.md" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user does not reconstruct a missing non-symlink artifact" {
+  local link owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link" "$HOME/.claude/settings.json"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ]
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ ! -e "$HOME/.claude/settings.json" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "relink --user verifies owner permissions schema and canonical HOME before repair" {
+  local link owner owner_before changed_home
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner="$(user_owner_path)"
+  owner_before="$(sha256_file "$owner")"
+  rm "$link"
+  chmod 644 "$owner"
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 4 ]
+  chmod 600 "$owner"
+  jq '.schema_version = 99' "$owner" > "$owner.next"
+  chmod 600 "$owner.next"
+  cp "$owner" "$SANDBOX/valid owner"
+  mv "$owner.next" "$owner"
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 4 ]
+  cp "$SANDBOX/valid owner" "$owner"
+  changed_home="$SANDBOX/different HOME"
+  mkdir "$changed_home"
+  run env HOME="$changed_home" "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "different canonical HOME"
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$owner")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+}
+
+@test "interrupted phase-one repair replans after an applied link is deleted again" {
+  local link second_link owner owner_before owner_identity journal target second_target
+  make_full_user_release 2.0.0
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.agents/skills/herdr-foreman"
+  second_link="$HOME/.pi/agent/skills/trellis-computer-use"
+  owner="$(user_owner_path)"
+  owner_before="$(sha256_file "$owner")"
+  owner_identity="$(file_identity "$owner")"
+  journal="$(user_attach_journal_path)"
+  target="$(readlink "$link")"
+  second_target="$(readlink "$second_link")"
+  rm "$link" "$second_link"
+
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach 2.0.0)" \
+    relink --user --home "$TRELLIS_HOME" --release 2.0.0
+
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [ "$(sha256_file "$owner")" = "$owner_before" ]
+  [ "$(file_identity "$owner")" = "$owner_identity" ]
+  jq -e --arg target "$target" --arg second "$second_target" '
+    .operation == "repair" and .phase == 1 and .pending == null
+    and .release == "2.0.0" and .next_owner == null and .renders == []
+    and .owner_override == .original_owner
+    and .attachment_id == .original_owner.attachment_id
+    and (.artifacts | length) == 2
+    and ([.artifacts[].target] | sort) == ([$target,$second] | sort)
+  ' "$journal" >/dev/null
+  assert_output_has "$output" "$(printf '%q relink --user --home %q --release 2.0.0' "$(installed_attach 2.0.0)" "$TRELLIS_HOME")"
+  [ -L "$(jq -r '.artifacts[0].destination' "$journal")" ]
+  [ ! -L "$(jq -r '.artifacts[1].destination' "$journal")" ]
+  rm "$(jq -r '.artifacts[0].destination' "$journal")"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$link")" = "$target" ]
+  [ "$(readlink "$second_link")" = "$second_target" ]
+  [ "$(sha256_file "$owner")" = "$owner_before" ]
+  [ "$(file_identity "$owner")" = "$owner_identity" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "interrupted repair preserves a foreign replacement but discards its journal" {
+  local link owner_before journal replacement_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  journal="$(user_attach_journal_path)"
+  rm "$link"
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  rm "$link"
+  printf 'foreign after interruption\n' > "$link"
+  replacement_before="$(sha256_file "$link")"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ]
+  assert_output_has "$output" "owned user destination was modified: $link"
+  [ "$(sha256_file "$link")" = "$replacement_before" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "interrupted repair discards pinned links before refusing a lost source" {
+  local link source owner_before journal
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  source="$(readlink "$link")"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  journal="$(user_attach_journal_path)"
+  rm "$link"
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  chmod u+w "${source%/*}"
+  rm "$source"
+  chmod a-w "${source%/*}"
+
+  run "$(installed_attach "$USER_RELEASE")" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "a publication fault rolls back a missing-link repair without changing ownership" {
+  local link owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+
+  run env ATTACHMENT_FAULT_PHASE=user-pending-finalize "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+  run compgen -G "$HOME/.claude/output-styles/.fixture.md.user-attachment-stage-*"
+  [ "$status" -eq 1 ]
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "external deletion during repair rolls back remaining pinned links without wedging" {
+  local link second_link owner_before owner_identity target second_target
+  make_full_user_release 2.0.0
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.agents/skills/herdr-foreman"
+  second_link="$HOME/.pi/agent/skills/trellis-computer-use"
+  target="$(readlink "$link")"
+  second_target="$(readlink "$second_link")"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  owner_identity="$(file_identity "$(user_owner_path)")"
+  rm "$link" "$second_link"
+
+  # The seam deletes A immediately after B is finalized, before strict final
+  # verification. No background race, sleeps, or installed-payload edits.
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attachment_user_finalize_pending)"
+    eval "${definition/_attachment_user_finalize_pending /real_finalize_pending }"
+    _attachment_user_finalize_pending() {
+      real_finalize_pending "$@" || return "$?"
+      if [ "$(jq -r .phase "$1")" -eq 2 ]; then
+        rm "$(jq -r ".artifacts[0].destination" "$1")"
+      fi
+    }
+    attach_cmd_user_relink --user --home "$2" --release 2.0.0
+  ' _ "$(installed_attach 2.0.0)" "$TRELLIS_HOME"
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  assert_output_has "$output" "owned user destination is missing:"
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ ! -e "$second_link" ]
+  [ ! -L "$second_link" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ "$(file_identity "$(user_owner_path)")" = "$owner_identity" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+  [ ! -L "$(user_attach_journal_path)" ]
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$link")" = "$target" ]
+  [ "$(readlink "$second_link")" = "$second_target" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+  [ ! -L "$(user_attach_journal_path)" ]
+}
+
+@test "interrupted repair discards work even when owned JSON keys were changed" {
+  local link owner_before settings_before journal
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  journal="$(user_attach_journal_path)"
+  rm "$link"
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  jq '.managed.policy = "foreign"' "$HOME/.claude/settings.json" > "$SANDBOX/changed settings"
+  chmod 600 "$SANDBOX/changed settings"
+  mv "$SANDBOX/changed settings" "$HOME/.claude/settings.json"
+  settings_before="$(sha256_file "$HOME/.claude/settings.json")"
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$HOME/.claude/settings.json")" = "$settings_before" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "a staged repair publication failure removes its pinned stage and journal" {
+  local link owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+
+  run bash -c '
+    . "$1"
+    _attachment_publish_stage_link() { return 3; }
+    attach_cmd_user_relink --user --home "$2" --release "$3"
+  ' _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$USER_RELEASE"
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+  [ ! -e "$(user_attach_journal_path)" ]
+  [ ! -L "$(user_attach_journal_path)" ]
+  run compgen -G "$HOME/.claude/output-styles/.fixture.md.user-attachment-stage-*"
+  [ "$status" -eq 1 ]
+}
+
+@test "interrupted repair reclaims a stage created before its identity was journaled" {
+  local link target stage journal owner_before
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  target="$(readlink "$link")"
+  journal="$(user_attach_journal_path)"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+
+  # Stop immediately after ln -s, before staging_identity can be recorded.
+  run bash -c '
+    . "$1"
+    _attachment_create_symlink_stage() {
+      ln -s -- "$(printf "%s\n" "$2" | jq -r .target)" "$3" || return "$?"
+      kill -TERM "$_ATTACHMENT_PROCESS_PID"
+    }
+    attach_cmd_user_relink --user --home "$2" --release "$3"
+  ' _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$USER_RELEASE"
+
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  jq -e '
+    .operation == "repair" and .phase == 0
+    and (.pending.staging_path | type == "string" and length > 0)
+    and .pending.staging_identity == null and .pending.destination_identity == null
+  ' "$journal" >/dev/null
+  stage="$(jq -r '.pending.staging_path' "$journal")"
+  [ -L "$stage" ]
+  [ "$(readlink "$stage")" = "$target" ]
+  [ ! -e "$link" ]
+  [ ! -L "$link" ]
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$stage" ]
+  [ ! -L "$stage" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+  [ "$(readlink "$link")" = "$target" ]
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+}
+
+@test "user lock contention with a live repair journal prints no interruption remedy" {
+  local link journal journal_before owner_before verb
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  journal="$(user_attach_journal_path)"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  rm "$link"
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  jq -e '.operation == "repair" and .phase == 1' "$journal" >/dev/null
+  journal_before="$(sha256_file "$journal")"
+
+  for verb in attach relink detach; do
+    # A live parent holds the real user lock while a separate CLI contends.
+    # No sleeps or background timing assumptions are needed.
+    run bash -c '
+      . "$1"
+      attachment_user_lock_acquire "$2" "$(jq -r .attachment_id "$3")" || exit "$?"
+      trap "_attachment_user_lock_release >/dev/null 2>&1" EXIT
+      if [ "$4" = detach ]; then
+        "$1" "$4" --user --home "$2"
+      else
+        "$1" "$4" --user --home "$2" --release "$5"
+      fi
+    ' _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$journal" "$verb" "$USER_RELEASE"
+
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    [[ "$output" != *"user link repair interrupted"* ]] || { echo "$output"; false; }
+    [[ "$output" != *"recover with:"* ]] || { echo "$output"; false; }
+    [ "$(sha256_file "$journal")" = "$journal_before" ]
+    [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+    [ -L "$link" ]
+  done
+
+  # Interruption status alone must not claim another process's repair.
+  run bash -c '. "$1"; attach_user_repair_remedy "$2" 5' \
+    _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ]
+
+  # Holding the lock alone must not label an ordinary failure interrupted.
+  run bash -c '
+    . "$1"
+    attachment_user_lock_acquire "$2" "$(jq -r .attachment_id "$3")" || exit "$?"
+    trap "_attachment_user_lock_release >/dev/null 2>&1" EXIT
+    attach_user_repair_remedy "$2" 3
+  ' _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$journal"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ]
+
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "TERM during repair prints the exact installed-release remedy and leaves recoverable work" {
+  local link journal remedy
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  journal="$(user_attach_journal_path)"
+  printf -v remedy '%q relink --user --home %q --release %q' \
+    "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$USER_RELEASE"
+  rm "$link"
+
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attachment_user_finalize_pending)"
+    eval "${definition/_attachment_user_finalize_pending /real_finalize_pending }"
+    _attachment_user_finalize_pending() {
+      real_finalize_pending "$@" || return "$?"
+      # Lock acquisition captured this exact subshell PID even on Bash 3.2.
+      kill -TERM "$_ATTACHMENT_PROCESS_PID"
+    }
+    attach_cmd_user_relink --user --home "$2" --release "$3"
+  ' _ "$(installed_attach "$USER_RELEASE")" "$TRELLIS_HOME" "$USER_RELEASE"
+
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  assert_output_has "$output" "user link repair interrupted; recover with: $remedy"
+  jq -e '.operation == "repair" and .phase == 1 and .pending == null' "$journal" >/dev/null
+  [ -L "$link" ]
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -L "$link" ]
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+}
+
+@test "1.3.9 configure interruption names the 1.3.10 payload recovery command" {
+  local old_source new_attach link owner_before journal configure_source remedy
+  old_source="$SANDBOX/released 1.3.9 source"
+  mkdir -p "$old_source"
+  # Actual old configure/attachment validator, not a stubbed rejection. A local
+  # published tag is required just as in the old-installer acceptance suites.
+  git -C "$REPO_ROOT" rev-parse -q --verify 'refs/tags/v1.3.9^{commit}' >/dev/null || {
+    echo 'the v1.3.9 release tag is absent from this checkout; fetch it: git fetch origin tag v1.3.9' >&2
+    return 1
+  }
+  git -C "$REPO_ROOT" archive v1.3.9 core-rules scripts > "$SANDBOX/old runtime.tar"
+  tar -xf "$SANDBOX/old runtime.tar" -C "$old_source"
+  release_fixture_install "$HOME" "$TRELLIS_HOME" 1.3.9 "$old_source"
+  make_full_user_release 1.3.10
+  cp "$old_source/scripts/trellis-launcher.sh" "$USER_CLI"
+  chmod 755 "$USER_CLI"
+  jq '.active_cli_release = "1.3.9"' "$TRELLIS_HOME/config.json" > "$SANDBOX/old config"
+  chmod 600 "$SANDBOX/old config"
+  mv "$SANDBOX/old config" "$TRELLIS_HOME/config.json"
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 1.3.9
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.agents/skills/herdr-foreman"
+  owner_before="$(sha256_file "$(user_owner_path)")"
+  journal="$(user_attach_journal_path)"
+  configure_source="$(make_configure_source)"
+  new_attach="$(installed_attach 1.3.10)"
+  printf -v remedy '%q relink --user --home %q --release 1.3.10' "$new_attach" "$TRELLIS_HOME"
+  rm "$link"
+
+  # The launcher deliberately strips fault-injection variables. Invoke its old
+  # installed configure directly solely to inject the phase-one interruption.
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_configure 1.3.9)" \
+    --source "$configure_source" --home "$TRELLIS_HOME" --release 1.3.10 --no-install-launcher
+
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  assert_output_has "$output" "$remedy"
+  jq -e '.operation == "repair" and .phase == 1 and .release == "1.3.9"' "$journal" >/dev/null
+  jq -e '.active_cli_release == "1.3.9"' "$TRELLIS_HOME/config.json" >/dev/null
+  [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
+
+  run "$USER_CLI" configure --source "$configure_source" \
+    --home "$TRELLIS_HOME" --release 1.3.10 --no-install-launcher
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ -f "$journal" ]
+
+  run "$new_attach" relink --user --home "$TRELLIS_HOME" --release 1.3.10
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+  [ "$(readlink "$link")" = "$TRELLIS_HOME/releases/1.3.10/payload/core-rules/skills/herdr-foreman" ]
+  jq -e '.release == "1.3.10"' "$(user_owner_path)" >/dev/null
+
+  run "$USER_CLI" configure --source "$configure_source" \
+    --home "$TRELLIS_HOME" --release 1.3.10 --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.active_cli_release == "1.3.10"' "$TRELLIS_HOME/config.json" >/dev/null
+  [ ! -e "$journal" ]
+  [ ! -L "$journal" ]
+  [ ! -e "$(user_detach_journal_path)" ]
+  [ ! -L "$(user_detach_journal_path)" ]
+}
+
+@test "user owner and repair journal validation do not require effective-UID ownership" {
+  local link journal
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  link="$HOME/.claude/output-styles/fixture.md"
+  journal="$(user_attach_journal_path)"
+  rm "$link"
+  run env ATTACHMENT_FAULT_PHASE=1 "$(installed_attach "$USER_RELEASE")" \
+    relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+
+  # Model a false -O predicate without chown, sudo, or a second real UID.
+  # All file-shape, mode, schema, and snapshot predicates remain real.
+  run bash -c '
+    . "$1"
+    function [() {
+      case "${1-}" in -O) return 1 ;; esac
+      builtin [ "$@"
+    }
+    if [ -O "$2" ]; then exit 1; fi
+    _attachment_user_owner_json_valid "$2" || exit "$?"
+    _attachment_user_journal_json_valid "$3"
+  ' _ "$REPO_ROOT/scripts/lib/attachment.sh" "$(user_owner_path)" "$journal"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
 @test "project selector usage rejection happens before HOME-state mutation and accepts -- as delimiter" {
   local unused_home="$SANDBOX/unused selector home" uninspected_path="--user"
 
@@ -746,6 +1405,29 @@ teardown() {
   [ ! -L "$pi_link" ]
   [ ! -e "$owner" ]
   [ ! -L "$owner" ]
+}
+
+@test "configure --release repairs a missing owned skill link before activation" {
+  local agents_link pi_link owner
+  agents_link="$HOME/.agents/skills/herdr-foreman"
+  pi_link="$HOME/.pi/agent/skills/trellis-computer-use"
+  make_full_user_release 2.0.0
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  make_full_user_release 2.0.1
+  owner="$(user_owner_path)"
+  rm "$agents_link"
+
+  run "$USER_CLI" configure --source "$(make_configure_source)" \
+    --home "$TRELLIS_HOME" --release 2.0.1 --no-install-launcher
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$agents_link")" = "$TRELLIS_HOME/releases/2.0.1/payload/core-rules/skills/herdr-foreman" ]
+  [ "$(readlink "$pi_link")" = "$TRELLIS_HOME/releases/2.0.1/payload/core-rules/pi/computer-use" ]
+  jq -e '.release == "2.0.1" and .status == "committed"' "$owner" >/dev/null
+  jq -e '.active_cli_release == "2.0.1"' "$TRELLIS_HOME/config.json" >/dev/null
+  [ ! -e "$(user_attach_journal_path)" ]
+  [ ! -e "$(user_detach_journal_path)" ]
 }
 
 @test "configure --release moves the release user skill links" {

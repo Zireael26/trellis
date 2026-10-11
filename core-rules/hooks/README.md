@@ -16,16 +16,17 @@ surfaces.
 | `pr-gate-shiftleft.sh` | PreToolUse (Bash, `gh pr create`) | new |
 | `skill-preload-guard.sh` | PreToolUse (Skill) | new |
 | `skill-slash-guard.sh` | UserPromptExpansion (slash command) | new |
+| `turn-baseline.sh` | UserPromptSubmit (turn-entry baseline for stop-verify's receipt trigger) | new |
 | `reread-guard.sh` | PreToolUse (Edit/Write/MultiEdit) | new |
 | `post-edit-verify.sh` | PostToolUse (Edit/Write/MultiEdit) | upstream, extended |
 | `slop-tripwire.sh` | PostToolUse (Edit/Write/MultiEdit) | new |
-| `truncation-check.sh` | PostToolUse (Grep/Bash/Read) | upstream |
+| `truncation-check.sh` | unregistered (was PostToolUse Grep/Bash/Read) | upstream |
 | `track-read.sh` | PostToolUse (Read/Write/Edit/MultiEdit) | new |
 | `session-context.sh` | SessionStart (startup/resume) | new |
 | `save-context-log.sh` | PreCompact | new |
 | `post-compact-context.sh` | SessionStart (compact) | new |
 | `inject-primer-index.sh` | SessionStart | new |
-| `skill-size-preflight.sh` | SessionStart (advisory) | new |
+| `skill-size-preflight.sh` | unregistered (was SessionStart advisory) | new |
 | `env-echo.sh` | SessionStart (environment probe) | new |
 | `core-rules/hooks/wiki-skill-suggest.sh` | PostToolUse (Write/Edit/MultiEdit) | new |
 | `core-rules/codex/hooks/wiki-skill-suggest.sh` | PostToolUse (Write/Edit/MultiEdit) | new |
@@ -50,8 +51,8 @@ paths are listed above.
 | `decision-receipt.sh` | Stop (L4/L5 substantive turns) | new |
 | `stop-verify.sh` | Stop | upstream, extended |
 | `code-review-subagent.sh` | Stop (edit-heavy) | new |
-| `propose-rules.sh` | Stop (default-on, opt-out) | new |
-| `primer-capture-nudge.sh` | Stop (edit-heavy unknown subsystem) | new |
+| `propose-rules.sh` | unregistered (was Stop, default-on) | new |
+| `primer-capture-nudge.sh` | unregistered (was Stop, edit-heavy) | new |
 | `ui-verify.sh` | Stop (UI diff) | new |
 | `stamp-turn.sh` | Stop | new |
 
@@ -74,6 +75,9 @@ registered only by those attach-rendered local templates, not by either legacy
 direct-copy manifest. `hookspath-guard.sh` is rendered behind
 `[ -f "$h" ] || exit 0`, so a rollback to a payload without it leaves Bash
 working; it is the only hook with that guard, because it is advisory.
+`skill-size-preflight.sh`, `truncation-check.sh`, `propose-rules.sh` and
+`primer-capture-nudge.sh` have no registration in any manifest since 1.3.12
+(E-15); their scripts remain on disk.
 Override project-local tooling through the harness hook `config.sh` files (for
 example `TODOS_FILE`, `UI_PORT`, or `REVIEW_MIN_FILES`; see script headers).
 

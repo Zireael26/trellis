@@ -5,12 +5,17 @@ load helpers
 setup() {
   setup_project_dir
   ADAPTER="$HOOKS_DIR/lib/verification-bash.py"
+  # The real interpreter, never a PATH shim: a pyenv python3 is a bash script
+  # that sources BASH_ENV on startup, which would trip the BASH_ENV test below
+  # before the adapter runs (R44). Resolved here so no child bash runs after
+  # that test exports BASH_ENV. This still execs the same interpreter.
+  REAL_PYTHON3="$(python3 -c 'import sys; print(sys.executable)')"
   printf 'echo valid\n' > "$PROJECT_DIR/a.sh"
 }
 
 teardown() { teardown_project_dir; }
 
-check_bash() { run python3 -I "$ADAPTER" --cwd "$PROJECT_DIR" --harness "${1:-claude}"; }
+check_bash() { run "$REAL_PYTHON3" -I "$ADAPTER" --cwd "$PROJECT_DIR" --harness "${1:-claude}"; }
 field() { printf '%s' "$output" | jq -r ".$1"; }
 
 @test "CLI executes then cross-harness reuses and HEAD is provenance only" {

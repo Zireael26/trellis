@@ -9,8 +9,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh",
-            "timeout": 5,
+            "command": "/bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl\" claude block-destructive \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh\"",
+            "timeout": 30,
             "statusMessage": "Checking command safety..."
           },
           {
@@ -26,8 +26,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-preload-guard.sh",
-            "timeout": 5,
+            "command": "/bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl\" claude skill-preload-guard \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-preload-guard.sh\"",
+            "timeout": 30,
             "statusMessage": "Checking Skill pre-load size..."
           }
         ]
@@ -37,8 +37,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/reread-guard.sh",
-            "timeout": 5,
+            "command": "/bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl\" claude reread-guard \"$CLAUDE_PROJECT_DIR/.claude/hooks/reread-guard.sh\"",
+            "timeout": 30,
             "statusMessage": "Re-read guard..."
           }
         ]
@@ -53,6 +53,18 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-slash-guard.sh",
             "timeout": 5,
             "statusMessage": "Checking slash-command Skill size..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/turn-baseline.sh",
+            "timeout": 10,
+            "statusMessage": "Recording turn baseline..."
           }
         ]
       }
@@ -77,17 +89,6 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/slop-tripwire.sh",
             "timeout": 5,
             "statusMessage": "Checking evidence doctrine..."
-          }
-        ]
-      },
-      {
-        "matcher": "Grep|Bash|Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/truncation-check.sh",
-            "timeout": 5,
-            "statusMessage": "Checking for truncation..."
           }
         ]
       },
@@ -123,12 +124,6 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/inject-primer-index.sh",
             "timeout": 5,
             "statusMessage": "Loading primer index..."
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-size-preflight.sh",
-            "timeout": 10,
-            "statusMessage": "Scanning discoverable Skill sizes..."
           },
           {
             "type": "command",
@@ -177,18 +172,6 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/code-review-subagent.sh",
             "timeout": 120,
             "statusMessage": "Code review on diff..."
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/propose-rules.sh",
-            "timeout": 60,
-            "statusMessage": "Proposing rules..."
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/primer-capture-nudge.sh",
-            "timeout": 15,
-            "statusMessage": "Checking primer coverage..."
           },
           {
             "type": "command",

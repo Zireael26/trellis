@@ -1079,6 +1079,7 @@ fi
 . "$SCRIPT_DIR/lib/surface-plan.sh"
 . "$SCRIPT_DIR/lib/attachment.sh"
 . "$SCRIPT_DIR/lib/health-checks.sh"
+. "$SCRIPT_DIR/lib/attach-postjob.sh"
 
 ONLY_PROJECT=""; ONLY_FLEET=""; DO_FIX=0; DO_DRY_RUN=0; DO_ADOPT_HUSKY=0
 usage() {
@@ -1167,6 +1168,12 @@ portable_check_failure_class() {
       ;;
     hc_portable_hooks_path)
       printf '%s\n' "$DOCTOR_EX_CONFLICT"
+      ;;
+    hc_portable_attach_status)
+      case "$output" in
+        *'blocked by an unfinished'*) printf '%s\n' "$DOCTOR_EX_CONFLICT" ;;
+        *) printf '%s\n' "$DOCTOR_EX_STATE" ;;
+      esac
       ;;
     hc_portable_layout)
       case "${HC_PORTABLE_LAYOUT:-}:${HC_PORTABLE_OWNER_STATE:-}" in
@@ -2044,9 +2051,21 @@ fi
 run_check '  ' hc_portable_source_root "$HOME_PATH" || true
 run_check '  ' hc_portable_release_store "$HOME_PATH" || true
 run_check '  ' hc_portable_active_cli_release "$HOME_PATH" || true
+run_check '  ' hc_release_tmp_scratch "$HOME_PATH" || true
 # Spec 055 R2.7: WARN-only rows; silent when healthy.
 if launcher_row="$(hc_launcher_currency "${HOME:-}" "$HOME_PATH")"; then :; else
   report '  ' "$?" "$launcher_row"
+fi
+# Claude Code version floor for hook fail-open fixes: WARN/INFO, silent when healthy.
+if claude_row="$(hc_claude_code_version)"; then :; else
+  report '  ' "$?" "$claude_row"
+fi
+# pi floor of the recommended setup: WARN/INFO, silent when healthy.
+if pi_row="$(hc_pi_version "$REGISTRY_PATH")"; then :; else
+  report '  ' "$?" "$pi_row"
+fi
+if perl_row="$(hc_guard_supervisor_perl)"; then :; else
+  report '  ' "$?" "$perl_row"
 fi
 if run_check '  ' hc_portable_user_surface "$HOME_PATH"; then
   :
@@ -2251,8 +2270,26 @@ while IFS= read -r row; do
       fi
     fi
     run_check '  ' hc_portable_hooks_path "$HOME_PATH" "$root" "$checkout_id" "$owner" || true
+    # 1.3.12 A4: the deferred attachment checks. --fix runs the job here,
+    # synchronously; it never waits on a lock and leaves contention pending.
+    if [ "$DO_FIX" -eq 1 ] && [ "$owner_state" = attached ] &&
+       [ "$(attach_status_classify "$HOME_PATH" "$owner" "$checkout_id" "$worktree_id" | cut -f 1)" != ok ]; then
+      if [ "$DO_DRY_RUN" -eq 1 ]; then
+        report '  ' "$HC_INFO" 'attachment checks would run now (dry run; nothing was changed)'
+      else
+        postjob_output="$(TRELLIS_HOME="$HOME_PATH" bash "$SCRIPT_DIR/lib/attach-postjob.sh" run --sync --target "$root" </dev/null 2>&1)" || true
+        [ -z "$postjob_output" ] || printf '%s\n' "$postjob_output" | sed 's/^/    /'
+      fi
+    fi
+    run_check '  ' hc_portable_attach_status "$HOME_PATH" "$owner" "$checkout_id" "$worktree_id" || true
     if toolchain_row="$(hc_portable_toolchain_provenance "$root" "$owner")"; then :; else
       report '  ' "$?" "$toolchain_row"
+    fi
+    if docker_row="$(hc_portable_docker_toolchain "$root" "$owner")"; then :; else
+      report '  ' "$?" "$docker_row"
+    fi
+    if remote_row="$(hc_portable_remote_default "$root")"; then :; else
+      report '  ' "$?" "$remote_row"
     fi
   fi
   if [ -z "$release" ] && [ "$owner_state" != missing ]; then
@@ -2283,6 +2320,10 @@ while IFS= read -r row; do
   test_runner_status=0
   test_runner_message="$(hc_test_runner_exposure "$root")" || test_runner_status=$?
   [ "$test_runner_status" -eq 0 ] || report '  ' "$test_runner_status" "$test_runner_message"
+  # Rendered bright-line guard registrations: WARN or nothing (re-render only).
+  if guard_row="$(hc_guard_registrations "$root")"; then :; else
+    report '  ' "$?" "$guard_row"
+  fi
   row_diagnostics_ok=false
   [ "$N_ERROR" -eq "$ROW_ERRORS_AT_START" ] && row_diagnostics_ok=true
   plan_safe_repair "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" \

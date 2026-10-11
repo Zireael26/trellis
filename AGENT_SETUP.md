@@ -152,6 +152,7 @@ Two preconditions come with that route, because the launcher crosses an `env -i`
 
 - The launcher resolves a home of its own — `TRELLIS_HOME`, else `$HOME/.trellis` — and refuses before dispatch if that home has no verified active release. `--home PATH` then selects which machine state to render; it is not a way to reach an unconfigured launcher.
 - `TRELLIS_FLEET` does not survive the boundary. Select the fleet with `--fleet NAME`; with neither, the rendered home's `default_fleet` applies.
+- `DOCKER_HOST` is the one caller-owned value the managed hook dispatcher forwards. Hooks run with `HOME=/dev/null`, so Docker CLI contexts under `~/.docker` (colima, OrbStack, any non-default `docker context`) are invisible inside hooks. On such setups export the socket in the shell profile before pushing: `export DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"`; `DOCKER_CONTEXT` is never forwarded.
 
 Sections 1 and 2 already export `TRELLIS_HOME` and set `FLEET`, and section 3 installed and verified the active release into that home, so the block below satisfies both preconditions as written.
 

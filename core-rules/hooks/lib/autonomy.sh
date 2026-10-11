@@ -7,7 +7,7 @@
 #   or legacy fallback -> session override -> lowest active preset ceiling.
 
 #
-# Call `_se_resolve_autonomy <canonical-repo-root>`. It sets:
+# Call `_se_resolve_autonomy <canonical-repo-root> [project-policy-reader]`. It sets:
 #   AUTONOMY_LEVEL, AUTONOMY_NAME, AUTONOMY_REQUESTED_LEVEL,
 #   AUTONOMY_CEILING, AUTONOMY_CLAMPED, AUTONOMY_LIMITING_PRESET.
 #
@@ -46,8 +46,15 @@ _se_autonomy_frontmatter_value() {
   ' "$file" 2>/dev/null
 }
 
+# Optional reader lets an object-aware caller supply committed project policy;
+# fleet/preset definitions and session state still belong to the runtime/checkout.
+_se_autonomy_policy_json() {
+  [ -f "$1" ] || return 1
+  printf '%s\n' "$(< "$1")"
+}
+
 _se_resolve_autonomy() {
-  local repo_root="$1"
+  local repo_root="$1" reader="${2:-_se_autonomy_policy_json}" json
   local canonical_cfg="$repo_root/.trellis.json"
   # DEPRECATED read-only fallback. Retained past v1.0.0-rc.25 only for checkouts
   # still held on the legacy layout; `trellis migrate --prepare` replaces it.
@@ -80,14 +87,14 @@ _se_resolve_autonomy() {
   # compatibility file fills only an absent canonical value. A present but
   # malformed higher-precedence value suppresses lower-precedence overrides.
   for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
-    [ -f "$project_cfg_candidate" ] || continue
-    if ! jq -e 'type == "object"' "$project_cfg_candidate" >/dev/null 2>&1; then
+    json=$("$reader" "$project_cfg_candidate") || continue
+    if ! jq -e 'type == "object"' <<<"$json" >/dev/null 2>&1; then
       project_override_present=1
       break
     fi
-    if jq -e 'has("autonomy")' "$project_cfg_candidate" >/dev/null 2>&1; then
+    if jq -e 'has("autonomy")' <<<"$json" >/dev/null 2>&1; then
       project_override_present=1
-      value=$(jq -r '.autonomy' "$project_cfg_candidate" 2>/dev/null || true)
+      value=$(jq -r '.autonomy' <<<"$json" 2>/dev/null || true)
       if _se_valid_autonomy_level "$value"; then
         project_level="$value"
       fi
@@ -98,13 +105,13 @@ _se_resolve_autonomy() {
   # Active preset names use the same canonical-then-legacy field precedence,
   # while every preset definition is loaded solely from the immutable runtime.
   for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
-    [ -f "$project_cfg_candidate" ] || continue
-    if ! jq -e 'type == "object"' "$project_cfg_candidate" >/dev/null 2>&1; then
+    json=$("$reader" "$project_cfg_candidate") || continue
+    if ! jq -e 'type == "object"' <<<"$json" >/dev/null 2>&1; then
       break
     fi
-    if jq -e 'has("presets")' "$project_cfg_candidate" >/dev/null 2>&1; then
-      if jq -e '.presets | type == "array"' "$project_cfg_candidate" >/dev/null 2>&1; then
-        preset_cfg="$project_cfg_candidate"
+    if jq -e 'has("presets")' <<<"$json" >/dev/null 2>&1; then
+      if jq -e '.presets | type == "array"' <<<"$json" >/dev/null 2>&1; then
+        preset_cfg="$json"
       fi
       break
     fi
@@ -130,7 +137,7 @@ _se_resolve_autonomy() {
         AUTONOMY_CEILING="$value"
         AUTONOMY_LIMITING_PRESET="$preset"
       fi
-    done < <(jq -r '.presets[]? | strings' "$preset_cfg" 2>/dev/null || true)
+    done < <(jq -r '.presets[]? | strings' <<<"$preset_cfg" 2>/dev/null || true)
   fi
 
   if [ -n "$preset_default" ] && [ "$project_override_present" -eq 0 ]; then

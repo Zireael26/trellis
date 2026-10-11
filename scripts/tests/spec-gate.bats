@@ -33,7 +33,10 @@ setup() {
   echo "seed" > README.md
   git add -A && git commit -qm "init" >/dev/null
   TRELLIS_FIXTURE="$SANDBOX/trellis"
-  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"
+  mkdir -p "$TRELLIS_FIXTURE/core-rules/presets" \
+    "$TRELLIS_FIXTURE/core-rules/skills/process-gate/scripts/lib"
+  cp "$REPO/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$TRELLIS_FIXTURE/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
 }
 
 teardown() {

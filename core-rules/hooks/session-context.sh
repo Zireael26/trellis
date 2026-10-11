@@ -1023,6 +1023,13 @@ if [ -f "$__se_hp_lib" ]; then
 
 ${CTX}"
   fi
+  # Deferred attachment checks (1.3.12 A4): data only, one advisory line.
+  _se_attach_status_line="$(trellis_attach_status_line "$PROJECT_DIR" 2>/dev/null)"
+  if [ -n "$_se_attach_status_line" ]; then
+    CTX="${_se_attach_status_line}
+
+${CTX}"
+  fi
 fi
 
 FULL_CTX="${CTX}${AUTONOMY_CTX}${TASK_CTX}${CTX_TAIL}"

@@ -781,6 +781,785 @@ render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
 
+## `1.3.11` → `1.3.12` adoption
+
+1.3.12 changes rendered harness files, so **adoption alone does not deliver
+it**. The release adds a manifest leaf (`hooks/lib/guard-supervise.pl` for the
+Claude Code, Codex and pi surfaces) and changes the rendered settings arrays:
+bright-line guards are re-registered through the supervisor at 30 s,
+`turn-baseline.sh` is registered on `UserPromptSubmit`, four retired hooks are
+unregistered, and `.claude/settings.local.json` gains a `permissions.deny`
+backstop. `release adopt` replays the owner record's saved values and does not
+materialize new leaves, and template key removal needs a fresh render
+(`core-rules/inheritance.md` §6). Until a checkout group is detached and
+attached fresh it keeps 1.3.11's 5 s, unsupervised guard registrations, which a
+stalled guard can turn into an allow; keeps the retired hooks; and still asks
+for a DoD receipt on every dirty non-doc Stop.
+
+Several 1.3.12 rules also judge a project's **default branch**, not your
+checkout: both gates read their configuration from the range base, and pi
+checks project `.pi/` content against the remote default. Land the
+preparation in step 1 through ordinary PRs **before** a project adopts 1.3.12:
+afterwards each of those changes is a gate-config change that needs the
+repository owner's approval.
+
+On every machine, in this order:
+
+1. Prepare each project ([preparation](#1312-project-preparation)).
+2. Update the tools ([tool floors](#1312-tool-floors)).
+3. Install, verify and activate 1.3.12:
+
+   ```sh
+   TARGET_RELEASE=1.3.12
+   : "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+   : "${TRELLIS:=trellis}"
+   : "${TRELLIS_HOME:?Set TRELLIS_HOME (or export it) before configuring}"
+   "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+   "$TRELLIS" release verify "$TARGET_RELEASE"
+   "$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+   ```
+
+   `configure` relinks the user surface. That replaces the pi
+   `trellis-computer-use` skill with its 1.3.12 routing text and the user-level
+   `~/.claude/hooks/herdr-foreman-session.sh` with the 1.3.12 hook, which no
+   longer probes at SessionStart; project adoption does not touch either.
+   1.3.12 does not change `scripts/trellis-launcher.sh`, so the 1.3.11
+   launcher can stay.
+4. On machines that run pi, update pi and its setup
+   ([pi](#1312-pi-110-and-the-pi-setup)), so the pi version row can be clean
+   when you verify.
+5. Detach and attach each **entire checkout group** fresh, one group at a time
+   ([re-render](#1312-re-render-every-checkout-group)), then run its scoped
+   `doctor` ([verify](#1312-verify)).
+
+Projects not yet re-rendered keep working under an active 1.3.12: their
+`skill-size-preflight` SessionStart call is answered as a silent no-op.
+**Attaching at an older release needs that release's own CLI.** Every release
+through 1.3.11 renders that SessionStart route and 1.3.12's renderer does not,
+so an active 1.3.12 refuses `trellis attach --release 1.3.11` (or earlier) with
+`contextual template is malformed or unsafe:
+core-rules/templates/claude-settings.local.json` and writes nothing. Run the
+older release's own attach, or detach and attach the group at 1.3.12. Worktree
+seeding and `doctor` are unaffected: they use the recorded release's own
+code.
+
+### 1.3.12 project preparation
+
+Do these on each project's default branch, merged before the project adopts
+1.3.12.
+
+- **Make `local.config.sh` data.** Both gates now parse
+  `process-gate-local/local.config.sh` and `security-gate-local/local.config.sh`
+  (each in `.claude/skills/` and `.agents/skills/`) as data instead of sourcing
+  them. Allowed lines are blanks, comments and `NAME=value` with a literal
+  value (`PROCESS_GATE_*`, which may also be an array, or `SECURITY_GATE_*` /
+  `LLM_*`); the only expansion allowed is `"${NAME:-literal}"` naming its own
+  key. A function, a command, `export`, `source`, `$(…)`, a variable reference,
+  a `;` inside a value, or a default that names another key makes every run
+  BLOCKED with `process-gate local config is not data` (or the security-gate
+  equivalent). Move computed values into the commands themselves or into a
+  validator:
+
+  ```sh
+  # Before (sourced shell): BLOCKED in 1.3.12
+  PROCESS_GATE_TEST_CMD="$(./scripts/pick-tests.sh)"
+  export PROCESS_GATE_TEST_TIMEOUT=900
+  # After (data)
+  PROCESS_GATE_TEST_CMD="./scripts/run-gate-tests.sh"
+  PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-900}"
+  ```
+
+  The process-gate grammar is in the process-gate skill's "Gate config is
+  read from the range base, as data"; the security-gate grammar is in the
+  security-gate skill's "Diff mode: config comes from the range base".
+
+- **Point validators at `$PROCESS_GATE_PROJECT_DIR`.** Stack validators now
+  run from a private copy taken from the range base, with cwd set to the
+  checkout under test and `PROCESS_GATE_PROJECT_DIR` set to its absolute path.
+  A validator that finds the project from its own location now finds the
+  private copy. The one-line fix:
+
+  ```sh
+  # Before
+  ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+  # After
+  ROOT="$PROCESS_GATE_PROJECT_DIR"
+  ```
+
+  A validator may `source` only files from the trusted copy; declare any
+  helper it sources in `PROCESS_GATE_VALIDATOR_DEPS` and source it from
+  `$PG_TRUSTED_ROOT`. Sourcing a sibling that is not declared fails the
+  validator.
+
+- **Commit the security baseline on the default branch.** Diff mode reads
+  `<audit dir>/*-baseline-<project>.json` from the range base only. A range
+  that adds or edits its own baseline does not use it, and a base without one
+  BLOCKS. The baseline has been required since 1.3.10.
+
+- **Inline `.gitleaks.toml` extends.** A base `.gitleaks.toml` with an
+  `[extend] path` (in any key casing or quoting) BLOCKS every diff run,
+  because gitleaks would resolve that path against the worktree. Inline the
+  extended rules into the root `.gitleaks.toml` before adopting.
+  `[extend] useDefault = true` is fine and needs no change.
+
+- **Check project pi configuration.** If the project tracks a `.pi/`
+  directory or `.agents/agents`, `.agents/workflows` or `.agents/skills`
+  content, it must be merged on the remote default branch: from 1.3.12 every
+  Trellis pi launcher refuses to start over pi configuration the default
+  branch has not approved.
+
+- **Move any `permissions.deny` you added to `.claude/settings.local.json`.**
+  The 1.3.12 render owns that key, and attach refuses to render over a file
+  that already has a value there. Move those rules to `.claude/settings.json`
+  or merge them by hand first.
+
+### 1.3.12 tool floors
+
+- **Scanners.** A required scanner that is missing, crashes or reports a
+  partial scan now BLOCKS its row instead of passing: semgrep for changed
+  code, ShellCheck for changed shell, osv-scanner when a manifest changes,
+  and gitleaks for every range. Install all four where the gate runs, as
+  absolute binaries outside any project. gitleaks must support
+  `--gitleaks-ignore-path`. A project with a root `.gitleaks.toml` needs
+  Python 3.11 or later for `tomllib`.
+- **perl** must be on the hook `PATH`: the guard supervisor is a perl script,
+  and every guarded tool call is denied without it. `doctor` reports a missing
+  perl as an ERROR.
+- **Claude Code 2.1.294 or later and Codex 0.116.0 or later** for the
+  receipt trigger. `doctor` warns below the Claude Code floor; nothing checks
+  the Codex floor yet.
+- **pi 1.1.0 or later** on machines that run pi (below).
+
+### 1.3.12 re-render every checkout group
+
+Use the whole-group procedure from the `1.3.6` → `1.3.7` section below: record
+every worktree root and its harness selection, detach all worktrees of the
+group together, then attach the former manager first and each remaining root
+with its recorded `--harness` flags, at `--release 1.3.12`. Do not reattach any
+root before the whole group is detached, and do not use the default harness
+set. A legacy direct-copy install must also copy `lib/guard-supervise.pl`
+beside its hooks; without it every guarded call is denied.
+
+### Gate-config changes need the owner at merge
+
+From 1.3.12 both gates are judged with the configuration on the range base,
+and a range that changes gate configuration needs the repository owner. Gate
+configuration is:
+
+- at the repository root: the `process-gate-local` and `security-gate-local`
+  trees under `.claude/skills/` and `.agents/skills/`, the legacy
+  `.claude/skills/process-gate/local.config.sh` (still honoured read-only;
+  changing it is likewise a gate-config change), the scanner config
+  (`.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore`,
+  `osv-scanner.toml`), the security baselines, and the validator paths and
+  declared dependencies;
+- at any depth: any `secrets-allowlist.txt`, `.trellis.json` and `.trellis/`,
+  `.envrc` and `.env*`, and the pi and agent loader paths (`.pi/`,
+  `.agents/agents/`, `.agents/workflows/`, `.agents/skills/`);
+- any changed path that contains a non-ASCII byte.
+
+- **Push mode** (a feature-branch push): the range is gated with the base
+  configuration and the verdict carries a notice.
+- **Merge mode** (the gate of record before merging a PR): BLOCKED until the
+  repository owner posts the line `gate-config-approved: <full head SHA>` in a
+  comment or review on the one open PR whose head is that SHA. Push a new
+  commit and the approval must be posted again for the new SHA. Agents never
+  post or script this line, and there is no environment override.
+- **A push that targets `main` or `master`** (`--target=main`, passed by the
+  managed `pre-push`): any gate-config change is BLOCKED, approved or not.
+  Merge it through its PR.
+
+`SECURITY_GATE_SKIP=1` is no longer honoured: process-gate reports it as
+BLOCKED. Remove it from scripts and aliases, and unset any
+`PR_GATE_SHIFTLEFT_*` overrides: they are now ignored, because
+`pr-gate-shiftleft` no longer runs the gate.
+
+### Push mode never falls back to the last commit
+
+With no `--range` or `--base`, push mode gates the base the shared diff-base
+resolver derives and prints a `diff-base:` receipt line. When the resolver
+cannot derive a base it gates every commit not on the local `main` (else
+`master`), receipted `via fallback`; with neither branch it refuses before any
+check. The 1.3.11 `HEAD~1..HEAD` fallback is gone in every mode, so a scratch
+clone with no derivable base and no `main`/`master` now refuses, including a
+`pre-push` run with nothing on stdin. Pass `--base=<ref>` or `--range=<a>..<b>`
+in scripts and agent runs. Merge mode accepts `--base` as well as `--range`.
+
+The managed `pre-push` also changes for stacked and multi-ref pushes. A first
+push whose parent branch is not on the remote gates from the remote default
+and prints a hint to push the parent first; push the parent first to gate only
+your own commits. With `TRELLIS_ALLOW_MAIN_PUSH=1`, a push of `main` beside a
+branch on a different range refuses: push them separately.
+`TRELLIS_ALLOW_MAIN_PUSH` is owner-only break-glass; agents stop and report.
+A pushed `.trellis.json` cannot remove protection from `main`, `master` or the
+remote default's `template.branch`, and a `template.branch` that does not name
+a real branch is refused.
+
+`doctor`'s `remote-default` row is now `remote-default-not-protected`, at INFO
+when `origin/HEAD` differs from the project's `template.branch` (default
+`main`). Fix it with `git remote set-head origin <policy-branch>` if the
+difference is unintended.
+
+### Retired hooks and local opt-in
+
+`skill-size-preflight`, `truncation-check`, `propose-rules` and
+`primer-capture-nudge` are no longer registered for Claude Code or Codex; the
+re-render removes them. The scripts stay in the payload under
+`.trellis/runtime/core-rules/hooks/` (Codex: `core-rules/codex/hooks/`). The
+pi dispatcher is unchanged. The Skill size budget is still enforced at use by
+`skill-preload-guard` and `skill-slash-guard`.
+
+To keep one of them in an attached Claude Code project, register it in a
+settings file the project owns, such as the tracked `.claude/settings.json`,
+never in the rendered `.claude/settings.local.json` or `.codex/hooks.json`: a
+hand edit to a Trellis-owned array becomes a detach conflict. The command form
+is the one 1.3.11 rendered, for example:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Grep|Bash|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/truncation-check.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`propose-rules.sh` and `primer-capture-nudge.sh` go on `Stop` the same way.
+`skill-size-preflight.sh` goes on `SessionStart` with the direct script path:
+the launcher route it used is now a no-op. Such a registration resolves only
+in an attached checkout. Codex reads its hooks from `.codex/hooks.json`,
+which Trellis renders, so 1.3.12 documents no Codex opt-in.
+
+### The receipt trigger and its residuals
+
+`stop-verify` now demands the DoD receipt only when the turn changed the tree,
+judged against the baseline `turn-baseline.sh` writes at the start of each
+turn. A changed tree, a commit that left the tree clean, and a missing or
+unreadable baseline still demand it. Two residuals are accepted:
+
+- **Forged baseline.** The baseline and its nonce log are ordinary files owned
+  by the agent's own user, under `TRELLIS_HOME`. An agent that deliberately
+  rewrites both with the current fingerprint can suppress the demand on a turn
+  that changed code. A turn that edits and then exactly reverts to its entry
+  state also reads as unchanged. The receipt is a nudge; real verification
+  stays in the pre-push and merge gates.
+- **Un-arming.** A project is armed only while its settings register
+  `turn-baseline.sh`, and `.claude/settings.local.json` is git-ignored. Removing
+  that registration does not dirty the tree, and the project then behaves as it
+  did before 1.3.12. Re-attaching re-renders the registration.
+
+### 1.3.12 pi 1.1.0 and the pi setup
+
+The recommended pi setup (`AGENT_PI_SETUP.md`) supports pi 1.1.0 and above and
+installs 1.1.0. `trellis doctor` warns when pi is below 1.1.0, or missing while
+a registered checkout selects the pi harness.
+
+1. **Upgrade pi** (guide step 1):
+
+   ```sh
+   npm install --global @earendil-works/pi-coding-agent@1.1.0
+   pi --version < /dev/null
+   ```
+
+2. **Apply guide step 2.** Its `settings.json` adds
+   `"extensions": ["-builtin:mcp"]`, which switches off pi 1.x's built-in MCP
+   client, and its trimmed package set drops the MCP adapter and the
+   session-messaging package. Reinstall packages with
+   `npm ci --legacy-peer-deps` in `~/.pi/agent/npm`, never `npm install`.
+3. **Keep workflows off globally** (guide step 6). `foreman-start.sh` turns
+   `SubagentWorkflow` on for a foreman's worktree by writing that worktree's
+   `.pi/subagents.json`. Do not hand-write one: the interactive `pi()` refuses
+   an untracked or branch-modified file.
+4. **Remove the retired computer-use profile.** pi no longer carries computer
+   use or the session-messaging (intercom) package. Back up
+   `~/.pi/agent/settings.json` and `~/.pi/agent/mcp.json`, then:
+
+   ```sh
+   pi remove "$HOME/.local/share/trellis/pi-computer-use/node_modules/pi-mcp-adapter"
+   if [ -f "$HOME/.pi/agent/mcp.json" ]; then
+     jq 'del(.mcpServers.cua)' "$HOME/.pi/agent/mcp.json" > "$HOME/.pi/agent/mcp.json.tmp" &&
+       mv "$HOME/.pi/agent/mcp.json.tmp" "$HOME/.pi/agent/mcp.json"
+   fi
+   ```
+
+   The `pi remove` operand is the adapter package the earlier guide installed
+   with `pi install`; if `pi list` shows no such package, skip that line.
+
+   Keep every other package, server and setting. Do not edit
+   `~/.pi/agent/skills/trellis-computer-use` by hand; step 3 of the adoption
+   order relinks it. The tool prefix
+   `~/.local/share/trellis/pi-computer-use`, the `agent-browser` symlink and
+   Cua Driver are no longer used by pi; remove them only if nothing else uses
+   them. Route computer-use work to Codex CLI in a Herdr pane
+   (`herdr agent start <name> --kind codex --pane <id> -- --search`) or to
+   Claude Code.
+5. **Restart pi** at an attended boundary. A running session keeps the tools
+   it started with. In a new session, no `cua_*`, `mcp` or `mcpScript` tool
+   is offered.
+
+#### pi worktree root and temp directory
+
+1.3.12 moves pi's durable worktree root from `~/.trellis/pi-worktrees` to
+`~/.pi-worktrees`, and sends the temp files of the commands pi runs to a
+private `$TMPDIR/pi`. pi writes its bash spill logs to the same root as its
+worktrees, and that root must not sit under `~/.trellis`. `foreman-start.sh`
+applies the change to Herdr launches. For interactive launches, replace the
+`pi()` function in your shell profile with the guide's step 8 version and add
+the step 2 `shellCommandPrefix` key to `~/.pi/agent/settings.json`. The new
+`pi()` refuses a symlinked or foreign-owned `~/.pi-worktrees`, and refuses
+`TMPDIR` set to the home directory.
+
+Worktrees already under `~/.trellis/pi-worktrees` stay there until their work
+is merged; do not move them. To see what is stale in the new root, the old
+root and the temp directory:
+
+```sh
+scripts/disk-janitor.sh --report --scopes pi
+```
+
+The pi scope is **report-only** in 1.3.12: `--apply` refuses it and nothing
+under a pi root is deleted. Remove what it lists by hand.
+
+### Faster attach and new worktrees
+
+Attach now commits its artifacts from one process (journal v2), hands its
+slower checks to a detached background job and returns, and a new worktree of
+an already attached checkout reuses a verified sibling's render, falling back
+to the full attach on any doubt. The deferred checks are visible:
+
+- `doctor` shows an `attachment checks` row per worktree, and
+  `doctor --fix` runs them now.
+- `SessionStart` prints one warning when a worktree's checks FAILED or are
+  blocked by an unfinished Trellis operation.
+- The managed `pre-push` refuses while the checks are FAILED or blocked by a
+  pending journal or adoption marker; follow the printed remedy (often
+  `trellis recover <root>` or `trellis doctor --fix`). On `ok` it passes; in
+  any other state it runs the read-only checks inline.
+
+A journal left by an interrupted 1.3.12 attach is a v2 journal. Recover it
+with 1.3.12: an earlier release refuses it rather than rolling back a prefix it
+cannot see. If you script delegated recovery with `--expected-journal-sha256`,
+a v2 journal's value is the SHA-256 of
+`trellis-attachment-journal-v2\n<journal sha256>\n<progress-log sha256, or none>\n`,
+where the progress log is `state/attachment-progress/<attachment id>.log`.
+
+### 1.3.12 known residuals
+
+These are accepted for 1.3.12:
+
+- **Journal v2 durability.** The one-process publisher does not `fsync` its
+  writes, so its crash safety covers a killed process, not a power loss.
+- **Linux exclusive rename.** On Linux the publisher needs `renameat2`
+  (glibc 2.28 or later) for its no-replace rename. Without it attach fails
+  closed rather than risk replacing a directory; run the attach on a host with
+  glibc 2.28 or later.
+- **Mixed-release locks.** A release from before journal v2 refuses to
+  reclaim a lock left by a v2 attach; use 1.3.12 for that checkout.
+- **Refuter degraded.** With Grok retired, four model families remain. The
+  herdr-foreman refuter role still requires three seats and can fill two
+  beside any producer, so it reports `DEGRADED: refuter has 2/3` and
+  `approval_ready` stays false. A seat-count change is deferred.
+- **Receipt trigger.** The forged-baseline and un-arming residuals described
+  in [The receipt trigger and its residuals](#the-receipt-trigger-and-its-residuals).
+- **pi janitor.** `disk-janitor.sh --scopes pi` is report-only; delete what it
+  lists by hand.
+- **Older releases.** An active 1.3.12 cannot attach a project at 1.3.11 or
+  earlier; use that release's own CLI.
+- **Validator helpers.** A stack validator may source only files from the
+  trusted base copy, and its helper API is narrower than native `source`
+  (see the process-gate skill). `run-baseline.sh` still reads
+  `security-gate-local/local.config.sh` from the worktree; only the owner
+  runs it.
+- **Codex version floor.** The receipt trigger needs Codex 0.116.0 or later,
+  and nothing checks it yet.
+
+### 1.3.12 verify
+
+After each group is re-rendered, run its scoped `doctor` and confirm:
+
+- no `perl` ERROR and no guard-registration WARN (unsupervised, under 30 s,
+  or a missing supervisor);
+- the Claude Code version row and, on pi machines, the pi version row are
+  clean;
+- for each root and each recorded harness, `hooks/lib/guard-supervise.pl` is a
+  live link and its exact exclude entry is present.
+
+`doctor` validates recorded values, not the new template, so check the
+rendered settings directly as well. For a Claude Code root:
+
+```sh
+S="$ROOT/.claude/settings.local.json"
+grep -c 'guard-supervise.pl' "$S"   # 3
+grep -c 'turn-baseline.sh' "$S"     # 1
+grep -cE 'truncation-check|propose-rules|primer-capture-nudge|skill-size-preflight' "$S" || test $? -eq 1   # expect 0
+```
+
+For a Codex root, run the same three checks, with the same `|| test $? -eq 1`
+on the third, on `$ROOT/.codex/hooks.json`; expect `2`, `1` and `0`.
+
+## `1.3.10` → `1.3.11` adoption
+
+Adoption delivers the 1.3.11 process-gate secrets-allowlist move and the
+attach launcher-missing diagnostic. 1.3.11 adds no harness leaves or settings
+arrays of its own. Adoption still does not materialize native leaves that an
+existing root is missing: a checkout group that reached 1.3.7 or later by
+adoption alone still lacks the 1.3.7 `hookspath-guard` leaves until the
+whole-group detach and fresh attach in the `1.3.6` → `1.3.7` section below.
+
+### Secrets allowlist moves to `process-gate-local`
+
+`check-secrets.sh` now reads `<project>/.claude/skills/process-gate-local/secrets-allowlist.txt`
+(Codex: `<project>/.agents/skills/process-gate-local/secrets-allowlist.txt`;
+when both exist the active harness wins, same as `local.config.sh`). The old
+`<project>/.claude/skills/process-gate/secrets-allowlist.txt` path (and its
+`.agents` twin) is linked read-only to the release runtime at attach time via
+the `core-rules/skills` → `.claude/skills` inheritance manifest entry, so a
+project file there refuses attach with exit `3`
+(`attachment destination is project-owned: .claude/skills/process-gate`).
+Move the file before attaching:
+
+```sh
+mkdir -p .claude/skills/process-gate-local
+mv .claude/skills/process-gate/secrets-allowlist.txt \
+  .claude/skills/process-gate-local/secrets-allowlist.txt
+# Codex twin: .agents/skills/process-gate-local/secrets-allowlist.txt
+```
+
+The legacy path is still read, read-only, with a one-line deprecation notice
+on stderr naming both paths (`check-secrets: deprecated allowlist <legacy>;
+move it to <new>`). When both exist the overlay file wins and the legacy file
+is ignored, with the same notice.
+
+### Attach requires the installed launcher
+
+`attachment_contextual_render_context` requires the installed launcher at
+`$HOME/.local/bin/trellis` to be present and executable. A missing launcher
+still returns `5` (`TRELLIS_EX_UNAVAILABLE`) and a non-executable launcher
+still returns `4` (`TRELLIS_EX_STATE`); each now emits exactly one diagnostic
+line naming the expected path and the remedy
+(`launcher missing at <path>; install it (docs/UPGRADING.md "Reinstalling the
+launcher") and retry` /
+`launcher at <path> is not executable; ...`). Reinstall with the
+[Reinstalling the launcher](#reinstalling-the-launcher) procedure when doctor
+reports `launcher currency`.
+
+### Docker inside managed hooks
+
+The managed git-hook dispatcher runs hooks with `HOME=/dev/null`, so Docker
+CLI contexts (e.g. colima's `docker context use colima`, stored under
+`~/.docker`) are invisible inside hooks, and a pre-push gate that runs Docker
+fails with "Docker run failed". The dispatcher forwards a caller-set
+`DOCKER_HOST` but never a context. From 1.3.11 that export reaches the
+process-gate payload as well as the prior hooks; under 1.3.10 it reached only
+the prior hooks and passthrough shims, never the gate payload — so a
+Docker-gated push failed even with `DOCKER_HOST` exported. On context-based
+setups (colima, OrbStack, any non-default `docker context`), export the socket
+in the shell profile before pushing:
+
+```sh
+export DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+```
+
+`doctor` now WARNs while the export is missing or unreachable: host-level
+`docker-host-unset-for-hooks` when a docker CLI is on `PATH`, `DOCKER_HOST`
+is unset, and the active context is not `default` (sits alongside the
+colima-fleet `docker-context-not-colima` row, which is unchanged; overlap on
+a drifted colima machine reports both), and per-row
+`docker-not-on-recorded-toolchain` when `docker` resolves on the caller `PATH`
+but not on the recorded toolchain `PATH` the gate runs with — refresh it with
+`trellis attach --refresh-toolchain`.
+
+### `trellis recover` is only for a journaled, interrupted operation
+
+`trellis recover` recovers a journaled, interrupted attach/detach/adopt
+transaction for that worktree. On a healthy attachment with no matching
+journal it returns `5` (`TRELLIS_EX_UNAVAILABLE`,
+`no matching attachment journal`). That is expected, not a fault in the
+attachment: do not delete journals or re-attach to "fix" it.
+
+### Merge mode now requires `--range`
+
+`run-all.sh --mode=merge` (the default) no longer defaults a range: without
+an explicit `--range` it refuses with exit `1` and the exact stderr line
+`merge mode requires --range/--base` before any check runs. In a scratch clone
+with no local `main`/`master` the old default gated only `HEAD~1..HEAD` while
+reporting a full merge verdict. Pass `--range=<base>..HEAD` (agents and
+scripts) or derive it per ref (the pre-push hook already does). Push mode is
+unchanged and keeps its `main..HEAD` / `master..HEAD` / `HEAD~1..HEAD`
+fallbacks. (1.3.12 removes the last of these; see
+[Push mode never falls back to the last commit](#push-mode-never-falls-back-to-the-last-commit).) Who is affected: any script or agent running merge mode without
+a range must add one; ambiguous pushes now fail the push closed instead of
+falling back to a default scan.
+
+The pre-push hook fails closed when (i) two or more branch updates
+derive different ranges, or (ii) a new branch ref derives nothing because the
+remote default does not resolve — the refusal message names which case fired
+(push branches one at a time; `git remote set-head origin -a`). Tag refs
+(`refs/tags/*`) and branch deletes never count toward ambiguity: a branch+tag
+push gates the branch range plus every tag not reachable from its gated tip.
+A tag-only push gates each tag range in turn (a payload tag gates exactly its
+payload commit). Any underivable tag range refuses before the gates run;
+there is no checkout-scan fallback for tags (R31). A delete never widens the
+range. `doctor` reports a checkout whose `origin`
+default resolves nowhere as `remote-default-unresolved` (remedy: `git remote
+set-head origin -a`), and names a resolved non-`main`/`master` default as
+info only.
+
+The hook also refuses a branch update whose remote tip is not in the local
+object store (`its remote tip is not local; fetch first`), a new branch with
+no merge-base with the remote default, and any ref outside `refs/heads/*` and
+`refs/tags/*` (`unsupported ref ... push branches or tags only`; deleting such
+a ref is still allowed). A push that only deletes refs runs no gate. A new
+branch is ranged from its merge-base with `refs/remotes/origin/HEAD` (else
+`origin/main` or `origin/master`), so run `git fetch` first: a stale remote-tracking ref makes the
+range include commits that are already merged. That over-gates rather than
+under-gates, but it can block a push on findings that are not yours.
+
+Enforcement lives in `run-all.sh` alone, by design: it is the single choke
+point every gate row passes through, while the individual `check-*.sh`
+scripts take no `--mode` flag (a direct invocation cannot name a mode, so
+there is nothing to refuse on) and legitimately keep their `main..HEAD`
+default for direct use. `pg_parse_range` is the backstop, not the enforcer:
+it can never return `HEAD~1..HEAD` in merge, which closes the scratch-clone
+hole for direct invocations too.
+
+## `1.3.9` → `1.3.10` adoption
+
+Adoption delivers the 1.3.10 process-gate and security-gate scripts (security
+scans and Pi auxiliary checks now fail closed), the attachment and doctor
+changes, and the shared-exclude migration for checkout groups. 1.3.10 adds no
+harness leaves or settings arrays of its own. Adoption still does not
+materialize native leaves that an existing root is missing: a checkout group
+that reached 1.3.7 or later by adoption alone still lacks the 1.3.7
+`hookspath-guard` leaves until the whole-group detach and fresh attach in the
+`1.3.6` → `1.3.7` section below.
+
+On every machine, in this order:
+
+1. Install, verify and activate 1.3.10
+   ([user-surface activation](#139--1310-user-surface-activation)).
+2. Refresh the launcher (below). Group adoption refuses until this is done.
+3. For each project to adopt, generate and commit its security baseline
+   ([security baseline prerequisite](#1310-security-baseline-prerequisite)).
+   Pi owners with a project-authored `.pi/` deferral fail Bypass and doctor
+   after adoption; list them first:
+
+   ```sh
+   jq -r 'select(any((.pre_existing // [])[]; .kind == "symlink"
+       and .reason == "project-authored-file" and (.path | startswith(".pi/"))))
+     | .worktree_root' "${TRELLIS_HOME:-$HOME/.trellis}"/state/attachments/*/*.json
+   ```
+
+4. Adopt each whole project group through the refreshed launcher
+   ([adopted worktree groups](#139--1310-adopted-worktree-groups)), then run the
+   scoped `doctor`.
+5. Only where a partial detach/re-attach left the registry release behind its
+   owners, use [record/registry release reconciliation](#139--1310-recordregistry-release-reconciliation).
+
+### Refresh the launcher
+
+1.3.10 changes `scripts/trellis-launcher.sh`: its verified `release` and
+`upgrade` bundle now also loads `scripts/lib/surface-plan.sh` and
+`scripts/attach-project.sh`, which define the group exclude planner.
+`release install` and `configure` do not replace an installed launcher that
+differs from its template, so a machine keeps its 1.3.9 launcher until it is
+reinstalled. With that launcher, adopting a real checkout group (more than one
+owner record for the checkout) refuses with
+`group exclude planner unavailable; use the verified 1.3.10 CLI to adopt`
+(exit `5`). Singleton adoption still succeeds.
+
+Check which launcher is installed:
+
+```sh
+grep -c 'EXCLUDE_PLANNER' "$HOME/.local/bin/trellis"
+```
+
+`2` is the 1.3.10 launcher. `0` (grep exits `1`) is an older one; reinstall it
+with the [Reinstalling the launcher](#reinstalling-the-launcher) procedure:
+
+```sh
+TARGET_RELEASE=1.3.10
+PAYLOAD_LAUNCHER="${TRELLIS_HOME:-$HOME/.trellis}/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh"
+grep -c 'EXCLUDE_PLANNER' "$PAYLOAD_LAUNCHER"            # must print 2
+mv "$HOME/.local/bin/trellis" "$HOME/.local/bin/trellis.before-$TARGET_RELEASE"
+"$HOME/.local/bin/trellis.before-$TARGET_RELEASE" configure --release "$TARGET_RELEASE" \
+  --launcher-template "$PAYLOAD_LAUNCHER"
+cmp "$HOME/.local/bin/trellis" "$PAYLOAD_LAUNCHER"
+grep -c 'EXCLUDE_PLANNER' "$HOME/.local/bin/trellis"      # must print 2
+```
+
+Then finish step 4 of that procedure: a scratch `trellis worktree sync` and a
+`trellis doctor` with no `launcher currency` or `toolchain provenance` WARN.
+Only then remove `trellis.before-1.3.10`. Never edit the installed launcher by
+hand.
+
+## `1.3.9` → `1.3.10` user-surface activation
+
+1.3.10 adds missing-owned-symlink repair to `relink --user`. It restores only
+absent symlinks recorded in the committed user owner, verifies their recorded
+release, and leaves ownership and rendered settings unchanged during repair.
+Modified destinations, missing sources, and missing non-symlink artifacts still
+refuse; this is not a force or reconstruction command. Project attachment
+migration remains separate.
+
+Install and verify 1.3.10 through the stable launcher, then activate it explicitly:
+
+```sh
+TARGET_RELEASE=1.3.10
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+**Interrupted activation caveat:** the still-active 1.3.9 runtime runs configure,
+which delegates user relinking to 1.3.10. A signal/crash during repair can leave
+an `operation: "repair"` user journal that 1.3.9 cannot read. Its configure
+recovery runs the old attachment script, so retrying through the launcher can
+exit `4` before reaching the new runtime. `trellis recover PATH` is project-only
+and cannot recover this user journal.
+
+Run the installed **1.3.10** attachment command directly, even when the journal's
+recorded owner release is 1.3.9, then retry activation through the stable launcher:
+
+```sh
+"$TRELLIS_HOME/releases/1.3.10/payload/scripts/attach-project.sh" \
+  relink --user --home "$TRELLIS_HOME" --release 1.3.10
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release 1.3.10
+```
+
+Repair interruption diagnostics print this release-specific command with the
+actual home and executing runtime version. Recovery discards still-exact,
+journal-pinned links and stages, accepts already-absent links, and drops the
+repair journal before relink re-plans. It does not require the old payload or
+owned JSON to remain exact merely to undo the repair. Foreign replacements and
+unsafe paths are preserved, and re-planning still refuses them. Non-signal repair
+failures also discard the journal rather than wedging later user commands. Do
+not hand-delete journals, edit installed payloads, or recreate links by hand.
+
+## `1.3.10` security baseline prerequisite
+
+Before adopting 1.3.10 for any project, run the current release's security-gate
+`run-baseline.sh` against that checkout and confirm its baseline JSON exists:
+
+```sh
+bash "$PROJECT_ROOT/.trellis/runtime/core-rules/skills/security-gate/scripts/run-baseline.sh" "$PROJECT_ROOT"
+```
+
+Commit the generated baseline JSON so clones and worktrees see it.
+
+A missing security-gate skill or baseline now fails the Security row, including
+in attached projects. This row remains always-hard in **pre-push**, so adoption
+without a baseline blocks pushes, not just merge reviews. Missing scanner-binary
+behaviour is unchanged and is a separate follow-up.
+
+Pi owners with `project-authored-file` entries under `.pi/` now fail Bypass and
+doctor after adopting 1.3.10; move the project file aside, then detach and attach again.
+
+## `1.3.9` → `1.3.10` adopted worktree groups
+
+After installing, verifying and activating the 1.3.10 CLI and
+[refreshing the launcher](#refresh-the-launcher), explicitly adopt the whole
+selected project group through that CLI:
+
+```sh
+"$TRELLIS" release adopt 1.3.10 --project "$PROJECT_ID" --fleet "$FLEET"
+```
+
+Adoption now derives each root's selected-release exclude plan with legitimate
+project-authored deferrals, requires compatible plans and exactly one exclude
+manager, and reconciles the recorded/live managed block even when the owners
+already say 1.3.10. Every owner receives the same current block/hash and after
+snapshot; manager roles, original pre-attach restoration data and every external
+exclude byte are preserved. Winning Git ignore negations, divergent deferrals,
+unavailable committed siblings, tampered/duplicated blocks and CAS races refuse
+instead of publishing a union or accepting stale bytes.
+
+This is **not existing-root native-leaf delivery**: missing hookspath leaves and
+associated doctor findings remain until the documented whole-group detach/fresh
+attach procedure. Fresh checkout-enabled adds receive the current full surfaces.
+The wrapper checks the source group's plan before Git creation; `--no-checkout`
+still defers reconciliation. Other checkout/hook failures can still leave a Git
+worktree; the wrapper never automatically deletes it or its branch.
+
+On interruption, retry `release adopt` through 1.3.10 with the same selector.
+Private plans under `state/release-adoptions/<checkout-id>` retain common-file,
+owner, anchor and hook snapshots. Recovery verifies the registry commit boundary
+and either recognizes a fully published group or rolls back before re-planning;
+it never replays a whole registry snapshot. Pending plans block sync/attach/add.
+Foreign changes are preserved and require inspection, not hand-deleted journals.
+Sync failures (including quiet seeding) name exclude-plan hashes/missing paths,
+invalid donors or owned artifacts, with a remedy; quiet suppresses only success.
+
+## `1.3.9` → `1.3.10` record/registry release reconciliation
+
+If a partial detach/re-attach left the registry release behind the committed
+owner, use 1.3.10's `trellis attach --release RECORDED_RELEASE PATH` with the
+owner's exact recorded harness selection (`--harness NAME` for each harness).
+This is not adoption: the selected release must equal the owner release, and
+all live siblings must agree. Attach verifies exact owner artifacts, runtime
+anchors, harnesses, UUIDs and checkout binding before aligning **only** the stale
+registry release. Owner records and project files are not republished; retained
+unavailable inventory and unrelated rows are preserved. Repeating attach is a
+no-op. Discovery/rebuild is not evidence of ownership.
+
+An interrupted reconcile leaves a `reconcile-UUID.json` before/after journal.
+Retry the same attach or run `trellis recover PATH` through **1.3.10**; recovery
+reverifies exact ownership and rolls forward, never restores the stale release.
+Foreign UUIDs, tampered owners/anchors, harness drift or changed journal bindings
+refuse without reconciliation. Mixed live releases require a separately planned
+whole-group detach/attach, not repeated single-owner release changes. Do not edit
+registry JSON, hand-delete journals, force-deregister attached rows or run blanket
+cleanup; this path does not authorize machine cleanup.
+
+## `1.3.8` → `1.3.9` adoption
+
+Adoption delivers all of 1.3.9: the updated managed `pre-push` dispatcher (the
+`post-checkout` dispatcher is unchanged), the immutable pre-push carrier (both
+the `githooks` and `husky` variants run from the release payload), the
+process-gate `check-bypass.sh`, and the attachment and doctor changes. 1.3.9
+adds no harness leaves, managed exclude entries or settings arrays, so no detach
+and attach is needed for 1.3.9 itself. A checkout group that came to 1.3.7 or
+1.3.8 by adoption alone still lacks the 1.3.7 `hookspath-guard` leaves and
+`hooks.PostToolUse` entry; the `1.3.6` → `1.3.7` section below still applies to
+it.
+
+Two behaviour changes need attention after adopting:
+
+- **Pushes fail hard on drifted hook authority.** For a managed attachment, a
+  guarded push now fails unless the local `core.hooksPath` is exactly the one
+  owner-recorded managed path and the effective value matches; a second local
+  value or a worktree override also fails. The failure prints
+  `git config --replace-all core.hooksPath <managed path>`, plus
+  `git config --worktree --unset core.hooksPath` when a worktree override
+  exists. For a single drifted value, `trellis doctor --fix` writes the same
+  path; it does not repair multiple values. The carrier's verification runs with
+  `HUSKY=0`, and both it and the operator's prior hook run with
+  `pnpm_config_verify_deps_before_run=error`, so on pnpm 11 a stale
+  `node_modules` fails the push instead of running `prepare: husky`.
+- **`check-bypass.sh` reads the local owner record.** A manifest-only clone or CI
+  checkout (a `.trellis.json` with no owner record under `TRELLIS_HOME`) now warns
+  `not attached` instead of failing, so merge-mode gates in unattached clones
+  pass this check. An attached checkout must still show every declared
+  harness's owner-recorded registrations.
+
+Before adopting a project, run the scoped `doctor`. Every checkout it reports
+with a drifted or multi-valued `core.hooksPath` will refuse pushes after
+adoption until it is repaired. Doctor checks local values only: in a repository
+with `extensions.worktreeConfig` enabled, also run
+`git config --worktree --get core.hooksPath` in each worktree and clear any
+override. After adoption, run the scoped `doctor` again and confirm each row
+reports the target release and a managed `core.hooksPath`.
+
 ## `1.3.6` → `1.3.7` adoption
 
 Adoption delivers the new managed `pre-push` and `post-checkout` dispatchers and

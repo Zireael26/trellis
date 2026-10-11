@@ -32,7 +32,9 @@ A match: **fail** with the file:line and the pattern name. The contributor is ex
 
 ## False-positive handling
 
-If a match is a documented test fixture, example placeholder, or pattern that genuinely matches non-secret content, add it to `<project>/.claude/skills/process-gate/secrets-allowlist.txt`:
+If a match is a documented test fixture, example placeholder, or pattern that genuinely matches non-secret content, add it to `<project>/.claude/skills/process-gate-local/secrets-allowlist.txt` (Codex uses `<project>/.agents/skills/process-gate-local/secrets-allowlist.txt`; when both exist the active harness wins, same as `local.config.sh`). The old `<project>/.claude/skills/process-gate/secrets-allowlist.txt` path (and its `.agents` twin) is linked read-only to the release runtime at attach time, so a project file there refuses attach — move it to `process-gate-local` before attaching. The legacy path is still read with a one-line deprecation notice naming both paths.
+
+The allowlist is gate config: it is read at the BASE of the gated range, so an entry takes effect only once it is on the base branch. A range that adds an entry for its own secret still fails, and a range that changes the allowlist needs the repo owner's `gate-config-approved: <head sha>` on the PR to merge (see SKILL.md). Example allowlist:
 
 ```
 # One pattern per line. Lines starting with # are comments.

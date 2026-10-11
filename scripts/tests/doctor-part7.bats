@@ -290,7 +290,7 @@ EOF
   done
   # Shared task and verification primitives are explicit manifest link sources.
   # Keep this minimal payload complete before its immutable tree is sealed.
-  for primitive in task-context.sh task-state.py verification-bash.py; do
+  for primitive in task-context.sh task-state.py verification-bash.py guard-supervise.pl; do
     cp "$REPO_ROOT/core-rules/hooks/lib/$primitive" "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/lib/$primitive" || return 1
   done
   printf '#!/usr/bin/env bash\nexit 0\n' \
@@ -927,7 +927,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'2\tdocker-cli-from-desktop' ]
+  [ "$output" = $'2\tdocker-cli-from-desktop\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
 @test "container-runtime: non-Colima context warns only with Colima and unset host" {
@@ -938,7 +938,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'2\tdocker-context-not-colima' ]
+  [ "$output" = $'2\tdocker-context-not-colima\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
   run_container_runtime_rows DOCKER_HOST=unix:///fixture/colima.sock
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -952,26 +952,26 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'3\tdocker-desktop-dormant' ]
+  [ "$output" = $'3\tdocker-desktop-dormant\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
-@test "container-runtime: Colima absent is info and skips context check" {
+@test "container-runtime: Colima absent is info, and hooks still warn for a non-default context" {
   container_runtime_stubs
   RUNTIME_OS=Darwin
   RUNTIME_CONTEXT=desktop-linux
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'3\tcolima-not-installed' ]
+  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
-@test "container-runtime: clean Colima and doctor integration rows" {
+@test "container-runtime: Colima with unset host warns for hooks, plus doctor integration rows" {
   container_runtime_stubs
   RUNTIME_OS=Darwin
   touch "$RUNTIME_BIN/colima"
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$output" = $'2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 
   build_portable_doctor_home
   run /usr/bin/env -u TRELLIS_CONFIG -u DOCKER_HOST \
@@ -980,5 +980,192 @@ run_container_runtime_rows() {
     RUNTIME_RESOLVED="$RUNTIME_BIN/docker" /bin/bash "$DOCTOR"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *'⚠ docker-context-not-colima'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'⚠ docker-host-unset-for-hooks'* ]] || { echo "$output"; false; }
   [[ "$output" != *'docker-cli-from-desktop'* ]] || { echo "$output"; false; }
+}
+
+@test "container-runtime: docker-host-unset-for-hooks warns for a non-default context without colima" {
+  container_runtime_stubs
+  RUNTIME_OS=Darwin
+  RUNTIME_CONTEXT=orbstack
+  run_container_runtime_rows
+  [ "$status" -eq 0 ]
+  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'orbstack\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+}
+
+@test "container-runtime: docker-host-unset-for-hooks stays silent with an exported host" {
+  container_runtime_stubs
+  RUNTIME_OS=Darwin
+  RUNTIME_CONTEXT=desktop-linux
+  touch "$RUNTIME_BIN/colima"
+  chmod 700 "$RUNTIME_BIN/colima"
+  run_container_runtime_rows DOCKER_HOST=unix:///fixture/colima.sock
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "container-runtime: docker-host-unset-for-hooks stays silent for the default context" {
+  container_runtime_stubs
+  RUNTIME_OS=Darwin
+  RUNTIME_CONTEXT=default
+  touch "$RUNTIME_BIN/colima"
+  chmod 700 "$RUNTIME_BIN/colima"
+  run_container_runtime_rows
+  [ "$status" -eq 0 ]
+  [ "$output" = $'2\tdocker-context-not-colima' ]
+}
+
+@test "docker-not-on-recorded-toolchain warns naming the caller directory" {
+  local bin="$SANDBOX/docker-caller-bin" owner="$SANDBOX/docker-owner.json"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/docker"
+  chmod 700 "$bin/docker"
+  jq -n '{toolchain_path: ["/usr/bin", "/bin"]}' > "$owner"
+  run env PATH="$bin:/usr/bin:/bin" /bin/bash -c '. "$1"; hc_portable_docker_toolchain "$2" "$3"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "fixture-root" "$owner"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'docker-not-on-recorded-toolchain'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$bin"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'trellis attach --refresh-toolchain'* ]] || { echo "$output"; false; }
+}
+
+@test "docker-not-on-recorded-toolchain is silent when the caller directory is recorded" {
+  local bin="$SANDBOX/docker-caller-recorded" owner="$SANDBOX/docker-owner-recorded.json"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/docker"
+  chmod 700 "$bin/docker"
+  jq -n --arg dir "$bin" '{toolchain_path: ["/usr/bin", "/bin", $dir]}' > "$owner"
+  run env PATH="$bin:/usr/bin:/bin" /bin/bash -c '. "$1"; hc_portable_docker_toolchain "$2" "$3"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "fixture-root" "$owner"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "docker-not-on-recorded-toolchain is silent without docker on PATH" {
+  local empty="$SANDBOX/docker-empty-bin" owner="$SANDBOX/docker-owner-nodocker.json"
+  mkdir -p "$empty"
+  jq -n '{toolchain_path: ["/usr/bin", "/bin"]}' > "$owner"
+  run env PATH="$empty:/usr/bin:/bin" /bin/bash -c '. "$1"; hc_portable_docker_toolchain "$2" "$3"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "fixture-root" "$owner"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "remote-default-unresolved: warns when origin remote has no resolvable default" {
+  local repo="$SANDBOX/remote-unresolved"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'remote-default-unresolved'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'git remote set-head origin -a'* ]] || { echo "$output"; false; }
+}
+
+@test "remote-default-unresolved: silent when origin/main resolves" {
+  local repo="$SANDBOX/remote-main"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@e.c && git -C "$repo" config user.name t
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "remote-default-not-protected: info when origin/HEAD differs from default policy main" {
+  local repo="$SANDBOX/remote-stacked"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config user.email t@e.c && git -C "$repo" config user.name t
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  git -C "$repo" update-ref refs/remotes/origin/recovery/desktop-2026-09-08 HEAD
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/recovery/desktop-2026-09-08
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *'remote-default-not-protected'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'refs/remotes/origin/recovery/desktop-2026-09-08'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"template.branch 'main'"* ]] || { echo "$output"; false; }
+}
+
+@test "remote-default: silent when checkout has no origin remote" {
+  local repo="$SANDBOX/remote-noorigin"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "remote-default-not-protected: info when origin/HEAD differs from declared policy" {
+  local repo="$SANDBOX/remote-not-protected-declared"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@e.c
+  git -C "$repo" config user.name t
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  printf '{"schema_version":1,"template":{"branch":"trunk"}}\n' > "$repo/.trellis.json"
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *'remote-default-not-protected'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'refs/remotes/origin/main'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"template.branch 'trunk'"* ]] || { echo "$output"; false; }
+}
+
+@test "remote-default-not-protected: silent when origin/HEAD matches default policy main" {
+  local repo="$SANDBOX/remote-matching-default"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@e.c
+  git -C "$repo" config user.name t
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "remote-default-not-protected: silent when origin/HEAD matches declared non-main policy" {
+  local repo="$SANDBOX/remote-matching-declared"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@e.c
+  git -C "$repo" config user.name t
+  git -C "$repo" commit -q --allow-empty -m init
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  git -C "$repo" update-ref refs/remotes/origin/recovery/desktop-2026-09-08 HEAD
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/recovery/desktop-2026-09-08
+  printf '{"schema_version":1,"template":{"branch":"recovery/desktop-2026-09-08"}}\n' > "$repo/.trellis.json"
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "remote-default-unresolved: names non-main policy branch in missing list" {
+  local repo="$SANDBOX/remote-unresolved-policy"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config remote.origin.url "https://example.invalid/repo.git"
+  printf '{"schema_version":1,"template":{"branch":"trunk"}}\n' > "$repo/.trellis.json"
+  run env /bin/bash -c '. "$1"; hc_portable_remote_default "$2"' \
+    _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$repo"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'remote-default-unresolved'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'origin/trunk'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'git remote set-head origin -a'* ]] || { echo "$output"; false; }
 }

@@ -5,6 +5,8 @@
 HOOK="$(cd "$BATS_TEST_DIRNAME/.." && pwd)/session-context.sh"
 
 setup() {
+  # Never read the operator's ~/.trellis.
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/project.XXXXXX")"
   TRELLIS_FIXTURE="$(mktemp -d "$BATS_TEST_TMPDIR/trellis.XXXXXX")"
   mkdir -p "$TRELLIS_FIXTURE/core-rules/presets"

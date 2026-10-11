@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,32 @@ from .manifest import verify_manifest
 from .models import Status
 
 DEFAULT_TRIAGE_PROMPT = Path(__file__).resolve().parents[3] / "prompts" / "triage.md"
+DIFF_BASE = (
+    Path(__file__).resolve().parents[4]
+    / "process-gate"
+    / "scripts"
+    / "lib"
+    / "diff-base.sh"
+)
+
+
+def default_range(checkout: Path) -> str:
+    """The process-gate diff-base resolver's range for checkout (spec 067)."""
+    if not DIFF_BASE.is_file():
+        raise RuntimeError(
+            f"diff-base resolver unavailable at {DIFF_BASE}; pass --range"
+        )
+    resolved = subprocess.run(
+        ["bash", str(DIFF_BASE), "resolve", "--format=kv"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for line in resolved.stdout.splitlines():
+        if line.startswith("DB_RANGE=") and line != "DB_RANGE=":
+            return line[len("DB_RANGE=") :]
+    raise RuntimeError(f"no diff base resolvable in {checkout}; pass --range")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -26,7 +53,7 @@ def parser() -> argparse.ArgumentParser:
     diff = commands.add_parser("diff")
     _common_scan_arguments(diff)
     diff.add_argument("--baseline", type=Path, required=True)
-    diff.add_argument("--range", default="origin/main..HEAD")
+    diff.add_argument("--range")
 
     deep = commands.add_parser("deep")
     deep.add_argument("--html", type=Path, required=True)
@@ -164,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_diff(
             **common,
             previous_baseline=args.baseline,
-            git_range=args.range,
+            git_range=args.range or default_range(args.checkout),
         )
         print(warn_only_verdict(result))
         return 0

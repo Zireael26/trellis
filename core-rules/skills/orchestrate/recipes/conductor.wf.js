@@ -91,8 +91,8 @@ const SAFETY_BUDGET_CEILING_USD = 60
 const AGENT_FAMILIES = {
   sol: 'openai', 'sol-xhigh': 'openai', 'sol-max': 'openai',
   luna: 'openai', astra: 'openai', 'code-reviewer': 'openai',
-  opus: 'anthropic',
-  grok: 'xai', 'security-reviewer': 'xai',
+  opus: 'anthropic', haiku: 'anthropic', 'haiku-xhigh': 'anthropic', sonnet: 'anthropic',
+  'security-reviewer': 'openai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
   cheap: 'meta', 'cheap-1': 'meta', 'cheap-2': 'meta', 'muse-meta': 'meta',
   gemini: 'google', flash: 'google',

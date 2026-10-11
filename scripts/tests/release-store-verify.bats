@@ -408,3 +408,50 @@ release_fingerprint() {
     false
   }
 }
+
+# Spec 067 T16: verify scratch carries the exec-snapshot sibling owner record.
+# The probe runs inside the verify body (its manifest-path read), after
+# the scratch and its owner file exist and before the EXIT trap removes them.
+@test "verify scratch has a sibling owner record while live and leaves nothing after exit" {
+  rel="$(install_small_release 1.0.0)"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    . "$1"
+    probe="$4"
+    jq() {
+      [ "$*" != "-r .tree[].path $TRELLIS_HOME/releases/1.0.0/release.json" ] ||
+        ls -A "$TRELLIS_HOME/releases" > "$probe"
+      command jq "$@"
+    }
+    release_store_verify_path "$2" "$3"
+  ' verify-probe "$RELEASE_STORE_LIB" "$rel" 1.0.0 "$SANDBOX/probe"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Eq '^\.tmp\.1\.0\.0\.verify\.[A-Za-z0-9]+$' "$SANDBOX/probe" || { cat "$SANDBOX/probe"; false; }
+  grep -Eq '^\.tmp\.1\.0\.0\.verify\.[A-Za-z0-9]+\.owner\.json$' "$SANDBOX/probe" || { cat "$SANDBOX/probe"; false; }
+  [ -z "$(verify_scratch_entries)" ] || { verify_scratch_entries; false; }
+}
+
+# A SIGKILL (the SessionStart timeout) skips the EXIT trap. The owner record
+# names the killed shell, so reap-tmp removes the pair at 1 h, not 24 h.
+@test "a SIGKILLed verify leaves scratch reap-tmp classifies by pid at 1 h" {
+  rel="$(install_small_release 1.0.0)"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    top=$$
+    . "$1"
+    jq() {
+      [ "$*" != "-r .tree[].path $TRELLIS_HOME/releases/1.0.0/release.json" ] ||
+        sh -c "kill -9 \$PPID $top"
+      command jq "$@"
+    }
+    release_store_verify_path "$2" "$3"
+  ' verify-kill "$RELEASE_STORE_LIB" "$rel" 1.0.0
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  scratch="$(verify_scratch_entries | grep -v '\.owner\.json$')"
+  [ -d "$scratch" ] || { verify_scratch_entries; false; }
+  [ -f "$scratch.owner.json" ] || { verify_scratch_entries; false; }
+  python3 -c 'import os, sys, time; t = time.time() - 3660; [os.utime(p, (t, t)) for p in sys.argv[1:]]' \
+    "$scratch" "$scratch.owner.json"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1"; release_store_reap_tmp fix' reap "$RELEASE_STORE_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"removed dir ${scratch##*/} "*"owner=dead"* ]] || { echo "$output"; false; }
+  [ -z "$(verify_scratch_entries)" ] || { verify_scratch_entries; false; }
+}

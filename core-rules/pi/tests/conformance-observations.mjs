@@ -9,11 +9,14 @@ import extension from '../extensions/trellis.ts';
 const [id, scratch] = process.argv.slice(2);
 const cwd = resolve(scratch, id);
 const observations = {}, commands = [], handlers = new Map(), messages = [], notifications = [];
-for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.agents/rules', '.pi/hooks']) {
+for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.agents/rules', '.pi/hooks']) {
   mkdirSync(resolve(cwd, dir), { recursive: true });
 }
 const dispatcher = resolve(cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh');
 copyFileSync(new URL('../hooks/dispatch.sh', import.meta.url), dispatcher);
+// Required guards run through the runtime's supervisor, beside the dispatcher.
+copyFileSync(new URL('../../hooks/lib/guard-supervise.pl', import.meta.url),
+  resolve(cwd, '.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl'));
 writeFileSync(resolve(cwd, '.trellis/runtime/trellis.config.json'), '{}');
 writeFileSync(resolve(cwd, '.agents/rules/trellis.md'), 'Fixture inherited parent policy');
 const hook = (name, body) => {
@@ -116,14 +119,11 @@ try {
         assert.equal(observations.responses[name].block, true);
         assert.match(observations.responses[name].reason, /parent policy is missing/);
       }
-      assert.equal(observations.responses.agent, null);
-      assert.equal(observations.responses.custom, null);
-      assert.deepEqual(envelopes.map(e => e.action.tool_name), ['agent', 'custom']);
-      for (const e of envelopes) {
-        assert.equal(e.action.family, 'unknown');
-        assert.equal(e.action.target_coverage, 'none');
-        assert.deepEqual(e.action.targets, []);
+      for (const name of ['agent', 'custom']) {
+        assert.equal(observations.responses[name].block, true);
+        assert.match(observations.responses[name].reason, /unmediated/);
       }
+      assert.deepEqual(envelopes, []); // Unknown tools never reach a fail-open dispatcher.
       break;
     }
     case 'pi.command-discovery': {

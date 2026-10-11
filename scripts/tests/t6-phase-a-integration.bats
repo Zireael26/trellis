@@ -28,6 +28,12 @@ teardown_file() {
 }
 
 setup() {
+  # Fixture attaches must not leave a detached post-attach job behind: since
+  # the job runs from the installed release it outlives the case and holds
+  # TRELLIS_HOME while teardown removes the sandbox. run-tests.sh sets this
+  # too; the suite must not depend on its runner. attach-postjob.bats covers
+  # the job.
+  export TRELLIS_ATTACH_POSTJOB=off
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/t6-phase-a.XXXXXX")"
   SANDBOX="$(release_fixture_canonical_dir "$SANDBOX")"
   HOME="$SANDBOX/user"
@@ -53,6 +59,14 @@ setup() {
 
 teardown() {
   chmod -R u+w "$SANDBOX" 2>/dev/null || true
+  # The attach postjob runs detached from the installed release and can
+  # outlive the last assertion; retry removal briefly instead of racing it.
+  # A holder past the bound still fails closed below.
+  local i
+  for i in $(seq 1 30); do
+    rm -rf "$SANDBOX" 2>/dev/null && break
+    sleep 2
+  done
   rm -rf "$SANDBOX"
 }
 

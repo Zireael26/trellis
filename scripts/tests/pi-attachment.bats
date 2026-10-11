@@ -31,10 +31,17 @@ setup() {
   RELEASE_SOURCE="$SANDBOX/release"
   PROJECT="$SANDBOX/project"
   export HOME TRELLIS_HOME
+  # Isolate signing policy as well as HOME: the runner exports a global config
+  # with commit.gpgSign=false, which makes a healthy bypass check WARN (exit 2).
+  # Keep the exact pass/fail assertions; this suite tests Pi, not signing policy.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   # Independent PHYSICAL copy of the prototype: this case gets its own user
   # home, TRELLIS_HOME, release source and bootstrap source, and every absolute
   # path the prototype recorded is rewritten to this sandbox.
   release_fixture_prototype_clone "$RELEASE_FIXTURE_PROTOTYPE" "$SANDBOX"
+  # Doctor validates the configured management source, not just installed
+  # releases. The minimal bootstrap source lacks this policy-checkout marker.
+  cp "$REPO_ROOT/trellis.config.json" "$SANDBOX/bootstrap release source/trellis.config.json"
   mkdir -p "$PROJECT"
   git -C "$PROJECT" init -q
   git -C "$PROJECT" config user.email fixture@example.invalid
@@ -212,4 +219,168 @@ PY
   [ ! -L "$PROJECT/.pi/extensions/trellis.ts" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]
+}
+
+# These checks run the real standalone bypass and doctor readers, never the
+# dispatcher: runtime denial is distinct from registration detection.
+pi_aux_verdict() {
+  local expected="$1" path="${2:-}" reason="${3:-}" bash_bin="/bin/bash"
+  [ -x "$bash_bin" ] || bash_bin="bash"
+  run env CODEX_PROJECT_DIR="$PROJECT" CLAUDE_PROJECT_DIR="$PROJECT" \
+    "$bash_bin" "$REPO_ROOT/core-rules/skills/process-gate/scripts/check-bypass.sh" --range=HEAD..HEAD
+  [ "$status" -eq "$expected" ] || { echo "$output"; false; }
+  if [ "$expected" -ne 0 ]; then
+    [[ "$output" == *"$path: native Pi hook artifact"*"$reason"* ]] || { echo "$output"; false; }
+    [[ "$output" != *$'\n.pi/'* ]] || { echo "unindented Pi finding: $output"; false; }
+  fi
+  run "$bash_bin" "$REPO_ROOT/scripts/doctor.sh" --home "$TRELLIS_HOME" --project pi-fixture
+  if [ "$expected" -eq 0 ]; then
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"owned artifacts, and managed hooks match"* ]]
+  else
+    [ "$status" -ne 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"$path"*"$reason"* ]] || { echo "$output"; false; }
+    if [ "$path" = .pi/hooks/lib ] && [ -z "$reason" ]; then
+      # A missing child must not mask missing/type-redirected literal parents.
+      [[ "$output" == *"$path (recorded parent)"* || "$output" == *"$path: native Pi hook artifact"* ]]
+    fi
+  fi
+}
+
+pi_aux_attach() {
+  run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  pi_aux_verdict 0
+}
+
+pi_aux_leaf_control() {
+  local relative="$1" source
+  pi_aux_attach
+  jq -e --arg path "$relative" 'any(.artifacts[]; .path == $path and .kind == "symlink")' "$(owner_file)" >/dev/null
+  source="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$PROJECT/$relative")"
+  cp -p "$source" "$SANDBOX/aux-backup"
+  chmod u+w "$source"
+  printf '\n# hash mismatch: still nonempty\n' >> "$source"
+  chmod a-w "$source"
+  pi_aux_verdict 1 "$relative" 'payload content hash'
+  chmod u+w "$source"
+  cp -p "$SANDBOX/aux-backup" "$source"
+  rm "$PROJECT/$relative"
+  pi_aux_verdict 1 "$relative"
+}
+
+@test "Pi auxiliary healthy attachment including literal parents passes bypass and doctor" {
+  pi_aux_attach
+  jq -e 'any(.artifacts[]; .path == ".pi/hooks/lib" and .kind == "parent")' "$(owner_file)" >/dev/null
+  local mode parent
+  while IFS= read -r parent; do
+    chgrp "$(id -g)" "$PROJECT/$parent"
+  done < <(jq -r '.artifacts[] | select(.kind == "parent" and (.path | startswith(".pi/"))) | .path' "$(owner_file)")
+  for mode in 0700 0755 2755; do
+    while IFS= read -r parent; do
+      chmod "$mode" "$PROJECT/$parent"
+      [ "$(python3 -I -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o7777))' "$PROJECT/$parent")" = "0o${mode#0}" ] \
+        || { echo "mode $mode did not stick on $parent"; false; }
+    done < <(jq -r '.artifacts[] | select(.kind == "parent" and (.path | startswith(".pi/"))) | .path' "$(owner_file)")
+    pi_aux_verdict 0
+  done
+}
+
+pi_aux_deferred_fixture() {
+  mkdir -p "$PROJECT/.pi/hooks/lib"
+  printf '# project-owned dependency helper\n' > "$PROJECT/.pi/hooks/lib/deps.sh"
+  run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
+  jq -e 'any(.pre_existing[]; .path == ".pi/hooks/lib/deps.sh" and .kind == "symlink" and .reason == "project-authored-file")
+    and (any(.artifacts[]; .path == ".pi/hooks/lib/deps.sh") | not)' "$(owner_file)" >/dev/null
+  grep -Fxq '# project-owned dependency helper' "$PROJECT/.pi/hooks/lib/deps.sh"
+}
+
+@test "Pi auxiliary project-authored deferral fails both readers with a repair hint" {
+  pi_aux_deferred_fixture
+  printf '# edited project-owned helper\n' > "$PROJECT/.pi/hooks/lib/deps.sh"
+  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
+}
+
+@test "Pi auxiliary project-authored deferral repair via detach and attach passes both readers" {
+  pi_aux_deferred_fixture
+  mv "$PROJECT/.pi/hooks/lib/deps.sh" "$SANDBOX/project-deps.sh"
+  run "$LAUNCHER" detach "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e 'any(.artifacts[]; .path == ".pi/hooks/lib/deps.sh" and .kind == "symlink")
+    and (any(.pre_existing[]; .path == ".pi/hooks/lib/deps.sh") | not)' "$(owner_file)" >/dev/null
+  pi_aux_verdict 0
+}
+
+@test "Pi auxiliary absent project-authored deferral has a distinct diagnostic in both readers" {
+  pi_aux_deferred_fixture
+  rm "$PROJECT/.pi/hooks/lib/deps.sh"
+  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
+  : > "$PROJECT/.pi/hooks/lib/deps.sh"
+  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
+  rm "$PROJECT/.pi/hooks/lib/deps.sh"
+  ln -s "$PAYLOAD/core-rules/pi/hooks/lib/deps.sh" "$PROJECT/.pi/hooks/lib/deps.sh"
+  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
+}
+
+@test "Pi native registrations cannot defer to project-authored regular files" {
+  local relative
+  mkdir -p "$PROJECT/.pi/extensions" "$PROJECT/.pi/hooks"
+  for relative in .pi/extensions/trellis.ts .pi/hooks/dispatch.sh; do
+    printf 'project-authored native registration\n' > "$PROJECT/$relative"
+  done
+  run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for relative in .pi/extensions/trellis.ts .pi/hooks/dispatch.sh; do
+    jq -e --arg path "$relative" 'any(.pre_existing[]; .path == $path and .reason == "project-authored-file")' "$(owner_file)" >/dev/null
+    pi_aux_verdict 1 "$relative" 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
+  done
+}
+
+@test "Pi auxiliary required hook removal and hash mismatch fail both readers" {
+  pi_aux_leaf_control .pi/hooks/block-destructive.sh
+}
+
+@test "Pi auxiliary advisory hook removal and hash mismatch fail both readers" {
+  pi_aux_leaf_control .pi/hooks/decision-receipt.sh
+}
+
+@test "Pi auxiliary helper removal and hash mismatch fail both readers" {
+  pi_aux_leaf_control .pi/hooks/lib/deps.sh
+}
+
+@test "Pi auxiliary dormant executable removal and hash mismatch fail both readers" {
+  pi_aux_leaf_control .pi/hooks/code-review-subagent.sh
+}
+
+@test "Pi auxiliary literal parent removal fails both readers" {
+  pi_aux_attach
+  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/saved-lib"
+  pi_aux_verdict 1 .pi/hooks/lib
+}
+
+@test "Pi auxiliary literal parent replaced by a file fails both readers" {
+  pi_aux_attach
+  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/saved-lib"
+  printf 'not a directory\n' > "$PROJECT/.pi/hooks/lib"
+  pi_aux_verdict 1 .pi/hooks/lib
+}
+
+@test "Pi auxiliary literal parent unsafe mode fails both readers" {
+  pi_aux_attach
+  chmod 0777 "$PROJECT/.pi/hooks/lib"
+  pi_aux_verdict 1 .pi/hooks/lib 'safe mode'
+}
+
+@test "Pi auxiliary redirected parent fails despite intact linked helper bytes" {
+  pi_aux_attach
+  mkdir -p "$SANDBOX/decoy/.pi/hooks" "$SANDBOX/decoy/.trellis"
+  ln -s "$PAYLOAD" "$SANDBOX/decoy/.trellis/runtime"
+  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/decoy/.pi/hooks/lib"
+  ln -s "$SANDBOX/decoy/.pi/hooks/lib" "$PROJECT/.pi/hooks/lib"
+  [ -s "$PROJECT/.pi/hooks/lib/deps.sh" ]
+  pi_aux_verdict 1 .pi/hooks/lib
 }

@@ -24,6 +24,11 @@ setup() {
   mkdir -p "$STUB/scripts/lib"
   cp "$REAL_SCRIPTS/run-all.sh"      "$STUB/scripts/run-all.sh"
   cp "$REAL_SCRIPTS/lib/common.sh"   "$STUB/scripts/lib/common.sh"
+  cp "$REAL_SCRIPTS/lib/diff-base.sh" "$STUB/scripts/lib/diff-base.sh"
+  # The validator source guard run-all.sh loads through BASH_ENV.
+  if [ -f "$REAL_SCRIPTS/lib/validator-env.sh" ]; then
+    cp "$REAL_SCRIPTS/lib/validator-env.sh" "$STUB/scripts/lib/validator-env.sh"
+  fi
   chmod +x "$STUB/scripts/run-all.sh"
 
   # One passing stub per run_gate idx so the only non-pass verdict driver is
@@ -101,10 +106,17 @@ EOF
   [ ! -x "$dest" ]
 }
 
-# Stage a local.config.sh that pg_load_config sources at runtime. It sets the
-# stack profile + validators array (arrays cannot be exported, so a sourced
-# config is the only path). $1 = the single validator entry (bare name or
-# absolute path).
+# Commit the fixture's gate config: pg_load_config and the validator lookup
+# read the range BASE (main here), never the working tree.
+_commit_gate_config() {
+  git -C "$PROJECT_DIR" add -A
+  git -C "$PROJECT_DIR" commit -qm "gate config"
+}
+
+# Stage and commit a local.config.sh that pg_load_config reads as data. It sets
+# the stack profile + validators array (arrays cannot be exported, so config
+# is the only path). Commits any validator staged in the project before it.
+# $1 = the single validator entry (bare name or absolute path).
 _stage_config() {
   local entry="$1"
   local cfgdir="$PROJECT_DIR/.claude/skills/process-gate-local"
@@ -113,6 +125,7 @@ _stage_config() {
 PROCESS_GATE_STACK_PROFILE="custom"
 PROCESS_GATE_STACK_VALIDATORS=("$entry")
 EOF
+  _commit_gate_config
 }
 
 # Build a RED copy of the aggregator: flip the two `-f` tests back to `-x`.
@@ -140,7 +153,7 @@ _make_red_copy() {
   _stage_validator_644 "$PROJECT_DIR/.claude/skills/process-gate-local/stack-check.sh"
   _stage_config "stack-check.sh"
 
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 0 ]                                  # MERGEABLE: validator passed
   [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Stack profile:"* ]] || { echo "$output"; false; }
@@ -154,22 +167,23 @@ _make_red_copy() {
   _stage_config "stack-check.sh"
   RED="$(_make_red_copy)"
 
-  run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]                                  # BLOCKED
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" == *"validator missing"* ]] || { echo "$output"; false; }  # reported missing under -x
   [ ! -f "$INVOKED_MARKER" ]                           # validator was NEVER run
 }
 
-# --- absolute-path arm (case /*) --------------------------------------------
+# --- absolute-path arm (an absolute path inside the project) -----------------
+# An absolute validator must be a project file: it runs as its base copy, like
+# a bare name. One outside the project is refused (config-validators.bats).
 
 @test "GREEN absolute-path: 644 validator given by absolute path is LOCATED + INVOKED (idx5 pass)" {
-  # Absolute path takes the `case /*` arm (line ~81) — a separate fix site.
-  local vabs="$STUB/abs-validator.sh"
+  local vabs="$PROJECT_DIR/abs-validator.sh"
   _stage_validator_644 "$vabs"
   _stage_config "$vabs"
 
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
   [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }
@@ -178,12 +192,12 @@ _make_red_copy() {
 }
 
 @test "RED absolute-path: -x copy treats the 644 absolute validator as MISSING -> BLOCKED" {
-  local vabs="$STUB/abs-validator.sh"
+  local vabs="$PROJECT_DIR/abs-validator.sh"
   _stage_validator_644 "$vabs"
   _stage_config "$vabs"
   RED="$(_make_red_copy)"
 
-  run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$RED' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" == *"validator missing"* ]] || { echo "$output"; false; }
@@ -194,7 +208,7 @@ _make_red_copy() {
 # still hard-fails. -f must not loosen a genuine failure to warn. -----------
 
 @test "BRIGHT LINE: a 644 validator that RUNS and exits 1 still hard-fails (idx5 fail -> BLOCKED)" {
-  local vabs="$STUB/abs-failing.sh"
+  local vabs="$PROJECT_DIR/abs-failing.sh"
   mkdir -p "$(dirname "$vabs")"
   cat > "$vabs" <<EOF
 #!/usr/bin/env bash
@@ -205,7 +219,7 @@ EOF
   chmod 644 "$vabs"
   _stage_config "$vabs"
 
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]                                  # BLOCKED (genuine fail)
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" != *"validator missing"* ]] || { echo "$output"; false; }  # it was FOUND, not missing
@@ -220,7 +234,8 @@ EOF
   cat > "$cfgdir/local.config.sh" <<EOF
 PROCESS_GATE_STACK_PROFILE="custom"
 EOF
-  run bash -c "cd '$PROJECT_DIR' && unset PROCESS_GATE_STACK_VALIDATORS; '$STUB/scripts/run-all.sh' --mode=merge"
+  _commit_gate_config
+  run bash -c "cd '$PROJECT_DIR' && unset PROCESS_GATE_STACK_VALIDATORS; '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }
@@ -233,7 +248,8 @@ EOF
 PROCESS_GATE_STACK_PROFILE="custom"
 PROCESS_GATE_STACK_VALIDATORS=()
 EOF
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  _commit_gate_config
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }
@@ -246,7 +262,8 @@ EOF
 PROCESS_GATE_STACK_PROFILE="custom"
 PROCESS_GATE_STACK_VALIDATORS=("" "")
 EOF
-  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge"
+  _commit_gate_config
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Stack profile:"*"warn"* ]] || { echo "$output"; false; }

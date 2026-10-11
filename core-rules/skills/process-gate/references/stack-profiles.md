@@ -126,6 +126,25 @@ skill symlink (`<project>/.claude/skills/process-gate/` or
 `<project>/.agents/skills/process-gate/`) so promoted canonical validators can
 still be referenced by relative path.
 
+Project validators run as they are at the BASE of the gated range. `run-all.sh`
+copies the base's `process-gate-local/` trees (both twins), each named
+validator and each `PROCESS_GATE_VALIDATOR_DEPS` path into a private trusted
+root (`$PG_TRUSTED_ROOT`) and runs the copies; mode-100755 blobs stay
+executable. A validator's path is walked in the base tree, never through
+working-tree symlinks, and an absolute validator outside the project is
+refused. A validator may source only files from that root or the skill;
+sourcing anything else fails it. A no-argument `source` gives the sourced
+file the validator's `--range=<range>`; pass arguments explicitly inside
+functions (SKILL.md has the full helper API and what is not intercepted). A project script a
+validator executes as the code under test still runs from the range. To pin
+one, declare it in `PROCESS_GATE_VALIDATOR_DEPS` and run
+`$PG_TRUSTED_ROOT/<path>`. Changing any of these is a gate-config change (see
+SKILL.md).
+
+A validator runs with the checkout under test as its cwd and its absolute path
+in `PROCESS_GATE_PROJECT_DIR`. Find the project there, not from the
+validator's own path, which is the private copy.
+
 Each validator script must:
 
 - Exit `0` for pass, `1` for fail, `2` for warn.

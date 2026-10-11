@@ -1496,7 +1496,7 @@ def validate_process_gate(path: Path) -> None:
     text = read_text(path, "process-gate receipt").replace("\r\n", "\n")
     lines = (text[:-1] if text.endswith("\n") else text).split("\n")
     expected = [
-        "bash core-rules/skills/process-gate/scripts/run-all.sh --range=origin/main..HEAD",
+        "bash core-rules/skills/process-gate/scripts/run-all.sh --base=origin/main",
         "exit: 0",
         "Overall: MERGEABLE",
     ]

@@ -716,15 +716,10 @@ JSON
 
 SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
 
-# The public mirror withholds the extension until its security review approves
-# (payload_no_publish in sync-to-template.sh), so the two cases that lint the
-# real file skip there. In the instance checkout the file is tracked and they run.
-require_search_ext() {
-  [ -f "$REPO_ROOT/$SEARCH_EXT" ] || skip "$SEARCH_EXT is withheld from this checkout"
-}
+# The extension publishes from 1.3.12 (spec 056 hold lifted), so the two cases
+# that lint the real file run in the public mirror too.
 
 @test "053: the tracked web-search extension publishes at its own path" {
-  require_search_ext
   mkdir -p "$MIRROR/core-rules/pi/extensions"
   cp "$REPO_ROOT/$SEARCH_EXT" "$MIRROR/$SEARCH_EXT"
 
@@ -748,7 +743,6 @@ require_search_ext() {
 }
 
 @test "053: the same extension fails at any other path" {
-  require_search_ext
   mkdir -p "$MIRROR/core-rules/pi/extensions"
   cp "$REPO_ROOT/$SEARCH_EXT" "$MIRROR/core-rules/pi/extensions/other-search.ts"
 

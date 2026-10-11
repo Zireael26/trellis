@@ -48,6 +48,11 @@
           "source": "core-rules/hooks/lib/verification-bash.py",
           "destination": ".claude/hooks/lib/verification-bash.py",
           "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/guard-supervise.pl",
+          "destination": ".claude/hooks/lib/guard-supervise.pl",
+          "executable": true
         }
       ],
       "render": [
@@ -198,6 +203,11 @@
           "source": "core-rules/hooks/lib/verification-bash.py",
           "destination": ".codex/hooks/lib/verification-bash.py",
           "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/guard-supervise.pl",
+          "destination": ".codex/hooks/lib/guard-supervise.pl",
+          "executable": true
         }
       ],
       "render": [
@@ -293,6 +303,11 @@
         {
           "source": "core-rules/hooks/lib/verification-bash.py",
           "destination": ".pi/hooks/lib/verification-bash.py",
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/lib/guard-supervise.pl",
+          "destination": ".pi/hooks/lib/guard-supervise.pl",
           "executable": true
         }
       ],

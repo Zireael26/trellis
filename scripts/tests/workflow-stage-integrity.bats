@@ -133,7 +133,7 @@ for (const item of cases) {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: 'sol',
-    reviewerAgent: 'grok',
+    reviewerAgent: 'gemini',
     __agentOutputByLabel: {
       'refresh-refs': { complete: true, refs: [{ project: 'repo', repo_path: '/tmp/repo', main_sha: sha }], notes: 'ok' },
       rank: { generated_for: '2026-08-03', ranked: [{ id: 'alpha', project: 'repo', title: 'alpha', score: 1, reasons: 'top', eligible_auto_spec: true, auto_spec: null, delivered_on_main: false, existing_spec_path: '', auto_spec_exclusions: [], safe: null, surgical: false, status: 'todo' }] },
@@ -148,7 +148,7 @@ for (const item of cases) {
   const exe = run.prompts.find((p) => p.opts.label === 'execute:alpha')
   if (!spec || !rev || !exe) fail('conductor routed auto-execution did not dispatch spec+review+execute', run)
   if (spec.opts.agentType !== 'sol') fail('conductor spec must carry author agentType sol when autoExecute', run)
-  if (rev.opts.agentType !== 'grok') fail('conductor review must carry reviewer agentType grok', run)
+  if (rev.opts.agentType !== 'gemini') fail('conductor review must carry reviewer agentType gemini', run)
   if (exe.opts.agentType !== 'sol') fail('conductor execute must carry author agentType sol', run)
   if (hasOwn(spec.opts, 'agent') || hasOwn(rev.opts, 'agent') || hasOwn(exe.opts, 'agent')) fail('conductor routed stages must use agentType only, not agent', run)
   if (run.result.routing_status !== 'routed' || run.result.auto_execute_hold !== false) fail('conductor routed run must be routing_status routed and not held', run)

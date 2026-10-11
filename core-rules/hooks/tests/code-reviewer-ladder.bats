@@ -361,7 +361,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" != *"from-llm-stub"* ]] || { echo "$output"; false; }
-  [ "$output" = '{"findings":[]}' ]
+  [ "$output" = '{"status":"degraded","findings":[]}' ]
   assert_valid_findings
   [ "$stderr" = 'code-reviewer: deciding artifact is unavailable or invalid; deterministic fallback applies' ] || { echo "$stderr"; false; }
   [ ! -e "$claude_count" ]

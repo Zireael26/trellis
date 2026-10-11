@@ -39,6 +39,9 @@ session_file=$(printf '%s' "$INPUT" | jq -r '.session_file // ""')
 family=$(printf '%s' "$INPUT" | jq -r '.action.family // "unknown"')
 tool=$(printf '%s' "$INPUT" | jq -r '.action.tool_name // ""')
 status=$(printf '%s' "$INPUT" | jq -r '.result.status // "unknown"')
+# The delivered extension owns session-scoped read credit. Legacy callers keep
+# the original tracker; this flag never skips a pre-action guard/supervisor.
+read_tracking=$(printf '%s' "$INPUT" | jq -r '.in_process_read_tracking == true')
 operation=$(printf '%s' "$INPUT" | jq -r '.action.targets[0].operation // ""')
 
 case "$tool" in
@@ -124,7 +127,17 @@ run_hook() {
     messages="${messages}${messages:+$'\n'}$name: unknown — hook unavailable (required=$required)"
     return
   fi
-  output=$(printf '%s' "$legacy" | env CODEX_PROJECT_DIR="$cwd" TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi "$HOOKS/$name" 2>"$stderr_file")
+  if [ "$required" = true ]; then
+    # Bright-line guards run under the shared supervisor: a deadline from its
+    # own start, and pipes it owns. Without perl or the supervisor the call
+    # exits nonzero, which a required hook turns into a deny below. perl's own
+    # environment switches are cleared so they cannot load code before it.
+    output=$(printf '%s' "$legacy" | env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV \
+      CODEX_PROJECT_DIR="$cwd" TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi \
+      perl "$(dispatch_dir)/../../hooks/lib/guard-supervise.pl" pi "${name%.sh}" "$HOOKS/$name" 2>"$stderr_file")
+  else
+    output=$(printf '%s' "$legacy" | env CODEX_PROJECT_DIR="$cwd" TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi "$HOOKS/$name" 2>"$stderr_file")
+  fi
   rc=$?
   stderr=$(<"$stderr_file")
   hook_context=$(printf '%s' "$output" | jq -rs '[.[]? | objects | .hookSpecificOutput.additionalContext | strings] | join("\n\n")' 2>/dev/null || true)
@@ -173,11 +186,11 @@ case "$phase:$native" in
     if [ "$family" = file_mutation ] && [ "$status" != failed ]; then
       run_hook post-edit-verify.sh false
       run_hook slop-tripwire.sh false
-      run_hook track-read.sh false
+      [ "$read_tracking" = true ] || run_hook track-read.sh false
       run_hook wiki-skill-suggest.sh false
     elif [ "$family" = file_read ]; then
       run_hook truncation-check.sh false
-      [ "$status" = failed ] || run_hook track-read.sh false
+      [ "$status" = failed ] || [ "$read_tracking" = true ] || run_hook track-read.sh false
     elif [ "$family" = shell ]; then
       run_hook truncation-check.sh false
     else

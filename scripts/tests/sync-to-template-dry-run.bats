@@ -147,10 +147,14 @@ AGENT
   printf 'process.exit(0);\n' \
     > "$SOURCE/core-rules/pi/patches/tests/fixture-patch.test.mjs"
   printf '# Fixture patch notes\n' > "$SOURCE/core-rules/pi/patches/FIXTURE.md"
-  # Spec 053 C7: a blocked extension, the guide that installs it, and the
-  # parity tooling that proves the guide. All of them are real payload paths.
-  printf '// Blocked web-search extension fixture\n' \
+  # Specs 053 C7 and 056: the web-search extension and its tests, the guide that
+  # installs it, and the parity tooling that proves the guide. All of them are
+  # real payload paths.
+  printf '// Reviewed web-search extension fixture\n' \
     > "$SOURCE/core-rules/pi/extensions/trellis-web-search.ts"
+  mkdir -p "$SOURCE/core-rules/pi/extensions/tests"
+  printf '#!/usr/bin/env bash\n# Extension gate fixture\nexit 0\n' \
+    > "$SOURCE/core-rules/pi/extensions/tests/run.sh"
   printf '# Updated pi guide fixture\n' > "$SOURCE/AGENT_PI_SETUP.md"
   mkdir -p "$SOURCE/scripts/tests"
   printf '#!/usr/bin/env bash\n# Guide parity fixture\nexit 0\n' > "$SOURCE/scripts/pi-guide-parity.sh"
@@ -626,9 +630,9 @@ EOF
   [ ! -e "$MIRROR/config.json" ]
   [ ! -e "$MIRROR/state" ]
   [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
-  # Held with the pi guide until Spec 053 C7 approves (see the 053 C7 cases).
-  [ ! -e "$MIRROR/docs/PI-COMPUTER-USE.md" ]
-  cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
+  # Published with the pi guide since 1.3.12 (see the 053 C7 cases).
+  [ "$(git -C "$SOURCE" rev-parse HEAD:docs/PI-COMPUTER-USE.md)" = "$(git hash-object --no-filters "$MIRROR/docs/PI-COMPUTER-USE.md")" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md)" = "$(git hash-object --no-filters "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md")" ]
   jq -e '
     .schema_version == 2
     and (.trellis_root? | not)
@@ -838,46 +842,81 @@ EOF
     "$(git hash-object --no-filters "$MIRROR/core-rules/pi/extensions/trellis.ts")" ]
 }
 
-@test "053 C7: a held guide keeps its published bytes and the blocked extension never publishes" {
+@test "053 C7: the updated guide and its parity script replace the published guide" {
+  mkdir -p "$MIRROR/scripts/tests"
   printf '# Previously published pi guide\n' > "$MIRROR/AGENT_PI_SETUP.md"
+  printf 'stale\n' > "$MIRROR/scripts/tests/pi-guide-parity.bats"
   git -C "$MIRROR" add -A
   git -C "$MIRROR" commit -qm seed
 
   run_sync --apply
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # Held, not pruned: the old public guide survives byte for byte.
-  [ "$(cat "$MIRROR/AGENT_PI_SETUP.md")" = '# Previously published pi guide' ]
-  [ ! -e "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts" ]
-  [ ! -e "$MIRROR/scripts/pi-guide-parity.sh" ]
+  [ "$(git -C "$SOURCE" rev-parse HEAD:AGENT_PI_SETUP.md)" = "$(git hash-object --no-filters "$MIRROR/AGENT_PI_SETUP.md")" ]
+  # The guide names scripts/pi-guide-parity.sh, so it publishes with the guide.
+  [ "$(git -C "$SOURCE" rev-parse HEAD:scripts/pi-guide-parity.sh)" = "$(git hash-object --no-filters "$MIRROR/scripts/pi-guide-parity.sh")" ]
+  # Its bats suite carries synthetic /Users/ paths the mirror lint rejects, so
+  # it stays held and a stale copy is pruned.
   [ ! -e "$MIRROR/scripts/tests/pi-guide-parity.bats" ]
-  # The rest of the pi surface still publishes beside the withheld file.
+}
+
+@test "053 C7: the guide and computer-use docs publish into a mirror that never had them" {
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$MIRROR/AGENT_PI_SETUP.md")" = '# Updated pi guide fixture' ]
+  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE.md")" = '# Portable Pi computer-use setup' ]
+  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md")" = '# Portable Pi upgrade prompt' ]
+  # The guide never names an unpublished extension (spec 056 section 11).
+  [ -f "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts" ]
+}
+
+@test "056: the reviewed web-search extension publishes and its tests stay held" {
+  # Seed stale copies of both, so publication is proved by replaced bytes and
+  # the held tests by a prune rather than by an absence that could be vacuous.
+  mkdir -p "$MIRROR/core-rules/pi/extensions/tests"
+  printf '// Stale published extension\n' > "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts"
+  printf 'stale\n' > "$MIRROR/core-rules/pi/extensions/tests/run.sh"
+  git -C "$MIRROR" add -A
+  git -C "$MIRROR" commit -qm seed
+
+  run_sync --apply
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(git -C "$SOURCE" rev-parse HEAD:core-rules/pi/extensions/trellis-web-search.ts)" = \
+    "$(git hash-object --no-filters "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts")" ]
+  [ ! -e "$MIRROR/core-rules/pi/extensions/tests" ]
   [ -f "$MIRROR/core-rules/pi/extensions/trellis.ts" ]
 }
 
-@test "053 C7: a held guide is not created in a mirror that never had it" {
-  run_sync --apply
-
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ ! -e "$MIRROR/AGENT_PI_SETUP.md" ]
-  [ ! -e "$MIRROR/docs/PI-COMPUTER-USE.md" ]
-  [ ! -e "$MIRROR/core-rules/pi/extensions/trellis-web-search.ts" ]
+# The hold is gone, so nothing in the publisher stands between the tracked
+# extension and the public mirror. What keeps the pre-056 build (spec 053 C7
+# BLOCK) out is that the tracked file is never that build. Read the real tree.
+@test "056: the extension the mirror publishes is never a blocked build" {
+  local list="$REPO_ROOT/core-rules/pi/extensions/trellis-web-search.blocked.sha256"
+  local tracked
+  tracked="$(shasum -a 256 "$REPO_ROOT/core-rules/pi/extensions/trellis-web-search.ts" | cut -d ' ' -f 1)"
+  # Vacuity guard: the list must name the pre-056 build, or a missing or
+  # emptied list would pass this test.
+  grep -qi '^a1fbe3c94fd5e84df0e29c857668deb76c410d1769f5a96af9672f276342bb93 ' "$list"
+  run grep -qi "^$tracked " "$list"
+  [ "$status" -eq 1 ] || { echo "tracked extension $tracked is on the block list"; false; }
 }
 
-@test "053 C7: the held computer-use doc keeps its published bytes" {
-  # The source fixture carries a different, updated body; the mirror must keep
-  # the old public copy unchanged rather than take the update or lose the file.
+@test "053 C7: the computer-use doc and prompt replace their published bytes" {
+  # The source fixture carries a different, updated body; the mirror must take
+  # the update, which matches the guide published beside it.
   mkdir -p "$MIRROR/docs"
   printf '# Previously published computer-use doc\n' > "$MIRROR/docs/PI-COMPUTER-USE.md"
+  printf '# Previously published upgrade prompt\n' > "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
   git -C "$MIRROR" add -A
   git -C "$MIRROR" commit -qm seed
 
   run_sync --apply
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE.md")" = '# Previously published computer-use doc' ]
-  # Its sibling upgrade prompt is not held and still publishes.
-  cmp "$SOURCE/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md" "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md"
+  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE.md")" = '# Portable Pi computer-use setup' ]
+  [ "$(cat "$MIRROR/docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md")" = '# Portable Pi upgrade prompt' ]
 }
 
 @test "the withheld roster's private sentinels never reach the mirror" {

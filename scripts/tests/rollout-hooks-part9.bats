@@ -473,6 +473,11 @@ donor_target_absent() {
   cat > "$wrapper" <<'SH'
 source "$1"
 shift
+# The final snapshot guard lives in the full transaction path. The donor fast
+# path (new in 1.3.12) never calls attach_plan_from_surfaces, so without this
+# the whitespace mutation below would be a no-op and the attach would succeed
+# via the fast path instead of reaching the guard under test.
+attach_try_donor_fastpath() { return 10; }
 definition="$(declare -f attach_plan_from_surfaces)"
 eval "${definition/attach_plan_from_surfaces/original_plan_from_surfaces}"
 attach_plan_from_surfaces() {

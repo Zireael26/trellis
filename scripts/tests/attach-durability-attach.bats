@@ -30,18 +30,24 @@ canonical_dir() {
   (CDPATH= cd "$1" && pwd -P)
 }
 
+# make_release <version> [source_root]: with a source root, a complete release
+# of that source, carrying its own templates and its own scripts (the dispatcher
+# generator among them); the seed script stays the fixture's no-op.
 make_release() {
-  local release="$1" repo="$SANDBOX/release-source"
+  local release="$1" source_root="${2:-$REPO_ROOT}" repo="$SANDBOX/release-source-$1"
   mkdir -p "$repo/core-rules/commands/templates" "$repo/core-rules/templates" \
     "$repo/core-rules/husky" "$repo/core-rules/githooks" "$repo/scripts"
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
   printf '# generated primer index\n' > "$repo/core-rules/commands/templates/primer-index-template.md"
   # The contextual SessionStart renders are validated against the real shipped
   # templates by path, so the fixture release carries the real bytes.
-  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
+  cp "$source_root/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
-  cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
+  cp "$source_root/core-rules/templates/codex-hooks.local.json" \
     "$repo/core-rules/templates/codex-hooks.local.json"
+  if [ "$#" -ge 2 ]; then
+    rsync -a --exclude /tests --exclude /seed-inheritance-symlinks.sh "$source_root/scripts/" "$repo/scripts/"
+  fi
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/husky/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/seed-inheritance-symlinks.sh"
@@ -393,4 +399,142 @@ run_detach() {
   [ "$status" -eq 0 ]
   run grep -Fq "detach+attach" "$REPO_ROOT/core-rules/inheritance.md"
   [ "$status" -eq 0 ]
+}
+
+# Journal v2 (1.3.12) across releases. PRE_V2_COMMIT is the last commit before
+# journal v2; its scripts run as the other release of a mixed group. Each side
+# is a consistent release: a payload's templates are valid only to its own
+# renderer, and its dispatchers are rebuilt by the generator it ships. So the
+# pre-v2 release (1.2.2) is built from PRE_V2_COMMIT's core-rules and scripts,
+# and this release (1.2.4) from this checkout's.
+PRE_V2_COMMIT=bdc21b05
+
+pre_v2_attach_script() {
+  git -C "$REPO_ROOT" cat-file -e "$PRE_V2_COMMIT^{commit}" 2>/dev/null ||
+    skip "the pre-v2 release ($PRE_V2_COMMIT) is not in this clone's history"
+  mkdir "$SANDBOX/pre-v2"
+  git -C "$REPO_ROOT" archive "$PRE_V2_COMMIT" scripts core-rules/templates | tar -x -C "$SANDBOX/pre-v2"
+  PRE_V2_ATTACH="$SANDBOX/pre-v2/scripts/attach-project.sh"
+  make_release 1.2.2 "$SANDBOX/pre-v2"
+  make_release 1.2.4 "$REPO_ROOT"
+}
+
+run_attach_v2() {
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.4 "$PROJECT"
+}
+
+pre_v2_cli() {
+  run env -u TRELLIS_LIBS_PRELOADED "$PRE_V2_ATTACH" "$@"
+}
+
+assert_detached_clean() {
+  [ -z "$(owner_for_root "$PROJECT")" ]
+  [ -z "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print 2>/dev/null)" ]
+  [ -z "$(git -C "$PROJECT" status --porcelain)" ]
+  [ ! -e "$PROJECT/.trellis/runtime" ] && [ ! -L "$PROJECT/.trellis/runtime" ]
+}
+
+@test "V2a an owner attached by the pre-v2 release detaches under this release" {
+  pre_v2_attach_script
+  pre_v2_cli attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.2 "$PROJECT"
+  [ "$status" -eq 0 ]
+
+  run_detach
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_detached_clean
+}
+
+@test "V2b an owner attached by this release detaches under the pre-v2 release" {
+  pre_v2_attach_script
+  run_attach_v2
+  [ "$status" -eq 0 ]
+
+  pre_v2_cli detach --home "$TRELLIS_HOME" "$PROJECT"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_detached_clean
+}
+
+@test "V2c this release recovers a pre-v2 attach stopped before commit" {
+  pre_v2_attach_script
+  ATTACHMENT_FAULT_PHASE=prepared pre_v2_cli attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.2 "$PROJECT"
+  [ "$status" -eq 5 ]
+
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_detached_clean
+}
+
+@test "V2d the pre-v2 release recovers this release's attach stopped after owner publication" {
+  pre_v2_attach_script
+  ATTACHMENT_FAULT_PHASE=owner-published run_attach_v2
+  [ "$status" -eq 5 ]
+  owner="$(owner_for_root "$PROJECT")"
+  [ -f "$owner" ]
+  # The commit folded its progress log before publishing the owner, so the
+  # journal left behind is in the shape every release reads.
+  journal="$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)"
+  jq -e 'has("journal_version") | not' "$journal"
+  [ -z "$(find "$TRELLIS_HOME/state/attachment-progress" -type f -print)" ]
+
+  pre_v2_cli recover --home "$TRELLIS_HOME" "$PROJECT"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$journal" ]
+  [ -f "$owner" ]
+  run_detach
+  [ "$status" -eq 0 ]
+  assert_detached_clean
+}
+
+# The --expected-journal-sha256 digest of a journal v2 (a commit killed
+# mid-publish): its bytes and its progress log's, in a fixed framing.
+journal_v2_digest() {
+  local journal="$1" log="$2" log_sha=none
+  [ ! -e "$log" ] || log_sha="$(sha256_file "$log")"
+  printf 'trellis-attachment-journal-v2\n%s\n%s\n' "$(sha256_file "$journal")" "$log_sha" | shasum -a 256 | cut -d ' ' -f 1
+}
+
+@test "V2e a journal digest taken before progress moved is refused by recover" {
+  local journal attachment log program status journal_sha log_sha inspected_log stale_digest current_digest
+  ATTACHMENT_FAULT_PHASE=prepared run_attach
+  [ "$status" -eq 5 ]
+  journal="$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)"
+  attachment="$(jq -r '.attachment_id' "$journal")"
+  log="$TRELLIS_HOME/state/attachment-progress/$attachment.log"
+  # A commit killed at its 20th durable step leaves a v2 journal and its log.
+  program="$(_attachment_commit_program)"
+  program="${program/'    return None  # crash-test seam'/'    checkpoint.calls = getattr(checkpoint, "calls", 0) + 1
+    if checkpoint.calls == 20: os.kill(os.getpid(), signal.SIGKILL)'}"
+  [ "$program" != "$(_attachment_commit_program)" ]
+  _attachment_ensure_private_dir "$TRELLIS_HOME/state/attachment-progress"
+  _attachment_ensure_private_dir "$SANDBOX/holder"
+  status=0
+  python3 -I -c "$program" "$journal" "$log" "" "$SANDBOX/holder" "$BASHPID" || status=$?
+  [ "$status" -eq 137 ]
+  jq -e '.journal_version == 2' "$journal"
+  [ "$(wc -l < "$log")" -gt 3 ]
+  journal_sha="$(sha256_file "$journal")"
+  log_sha="$(sha256_file "$log")"
+  # An operator inspected this transaction three log records earlier: the
+  # journal file was the same bytes, the log a prefix of today's.
+  inspected_log="$SANDBOX/inspected.log"
+  head -n 3 "$log" > "$inspected_log"
+  stale_digest="$(journal_v2_digest "$journal" "$inspected_log")"
+
+  run "$ATTACH" recover --home "$TRELLIS_HOME" --expected-journal-sha256 "$journal_sha" "$PROJECT"
+  [ "$status" -eq 3 ] || { echo "journal-only digest: $status $output"; false; }
+  run "$ATTACH" recover --home "$TRELLIS_HOME" --expected-journal-sha256 "$stale_digest" "$PROJECT"
+  [ "$status" -eq 3 ] || { echo "stale digest: $status $output"; false; }
+  [[ "$output" == *"expected attachment journal changed"* ]] || { echo "$output"; false; }
+  [ "$(sha256_file "$journal")" = "$journal_sha" ]
+  [ "$(sha256_file "$log")" = "$log_sha" ]
+
+  current_digest="$(journal_v2_digest "$journal" "$log")"
+  run "$ATTACH" recover --home "$TRELLIS_HOME" --expected-journal-sha256 "$current_digest" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_detached_clean
+  [ ! -e "$log" ]
 }

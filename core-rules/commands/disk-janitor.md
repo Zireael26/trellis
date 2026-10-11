@@ -25,6 +25,8 @@ scripts/disk-janitor.sh
 
 To scope to a single project, add `--project <registry-name>`. To limit which scopes are scanned, add `--scopes caches,worktrees,stores` (any subset; default is all three). This run is read-only — it deletes nothing. It writes the report to `audits/YYYY-MM-DD-disk-janitor.md` as well as stdout.
 
+`--scopes pi` is opt-in, never part of the default, and **report-only in 1.3.12**: `--apply` refuses it and nothing under a pi root is deleted; relay the `[reclaimable]` rows so the user can remove them by hand. It covers pi's roots: `~/.pi-worktrees`, the pre-1.3.12 `$TRELLIS_HOME/pi-worktrees`, and the temp dir `$TRELLIS_PI_TMPDIR` (else `$TMPDIR/pi`; never `/` or `$HOME`). A symlinked or foreign-owned root is not scanned. Temp files are listed after 3 days. A worktree is listed only as an aged orphan: no attachment owner record names it and its repository's `git worktree list` does not register it; a repository is never listed. pi's bash spill logs (`pi-bash-*.log`) are listed after 1 day, or at any age once over 1 GiB. Nothing is listed while lsof shows a process using it, or when lsof cannot run.
+
 ### 2. Read the result
 
 The report has these sections — summarize them for the user, most actionable first:

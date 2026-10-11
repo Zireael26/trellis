@@ -19,6 +19,7 @@ setup() {
   # Resolve through real path so /var vs /private/var cannot diverge
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
 
+  export TRELLIS_HOME="$SANDBOX/inert trellis home"
   ROOT="$SANDBOX/root"
   MAIN="$SANDBOX/main"
   WT="$SANDBOX/wt"
@@ -169,6 +170,121 @@ worktree_surface_snapshot() {
   [[ "$output" == *"trellis attach"* ]] || { echo "$output"; false; }
 }
 
+# Build an intentionally unseeded fixture through Git's supported deferred
+# checkout mode. read-tree populates tracked files without a checkout event.
+seed_unattached_worktree() {
+  git -C "$T14_PROJECT" worktree add --no-checkout -q -b "$1" "$2"
+  git -C "$2" read-tree -mu HEAD
+}
+
+# Instrument only the invoking seeder's libraries. The delegated sealed attach
+# remains untouched and must enforce its own exclude preflight.
+seed_counted_copy() {
+  COUNTED_SEED_DIR="$T14_SANDBOX/counted seed"
+  export SEED_COUNT_LOG="$T14_SANDBOX/seed.counts"
+  : > "$SEED_COUNT_LOG"
+  mkdir -p "$COUNTED_SEED_DIR"
+  cp "$SCRIPT" "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh"
+  cp "$REPO_ROOT/scripts/attach-project.sh" "$COUNTED_SEED_DIR/attach-project.sh"
+  cp -R "$REPO_ROOT/scripts/lib" "$COUNTED_SEED_DIR/lib"
+  cat >> "$COUNTED_SEED_DIR/lib/release-store.sh" <<'SH'
+definition="$(declare -f release_store_locate)"
+eval "${definition/release_store_locate /real_seed_locate }"
+release_store_locate() {
+  printf 'locate\n' >> "$SEED_COUNT_LOG"
+  real_seed_locate "$@"
+}
+SH
+  cat >> "$COUNTED_SEED_DIR/attach-project.sh" <<'SH'
+definition="$(declare -f attach_exclude_preflight)"
+eval "${definition/attach_exclude_preflight /real_seed_exclude_preflight }"
+attach_exclude_preflight() {
+  printf 'exclude\n' >> "$SEED_COUNT_LOG"
+  real_seed_exclude_preflight "$@"
+}
+SH
+}
+
+@test "new-worktree seed locates once and leaves exclude preflight to sealed attach" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  linked="$T14_SANDBOX/counted linked worktree"
+  seed_unattached_worktree t14-counted "$linked"
+  seed_counted_copy
+
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$linked" --quiet
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^locate$' "$SEED_COUNT_LOG")" -eq 1 ]
+  [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG" || true)" -eq 0 ]
+  [ -f "$(t14_owner_for_root "$linked")" ]
+  [ -L "$linked/.claude/rules/trellis.md" ]
+}
+
+@test "pre-add seed still performs one exclude preflight without publication" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  seed_counted_copy
+  before="$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")"
+
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$T14_PROJECT" --pre-add --quiet
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^locate$' "$SEED_COUNT_LOG")" -eq 1 ]
+  [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG")" -eq 1 ]
+  [ "$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")" = "$before" ]
+}
+
+@test "seed single locate refuses a tampered immutable attach before execution" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  linked="$T14_SANDBOX/tampered release worktree"
+  seed_unattached_worktree t14-counted-tamper "$linked"
+  seed_counted_copy
+  payload_attach="$TRELLIS_HOME/releases/1.2.3/payload/scripts/attach-project.sh"
+  chmod u+w "$payload_attach"
+  printf '#!/usr/bin/env bash\ntouch "$SEED_POISON_MARKER"\nexit 0\n' > "$payload_attach"
+  chmod 500 "$payload_attach"
+  export SEED_POISON_MARKER="$T14_SANDBOX/payload executed"
+  before="$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")"
+
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$linked" --quiet
+
+  [ "$status" -eq 4 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^locate$' "$SEED_COUNT_LOG")" -eq 1 ]
+  [ ! -e "$SEED_POISON_MARKER" ]
+  [ ! -e "$linked/.trellis/runtime" ]
+  [ "$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")" = "$before" ]
+}
+
+@test "delegated exclude refusal diagnoses malformed shared block without publication" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  linked="$T14_SANDBOX/exclude refusal worktree"
+  seed_unattached_worktree t14-counted-exclude "$linked"
+  seed_counted_copy
+  printf '\n# --- Trellis local attachment exclude block ---\n' >> "$T14_PROJECT/.git/info/exclude"
+  before="$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")"
+  exclude_before="$(t14_sha256_text "$(cat "$T14_PROJECT/.git/info/exclude")")"
+
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$linked" --quiet
+
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"exclude"* ]] || { echo "$output"; return 1; }
+  [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG" || true)" -eq 1 ]
+  [ ! -e "$linked/.trellis/runtime" ]
+  [ "$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")" = "$before" ]
+  [ "$(t14_sha256_text "$(cat "$T14_PROJECT/.git/info/exclude")")" = "$exclude_before" ]
+}
+
 # T14 local attachment reconciliation: ordinary clones must not inherit any
 # behavior merely because this script exists.
 @test "unregistered clone remains inert and Git-clean" {
@@ -297,7 +413,7 @@ t14_add_broken_sibling_row() {
   [ "$?" -eq 0 ]
   t14_add_broken_sibling_row
   linked="$T14_SANDBOX/healthy linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-healthy-sibling "$linked"
+  seed_unattached_worktree t14-healthy-sibling "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -307,6 +423,59 @@ t14_add_broken_sibling_row() {
   git -C "$T14_PROJECT" worktree remove --force "$linked"
 }
 
+# The detached post-attach job takes this checkout's lock for brief steps right
+# after an attach; a `git worktree add` in that window must not refuse.
+checkout_lock_common() {
+  (cd "$T14_PROJECT" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+}
+
+@test "a new worktree's attach waits out a brief checkout-lock holder" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  TRELLIS_ATTACH_POSTJOB=off t14_attach
+  linked="$T14_SANDBOX/lock-held linked worktree"
+  seed_unattached_worktree t14-lock-held "$linked"
+  sleep 3 &
+  holder=$!
+  TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/attachment.sh"
+    _attachment_test_stage_checkout_lock "$2" "$3" "$4" "$5"' _ \
+    "$REPO_ROOT" "$TRELLIS_HOME" "$(t14_checkout_id "$T14_PROJECT")" "$(checkout_lock_common)" "$holder"
+  kill -0 "$holder"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
+  wait "$holder" || true
+
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
+  [ -f "$(t14_owner_for_root "$linked")" ]
+  [ -L "$linked/.claude/rules/trellis.md" ]
+}
+
+@test "a checkout lock released mid-reclaim is retried; a lasting broken lock still refuses" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  TRELLIS_ATTACH_POSTJOB=off t14_attach
+  checkout="$(t14_checkout_id "$T14_PROJECT")"
+  link="$TRELLIS_HOME/state/locks/attachment-checkout-$checkout.lock"
+  reclaim() {
+    TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/attachment.sh"
+      attachment_checkout_lock_reclaim "$2" "$3" "$4"' _ "$REPO_ROOT" "$TRELLIS_HOME" "$checkout" "$(checkout_lock_common)"
+  }
+  # The link outlives its holder only while that holder is releasing.
+  ln -s ".attachment-checkout-$checkout.holder-1.released" "$link"
+  (sleep 0.5; rm -f "$link") &
+  remover=$!
+  run reclaim
+  wait "$remover" || true
+  [ "$status" -eq 0 ] || { printf 'status %s\n%s\n' "$status" "$output" >&2; false; }
+
+  ln -s ".attachment-checkout-$checkout.holder-1.broken" "$link"
+  run reclaim
+  rm -f "$link"
+  [ "$status" -eq 4 ] || { printf 'status %s\n%s\n' "$status" "$output" >&2; false; }
+}
+
 @test "seeding refuses when the row it binds is itself broken" {
   t14_setup_sandbox
   t14_make_runtime_release
@@ -314,7 +483,7 @@ t14_add_broken_sibling_row() {
   t14_attach
   [ "$?" -eq 0 ]
   linked="$T14_SANDBOX/own-drift linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-own-drift "$linked"
+  seed_unattached_worktree t14-own-drift "$linked"
 
   # Repoint the bound checkout row at a present directory that is not this
   # (or any) Git worktree. Only the row being bound is corrupted.
@@ -343,7 +512,7 @@ t14_add_broken_sibling_row() {
   primary_owner="$(t14_owner_for_root "$T14_PROJECT")"
   rm "$primary_owner"
   linked="$T14_SANDBOX/missing donor linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-missing-donor "$linked"
+  seed_unattached_worktree t14-missing-donor "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -363,7 +532,7 @@ t14_add_broken_sibling_row() {
   printf '{broken\n' > "$primary_owner"
   chmod 600 "$primary_owner"
   linked="$T14_SANDBOX/corrupt donor linked worktree"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t14-corrupt-donor "$linked"
+  seed_unattached_worktree t14-corrupt-donor "$linked"
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
 
@@ -385,7 +554,7 @@ assert_stale_donor_binding_rejected() {
   barrier="$T14_SANDBOX/expected-binding-barrier"
   output_file="$T14_SANDBOX/reconcile.out"
   mkdir "$barrier"
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b "t14-race-$mutation" "$linked"
+  seed_unattached_worktree "t14-race-$mutation" "$linked"
   linked="$(t14_canonical_dir "$linked")"
 
   env TRELLIS_HOME="$TRELLIS_HOME" \
@@ -393,7 +562,9 @@ assert_stale_donor_binding_rejected() {
     bash "$SCRIPT" --target "$linked" --quiet > "$output_file" 2>&1 &
   pid=$!
   entered=0
-  for ((attempt = 0; attempt < 500; attempt++)); do
+  # The real sealed-release check runs before this barrier. Allow a loaded,
+  # nice'd targeted run to reach it; timeout must not masquerade as a refusal.
+  for ((attempt = 0; attempt < 12000; attempt++)); do
     if [ -e "$barrier/entered" ]; then
       entered=1
       break
@@ -403,6 +574,8 @@ assert_stale_donor_binding_rejected() {
   if [ "$entered" -ne 1 ]; then
     : > "$barrier/release"
     wait "$pid" || true
+    printf 'timed out waiting for expected-binding barrier\n' >&2
+    cat "$output_file" >&2
     false
   fi
 
@@ -448,7 +621,7 @@ assert_stale_donor_binding_rejected() {
   [[ "$(cat "$output_file")" == *"expected repair target or donor binding"* ]] || { cat "$output_file"; false; }
   [ ! -e "$linked/.trellis/runtime" ]
   [ ! -e "$linked/.claude/rules/trellis.md" ]
-  git -C "$T14_PROJECT" -c core.hooksPath=/dev/null worktree remove --force "$linked"
+  git -C "$T14_PROJECT" worktree remove --force "$linked"
 }
 
 @test "reconcile rejects concurrent donor detach after its snapshot" {

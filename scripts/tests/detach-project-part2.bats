@@ -115,6 +115,7 @@ make_release() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/seed-inheritance-symlinks.sh"
   chmod 755 "$repo/core-rules/husky/pre-push" "$repo/core-rules/githooks/pre-push" "$repo/scripts/seed-inheritance-symlinks.sh"
+  release_fixture_seal_executed_files "$repo" || return 1
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
   "schema_version": 1,
@@ -515,6 +516,28 @@ make_large_checkout_group() {
   [ "$count" -eq 13 ]
   jq -e '.projects["personal/fixture-project"].checkouts[] |
     .release == "1.2.4" and (.worktrees | length == 13)' "$TRELLIS_HOME/registry.json"
+}
+
+# Inversion: one owner whose render snapshots alone exceed 1 MiB. Re-running
+# attach reconciles it, and the bound-harness read passed the whole owner as
+# `jq --argjson record`, which exits 4 with `Argument list too long` on macOS.
+@test "attach reconciles an owner record larger than ARG_MAX" {
+  mkdir -p "$PROJECT/.claude" "$PROJECT/.codex"
+  jq -n '{project_padding: ("x" * 210000)}' > "$PROJECT/.claude/settings.local.json"
+  cp "$PROJECT/.claude/settings.local.json" "$PROJECT/.codex/hooks.json"
+  chmod 600 "$PROJECT/.claude/settings.local.json" "$PROJECT/.codex/hooks.json"
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(owner_for_root "$PROJECT")"
+  [ "$(wc -c < "$owner")" -gt 1048576 ]
+  owner_hash="$(sha256_file "$owner")"
+
+  run_attach
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *'Argument list too long'* ]] || { echo "$output"; false; }
+  [ "$(sha256_file "$owner")" = "$owner_hash" ]
+  jq -e '.project_padding == ("x" * 210000)' "$PROJECT/.claude/settings.local.json"
 }
 
 @test "all-worktrees retry rebases a partial manager journal before shared restore" {

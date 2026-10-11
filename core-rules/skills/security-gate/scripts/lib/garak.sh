@@ -17,6 +17,18 @@
 # warns and emits an empty findings stream — matches the semgrep/osv/gitleaks
 # convention.
 
+# Inherited shell functions never answer for a tool. Every command name can be
+# shadowed, `builtin` included, but an assignment cannot: POSIXLY_CORRECT turns
+# on POSIX mode, where the special builtins `unset` and `set` are found before
+# functions, so the first purge cannot be intercepted (see run-diff.sh).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset -f garak python3 timeout gtimeout
+builtin unset _sg_fn
+
 set -euo pipefail
 
 : "${1:?project-dir required}"
@@ -28,7 +40,9 @@ if [ -z "${SECURITY_GATE_GARAK_TARGET:-}" ]; then
   exit 2
 fi
 
-if ! command -v garak >/dev/null 2>&1; then
+GARAK_BIN="$(builtin type -P garak)" || GARAK_BIN=""
+PYTHON3_BIN="$(builtin type -P python3)" || PYTHON3_BIN=""
+if [ -z "$GARAK_BIN" ] || [ -z "$PYTHON3_BIN" ]; then
   echo "warn: garak not installed (pipx install garak) — skipping LLM-app probe stage" >&2
   : > "$OUT"
   exit 2
@@ -42,10 +56,10 @@ MODEL_TYPE="${SECURITY_GATE_GARAK_TARGET%%:*}"
 MODEL_NAME="${SECURITY_GATE_GARAK_TARGET#*:}"
 
 RUNNER=()
-if command -v timeout >/dev/null 2>&1; then
-  RUNNER=(timeout --preserve-status "$TIMEOUT")
-elif command -v gtimeout >/dev/null 2>&1; then
-  RUNNER=(gtimeout --preserve-status "$TIMEOUT")
+if TIMEOUT_BIN="$(builtin type -P timeout)"; then
+  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
+elif TIMEOUT_BIN="$(builtin type -P gtimeout)"; then
+  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
 else
   echo "warn: neither timeout nor gtimeout is available — refusing to invoke garak without a deadline" >&2
   : > "$OUT"
@@ -61,7 +75,7 @@ mkdir -p "$REPORT_DIR"
 # Garak writes a JSONL report under the report dir; capture its status and path.
 GARAK_RC=0
 # SAFETY: SECURITY_GATE_GARAK_TIMEOUT, default 600 seconds per the env contract above, bounds the external scanner.
-"${RUNNER[@]}" garak \
+"${RUNNER[@]}" "$GARAK_BIN" \
   --model_type "$MODEL_TYPE" \
   --model_name "$MODEL_NAME" \
   --probes "$PROBES" \
@@ -90,7 +104,7 @@ fi
 # Normalize each failed attempt into our finding shape.
 NORMALIZED="$WORK/normalized.jsonl"
 NORMALIZE_RC=0
-python3 - "$REPORT" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
+"$PYTHON3_BIN" -I - "$REPORT" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
 import json
 import sys
 

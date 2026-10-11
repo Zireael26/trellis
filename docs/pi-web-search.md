@@ -15,9 +15,12 @@ cells under independent delegated-root assessment (xai/grok-4.6, review ages
 101.5 / 71.2 / 104.8 s against a 120 s bar), the canary project was rolled back to
 release 1.0.0 (39/39 prior hashes, search directory and config absent), and the
 same-run ordinary-inference check after rollback returned exactly
-`ordinary-inference-ok` with no tool events. Supported: Pi 0.85.1 with
-pi-antigravity 0.7.0, parent `meta/muse-spark-1.3-contributor`, backend
-`antigravity/gemini-3.8-flash` (runtime `gemini-3.8-flash-low`), `max_calls` 3.
+`ordinary-inference-ok` with no tool events. Qualified (measured by that
+canary): Pi 0.85.1 with pi-antigravity 0.7.0, parent
+`meta/muse-spark-1.3-contributor`, backend `antigravity/gemini-3.8-flash`
+(runtime `gemini-3.8-flash-low`), `max_calls` 3. Trellis supports pi 1.1.0 and
+above ([pi setup guide](../AGENT_PI_SETUP.md)); this adapter has no runtime
+receipt on 1.1.0 or later, so treat it as unverified there until it has one.
 
 **Not verified.** No other parent family has live proof. The native Codex
 baseline and the OpenAI (`gpt-5.6-luna`) Pi parent were registered *unrun* in the
@@ -43,9 +46,12 @@ Treat every result from this tool as unverified until you inspect its sources.
 ## Prerequisites
 
 - An attached Trellis project on a release containing `core-rules/pi/web-search/`.
-- Pi 0.85.1 with `pi-antigravity` 0.7.0 installed and logged in the ordinary way
-  (`/login antigravity`). The tool asks Pi's model registry for that credential
-  at call time; it never reads auth files, environment keys, or any other store.
+- Pi 1.1.0 or later (the [pi setup guide](../AGENT_PI_SETUP.md) floor) with
+  `pi-antigravity` installed and logged in the ordinary way
+  (`/login antigravity`). The qualifying canary ran Pi 0.85.1 with
+  `pi-antigravity` 0.7.0; no later pair has a receipt. The tool asks Pi's
+  model registry for that credential at call time; it never reads auth files,
+  environment keys, or any other store.
 - macOS on Apple silicon. Other host profiles return `unavailable/unsupported_profile`.
 
 ## Configuration

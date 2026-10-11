@@ -2,14 +2,28 @@
 # Semgrep scanner — emits normalized findings JSONL.
 # Usage: semgrep.sh <project-dir> <profile> <out-jsonl>
 
+# Inherited shell functions never answer for a tool. Every command name can be
+# shadowed, `builtin` included, but an assignment cannot: POSIXLY_CORRECT turns
+# on POSIX mode, where the special builtins `unset` and `set` are found before
+# functions, so the first purge cannot be intercepted (see run-diff.sh).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset -f semgrep python3
+builtin unset _sg_fn
+
 set -euo pipefail
 
 PROJECT_DIR="${1:?project-dir required}"
 PROFILE="${2:?profile required}"
 OUT="${3:?out-jsonl required}"
 
-if ! command -v semgrep >/dev/null 2>&1; then
-  echo "warn: semgrep not installed — skipping SAST stage" >&2
+SEMGREP_BIN="$(builtin type -P semgrep)" || SEMGREP_BIN=""
+PYTHON3_BIN="$(builtin type -P python3)" || PYTHON3_BIN=""
+if [ -z "$SEMGREP_BIN" ] || [ -z "$PYTHON3_BIN" ]; then
+  echo "warn: semgrep or python3 not installed — skipping SAST stage" >&2
   : > "$OUT"
   exit 2
 fi
@@ -56,12 +70,12 @@ RAW="$(mktemp)"
 trap 'rm -f "$RAW"' EXIT
 
 # --error 0: do not exit non-zero just because findings exist; --metrics off: no telemetry.
-if ! semgrep scan --json --metrics=off --quiet "${CONFIGS[@]}" "${EXCLUDES[@]}" "$PROJECT_DIR" >"$RAW" 2>/dev/null; then
+if ! "$SEMGREP_BIN" scan --json --metrics=off --quiet "${CONFIGS[@]}" "${EXCLUDES[@]}" "$PROJECT_DIR" >"$RAW" 2>/dev/null; then
   echo "warn: semgrep exited non-zero — partial output (if any) used" >&2
 fi
 
 # Normalize → JSONL of {tool, rule, severity, file, line, message}
-python3 - "$RAW" "$PROJECT_DIR" >"$OUT" <<'PY'
+"$PYTHON3_BIN" -I - "$RAW" "$PROJECT_DIR" >"$OUT" <<'PY'
 import json, sys, os
 raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
 sev_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}

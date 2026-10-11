@@ -82,12 +82,142 @@ PROCESS_GATE_STACK_PROFILE="web-next"
 
 If `local.config.sh` is missing the canonical scripts use sensible defaults and warn that no stack profile is declared.
 
+### Gate config is read from the range base, as data
+
+Gate config is read from the BASE of the gated range — `a` in `a..b`, the
+merge-base in `a...b`, the revision itself for a single-rev range — with git,
+never from the working tree. It covers:
+
+- `process-gate-local/local.config.sh` (both twins, the active harness's
+  loaded last so it wins; the deprecated `.claude/skills/process-gate/local.config.sh`
+  only when neither twin exists);
+- `secrets-allowlist.txt`;
+- stack validators and the helpers they declare (below).
+
+Every one of these paths is looked up in the BASE tree, ancestor by ancestor:
+each directory on the way (`.claude`, `.agents`, `skills`, the deprecated
+`process-gate` directory, a validator's own directories) must be a tree there,
+and the file a regular blob. A symlink, submodule or file on the way, a leaf
+that is not a regular file, or a failed lookup is `BLOCKED`, never treated as
+absent; only true absence counts as absent. An unresolvable base is `BLOCKED`.
+
+`local.config.sh` is parsed as data, not sourced. Allowed lines: blank lines,
+`# comments`, `PROCESS_GATE_<NAME>=<value>` and
+`PROCESS_GATE_<NAME>=( <value> ... )` (on one line or several, empty items
+kept), each optionally followed by ` # comment`. A value is one of:
+
+- a bare word of `A-Z a-z 0-9 _ . / : @ % + , = -`;
+- a `"double-quoted"` literal with no `$`, backtick, `;`, `"` or backslash;
+- a `'single-quoted'` literal with no `$`, backtick, `;` or `'`;
+- `"${PROCESS_GATE_X:-<literal>}"` assigned to that same `PROCESS_GATE_X`
+  (an inherited value wins), with nothing nested inside.
+
+Any other line — a function, a command, `export`, `source`, a default for a
+different key — makes the run `BLOCKED` with `process-gate local config is not
+data`.
+
+**Validator code.** `run-all.sh` copies the regular files of both twins'
+`process-gate-local/` trees, every project validator the base config names and
+every path in `PROCESS_GATE_VALIDATOR_DEPS` out of the base commit into a
+private trusted root, and runs validators only from there. It exports that
+root to them as `PG_TRUSTED_ROOT`, set by `run-all.sh` itself and never taken
+from the caller; copies keep the exec bit of mode-100755 blobs. A validator
+path names a base-tree path: only the project ROOT is resolved physically
+(its logical spelling, its physical spelling, or an outside symlink to the
+root itself); everything below it is normalised lexically (`.`, `..`, `//`)
+and walked in the base tree, never through working-tree symlinks. That one
+mapping decides what is copied, what runs and what counts as a change. An
+absolute validator outside the project, or reached through a symlink into a
+project subdirectory, is refused.
+
+A validator's bytes come from that base copy, but it runs against the
+checkout under test: its cwd is the checkout and `PROCESS_GATE_PROJECT_DIR`
+holds the checkout's absolute path. A validator that locates the project from
+its own file path (`dirname "$0"`) finds the private copy instead; use
+`PROCESS_GATE_PROJECT_DIR`.
+
+While a validator runs, a guard loaded through `BASH_ENV` lets `.`/`source`
+load files only from the trusted root or this skill; sourcing a missing
+sibling, a cwd-relative file or a project helper fails the validator. Its
+helper API is narrower than native `source`: with explicit arguments it
+behaves natively; with none, the sourced file sees the validator's own
+arguments (`--range=<range>`), as at the validator's top level, so a source
+inside a function or after `set --`/`shift` must pass its arguments. The
+sourced code runs in the caller's variable scope. NOT intercepted:
+`builtin source`, `builtin .`, `command .`, helpers a validator executes
+rather than sources, and other interpreters. Those are reviewed code (LB-6).
+
+Every other bash the gate starts runs without a startup file or an imported
+function: both pre-push carriers and `run-all.sh` clear `BASH_ENV` and `ENV`,
+and start every bash with `bash -p`, which imports no exported function and
+reads no `BASH_ENV`. Only validators get the guard (so they cannot use `-p`).
+`run-all.sh` also drops every function it inherited before it runs anything;
+that purge starts with the assignment `POSIXLY_CORRECT=y`, so `unset` is found
+before any function and an exported `builtin`, `unset` or `set` cannot
+intercept it. A startup file inherited by `run-all.sh` itself runs before any
+of that, so a direct caller launches it clean:
+
+```bash
+bash -p <skill>/scripts/run-all.sh --mode=merge --range=<base>..<head>
+```
+
+The boundary: a project script that a validator or `PROCESS_GATE_TEST_CMD`
+executes as the code under test (a test suite, a build, `make lint`) runs
+from the range under review. That is reviewed project code, not gate config.
+To pin a helper, declare it in `PROCESS_GATE_VALIDATOR_DEPS` and run it from
+`$PG_TRUSTED_ROOT`.
+
+**Changes to gate config.** A range that adds, changes, deletes or renames
+gate config is still gated with the base config. Gate config here means:
+
+- `process-gate-local/**` or `security-gate-local/**` in either twin;
+- the loader paths pi and pi-subagents read, at any depth (pi can start in a
+  subdirectory): `.pi/`, `.agents/agents/`, `.agents/workflows/`,
+  `.agents/skills/` (each also as the bare path, e.g. replaced by a symlink),
+  plus `.trellis/` and `.trellis.json` (its `template.branch` steers the diff
+  base), also at any depth;
+- `.envrc` and `.env*` at any depth, matched by path only (their contents are
+  never read);
+- the security scanners' root config (`.gitleaks.toml`, `.gitleaksignore`,
+  `.semgrepignore`, `osv-scanner.toml`) and `<audit dir>/*-baseline-*.json`
+  for `audits` and every `SECURITY_GATE_AUDIT_DIR` the environment (which
+  can only add a dir) or the base-side security-gate config sets, read with
+  the security gate's own data grammar; a config it would not read as data
+  makes every `*-baseline-*.json` at any depth gate config;
+  these and the two items above are the same namespace the security gate's
+  diff mode reserves;
+- any `secrets-allowlist.txt`;
+- the deprecated config;
+- a validator path or a declared dependency.
+
+Any changed path with a non-ASCII byte anywhere is gate config (release-owner
+ruling: a case-insensitive checkout folds `.agents/ſkills/x` into
+`.agents/skills/x`, and no look-alike list is complete). ASCII paths match on
+their NFKC + case-folded form (on a case-insensitive checkout `.PI/x` is
+`.pi/x`). The fold runs in `python3 -I`; without it the run BLOCKS.
+
+The rules by context:
+
+- **Push mode:** the verdict carries a notice: `gate config changed in range:
+  gated with BASE config; merge requires gate-config-approved: <head-sha>`.
+- **Merge mode:** `BLOCKED` unless the repo owner has posted the line
+  `gate-config-approved: <full head sha>` in a comment or non-dismissed review
+  on the one open PR whose head is that SHA. `run-all.sh` reads it with `gh`,
+  refuses an incomplete PR search, re-checks the PR is still open at that
+  head, and quotes the author and the line. Only the owner posts it; agents
+  never post or script it.
+- **A push that targets main/master:** pre-push passes `--target=main`. A
+  gate-config change is `BLOCKED` whether or not an approved PR exists; it
+  must merge through the PR.
+
+There is no override.
+
 ## The standard run
 
 When invoked, the skill:
 
 1. Reads each of the nine gate references so its advice reflects current rules (not stale training data).
-2. Sources `local.config.sh` if present.
+2. Reads `local.config.sh` (if present) as data from the range base — see above.
 3. Inspects the working tree (or the diff range provided) and runs each validator in order.
 4. Emits a verdict section in this exact shape:
 
@@ -124,13 +254,15 @@ A `❌ fail` in any category means **BLOCKED** regardless of other rows.
 SKILL_DIR=".claude/skills/process-gate"
 # Codex-enabled projects can use:
 # SKILL_DIR=".agents/skills/process-gate"
-bash "$SKILL_DIR/scripts/run-all.sh" --range=main..HEAD
+bash "$SKILL_DIR/scripts/run-all.sh" --base=main
 ```
+
+`--base=<ref>` gates `merge-base(<ref>, HEAD)..HEAD`; `--range=<start>..<end>` is used verbatim. Merge mode requires one of the two. In push mode, with neither flag, the diff-base resolver (`scripts/lib/diff-base.sh`) picks the base: PR base cache, recorded parent, creation reflog, upstream, then the default branch. If it cannot derive a base, every commit not on the local `main` (else `master`) is gated and the receipt says `via fallback`; with neither branch the run refuses, never gating only `HEAD~1..HEAD`. The verdict prints one `diff-base:` receipt line under its header naming the range it judged.
 
 ### Agent-invoked review
 
 1. Checkout the PR branch.
-2. Run scripts above with `--range=origin/main..HEAD`.
+2. Run scripts above with `--base=origin/main`, or `--base=origin/<pr-base>` for a stacked PR.
 3. Emit the verdict section verbatim in the PR review comment.
 4. For each finding, attach the exact file:line anchor.
 

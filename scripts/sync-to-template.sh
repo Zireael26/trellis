@@ -516,16 +516,9 @@ sync_paths=(
   'AGENT_SETUP.md'
   'AGENT_UPGRADE.md'
   'AGENT_ONBOARD_PROJECT.md'
-  # 'AGENT_PI_SETUP.md' is HELD, not delisted (Spec 053 C7). The updated guide
-  # installs core-rules/pi/extensions/trellis-web-search.ts, which a
-  # cross-family security review blocked, so the guide must not publish ahead
-  # of it. Leaving the path out of this allowlist means the sync neither
-  # copies nor removes it: the previously published guide stays public,
-  # unchanged, until the review approves. Do not add it to delist_prune.
-  # 'docs/PI-COMPUTER-USE.md' is HELD on the same terms and for the same review:
-  # its update describes the held guide's base (0.87.1, the /mcp connect in
-  # step 5), so publishing it alone would make the public docs disagree. The
-  # previously published copy stays public, unchanged. Not in delist_prune.
+  # The spec 053 C7 holds on these three lifted in 1.3.12 after the C7 re-review.
+  'AGENT_PI_SETUP.md'
+  'docs/PI-COMPUTER-USE.md'
   'docs/PI-COMPUTER-USE-UPGRADE-PROMPT.md'
   'docs/pi-web-search.md'
   'CHANGELOG.md'
@@ -613,16 +606,13 @@ payload_no_publish=(
   'scripts/lib/usage_federation'
   # Its test suite names the same provider modules, so it is withheld with it.
   'scripts/tests/usage-federation.bats'
-  # Spec 056 publish hold (supersedes the spec 053 C7 BLOCK): the pi web-search
-  # extension ships to the mirror only after its cross-family security
-  # re-review. The hold is lifted by removing these entries and their
-  # delist_prune pairs. Its tests use the provider's capitalised spelling, which
-  # the mirror-lint path-scoped allowance does not yet cover.
-  'core-rules/pi/extensions/trellis-web-search.ts'
+  # Spec 056 lifted the hold on the pi web-search extension itself in 1.3.12,
+  # after the spec 053 C7 cross-family re-review. Its tests stay withheld: they
+  # spell the provider in capitals outside the lint's one-file allowance and
+  # carry synthetic /Users/ sentinels, both of which the mirror lint rejects.
   'core-rules/pi/extensions/tests'
-  # The guide-parity tooling proves the held guide; it checks for the withheld
-  # extension, so it would fail in a mirror that has neither. Withheld with it.
-  'scripts/pi-guide-parity.sh'
+  # The guide-parity script publishes with the guide, which names it. Its bats
+  # suite stays withheld: its synthetic /Users/ paths fail the mirror lint.
   'scripts/tests/pi-guide-parity.bats'
 )
 
@@ -638,9 +628,7 @@ payload_no_publish=(
 delist_prune=(
   'scripts/lib/usage_federation'
   'scripts/tests/usage-federation.bats'
-  'core-rules/pi/extensions/trellis-web-search.ts'
   'core-rules/pi/extensions/tests'
-  'scripts/pi-guide-parity.sh'
   'scripts/tests/pi-guide-parity.bats'
   'core-rules/pi/agents'
   'core-rules/usage-federation'

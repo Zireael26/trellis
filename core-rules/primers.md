@@ -17,7 +17,9 @@ unaffected by any of this.
 
 The `inject-primer-index` SessionStart hook auto-injects
 `.claude/primers/INDEX.md` — one line per primer, with a drift flag (FRESH /
-WARM / STALE / MISSING_PATHS / UNREACHABLE_PIN / BROKEN / NO_ENTRY_POINTS). You
+CHANGED / MISSING_PATHS / UNREACHABLE_PIN / BROKEN / NO_ENTRY_POINTS / UNKNOWN).
+At startup the hook only compares the entry-point trees at the pin and HEAD; it
+does not count commits, so WARM / STALE come from `/primer-check`. You
 do not need to read INDEX manually. The path resolves at the canonical repo root
 via `git rev-parse --git-common-dir`, the same pattern as `context-log.md`.
 
@@ -28,8 +30,9 @@ via `git rev-parse --git-common-dir`, the same pattern as `context-log.md`.
    that is why the primer exists. Cost is ~3 KB; re-exploring costs 50× that.
 2. If the relevant primer shows drift status WARM, FRESH, or no flag, load and
    use it.
-3. If it shows STALE / MISSING_PATHS / UNREACHABLE_PIN / BROKEN, tell the user
-   before relying on it and offer `/primer-refresh`.
+3. If it shows CHANGED / STALE / MISSING_PATHS / UNREACHABLE_PIN / BROKEN, tell
+   the user before relying on it and offer `/primer-refresh` (`/primer-check`
+   sizes a CHANGED primer's drift as WARM or STALE).
 4. If the task touches a feature with no primer, do the work, then propose
    `/primer <feature-slug>` at the end to capture what you learned.
 

@@ -12,7 +12,7 @@ function fixture(t) {
   const attach = (name, policy = true) => {
     const root = resolve(base, name);
     mkdirSync(resolve(root, '.trellis/runtime/core-rules/pi/hooks'), { recursive: true });
-    writeFileSync(resolve(root, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh'), 'fixture');
+    writeFileSync(resolve(root, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh'), 'fixture', { mode: 0o755 });
     writeFileSync(resolve(root, '.trellis/runtime/trellis.config.json'), '{}');
     if (policy) {
       mkdirSync(resolve(root, '.agents/rules'), { recursive: true });
@@ -116,6 +116,8 @@ test('valid nested symlink runtime selects its own root instead of the parent', 
   assert.deepEqual(f.fire('resources_discover', { cwd }), { skillPaths: [resolve(nested, '.agents/skills')], promptPaths: [resolve(nested, '.agents/commands')] });
   assert.match(f.fire('before_agent_start', { systemPrompt: 'parent' }, ctx).systemPrompt, /attached\/nested policy/);
   assert.equal(await f.fire('tool_call', call(), ctx), undefined);
+  assert.equal(f.calls.length, 0); // Read pre-action is entirely in-process.
+  await f.fire('tool_result', result(), ctx);
   assert.equal(f.calls[0].options.cwd, nested);
   assert.equal(f.calls[0].script, resolve(runtime, 'core-rules/pi/hooks/dispatch.sh'));
 });
@@ -148,18 +150,19 @@ for (const toolName of ['Agent', 'SubagentWorkflow']) {
   });
 }
 
-test('builtin searches and unknown tools bypass only the policy guard without file read credit', async t => {
+test('pure builtin searches pass without policy; unknown tools refuse without file read credit', async t => {
   const f = fixture(t);
   const ctx = { ...f.ctx, cwd: f.attach('missing', false) };
-  for (const toolName of ['grep', 'find', 'ls', 'agent', 'custom']) {
+  for (const toolName of ['grep', 'find', 'ls']) {
     assert.equal(await f.fire('tool_call', { ...call(toolName), toolName }, ctx), undefined);
     const action = f.calls.at(-1).event.action;
     assert.equal(action.tool_name, toolName);
-    assert.equal(action.family, ['grep', 'find', 'ls'].includes(toolName) ? 'local_tool' : 'unknown');
+    assert.equal(action.family, 'local_tool');
     assert.equal(action.target_coverage, 'none');
     assert.deepEqual(action.targets, []);
   }
-  assert.equal(f.calls.length, 5);
+  for (const toolName of ['agent', 'custom']) assert.equal((await f.fire('tool_call', { ...call(toolName), toolName }, ctx)).block, true);
+  assert.equal(f.calls.length, 3);
 });
 
 test('post envelope retains deep pre-input snapshot after trusted handler mutation', async t => {

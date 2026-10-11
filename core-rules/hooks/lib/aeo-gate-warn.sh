@@ -35,7 +35,25 @@ case "$ENABLED" in
   *) _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=malformed enabled flag" ;;
 esac
 
-RANGE=${AEO_GATE_RANGE:-origin/main..HEAD}
+RANGE=${AEO_GATE_RANGE:-}
+if [ -z "$RANGE" ]; then
+  # Spec 067: the default is the process-gate diff-base resolver's range.
+  DIFF_BASE=""
+  for candidate in \
+    "$ROOT/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$ROOT/.codex/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$ROOT/.agents/skills/process-gate/scripts/lib/diff-base.sh" \
+    "${TRELLIS_ROOT:-}/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
+  do
+    if [ -f "$candidate" ]; then
+      DIFF_BASE="$candidate"
+      break
+    fi
+  done
+  [ -n "$DIFF_BASE" ] || _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=diff-base resolver unavailable"
+  RANGE=$(cd "$ROOT" && bash "$DIFF_BASE" resolve --format=kv 2>/dev/null | sed -n 's/^DB_RANGE=//p')
+  [ -n "$RANGE" ] || _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=no diff base resolvable"
+fi
 if ! CHANGED=$(git -C "$ROOT" diff --no-renames --name-only --diff-filter=ACDMR "$RANGE" -- 2>/dev/null); then
   _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=git range unavailable"
 fi

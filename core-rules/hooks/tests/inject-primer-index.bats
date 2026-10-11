@@ -62,7 +62,12 @@ EOF
   [[ "$output" == *"foo — FRESH"* ]]
 }
 
-@test "v031: emits STALE when entry-point churned past threshold" {
+# Lean C04: startup no longer counts commits (`rev-list <pin>..HEAD -- paths`
+# walked the commit graph once per primer and hit the 5 s timeout on deep
+# histories). It compares the entry-point trees at the pin and HEAD instead;
+# /primer-check still produces the WARM/STALE commit count on demand.
+@test "C04: entry points that differ from the pin are CHANGED, not counted (both twins)" {
+  local hook
   mkdir -p "$PROJECT_DIR/.claude/primers"
   echo "v1" > "$PROJECT_DIR/foo.txt"
   ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "seed" )
@@ -85,10 +90,97 @@ pinned_to: $SHA
 - \`foo.txt\`
 EOF
 
+  for hook in "$HOOK" "$CODEX_HOOKS_DIR/inject-primer-index.sh"; do
+    run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' CODEX_PROJECT_DIR='$PROJECT_DIR' '$hook'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"foo — CHANGED"* ]] || { echo "$hook: $output"; false; }
+    [[ "$output" == *"/primer-check"* ]] || { echo "$hook: $output"; false; }
+    [[ "$output" != *"STALE"* && "$output" != *"WARM"* && "$output" != *"commits"* ]] || { echo "$hook still counts commits: $output"; false; }
+  done
+}
+
+@test "C04: entry points churned and restored to the pinned content stay FRESH" {
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "v1" > "$PROJECT_DIR/foo.txt"
+  ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  echo "v2" > "$PROJECT_DIR/foo.txt"
+  ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "churn" )
+  echo "v1" > "$PROJECT_DIR/foo.txt"
+  ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "restore" )
+
+  cat > "$PROJECT_DIR/.claude/primers/INDEX.md" <<EOF
+- [foo](./foo.md) — sample
+EOF
+  cat > "$PROJECT_DIR/.claude/primers/foo.md" <<EOF
+---
+slug: foo
+pinned_to: $SHA
+---
+## Entry points
+- \`foo.txt\`
+EOF
+
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"STALE"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"/primer-refresh"* ]]
+  [[ "$output" == *"foo — FRESH"* ]] || { echo "$output"; false; }
+}
+
+@test "C04: startup never walks the commit graph and finishes despite a hanging walk (both twins)" {
+  local hook start elapsed
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  echo "v1" > "$PROJECT_DIR/foo.txt"
+  ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "seed" )
+  SHA=$( cd "$PROJECT_DIR" && git rev-parse HEAD )
+  echo "v2" > "$PROJECT_DIR/foo.txt"
+  ( cd "$PROJECT_DIR" && git add foo.txt && git commit -q -m "bump" )
+  printf -- '- [p%s](./p%s.md) — primer\n' 1 1 2 2 3 3 > "$PROJECT_DIR/.claude/primers/INDEX.md"
+  for i in 1 2 3; do
+    printf -- '---\nslug: p%s\npinned_to: %s\n---\n## Entry points\n- `foo.txt`\n' "$i" "$SHA" \
+      > "$PROJECT_DIR/.claude/primers/p$i.md"
+  done
+
+  REAL_GIT=$(command -v git)
+  GIT_LOG="$BATS_TEST_TMPDIR/git-argv.log"
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-hanging-walk"
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/git" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$GIT_LOG"
+case " \$* " in
+  *" rev-list "*|*" log "*|*" merge-base "*) sleep 10 ;;
+esac
+exec "$REAL_GIT" "\$@"
+EOS
+  chmod +x "$FAKE_BIN/git"
+
+  for hook in "$HOOK" "$CODEX_HOOKS_DIR/inject-primer-index.sh"; do
+    : > "$GIT_LOG"
+    start=$(date +%s)
+    run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$hook\" <<< '{\"source\":\"startup\"}'"
+    elapsed=$(( $(date +%s) - start ))
+    [ "$status" -eq 0 ]
+    [ "$elapsed" -lt 4 ] || { echo "$hook took ${elapsed}s"; false; }
+    if grep -E '(^| )(rev-list|log|merge-base)( |$)' "$GIT_LOG"; then
+      echo "$hook walked the commit graph at startup"; false
+    fi
+    [[ "$output" == *"p1 — CHANGED"* && "$output" == *"p3 — CHANGED"* ]] || { echo "$hook: $output"; false; }
+  done
+}
+
+@test "C04: injected index stays within the 1,500-char cap" {
+  local i
+  mkdir -p "$PROJECT_DIR/.claude/primers"
+  : > "$PROJECT_DIR/.claude/primers/INDEX.md"
+  for i in $(seq 1 80); do
+    printf -- '- [primer-with-a-long-slug-%02d](./primer-with-a-long-slug-%02d.md) — x\n' "$i" "$i" \
+      >> "$PROJECT_DIR/.claude/primers/INDEX.md"
+  done
+  run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
+  [ "$status" -eq 0 ]
+  ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
+  [ "${#ctx}" -le 1500 ] || { echo "context is ${#ctx} chars"; false; }
+  [[ "$ctx" == *"...[trimmed]" ]]
 }
 
 @test "v031: emits MISSING_PATHS when entry-point file deleted" {
@@ -253,7 +345,7 @@ EOF
   [[ "$output" == *"s — FRESH"* ]]
 }
 
-# --- v032 guards: no-git, rev-list error, multiline comment (both twins) ---
+# --- v032 guards: no-git, drift-comparison error, multiline comment (both twins) ---
 
 @test "v032: no-git yields UNKNOWN not FRESH (canonical)" {
   mkdir -p "$PROJECT_DIR/.claude/primers"
@@ -338,7 +430,7 @@ EOS
   [[ "$output" == *"p2 — UNKNOWN"* || "$output" == *"p2 — INDETERMINATE"* ]] || { echo "p2 not UNKNOWN codex: $output"; false; }
 }
 
-@test "v032: rev-list failure yields UNKNOWN not FRESH (canonical)" {
+@test "v032: drift-comparison failure yields UNKNOWN not FRESH (canonical)" {
   mkdir -p "$PROJECT_DIR/.claude/primers"
   echo "v1" > "$PROJECT_DIR/entry.txt"
   ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
@@ -355,12 +447,12 @@ pinned_to: $SHA
 - \`entry.txt\`
 EOF
   REAL_GIT=$(command -v git)
-  FAKE_BIN="$BATS_TEST_TMPDIR/fake-revlist-canonical"
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-difftree-canonical"
   mkdir -p "$FAKE_BIN"
   cat > "$FAKE_BIN/git" <<EOS
 #!/usr/bin/env bash
-if [[ "\$*" == *"rev-list"* ]]; then
-  echo "simulated rev-list failure" >&2
+if [[ "\$*" == *"diff-tree"* ]]; then
+  echo "simulated diff-tree failure" >&2
   exit 1
 fi
 exec "$REAL_GIT" "\$@"
@@ -368,12 +460,12 @@ EOS
   chmod +x "$FAKE_BIN/git"
   run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$HOOK\" <<< '{\"source\":\"startup\"}'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on rev-list error canonical: $output"; false; }
-  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on rev-list error canonical: $output"; false; }
-  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on rev-list error canonical: $output"; false; }
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on diff-tree error canonical: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on diff-tree error canonical: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on diff-tree error canonical: $output"; false; }
 }
 
-@test "v032: rev-list failure yields UNKNOWN not FRESH (codex)" {
+@test "v032: drift-comparison failure yields UNKNOWN not FRESH (codex)" {
   mkdir -p "$PROJECT_DIR/.claude/primers"
   echo "v1" > "$PROJECT_DIR/entry.txt"
   ( cd "$PROJECT_DIR" && git add -A && git commit -q -m "seed" )
@@ -390,12 +482,12 @@ pinned_to: $SHA
 - \`entry.txt\`
 EOF
   REAL_GIT=$(command -v git)
-  FAKE_BIN="$BATS_TEST_TMPDIR/fake-revlist-codex"
+  FAKE_BIN="$BATS_TEST_TMPDIR/fake-difftree-codex"
   mkdir -p "$FAKE_BIN"
   cat > "$FAKE_BIN/git" <<EOS
 #!/usr/bin/env bash
-if [[ "\$*" == *"rev-list"* ]]; then
-  echo "simulated rev-list failure" >&2
+if [[ "\$*" == *"diff-tree"* ]]; then
+  echo "simulated diff-tree failure" >&2
   exit 1
 fi
 exec "$REAL_GIT" "\$@"
@@ -404,9 +496,9 @@ EOS
   CODEX_HOOK="$CODEX_HOOKS_DIR/inject-primer-index.sh"
   run bash -c "PATH=\"$FAKE_BIN:\$PATH\" CLAUDE_PROJECT_DIR=\"$PROJECT_DIR\" CODEX_PROJECT_DIR=\"$PROJECT_DIR\" bash \"$CODEX_HOOK\" <<< '{\"source\":\"startup\"}'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on rev-list error codex: $output"; false; }
-  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on rev-list error codex: $output"; false; }
-  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on rev-list error codex: $output"; false; }
+  [[ "$output" != *"FRESH"* ]] || { echo "unexpected FRESH on diff-tree error codex: $output"; false; }
+  [[ "$output" == *"UNKNOWN"* || "$output" == *"INDETERMINATE"* ]] || { echo "expected UNKNOWN on diff-tree error codex: $output"; false; }
+  [[ "$output" == *"p1 — UNKNOWN"* || "$output" == *"p1 — INDETERMINATE"* ]] || { echo "p1 not UNKNOWN on diff-tree error codex: $output"; false; }
 }
 
 @test "v032: codex multiline HTML comment does not produce phantom MISSING_FILE" {

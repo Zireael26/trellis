@@ -516,10 +516,14 @@ attachment_contextual_render_context() {
   _attachment_canonical_dir "$user_home" || return "$TRELLIS_EX_STATE"
   launcher="$user_home/.local/bin/trellis"
   if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+    _attachment_diag "launcher missing at $launcher; install it (docs/UPGRADING.md \"Reinstalling the launcher\") and retry"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
   _attachment_canonical_file "$launcher" || return "$TRELLIS_EX_STATE"
-  [ -x "$launcher" ] || return "$TRELLIS_EX_STATE"
+  if [ ! -x "$launcher" ]; then
+    _attachment_diag "launcher at $launcher is not executable; install it (docs/UPGRADING.md \"Reinstalling the launcher\") and retry"
+    return "$TRELLIS_EX_STATE"
+  fi
   user_home_shell="$(attachment_contextual_posix_shell_quote "$user_home")" || return "$?"
   trellis_home_shell="$(attachment_contextual_posix_shell_quote "$trellis_home")" || return "$?"
   launcher_shell="$(attachment_contextual_posix_shell_quote "$launcher")" || return "$?"
@@ -578,8 +582,7 @@ attachment_contextual_template_expected() {
 [
   {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context claude \"$CLAUDE_PROJECT_DIR\""},
   {"path":["hooks","SessionStart",0,"hooks",1,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context claude \"$CLAUDE_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index claude \"$CLAUDE_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",3,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook skill-size-preflight claude \"$CLAUDE_PROJECT_DIR\""}
+  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index claude \"$CLAUDE_PROJECT_DIR\""}
 ]
 JSON
       ;;
@@ -947,13 +950,15 @@ _attachment_hooks_verify_passthrough_shims() {
 
 _attachment_hooks_current_path() {
   local root=$1 values rc count
-  values=$(git -C "$root" config --local --get-all core.hooksPath 2>/dev/null)
+  # Preserve every value, including trailing empty values, as doctor does.
+  values=$(git -C "$root" config --local --get-all core.hooksPath 2>/dev/null && printf '.')
   rc=$?
+  values="${values%.}"
   case "$rc" in
     0)
-      count=$(printf '%s\n' "$values" | wc -l | tr -d ' ') || return 4
+      count=$(printf '%s' "$values" | wc -l | tr -d ' ') || return 4
       [ "$count" -eq 1 ] || return 3
-      printf '%s\n' "$values"
+      printf '%s' "$values"
       ;;
     1) printf '\n' ;;
     *) return 4 ;;
@@ -1547,10 +1552,12 @@ trellis_release_manifest_valid() {
   ' "$release_json" >/dev/null 2>&1
 }
 
-trellis_verify_release() (
+# The sealed-store checks both release checks below share: the store layout,
+# the read-only release and payload directories, release.json's pinned sha256
+# and manifest shape, and nothing beside release.json and payload.
+trellis_verify_release_anchor() {
   local payload="${1:-}" release_dir="" releases_dir="" release_json="" version="" hash=""
-  local tmpdir="" manifest_paths="" manifest_dirs="" actual_paths="" actual_dirs="" entry="" base=""
-  local mode="" oid="" path="" full="" parent="" actual_mode="" actual_oid="" target="" rel=""
+  local entry="" base="" parent=""
 
   [ -n "$expected_release_manifest_sha256" ] || return 1
   [ "$payload" = "$expected_payload" ] || return 1
@@ -1581,6 +1588,17 @@ trellis_verify_release() (
     base="${entry##*/}"
     case "$base" in release.json|payload) ;; *) return 1 ;; esac
   done
+}
+
+trellis_verify_release() (
+  local payload="${1:-}" release_dir="" release_json="" version=""
+  local tmpdir="" manifest_paths="" manifest_dirs="" actual_paths="" actual_dirs=""
+  local mode="" oid="" path="" full="" parent="" actual_mode="" actual_oid="" target="" rel=""
+
+  trellis_verify_release_anchor "$payload" || return 1
+  release_dir="${payload%/payload}"
+  version="${release_dir##*/}"
+  release_json="$release_dir/release.json"
 
   # Scratch belongs in this invocation's own private command scratch, never in
   # ambient temp space and no longer beside the sealed release store: TMPDIR is
@@ -1646,14 +1664,131 @@ trellis_verify_release() (
   diff -u "$manifest_dirs.sorted" "$actual_dirs.sorted" >/dev/null 2>&1 || return 1
 )
 
+# The post-checkout check. trellis_verify_release spawns about ten processes per
+# manifest entry, and post-checkout runs on every worktree add, branch switch
+# and rebase, so this checks only what that hook is about to run: the anchor
+# above, then in one python process the content, mode and read-only state of
+# every payload file the reconcile runs, sources or reads as code before its own
+# full release verify (release_store_locate) — or without one, when the registry
+# names another release, since seed-inheritance-symlinks.sh still sources this
+# payload's attach-project.sh. That attach can take the donor fast path
+# (attach-fastpath.py, which loads release-executed.py) and starts
+# attach-postjob.sh, which sources health-checks.sh and disk-janitor-agents.sh,
+# so those are listed too. A listed file the release lacks refuses. The rest of
+# the payload stays covered by that reconcile verify, by pre-push (its carriers
+# keep trellis_verify_release) and by doctor.
+trellis_verify_release_executed() {
+  local payload="${1:-}" release_dir="" python_bin="" program="" permissions="" path=""
+  local -a paths=(
+    scripts/seed-inheritance-symlinks.sh
+    scripts/lib/trellis-home.sh
+    scripts/lib/local-registry.sh
+    scripts/lib/release-store.sh
+    scripts/lib/semver.sh
+    scripts/lib/attachment.sh
+    scripts/attach-project.sh
+    scripts/lib/surface-plan.sh
+    scripts/lib/skill-roots.sh
+    scripts/trellis-launcher.sh
+    scripts/lib/trellis.machine.schema.json
+    scripts/lib/trellis.registry.schema.json
+    scripts/lib/attach-fastpath.py
+    scripts/lib/release-executed.py
+    scripts/lib/attach-postjob.sh
+    scripts/lib/health-checks.sh
+    scripts/lib/disk-janitor-agents.sh
+  )
+  local -a listed=("$payload/scripts" "$payload/scripts/lib")
+
+  trellis_verify_release_anchor "$payload" || return 1
+  release_dir="${payload%/payload}"
+  for path in "${paths[@]}"; do
+    listed+=("$payload/$path")
+  done
+  # One ls refuses any ACL; python checks the rest. On macOS the "@" an xattr
+  # puts after the mode hides the "+" of an ACL, so list the ACL entries
+  # themselves with -e (one " 0: user:... allow write" line each). Where ls has
+  # no -e (GNU), the mode column's "+" is reliable.
+  permissions="$(LC_ALL=C /bin/ls -lde -- "${listed[@]}" 2>/dev/null)" ||
+    permissions="$(LC_ALL=C /bin/ls -ld -- "${listed[@]}" 2>/dev/null)" || return 1
+  printf '%s\n' "$permissions" |
+    /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }' || return 1
+  python_bin="$(command -v python3)" || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  program="$(trellis_verify_executed_program)" || return 1
+  LC_ALL=C "$python_bin" -I -c "$program" \
+    "$payload" "$release_dir/release.json" "$expected_release_manifest_sha256" "${paths[@]}"
+}
+
+trellis_verify_executed_program() {
+  printf '%s' 'import hashlib
+import json
+import os
+import stat
+import sys
+
+payload, release_json, expected = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def refuse():
+    raise SystemExit(1)
+
+
+try:
+    with open(release_json, "rb") as handle:
+        raw = handle.read()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        refuse()
+    tree = {}
+    for item in json.loads(raw.decode("utf-8"))["tree"]:
+        tree[item["path"]] = item
+    for path in sys.argv[4:]:
+        item = tree.get(path)
+        if item is None or item["mode"] not in ("100644", "100755"):
+            refuse()
+        current = payload
+        for component in path.split("/")[:-1]:
+            current = current + "/" + component
+            info = os.lstat(current)
+            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o222:
+                refuse()
+        descriptor = os.open(payload + "/" + path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(descriptor)
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1048576)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222:
+            refuse()
+        if ("100755" if info.st_mode & 0o111 else "100644") != item["mode"]:
+            refuse()
+        content = b"".join(chunks)
+        if hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest() != item["oid"]:
+            refuse()
+except (OSError, ValueError, KeyError, TypeError):
+    refuse()
+'
+}
+
+# A third argument "verified" skips the release verify for a payload this
+# dispatcher run has just verified through this function.
 trellis_managed_payload_file() {
-  local payload="$1" source="$2" release_dir releases_dir candidate parent actual
+  local payload="$1" source="$2" verified="${3:-}" release_dir releases_dir candidate parent actual
   case "$source" in
-    scripts/seed-inheritance-symlinks.sh|core-rules/husky/pre-push|core-rules/githooks/pre-push) ;;
+    scripts/seed-inheritance-symlinks.sh|scripts/lib/attach-postjob.sh|core-rules/husky/pre-push|core-rules/githooks/pre-push) ;;
     *) return 1 ;;
   esac
   [ "$payload" = "$expected_payload" ] || return 1
-  trellis_verify_release "$payload" || return 1
+  case "$verified:$source" in
+    verified:*) ;;
+    *:scripts/seed-inheritance-symlinks.sh) trellis_verify_release_executed "$payload" || return 1 ;;
+    *) trellis_verify_release "$payload" || return 1 ;;
+  esac
   release_dir="${payload%/payload}"
   releases_dir="$(dirname "$release_dir")" || return 1
   [ "$releases_dir" = "$managed_home/releases" ] || return 1
@@ -1693,7 +1828,7 @@ trellis_run_prior_hook() {
   local -a prior_env=(
     "PATH=$caller_path" "HOME=$caller_home"
     "TMPDIR=$caller_tmpdir" "TMP=$caller_tmpdir" "TEMP=$caller_tmpdir"
-    'LC_ALL=C'
+    'LC_ALL=C' 'pnpm_config_verify_deps_before_run=error'
   )
   shift
   if [ "${caller_docker_host_set:-}" = x ]; then
@@ -1725,6 +1860,7 @@ trellis_run_control_payload() {
 
 trellis_run_gate_payload() {
   local executable="$1" toolchain_path="" gate_home="" owner="" mode="" reason=""
+  local -a gate_env
   shift
   if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ] || [ -L "$TMPDIR" ]; then
     reason="private command scratch is unavailable"
@@ -1749,22 +1885,31 @@ trellis_run_gate_payload() {
     return 1
   fi
   toolchain_path="$(trellis_gate_toolchain_path)" || return 1
-  /usr/bin/env -i \
-    PATH="$toolchain_path" \
-    HOME="$gate_home" \
-    TMPDIR="$TMPDIR" \
-    TMP="$TMPDIR" \
-    TEMP="$TMPDIR" \
-    LC_ALL=C \
-    GIT_CONFIG_NOSYSTEM=1 \
-    GIT_CONFIG_GLOBAL=/dev/null \
-    XDG_CONFIG_HOME="$gate_xdg_config" \
-    XDG_CACHE_HOME="$gate_xdg_cache" \
-    COREPACK_HOME="$gate_xdg_cache/node/corepack" \
-    TRELLIS_HOME="$managed_home" \
-    TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}" \
-    SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}" \
-    /bin/bash --noprofile --norc "$executable" "$@"
+  # The caller's DOCKER_HOST reaches the gate exactly when it was set
+  # (empty-but-set stays set, unset stays absent), mirroring
+  # trellis_run_prior_hook. The set/unset pair crossed the control-plane
+  # env -i as positional args and is never exported there.
+  gate_env=(
+    "PATH=$toolchain_path"
+    "HOME=$gate_home"
+    "TMPDIR=$TMPDIR"
+    "TMP=$TMPDIR"
+    "TEMP=$TMPDIR"
+    'LC_ALL=C'
+    'GIT_CONFIG_NOSYSTEM=1'
+    'GIT_CONFIG_GLOBAL=/dev/null'
+    "XDG_CONFIG_HOME=$gate_xdg_config"
+    "XDG_CACHE_HOME=$gate_xdg_cache"
+    "COREPACK_HOME=$gate_xdg_cache/node/corepack"
+    "TRELLIS_HOME=$managed_home"
+    # Bare-name form: older-payload fixtures age this file by deleting ^NAME= lines.
+    TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}"
+    SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}"
+  )
+  if [ "${caller_docker_host_set:-}" = x ]; then
+    gate_env+=("DOCKER_HOST=$caller_docker_host")
+  fi
+  /usr/bin/env -i "${gate_env[@]}" /bin/bash --noprofile --norc "$executable" "$@"
 }
 EOF
   printf '%s\n' "$predicate"
@@ -1874,12 +2019,73 @@ _attachment_hooks_post_checkout_dispatcher_body_in_process() {
   # A failed common body must not be hidden by the successful cat that follows.
   _attachment_hooks_dispatcher_common_body "${1:-}" "" "${2:-}" || return "$?"
   cat <<'EOF'
+# trellis-diff-base-creation-recorder-v1 (spec 067 T10; delivery marker)
+trellis_record_creation_base() {
+  local branch="" log="" record="" parent="" base="" stamp="" count="" head_log="" rc=0
+  [ "${3:-}" = 1 ] || return 0
+  branch="$(git -C "$project_root" symbolic-ref -q --short HEAD 2>/dev/null)" || return 0
+  # --local reads/writes the common config, even with extensions.worktreeConfig.
+  if git -C "$project_root" config --local --get "branch.$branch.trellisParent" >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] || return 1
+  fi
+  log="$(git -C "$project_root" rev-parse --git-path "logs/refs/heads/$branch")" || return 1
+  [ -f "$log" ] || return 0
+  record="$(awk -F '\t' '
+    { count++ }
+    !seen && index($2, "branch: Created from ") == 1 {
+      seen=1; n=split($1, meta, " ")
+      parent=substr($2, length("branch: Created from ")+1)
+      base=meta[2]; stamp=meta[n-1]
+    }
+    END { if (seen) printf "%s\t%s\t%s\t%d\n", parent, base, stamp, count }
+  ' "$log")" || return 1
+  [ -n "$record" ] || return 0
+  IFS=$'\t' read -r parent base stamp count <<< "$record"
+  # HEAD is not a stable parent name. Use the matching checkout reflog event,
+  # never the previous-head argument ($1), which may be null or unrelated.
+  if [ "$parent" = HEAD ]; then
+    head_log="$(git -C "$project_root" rev-parse --git-path logs/HEAD)" || return 1
+    [ -f "$head_log" ] || return 1
+    parent="$(awk -F '\t' -v branch="$branch" -v base="$base" -v stamp="$stamp" '
+      {
+        n=split($1, meta, " "); suffix=" to " branch
+        if (meta[2] == base && meta[n-1] == stamp &&
+            index($2, "checkout: moving from ") == 1 &&
+            substr($2, length($2)-length(suffix)+1) == suffix) {
+          print substr($2, length("checkout: moving from ")+1,
+            length($2)-length("checkout: moving from ")-length(suffix)); exit
+        }
+      }
+    ' "$head_log")" || return 1
+    [ -n "$parent" ] || return 1
+  fi
+  # On a fresh branch $2 is the start commit; on a later checkout retain the
+  # creation entry SHA, not today's tip. No ancestry heuristic is used.
+  if [ "$count" -eq 1 ]; then base="${2:-}"; fi
+  git -C "$project_root" rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1 || return 1
+  # Parent last: a failed earlier write must not publish an incomplete record.
+  git -C "$project_root" config --local "branch.$branch.trellisBase" "$base" || return 1
+  git -C "$project_root" config --local "branch.$branch.trellisSource" post-checkout || return 1
+  git -C "$project_root" config --local "branch.$branch.trellisParent" "$parent" || return 1
+}
+if ! trellis_record_creation_base "$@"; then
+  printf 'trellis post-checkout: warning: could not record branch creation base; use diff-base.sh set <parent>.\n' >&2
+fi
 previous="$(trellis_read_sidecar "$managed_dir/previous-hooks-path" true)" || exit 1
 prior_status=0
 prior_hook="$(trellis_prior_hook "$previous" post-checkout)" || prior_hook=""
 if [ -n "$prior_hook" ] && { [ -f "$prior_hook" ] || [ -L "$prior_hook" ]; } && [ -x "$prior_hook" ]; then
   trellis_run_prior_hook "$prior_hook" "$@"
   prior_status=$?
+fi
+# Git passes 0 as the third argument for a file checkout (`git checkout --
+# <path>`, `git restore`). It changes no branch and adds no worktree, so only
+# the prior hook runs. A branch switch, a rebase and a new worktree pass 1.
+if [ "${3:-}" = 0 ]; then
+  exit "$prior_status"
 fi
 reconcile_status=0
 reconcile_output=""
@@ -1900,6 +2106,9 @@ if [ "$reconcile_status" -ne 0 ]; then
   [ -z "$reconcile_output" ] || printf '%s\n' "$reconcile_output" >&2
   exit "$reconcile_status"
 fi
+# trellis-deferred-release-verify: the check before the reconcile covered only
+# the files it runs. The async attachment-status job (1.3.12 A4) starts the
+# full release verify here; pre-push still runs it in full before any carrier.
 exit 0
 EOF
 }
@@ -1908,6 +2117,25 @@ _attachment_hooks_pre_push_dispatcher_body_in_process() {
   # A failed common body must not be hidden by the successful cat that follows.
   _attachment_hooks_dispatcher_common_body "${1:-}" "${2:-}" "${3:-}" || return "$?"
   cat <<'EOF'
+# Leave the common body's EXIT scratch cleanup intact, including signal exits.
+trellis_pre_push_postcheck() {
+  local local_hooks effective_hooks
+  local_hooks="$(git -C "$project_root" config --local --get-all core.hooksPath 2>/dev/null || true; printf '.')"
+  local_hooks="${local_hooks%.}"
+  effective_hooks="$(git -C "$project_root" config --get core.hooksPath 2>/dev/null || true)"
+  if [ "$local_hooks" = "$managed_dir"$'\n' ] && [ "$effective_hooks" = "$managed_dir" ]; then
+    return 0
+  fi
+  printf 'trellis pre-push: core.hooksPath does not match managed dispatcher — restore with: git config --replace-all core.hooksPath %q\n' "$managed_dir" >&2
+  if [ "$(git -C "$project_root" config --bool --get extensions.worktreeConfig 2>/dev/null || true)" = true ] &&
+     git -C "$project_root" config --worktree --get core.hooksPath >/dev/null 2>&1; then
+    printf 'core.hooksPath: clear worktree override with: git config --worktree --unset core.hooksPath\n' >&2
+  fi
+  return 1
+}
+trap 'trellis_pre_push_postcheck || :; exit 129' HUP
+trap 'trellis_pre_push_postcheck || :; exit 130' INT
+trap 'trellis_pre_push_postcheck || :; exit 143' TERM
 # Refs staging lives in the private command scratch, which the EXIT trap armed
 # above removes wholesale. A refs-only EXIT trap here would replace that trap
 # and leak the scratch directory, so there is none.
@@ -1928,12 +2156,28 @@ if payload="$(trellis_read_sidecar "$managed_dir/release-payload")" &&
    source="$(trellis_read_sidecar "$managed_dir/pre-push-source")" &&
    [ "$source" = "$expected_pre_push_source" ] &&
    carrier="$(trellis_managed_payload_file "$payload" "$source")"; then
-  trellis_run_gate_payload "$carrier" "$@" < "$refs_file"
-  carrier_status=$?
+  # The deferred attachment checks decide first: FAILED or blocked refuses,
+  # ok passes, anything else runs them inline. Only then does the gate run.
+  if postjob="$(trellis_managed_payload_file "$payload" scripts/lib/attach-postjob.sh verified)"; then
+    trellis_run_control_payload "$postjob" prepush --target "$project_root" < /dev/null
+    attach_status=$?
+  else
+    attach_status=1
+    printf 'trellis pre-push: managed attachment checks are unavailable\n' >&2
+  fi
+  if [ "$attach_status" -eq 0 ]; then
+    trellis_run_gate_payload "$carrier" "$@" < "$refs_file"
+    carrier_status=$?
+  else
+    carrier_status=1
+  fi
 else
   carrier_status=1
   printf 'trellis pre-push: managed immutable release carrier is unavailable\n' >&2
 fi
+# Check after BOTH hooks, even when no carrier ran. Mirror common.sh/doctor:
+# one literal local value plus the effective value, never last-local-value wins.
+trellis_pre_push_postcheck || exit 1
 if [ "$prior_status" -ne 0 ]; then
   exit "$prior_status"
 fi
@@ -2372,8 +2616,9 @@ _attachment_journal_json_valid() {
   _attachment_json_file "$file" || return 2
   [ "$(_attachment_mode "$file")" = 600 ] || return 3
   jq -e "(. as \$journal
-    | (del(.applied,.phase,.pending,.removal) | $_attachment_plan_filter)
-    and ((keys_unsorted - [\"applied\",\"phase\",\"pending\",\"removal\",\"artifacts\",\"attachment_id\",\"checkout_id\",\"exclude\",\"exclude_block_hash\",\"fleet\",\"git_hooks\",\"pre_existing\",\"project_id\",\"project_root\",\"release\",\"render_context\",\"renders\",\"schema_version\",\"status\",\"surface\",\"toolchain_path\",\"worktree_id\",\"worktree_root\"]) | length) == 0
+    | (del(.applied,.phase,.pending,.removal,.journal_version) | $_attachment_plan_filter)
+    and ((has(\"journal_version\") | not) or .journal_version == 2)
+    and ((keys_unsorted - [\"applied\",\"phase\",\"pending\",\"removal\",\"journal_version\",\"artifacts\",\"attachment_id\",\"checkout_id\",\"exclude\",\"exclude_block_hash\",\"fleet\",\"git_hooks\",\"pre_existing\",\"project_id\",\"project_root\",\"release\",\"render_context\",\"renders\",\"schema_version\",\"status\",\"surface\",\"toolchain_path\",\"worktree_id\",\"worktree_root\"]) | length) == 0
     and (.phase | type == \"number\" and floor == . and . >= 0 and . <= (\$journal.artifacts | length))
     and (.applied | type == \"array\")
     and .applied == .artifacts[0:.phase]
@@ -2489,7 +2734,7 @@ _attachment_owner_json_valid() {
 }
 
 _attachment_plan_from_journal() {
-  jq -cS 'del(.applied,.phase,.pending,.removal)' "$1"
+  jq -cS 'del(.applied,.phase,.pending,.removal,.journal_version)' "$1"
 }
 
 _attachment_owner_from_plan() {
@@ -3162,7 +3407,7 @@ _attachment_lock_release() {
     [ "$(dirname "$holder")/$(basename "$target")" = "$holder" ] || return 1
     rm "$link" || return 1
   fi
-  rm -f "$holder/owner.json" || return 1
+  rm -f "$holder/owner.json" "$holder/publisher.lock" || return 1
   rmdir "$holder" 2>/dev/null || return 1
   _ATTACHMENT_LOCK_LINK=
   _ATTACHMENT_LOCK_HOLDER=
@@ -3184,7 +3429,7 @@ _attachment_lock_acquire() {
     '{checkout_id:$checkout,worktree_id:$worktree,attachment_id:$attachment,pid:$pid,process_birth:$birth}') || { rmdir "$holder"; return 1; }
   _attachment_write_json "$holder/owner.json" "$metadata" || { rmdir "$holder" 2>/dev/null; return 1; }
   target=$(basename "$holder")
-  if ! ln -s -- "$target" "$link" 2>/dev/null; then
+  if ! ln -sn -- "$target" "$link" 2>/dev/null; then
     rm -f "$holder/owner.json"
     rmdir "$holder" 2>/dev/null
     return 3
@@ -3226,9 +3471,30 @@ _attachment_lock_reclaim() {
     [ -n "$current_birth" ] || return 4
     [ "$current_birth" != "$recorded_birth" ] || return 3
   fi
+  if [ -e "$holder/publisher.lock" ] || [ -L "$holder/publisher.lock" ]; then
+    [ -f "$holder/publisher.lock" ] && [ ! -L "$holder/publisher.lock" ] || return 4
+    _attachment_publisher_idle "$holder/publisher.lock" || return $?
+  fi
   rm "$link" || return 1
   rm "$metadata" || return 1
+  rm -f "$holder/publisher.lock" || return 1
   rmdir "$holder" || return 1
+}
+
+# A commit's publisher holds this flock until it exits, even when the shell
+# that owns the transaction lock was killed first. Returns 3 while it is held.
+_attachment_publisher_idle() {
+  local python_bin
+  python_bin=$(command -v python3) || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  "$python_bin" -I -c '
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(3)
+' "$1"
 }
 
 _attachment_test_stage_lock() {
@@ -3244,7 +3510,7 @@ _attachment_test_stage_lock() {
   metadata=$(jq -cn --arg checkout "$checkout" --arg worktree "$worktree" --arg attachment "$attachment" --arg birth "$birth" --argjson pid "$pid" \
     '{checkout_id:$checkout,worktree_id:$worktree,attachment_id:$attachment,pid:$pid,process_birth:$birth}') || return 1
   _attachment_write_json "$holder/owner.json" "$metadata" || return 1
-  ln -s -- "$(basename "$holder")" "$link"
+  ln -sn -- "$(basename "$holder")" "$link"
 }
 
 _attachment_checkout_lock_path() {
@@ -3287,7 +3553,7 @@ _attachment_checkout_lock_acquire() {
     '{checkout_id:$checkout,git_common_dir:$common,pid:$pid,process_birth:$birth}') || { rmdir "$holder"; return 1; }
   _attachment_write_json "$holder/owner.json" "$metadata" || { rmdir "$holder" 2>/dev/null; return 1; }
   target=$(basename "$holder")
-  if ! ln -s -- "$target" "$link" 2>/dev/null; then
+  if ! ln -sn -- "$target" "$link" 2>/dev/null; then
     rm -f "$holder/owner.json"
     rmdir "$holder" 2>/dev/null
     return 3
@@ -3351,7 +3617,7 @@ _attachment_test_stage_checkout_lock() {
   metadata=$(jq -cn --arg checkout "$checkout" --arg common "$common" --arg birth "$birth" --argjson pid "$pid" \
     '{checkout_id:$checkout,git_common_dir:$common,pid:$pid,process_birth:$birth}') || return 1
   _attachment_write_json "$holder/owner.json" "$metadata" || return 1
-  ln -s -- "$(basename "$holder")" "$link"
+  ln -sn -- "$(basename "$holder")" "$link"
 }
 
 _attachment_validate_journal_binding() {
@@ -3475,25 +3741,6 @@ _attachment_prepare_impl() {
   return 0
 }
 
-_attachment_set_pending() {
-  local journal=$1 artifact=$2 stage=$3 root=$4 next relative destination parent parent_identity
-  relative=$(printf '%s\n' "$artifact" | jq -r '.path') || return 2
-  _attachment_parent_safe "$root" "$relative" || return 3
-  destination=$(_attachment_destination "$root" "$relative")
-  parent=$(dirname "$destination") || return 2
-  _attachment_canonical_dir "$parent" || return 3
-  parent_identity=$(_attachment_fs_identity "$parent") || return 1
-  if [ -n "$stage" ]; then
-    [ "$(dirname "$stage")" = "$parent" ] || return 2
-    next=$(trellis_jq -cS --argjson artifact "$artifact" --arg stage "$stage" --arg parent_identity "$parent_identity" \
-      '.pending = {artifact:$artifact,staging_path:$stage,staging_identity:null,destination_identity:null,parent_identity:$parent_identity}' "$journal") || return 1
-  else
-    next=$(trellis_jq -cS --argjson artifact "$artifact" --arg parent_identity "$parent_identity" \
-      '.pending = {artifact:$artifact,staging_path:null,staging_identity:null,destination_identity:null,parent_identity:$parent_identity}' "$journal") || return 1
-  fi
-  _attachment_write_json "$journal" "$next"
-}
-
 _attachment_set_pending_identity() {
   local journal=$1 field=$2 identity=$3 next
   case "$field" in
@@ -3589,7 +3836,7 @@ _attachment_create_symlink_stage() (
   [ "$(_attachment_fs_identity .)" = "$expected_parent" ] || return 3
   stage="./$base"
   target=$(printf '%s\n' "$artifact" | jq -r '.target') || return 2
-  ln -s -- "$target" "$stage" 2>/dev/null || return 3
+  ln -sn -- "$target" "$stage" 2>/dev/null || return 3
   identity=$(_attachment_fs_identity "$stage") || return 1
   if ! _attachment_set_pending_identity "$journal" staging_identity "$identity"; then
     _attachment_remove_pinned "$journal" "$stage_path" "$artifact" "$identity" 1 0
@@ -3786,6 +4033,12 @@ _attachment_remove_pending_destination() {
   relative=$(printf '%s\n' "$artifact" | jq -r '.path') || return 2
   _attachment_parent_safe "$root" "$relative" || return 3
   destination=$(_attachment_destination "$root" "$relative")
+  # A replacement killed before its publish still holds the project's bytes,
+  # with no staged identity to prove ownership by: there is nothing to undo.
+  if printf '%s\n' "$artifact" | jq -e 'has("replace")' >/dev/null 2>&1 &&
+    _attachment_replace_before_matches "$destination" "$artifact"; then
+    return 0
+  fi
   _attachment_pending_destination_owned "$root" "$pending" "$journal" || return $?
   if printf '%s\n' "$artifact" | jq -e 'has("replace")' >/dev/null 2>&1; then
     _attachment_restore_replaced_file "$root" "$artifact"
@@ -3949,6 +4202,13 @@ _attachment_rollback_locked() {
   done < <(jq -c '.applied | reverse[]' "$journal")
 
   if [ "$pending" != null ]; then
+    # A kill between journaling the stage's removal and claiming it leaves
+    # that removal active, and the destination's removal refuses any other
+    # active claim. Finish the journaled one first.
+    if [ "$stage_rc" -eq 0 ] &&
+      [ "$(trellis_jq -r --argjson pending "$pending" '.removal != null and .removal.path == $pending.staging_path' "$journal")" = true ]; then
+      _attachment_remove_pending_stage "$root" "$pending" "$journal" || return $?
+    fi
     [ "$destination_rc" -ne 0 ] || _attachment_remove_pending_destination "$root" "$pending" "$journal" || return $?
     [ "$stage_rc" -ne 0 ] || _attachment_remove_pending_stage "$root" "$pending" "$journal" || return $?
   fi
@@ -3983,8 +4243,753 @@ _attachment_install_checkout_lock_traps() {
   trap '_attachment_signal_exit' TERM
 }
 
+# Journal v2: the commit marks the journal once (`journal_version: 2`) and
+# appends each per-artifact transition to a progress log instead of rewriting
+# the journal. Folding replays that log onto the journal's v1 fields, writes the
+# v1 shape back and drops the log, so rollback and recovery keep reading the v1
+# journal they always have. Releases without v2 refuse a marked journal as an
+# unknown shape instead of rolling back a prefix they cannot see. The log is
+# replayed only on top of a clean begin record, every event must follow from
+# the state before it, and a torn final line (a kill mid-append) is the step
+# before it.
+_attachment_progress_path() {
+  printf '%s/state/attachment-progress/%s.log\n' "$1" "$2"
+}
+
+_attachment_progress_fold_filter='
+  def exact($allowed): (keys | sort) == ($allowed | sort);
+  def ident: type == "string" and test("^[0-9]+:[0-9]+$");
+  ($log | split("\n") | .[0:-1] | map(fromjson)) as $events
+  | if ($events | length) == 0 then .
+    elif ($events[0] | exact(["attachment_id","e","phase","v"]) and .e == "begin" and .v == 2)
+      and $events[0].attachment_id == .attachment_id and $events[0].phase == .phase
+      and .pending == null and .removal == null
+    then reduce $events[1:][] as $event (.;
+      if $event.e == "pending" and ($event | exact(["e","index","parent_identity","staging_path"]))
+        and .pending == null and .removal == null and $event.index == .phase and .phase < (.artifacts | length)
+        and ($event.staging_path | type == "string") and ($event.parent_identity | ident)
+      then .pending = {artifact: .artifacts[.phase], staging_path: $event.staging_path, staging_identity: null,
+        destination_identity: null, parent_identity: $event.parent_identity}
+      elif ($event.e == "staging_identity" or $event.e == "destination_identity")
+        and ($event | exact(["e","identity"])) and ($event.identity | ident)
+        and .pending != null and .pending[$event.e] == null
+      then .pending[$event.e] = $event.identity
+      elif $event.e == "removal" and ($event | exact(["e","nonce","path"])) and .removal == null
+        and ($event.path | type == "string") and ($event.nonce | type == "string" and test("^[a-f0-9]{64}$"))
+      then .removal = {path: $event.path, nonce: $event.nonce}
+      elif $event.e == "removal_clear" and ($event | exact(["e"])) and .removal != null
+      then .removal = null
+      elif $event.e == "applied" and ($event | exact(["e","index"])) and .pending != null and .removal == null
+        and $event.index == .phase
+      then .applied += [.artifacts[.phase]] | .phase += 1 | .pending = null
+      else error("invalid attachment progress event") end)
+    else error("invalid attachment progress header") end
+  | del(.journal_version)'
+
+_attachment_fold_progress_log() {
+  local home=$1 journal=$2 log version next tmp status
+  log=$(_attachment_progress_path "$home" "$(jq -r '.attachment_id' "$journal")") || return 2
+  version=$(jq -r '.journal_version // 1' "$journal") || return 2
+  if [ -e "$log" ] || [ -L "$log" ]; then
+    _attachment_canonical_dir "$(dirname "$log")" && [ -f "$log" ] && [ ! -L "$log" ] &&
+      [ "$(_attachment_mode "$log")" = 600 ] || return 3
+  fi
+  if [ "$version" = 2 ]; then
+    [ ! -L "$journal" ] || return 3
+    if [ -f "$log" ]; then
+      next=$(jq -cS --rawfile log "$log" "$_attachment_progress_fold_filter" "$journal") || return 2
+    else
+      next=$(jq -cS 'del(.journal_version)' "$journal") || return 2
+    fi
+    tmp=$(mktemp "$journal.tmp.XXXXXX") || return 1
+    { chmod 600 "$tmp" && printf '%s\n' "$next" > "$tmp"; } || { rm -f "$tmp"; return 1; }
+    _attachment_journal_json_valid "$tmp" || { status=$?; rm -f "$tmp"; return "$status"; }
+    mv -f "$tmp" "$journal" || { rm -f "$tmp"; return 1; }
+  fi
+  # The fold writes the journal before it drops the log, so a log beside an
+  # unmarked journal has already been replayed into it. Drop the directory
+  # when it is empty so a rolled-back attach leaves no mark behind; a
+  # concurrent commit keeps it alive by holding its own log.
+  [ ! -f "$log" ] || rm "$log" || return 1
+  rmdir "$(dirname "$log")" 2>/dev/null || true
+}
+
+# The commit's publisher: every remaining artifact in one process, through the
+# same pinned stage, identity and claim steps as _attachment_publish_pending,
+# with each transition appended to the progress log.
+_attachment_commit_program() {
+  cat <<'PY'
+import base64
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import random
+import signal
+import stat
+import string
+import sys
+
+# Exit statuses match the shell publish path they replace: 1 I/O, 2 shape,
+# 3 conflict. FAULT is the pre-existing numeric ATTACHMENT_FAULT_PHASE stop.
+FAULT = 75
+ORPHANED = 76
+REMOVE_PREFIX = ".trellis-attachment-remove-"
+
+
+class Stop(Exception):
+    def __init__(self, status):
+        Exception.__init__(self, status)
+        self.status = status
+
+
+def refuse(status=3):
+    raise Stop(status)
+
+
+def orphaned():
+    # Our parent is no longer the shell recorded as the lock owner, so a
+    # recovery may already own the worktree: stop without another write.
+    sys.stderr.write("trellis attachment: commit stopped: the transaction lock owner is gone\n")
+    sys.stderr.flush()
+    os._exit(ORPHANED)
+
+
+def checkpoint(label):
+    # Called after every durable step. The crash suites substitute this one
+    # line in a copy of the program; nothing in the product activates it.
+    return None  # crash-test seam
+
+
+def has_controls(value):
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def valid_absolute(value):
+    if not value.startswith("/") or value == "/" or value.endswith("/"):
+        return False
+    if "//" in value or "/./" in value or "/../" in value:
+        return False
+    if value.endswith("/.") or value.endswith("/.."):
+        return False
+    return not has_controls(value)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def no_symlink_components(value):
+    if not valid_absolute(value):
+        return False
+    parts = value[1:].split("/")
+    current = ""
+    for index, part in enumerate(parts):
+        if not part:
+            return False
+        current += "/" + part
+        info = lstat_or_none(current)
+        if info is None or stat.S_ISLNK(info.st_mode):
+            return False
+        if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            return False
+    return True
+
+
+def canonical_dir(value):
+    # Pins the working directory, like the shell's `cd` + `pwd -P`.
+    if not no_symlink_components(value):
+        return False
+    info = lstat_or_none(value)
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        return False
+    try:
+        os.chdir(value)
+        return os.getcwd() == value
+    except OSError:
+        return False
+
+
+def canonical_file(value):
+    if not no_symlink_components(value):
+        return False
+    info = lstat_or_none(value)
+    if info is None or not stat.S_ISREG(info.st_mode):
+        return False
+    parent, base = os.path.split(value)
+    try:
+        os.chdir(parent or "/")
+        actual = os.getcwd()
+    except OSError:
+        return False
+    return (("/" + base) if actual == "/" else (actual + "/" + base)) == value
+
+
+def identity(path):
+    info = lstat_or_none(path)
+    if info is None:
+        return ""
+    return "%d:%d" % (info.st_dev, info.st_ino)
+
+
+def is_file(path):
+    info = lstat_or_none(path)
+    return info is not None and stat.S_ISREG(info.st_mode)
+
+
+def is_dir(path):
+    info = lstat_or_none(path)
+    return info is not None and stat.S_ISDIR(info.st_mode)
+
+
+def is_link(path):
+    info = lstat_or_none(path)
+    return info is not None and stat.S_ISLNK(info.st_mode)
+
+
+def exists(path):
+    return lstat_or_none(path) is not None
+
+
+def rename_exclusive(source, destination):
+    # rename(2) silently replaces an empty directory, so a directory raced into
+    # the destination would be lost; refuse it instead, as the shell's mv did.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        result = libc.renamex_np(source.encode(), destination.encode(), ctypes.c_uint(0x4))  # RENAME_EXCL
+    else:
+        result = libc.renameat2(-100, source.encode(), -100, destination.encode(), ctypes.c_uint(0x1))  # AT_FDCWD, RENAME_NOREPLACE
+    if result != 0:
+        code = ctypes.get_errno()
+        if code in (errno.EEXIST, errno.ENOTEMPTY):
+            refuse(3)
+        raise OSError(code, os.strerror(code), destination)
+
+
+def hold_transaction_lock(holder, owner_pid):
+    # The transaction lock is recorded against the shell that started us, and
+    # a SIGKILL of that shell does not stop us. Hold a flock in the lock's
+    # holder for our whole life: recovery reclaims the lock only once it is
+    # free. A shell that died before we took it may already have been
+    # reclaimed, so stop before any mutation if our parent is not that shell.
+    if not canonical_dir(holder):
+        refuse(3)
+    fd = os.open(holder + "/publisher.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        refuse(3)
+    if os.getppid() != owner_pid:
+        orphaned()
+    return fd
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def mode_matches(path, expected):
+    info = lstat_or_none(path)
+    return info is not None and format(stat.S_IMODE(info.st_mode), "o") == expected[1:]
+
+
+def identity_matches(path, expected, kind, dir_fd=None):
+    if not expected:
+        return False
+    try:
+        info = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    if kind == "file" and not stat.S_ISREG(info.st_mode):
+        return False
+    if kind == "symlink" and not stat.S_ISLNK(info.st_mode):
+        return False
+    if kind in ("directory", "parent") and not stat.S_ISDIR(info.st_mode):
+        return False
+    return "%d:%d" % (info.st_dev, info.st_ino) == expected
+
+
+def open_fresh_dir(name):
+    # Pin a directory we just created before changing it: a symlink swapped in
+    # after the mkdir fails O_NOFOLLOW, and the pinned inode must still be the
+    # entry by that name.
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        refuse(3)
+    if identity(name) != fd_identity(fd):
+        os.close(fd)
+        refuse(3)
+    return fd
+
+
+def fd_identity(fd):
+    info = os.fstat(fd)
+    return "%d:%d" % (info.st_dev, info.st_ino)
+
+
+def path_exact(path, artifact):
+    kind = artifact["kind"]
+    if kind == "file":
+        if not is_file(path) or sha256_file(path) != artifact["sha256"]:
+            return False
+        return "mode" not in artifact or mode_matches(path, artifact["mode"])
+    if kind == "symlink":
+        return is_link(path) and os.readlink(path) == artifact["target"]
+    if kind == "directory":
+        return is_dir(path) and not os.listdir(path)
+    if kind == "parent":
+        return is_dir(path)
+    return False
+
+
+def path_exact_pinned(name, artifact):
+    # `name` is relative to the pinned working directory.
+    here = os.getcwd()
+    return canonical_dir(here) and path_exact("./" + name, artifact)
+
+
+def parent_safe(root, relative):
+    parent = os.path.dirname(relative)
+    if not parent:
+        return True
+    current = root
+    for part in parent.split("/"):
+        if not part:
+            return False
+        current += "/" + part
+        if not is_dir(current):
+            return False
+    return True
+
+
+def replace_before_matches(path, artifact):
+    replace = artifact["replace"]
+    return (is_file(path) and sha256_file(path) == replace["before_sha256"]
+            and mode_matches(path, replace["before_mode"]))
+
+
+def claim_layout(path, nonce):
+    return os.path.dirname(path) + "/" + REMOVE_PREFIX + sha256_text(nonce + ":" + path)
+
+
+def claim_namespace_valid(path, removal):
+    parent = os.path.dirname(path)
+    expected = None
+    if removal is not None and os.path.dirname(removal["path"]) == parent:
+        expected = claim_layout(removal["path"], removal["nonce"])
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return True
+    return all(parent + "/" + entry == expected
+               for entry in entries if entry.startswith(REMOVE_PREFIX))
+
+
+class Commit(object):
+    def __init__(self, journal_path, log_path, fault, owner_pid):
+        self.journal_path = journal_path
+        self.log_path = log_path
+        self.fault = fault
+        self.owner_pid = owner_pid
+        with open(journal_path, "rb") as handle:
+            self.journal = json.loads(handle.read().decode("utf-8"))
+        self.root = self.journal["worktree_root"]
+        self.attachment = self.journal["attachment_id"]
+        self.artifacts = self.journal["artifacts"]
+        self.removal = None
+        self.log = None
+
+    def guard(self):
+        # The transaction lock belongs to the shell recorded as its owner, not
+        # to whichever process adopts us after it dies. Called before every
+        # write; the flock keeps recovery out for the one write in flight.
+        if os.getppid() != self.owner_pid:
+            orphaned()
+
+    def step(self, label):
+        self.guard()
+        checkpoint(label)
+
+    def emit(self, record):
+        self.guard()
+        data = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if os.write(self.log, data) != len(data):
+            raise OSError("short progress write")
+        checkpoint(record["e"])
+
+    def validate_sources(self):
+        for artifact in self.artifacts:
+            if artifact["kind"] != "file":
+                continue
+            if "source" in artifact:
+                source = artifact["source"]
+                if not canonical_file(source) or sha256_file(source) != artifact["sha256"]:
+                    refuse(3)
+            elif not isinstance(artifact.get("content_base64"), str):
+                refuse(3)
+
+    def mark_journal(self):
+        # Journal v2: the marker makes releases that cannot replay the log
+        # refuse this journal instead of rolling back an empty prefix.
+        directory = os.path.dirname(self.journal_path)
+        if not canonical_dir(directory) or not is_file(self.journal_path):
+            refuse(3)
+        marked = dict(self.journal)
+        marked["journal_version"] = 2
+        temporary = self.journal_path + ".tmp." + random_suffix()
+        self.guard()
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            self.guard()
+            os.fchmod(fd, 0o600)
+            data = (json.dumps(marked, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            self.guard()
+            if os.write(fd, data) != len(data):
+                raise OSError("short journal write")
+        finally:
+            os.close(fd)
+        self.guard()
+        os.rename(temporary, self.journal_path)
+        self.step("journal-marked")
+        self.guard()
+        self.log = os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        self.guard()
+        os.fchmod(self.log, 0o600)
+        self.emit({"e": "begin", "v": 2, "attachment_id": self.attachment, "phase": self.journal["phase"]})
+
+    def run(self):
+        if self.journal.get("pending") is not None or self.journal.get("removal") is not None:
+            refuse(2)
+        phase = self.journal["phase"]
+        self.validate_sources()
+        self.mark_journal()
+        for index in range(phase, len(self.artifacts)):
+            self.publish(index, self.artifacts[index])
+            if self.fault == str(index + 1):
+                raise Stop(FAULT)
+
+    def reclaim_unidentified_stage(self, stage, parent_identity, kind):
+        if not canonical_dir(os.path.dirname(stage)) or identity(".") != parent_identity:
+            refuse(3)
+        base = "./" + os.path.basename(stage)
+        if not exists(base):
+            return
+        if kind in ("file", "symlink"):
+            if not (is_link(base) or is_file(base)):
+                refuse(3)
+            self.guard()
+            os.unlink(base)
+        else:
+            if not is_dir(base):
+                refuse(3)
+            try:
+                self.guard()
+                os.rmdir(base)
+            except OSError:
+                refuse(3)
+        self.step("stage-reclaimed")
+
+    def destination_owned(self, destination, artifact, owned_identity):
+        if not parent_safe(self.root, artifact["path"]) or not claim_namespace_valid(destination, self.removal):
+            return False
+        if not exists(destination):
+            return True
+        if not identity_matches(destination, owned_identity, artifact["kind"]):
+            return False
+        parent, base = os.path.split(destination)
+        return canonical_dir(parent) and path_exact_pinned(base, artifact)
+
+    def publish(self, index, artifact):
+        relative = artifact["path"]
+        kind = artifact["kind"]
+        if not parent_safe(self.root, relative):
+            refuse(3)
+        destination = self.root + "/" + relative
+        parent, base = os.path.split(destination)
+        if not canonical_dir(parent):
+            refuse(3)
+        parent_identity = identity(".")
+        if not parent_identity:
+            refuse(1)
+        stage = "%s/.%s.attachment-stage-%s.%s" % (parent, base, self.attachment, random_suffix())
+        self.emit({"e": "pending", "index": index, "staging_path": stage, "parent_identity": parent_identity})
+        if not parent_safe(self.root, relative):
+            refuse(3)
+        if identity(parent) != parent_identity:
+            refuse(3)
+        if exists(stage):
+            self.reclaim_unidentified_stage(stage, parent_identity, kind)
+        if kind in ("directory", "parent"):
+            if exists(destination):
+                refuse(3)
+            staged = self.create_directory_stage(parent, stage, parent_identity)
+            self.publish_directory_stage(parent, stage, destination, parent_identity, staged, kind)
+            self.emit({"e": "destination_identity", "identity": staged})
+            if not self.destination_owned(destination, artifact, staged):
+                refuse(3)
+        elif "replace" in artifact:
+            if not exists(destination) or not replace_before_matches(destination, artifact):
+                refuse(3)
+            staged = self.create_leaf_stage(parent, stage, artifact, parent_identity)
+            self.publish_stage_replace(parent, stage, destination, artifact, parent_identity, staged)
+            if not self.destination_owned(destination, artifact, staged):
+                refuse(3)
+        else:
+            if exists(destination):
+                refuse(3)
+            staged = self.create_leaf_stage(parent, stage, artifact, parent_identity)
+            self.publish_stage_link(parent, stage, destination, artifact, parent_identity, staged)
+            if not self.destination_owned(destination, artifact, staged):
+                refuse(3)
+            self.remove_stage(parent, stage, artifact, parent_identity, staged)
+        if identity(parent) != parent_identity:
+            refuse(3)
+        self.emit({"e": "applied", "index": index})
+
+    def pin(self, parent, parent_identity):
+        if not canonical_dir(parent) or identity(".") != parent_identity:
+            refuse(3)
+
+    def create_directory_stage(self, parent, stage, parent_identity):
+        self.pin(parent, parent_identity)
+        name = "./" + os.path.basename(stage)
+        try:
+            self.guard()
+            os.mkdir(name, 0o700)
+        except OSError:
+            refuse(3)
+        self.step("stage-created")
+        fd = open_fresh_dir(name)
+        try:
+            self.guard()
+            os.fchmod(fd, 0o700)
+            staged = fd_identity(fd)
+        finally:
+            os.close(fd)
+        if identity(name) != staged:
+            refuse(3)
+        self.emit({"e": "staging_identity", "identity": staged})
+        if identity(".") != parent_identity:
+            refuse(3)
+        return staged
+
+    def publish_directory_stage(self, parent, stage, destination, parent_identity, staged, kind):
+        self.pin(parent, parent_identity)
+        stage_name = "./" + os.path.basename(stage)
+        destination_name = "./" + os.path.basename(destination)
+        if exists(stage_name):
+            if not identity_matches(stage_name, staged, kind) or exists(destination_name):
+                refuse(3)
+            self.guard()
+            rename_exclusive(stage_name, destination_name)
+            self.step("published")
+        if not identity_matches(destination_name, staged, kind) or identity(".") != parent_identity:
+            refuse(3)
+
+    def create_leaf_stage(self, parent, stage, artifact, parent_identity):
+        self.pin(parent, parent_identity)
+        name = "./" + os.path.basename(stage)
+        if artifact["kind"] == "symlink":
+            try:
+                self.guard()
+                os.symlink(artifact["target"], name)
+            except OSError:
+                refuse(3)
+            self.step("stage-created")
+            staged = identity(name)
+            if not staged:
+                refuse(1)
+            self.emit({"e": "staging_identity", "identity": staged})
+            if identity(".") != parent_identity:
+                refuse(3)
+            return staged
+        try:
+            self.guard()
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            refuse(3)
+        try:
+            self.step("stage-created")
+            staged = identity(name)
+            if not staged:
+                refuse(1)
+            self.emit({"e": "staging_identity", "identity": staged})
+            self.guard()
+            os.fchmod(fd, int(artifact.get("mode", "0600"), 8))
+            if "source" in artifact:
+                with open(artifact["source"], "rb") as handle:
+                    content = handle.read()
+            else:
+                content = base64.b64decode(artifact["content_base64"])
+            view = memoryview(content)
+            while view:
+                self.guard()
+                written = os.write(fd, view)
+                view = view[written:]
+        finally:
+            os.close(fd)
+        self.step("stage-written")
+        if not identity_matches(name, staged, "file") or sha256_file(name) != artifact["sha256"]:
+            refuse(3)
+        if "mode" in artifact and not mode_matches(name, artifact["mode"]):
+            refuse(3)
+        if identity(".") != parent_identity:
+            refuse(3)
+        return staged
+
+    def publish_stage_link(self, parent, stage, destination, artifact, parent_identity, staged):
+        self.pin(parent, parent_identity)
+        kind = artifact["kind"]
+        stage_name = os.path.basename(stage)
+        destination_name = os.path.basename(destination)
+        if not identity_matches("./" + stage_name, staged, kind) or not path_exact_pinned(stage_name, artifact):
+            refuse(3)
+        if exists("./" + destination_name):
+            refuse(3)
+        try:
+            self.guard()
+            os.link("./" + stage_name, "./" + destination_name, follow_symlinks=False)
+        except OSError:
+            refuse(3)
+        self.step("published")
+        if not identity_matches("./" + destination_name, staged, kind) or not path_exact_pinned(destination_name, artifact):
+            refuse(3)
+        if identity(".") != parent_identity:
+            refuse(3)
+
+    def publish_stage_replace(self, parent, stage, destination, artifact, parent_identity, staged):
+        self.pin(parent, parent_identity)
+        stage_name = os.path.basename(stage)
+        destination_name = os.path.basename(destination)
+        if not identity_matches("./" + stage_name, staged, "file") or not path_exact_pinned(stage_name, artifact):
+            refuse(3)
+        if not replace_before_matches("./" + destination_name, artifact):
+            refuse(3)
+        self.guard()
+        os.rename("./" + stage_name, "./" + destination_name)
+        self.step("published")
+        if not identity_matches("./" + destination_name, staged, "file") or not path_exact_pinned(destination_name, artifact):
+            refuse(3)
+        if identity(".") != parent_identity:
+            refuse(3)
+
+    def remove_stage(self, parent, stage, artifact, parent_identity, staged):
+        # The shell's pinned removal: journal the claim, move the stage into a
+        # fresh quarantine, check its identity, then delete it.
+        kind = artifact["kind"]
+        if identity(parent) != parent_identity or not claim_namespace_valid(stage, None):
+            refuse(3)
+        if exists(stage) and not identity_matches(stage, staged, kind):
+            refuse(3)
+        if not canonical_dir(parent):
+            refuse(3)
+        nonce = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.emit({"e": "removal", "path": stage, "nonce": nonce})
+        self.removal = {"path": stage, "nonce": nonce}
+        quarantine = claim_layout(stage, nonce)
+        if exists(quarantine) or not claim_namespace_valid(stage, self.removal):
+            refuse(3)
+        if not canonical_dir(parent):
+            refuse(3)
+        stage_name = "./" + os.path.basename(stage)
+        quarantine_name = "./" + os.path.basename(quarantine)
+        if exists(stage_name):
+            try:
+                self.guard()
+                os.mkdir(quarantine_name, 0o700)
+            except OSError:
+                refuse(3)
+            self.step("quarantine-created")
+            # The claim goes through the pinned quarantine, never its name.
+            fd = open_fresh_dir(quarantine_name)
+            try:
+                pinned = fd_identity(fd)
+                self.guard()
+                os.fchmod(fd, 0o700)
+                if identity(quarantine_name) != pinned:
+                    refuse(3)
+                try:
+                    self.guard()
+                    os.rename(stage_name, "artifact", dst_dir_fd=fd)
+                except OSError:
+                    refuse(3)
+                self.step("stage-claimed")
+                if identity(quarantine_name) != pinned:
+                    refuse(3)
+                if not identity_matches("artifact", staged, kind, dir_fd=fd):
+                    if not exists(stage_name):
+                        self.guard()
+                        os.rename("artifact", stage_name, src_dir_fd=fd)
+                        self.guard()
+                        os.rmdir(quarantine_name)
+                    refuse(3)
+                self.guard()
+                os.unlink("artifact", dir_fd=fd)
+                self.step("claim-removed")
+            finally:
+                os.close(fd)
+            self.guard()
+            os.rmdir(quarantine_name)
+            self.step("quarantine-removed")
+        self.emit({"e": "removal_clear"})
+        self.removal = None
+
+
+def random_suffix():
+    alphabet = string.ascii_letters + string.digits
+    generator = random.SystemRandom()
+    return "".join(generator.choice(alphabet) for _ in range(6))
+
+
+def main(argv):
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    journal_path, log_path, fault, holder, owner_pid = argv
+    try:
+        hold_transaction_lock(holder, int(owner_pid))
+        Commit(journal_path, log_path, fault, int(owner_pid)).run()
+    except Stop as stop:
+        return stop.status
+    except OSError as error:
+        sys.stderr.write("trellis attachment: commit stopped: %s\n" % error)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+PY
+}
+
+_attachment_commit_batch() {
+  local home=$1 journal=$2 python_bin program attachment holder=${_ATTACHMENT_LOCK_HOLDER:-} owner_pid
+  python_bin=$(command -v python3) || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  program=$(_attachment_commit_program) || return 1
+  attachment=$(jq -r '.attachment_id' "$journal") || return 2
+  [ -n "$holder" ] || return 1
+  owner_pid=$(jq -r '.pid' "$holder/owner.json") || return 1
+  _attachment_ensure_private_dir "$home/state/attachment-progress" || return 1
+  LC_ALL=C "$python_bin" -I -c "$program" \
+    "$journal" "$(_attachment_progress_path "$home" "$attachment")" "${ATTACHMENT_FAULT_PHASE:-}" \
+    "$holder" "$owner_pid"
+}
+
 _attachment_commit_impl() (
-  local home=$1 journal=$2 plan checkout worktree attachment owner artifact kind stage phase owner_json rc rollback_rc removal
+  local home=$1 journal=$2 plan checkout worktree attachment owner phase owner_json rc rollback_rc removal
   [ "$#" -eq 2 ] || return 2
   _attachment_prepare_state "$home" || return $?
   _attachment_validate_journal_binding "$home" "$journal" || return $?
@@ -3997,6 +5002,7 @@ _attachment_commit_impl() (
   if [ -n "${ATTACHMENT_TEST_HOLD_LOCK:-}" ]; then
     sleep "$ATTACHMENT_TEST_HOLD_LOCK"
   fi
+  _attachment_fold_progress_log "$home" "$journal" || return $?
   _attachment_upgrade_legacy_journal_pending "$home" "$journal" || return $?
   _attachment_validate_journal_binding "$home" "$journal" || return $?
   owner=$(_attachment_ownership_path "$home" "$checkout" "$worktree")
@@ -4013,21 +5019,11 @@ _attachment_commit_impl() (
     _attachment_rollback_locked "$journal" || return $?
     return 5
   fi
-  _attachment_validate_sources "$plan" 3 || return $?
-
-  while :; do
-    if [ "$(jq -r '.pending == null' "$journal")" = false ]; then
-      _attachment_publish_pending "$journal" "$plan"
-      rc=$?
-    else
-      phase=$(jq -r '.phase' "$journal") || return 2
-      [ "$phase" -lt "$(jq '.artifacts | length' "$journal")" ] || break
-      artifact=$(jq -c --argjson phase "$phase" '.artifacts[$phase]' "$journal") || return 2
-      stage=$(_attachment_stage_candidate "$(jq -r '.worktree_root' "$journal")" "$(printf '%s\n' "$artifact" | jq -r '.path')" "$attachment") || return 1
-      _attachment_set_pending "$journal" "$artifact" "$stage" "$(jq -r '.worktree_root' "$journal")" || return $?
-      _attachment_publish_pending "$journal" "$plan"
-      rc=$?
-    fi
+  # A pending artifact from an interrupted commit finishes on the shell path.
+  if [ "$(jq -r '.pending == null' "$journal")" = false ]; then
+    _attachment_validate_sources "$plan" 3 || return $?
+    _attachment_publish_pending "$journal" "$plan"
+    rc=$?
     if [ "$rc" -ne 0 ]; then
       rollback_rc=0
       _attachment_rollback_locked "$journal" || rollback_rc=$?
@@ -4039,9 +5035,24 @@ _attachment_commit_impl() (
       _attachment_rollback_locked "$journal" || return $?
       return 5
     fi
-  done
+  fi
 
-  [ "$(jq -r '.removal == null' "$journal")" = true ] || return 3
+  _attachment_commit_batch "$home" "$journal"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # An unmarked journal means the publisher stopped before its first write,
+    # as the shell loop stopped on a changed source: nothing to roll back.
+    [ "$(jq -r '.journal_version // 1' "$journal")" = 2 ] || return "$rc"
+    _attachment_fold_progress_log "$home" "$journal" || return $?
+    rollback_rc=0
+    _attachment_rollback_locked "$journal" || rollback_rc=$?
+    [ "$rollback_rc" -eq 0 ] || return "$rollback_rc"
+    [ "$rc" -ne 75 ] || return 5
+    return "$rc"
+  fi
+  _attachment_fold_progress_log "$home" "$journal" || return $?
+
+  [ "$(jq -r '.removal == null and .pending == null and .phase == (.artifacts | length)' "$journal")" = true ] || return 3
   owner_json=$(_attachment_owner_from_plan "$plan") || return 1
   if ! _attachment_write_json "$owner" "$owner_json"; then
     _attachment_rollback_locked "$journal" || return $?
@@ -4064,6 +5075,7 @@ _attachment_rollback_impl() (
   attachment=$(jq -r '.attachment_id' "$journal") || return 2
   _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment" || return $?
   _attachment_install_lock_traps
+  _attachment_fold_progress_log "$home" "$journal" || return $?
   _attachment_upgrade_legacy_journal_pending "$home" "$journal" || return $?
   _attachment_validate_journal_binding "$home" "$journal" || return $?
   _attachment_rollback_locked "$journal"
@@ -4080,6 +5092,7 @@ _attachment_recover_impl() (
   _attachment_lock_reclaim "$home" "$checkout" "$worktree" "$attachment" || return $?
   _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment" || return $?
   _attachment_install_lock_traps
+  _attachment_fold_progress_log "$home" "$journal" || return $?
   _attachment_upgrade_legacy_journal_pending "$home" "$journal" || return $?
   _attachment_validate_journal_binding "$home" "$journal" || return $?
   plan=$(_attachment_plan_from_journal "$journal") || return 2
@@ -5093,7 +6106,7 @@ _attachment_user_lock_acquire() {
     return 1
   }
   target=$(basename "$holder")
-  if ! ln -s -- "$target" "$link" 2>/dev/null; then
+  if ! ln -sn -- "$target" "$link" 2>/dev/null; then
     rm -f "$holder/owner.json"
     rmdir "$holder" 2>/dev/null
     return 3
@@ -5406,6 +6419,19 @@ _attachment_user_owner_from_plan() {
   '
 }
 
+_attachment_user_repair_binding_valid() {
+  printf '%s\n' "$1" | jq -e '
+    .original_owner as $owner
+    | $owner != null and .owner_override == $owner and .next_owner == null
+    and .attachment_id == $owner.attachment_id and .release == $owner.release
+    and .home_paths == $owner.home_paths and .renders == []
+    and all(.artifacts[];
+      . as $artifact
+      | .kind == "symlink" and (has("restore") | not) and (has("replace") | not)
+      and any($owner.artifacts[]; .kind == "symlink" and del(.restore) == $artifact))
+  ' >/dev/null 2>&1 || return 2
+}
+
 _attachment_user_journal_json_valid() {
   local file=$1 plan original override next_owner
   [ -f "$file" ] && [ ! -L "$file" ] || return 4
@@ -5423,7 +6449,7 @@ _attachment_user_journal_json_valid() {
     ]) | length) == 0
     and (.home_identity | type == "string" and test("^[0-9]+:[0-9]+$"))
     and (.trellis_home_identity | type == "string" and test("^[0-9]+:[0-9]+$"))
-    and (.operation == "attach" or .operation == "relink" or .operation == "restore")
+    and (.operation == "attach" or .operation == "relink" or .operation == "restore" or .operation == "repair")
     and (.phase | type == "number" and floor == . and . >= 0 and . <= ($journal.artifacts | length))
     and (.applied | type == "array") and .applied == .artifacts[0:.phase]
     and (.identities | type == "array" and length == $journal.phase
@@ -5466,6 +6492,11 @@ _attachment_user_journal_json_valid() {
     printf '%s\n' "$next_owner" | jq -e "$_attachment_user_plan_filter" >/dev/null 2>&1 || return 2
   fi
   _attachment_user_snapshots_valid "$file" || return $?
+  if [ "$(jq -r '.operation' "$file")" = repair ]; then
+    _attachment_user_repair_binding_valid "$(jq -c . "$file")" || return $?
+    _attachment_user_validate_collisions "$original" || return 2
+    _attachment_user_validate_collisions "$plan" || return 2
+  fi
 }
 
 _attachment_user_validate_collisions() {
@@ -5525,10 +6556,17 @@ _attachment_user_validate_sources() {
 }
 
 _attachment_user_validate_journal_sources() {
-  local home=$1 journal=$2 plan release payload
+  local home=$1 journal=$2 plan release payload release_dir
   plan=$(_attachment_user_plan_from_journal "$journal") || return 2
   release=$(printf '%s\n' "$plan" | jq -r '.release') || return 2
   payload="$home/releases/$release/payload"
+  if [ "$(jq -r '.operation' "$journal")" = repair ]; then
+    # Recovery must reverify the sealed release, not merely a surviving target.
+    command -v release_store_locate >/dev/null 2>&1 || return 4
+    release_dir=$(TRELLIS_HOME="$home" release_store_locate "$release") || return $?
+    [ "$release_dir/payload" = "$payload" ] || return 4
+    _attachment_user_validate_sources "$(jq -c '.original_owner' "$journal")" "$payload" || return $?
+  fi
   _attachment_canonical_dir "$payload" || return 4
   _attachment_user_validate_sources "$plan" "$payload"
 }
@@ -5558,10 +6596,22 @@ _attachment_user_stage_path_valid() {
 }
 
 _attachment_user_artifact_exact() {
-  local home=$1 artifact=$2 destination
+  local home=$1 artifact=$2 allow_missing_symlink=${3:-false} destination kind
   destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 1
-  _attachment_user_parent_safe "$home" "$destination" || return 1
-  _attachment_path_exact_pinned "$destination" "$artifact"
+  _attachment_user_parent_safe "$home" "$destination" || {
+    _attachment_diag "unsafe owned user destination parent: $destination"
+    return 1
+  }
+  if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
+    kind=$(printf '%s\n' "$artifact" | jq -r '.kind') || return 1
+    if [ "$allow_missing_symlink" = true ] && [ "$kind" = symlink ]; then return 0; fi
+    _attachment_diag "owned user destination is missing: $destination"
+    return 1
+  fi
+  _attachment_path_exact_pinned "$destination" "$artifact" || {
+    _attachment_diag "owned user destination was modified: $destination"
+    return 1
+  }
 }
 
 _attachment_user_restore_kind() {
@@ -5613,7 +6663,7 @@ _attachment_user_json_keys_match() {
 }
 
 _attachment_user_verify_owner_artifacts_impl() {
-  local home=$1 owner=$2 canonical user_home artifact destination kind render keys
+  local home=$1 owner=$2 allow_missing_symlinks=${3:-false} canonical user_home artifact destination kind render keys
   canonical=$(_attachment_user_owner_path "$home")
   [ "$owner" = "$canonical" ] || return 2
   _attachment_user_owner_json_valid "$owner" || return $?
@@ -5627,7 +6677,7 @@ _attachment_user_verify_owner_artifacts_impl() {
       'any(.renders[]; .destination == $destination)' "$owner" >/dev/null 2>&1; then
       continue
     fi
-    _attachment_user_artifact_exact "$user_home" "$artifact" || return 3
+    _attachment_user_artifact_exact "$user_home" "$artifact" "$allow_missing_symlinks" || return 3
     if [ "$kind" = parent ]; then
       _attachment_mode_matches "$destination" 0700 || return 3
     fi
@@ -5985,7 +7035,7 @@ _attachment_user_restore_adopted() (
     symlink)
       tmp=$(mktemp -u "./.${base}.user-attachment-restore.XXXXXX") || return 1
       target=$(printf '%s\n' "$artifact" | jq -r '.restore.before_target') || return 2
-      ln -s -- "$target" "$tmp" 2>/dev/null || return 3
+      ln -sn -- "$target" "$tmp" 2>/dev/null || return 3
       ;;
     *) return 2 ;;
   esac
@@ -6353,10 +7403,81 @@ _attachment_user_rollback_restore_replaced_file() {
   _attachment_fault_after_user_rollback_replace_restore
 }
 
+_attachment_user_repair_remove_pinned() {
+  local home=$1 destination=$2 artifact=$3 identity=$4 expected_parent=${5:-} user_home
+  user_home=$(_attachment_user_runtime_home) || return $?
+  if ! _attachment_user_destination_safe "$user_home" "$home" "$destination" ||
+     ! _attachment_user_parent_safe "$user_home" "$destination"; then
+    _attachment_diag "repair rollback preserved unsafe user path: $destination"
+    return 0
+  fi
+  [ -e "$destination" ] || [ -L "$destination" ] || return 0
+  if [ -z "$identity" ] ||
+     ! _attachment_identity_matches "$destination" "$identity" symlink ||
+     ! _attachment_path_exact_pinned "$destination" "$artifact"; then
+    _attachment_diag "repair rollback preserved unpinned or modified user path: $destination"
+    return 0
+  fi
+  if [ -n "$expected_parent" ] &&
+     [ "$(_attachment_fs_identity "$(dirname "$destination")")" != "$expected_parent" ]; then
+    _attachment_diag "repair rollback preserved changed user parent: $destination"
+    return 0
+  fi
+  _attachment_user_remove_exact "$destination" "$artifact" "$identity" "$expected_parent"
+}
+
+_attachment_user_discard_repair_locked() {
+  local home=$1 journal=$2 pending artifact destination identity stage parent attachment phase index rc=0
+  [ "$journal" = "$(_attachment_user_journal_path "$home")" ] || return 2
+  _attachment_user_journal_json_valid "$journal" || return $?
+  [ "$(jq -r '.operation' "$journal")" = repair ] || return 2
+  _attachment_user_runtime_binding_matches "$home" "$journal" || return $?
+  # No owner/source verification: removing a pinned link needs neither a live
+  # target nor an unchanged render. Foreign replacements are never ours to undo.
+  pending=$(jq -c '.pending' "$journal") || return 2
+  if [ "$pending" != null ]; then
+    artifact=$(printf '%s\n' "$pending" | jq -c '.artifact') || return 2
+    destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 2
+    identity=$(printf '%s\n' "$pending" | jq -r '.destination_identity // .staging_identity // empty') || return 2
+    parent=$(printf '%s\n' "$pending" | jq -r '.parent_identity') || return 2
+    _attachment_user_repair_remove_pinned "$home" "$destination" "$artifact" "$identity" "$parent" || rc=$?
+    stage=$(printf '%s\n' "$pending" | jq -r '.staging_path // empty') || return 2
+    if [ -n "$stage" ]; then
+      attachment=$(jq -r '.attachment_id' "$journal") || return 2
+      if _attachment_user_stage_path_valid "$destination" "$attachment" "$stage"; then
+        identity=$(printf '%s\n' "$pending" | jq -r '.staging_identity // empty') || return 2
+        if [ -n "$identity" ]; then
+          _attachment_user_repair_remove_pinned "$home" "$stage" "$artifact" "$identity" "$parent" || rc=$?
+        else
+          _attachment_reclaim_unidentified_stage "$stage" "$parent" symlink || rc=$?
+        fi
+      else
+        _attachment_diag "repair rollback preserved invalid stage path: $stage"
+      fi
+    fi
+  fi
+  phase=$(jq -r '.phase' "$journal") || return 2
+  index=$phase
+  while [ "$index" -gt 0 ]; do
+    index=$((index - 1))
+    artifact=$(jq -c --argjson index "$index" '.artifacts[$index]' "$journal") || return 2
+    destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 2
+    identity=$(jq -r --argjson index "$index" '.identities[$index]' "$journal") || return 2
+    _attachment_user_repair_remove_pinned "$home" "$destination" "$artifact" "$identity" || rc=$?
+  done
+  # A failed repair must not block every subsequent user lifecycle operation.
+  rm "$journal" || return 1
+  return "$rc"
+}
+
 _attachment_user_rollback_locked() {
   local home=$1 journal=$2 pending artifact destination identity pending_state stage phase index operation conflict=0
   _attachment_user_journal_json_valid "$journal" || return $?
   operation=$(jq -r '.operation' "$journal") || return 2
+  if [ "$operation" = repair ]; then
+    _attachment_user_discard_repair_locked "$home" "$journal"
+    return $?
+  fi
   _attachment_user_rollback_preflight_replacements "$home" "$journal" "$operation" || return $?
   pending=$(jq -c '.pending' "$journal") || return 2
   if [ "$pending" != null ]; then
@@ -6464,8 +7585,10 @@ _attachment_user_prepare_impl() {
 }
 
 _attachment_user_prepare_relink_impl() {
-  local home=$1 plan_file=$2 original=$3 journal=$4 plan current_owner journal_json home_identity trellis_home_identity
-  [ "$#" -eq 4 ] || return 2
+  local home=$1 plan_file=$2 original=$3 journal=$4 operation=${5:-relink}
+  local plan current_owner journal_json home_identity trellis_home_identity artifact destination
+  [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || return 2
+  case "$operation" in relink|repair) ;; *) return 2 ;; esac
   _attachment_user_prepare_state "$home" || return $?
   [ "$journal" = "$(_attachment_user_journal_path "$home")" ] || return 2
   _attachment_user_validate_plan_file "$plan_file" || return $?
@@ -6477,29 +7600,40 @@ _attachment_user_prepare_relink_impl() {
   _attachment_user_owner_json_valid "$current_owner" || return $?
   [ "$(jq -cS . "$current_owner")" = "$(printf '%s\n' "$original" | jq -cS .)" ] || return 3
   [ ! -e "$journal" ] && [ ! -L "$journal" ] || return 3
+  if [ "$operation" = repair ]; then
+    _attachment_user_validate_collisions "$original" || return 2
+    _attachment_user_verify_owner_artifacts_impl "$home" "$current_owner" true || return $?
+    while IFS= read -r artifact; do
+      destination=$(printf '%s\n' "$artifact" | jq -r '.destination') || return 2
+      [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 3
+    done < <(printf '%s\n' "$plan" | jq -c '.artifacts[]')
+  fi
   home_identity=$(_attachment_fs_identity "$(_attachment_user_runtime_home)") || return 1
   trellis_home_identity=$(_attachment_fs_identity "$home") || return 1
   journal_json=$(printf '%s\n' "$plan" | trellis_jq -cS --argjson original "$original" \
-    --arg home_identity "$home_identity" --arg trellis_home_identity "$trellis_home_identity" '
+    --arg operation "$operation" --arg home_identity "$home_identity" --arg trellis_home_identity "$trellis_home_identity" '
     . + {
       home_identity:$home_identity,
       trellis_home_identity:$trellis_home_identity,
-      operation:"relink",
+      operation:$operation,
       original_owner:$original,
       next_owner:null,
-      owner_override:null,
+      owner_override:(if $operation == "repair" then $original else null end),
       applied:[],
       identities:[],
       phase:0,
       pending:null,
       removal:null
     }
-    | .next_owner = {
+    | if $operation == "relink" then .next_owner = {
         schema_version:.schema_version,surface:.surface,status:.status,
         attachment_id:.attachment_id,release:.release,home_paths:.home_paths,
         artifacts:.artifacts,renders:.renders
-      }
+      } else . end
   ') || return 2
+  if [ "$operation" = repair ]; then
+    _attachment_user_repair_binding_valid "$journal_json" || return $?
+  fi
   _attachment_write_json "$journal" "$journal_json" || return $?
 }
 
@@ -6516,18 +7650,39 @@ _attachment_user_set_reconcile_state() {
 }
 
 _attachment_user_commit_locked() {
+  local home=$1 journal=$2 operation rc discard_rc repair_interrupted=false
+  _attachment_user_journal_json_valid "$journal" || return $?
+  _attachment_user_runtime_binding_matches "$home" "$journal" || return $?
+  operation=$(jq -r '.operation' "$journal") || return 2
+  _attachment_user_commit_apply_locked "$home" "$journal"
+  rc=$?
+  if [ "$operation" = repair ] && [ "$rc" -ne 0 ] &&
+     [ "$repair_interrupted" = false ] && { [ -e "$journal" ] || [ -L "$journal" ]; }; then
+    discard_rc=0
+    _attachment_user_discard_repair_locked "$home" "$journal" || discard_rc=$?
+    [ "$discard_rc" -eq 0 ] || return "$discard_rc"
+  fi
+  return "$rc"
+}
+
+_attachment_user_commit_apply_locked() {
   local home=$1 journal=$2 plan owner artifact kind stage phase owner_json pending operation rc rollback_rc total match_rc
   _attachment_user_journal_json_valid "$journal" || return $?
   operation=$(jq -r '.operation' "$journal") || return 2
   _attachment_user_runtime_binding_matches "$home" "$journal" || return $?
   _attachment_user_validate_journal_sources "$home" "$journal" || return $?
+  plan=$(_attachment_user_plan_from_journal "$journal") || return 2
+  owner=$(_attachment_user_owner_path "$home")
+  if [ "$operation" = repair ]; then
+    _attachment_user_owner_json_valid "$owner" || return $?
+    [ "$(jq -cS . "$owner")" = "$(jq -cS '.original_owner' "$journal")" ] || return 3
+    _attachment_user_verify_owner_artifacts_impl "$home" "$owner" true || return $?
+  fi
   if [ "$(jq -r '.pending.rollback_state // empty' "$journal")" != "" ]; then
     _attachment_user_rollback_locked "$home" "$journal" || return $?
     return 0
   fi
-  plan=$(_attachment_user_plan_from_journal "$journal") || return 2
-  owner=$(_attachment_user_owner_path "$home")
-  if [ -e "$owner" ] || [ -L "$owner" ]; then
+  if [ "$operation" != repair ] && { [ -e "$owner" ] || [ -L "$owner" ]; }; then
     _attachment_user_owner_matches_plan "$owner" "$plan"
     match_rc=$?
     if [ "$match_rc" -ne 0 ]; then
@@ -6567,6 +7722,8 @@ _attachment_user_commit_locked() {
     fi
     phase=$(jq -r '.phase' "$journal") || return 2
     if [ "$operation" != restore ] && [ "${ATTACHMENT_FAULT_PHASE:-}" = "$phase" ]; then
+      # This fault models a signal/crash, unlike a publication failure.
+      if [ "$operation" = repair ]; then repair_interrupted=true; fi
       return 5
     fi
   done
@@ -6577,7 +7734,11 @@ _attachment_user_commit_locked() {
   fi
   _attachment_user_runtime_binding_matches "$home" "$journal" || return $?
   _attachment_user_validate_journal_sources "$home" "$journal" || return $?
-  if ! _attachment_write_json "$owner" "$owner_json"; then
+  if [ "$operation" = repair ]; then
+    # A repair never republishes ownership, even with identical JSON bytes.
+    _attachment_user_owner_json_valid "$owner" || return $?
+    [ "$(jq -cS . "$owner")" = "$(jq -cS '.original_owner' "$journal")" ] || return 3
+  elif ! _attachment_write_json "$owner" "$owner_json"; then
     _attachment_user_rollback_locked "$home" "$journal" || return $?
     return 1
   fi
@@ -6585,6 +7746,7 @@ _attachment_user_commit_locked() {
   _attachment_user_validate_journal_sources "$home" "$journal" || return $?
   _attachment_user_verify_owner_artifacts_impl "$home" "$owner" || return $?
   if [ "$operation" != restore ] && [ "${ATTACHMENT_FAULT_PHASE:-}" = owner-published ]; then
+    if [ "$operation" = repair ]; then repair_interrupted=true; fi
     return 5
   fi
   rm "$journal" || return 1
@@ -6602,6 +7764,11 @@ _attachment_user_recover_impl() {
   [ -e "$journal" ] || [ -L "$journal" ] || return 0
   _attachment_user_journal_json_valid "$journal" || return $?
   _attachment_user_runtime_binding_matches "$home" "$journal" || return $?
+  if [ "$(jq -r '.operation' "$journal")" = repair ]; then
+    # Discard first, then the caller can re-plan against the current owner.
+    _attachment_user_discard_repair_locked "$home" "$journal"
+    return $?
+  fi
   _attachment_user_validate_journal_sources "$home" "$journal" || return $?
   owner=$(_attachment_user_owner_path "$home")
   plan=$(_attachment_user_plan_from_journal "$journal") || return 2
@@ -7068,7 +8235,7 @@ _attachment_user_detach_restore_stage() (
         set +o noclobber
         ;;
       symlink)
-        ln -s -- "$(printf '%s\n' "$artifact" | jq -r '.restore.before_target')" "$stage_ref" 2>/dev/null ||
+        ln -sn -- "$(printf '%s\n' "$artifact" | jq -r '.restore.before_target')" "$stage_ref" 2>/dev/null ||
           return 3
         ;;
       *) return 2 ;;
@@ -7559,12 +8726,40 @@ attachment_checkout_lock_acquire() {
 }
 
 attachment_checkout_lock_reclaim() {
-  local status
+  local status tries=0
   [ "$#" -eq 3 ] || return 2
   _attachment_prepare_state "$1" || return $?
-  _attachment_checkout_lock_reclaim "$@"
-  status=$?
+  # A holder that releases between the link read and the holder read looks
+  # malformed. Releases take milliseconds; only a lock that stays malformed
+  # for two seconds is refused.
+  while :; do
+    _attachment_checkout_lock_reclaim "$@"
+    status=$?
+    [ "$status" -eq 4 ] && [ "$tries" -lt 10 ] || break
+    tries=$((tries + 1))
+    sleep 0.2
+  done
   _attachment_map_public_status "$status"
+}
+
+# Reclaim and acquire, waiting a bounded 10 s while the lock is held. The
+# detached post-attach job holds it for brief steps right after every attach,
+# so an attach or adopt landing in that window must wait rather than refuse.
+# Still held when the wait runs out: 3, and the caller names the lock.
+attachment_checkout_lock_wait() {
+  local rc tries=0
+  [ "$#" -eq 3 ] || return 2
+  while :; do
+    if attachment_checkout_lock_reclaim "$@"; then
+      attachment_checkout_lock_acquire "$@" && return 0
+      rc=$?
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq "${TRELLIS_EX_CONFLICT:-3}" ] && [ "$tries" -lt 40 ] || return "$rc"
+    tries=$((tries + 1))
+    sleep 0.25
+  done
 }
 
 attachment_prepare() {
