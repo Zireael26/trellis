@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eight-shard local gate with qualified structural containment on macOS.
+"""CPU-sized local gate with qualified structural containment on macOS.
 
 Trusted tests may accidentally detach; deliberately escaping code is out of
 scope. Ownership is the union of registered groups, an inherited sentinel fd,
@@ -47,7 +47,31 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from receipt_provenance import safe_capture, emit
 
-SHARD_COUNT = 8
+MAX_SHARD_COUNT = 16
+
+
+def _default_shard_count() -> int:
+    # cpu_count may be unavailable; retain the existing eight-shard floor.
+    return min(12, max(8, (os.cpu_count() or 10) - 2))
+
+
+def select_shard_count() -> int:
+    override = os.environ.get("TRELLIS_TEST_SHARDS")
+    if override is None:
+        return _default_shard_count()
+    message = "TRELLIS_TEST_SHARDS must be an integer from 1 to 16"
+    if not re.fullmatch(r"[0-9]+", override):
+        raise ValueError(message)
+    try:
+        count = int(override)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not 1 <= count <= MAX_SHARD_COUNT:
+        raise ValueError(message)
+    return count
+
+
+SHARD_COUNT = _default_shard_count()
 GLOBAL_DEADLINE_SECONDS = 7200.0
 TEARDOWN_RESERVE_SECONDS = 60.0
 TERM_GRACE_SECONDS = 5.0
@@ -203,6 +227,26 @@ def _scan_identity(pid: int, end: float) -> Optional[Tuple[int, int]]:
     return observed
 
 
+def _pid_gone(pid: int, error: int) -> bool:
+    """Positive death only: an inspection failure alone proves nothing.
+
+    XNU can return a short/zero read without ESRCH after enumeration. A signal-0
+    existence probe closes that race; success, EPERM, and other probe failures
+    leave the original inspection error fail-closed. No process is signaled.
+    """
+    if error == errno.ESRCH:
+        return True
+    if pid <= 0:
+        return False  # Never probe a process group.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 def _bounded(end: float) -> None:
     if time.monotonic() >= end:
         raise ContainmentError("containment scan budget exhausted")
@@ -224,9 +268,10 @@ def bsd_info(pid: int) -> Optional[_BSDInfo]:
     info = _BSDInfo()
     if _LIBPROC.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info):
         return info
-    if ctypes.get_errno() == errno.ESRCH:
+    error = ctypes.get_errno()
+    if _pid_gone(pid, error):
         return None
-    raise ContainmentError("PROC_PIDTBSDINFO unavailable for pid {}".format(pid), ctypes.get_errno())
+    raise ContainmentError("PROC_PIDTBSDINFO unavailable for pid {}".format(pid), error)
 
 
 def process_table(end: float) -> Dict[int, _BSDInfo]:
@@ -305,6 +350,8 @@ def process_environment(pid: int) -> Optional[Set[bytes]]:
     size = ctypes.c_size_t(ctypes.sizeof(buffer))
     if _LIBC.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0):
         error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            return set()  # The inspected process exited before the argument read.
         fresh = bsd_info(pid)
         if fresh is None or fresh.status == 5:
             return set()  # Positive exit during the scan, not unknown live work.
@@ -323,16 +370,22 @@ def process_files(pid: int, end: float) -> List[Tuple[Tuple[int, int], str]]:
     ctypes.set_errno(0)
     size = _LIBPROC.proc_pidinfo(pid, 1, 0, None, 0)  # PROC_PIDLISTFDS
     if size < 0 or (size == 0 and ctypes.get_errno() not in (0, errno.ESRCH)):
-        if ctypes.get_errno() in (errno.EPERM, errno.EACCES):
+        error = ctypes.get_errno()
+        if _pid_gone(pid, error):
+            return []
+        if error in (errno.EPERM, errno.EACCES):
             raise UnreadableProcess("PROC_PIDLISTFDS unreadable for pid {}".format(pid))
-        raise ContainmentError("PROC_PIDLISTFDS unavailable for pid {}".format(pid), ctypes.get_errno())
+        raise ContainmentError("PROC_PIDLISTFDS unavailable for pid {}".format(pid), error)
     descriptors = (_FDInfo * (size // ctypes.sizeof(_FDInfo) + 32))()
     ctypes.set_errno(0)
     used = _LIBPROC.proc_pidinfo(pid, 1, 0, descriptors, ctypes.sizeof(descriptors))
     if used < 0 or used >= ctypes.sizeof(descriptors) or (used == 0 and ctypes.get_errno() not in (0, errno.ESRCH)):
-        if ctypes.get_errno() in (errno.EPERM, errno.EACCES):
+        error = ctypes.get_errno()
+        if _pid_gone(pid, error):
+            return []
+        if error in (errno.EPERM, errno.EACCES):
             raise UnreadableProcess("PROC_PIDLISTFDS unreadable for pid {}".format(pid))
-        raise ContainmentError("PROC_PIDLISTFDS failed or saturated for pid {}".format(pid), ctypes.get_errno())
+        raise ContainmentError("PROC_PIDLISTFDS failed or saturated for pid {}".format(pid), error)
     paths = []
     for descriptor in descriptors[:used // ctypes.sizeof(_FDInfo)]:
         _bounded(end)
@@ -342,20 +395,26 @@ def process_files(pid: int, end: float) -> List[Tuple[Tuple[int, int], str]]:
         ctypes.set_errno(0)
         got = _LIBPROC.proc_pidfdinfo(pid, descriptor.fd, 2, ctypes.byref(vnode), ctypes.sizeof(vnode))
         if got != ctypes.sizeof(vnode):
-            if ctypes.get_errno() in (errno.EBADF, errno.ESRCH, errno.ENOENT):
-                continue  # fd closed/process exited while enumerating
-            if ctypes.get_errno() in (errno.EPERM, errno.EACCES):
+            error = ctypes.get_errno()
+            if _pid_gone(pid, error):
+                return []
+            if error in (errno.EBADF, errno.ENOENT):
+                continue  # Only this fd closed while enumerating.
+            if error in (errno.EPERM, errno.EACCES):
                 raise UnreadableProcess("PROC_PIDFDVNODEPATHINFO unreadable for pid {}".format(pid))
-            raise ContainmentError("PROC_PIDFDVNODEPATHINFO unavailable for pid {} fd {}".format(pid, descriptor.fd), ctypes.get_errno())
+            raise ContainmentError("PROC_PIDFDVNODEPATHINFO unavailable for pid {} fd {}".format(pid, descriptor.fd), error)
         paths.append(((vnode.vnode.node.stat.dev, vnode.vnode.node.stat.ino), os.fsdecode(vnode.vnode.path)))
     cwd = _CwdInfo()
     ctypes.set_errno(0)
     if _LIBPROC.proc_pidinfo(pid, 9, 0, ctypes.byref(cwd), ctypes.sizeof(cwd)) == ctypes.sizeof(cwd):
         paths.append(((cwd.cwd.node.stat.dev, cwd.cwd.node.stat.ino), os.fsdecode(cwd.cwd.path)))
-    elif ctypes.get_errno() != errno.ESRCH:
-        if ctypes.get_errno() in (errno.EPERM, errno.EACCES):
+    else:
+        error = ctypes.get_errno()
+        if _pid_gone(pid, error):
+            return []
+        if error in (errno.EPERM, errno.EACCES):
             raise UnreadableProcess("PROC_PIDVNODEPATHINFO unreadable for pid {}".format(pid))
-        raise ContainmentError("PROC_PIDVNODEPATHINFO unavailable for pid {}".format(pid), ctypes.get_errno())
+        raise ContainmentError("PROC_PIDVNODEPATHINFO unavailable for pid {}".format(pid), error)
     return paths
 
 
@@ -535,7 +594,9 @@ def _read_record(path: Path) -> Dict[str, Any]:
         if data.get("clock_step", 0) not in (0, 1):
             raise ValueError("invalid clock-step marker")
         for output in data.get("output_ids", []):
-            if output["path"] not in [str(root / "planner.out")] + [str(root / "shard-{}.out".format(i)) for i in range(1, SHARD_COUNT + 1)]:
+            # Old runs may have used a different CPU count or override. Validate
+            # their pinned paths against the supported range, not today's plan.
+            if output["path"] not in [str(root / "planner.out")] + [str(root / "shard-{}.out".format(i)) for i in range(1, MAX_SHARD_COUNT + 1)]:
                 raise ValueError("invalid output path")
             if not all(isinstance(output[key], int) for key in ("dev", "ino")):
                 raise ValueError("invalid output identity")
@@ -765,11 +826,11 @@ def _retain_failed_shards(state: RunState, data: Dict[str, Any], shards: Sequenc
             for source in (entry["output"], entry["receipt"]):
                 if source.is_file() and not source.is_symlink():
                     shutil.copyfile(str(source), str(kept / source.name))
-            print("run-tests-local: retained failing shard {}/8 output: {}".format(
-                entry["shard"], kept / entry["output"].name), flush=True)
+            print("run-tests-local: retained failing shard {}/{} output: {}".format(
+                entry["shard"], SHARD_COUNT, kept / entry["output"].name), flush=True)
         except (ContainmentError, OSError) as exc:
-            print("run-tests-local: could not retain failing shard {}/8 output: {}".format(
-                entry["shard"], exc), file=sys.stderr)
+            print("run-tests-local: could not retain failing shard {}/{} output: {}".format(
+                entry["shard"], SHARD_COUNT, exc), file=sys.stderr)
 
 
 def _prune_failed_shards(state: RunState) -> None:
@@ -1060,14 +1121,20 @@ def _usage() -> str:
 
 
 def main(argv: Sequence[str]) -> int:
+    global SHARD_COUNT
     for name, value in sorted(os.environ.items()):
-        if name.startswith("TRELLIS_LOCAL_GATE_") or name == "TRELLIS_GATE_STATE_DIR":
+        if name.startswith("TRELLIS_LOCAL_GATE_") or name in ("TRELLIS_GATE_STATE_DIR", "TRELLIS_TEST_SHARDS"):
             print("run-tests-local: seam active {}={}".format(name, value), file=sys.stderr)
     if argv in (["-h"], ["--help"]):
         print(_usage())
         return 0
     if argv and argv not in (["--runs-status"], ["--runs-reap"]):
         print("run-tests-local: invalid arguments\n" + _usage(), file=sys.stderr)
+        return 64
+    try:
+        SHARD_COUNT = select_shard_count()
+    except ValueError as exc:
+        print("run-tests-local: {}".format(exc), file=sys.stderr)
         return 64
     if argv == ["--runs-status"]:
         root = Path(os.environ.get("TRELLIS_GATE_STATE_DIR", str(Path.home() / ".local/state/trellis-gate"))).expanduser()
@@ -1189,7 +1256,7 @@ def main(argv: Sequence[str]) -> int:
         planner_output = run_root / "planner.out"
         with planner_output.open("wb") as stream:
             planner = _spawn(data, record_path, sentinel_fd, processes,
-                             ["bash", str(runner), "--scope=local", "--shard=1/8", "--plan"],
+                             ["bash", str(runner), "--scope=local", "--shard=1/{}".format(SHARD_COUNT), "--plan"],
                              root, environment, stream)
             while observe_exit(planner) is None:
                 time.sleep(0.02)
@@ -1224,7 +1291,7 @@ def main(argv: Sequence[str]) -> int:
                 shard_environment["TRELLIS_TEST_PROVENANCE_RECEIPT"] = str(aggregate)
                 try:
                     entry["process"] = _spawn(data, record_path, sentinel_fd, processes,
-                        ["bash", str(runner), "--scope=local", "--shard={}/8".format(shard)],
+                        ["bash", str(runner), "--scope=local", "--shard={}/{}".format(shard, SHARD_COUNT)],
                         root, shard_environment, stream)
                 except OSError as exc:
                     stream.write("run-tests-local: could not start shard {}: {}\n".format(shard, exc).encode())
@@ -1236,8 +1303,8 @@ def main(argv: Sequence[str]) -> int:
         _replay_output(shards)
         for entry in shards:
             status = observe_exit(entry["process"]) if entry["process"] is not None else 127
-            print("run-tests-local: shard {}/8 elapsed_seconds={:.3f} status={}".format(
-                entry["shard"], (entry["finished"] or time.monotonic()) - entry["started"], status))
+            print("run-tests-local: shard {}/{} elapsed_seconds={:.3f} status={}".format(
+                entry["shard"], SHARD_COUNT, (entry["finished"] or time.monotonic()) - entry["started"], status))
         _write_aggregate(aggregate, shards, expected)
         print("run-tests-local: aggregate receipt: {}".format(aggregate), flush=True)
         result = 0 if len(shards) == SHARD_COUNT and all(

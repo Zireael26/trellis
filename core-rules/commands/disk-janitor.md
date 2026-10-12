@@ -23,9 +23,9 @@ Run:
 scripts/disk-janitor.sh
 ```
 
-To scope to a single project, add `--project <registry-name>`. To limit which scopes are scanned, add `--scopes caches,worktrees,stores` (any subset; default is all three). This run is read-only — it deletes nothing. It writes the report to `audits/YYYY-MM-DD-disk-janitor.md` as well as stdout.
+To scope to a single project, add `--project <registry-name>`. To limit which scopes are scanned, add `--scopes caches,worktrees,stores` (any subset; default is caches,worktrees,stores,docker,releases). Opt-in host scopes: `pi,orphans,logs,tmp,transcripts` (never in the default set). Add `--dehydrate` to delete only regenerable directories in idle clean trees (D1, worktree lane). This run is read-only — it deletes nothing. It writes the report to `audits/YYYY-MM-DD-disk-janitor.md` as well as stdout.
 
-`--scopes pi` is opt-in, never part of the default, and **report-only in 1.3.12**: `--apply` refuses it and nothing under a pi root is deleted; relay the `[reclaimable]` rows so the user can remove them by hand. It covers pi's roots: `~/.pi-worktrees`, the pre-1.3.12 `$TRELLIS_HOME/pi-worktrees`, and the temp dir `$TRELLIS_PI_TMPDIR` (else `$TMPDIR/pi`; never `/` or `$HOME`). A symlinked or foreign-owned root is not scanned. Temp files are listed after 3 days. A worktree is listed only as an aged orphan: no attachment owner record names it and its repository's `git worktree list` does not register it; a repository is never listed. pi's bash spill logs (`pi-bash-*.log`) are listed after 1 day, or at any age once over 1 GiB. Nothing is listed while lsof shows a process using it, or when lsof cannot run.
+`--scopes pi` is opt-in, never part of the default. Spill logs (`pi-bash-*.log` older than 1 day or over 1 GiB, no open handle) apply-delete across `~/projects/worktrees/_pi`, `~/.pi-worktrees`, the legacy `TRELLIS_HOME/pi-worktrees`, bare `$TMPDIR`, `$TMPDIR/pi` and the per-user `DARWIN_USER_TEMP_DIR` + `pi/` (all maxdepth 1, never following symlinks); `disk_janitor.pi_apply:false` restores report-only. Temp files older than 3 days stay manual. Orphan `pi-agent-*` worktrees older than `pi_worktree_ttl_days` (7) with no unique commits and no dirty files apply-remove via `git worktree remove` (no `--force`); all else is held with a reason. A repository is never listed. Nothing is listed while lsof shows a process using it, or when lsof cannot run.
 
 ### 2. Read the result
 
@@ -35,9 +35,14 @@ The report has these sections — summarize them for the user, most actionable f
 - **Tripwire status** — free space on the projects volume vs the configured floor, and the largest single cache vs the ceiling. A `⚠` here means cleanup is overdue.
 - **Build caches** — per cache dir: `[delete]` (stale past `cache_ttl_days`), `[skip]` (younger, or a build is currently running in that project), with sizes.
 - **Worktrees** — per linked worktree: `[delete]` (passes the configured recoverability and safety predicate), `[candidate]` (manual review; never auto-reaped), or `[skip]` (main checkout or unsafe), with the full verdict. Default recoverability is merged or pushed; `--safe-only` narrows deletion to merged, non-detached trees.
-- **Package stores** — best-effort `pnpm store` / `npm cache` reclaim estimate (may be 0).
-- **Docker** (when the `docker` scope runs) — anonymous-volume counts and the unattached volume IDs (report-only; the janitor never deletes volumes), BuildKit cache reclaimable, and image count.
+- **Release staging** — via `trellis release reap-tmp`: both `.verify` and `.exec` scratch; only reapable rows are `[delete]`.
+- **Package stores** — per-store bytes + last use for every pnpm store, uv, bun, go-build, Playwright and npm cache; pnpm majors no project resolves to are flagged `removable (operator)`. Apply runs only each tool's own prune (`pnpm store prune`, `uv cache prune`, `bun pm cache rm`, `go clean -cache`), never `rm`. Tools resolve via the tool-path file (the launcher strips PATH).
+- **Logs** — files over 50 MB older than 7 days, not open; report-only.
+- **Tmp** — `$TMPDIR` `bats-run-*`/`rv-*` older than 2 days, not open; apply-deletes.
+- **Transcripts** — age histogram for `~/.codex`, `~/.pi` and `~/.claude/projects`; never deleted.
+- **Docker** (when the `docker` scope runs) — anonymous-volume counts and the unattached volume IDs (report-only; the janitor never deletes volumes, images or containers), BuildKit cache reclaimable, and image count. Apply runs `docker buildx prune -f --reserved-space 20GB` followed by `colima ssh -- sudo fstrim -av` (skipped when colima is absent/not running).
 - **Total** — reclaimable-now bytes (stale caches + fully-gated worktrees).
+- **Coverage** — every report ends with `unattributed = df used − scanned bytes` (GiB and %).
 
 Exit codes: `0` success, `1` a scan or prune error occurred, `2` bad arguments.
 

@@ -58,6 +58,30 @@ SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 . "$SCRIPT_DIR/lib/config-load.sh"
 # shellcheck source=lib/disk-janitor-lib.sh
 . "$SCRIPT_DIR/lib/disk-janitor-lib.sh"
+# shellcheck source=lib/hygiene-common.sh
+. "$SCRIPT_DIR/lib/hygiene-common.sh"
+# shellcheck source=lib/disk-janitor-dehydrate.sh
+. "$SCRIPT_DIR/lib/disk-janitor-dehydrate.sh"
+# shellcheck source=lib/disk-janitor-host.sh
+. "$SCRIPT_DIR/lib/disk-janitor-host.sh"
+
+# The launcher and the LaunchAgents run the janitor with a minimal PATH, which
+# has no gh (merge checks read "unverified"), docker, colima, pnpm or uv. The
+# installer records their directories in TRELLIS_HOME/state/disk-janitor/
+# tool-path, one absolute directory per line; prepend them in file order. A
+# relative entry or one holding ':' is skipped.
+JANITOR_TOOL_PATH_FILE="$TRELLIS_HOME/state/disk-janitor/tool-path"
+if [ -f "$JANITOR_TOOL_PATH_FILE" ]; then
+  janitor_tool_path=""
+  while IFS= read -r tool_dir || [ -n "$tool_dir" ]; do
+    case "$tool_dir" in
+      /*:*|'') continue ;;
+      /*) janitor_tool_path="${janitor_tool_path:+$janitor_tool_path:}$tool_dir" ;;
+    esac
+  done <"$JANITOR_TOOL_PATH_FILE"
+  [ -z "$janitor_tool_path" ] || PATH="$janitor_tool_path:$PATH"
+  export PATH
+fi
 
 # ---------------------------------------------------------------------------
 # Args
@@ -67,6 +91,7 @@ ONLY_PROJECT=""
 SCOPES="caches,worktrees,stores,docker,releases"
 ASSUME_YES=0
 SAFE_ONLY=0              # --safe-only: unattended-safe worktree reap (merged-only)
+DEHYDRATE=0              # --dehydrate: delete regenerable dirs in idle clean trees (spec 069 D1)
 
 print_help() {
   cat <<'EOF'
@@ -94,6 +119,17 @@ Usage:
                                            spill logs and orphan pi worktrees
                                            (never in the default set; --apply
                                            refuses it).
+  disk-janitor.sh --scopes orphans,logs,tmp,transcripts
+                                           Opt-in spec 069 scopes (never in the
+                                           default set; not implemented in this
+                                           build).
+  disk-janitor.sh --dehydrate              Delete only regenerable directories
+                                           (node_modules, .venv, caches, dist/
+                                           build/target beside a manifest) in
+                                           idle, clean worktrees with a tracked
+                                           lockfile and no open handle, and in
+                                           orphans (spec 069 D1). Other ignored
+                                           content is kept.
   disk-janitor.sh --help                   Show this help.
 
 Modes (escalating):
@@ -139,10 +175,6 @@ Config:
                                      tripwire. The installed buildx supports
                                      --reserved-space, so Docker apply uses that
                                      flag rather than unsupported keep-storage flags.
-  disk_janitor.release_staging_ttl_days
-                                     Age before an execution snapshot may be
-                                     considered orphaned; default 1 day. Fresh
-                                     staging is always left intact.
 
 Scopes:
   caches      .turbo/cache, .next/cache, .next/dev older than cache_ttl_days,
@@ -164,24 +196,17 @@ Scopes:
               `docker buildx prune -f --reserved-space <N>GB`; volumes and
               images are never deleted. If Docker is not already live, the scope
               is skipped without starting Desktop.
-  releases    Host-global TRELLIS_HOME/releases staging. Only real direct-child
-              .tmp.<version>.exec.<alphanumeric-suffix> directories are scanned.
-              Fresh snapshots, live-owner snapshots, and malformed owner records
-              are skipped; aged snapshots without a live owner are reaped with
-              their exact owner sidecar.
-  pi          Host-global, opt-in, REPORT-ONLY in 1.3.12: --apply refuses it
-              and nothing under a pi root is ever deleted; remove what it
-              lists by hand. Direct children of $TRELLIS_PI_TMPDIR (else
-              $TMPDIR/pi), of $HOME/.pi-worktrees, and of the legacy
-              TRELLIS_HOME/pi-worktrees whose newest content is older than 3
-              days are listed as reclaimable. A worktree is listed only as an
-              orphan: no attachment owner record names it and its parent
-              repository's `git worktree list` does not register it. A
-              repository (a .git directory), unreadable owner records, a
-              failed query, or a live cwd/open handle keep the entry off the
-              list. pi's bash spill logs (pi-bash-*.log) are listed after 1
-              day, or at any age once over 1 GiB, unless lsof shows an open
-              handle or cannot run.
+  releases    Host-global TRELLIS_HOME/releases staging via `trellis release
+              reap-tmp` (spec 069 D3): both .tmp.<version>.exec.<suffix> and
+              .tmp.<version>.verify.<suffix> scratch. Only reap-tmp reapable
+              rows become [delete]; keep/refused rows are [skip]/[candidate].
+  pi          Host-global, opt-in: spill logs (pi-bash-*.log older than 1d or
+              over 1 GiB, no open handle) apply-delete across the _pi root,
+              ~/.pi-worktrees, the legacy root, bare $TMPDIR, $TMPDIR/pi and
+              the Darwin user temp + pi/ (maxdepth 1, never following symlinks;
+              pi_apply:false restores report-only). Temp files older than 3d
+              stay manual. A worktree is listed only as an orphan: no owner
+              record names it and its parent does not register it.
 
 Exit codes: 0 success, 1 scan/prune error, 2 bad arguments, 3 identity conflict.
 EOF
@@ -207,6 +232,10 @@ while [ "$i" -le "$#" ]; do
       ;;
     --safe-only)
       SAFE_ONLY=1
+      ;;
+    --dehydrate)
+      # shellcheck disable=SC2034  # read by lib/disk-janitor-dehydrate.sh
+      DEHYDRATE=1
       ;;
     --project)
       i=$((i + 1))
@@ -262,11 +291,11 @@ validate_scopes() {
   IFS=','
   for s in $SCOPES; do
     case "$s" in
-      caches|worktrees|stores|docker|releases|pi) ;;
+      caches|worktrees|stores|docker|releases|pi|orphans|logs|tmp|transcripts) ;;
       "") ;;
       *)
         IFS="$ifs_save"
-        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases, pi)" >&2
+        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases, pi, orphans, logs, tmp, transcripts)" >&2
         exit 2
         ;;
     esac
@@ -274,12 +303,9 @@ validate_scopes() {
   IFS="$ifs_save"
 }
 validate_scopes
-# The pi scope is report-only in 1.3.12 (release-owner ruling after the
-# security review): a race-safe deleting pi janitor is a 1.3.13 item.
-if [ "$MODE" = "apply" ] && scope_enabled pi; then
-  echo "disk-janitor: pi scope is report-only in 1.3.12; run --report or --dry-run with --scopes pi and remove what it lists by hand" >&2
-  exit 2
-fi
+# C3 (spec 069): the pi scope applies spill logs and orphan pi-agent worktrees
+# when disk_janitor.pi_apply is true (default); pi_apply:false restores
+# report-only. The 1.3.12 blanket refusal is retired.
 
 # Header tag so every mode's banner shows when the unattended-safe worktree
 # restriction is active (the nightly apply LaunchAgent runs with --safe-only).
@@ -328,13 +354,8 @@ if [ "$MODE" = "apply" ] && [ "$DJ_ENABLED" = "false" ]; then
   exit 2
 fi
 CACHE_TTL_DAYS="$(cfg_num '.disk_janitor.cache_ttl_days' 14)"
-RELEASE_STAGING_TTL_DAYS="$(cfg_num '.disk_janitor.release_staging_ttl_days' 1)"
-case "$RELEASE_STAGING_TTL_DAYS" in
-  ''|*[!0-9]*)
-    echo "disk-janitor: WARNING: malformed disk_janitor.release_staging_ttl_days='$RELEASE_STAGING_TTL_DAYS'; using 1" >&2
-    RELEASE_STAGING_TTL_DAYS=1
-    ;;
-esac
+# D3 delegates release staging to `release_store_reap_tmp` (spec 069); the
+# legacy `release_staging_ttl_days` key is retired and no longer read.
 WORKTREE_STALE_DAYS="$(cfg_num '.disk_janitor.worktree_stale_days' 30)"
 FREE_SPACE_FLOOR_GB="$(cfg_num '.disk_janitor.free_space_floor_gb' 30)"
 CACHE_CEILING_GB="$(cfg_num '.disk_janitor.cache_ceiling_gb' 20)"
@@ -351,14 +372,31 @@ fi
 # defaults (reap_pushed_worktrees true; ephemeral_tmp_ttl_days 2; ceilings 25/80).
 REAP_PUSHED_WORKTREES="$(cfg_bool '.disk_janitor.reap_pushed_worktrees' true)"
 EPHEMERAL_TMP_TTL_DAYS="$(cfg_num '.disk_janitor.ephemeral_tmp_ttl_days' 2)"
-# pi scope: owner ruling of 2026-10-08, a fixed 3 days for temp files and
-# orphan worktrees alike. Spill logs: release-owner requirement after the
-# 2026-10-08 disk-full incident, 1 day, or any age over 1 GiB.
+# pi scope: temp files 3d; spill logs 1d or over 1 GiB (C3); pi-agent
+# worktrees pi_worktree_ttl_days (A9, default 7). pi_apply:false restores
+# report-only (C3 rollback). Spill roots are maxdepth-1, never following
+# symlinks, across the worktree _pi root, ~/.pi-worktrees, the legacy root,
+# bare $TMPDIR, $TMPDIR/pi, and the per-user DARWIN_USER_TEMP_DIR + its pi/.
 PI_TMP_TTL_DAYS=3
 PI_SPILL_TTL_DAYS=1
 PI_SPILL_MAX_BYTES=1073741824
+PI_APPLY="$(cfg_bool '.disk_janitor.pi_apply' true)"
+PI_WORKTREE_TTL_DAYS="$(cfg_num '.disk_janitor.pi_worktree_ttl_days' 7)"
+case "$PI_WORKTREE_TTL_DAYS" in ''|*[!0-9]*) PI_WORKTREE_TTL_DAYS=7 ;; esac
 WORKTREE_COUNT_CEILING="$(cfg_num '.disk_janitor.worktree_count_ceiling' 25)"
 WORKTREE_TOTAL_GB_CEILING="$(cfg_num '.disk_janitor.worktree_total_gb_ceiling' 80)"
+
+# disk_janitor.apply_disabled_scopes: per-scope opt-out of --apply (the spec
+# 069 D rollback switch). A listed scope is dropped from an apply run with a
+# note; --report and --dry-run still scan it.
+if [ "$MODE" = "apply" ]; then
+  while IFS= read -r disabled_scope; do
+    [ -n "$disabled_scope" ] || continue
+    scope_enabled "$disabled_scope" || continue
+    echo "disk-janitor: apply disabled for scope $disabled_scope by disk_janitor.apply_disabled_scopes; skipped" >&2
+    SCOPES="$(printf '%s' ",$SCOPES," | sed "s/,$disabled_scope,/,/g; s/^,//; s/,\$//")"
+  done < <(jq -r '.disk_janitor.apply_disabled_scopes[]? // empty' "$CFG" 2>/dev/null || true)
+fi
 
 SKIP_PROJECTS=()
 while IFS= read -r sp; do
@@ -653,7 +691,8 @@ done < <(jq -c '.entries[]' "$REGISTRY_SNAPSHOT_TMP")
 # One bounded host-wide lsof snapshot feeds every linked-worktree predicate.
 # Failure is recorded in the snapshot itself; dj_worktree_in_use interprets that
 # marker as "in use" so a broken safety check can only close the reap gate.
-if scope_enabled worktrees || scope_enabled pi; then
+if scope_enabled worktrees || scope_enabled pi || scope_enabled orphans ||
+   scope_enabled logs || scope_enabled tmp; then
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
 fi
 
@@ -696,7 +735,7 @@ $label	$tj"
 # ---------------------------------------------------------------------------
 scan_caches() {
   local proj="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5" common="$6"
-  local kind path bytes mtime rc build_active=0 cache_rows
+  local kind path bytes mtime rc build_active=0 cache_rows detail
 
   # Running-build guard: if a build is live in this project, do not touch its
   # caches at all (testable via DJ_BUILD_ACTIVE_OVERRIDE).
@@ -722,6 +761,19 @@ scan_caches() {
       continue
     fi
     if dj_cache_is_stale "$mtime" "$CACHE_TTL_DAYS" "$NOW_EPOCH"; then rc=0; else rc=$?; fi
+    # A spec 069 D1 directory (node_modules, .venv, ...) is footprint here,
+    # never a cache delete: only --dehydrate removes it, and only in an idle,
+    # clean worktree with a tracked lockfile.
+    case "$kind" in
+      turbo-cache|next-cache|next-dev) ;;
+      *)
+        if [ "$rc" -eq 0 ]; then detail="no git activity for ${CACHE_TTL_DAYS}d"; else detail="git activity within ${CACHE_TTL_DAYS}d"; fi
+        plan_row caches candidate "$kind" "$path" "$bytes" "$proj" \
+          "regenerable ($detail) — reclaimed only by --dehydrate" \
+          "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+        continue
+        ;;
+    esac
     if [ "$rc" -eq 0 ]; then
       plan_row caches delete "$kind" "$path" "$bytes" "$proj" "stale > ${CACHE_TTL_DAYS}d" \
         "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
@@ -754,6 +806,32 @@ EOF
 # The main-checkout row carries kind `worktree-main` so the Layer 3 tripwire can
 # count LINKED worktrees only (col 3 == "worktree").
 # ---------------------------------------------------------------------------
+# scan_worktree_ignored_content WT BYTES BRANCH FLEET PROJECT_ID CHECKOUT_ID
+#   WORKTREE_ID COMMON PROJ
+#
+# A porcelain-clean linked worktree that holds ignored content is never reaped
+# whole. Spec 069 D1 splits that content: when the tree may shed regenerable
+# directories its verdict is `dehydrate` (applied only under --dehydrate);
+# otherwise it stays a manual candidate that names the hold reason.
+scan_worktree_ignored_content() {
+  local wt_path="$1" bytes="$2" branch="$3" summary count planned held
+  shift 3
+  summary="$(dj_dehydrate_plan_tree "$wt_path" "$@")" || return 1
+  IFS="$(printf '\t')" read -r count planned held <<EOF
+$summary
+EOF
+  case "$count$planned" in ''|*[!0-9]*) count=0 planned=0 ;; esac
+  if [ "$count" -gt 0 ]; then
+    plan_row worktrees dehydrate worktree "$wt_path" "$bytes" "$5" \
+      "dehydrate ($count regenerable path(s), $(dj_human_bytes "$planned")); other ignored local content kept — branch=$branch" \
+      "$@"
+  else
+    plan_row worktrees candidate worktree "$wt_path" "$bytes" "$5" \
+      "candidate (ignored local content${held:+; dehydrate held: $held}) — branch=$branch" \
+      "$@"
+  fi
+}
+
 scan_worktrees() {
   local proj="$1" fleet="$2" project_id="$3" checkout_id="$4" worktree_id="$5" common="$6"
   local wt_path head_sha branch is_main prunable registered_root found=0
@@ -762,6 +840,9 @@ scan_worktrees() {
   local real_wt is_tmp tmp_stale_rc is_detached in_use_reason
   local phantom_key phantom_known phantom_seen
 
+  # scan_project runs this in a subshell: keep every git status below from
+  # refreshing the index, whose mtime is the dehydrate idle clock.
+  export GIT_OPTIONAL_LOCKS=0
   registered_root="$(dj__abspath "$proj")"
   if worktree_rows="$(dj_list_worktrees "$proj")"; then :; else
     rc=$?
@@ -793,6 +874,8 @@ scan_worktrees() {
     # failed, timed out, or malformed: a broken safety check must fail closed.
     if in_use_reason="$(dj_worktree_in_use "$wt_path" "$LSOF_SNAPSHOT_TMP")"; then
       bytes="$(dj_dir_bytes "$wt_path")"
+      dj_dehydrate_plan_tree "$wt_path" "$fleet" "$project_id" "$checkout_id" \
+        "$worktree_id" "$common" "$proj" >/dev/null || return 1
       plan_row worktrees candidate worktree "$wt_path" "$bytes" "$common" \
         "candidate (worktree in use) — branch=$branch $in_use_reason in-use" \
         "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
@@ -804,15 +887,16 @@ scan_worktrees() {
     # ---- Fallback: pre-Layer-2 4-gate behavior (opt-out) ----
     if [ "$REAP_PUSHED_WORKTREES" = "false" ]; then
       if ! dj_worktree_porcelain_clean "$wt_path"; then
+        dj_dehydrate_plan_tree "$wt_path" "$fleet" "$project_id" "$checkout_id" \
+          "$worktree_id" "$common" "$proj" >/dev/null || return 1
         plan_row worktrees skip worktree "$wt_path" "$bytes" "$common" \
           "dirty (uncommitted work) — branch=$branch" \
           "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
         continue
       fi
       if ! dj_worktree_clean "$wt_path"; then
-        plan_row worktrees candidate worktree "$wt_path" "$bytes" "$common" \
-          "candidate (ignored local content) — branch=$branch" \
-          "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+        scan_worktree_ignored_content "$wt_path" "$bytes" "$branch" \
+          "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj" || return 1
         continue
       fi
       if dj_cache_is_stale "$mtime" "$WORKTREE_STALE_DAYS" "$NOW_EPOCH"; then stale_rc=0; else stale_rc=$?; fi
@@ -841,15 +925,16 @@ scan_worktrees() {
 
     # ---- Default: Layer 2 content-clean + recoverable ----
     if ! dj_worktree_porcelain_clean "$wt_path"; then
+      dj_dehydrate_plan_tree "$wt_path" "$fleet" "$project_id" "$checkout_id" \
+        "$worktree_id" "$common" "$proj" >/dev/null || return 1
       plan_row worktrees skip worktree "$wt_path" "$bytes" "$common" \
         "dirty (uncommitted work) — branch=$branch" \
         "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
       continue
     fi
     if ! dj_worktree_clean "$wt_path"; then
-      plan_row worktrees candidate worktree "$wt_path" "$bytes" "$common" \
-        "candidate (ignored local content) — branch=$branch" \
-        "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj"
+      scan_worktree_ignored_content "$wt_path" "$bytes" "$branch" \
+        "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$common" "$proj" || return 1
       continue
     fi
 
@@ -990,69 +1075,11 @@ RELEASE_STAGING_ALL_BYTES=0
 RELEASE_STAGING_RECLAIMED_BYTES=0
 
 scan_release_staging() {
-  local releases="$TRELLIS_HOME/releases"
-  local rows base version snapshot_bytes mtime snapshot_dev snapshot_inode
-  local path sidecar sidecar_bytes bytes stale_rc owner_rc owner_detail rc
-
-  RELEASE_STAGING_SCAN_REASON=""
-  if [ ! -d "$releases" ] || [ -L "$releases" ]; then
-    RELEASE_STAGING_SCAN_REASON="releases directory unavailable or symlinked"
-    return 0
-  fi
-  if rows="$(dj_find_release_staging "$releases")"; then :; else
-    rc=$?
-    RELEASE_STAGING_SCAN_REASON="release staging scan failed (exit $rc)"
-    EXIT_STATUS=1
-    return 0
-  fi
-  [ -n "$rows" ] || return 0
-
-  while IFS="$(printf '\t')" read -r base version snapshot_bytes mtime snapshot_dev snapshot_inode; do
-    [ -n "${base:-}" ] || continue
-    path="$releases/$base"
-    sidecar="${path}.owner.json"
-    sidecar_bytes="$(dj_release_staging_sidecar_bytes "$sidecar")"
-    case "$snapshot_bytes" in ''|*[!0-9]*) snapshot_bytes=0 ;; esac
-    case "$sidecar_bytes" in ''|*[!0-9]*) sidecar_bytes=0 ;; esac
-    bytes=$((snapshot_bytes + sidecar_bytes))
-
-    if dj_cache_is_stale "$mtime" "$RELEASE_STAGING_TTL_DAYS" "$NOW_EPOCH"; then
-      stale_rc=0
-    else
-      stale_rc=$?
-    fi
-    if [ "$stale_rc" -ne 0 ]; then
-      plan_row releases skip release-staging "$path" "$bytes" "$version" \
-        "fresh staging — younger than ${RELEASE_STAGING_TTL_DAYS}d; left intact" \
-        "$snapshot_dev" "$snapshot_inode"
-      continue
-    fi
-
-    if owner_detail="$(dj_release_staging_owner_state "$path")"; then
-      owner_rc=0
-    else
-      owner_rc=$?
-    fi
-    case "$owner_rc" in
-      0)
-        plan_row releases candidate release-staging "$path" "$bytes" "$version" \
-          "candidate (owner process is live) — $owner_detail" \
-          "$snapshot_dev" "$snapshot_inode"
-        ;;
-      1)
-        plan_row releases delete release-staging "$path" "$bytes" "$version" \
-          "orphaned aged staging — $owner_detail" \
-          "$snapshot_dev" "$snapshot_inode"
-        ;;
-      *)
-        plan_row releases candidate release-staging "$path" "$bytes" "$version" \
-          "candidate (owner record malformed or unreadable) — $owner_detail" \
-          "$snapshot_dev" "$snapshot_inode"
-        ;;
-    esac
-  done <<EOF
-$rows
-EOF
+  # D3 (spec 069): the release-staging matcher is `release_store_reap_tmp`
+  # dry-run, covering both .verify and .exec scratch. The legacy
+  # dj_find_release_staging walker is retired; dj_host_release_scan owns the
+  # translation into plan rows.
+  dj_host_release_scan
 }
 
 # ---------------------------------------------------------------------------
@@ -1106,6 +1133,53 @@ fi
 case "$PI_TEMP_ROOT/" in
   "${PI_WORKTREE_ROOT:-/nonexistent}"/*|"${PI_LEGACY_ROOT:-/nonexistent}"/*) PI_TEMP_ROOT="" ;;
 esac
+# C3 spill-only roots (maxdepth 1, pi-bash-*.log only, never following
+# symlinks): the worktree _pi root, bare $TMPDIR, and the per-user
+# DARWIN_USER_TEMP_DIR + its pi/ subdir. DJ_DARWIN_TMPDIR_OVERRIDE names the
+# Darwin dir in tests so the real per-user temp is never scanned.
+PI_CENTRAL_PI_ROOT=""
+if _pi_candidate="$(hy_root 2>/dev/null)/_pi"; then
+  if [ -d "$_pi_candidate" ] && [ ! -L "$_pi_candidate" ] && [ -O "$_pi_candidate" ]; then
+    PI_CENTRAL_PI_ROOT="$_pi_candidate"
+  fi
+fi
+PI_BARE_TMP_ROOT=""
+if [ -n "${TMPDIR:-}" ]; then
+  if _tmp_real="$(CDPATH='' cd -P -- "$TMPDIR" 2>/dev/null && pwd -P)"; then
+    _home_real="$(CDPATH='' cd -P -- "${HOME:-/}" 2>/dev/null && pwd -P)" || _home_real="/nonexistent-home"
+    [ -n "$_home_real" ] || _home_real="/nonexistent-home"
+    if [ "$_tmp_real" != / ] && [ "$_tmp_real" != "$_home_real" ] && [ -d "$_tmp_real" ] && [ ! -L "$TMPDIR" ] && [ -O "$_tmp_real" ]; then
+      case "$_tmp_real/" in "$_home_real/"*) ;; *) PI_BARE_TMP_ROOT="$_tmp_real" ;; esac
+    fi
+  fi
+fi
+PI_DARWIN_ROOT=""; PI_DARWIN_PI_ROOT=""
+if [ -n "${DJ_DARWIN_TMPDIR_OVERRIDE:-}" ]; then
+  _darwin_base="${DJ_DARWIN_TMPDIR_OVERRIDE}"
+else
+  _darwin_base="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo '')"
+fi
+if [ -n "$_darwin_base" ]; then
+  case "$_darwin_base" in /*) ;;
+    *) _darwin_base="" ;;
+  esac
+fi
+if [ -n "$_darwin_base" ] && [ -d "$_darwin_base" ] && [ ! -L "$_darwin_base" ]; then
+  _darwin_real="$(CDPATH='' cd -P -- "$_darwin_base" 2>/dev/null && pwd -P)" || _darwin_real=""
+  _darwin_home_real="$(CDPATH='' cd -P -- "${HOME:-/}" 2>/dev/null && pwd -P)" || _darwin_home_real="/nonexistent-home"
+  [ -n "$_darwin_home_real" ] || _darwin_home_real="/nonexistent-home"
+  if [ -n "$_darwin_real" ] && [ "$_darwin_real" != / ] && [ "$_darwin_real" != "$_darwin_home_real" ]; then
+    case "$_darwin_real/" in "$_darwin_home_real/"*) _darwin_real="" ;; esac
+  else
+    _darwin_real=""
+  fi
+  if [ -n "$_darwin_real" ]; then
+    PI_DARWIN_ROOT="$_darwin_real"
+    if [ -d "$_darwin_real/pi" ] && [ ! -L "$_darwin_real/pi" ]; then
+      PI_DARWIN_PI_ROOT="$_darwin_real/pi"
+    fi
+  fi
+fi
 PI_OWNERS=""
 PI_RECLAIMABLE_BYTES=0
 
@@ -1120,7 +1194,7 @@ pi_load_owners() {
 }
 
 scan_pi() {
-  local root entry row verdict kind detail tab nl
+  local root entry row verdict kind detail tab nl bytes _wt_pi_agent _wt_eligible
   tab="$(printf '\t')"
   nl="$(printf '\nx')"; nl="${nl%x}"
   pi_load_owners
@@ -1145,7 +1219,70 @@ scan_pi() {
       IFS="$tab" read -r verdict kind detail <<EOF
 $row
 EOF
-      plan_row pi "$verdict" "$kind" "$entry" "$(dj_dir_bytes "$entry")" "$root" "$detail"
+      # C3 apply/dry-run: reclaimable spill logs become delete unless
+      # pi_apply:false restores report-only.
+      if { [ "$MODE" = "apply" ] || [ "$MODE" = "dry-run" ]; } && [ "$PI_APPLY" = "true" ] && [ "$kind" = "pi-spill-log" ] && [ "$verdict" = "reclaimable" ]; then
+        verdict="delete"
+      fi
+      if [ "$PI_APPLY" != "true" ] && [ "$verdict" = "delete" ]; then
+        verdict="reclaimable"
+      fi
+      # A9: pi-agent-* worktrees need the 7-day TTL plus clean-tree and
+      # no-unique-commits gates before delete; otherwise hold. Covers both
+      # reclaimable orphans and registered-but-unowned worktrees (which `git
+      # worktree remove` can still remove). Non-pi-agent names stay as classified.
+      case "$(basename "$entry")" in pi-agent-*) _wt_pi_agent=1 ;; *) _wt_pi_agent=0 ;; esac
+      if [ "$kind" = "pi-worktree" ] && [ "$_wt_pi_agent" -eq 1 ]; then
+        _wt_eligible=0
+        if [ "$verdict" = "reclaimable" ]; then _wt_eligible=1; fi
+        if [ "$verdict" = "skip" ]; then case "$detail" in *"registered with its parent"*) _wt_eligible=1 ;; esac; fi
+        if [ "$_wt_eligible" -eq 1 ]; then
+          if dj_pi_entry_fresh "$entry" "$PI_WORKTREE_TTL_DAYS"; then
+            verdict="skip"
+            detail="fresh — younger than ${PI_WORKTREE_TTL_DAYS}d pi-worktree TTL; held"
+          elif dj_host_worktree_dirty "$entry"; then
+            verdict="candidate"
+            detail="candidate (dirty or untracked files); held"
+          elif ! dj_host_pi_no_unique_commits "$entry"; then
+            verdict="candidate"
+            detail="candidate (unique commits); held"
+          elif { [ "$MODE" = "apply" ] || [ "$MODE" = "dry-run" ]; } && [ "$PI_APPLY" = "true" ]; then
+            verdict="delete"
+            detail="orphan pi-agent worktree older than ${PI_WORKTREE_TTL_DAYS}d, clean, no unique commits"
+          else
+            verdict="reclaimable"
+            detail="orphan pi-agent worktree older than ${PI_WORKTREE_TTL_DAYS}d, clean, no unique commits; manual removal"
+          fi
+        fi
+      fi
+      bytes="$(dj_dir_bytes "$entry")"
+      case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+      plan_row pi "$verdict" "$kind" "$entry" "$bytes" "$root" "$detail"
+    done
+  done
+  # C3 spill-only roots: central _pi, bare TMPDIR, Darwin tmp + pi/ —
+  # maxdepth 1, pi-bash-*.log only, never following symlinks.
+  for root in "$PI_CENTRAL_PI_ROOT" "$PI_BARE_TMP_ROOT" "$PI_DARWIN_ROOT" "$PI_DARWIN_PI_ROOT"; do
+    [ -n "$root" ] || continue
+    if [ ! -d "$root" ] || [ -L "$root" ]; then continue; fi
+    for entry in "$root"/pi-bash-*.log; do
+      [ -f "$entry" ] && [ ! -L "$entry" ] || continue
+      case "$entry" in *"$tab"*|*"$nl"*) continue ;; esac
+      row="$(dj_pi_entry_verdict "$entry" "$PI_TMP_TTL_DAYS" "$PI_OWNERS" "$LSOF_SNAPSHOT_TMP" \
+        "$PI_SPILL_TTL_DAYS" "$PI_SPILL_MAX_BYTES")"
+      IFS="$tab" read -r verdict kind detail <<EOF
+$row
+EOF
+      [ "$kind" = "pi-spill-log" ] || continue
+      if { [ "$MODE" = "apply" ] || [ "$MODE" = "dry-run" ]; } && [ "$PI_APPLY" = "true" ] && [ "$verdict" = "reclaimable" ]; then
+        verdict="delete"
+      fi
+      if [ "$PI_APPLY" != "true" ] && [ "$verdict" = "delete" ]; then
+        verdict="reclaimable"
+      fi
+      bytes="$(dj_dir_bytes "$entry")"
+      case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+      plan_row pi "$verdict" "$kind" "$entry" "$bytes" "$root" "$detail"
     done
   done
 }
@@ -1356,6 +1493,9 @@ fi
 if scope_enabled pi; then
   scan_pi
 fi
+# Spec 069 lane libraries; each gates itself on the scopes it owns.
+dj_dehydrate_scan
+dj_host_scan
 
 STORES_PLAN=""
 if scope_enabled stores; then
@@ -1429,8 +1569,8 @@ CEILING_BYTES=$((CACHE_CEILING_GB * 1024 * 1024 * 1024))
 # print_pi_rows — the pi scope's plan, shared by report and dry-run.
 print_pi_rows() {
   local scope verdict kind path bytes repo detail
-  echo "== pi temp files and orphan pi worktrees (host-global, REPORT-ONLY: remove by hand; older than ${PI_TMP_TTL_DAYS}d; spill logs older than ${PI_SPILL_TTL_DAYS}d or over 1 GiB) =="
-  echo "  roots: ${PI_WORKTREE_ROOT:-<none>} ${PI_LEGACY_ROOT:-<none>} ${PI_TEMP_ROOT:-<none>}"
+  echo "== pi temp files and orphan pi worktrees (host-global; spill logs apply-delete when pi_apply:true; older than ${PI_TMP_TTL_DAYS}d; spill logs older than ${PI_SPILL_TTL_DAYS}d or over 1 GiB) =="
+  echo "  roots: ${PI_WORKTREE_ROOT:-<none>} ${PI_LEGACY_ROOT:-<none>} ${PI_TEMP_ROOT:-<none>} ${PI_CENTRAL_PI_ROOT:-<none>} ${PI_BARE_TMP_ROOT:-<none>} ${PI_DARWIN_ROOT:-<none>} ${PI_DARWIN_PI_ROOT:-<none>}"
   [ -z "$PI_SCAN_NOTES" ] || echo "  note: $PI_SCAN_NOTES"
   while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail; do
     [ "$scope" = "pi" ] || continue
@@ -1448,7 +1588,7 @@ render_report() {
   echo "date:          $(date +%F)"
   echo "fleet:         $TRELLIS_FLEET_NAME"
   echo "worktrees:     $TARGET_COUNT strict local-registry identity/identities"
-  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS release_staging_ttl_days=$RELEASE_STAGING_TTL_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
+  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
   echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
   echo
 
@@ -1550,21 +1690,20 @@ INNER
     print_pi_rows
     echo
   fi
+  dj_dehydrate_render
+  dj_host_render
 
 
-  # --- stores --- (report-only: STORES_PLAN is a best-effort byte estimate)
+  # --- stores --- D6 (spec 069): per-store report lives in dj_host_render
+  # (called below); the legacy single-number STORES_PLAN is retained only for
+  # the total line. Detailed bytes + last use print in the host section.
   if scope_enabled stores; then
-    echo "== Package stores (report-only; --apply does not prune stores) =="
     case "${STORES_PLAN:-0}" in
-      ''|0|*[!0-9]*)
-        echo "  (no reclaimable package-store space detected)"
-        ;;
+      ''|0|*[!0-9]*) ;;
       *)
-        printf '  pnpm + npm store footprint (best-effort upper bound): %s\n' "$(dj_human_bytes "$STORES_PLAN")"
-        echo "  to reclaim, run 'pnpm store prune' manually (removes only unreferenced packages)."
+        printf '  (stores total footprint: %s; see per-store breakdown below)\n' "$(dj_human_bytes "$STORES_PLAN")"
         ;;
     esac
-    echo
   fi
 
   # --- Docker --- (host-global; report is read-only)
@@ -1601,6 +1740,30 @@ INNER
       "$(dj_human_bytes "$DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES")" \
       "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
   fi
+  # D7 coverage: unattributed = df used − scanned bytes (GiB and %).
+  # Scanned = caches + worktrees + releases + stores + pi + logs + tmp plan
+  # bytes (all validated numerics; awk sums treat text as 0, bash arithmetic
+  # below runs only on validated uints).
+  {
+    _cov_pi="$(sum_bytes pi '*')"; case "$_cov_pi" in ''|*[!0-9]*) _cov_pi=0 ;; esac
+    _cov_logs="$(sum_bytes logs '*')"; case "$_cov_logs" in ''|*[!0-9]*) _cov_logs=0 ;; esac
+    _cov_tmp="$(sum_bytes tmp '*')"; case "$_cov_tmp" in ''|*[!0-9]*) _cov_tmp=0 ;; esac
+    _cov_stores="${STORES_PLAN:-0}"; case "$_cov_stores" in ''|*[!0-9]*) _cov_stores=0 ;; esac
+    _cov_cache="${CACHE_ALL_BYTES:-0}"; case "$_cov_cache" in ''|*[!0-9]*) _cov_cache=0 ;; esac
+    _cov_wt="${WT_TOTAL_BYTES:-0}"; case "$_cov_wt" in ''|*[!0-9]*) _cov_wt=0 ;; esac
+    _cov_rel="${RELEASE_STAGING_ALL_BYTES:-0}"; case "$_cov_rel" in ''|*[!0-9]*) _cov_rel=0 ;; esac
+    _cov_scanned=$(( _cov_cache + _cov_wt + _cov_rel + _cov_stores + _cov_pi + _cov_logs + _cov_tmp ))
+    _cov_used="$(df -k "$TRELLIS_HOME" 2>/dev/null | awk 'NR==2 {print $3*1024}')"
+    case "$_cov_used" in ''|*[!0-9]*) _cov_used=0 ;; esac
+    if [ "$_cov_used" -gt 0 ] && [ "$_cov_scanned" -ge 0 ] 2>/dev/null; then
+      if [ "$_cov_scanned" -gt "$_cov_used" ] 2>/dev/null; then _cov_unattr=0; else _cov_unattr=$(( _cov_used - _cov_scanned )); fi
+      _cov_pct_tenths=$(( _cov_unattr * 1000 / _cov_used ))
+      _cov_pct_int=$(( _cov_pct_tenths / 10 )); _cov_pct_frac=$(( _cov_pct_tenths % 10 ))
+      printf '  unattributed = df used − scanned bytes: %s (%d.%d%% of df used)\n' "$(dj_human_bytes "$_cov_unattr")" "$_cov_pct_int" "$_cov_pct_frac"
+    else
+      echo "  unattributed: unavailable (df used unreadable)"
+    fi
+  } 2>/dev/null || echo "  unattributed: unavailable (coverage probe failed)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1673,6 +1836,8 @@ if [ "$MODE" = "dry-run" ]; then
     print_pi_rows
     echo
   fi
+  dj_dehydrate_render
+  dj_host_render
 
   if scope_enabled docker; then
     echo "== Docker prune plan (host-global) =="
@@ -1738,50 +1903,9 @@ revalidate_cache_for_apply() {
   fi
   return 0
 }
-revalidate_release_staging_for_apply() {
-  local path="$1" version="$2" expected_device="$3" expected_inode="$4"
-  local releases="$TRELLIS_HOME/releases" identity actual_device actual_inode
-  local mtime owner_detail owner_rc
-  DJ_REVALIDATE_REASON=""
-  if ! dj_release_staging_path_is_safe "$releases" "$path" "$version"; then
-    DJ_REVALIDATE_REASON="release snapshot is no longer an exact canonical direct child"
-    return 1
-  fi
-  identity="$(dj_stat_device_inode "$path" 2>/dev/null)" || {
-    DJ_REVALIDATE_REASON="release snapshot directory identity is unavailable"
-    return 1
-  }
-  actual_device="${identity%%:*}"
-  actual_inode="${identity#*:}"
-  if [ "$actual_device" != "$expected_device" ] || [ "$actual_inode" != "$expected_inode" ]; then
-    DJ_REVALIDATE_REASON="release snapshot directory identity changed"
-    return 1
-  fi
-  mtime="$(dj_mtime "$path")"
-  if ! dj_cache_is_stale "$mtime" "$RELEASE_STAGING_TTL_DAYS" "$(date +%s)"; then
-    DJ_REVALIDATE_REASON="release snapshot is no longer aged"
-    return 1
-  fi
-  if owner_detail="$(dj_release_staging_owner_state "$path")"; then
-    owner_rc=0
-  else
-    owner_rc=$?
-  fi
-  case "$owner_rc" in
-    0)
-      DJ_REVALIDATE_REASON="owner process is live ($owner_detail)"
-      return 1
-      ;;
-    1)
-      return 0
-      ;;
-    *)
-      DJ_REVALIDATE_REASON="owner record malformed or unreadable ($owner_detail)"
-      return 1
-      ;;
-  esac
-}
-
+# D3 (spec 069): release-staging revalidation lives in `release_store_reap_tmp
+# fix`, which re-classifies just before removing. The legacy per-row
+# revalidator is retired with the old matcher.
 
 revalidate_worktree_for_apply() {
   local fleet="$1" project_id="$2" checkout_id="$3" worktree_id="$4"
@@ -1990,61 +2114,20 @@ if scope_enabled worktrees; then
   fi
   echo
 fi
-# --- release staging --- host-global; only aged orphaned snapshots are deleted.
+# --- release staging --- host-global; D3 delegates removal to reap-tmp fix.
 if scope_enabled releases; then
-  echo "== Release staging to delete (aged orphaned snapshots), $(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES") =="
+  echo "== Release staging to delete (aged orphaned snapshots via reap-tmp), $(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES") =="
+  # shellcheck disable=SC2034  # plan identity columns are consumed positionally; only path/bytes/detail render here.
   awk -F'\t' '$1=="releases" && $2=="delete"' "$PLAN_TMP" | while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail release_device release_inode checkout_id worktree_id common owner_root; do
     printf '  %s (%s) — %s\n' "$path" "$(dj_human_bytes "$bytes")" "$detail"
   done
-  if [ "$RELEASE_STAGING_DELETE_COUNT" -gt 0 ] && confirm_category "these orphaned release staging snapshots"; then
-    while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail release_device release_inode checkout_id worktree_id common owner_root; do
-      [ "$scope" = "releases" ] && [ "$verdict" = "delete" ] || continue
-      case "$release_device" in
-        ''|*[!0-9]*)
-          echo "  REFUSED/failed: $path (plan carried malformed directory device)" >&2
-          EXIT_STATUS=1
-          continue
-          ;;
-      esac
-      case "$release_inode" in
-        ''|*[!0-9]*)
-          echo "  REFUSED/failed: $path (plan carried malformed directory inode)" >&2
-          EXIT_STATUS=1
-          continue
-          ;;
-      esac
-      if ! revalidate_release_staging_for_apply "$path" "$repo" "$release_device" "$release_inode"; then
-        echo "  skipped (plan changed): $path — $DJ_REVALIDATE_REASON"
-        continue
-      fi
-      if removed_bytes="$(dj_remove_release_staging_safely "$TRELLIS_HOME/releases" \
-          "$path" "$repo" "$RELEASE_STAGING_TTL_DAYS" "$release_device" "$release_inode")"; then
-        case "$removed_bytes" in
-          ''|*[!0-9]*)
-            echo "  REFUSED/failed: $path (cleanup returned malformed reclaimed bytes)" >&2
-            EXIT_STATUS=1
-            ;;
-          *)
-            RELEASE_STAGING_RECLAIMED_BYTES=$((RELEASE_STAGING_RECLAIMED_BYTES + removed_bytes))
-            echo "  removed: $path (actual $(dj_human_bytes "$removed_bytes"))"
-            ;;
-        esac
-      else
-        echo "  REFUSED/failed: $path (descriptor-relative release cleanup refused)" >&2
-        EXIT_STATUS=1
-      fi
-    done <"$PLAN_TMP"
+  if [ "$RELEASE_STAGING_DELETE_COUNT" -gt 0 ]; then
+    dj_host_release_apply
   fi
   echo
 fi
-# --- stores --- report-only even under --apply (no store-prune in this release).
-if scope_enabled stores; then
-  echo "== Package stores =="
-  echo "  stores is report-only — --apply does not prune package stores in this"
-  echo "  release. Run 'trellis disk-janitor --report' for the footprint, then"
-  echo "  'pnpm store prune' manually to reclaim unreferenced packages."
-  echo
-fi
+# --- stores --- D6 (spec 069): prune lives in dj_host_store_apply (called via
+# dj_host_apply below), using each tool's own prune command, never rm.
 
 # --- Docker --- host-global; --safe-only does not change Docker behavior.
 if scope_enabled docker; then
@@ -2076,6 +2159,9 @@ if scope_enabled docker; then
   fi
   echo
 fi
+
+dj_dehydrate_apply
+dj_host_apply
 
 # Re-scan caches post-delete to report the actually-reclaimed bytes.
 remaining_cache_bytes=0

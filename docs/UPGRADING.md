@@ -781,6 +781,47 @@ render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
 
+## `1.3.13` → `1.3.14` adoption
+
+1.3.14 only neutralizes test fixture names for public mirror publication and
+updates release documentation. The runtime code and policy payload are
+identical to 1.3.13 apart from the version file: no manifest, rendered settings
+or owned-leaf changes. **No re-render, detach or fresh attach is needed** for
+projects already on 1.3.13.
+
+Install, verify and activate the exact published release through the stable
+launcher:
+
+```sh
+TARGET_RELEASE=1.3.14
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+: "${TRELLIS:=trellis}"
+: "${TRELLIS_HOME:?Set TRELLIS_HOME (or export it) before configuring}"
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+Optionally use `release adopt "$TARGET_RELEASE"` with the reviewed `--project`,
+`--fleet` or `--all` selector to move existing attachment pins to 1.3.14.
+Installation and configuration do not implicitly adopt projects. Machines
+still on an earlier release must follow the 1.3.13 render/migration steps below;
+this patch does not replace that upgrade.
+
+## `1.3.12` → `1.3.13` adoption
+
+1.3.13 changes where worktrees live and how the janitor treats them, so **a fresh render is needed to deliver it**. The release adds the worktree-convention render (`trellis worktree add` refuses paths outside the central root); the user-surface pieces (Claude Code `WorktreeCreate`/`WorktreeRemove` hooks, single-delivery skills) arrive with install plus `configure`, the pi bash guard with `AGENT_PI_SETUP.md` step 2, and the pnpm setting with `trellis doctor --fix` — detach/attach alone does not re-render those (`core-rules/inheritance.md` §6). Until a group is re-attached it keeps 1.3.12's worktree locations, which doctor reports as layout warnings rather than failures.
+
+On every machine, in this order:
+
+1. Install, verify and activate 1.3.13 (same commands as 1.3.12 with `TARGET_RELEASE=1.3.13`). The install plus `configure` relinks the user surface: WorktreeCreate/WorktreeRemove hooks and single-delivery skills. Install the pi bash guard per `AGENT_PI_SETUP.md` step 2.
+2. Set `worktrees.known_parents` (default is the measured parent list) and `worktrees.push_owners` in machine config; run `trellis doctor --fix` for the pnpm dep-sharing row.
+3. Point the Codex app at `~/projects/worktrees/_codex` in its Settings → Worktrees (GUI, owner step) — before migrating, since un-repointed roots are held.
+4. Detach and attach each **entire checkout group** fresh at `--release 1.3.13`, one group at a time, manager first with the group's recorded `--harness` flags.
+5. `trellis worktree root-init` once (creates `~/projects/worktrees` with the Spotlight/Time Machine exclusions).
+6. `trellis launchd --with-pi-watchdog` for the report agent plus the truncate-only watchdog. Do NOT enable nightly `--with-apply`; that stays an owner decision.
+7. Run `trellis worktree migrate` (dry run) and review the plan. Do not `--apply` machine-wide without owner review (`--only <path>` limits apply to one path; remove/move/preserve wait for review of the dry run).
+
 ## `1.3.11` → `1.3.12` adoption
 
 1.3.12 changes rendered harness files, so **adoption alone does not deliver

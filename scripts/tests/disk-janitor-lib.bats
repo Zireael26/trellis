@@ -221,7 +221,7 @@ SH
   [[ "$output" == *"$proj/apps/web/.next/cache"* ]] || { echo "$output"; false; }
 }
 
-@test "dj_find_caches does NOT descend into node_modules (prunes other tools' trees)" {
+@test "dj_find_caches reports node_modules whole and never descends into it" {
   local proj="$SANDBOX/proj"
   mkdir -p "$proj/node_modules/.next/cache" \
            "$proj/node_modules/some-dep/.turbo/cache"
@@ -230,8 +230,78 @@ SH
 
   run dj_find_caches "$proj"
   [ "$status" -eq 0 ]
-  # node_modules is pruned: no cache rows from inside it.
-  [[ "$output" != *"node_modules"* ]] || { echo "$output"; false; }
+  # One row for node_modules itself; nothing nested inside it.
+  [ "$output" = "$(printf '%s\n' "$output" | grep "^node_modules"$'\t'"$proj/node_modules"$'\t')" ] ||
+    { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "dj_find_caches lists the spec 069 D1 kinds with their per-kind markers" {
+  local proj="$SANDBOX/proj" kind
+  for kind in .venv .mypy_cache .pytest_cache .ruff_cache pkg/__pycache__ \
+      web/dist tools/dist py/target rs/target lib/build; do
+    mkdir -p "$proj/$kind"
+    printf 'x\n' > "$proj/$kind/blob"
+  done
+  printf '{}\n' > "$proj/web/package.json"
+  printf 'requests\n' > "$proj/py/requirements.txt"
+  printf '[package]\n' > "$proj/rs/Cargo.toml"
+  printf 'x\n' > "$proj/lib/pyproject.toml"
+  mkdir -p "$proj/.venv/lib/__pycache__"
+
+  run dj_find_caches "$proj"
+  [ "$status" -eq 0 ]
+  for kind in .venv .mypy_cache .pytest_cache .ruff_cache pkg/__pycache__ web/dist rs/target lib/build; do
+    printf '%s\n' "$output" | awk -F'\t' -v p="$proj/$kind" '$2==p { f=1 } END { exit !f }' ||
+      { echo "$kind: $output"; false; }
+  done
+  # No marker beside it, or the wrong kind of marker: not regenerable.
+  [[ "$output" != *"$proj/tools/dist"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"$proj/py/target"* ]] || { echo "$output"; false; }
+  # Never walked into a reported directory.
+  [[ "$output" != *"$proj/.venv/lib"* ]] || { echo "$output"; false; }
+}
+
+@test "dj_find_caches ages D1 kinds by git activity and build caches by mtime" {
+  local proj="$SANDBOX/repo" gd common ref
+  git_init_at "$proj"
+  mkdir -p "$proj/node_modules/pkg" "$proj/.next/cache"
+  printf 'x\n' > "$proj/node_modules/pkg/x"
+  printf 'x\n' > "$proj/.next/cache/x"
+  gd="$(git -C "$proj" rev-parse --absolute-git-dir)"
+  touch -t 202001010000 "$gd/HEAD" "$gd/index" "$gd/logs/HEAD"
+  common="$(git -C "$proj" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  if ref="$(git -C "$proj" symbolic-ref -q HEAD 2>/dev/null)"; then
+    if [ -f "$common/$ref" ]; then
+      touch -t 202001010000 "$common/$ref"
+    elif [ -f "$common/packed-refs" ]; then
+      touch -t 202001010000 "$common/packed-refs"
+    fi
+  fi
+  touch "$proj/node_modules"
+  touch -t 202101010000 "$proj/.next/cache"
+
+  run dj_find_caches "$proj"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | awk -F'\t' '$1=="node_modules" { print $4 }')" = "$(dj_mtime "$gd/HEAD")" ] ||
+    { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | awk -F'\t' '$1=="next-cache" { print $4 }')" = "$(dj_mtime "$proj/.next/cache")" ] ||
+    { echo "$output"; false; }
+
+  # No git activity to read: the age is now, never stale.
+  local plain="$SANDBOX/plain" before
+  mkdir -p "$plain/node_modules"
+  before="$(date +%s)"
+  run dj_find_caches "$plain"
+  [ "$(printf '%s\n' "$output" | cut -f4)" -ge "$before" ] || { echo "$output"; false; }
+}
+
+@test "dj_find_caches skips a directory whose name holds a control character" {
+  local proj="$SANDBOX/proj"
+  mkdir -p "$proj/x"$'\t'"y/node_modules" "$proj/z"$'\n'"w/.next/cache"
+  run dj_find_caches "$proj"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
 }
 
 @test "dj_find_caches returns nothing for a project with no cache dirs" {

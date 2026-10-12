@@ -757,8 +757,8 @@ surface_plan_emit_harness() {
 
 surface_plan_validate_manifest() {
   local manifest="$1" harness require_user=false require_pi=false
-  local shared_root pi_root codex_root destinations_file destination skill
-  local shared_names="" pi_names="" codex_names="" nl pi_scan codex_scan
+  local shared_root pi_root codex_root claude_root destinations_file destination skill
+  local shared_names="" pi_names="" codex_names="" nl pi_scan codex_scan shadowed
 
   for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
     if [ "$harness" = "user" ]; then
@@ -845,7 +845,6 @@ surface_plan_validate_manifest() {
                and (has("required_file") | not)
              else
                (has("suffix") | not)
-               and (has("exclude_dirs") | not)
                and ((has("recursive") | not) or .recursive == false)
                and (if has("required_file") then (.required_file | safe_relative_path) else true end)
              end)
@@ -917,6 +916,47 @@ surface_plan_validate_manifest() {
   shared_root="$(skill_roots_for_harnesses codex pi)" || return "$?"
   pi_root="$(skill_roots_for_harnesses pi)" || return "$?"
   codex_root="$(skill_roots_for_harnesses codex)" || return "$?"
+  claude_root="$(skill_roots_for_harnesses claude)" || return "$?"
+
+  # A release user skill is delivered once. A project leaf of the same name in
+  # the same discovery root would shadow it (pi and Codex read the project
+  # root first), so every project expansion into that root must exclude it.
+  # Manifests that predate single-delivery carry no exclude_dirs anywhere:
+  # the shadowing contract did not exist for them, so planning them keeps
+  # the previous behavior (deliver as before) instead of refusing. This keeps
+  # new-code diagnosis of old payloads (seed diagnostics, historical
+  # reconcile witnesses) working across the 069 boundary.
+  if jq -e '[.. | objects | select(has("exclude_dirs"))] | length == 0' "$manifest" >/dev/null 2>&1; then
+    : # pre-contract manifest; skip shadow enforcement below
+  else
+  if ! shadowed="$(jq -r --arg claude "$claude_root" --arg shared "$shared_root" \
+    --arg pi "$pi_root" --arg codex "$codex_root" '
+    [$claude, $shared, $pi, $codex] as $roots
+    | [.harnesses.user.links[].destination | strings
+       | select(contains("/"))
+       | {root: (split("/")[:-1] | join("/")), name: (split("/") | last)}
+       | select(.root as $root | $roots | index($root))] as $user_skills
+    | [.harnesses | to_entries[] | select(.key != "user") | .value.links[]
+       | . as $entry
+       | $user_skills[]
+       | select(
+           if $entry | has("source_children")
+           then .root == $entry.destination_dir
+                and (.name as $name | ($entry.exclude_dirs // []) | index($name) | not)
+           else (.root + "/" + .name) == $entry.destination
+           end)
+       | "\(.name)\t\(.root)"]
+    | first // empty
+  ' "$manifest")"; then
+    surface_plan_err "could not compare user skills with project leaves: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ -n "$shadowed" ]; then
+    surface_plan_err "user skill '${shadowed%%$'\t'*}' is also a project leaf under '${shadowed#*$'\t'}': $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  fi
+
   surface_plan_make_tempfile || return "$?"
   destinations_file="$_SURFACE_PLAN_LAST_TMP"
   if ! jq -r '.harnesses.user.links[] | select(has("destination")) | .destination' "$manifest" > "$destinations_file"; then

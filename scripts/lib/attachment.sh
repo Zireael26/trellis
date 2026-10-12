@@ -1697,6 +1697,11 @@ trellis_verify_release_executed() {
     scripts/lib/attach-postjob.sh
     scripts/lib/health-checks.sh
     scripts/lib/disk-janitor-agents.sh
+    scripts/lib/config-load.sh
+    scripts/lib/hygiene-common.sh
+    scripts/lib/disk-janitor-lib.sh
+    scripts/lib/disk-janitor-dehydrate.sh
+    scripts/lib/disk-janitor-host.sh
   )
   local -a listed=("$payload/scripts" "$payload/scripts/lib")
 

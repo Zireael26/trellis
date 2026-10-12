@@ -69,7 +69,7 @@ bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi
 | 9 | Author and materialize your agent roster | every agent you wrote resolves from `.agents/agents/`; boundaries pass |
 | 10 | Implement the Herdr placement policy | 2x2 fill before overflow; `--tab` is preference plus overflow label |
 | 11 | Understand remote compaction | six reason codes understood; not installed by step 2 |
-| 12 | Fire pi and enumerate active tools | the 10-name tool list prints, including `trellis_web_search` and `web_search` |
+| 12 | Fire pi and enumerate active tools | the 9-name tool list prints, including `trellis_web_search` |
 
 Computer use has no row: pi carries no computer-use tools in this setup.
 
@@ -129,7 +129,7 @@ Expected: `pi=1.1.0 floor=1.1.0` (or a later version), `@earendil-works/pi-codin
 
 ## 2. Install the active add-ons
 
-There are **three npm packages and three local extensions**: `@tintinweb/pi-subagents`, `@narumitw/pi-codex-compact`, `pi-antigravity`; and the local files `opencode-go-2.ts` (account-2 provider), `trellis-web-search.ts` (the `trellis_web_search` and `web_search` tools), and the `omp-statusline` fork. The step also writes the whole `settings.json`. This is the trimmed package set the reference setup runs: no MCP adapter, no computer-use server and no session-messaging package, so pi runs no MCP server, and `settings.json` switches pi 1.x's built-in MCP client off. `pi install` performs initial npm package registration. The final `npm ci --legacy-peer-deps` replays the generated lockfile and verifies its integrity without trying to lock pi's globally supplied peer packages. After this first installation, **every reinstall is `npm ci --legacy-peer-deps` in `~/.pi/agent/npm`; never run `npm install` there.**
+There are **three npm packages and four local extensions**: `@tintinweb/pi-subagents`, `@narumitw/pi-codex-compact`, `pi-antigravity`; and the local files `opencode-go-2.ts` (account-2 provider), `trellis-web-search.ts` (the `trellis_web_search` tool), `trellis-bash-guard.ts` (a timeout and output cap for bash calls), and the `omp-statusline` fork. The step also writes the whole `settings.json`. This is the trimmed package set the reference setup runs: no MCP adapter, no computer-use server and no session-messaging package, so pi runs no MCP server, and `settings.json` switches pi 1.x's built-in MCP client off. `pi install` performs initial npm package registration. The final `npm ci --legacy-peer-deps` replays the generated lockfile and verifies its integrity without trying to lock pi's globally supplied peer packages. After this first installation, **every reinstall is `npm ci --legacy-peer-deps` in `~/.pi/agent/npm`; never run `npm install` there.**
 
 `trellis-remote-compact` is a separate customization; it is not in the active package set and no implementation ships here. Step 11 records the contract it must satisfy.
 
@@ -213,13 +213,22 @@ install -m 0644 "$TRELLIS_REPO_ROOT/core-rules/pi/extensions/opencode-go-2.ts" \
   "$HOME/.pi/agent/extensions/opencode-go-2.ts"
 ```
 
-Install web search. The extension registers `trellis_web_search` plus its `web_search` alias. It asks Google Search grounding with the `antigravity` credential, which it gets from pi's model registry at call time (step 5), and has no fallback provider. It allows 20 calls per pi process by default.
+Install web search. The extension registers `trellis_web_search`. It asks Google Search grounding with the `antigravity` credential, which it gets from pi's model registry at call time (step 5), and has no fallback provider. It allows 20 calls per pi process by default.
 
 <!-- pi-guide:file ~/.pi/agent/extensions/trellis-web-search.ts -->
 ```bash
 mkdir -p "$HOME/.pi/agent/extensions"
 install -m 0644 "$TRELLIS_REPO_ROOT/core-rules/pi/extensions/trellis-web-search.ts" \
   "$HOME/.pi/agent/extensions/trellis-web-search.ts"
+```
+
+Install the bash guard. pi's bash tool has no default timeout and writes any output past 50 KB to a `pi-bash-*.log` with no size limit, so one runaway command can fill the disk. The guard gives every bash tool call that has no timeout one of 1800 s, and passes at most 512 MiB of its output, then one line `[trellis-bash-guard: output truncated at 536870912 bytes]`; a producer cut off there exits 141 (SIGPIPE). `TRELLIS_PI_BASH_TIMEOUT_S` and `TRELLIS_PI_BASH_CAP_BYTES` change either, and 0 turns it off; `trellis doctor` reports both. The command runs unchanged in its own `bash -c`, so state that `shellCommandPrefix` sets reaches it only when exported, as step 2's prefix does. The cap needs `perl` on `PATH`; without it commands run uncapped, with a notice. `!` commands you type yourself do not pass through the guard.
+
+<!-- pi-guide:file ~/.pi/agent/extensions/trellis-bash-guard.ts -->
+```bash
+mkdir -p "$HOME/.pi/agent/extensions"
+install -m 0644 "$TRELLIS_REPO_ROOT/core-rules/pi/extensions/trellis-bash-guard.ts" \
+  "$HOME/.pi/agent/extensions/trellis-bash-guard.ts"
 ```
 
 Copy the `omp-statusline` fork's published source, then install its one runtime dependency.
@@ -564,7 +573,7 @@ Add this exact configuration to `~/.zshenv`. The key stays in Keychain; command 
 export OPENCODE_GO_2_API_KEY=$(security find-generic-password -a "$USER" -s "opencode-go-key-2" -w 2>/dev/null)
 
 pi() {
-  local sys=/usr/bin:/bin:/usr/sbin:/sbin home trellis_home top release pi_tmp
+  local sys=/usr/bin:/bin:/usr/sbin:/sbin home trellis_home top release pi_tmp pi_root
   home="$(/usr/bin/env -i PATH=$sys python3 -Ic 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" || return 1
   trellis_home="${${TRELLIS_HOME:-$home/.trellis}:A}"
   top="$(/usr/bin/env -i PATH=$sys git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" || top="$PWD"
@@ -579,16 +588,21 @@ pi() {
   [[ -n "$pi_tmp" && "$pi_tmp" == "${home:A}" ]] &&
     { echo "pi: refusing: TMPDIR '$TMPDIR' is the home directory, not a temp dir" >&2; return 1; }
   case "$pi_tmp/" in
-    /|//|"${home:A}/.pi-worktrees"/*|"${home:A}/.trellis/pi-worktrees"/*|"${top:A}"/*)
+    /|//|"${home:A}/projects/worktrees"/*|"${home:A}/.pi-worktrees"/*|"${home:A}/.trellis/pi-worktrees"/*|"${top:A}"/*)
       pi_tmp="$(/usr/bin/env -i PATH=$sys getconf DARWIN_USER_TEMP_DIR)" || return 1 ;;
   esac
   pi_tmp="${pi_tmp%/}/pi"
   /bin/mkdir -p -m 0700 "$pi_tmp" && [[ -d "$pi_tmp" && ! -L "$pi_tmp" && -O "$pi_tmp" ]] && /bin/chmod 0700 "$pi_tmp" ||
     { echo "pi: refusing: temp dir '$pi_tmp' is not a private directory of this account" >&2; return 1; }
-  { [[ -d "$home/.pi-worktrees" ]] || /bin/mkdir -m 0700 "$home/.pi-worktrees"; } &&
-    [[ ! -L "$home/.pi-worktrees" && -O "$home/.pi-worktrees" ]] && /bin/chmod 0700 "$home/.pi-worktrees" ||
-    { echo "pi: refusing: worktree root '$home/.pi-worktrees' is not a private directory of this account" >&2; return 1; }
-  TRELLIS_PI_TMPDIR="$pi_tmp" TMPDIR="$home/.pi-worktrees" /usr/bin/env -u PI_CODING_AGENT_DIR pi "$@"
+  pi_root="$home/projects/worktrees/_pi"
+  case "${pi_root:A}/" in
+    "$trellis_home"/*|"${top:A}"/*)
+      echo "pi: refusing: worktree root '$pi_root' resolves to '${pi_root:A}', inside TRELLIS_HOME or the checkout" >&2; return 1 ;;
+  esac
+  { [[ -d "$pi_root" ]] || /bin/mkdir -p -m 0700 "$pi_root"; } &&
+    [[ ! -L "$pi_root" && -O "$pi_root" ]] && /bin/chmod 0700 "$pi_root" ||
+    { echo "pi: refusing: worktree root '$pi_root' is not a private directory of this account" >&2; return 1; }
+  TRELLIS_PI_TMPDIR="$pi_tmp" TMPDIR="$pi_root" /usr/bin/env -u PI_CODING_AGENT_DIR pi "$@"
 }
 ```
 
@@ -596,14 +610,14 @@ The function refuses to start pi when `<cwd>/.pi` carries anything pi would load
 
 A direnv `.envrc` can set the variables this function reads, so it trusts none of them blindly. It takes the account home from the passwd entry rather than `$HOME`, refuses a `TRELLIS_HOME` inside the checkout before running anything from it, runs its helpers and the validator on the system `PATH` with a clean environment (no `BASH_ENV` or `SHELLOPTS`), and starts pi with `PI_CODING_AGENT_DIR` unset. The validator in turn refuses a `HOME`, `TRELLIS_HOME` or `PI_CODING_AGENT_DIR` that resolves inside the checkout.
 
-Pi's subagent extension places worktrees under Node's `os.tmpdir()`. On macOS the default is the volatile per-boot `/var/folders/...` root; unmerged agent work there can disappear. The shell function pins interactive pi launches to `~/.pi-worktrees`. A Herdr launcher must independently scope the same `TMPDIR` for the sessions it starts.
+Pi's subagent extension places worktrees under Node's `os.tmpdir()`. On macOS the default is the volatile per-boot `/var/folders/...` root; unmerged agent work there can disappear. The shell function pins interactive pi launches to `~/projects/worktrees/_pi`, pi's slot in the root that holds every harness's worktrees (1.3.12 used `~/.pi-worktrees`). A Herdr launcher must independently scope the same `TMPDIR` for the sessions it starts.
 
-pi's own process writes its other temp files to that root too, including the bash tool's spill logs (`pi-bash-*.log`, the full output of any command too long to show). So the root lives outside `~/.trellis`: a recursive grep over `~/.trellis` once read its own growing spill log until the disk filled. The temp files of the commands pi runs go elsewhere: the function passes a private `$TMPDIR/pi` (the system per-user temp dir when the inherited one lies inside a worktree root or the checkout) as `TRELLIS_PI_TMPDIR`, and step 2's `shellCommandPrefix` points each command's `TMPDIR` at it. The function refuses a worktree root that is a symlink or not a private directory of this account, since a link could lead the spill logs back into `~/.trellis`, and refuses the home directory itself as `TMPDIR`. `scripts/disk-janitor.sh --report --scopes pi` lists what is stale in all three places (report-only in 1.3.12; remove what it lists by hand); worktrees under the pre-1.3.12 root `~/.trellis/pi-worktrees` stay where they are until their work is merged.
+pi's own process writes its other temp files to that root too, including the bash tool's spill logs (`pi-bash-*.log`, the full output of any command too long to show). So the root lives outside `~/.trellis`: a recursive grep over `~/.trellis` once read its own growing spill log until the disk filled. The temp files of the commands pi runs go elsewhere: the function passes a private `$TMPDIR/pi` (the system per-user temp dir when the inherited one lies inside a worktree root or the checkout) as `TRELLIS_PI_TMPDIR`, and step 2's `shellCommandPrefix` points each command's `TMPDIR` at it. The function refuses a worktree root that is a symlink or not a private directory of this account, or that resolves into `TRELLIS_HOME` or the checkout through a linked parent, since a link could lead the spill logs back into `~/.trellis`, and refuses the home directory itself as `TMPDIR`. The bash guard (step 2) caps each spill log at 512 MiB. `scripts/disk-janitor.sh --report --scopes pi` lists what is stale in all three places (report-only in 1.3.12; remove what it lists by hand); worktrees under the earlier roots `~/.pi-worktrees` (1.3.12) and `~/.trellis/pi-worktrees` (before 1.3.12) stay where they are until their work is merged.
 
 **Command**
 
 ```bash
-mkdir -p -m 0700 "$HOME/.pi-worktrees"
+mkdir -p -m 0700 "$HOME/projects/worktrees/_pi"
 ```
 
 **Verify**
@@ -612,9 +626,9 @@ mkdir -p -m 0700 "$HOME/.pi-worktrees"
 zsh -lc '
   test -z "${PI_CODING_AGENT_DIR+x}"
   test -n "$OPENCODE_GO_2_API_KEY"
-  test "$(TMPDIR="$HOME/.pi-worktrees" node -p '\''require("node:os").tmpdir()'\'')" = "$HOME/.pi-worktrees"
-  functions pi | grep -F '\''TMPDIR="$home/.pi-worktrees" /usr/bin/env -u PI_CODING_AGENT_DIR pi "$@"'\'' >/dev/null
-  printf "OPENCODE_GO_2_API_KEY=loaded tmpdir=%s pi_function=ready\n" "$HOME/.pi-worktrees"
+  test "$(TMPDIR="$HOME/projects/worktrees/_pi" node -p '\''require("node:os").tmpdir()'\'')" = "$HOME/projects/worktrees/_pi"
+  functions pi | grep -F '\''TMPDIR="$pi_root" /usr/bin/env -u PI_CODING_AGENT_DIR pi "$@"'\'' >/dev/null
+  printf "OPENCODE_GO_2_API_KEY=loaded tmpdir=%s pi_function=ready\n" "$HOME/projects/worktrees/_pi"
 '
 zsh -lc 'pi --offline --no-session --list-models opencode-go-2' | awk '$1 == "opencode-go-2" { found=1 } END { if (!found) exit 1; print "provider:opencode-go-2=ready" }'
 ```
@@ -775,7 +789,7 @@ This probe loads the real pi profile and all installed extensions. It exits from
 **Command**
 
 ```bash
-PROBE_PATH="$HOME/.pi-worktrees/trellis-pi-tool-probe.$$.ts"
+PROBE_PATH="$HOME/projects/worktrees/_pi/trellis-pi-tool-probe.$$.ts"
 cat >"$PROBE_PATH" <<'TS'
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -792,9 +806,9 @@ TS
 **Verify**
 
 ```bash
-actual="$(env -u PI_CODING_AGENT_DIR TMPDIR="$HOME/.pi-worktrees" \
+actual="$(env -u PI_CODING_AGENT_DIR TMPDIR="$HOME/projects/worktrees/_pi" \
   pi --offline --no-session -e "$PROBE_PATH" -p "unused")"
-expected='TRELLIS_TOOLS=Agent,bash,edit,generate_image,get_subagent_result,read,steer_subagent,trellis_web_search,web_search,write'
+expected='TRELLIS_TOOLS=Agent,bash,edit,generate_image,get_subagent_result,read,steer_subagent,trellis_web_search,write'
 printf '%s\n' "$actual"
 test "$actual" = "$expected"
 python3 - "$PROBE_PATH" <<'PY'
@@ -807,10 +821,10 @@ PY
 Expected: exactly this one line and exit 0:
 
 ```text
-TRELLIS_TOOLS=Agent,bash,edit,generate_image,get_subagent_result,read,steer_subagent,trellis_web_search,web_search,write
+TRELLIS_TOOLS=Agent,bash,edit,generate_image,get_subagent_result,read,steer_subagent,trellis_web_search,write
 ```
 
-The four default coding tools are `read`, `bash`, `edit`, `write`; `@tintinweb/pi-subagents` adds `Agent`, `get_subagent_result`, and `steer_subagent`, plus `SubagentWorkflow` only where `workflowsEnabled` is true. The statusline and local account-2 provider intentionally add no tools. `trellis-web-search.ts` adds `trellis_web_search` and its `web_search` alias; `pi-antigravity` adds `generate_image`. A live 0.87.1 session of the reference setup registered these names on 2026-09-27, together with `SubagentWorkflow` (then on globally) and the computer-use and session-messaging tools this guide no longer installs; this 10-name list has not been re-measured as a whole. On 2026-10-08 a pi 1.1.0 session showed `SubagentWorkflow` absent with a project `workflowsEnabled: false` and present with `true`.
+The four default coding tools are `read`, `bash`, `edit`, `write`; `@tintinweb/pi-subagents` adds `Agent`, `get_subagent_result`, and `steer_subagent`, plus `SubagentWorkflow` only where `workflowsEnabled` is true. The statusline, the bash guard and the local account-2 provider intentionally add no tools. `trellis-web-search.ts` adds `trellis_web_search`; `pi-antigravity` adds `generate_image`. A live 0.87.1 session of the reference setup registered these names on 2026-09-27, together with `SubagentWorkflow` (then on globally) and the computer-use and session-messaging tools this guide no longer installs; this 9-name list has not been re-measured as a whole. On 2026-10-08 a pi 1.1.0 session showed `SubagentWorkflow` absent with a project `workflowsEnabled: false` and present with `true`.
 
 Do not start pi with `-e core-rules/pi/web-search/index.ts` while `~/.pi/agent/extensions/trellis-web-search.ts` is installed. Both register `trellis_web_search`. The installed extension registers nothing when `TRELLIS_WEB_SEARCH_CONFIG` is set to a non-blank value, which the adapter requires, but a profile that carries both leaves the owner of the tool to one environment variable. The opt-in adapter ([Web search in Pi](docs/pi-web-search.md)) belongs in a profile without this file.
 
@@ -895,7 +909,7 @@ Each line below names the measured failure, not a preference.
 
 ### Interactive pi pins a durable `TMPDIR`
 
-**Customization:** the `pi()` function sets `TMPDIR=$HOME/.pi-worktrees` and passes a private `$TMPDIR/pi` as `TRELLIS_PI_TMPDIR`, which `settings.json`'s `shellCommandPrefix` makes the `TMPDIR` of each command pi runs; foreman scopes the same values to Herdr pi launches. Before 1.3.12 the root was `~/.trellis/pi-worktrees`.
+**Customization:** the `pi()` function sets `TMPDIR=$HOME/projects/worktrees/_pi` and passes a private `$TMPDIR/pi` as `TRELLIS_PI_TMPDIR`, which `settings.json`'s `shellCommandPrefix` makes the `TMPDIR` of each command pi runs; foreman scopes the same values to Herdr pi launches. The root was `~/.pi-worktrees` in 1.3.12 and `~/.trellis/pi-worktrees` before it.
 
 **What breaks without it:** pi-subagents creates worktrees under `os.tmpdir()`. On macOS that is the volatile `/var/folders` root, so reboot or OS cleanup can erase a worktree containing unmerged agent changes. pi's bash spill logs share that root, so a root inside `~/.trellis` lets a recursive grep there read its own output without end; and with no split, every build cache the commands write becomes durable and unreaped.
 
@@ -951,7 +965,7 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 **Customization:** install `@tintinweb/pi-subagents@0.19.0`, `@narumitw/pi-codex-compact@0.54.0`, `pi-antigravity@0.9.0`, local `opencode-go-2.ts` (openai-responses, Muse Spark 1.3), local `trellis-web-search.ts`, and the `omp-statusline@0.50.0-omp.1` fork from `core-rules/pi/statusline/omp-statusline/`.
 
-**What breaks without it:** omitting subagents removes three active tools and makes the roster undispatchable; omitting the forked statusline removes the provider/model/tool/context/usage footer (upstream alone renders the old 11-segment footer, which is why a mirror checkout shows a different status line); omitting `pi-codex-compact` removes Codex compaction support; omitting `pi-antigravity` makes an `antigravity/`-routed read-only agent unavailable; omitting the local provider removes the separate account-2 lanes; omitting `trellis-web-search.ts` removes `trellis_web_search` and `web_search`.
+**What breaks without it:** omitting subagents removes three active tools and makes the roster undispatchable; omitting the forked statusline removes the provider/model/tool/context/usage footer (upstream alone renders the old 11-segment footer, which is why a mirror checkout shows a different status line); omitting `pi-codex-compact` removes Codex compaction support; omitting `pi-antigravity` makes an `antigravity/`-routed read-only agent unavailable; omitting the local provider removes the separate account-2 lanes; omitting `trellis-web-search.ts` removes `trellis_web_search`.
 
 **Demonstration:** step 2 checks all three npm versions, the local account-2 registration source, the web-search bytes and the fork version; step 8 checks its runtime catalogue; step 5 checks the `antigravity` catalogue; step 12 proves the tool-producing registrations remain active.
 

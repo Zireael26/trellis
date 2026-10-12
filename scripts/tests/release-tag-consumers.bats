@@ -30,8 +30,11 @@ CONSUMER_ALLOWLIST='scripts/lib/release-store.sh|2|b842673ff8b25bae|installer: f
 scripts/trellis-launcher.sh|2|056f774f16eb9aa8|launcher bootstrap install: the same explicit tag refspec as the store
 scripts/sync-to-template.sh|2|85c7d99542690d3c|mirror: fetches the installed tag by explicit refspec and main beside it (R3.6)
 scripts/release-payload-commit.sh|4|44ff032b8536bb6b|identity gate: resolves refs/tags/<tag>; is-ancestor checks the approved commit against the fetched origin/main, never the tag
+scripts/lib/worktree-migrate-classify.sh|1|8e5d9e2d3e948a28|migrate classify: merged-PR check between a head and a remote branch tip, no tag discovery
+scripts/lib/worktree-migrate-preserve.sh|1|91755fab79e70b04|migrate preserve: reads one refs/heads ref to confirm the preserve push landed, never lists tags
 core-rules/githooks/pre-push|3|8997fa86b330e05b|gate dispatch: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
 core-rules/husky/pre-push|3|cb331fcaea38dc04|husky twin: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
+core-rules/hooks/trellis-worktree-remove.sh|1|97d070632a511735|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
 core-rules/skills/process-gate/scripts/lib/diff-base.sh|1|f2894e8dac5d879b|is-ancestor between two commits for base refinement, no tag involved
 scripts/verify-conductor-spec-inventory.mjs|2|b24ec11275dc1812|is-ancestor between main refs, no tag involved

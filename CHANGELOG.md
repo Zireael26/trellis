@@ -4,6 +4,25 @@ All notable changes to Trellis are documented here.
 
 The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project uses Conventional Commits. Portable Trellis releases use semantic versions and annotated immutable tags. Earlier dated entries remain as historical records.
 
+## [1.3.14] - 2026-10-12
+
+### Changed
+
+- Test fixtures use neutral names so the public mirror can publish; no runtime change.
+
+## [1.3.13] - 2026-10-11
+
+**Highlights.** 1.3.13 puts every harness worktree under `~/projects/worktrees` and reclaims disk unattended. `trellis worktree add` creates only at `<central-root>/<project>/<branch-slug>`; `trellis worktree migrate` (dry run by default) inventories every registry checkout plus every repo under the known parents and classifies each worktree exactly once — prune (registered but missing), remove (clean, merged, idle, regenerable-only), move (detach, `git worktree move`, repair, attach) or hold with a reason — never deleting dirty, untracked or non-regenerable files, never wrapping an attach in a timeout. Claude Code worktrees are created and cleaned up by Trellis user-level `WorktreeCreate`/`WorktreeRemove` hooks: creation populates by `reset --hard` (no checkout hook) and a detached background `trellis worktree sync` follows to attach. pi subagent worktrees move to `~/projects/worktrees/_pi` behind a bash guard (command wrapper, tool_call handler, corpus-tested); the duplicate `web_search` alias is gone, only `trellis_web_search` remains. pnpm shares one global virtual store (`enableGlobalVirtualStore`, via `trellis doctor --fix`) and uv shares its cache, so a new worktree stops re-paying the full dependency cost. The disk janitor gains dehydrate/host scopes (orphans, logs, tmp, transcripts, pi TTL), a nightly safe set with a dry-run argv gate, and a 60 s truncate-only pi-spill watchdog (`trellis launchd --with-pi-watchdog`); each skill delivers exactly once through the user surface (`~/.agents/skills/`). Adopting 1.3.13 needs a detach and fresh attach of each checkout group; see `docs/UPGRADING.md` (`1.3.12` → `1.3.13` adoption).
+
+### Added
+
+- **Worktree convention and `trellis worktree migrate` (spec 069 A).** Central root `~/projects/worktrees/<project>/<branch-slug>` (detached HEAD becomes `detached-<shortsha>`); sanctioned roots are the central root, `~/projects/worktrees/_codex` (Codex app), `~/projects/worktrees/_unregistered/<repo>/` and each repo's main checkout. `trellis worktree root-init` creates the root with the Spotlight/Time Machine exclusions; doctor reports the layout. Migrate's journaled apply engine covers prune, remove, preserve and move under `--apply` (limitable to one path with `--only`, resumable with `--resume`); review the dry-run plan first and apply nothing machine-wide without owner go-ahead. `worktrees.known_parents` defaults to the measured parent list; `worktrees.push_owners` scopes which preserves may push.
+- **Claude Code worktree hooks (spec 069 A7).** User-level `WorktreeCreate` (creates `cc-<name>` on branch `worktree-<name>`, populates with `reset --hard`, then a detached background `trellis worktree sync` attaches) and `WorktreeRemove` (removes only clean worktrees, deletes the branch only if merged). The janitor sweeps idle clean `cc-*` worktrees with no unique commits.
+- **pi bash guard and `_pi` root (spec 069 C).** pi subagent worktrees live under `~/projects/worktrees/_pi`; the installed bash guard (wrapper + tool_call handler + env overrides) bounds runaway output and commands that never exit. Doctor verifies the guard installation.
+- **pnpm/uv sharing (spec 069 B).** Doctor reports pnpm shared-store and uv rows; `trellis doctor --fix` writes the user-level pnpm `enableGlobalVirtualStore` setting. New worktrees reuse the shared stores instead of copying `.venv`s.
+- **Janitor dehydrate/host scopes, nightly safe set, watchdog (spec 069 D, DH, DS).** Ignored worktree content splits into regenerable vs kept (D1); `--dehydrate` reclaims regenerable weight under the registry lock with re-validation. New scopes cover orphans, logs, tmp, transcripts and pi state; the nightly apply argv runs only the safe set behind a dry-run gate. The pi-spill watchdog truncates runaway bash spill logs; install with `trellis launchd --with-pi-watchdog` (report agent only — nightly `--with-apply` stays owner-gated).
+- **Tool and skill hygiene (spec 069 E, F).** pi registers only `trellis_web_search`; the duplicate `web_search` alias and its ~134 prompt tokens are gone. Each skill delivers exactly once through the user surface (`~/.agents/skills/`); project leaves that repeat a user skill are excluded and refused.
+
 ## [1.3.12] - 2026-10-10
 
 **Highlights.** 1.3.12 makes everyday turns faster and the hook set smaller,
@@ -293,6 +312,16 @@ fresh attach of each checkout group; see `docs/UPGRADING.md`
   CHANGELOG and UPGRADING text describing the pre-push ref refusal matched the
   consumer patterns that the A3.8 check pins, which left that check red on
   `main` after the cut. Both lines are reviewed as prose and pinned.
+- **`herdr-foreman` is delivered once, by the user surface.** Project
+  attachments also linked it into `.claude/skills` and `.agents/skills`, so pi
+  preferred a project copy pinned to the project's older release over
+  `~/.agents/skills/herdr-foreman` and logged a skill collision, and Codex
+  listed it twice. The project skill expansions now exclude it, and the
+  planner rejects a manifest whose project leaves repeat a user skill in the
+  same discovery root. The source checkout's `.pi/settings.json` excludes it
+  from `core-rules/skills` too. A project that only attaches, with no
+  `trellis attach --user`, no longer gets the skill. Detach then attach at
+  this release removes an existing project leaf; adoption alone does not.
 
 - **Codex spec-gate reads autonomy from the pushed commit.** 1.3.12's
   project-policy reader was added to the Claude Code copy of

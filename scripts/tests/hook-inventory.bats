@@ -76,10 +76,12 @@ EOF
   local script base
   while IFS= read -r script; do
     base="${script##*/}"
-    # Herdr role resolution is a user-global SessionStart hook. It is shipped
-    # beside project hooks for release packaging, but must not be duplicated in
-    # each attached project's canonical settings.
-    [ "$base" = "herdr-foreman-session.sh" ] && continue
+    # User-global hooks (Herdr role resolution, the spec 069 A7 worktree
+    # hooks) ship beside project hooks for release packaging, but must not be
+    # duplicated in each attached project's canonical settings.
+    case "$base" in
+      herdr-foreman-session.sh|trellis-worktree-create.sh|trellis-worktree-remove.sh) continue ;;
+    esac
     is_local_template_only_hook "$base" && continue
     is_retired_registration_hook "$base" && continue
     jq -e --arg base "$base" \

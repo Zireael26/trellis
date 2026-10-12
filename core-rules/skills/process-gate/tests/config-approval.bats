@@ -43,7 +43,7 @@ approve() {
   run_gate merge
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"gate config approved on PR #42 by repo-owner: \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+  [[ "$output" == *"gate config approved on PR #42 by repo-owner (owner permission): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
 }
 
 @test "merge with the owner's approval for the wrong SHA is BLOCKED" {
@@ -164,7 +164,7 @@ approve() {
   run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=$rev"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"merge requires gate-config-approved: $rev"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"gate config approved on PR #42 by repo-owner: \"gate-config-approved: $rev\""* ]] || { echo "$output"; false; }
+  [[ "$output" == *"gate config approved on PR #42 by repo-owner (owner permission): \"gate-config-approved: $rev\""* ]] || { echo "$output"; false; }
   ! grep -q -- "--search $main_sha" "$GH_LOG" || { cat "$GH_LOG"; false; }
 }
 
@@ -384,7 +384,7 @@ approval_control() {
   approve 42 OPEN "$head" repo-owner "$head"
   run_gate merge
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"gate config approved on PR #42 by repo-owner: \"gate-config-approved: $head\""* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"gate config approved on PR #42 by repo-owner (owner permission): \"gate-config-approved: $head\""* ]] || { echo "$output"; return 1; }
 }
 
 @test "a root scanner config change merges only with the owner's approval" {
@@ -695,4 +695,72 @@ audit_dir_case() {
   run env PATH="$tb" bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=push --range=main..HEAD"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"cannot list (or, with python3, fold) the files changed"* ]] || { echo "$output"; false; }
+}
+
+# Organization-owned repos (e.g. example-org/example-repo): the owner login can
+# never author a comment, so an admin's approval line counts instead. The
+# permission comes from gh, never from the PR body; anything but admin, or
+# any lookup failure, fails closed.
+
+@test "org repo: an admin's approval for the head SHA proceeds and quotes permission" {
+  approval_fixture || return 1
+  gh_org example-org example-repo
+  gh_perm team-lead admin
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" team-lead "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"gate config approved on PR #42 by team-lead (admin permission): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+  grep -q -- "api repos/example-org/example-repo/collaborators/team-lead/permission" "$GH_LOG" || { cat "$GH_LOG"; false; }
+}
+
+@test "org repo: a non-admin's approval is BLOCKED and names the permission" {
+  approval_fixture || return 1
+  gh_org example-org example-repo
+  gh_perm contributor push
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" contributor "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PR #42 has an approval by contributor (permission push, need admin): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+}
+
+@test "org repo: a failed permission lookup fails closed" {
+  approval_fixture || return 1
+  gh_org example-org example-repo
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" team-lead "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PR #42 has an approval by team-lead (permission lookup failed): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+}
+
+@test "user repo: a non-owner's line stays BLOCKED without any permission lookup" {
+  approval_fixture || return 1
+  gh_perm some-agent admin
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" some-agent "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PR #42 has an approval by some-agent (not the repo owner repo-owner): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+  grep -q -- "api repos" "$GH_LOG" && { cat "$GH_LOG"; false; } || true
+}
+
+@test "org repo: an admin's approval for the wrong SHA is BLOCKED" {
+  approval_fixture || return 1
+  local base
+  base="$(git -C "$PROJECT_DIR" rev-parse main)"
+  gh_org example-org example-repo
+  gh_perm team-lead admin
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" team-lead "$base"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PR #42 has an approval by team-lead for another SHA: \"gate-config-approved: $base\""* ]] || { echo "$output"; false; }
 }

@@ -523,7 +523,8 @@ rewrite_manifest() {
   mkdir -p "$PAYLOAD/core-rules/skills/prefix-foo" "$PAYLOAD/core-rules/skills/prefix-foobar"
   printf '# Foo\n' > "$PAYLOAD/core-rules/skills/prefix-foo/SKILL.md"
   printf '# Foobar\n' > "$PAYLOAD/core-rules/skills/prefix-foobar/SKILL.md"
-  rewrite_manifest '.harnesses.user.links += [{"source": "core-rules/skills/prefix-foo", "destination": ".agents/skills/prefix-foo", "destination_home": true}, {"source": "core-rules/skills/prefix-foobar", "destination": ".pi/agent/skills/prefix-foobar", "destination_home": true}]'
+  rewrite_manifest '.harnesses.user.links += [{"source": "core-rules/skills/prefix-foo", "destination": ".agents/skills/prefix-foo", "destination_home": true}, {"source": "core-rules/skills/prefix-foobar", "destination": ".pi/agent/skills/prefix-foobar", "destination_home": true}]
+    | (.harnesses.shared_agents.links[] | select(.destination_dir == ".agents/skills") | .exclude_dirs) += ["prefix-foo"]'
 
   run_plan --harness user
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -572,4 +573,43 @@ rewrite_manifest() {
       )
     ] | length) == 1
   ' >/dev/null
+}
+
+@test "a release user skill is never also rendered as a project skill leaf" {
+  local shadowed
+  shadowed="$(jq -c '[.harnesses.user.links[].destination
+    | select(startswith(".claude/skills/") or startswith(".agents/skills/"))]' "$MANIFEST")"
+  printf '%s\n' "$shadowed" | jq -e 'index(".claude/skills/herdr-foreman") and index(".agents/skills/herdr-foreman")' >/dev/null
+
+  run_plan --harness claude --harness codex --harness pi
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '%s\n' "$output" | jq -e --argjson shadowed "$shadowed" '
+    ([.artifacts[] | select(.destination as $d | $shadowed | index($d))] | length) == 0
+    and ([.artifacts[] | select(.destination == ".claude/skills/clarify" and .source == "core-rules/skills/clarify")] | length) == 1
+    and ([.artifacts[] | select(.destination == ".agents/skills/clarify" and .source == "core-rules/skills/clarify")] | length) == 1
+  ' >/dev/null || { echo "$output"; false; }
+}
+
+@test "a project skill leaf that shadows a release user skill is invalid manifest state" {
+  rewrite_manifest '(.harnesses.shared_agents.links[] | select(.destination_dir == ".agents/skills")) |= del(.exclude_dirs)'
+
+  run_plan --harness pi
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"user skill 'herdr-foreman' is also a project leaf under '.agents/skills'"* ]] || { echo "$output"; false; }
+
+  cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
+  rewrite_manifest '.harnesses.claude.links += [{"source": "core-rules/skills/herdr-foreman", "destination": ".claude/skills/herdr-foreman"}]'
+
+  run_plan --harness claude
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"user skill 'herdr-foreman' is also a project leaf under '.claude/skills'"* ]] || { echo "$output"; false; }
+}
+
+@test "the source checkout's pi settings hide release user skills from project discovery" {
+  local name
+  for name in $(jq -r '.harnesses.user.links[].destination
+      | select(startswith(".agents/skills/")) | ltrimstr(".agents/skills/")' "$MANIFEST"); do
+    jq -e --arg exclude "!$name" '.skills | index($exclude)' "$REPO_ROOT/.pi/settings.json" >/dev/null ||
+      { echo "missing !$name in .pi/settings.json"; false; }
+  done
 }

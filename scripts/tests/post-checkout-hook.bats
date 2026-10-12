@@ -500,6 +500,16 @@ dispatcher_scripts() {
     while IFS= read -r name; do
       case "$file:$name" in
         scripts/lib/health-checks.sh:conformance-check.sh|scripts/lib/health-checks.sh:check-codex-plugin-surface.sh) continue ;;
+        # disk-janitor.sh and pi-spill-watchdog.sh are resolved with [ -f ]
+        # guards (or OID-checked) and skipped when absent, and the watchdog
+        # runs externally via launchd: neither is executed on hook paths.
+        scripts/lib/disk-janitor-agents.sh:disk-janitor.sh|scripts/lib/disk-janitor-agents.sh:pi-spill-watchdog.sh) continue ;;
+        # check-process-liveness runs only inside janitor/doctor flows on
+        # complete trees, never on dispatcher/attach/worktree hook paths.
+        scripts/lib/disk-janitor-lib.sh:check-process-liveness.sh) continue ;;
+        # check-process-liveness only compares process command names against
+        # the runner's (comm == "run-tests-local.py"), it never executes it.
+        scripts/check-process-liveness.sh:run-tests-local.py|scripts/check-process-liveness.sh:run-tests.sh) continue ;;
       esac
       for candidate in "scripts/$name" "scripts/lib/$name"; do
         if [ -f "$REPO_ROOT/$candidate" ]; then

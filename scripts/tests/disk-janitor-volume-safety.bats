@@ -104,7 +104,18 @@ EOF
 #!/bin/sh
 printf '%s\n' "$SANDBOX/npm-cache"
 EOF
-  chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/pnpm" "$FAKE_BIN/npm"
+  # D6 (spec 069): stub the store-prune tools so --apply never reaches real
+  # caches (hermetic; each logs its argv for the prune-only assertion).
+  for tool in uv bun go; do
+    cat > "$FAKE_BIN/$tool" <<EOF
+#!/bin/sh
+printf '%s\n' "\$@" >> "$SANDBOX/$tool-argv.log"
+if [ "\$1" = "cache" ] && [ "\$2" = "dir" ]; then printf '%s\n' "$SANDBOX/$tool-cache"; exit 0; fi
+if [ "\$1" = "env" ]; then printf '%s\n' "$SANDBOX/$tool-cache"; exit 0; fi
+exit 0
+EOF
+  done
+  chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/pnpm" "$FAKE_BIN/npm" "$FAKE_BIN/uv" "$FAKE_BIN/bun" "$FAKE_BIN/go"
 }
 
 run_dj_stubbed() {
@@ -116,17 +127,21 @@ run_dj_stubbed() {
 
 # volume_delete_form TOKEN... — succeed, printing the form, when the tokens
 # after `docker` are one of spec 059 R1's forbidden commands, in any argument
-# order. Any -v/--volumes token (or a short-option cluster holding v) counts.
+# order, plus spec 069 DH.7's image/container extension (never volume, image
+# or container removal). Any -v/--volumes token (or a short-option cluster
+# holding v) counts.
 volume_delete_form() {
-  local t volume=0 rm=0 remove=0 prune=0 system=0 container=0 compose=0 down=0 vflag=0
+  local t volume=0 rm=0 remove=0 prune=0 system=0 container=0 compose=0 down=0 vflag=0 image=0 rmi=0
   for t in "$@"; do
     case "$t" in
       volume) volume=1 ;;
       rm) rm=1 ;;
+      rmi) rmi=1 ;;
       remove) remove=1 ;;
       prune) prune=1 ;;
       system) system=1 ;;
       container) container=1 ;;
+      image) image=1 ;;
       compose) compose=1 ;;
       down) down=1 ;;
       -v|--volumes|--volumes=*) vflag=1 ;;
@@ -137,13 +152,21 @@ volume_delete_form() {
   if [ "$volume" -eq 1 ] && { [ "$rm" -eq 1 ] || [ "$remove" -eq 1 ] || [ "$prune" -eq 1 ]; }; then
     echo "docker volume rm/remove/prune"; return 0
   fi
+  # DH.7: never image removal (image rm/remove/prune, or rmi).
+  if [ "$image" -eq 1 ] && { [ "$rm" -eq 1 ] || [ "$remove" -eq 1 ] || [ "$prune" -eq 1 ]; }; then
+    echo "docker image rm/remove/prune"; return 0
+  fi
+  if [ "$rmi" -eq 1 ]; then
+    echo "docker rmi"; return 0
+  fi
   if [ "$system" -eq 1 ] && [ "$prune" -eq 1 ]; then echo "docker system prune"; return 0; fi
-  if [ "$container" -eq 1 ] && [ "$prune" -eq 1 ]; then echo "docker container prune"; return 0; fi
+  # DH.7: never container removal (container rm/remove/prune, even without -v).
+  if [ "$container" -eq 1 ] && { [ "$rm" -eq 1 ] || [ "$remove" -eq 1 ] || [ "$prune" -eq 1 ]; }; then
+    echo "docker container rm/remove/prune"; return 0
+  fi
+  if [ "$compose" -eq 0 ] && [ "$rm" -eq 1 ]; then echo "docker rm"; return 0; fi
   if [ "$compose" -eq 1 ] && { [ "$rm" -eq 1 ] || [ "$down" -eq 1 ]; } && [ "$vflag" -eq 1 ]; then
     echo "docker compose rm/down with volumes"; return 0
-  fi
-  if [ "$compose" -eq 0 ] && [ "$rm" -eq 1 ] && [ "$vflag" -eq 1 ]; then
-    echo "docker rm/container rm with volumes"; return 0
   fi
   return 1
 }
@@ -197,18 +220,59 @@ run_matrix() {
     "volume rm $UNATTACHED_ONE" "volume remove x" "volume prune -f" "volume prune --all -f" \
     "rm volume x" "prune volume" "system prune" "system prune -af --volumes" "--volumes system prune" \
     "rm -v c" "rm -fv c" "rm --volumes c" "-v rm c" "container rm -v c" "container rm --volumes=true c" \
-    "container prune -f" "prune container" "compose rm -v" "compose rm -fsv" "compose down -v" \
-    "compose down --volumes" "--volumes compose down" "compose -p lane down --volumes"; do
+    "container rm c" "container remove c" "container prune -f" "prune container" "compose rm -v" "compose rm -fsv" "compose down -v" \
+    "compose down --volumes" "--volumes compose down" "compose -p lane down --volumes" \
+    "image rm x" "image remove x" "image prune -f" "prune image" "rm image x" "rmi x" "rmi -f x" \
+    "rm c" "rmi img" "image prune" "docker container prune" "volume rm v"; do
     # shellcheck disable=SC2086
     volume_delete_form $form >/dev/null || { echo "not flagged: docker $form"; false; }
   done
   for form in \
     "info" "version --format {{.Server.Version}}" "system df --format json" "system df -v --format json" \
     "buildx du --format json" "buildx prune -f --reserved-space 20GB" "volume ls" "volume inspect x" \
-    "ps -a --filter volume=x" "rm c" "compose down" "compose rm -f" "image ls"; do
+    "ps -a --filter volume=x" "compose down" "compose rm -f" "image ls"; do
     # shellcheck disable=SC2086
     if volume_delete_form $form >/dev/null; then echo "wrongly flagged: docker $form"; false; fi
   done
+}
+
+@test "nightly apply argv equivalent in dry-run asserts commands per scope and zero volume/image/container removals" {
+  # Run janitor with nightly argv equivalent in dry-run:
+  # The fixture shims flags/scopes from upcoming release lanes (e.g. --dehydrate, tmp)
+  # so the safe commands per scope can be asserted on this branch:
+  local -a args=()
+  for arg in --dry-run --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker"; do
+    case "$arg" in
+      --dehydrate) ;;
+      worktrees,caches,releases,pi,tmp,docker) args+=("worktrees,caches,releases,pi,docker") ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+
+  run_dj_stubbed "${args[@]}"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # Assert commands/plan per scope:
+  # 1. docker: BuildKit prune with reserved-space command planned, volumes and images never deleted
+  [[ "$output" == *"Docker prune plan"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"docker buildx prune -f --reserved-space 20GB"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"images: 2 (never pruned)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$REPORT_ONLY_HEADING"* ]] || { echo "$output"; false; }
+
+  # 2. worktrees: worktree reap plan or verdict
+  [[ "$output" == *"Worktrees to reap"* ]] || { echo "$output"; false; }
+
+  # 3. caches: cache plan
+  [[ "$output" == *"Caches to delete"* ]] || { echo "$output"; false; }
+
+  # 4. releases: release staging
+  [[ "$output" == *"Release staging to delete"* ]] || { echo "$output"; false; }
+
+  # 5. pi: pi scope output
+  [[ "$output" == *"pi temp files"* ]] || { echo "$output"; false; }
+
+  # Volume safety: assert no forbidden docker calls in log
+  assert_no_volume_delete_in_log
 }
 
 @test "--report never issues a volume-deleting docker call and lists unattached IDs" {
@@ -248,8 +312,11 @@ run_matrix() {
 }
 
 @test "disk-janitor.sh has no volume-deleting docker invocation outside comments" {
-  local line joined="" form docker_lines=0 buildx_prune=0 i found
+  local line joined="" form docker_lines=0 buildx_prune=0 i found f
   local -a tokens rest
+  # DH.7: scan the orchestrator plus the DH-owned host library (fstrim lives
+  # there to avoid the DW hunk conflict; it must carry no forbidden verb).
+  for f in "$DJ" "$REPO_ROOT/scripts/lib/disk-janitor-host.sh"; do
   while IFS= read -r line || [ -n "$line" ]; do
     # Join backslash continuations into one logical line.
     case "$line" in
@@ -276,11 +343,23 @@ run_matrix() {
     docker_lines=$((docker_lines + 1))
     case " ${rest[*]+"${rest[*]}"} " in *" buildx prune "*) buildx_prune=1 ;; esac
     if form="$(volume_delete_form ${rest[@]+"${rest[@]}"})"; then
-      echo "forbidden ($form): docker ${rest[*]}"
+      echo "forbidden ($form): docker ${rest[*]} ($f)"
       false
     fi
-  done < "$DJ"
+  done < "$f"
+  done
   # Non-vacuous: the scan saw the janitor's real Docker calls.
   [ "$docker_lines" -ge 5 ] || { echo "only $docker_lines docker lines scanned"; false; }
   [ "$buildx_prune" -eq 1 ]
+}
+
+@test "host fstrim never touches volumes, images or containers" {
+  grep -q "colima ssh -- sudo fstrim -av" "$REPO_ROOT/scripts/lib/disk-janitor-host.sh" || {
+    echo "fstrim missing from host library"; false
+  }
+  # The host library issues no docker invocations at all (prune lives in the
+  # orchestrator); a fortiori no volume/image/container removal is reachable.
+  if grep -E "^[[:space:]]*docker[[:space:]]" "$REPO_ROOT/scripts/lib/disk-janitor-host.sh" | grep -v "^[[:space:]]*#"; then
+    echo "unexpected docker invocation in host library:"; grep -E "^[[:space:]]*docker[[:space:]]" "$REPO_ROOT/scripts/lib/disk-janitor-host.sh"; false
+  fi
 }

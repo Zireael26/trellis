@@ -570,7 +570,6 @@ export function createWebSearch(deps: Deps) {
       execute,
     };
     pi.registerTool({ ...definition, name: TOOL_NAME, label: "Trellis Web Search" });
-    pi.registerTool({ ...definition, name: "web_search", label: "Web Search" });
   }
 
   return { execute, register };

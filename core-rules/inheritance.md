@@ -363,7 +363,10 @@ validator, the skills command, and doctor:
 
 The mapping never exposes one skill twice to one harness: the manifest
 validator rejects a user skill name that appears under both the shared
-`.agents/skills` root and either solo root. The current release surface links
+`.agents/skills` root and either solo root, and a project leaf of that name in
+the same root (project skill expansions list it in `exclude_dirs`). A release
+user skill therefore reaches a session only through the user surface; a
+machine without `attach --user` does not get it. The current release surface links
 `herdr-foreman` for all three harnesses and `trellis-computer-use` (source
 `core-rules/pi/computer-use`) for pi only; the validator rule and the shipped
 manifest are proved together by the surface-plan suite.

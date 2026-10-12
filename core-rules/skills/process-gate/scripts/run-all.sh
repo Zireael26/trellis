@@ -618,14 +618,28 @@ gate_config_changes() {
 # gate_config_approval <head-sha>: the merge-mode approval for a range that
 # changes gate config — a line `gate-config-approved: <head-sha>` in a comment
 # or non-dismissed review on the one open PR whose head is <head-sha>,
-# authored by the repository OWNER, all read via gh. The open-PR search is
+# authored by the repository OWNER, all read via gh. For an ORGANIZATION-owned
+# repo the owner login can never author a comment, so an approval line from an
+# author whose repo permission is admin is accepted instead (looked up live
+# via gh; any lookup failure fails closed). User-owned repos keep the exact
+# owner-login rule. The open-PR search is
 # complete or refused (a full page may be truncated), and the chosen PR's
-# state and head are re-checked when its bodies are read. Only the owner may
-# post the line; no agent posts or scripts it. Sets APPROVAL_PR,
-# APPROVAL_AUTHOR and APPROVAL_LINE, or APPROVAL_REASON on failure. There is
+# state and head are re-checked when its bodies are read. Only the owner (or
+# an org admin) may post the line; no agent posts or scripts it. Sets
+# APPROVAL_PR, APPROVAL_AUTHOR, APPROVAL_PERMISSION and APPROVAL_LINE, or
+# APPROVAL_REASON on failure. There is
 # no override.
+# approval_repo_permission <nameWithOwner> <login>: print the login's repo
+# permission as reported by gh (empty on any lookup failure); succeed iff
+# the lookup itself worked. Callers compare against admin and fail closed.
+approval_repo_permission() {
+  local perm
+  perm="$(cd "$PROJECT_DIR" && gh api "repos/$1/collaborators/$2/permission" --jq '.permission // empty' 2>/dev/null)" || return 1
+  printf '%s' "$perm"
+}
+
 gate_config_approval() {
-  local head="$1" owner listing total prs view first lines author line other="" limit=1000
+  local head="$1" owner otype nwo oinfo rest listing total prs view first lines author line other="" limit=1000 perm
   local re='^[[:space:]]*gate-config-approved:[[:space:]]*([0-9a-f]+)[[:space:]]*$'
   local need="gate config changed in range: merge requires gate-config-approved: $head from the repo owner on the PR"
   if ! command -v gh >/dev/null 2>&1; then
@@ -633,13 +647,26 @@ gate_config_approval() {
     return 1
   fi
   # jq -r prints a missing login as "null", which would let an unreadable
-  # owner match a deleted (null) comment author: the owner read uses
-  # `// empty`, the author read a sentinel no login can spell.
-  owner="$(cd "$PROJECT_DIR" && gh repo view --json owner --jq '.owner.login // empty' 2>/dev/null)" || owner=""
+  # owner match a deleted (null) comment author: missing fields default to
+  # "" (never the literal string "null"), and an empty owner refuses
+  # below; the author read keeps a sentinel no login can spell.
+  owner=""; otype="User"; nwo=""
+  if oinfo="$(cd "$PROJECT_DIR" && gh repo view --json owner,nameWithOwner \
+    --jq '"\(.owner.login // "")\t\(.owner.type // "")\t\(.nameWithOwner // "")"' 2>/dev/null)"; then
+    owner="${oinfo%%$'\t'*}"; rest="${oinfo#*$'\t'}"
+    [ -n "${rest%%$'\t'*}" ] && otype="${rest%%$'\t'*}"
+    nwo="${rest#*$'\t'}"
+  fi
   if [ -z "$owner" ]; then
     APPROVAL_REASON="$need; gh could not read the repo owner"
     return 1
   fi
+  case "$otype" in
+    User) ;;
+    Organization) ;;
+    *) APPROVAL_REASON="$need; unknown repo owner type $otype"
+       return 1 ;;
+  esac
   listing="$(cd "$PROJECT_DIR" && gh pr list --state open --search "$head" --limit "$limit" \
     --json number,headRefOid,state \
     --jq "\"\(length)\t\" + ([.[] | select(.headRefOid == \"$head\" and .state == \"OPEN\") | .number | tostring] | join(\" \"))" \
@@ -683,13 +710,27 @@ gate_config_approval() {
     line="${line%$'\r'}"
     [[ "$line" =~ $re ]] || continue
     line="${line#"${line%%[![:space:]]*}"}"
-    if [ "${BASH_REMATCH[1]}" = "$head" ] && [ "$author" = "$owner" ]; then
-      APPROVAL_AUTHOR="$author"
-      APPROVAL_LINE="$line"
-      return 0
-    fi
     if [ "${BASH_REMATCH[1]}" = "$head" ]; then
-      other="$author (not the repo owner $owner): \"$line\""
+      if [ "$author" = "$owner" ]; then
+        APPROVAL_AUTHOR="$author"
+        APPROVAL_PERMISSION="owner"
+        APPROVAL_LINE="$line"
+        return 0
+      fi
+      if [ "$otype" = Organization ]; then
+        if [ -n "$nwo" ] && perm="$(approval_repo_permission "$nwo" "$author")" && [ "$perm" = admin ]; then
+          APPROVAL_AUTHOR="$author"
+          APPROVAL_PERMISSION="$perm"
+          APPROVAL_LINE="$line"
+          return 0
+        elif [ -n "${perm:-}" ]; then
+          other="$author (permission $perm, need admin): \"$line\""
+        else
+          other="$author (permission lookup failed): \"$line\""
+        fi
+      else
+        other="$author (not the repo owner $owner): \"$line\""
+      fi
     else
       other="$author for another SHA: \"$line\""
     fi
@@ -764,10 +805,10 @@ if [ -n "$CONFIG_CHANGES" ]; then
     pg_blocked_verdict "gate config changed in range: a push that targets main/master cannot change gate config, approved or not; merge it through its PR"
   fi
   if [ "$PG_MODE" = merge ]; then
-    APPROVAL_PR="" APPROVAL_AUTHOR="" APPROVAL_LINE="" APPROVAL_REASON=""
+    APPROVAL_PR="" APPROVAL_AUTHOR="" APPROVAL_PERMISSION="" APPROVAL_LINE="" APPROVAL_REASON=""
     pg_unshadow
     gate_config_approval "$HEAD_SHA" || pg_blocked_verdict "$APPROVAL_REASON"
-    printf 'gate config approved on PR #%s by %s: "%s"\n\n' "$APPROVAL_PR" "$APPROVAL_AUTHOR" "$APPROVAL_LINE"
+    printf 'gate config approved on PR #%s by %s (%s permission): "%s"\n\n' "$APPROVAL_PR" "$APPROVAL_AUTHOR" "$APPROVAL_PERMISSION" "$APPROVAL_LINE"
   fi
 fi
 

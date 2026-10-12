@@ -141,6 +141,15 @@ _pgcfg_validate_policy_fallback() {
       if type == "object" then
         optional_nonnegative_integer("auto_execute_top_n")
       else false end;
+    def janitor_scope:
+      . as $scope
+      | ["caches", "worktrees", "stores", "docker", "releases", "pi",
+         "orphans", "logs", "tmp", "transcripts"]
+      | any(.[]; . == $scope);
+    def home_or_absolute_path:
+      safe_text
+      and (startswith("/") or . == "~" or startswith("~/"))
+      and all(split("/")[]; . != "." and . != "..");
     def valid_disk_janitor:
       if type == "object" then
         optional_boolean("enabled")
@@ -153,6 +162,31 @@ _pgcfg_validate_policy_fallback() {
         and optional_nonnegative_integer("worktree_count_ceiling")
         and optional_nonnegative_integer("worktree_total_gb_ceiling")
         and ((has("skip_projects") | not) or (.skip_projects | valid_string_list))
+        and optional_nonnegative_number("docker_cache_keep_gb")
+        and optional_nonnegative_integer("dehydrate_idle_days")
+        and optional_nonnegative_integer("pi_worktree_ttl_days")
+        and optional_boolean("pi_apply")
+        and optional_nonnegative_integer("logs_min_mb")
+        and optional_nonnegative_integer("logs_min_age_days")
+        and optional_nonnegative_integer("tmp_ttl_days")
+        and optional_nonnegative_integer("cc_worktree_idle_days")
+        and (
+          (has("apply_disabled_scopes") | not)
+          or (.apply_disabled_scopes | valid_string_list and all(.[]; janitor_scope))
+        )
+      else false end;
+    def valid_worktrees:
+      if type == "object" then
+        ((has("root") | not) or (.root | home_or_absolute_path))
+        and (
+          (has("known_parents") | not)
+          or (.known_parents | valid_string_list and all(.[]; home_or_absolute_path))
+        )
+        and (
+          (has("push_owners") | not)
+          or (.push_owners | valid_string_list
+              and all(.[]; test("^[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9._-]+)?$")))
+        )
       else false end;
     def valid_loop_safety:
       if type == "object" then
@@ -242,6 +276,7 @@ _pgcfg_validate_policy_fallback() {
     )
     and (if has("conductor") then (.conductor | valid_conductor) else true end)
     and (if has("disk_janitor") then (.disk_janitor | valid_disk_janitor) else true end)
+    and (if has("worktrees") then (.worktrees | valid_worktrees) else true end)
     and (if has("loop_safety") then (.loop_safety | valid_loop_safety) else true end)
     and (if has("mandatory_pipeline") then (.mandatory_pipeline | valid_mandatory_pipeline) else true end)
     and (if has("aeo_gate") then (.aeo_gate | valid_aeo_gate) else true end)

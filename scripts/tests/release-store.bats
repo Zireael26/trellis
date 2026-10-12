@@ -546,8 +546,10 @@ GENERATOR
   cp "$GROUP_PLAN_OWNER" "$SANDBOX/original.owner"
   group_plan_adopt
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add -b gp-new "$3"' _ \
-    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/work trees"
+  GROUP_PLAN_NEW="$TRELLIS_WORKTREE_ROOT/group-plan/gp-new"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add gp-new' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   local owner harness leaf managed hash before
   owner="$(owner_for_root "$GROUP_PLAN_NEW")"
@@ -630,15 +632,18 @@ GENERATOR
   group_plan_setup_group
   local before
   before="$(group_plan_state)"
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add -b gp-blocked "$3"' _ \
-    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/work trees"
+  GROUP_PLAN_NEW="$TRELLIS_WORKTREE_ROOT/group-plan/gp-blocked"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add gp-blocked' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh"
   [ "$status" -eq 3 ]
   [[ "$output" == *'stale owned exclude plan'*'remedy:'* ]]
   [ ! -e "$GROUP_PLAN_NEW" ]
   ! git -C "$GROUP_PLAN_MAIN" show-ref --verify refs/heads/gp-blocked
   [ "$(group_plan_state)" = "$before" ]
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add --no-checkout -b gp-deferred "$3"' _ \
-    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh" "$GROUP_PLAN_NEW"
+  GROUP_PLAN_NEW="$TRELLIS_WORKTREE_ROOT/group-plan/gp-deferred"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add --no-checkout gp-deferred' _ \
+    "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh"
   [ "$status" -eq 0 ] && [ -d "$GROUP_PLAN_NEW" ] && [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
   group_plan_assert_no_journal
 }

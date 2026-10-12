@@ -1080,6 +1080,9 @@ fi
 . "$SCRIPT_DIR/lib/attachment.sh"
 . "$SCRIPT_DIR/lib/health-checks.sh"
 . "$SCRIPT_DIR/lib/attach-postjob.sh"
+. "$SCRIPT_DIR/lib/worktree-layout.sh"
+. "$SCRIPT_DIR/lib/dep-sharing.sh"
+. "$SCRIPT_DIR/lib/pi-output-guard.sh"
 
 ONLY_PROJECT=""; ONLY_FLEET=""; DO_FIX=0; DO_DRY_RUN=0; DO_ADOPT_HUSKY=0
 usage() {
@@ -2102,6 +2105,21 @@ while IFS=$'\t' read -r agent_status agent_message; do
   [ -n "$agent_message" ] || continue
   report '  ' "$agent_status" "$agent_message"
 done < <(hc_disk_janitor_agent_rows "${HOME:-}" "$HOME_PATH")
+# Spec 069 hygiene rows: worktree layout, dependency sharing and the pi output
+# guard, each in its own library under the row contract in worktree-layout.sh.
+# FIX_MODE lets a library run its own bounded repair under --fix.
+if [ "$DO_FIX" -eq 0 ]; then hygiene_fix_mode=off
+elif [ "$DO_DRY_RUN" -eq 1 ]; then hygiene_fix_mode=dry-run
+else hygiene_fix_mode=apply
+fi
+while IFS=$'\t' read -r hygiene_status hygiene_message; do
+  [ -n "$hygiene_message" ] || continue
+  report '  ' "$hygiene_status" "$hygiene_message"
+done < <(
+  hc_wt_layout_rows "${HOME:-}" "$HOME_PATH" "$hygiene_fix_mode"
+  hc_dep_sharing_rows "${HOME:-}" "$HOME_PATH" "$hygiene_fix_mode"
+  hc_pi_guard_rows "${HOME:-}" "$HOME_PATH" "$hygiene_fix_mode"
+)
 # The snapshot lives INSIDE the invocation scratch tree, and NO trap is
 # installed here: a second `trap … EXIT` would silently replace the
 # invocation-wide cleanup trap above and strand that tree on every exit.

@@ -52,6 +52,9 @@ case "$1 $2" in
   "repo view") json="$(cat "$GH_STUB_DIR/repo.json")" || exit 1 ;;
   "pr list") json="$(jq --argjson n "$limit" '.[:$n]' "$GH_STUB_DIR/prs.json")" || exit 1 ;;
   "pr view") json="$(cat "$GH_STUB_DIR/pr-$3.json" 2>/dev/null)" || exit 1 ;;
+  "api"*)
+    login="$(printf '%s' "$2" | sed -E 's#^repos/[^/]+/[^/]+/collaborators/([^/]+)/permission$#\1#')"
+    [ -n "$login" ] && [ "$login" != "$2" ] && json="$(cat "$GH_STUB_DIR/perm-$login.json" 2>/dev/null)" || exit 1 ;;
   *) exit 1 ;;
 esac
 if [ -n "$filter" ]; then
@@ -147,6 +150,14 @@ gh_view() {
   jq -n --arg s "$2" --arg h "$3" --argjson c "$4" --argjson r "${5:-[]}" \
     '{state:$s,headRefOid:$h,comments:$c,reviews:$r}' > "$GH_STUB_DIR/pr-$1.json"
 }
+# gh_org <org> <repo>: the repo is organization-owned (admin approvals apply).
+gh_org() {
+  printf '{"owner":{"login":"%s","type":"Organization"},"nameWithOwner":"%s/%s"}\n' \
+    "$1" "$1" "$2" > "$GH_STUB_DIR/repo.json"
+}
+# gh_perm <login> <permission>: serve this permission for the collaborators probe.
+# No stub file means the lookup fails (fail closed).
+gh_perm() { printf '{"permission":"%s"}\n' "$2" > "$GH_STUB_DIR/perm-$1.json"; }
 
 # Carrier fixture: a repo whose .claude/skills/process-gate/scripts/run-all.sh
 # is a stub beside the real diff-base resolver the carrier needs (spec 067),

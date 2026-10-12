@@ -15,6 +15,8 @@ setup() {
   ROOT="$(CDPATH='' cd "$ROOT" && pwd -P)"
   REPO="$ROOT/repo"
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  export TRELLIS_HOME="$ROOT/trellis-home" TRELLIS_WORKTREE_ROOT="$ROOT/worktrees"
+  WT="$TRELLIS_WORKTREE_ROOT/_unregistered/repo/feature-b"
   git init -qb main "$REPO"
   git -C "$REPO" config user.name test
   git -C "$REPO" config user.email test@example.invalid
@@ -218,15 +220,15 @@ PY
 }
 
 @test "wrapper --no-checkout -b records the literal parent without a dispatcher" {
-  run bash "$WORKTREE" add --no-checkout -b feature/b "$ROOT/wt" feature/a
+  run bash "$WORKTREE" add --no-checkout feature/b feature/a
   [ "$status" -eq 0 ]
   assert_record feature/b feature/a "$ATIP" worktree
-  [ ! -e "$ROOT/wt/tracked.txt" ]
+  [ -d "$WT" ] && [ ! -e "$WT/tracked.txt" ]
 }
 
 @test "wrapper default HEAD parent is captured before worktree creation" {
   git checkout -q feature/a
-  run bash "$WORKTREE" add --no-checkout -bfeature/b "$ROOT/wt"
+  run bash "$WORKTREE" add --no-checkout feature/b
   [ "$status" -eq 0 ]
   assert_record feature/b feature/a "$ATIP" worktree
 }
@@ -235,7 +237,7 @@ PY
   git config branch.feature/b.trellisParent main
   git config branch.feature/b.trellisBase "$M0"
   git config branch.feature/b.trellisSource manual
-  run bash "$WORKTREE" add --no-checkout -b feature/b "$ROOT/wt" feature/a
+  run bash "$WORKTREE" add --no-checkout feature/b feature/a
   [ "$status" -eq 0 ]
   assert_record feature/b main "$M0" manual
 }

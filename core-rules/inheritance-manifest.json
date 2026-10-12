@@ -11,7 +11,10 @@
           "source_children": "core-rules/skills",
           "destination_dir": ".claude/skills",
           "entry_type": "directory",
-          "required_file": "SKILL.md"
+          "required_file": "SKILL.md",
+          "exclude_dirs": [
+            "herdr-foreman"
+          ]
         },
         {
           "source_children": "core-rules/commands",
@@ -88,7 +91,10 @@
           "source_children": "core-rules/skills",
           "destination_dir": ".agents/skills",
           "entry_type": "directory",
-          "required_file": "SKILL.md"
+          "required_file": "SKILL.md",
+          "exclude_dirs": [
+            "herdr-foreman"
+          ]
         },
         {
           "source_children": "core-rules/commands",
@@ -323,6 +329,18 @@
         {
           "source": "core-rules/hooks/herdr-foreman-session.sh",
           "destination": ".claude/hooks/herdr-foreman-session.sh",
+          "destination_home": true,
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/trellis-worktree-create.sh",
+          "destination": ".claude/hooks/trellis-worktree-create.sh",
+          "destination_home": true,
+          "executable": true
+        },
+        {
+          "source": "core-rules/hooks/trellis-worktree-remove.sh",
+          "destination": ".claude/hooks/trellis-worktree-remove.sh",
           "destination_home": true,
           "executable": true
         },

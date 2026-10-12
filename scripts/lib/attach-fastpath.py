@@ -121,10 +121,12 @@ def current_inventory(donor, payload, harnesses):
             require(not entry.get('destination_home'), 'HOME surface in project plan')
             links = []
             if 'source_children' in entry:
-                require(not entry.get('recursive') and not entry.get('exclude_dirs'), 'complex expansion needs full planner')
+                require(not entry.get('recursive'), 'complex expansion needs full planner')
                 base = relative(entry['source_children'])
                 with directory(payload + '/' + base) as fd:
                     for name in sorted(os.listdir(fd)):
+                        if name in entry.get('exclude_dirs', []):
+                            continue
                         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                         if entry['entry_type'] == 'directory' and stat.S_ISDIR(info.st_mode):
                             if entry.get('required_file'):

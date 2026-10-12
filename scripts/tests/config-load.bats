@@ -416,6 +416,54 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
+@test "fallback accepts the spec 069 hygiene keys" {
+  jq '.disk_janitor = {
+        dehydrate_idle_days: 7, pi_worktree_ttl_days: 7, pi_apply: false,
+        logs_min_mb: 50, logs_min_age_days: 7, tmp_ttl_days: 2,
+        cc_worktree_idle_days: 1, apply_disabled_scopes: ["tmp", "pi"],
+        docker_cache_keep_gb: 20.5
+      }
+      | .worktrees = {root: "~/projects/worktrees", known_parents: ["~/projects", "/private/tmp"],
+                      push_owners: ["Zireael26", "acme/repo.name"]}' \
+    "$POLICY" > "$POLICY.tmp"
+  mv "$POLICY.tmp" "$POLICY"
+  run_loader_without_ajv "$POLICY"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "fallback rejects malformed spec 069 hygiene keys" {
+  local mutation
+  for mutation in \
+    '.disk_janitor.pi_apply = "false"' \
+    '.disk_janitor.dehydrate_idle_days = -1' \
+    '.disk_janitor.tmp_ttl_days = 1.5' \
+    '.disk_janitor.cc_worktree_idle_days = "1"' \
+    '.disk_janitor.docker_cache_keep_gb = "20"' \
+    '.disk_janitor.docker_cache_keep_gb = -1' \
+    '.disk_janitor.apply_disabled_scopes = ["bogus"]' \
+    '.disk_janitor.apply_disabled_scopes = "tmp"' \
+    '.disk_janitor.apply_disabled_scopes = ["tmp", "tmp"]' \
+    '.worktrees = []' \
+    '.worktrees.root = "projects/worktrees"' \
+    '.worktrees.root = "~/projects/../worktrees"' \
+    '.worktrees.root = ""' \
+    '.worktrees.known_parents = "~/projects"' \
+    '.worktrees.known_parents = ["relative"]' \
+    '.worktrees.known_parents = ["~/p", "~/p"]' \
+    '.worktrees.push_owners = "Zireael26"' \
+    '.worktrees.push_owners = ["bad owner"]' \
+    '.worktrees.push_owners = ["a/b/c"]'; do
+    write_policy "$POLICY" "Portable Maintainer" "portable-user"
+    jq "$mutation" "$POLICY" > "$POLICY.tmp"
+    mv "$POLICY.tmp" "$POLICY"
+
+    run_loader_without_ajv "$POLICY"
+
+    [ "$status" -eq 4 ] || { echo "$mutation: $output"; false; }
+    [[ "$output" == *"portable policy failed schema validation"* ]] || { echo "$mutation: $output"; false; }
+  done
+}
+
 @test "keeps an unavailable discovery root in fleet-local state" {
   local fleet_state missing
   missing="$SANDBOX/missing volume"

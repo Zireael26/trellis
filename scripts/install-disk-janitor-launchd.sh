@@ -18,6 +18,12 @@
 if [ -z "${BASH_VERSION-}" ] || [ "${BASH_SOURCE-}" = "$0" ]; then
   exec /usr/bin/env -i \
     "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
+    "TMPDIR=${TMPDIR-}" \
+    "TRELLIS_CALLER_TMPDIR=${TMPDIR-}" \
+    "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
+    "TRELLIS_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH:-${PATH-}}" \
+    "TRELLIS_TEST_VAR_FOLDERS_PREFIX=${TRELLIS_TEST_VAR_FOLDERS_PREFIX-}" \
+    "TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN-}" \
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     /bin/bash --noprofile --norc -c '
 set -u
@@ -41,6 +47,12 @@ fi
 exec /usr/bin/env -i \
   "HOME=${HOME-}" "TRELLIS_HOME=${TRELLIS_HOME-}" \
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+  "TMPDIR=${TMPDIR-}" \
+  "TRELLIS_CALLER_TMPDIR=${TRELLIS_CALLER_TMPDIR-}" \
+  "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
+  "TRELLIS_CALLER_PATH=${TRELLIS_CALLER_PATH-}" \
+  "TRELLIS_TEST_VAR_FOLDERS_PREFIX=${TRELLIS_TEST_VAR_FOLDERS_PREFIX-}" \
+  "TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN-}" \
   "TRELLIS_DISK_JANITOR_INSTALLER_SOURCE=$installer_source" \
   "TRELLIS_DISK_JANITOR_INSTALLER_BODY=$installer_body" \
   /bin/bash --noprofile --norc "$installer_body" "$@"
@@ -60,6 +72,9 @@ installer_cleanup_body() {
   [ -z "$body" ] || /bin/rm -f "$body"
 }
 trap 'installer_cleanup_body' EXIT
+caller_path="${TRELLIS_ATTACH_CALLER_PATH:-${TRELLIS_CALLER_PATH:-${PATH:-}}}"
+caller_tmpdir="${TRELLIS_CALLER_TMPDIR:-${TMPDIR:-}}"
+[ -n "$caller_tmpdir" ] && export TMPDIR="$caller_tmpdir"
 unset BASH_ENV ENV CDPATH
 PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 export PATH
@@ -78,10 +93,11 @@ SCRIPT_DIR="$(CDPATH='' cd "$installer_source_dir" && pwd -P)"
 usage() {
   cat <<'EOF'
 Usage:
-  trellis launchd [--with-apply] [--uninstall]
+  trellis launchd [--with-apply] [--with-pi-watchdog] [--uninstall]
 
 Installs the report LaunchAgent by default. --with-apply additionally installs
-the destructive nightly safe-only worktree janitor. Both agents start from an
+the destructive nightly safe-only worktree janitor. --with-pi-watchdog additionally
+installs the 60s pi spill log watchdog. Both agents start from an
 empty environment and execute only the fixed canonical
 operator-home/.local/bin/trellis with TRELLIS_HOME set explicitly.
 EOF
@@ -436,7 +452,7 @@ def ensure_expected_directory(parent_fd, name, expected, uid, label, open_fds):
 
 
 def validate_label(label):
-    if label not in ("org.trellis.disk-janitor", "org.trellis.disk-janitor-apply"):
+    if label not in ("org.trellis.disk-janitor", "org.trellis.disk-janitor-apply", "org.trellis.pi-spill-watchdog"):
         fail(STATE, "invalid LaunchAgent label")
     return label + ".plist"
 
@@ -496,15 +512,15 @@ def validate_rendered_plist(rendered, label, user_home, trellis_home, logs_dir, 
         "/bin/bash",
         "--noprofile",
         "--norc",
-        launcher,
-        "disk-janitor",
     ]
-    expected_schedule = {"Hour": 3, "Minute": 30}
     if label == "org.trellis.disk-janitor":
-        expected_arguments.append("--report")
-    else:
-        expected_arguments.extend(["--apply", "--scopes", "worktrees", "--yes", "--safe-only"])
+        expected_arguments.extend([launcher, "disk-janitor", "--report"])
+        expected_schedule = {"Hour": 3, "Minute": 30}
+    elif label == "org.trellis.disk-janitor-apply":
+        expected_arguments.extend([launcher, "disk-janitor", "--apply", "--yes", "--safe-only", "--dehydrate", "--scopes", "worktrees,caches,releases,pi,tmp,docker"])
         expected_schedule = {"Hour": 4, "Minute": 0}
+    elif label == "org.trellis.pi-spill-watchdog":
+        expected_arguments.append(os.path.join(trellis_home, "state", "disk-janitor", "pi-spill-watchdog"))
     if payload.get("Label") != label:
         fail(STATE, "rendered plist label is invalid")
     if payload.get("ProgramArguments") != expected_arguments:
@@ -517,8 +533,16 @@ def validate_rendered_plist(rendered, label, user_home, trellis_home, logs_dir, 
         fail(STATE, "rendered plist stderr path is invalid")
     if payload.get("RunAtLoad") is not False:
         fail(STATE, "rendered plist RunAtLoad is invalid")
-    if payload.get("StartCalendarInterval") != expected_schedule:
-        fail(STATE, "rendered plist schedule is invalid")
+    if label == "org.trellis.pi-spill-watchdog":
+        if payload.get("StartInterval") != 60:
+            fail(STATE, "rendered plist schedule is invalid")
+        if "StartCalendarInterval" in payload:
+            fail(STATE, "rendered plist schedule is invalid")
+    else:
+        if payload.get("StartCalendarInterval") != expected_schedule:
+            fail(STATE, "rendered plist schedule is invalid")
+        if "StartInterval" in payload:
+            fail(STATE, "rendered plist schedule is invalid")
 
 
 def render_plist(template, label, user_home, trellis_home, logs_dir, launcher):
@@ -720,7 +744,7 @@ def run():
             remove_destination(agents_fd, label, destination_identity, uid)
             return ""
         if operation == "publish":
-            if len(values) != 11:
+            if len(values) < 11:
                 fail(STATE, "invalid secure agent publication")
             template, trellis_home, logs_dir, launcher = values[7:11]
             return publish(
@@ -796,6 +820,14 @@ require_matching_janitor_agents() {
   rows="$(dj_agent_scan "$launch_agents_dir" "$user_home" "$trellis_home")"
   while IFS=$'\t' read -r state path detail; do
     case "$state" in
+      degraded)
+        if "$with_apply" && [ "${path##*/}" = "$apply_label.plist" ]; then
+          continue
+        fi
+        printf 'trellis launchd: refusing to install: %s is degraded (%s)\n' "$path" "$detail" >&2
+        printf 'trellis launchd: remedy:\n  %s\n' "$(dj_agent_remedy "$path")" >&2
+        refused=true
+        ;;
       mismatch)
         printf 'trellis launchd: refusing to install: %s does not match the installer'"'"'s expected arguments and schedule (%s)\n' "$path" "$detail" >&2
         printf 'trellis launchd: remedy:\n  %s\n' "$(dj_agent_remedy "$path")" >&2
@@ -929,6 +961,20 @@ install_agent() {
     had_existing=true
     verify_finalized_destination "$label" "$expected_identity" || return "$?"
   fi
+  if [ "$label" = "$apply_label" ] && [ "${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-0}" != "1" ]; then
+    local dj_script="$SCRIPT_DIR/disk-janitor.sh"
+    local dry_run_rc=0 dry_run_out=""
+    if [ -x "$dj_script" ]; then
+      dry_run_out="$(TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+    fi
+    if [ "$dry_run_rc" -ne 0 ]; then
+      printf 'trellis launchd: refusing to load %s: nightly apply argv failed dry-run (exit %d): %s\n' \
+        "$label" "$dry_run_rc" "${dry_run_out//$'\n'/ }" >&2
+      printf 'trellis launchd: %s requires capabilities from upcoming release lanes (e.g. --dehydrate, pi scope apply)\n' \
+        "$label" >&2
+      return "$TRELLIS_EX_STATE"
+    fi
+  fi
   if "$had_existing"; then launchctl_run unload "$destination" 2>/dev/null || true; fi
   published_identity="$(publish_plist "$label" "$template" "$expected_identity")" || return "$?"
   verify_finalized_destination "$label" "$published_identity" || return "$?"
@@ -944,6 +990,7 @@ logs_identity=''
 INSTALLER_SYSTEM_NAME="$("/usr/bin/uname" -s)"
 report_label='org.trellis.disk-janitor'
 apply_label='org.trellis.disk-janitor-apply'
+watchdog_label='org.trellis.pi-spill-watchdog'
 template_dir="$(CDPATH='' cd "$SCRIPT_DIR/../core-rules/templates" && pwd -P)"
 
 main() {
@@ -951,11 +998,13 @@ main() {
   local -a selected_labels
   uninstall=false
   with_apply=false
+  with_pi_watchdog=false
 
   for arg in "$@"; do
     case "$arg" in
       --uninstall) uninstall=true ;;
       --with-apply) with_apply=true ;;
+      --with-pi-watchdog) with_pi_watchdog=true ;;
       --help|-h) usage; return 0 ;;
       -*) printf 'trellis launchd: unknown option: %s\n' "$arg" >&2; return "$TRELLIS_EX_USAGE" ;;
       *) printf 'trellis launchd: unexpected argument: %s\n' "$arg" >&2; return "$TRELLIS_EX_USAGE" ;;
@@ -996,10 +1045,11 @@ main() {
   fi
 
   if "$uninstall"; then
-    selected_labels=("$apply_label" "$report_label")
+    selected_labels=("$watchdog_label" "$apply_label" "$report_label")
   else
     selected_labels=("$report_label")
     if "$with_apply"; then selected_labels+=("$apply_label"); fi
+    if "$with_pi_watchdog"; then selected_labels+=("$watchdog_label"); fi
   fi
 
   library_dir="$user_home/Library"
@@ -1022,6 +1072,8 @@ main() {
   done
 
   if "$uninstall"; then
+    remove_agent "$watchdog_label" || return "$?"
+    rm -f "$trellis_home/state/disk-janitor/pi-spill-watchdog" 2>/dev/null || true
     remove_agent "$apply_label" || return "$?"
     remove_agent "$report_label" || return "$?"
     return 0
@@ -1033,6 +1085,8 @@ main() {
     require_owned_destination "$label" "$launch_agents_dir/$label.plist" || return "$?"
   done
 
+  dj_agent_write_tool_path "$trellis_home" "$caller_path" "$caller_tmpdir" || return "$?"
+
   install_agent "$report_label" || return "$?"
   printf '  runs: %s disk-janitor --report (daily 03:30, report-only)\n' "$launcher"
   printf '  TRELLIS_HOME: %s\n' "$trellis_home"
@@ -1041,10 +1095,19 @@ main() {
   if "$with_apply"; then
     printf '\n!! installing the NIGHTLY APPLY agent — this one DELETES worktrees.\n'
     install_agent "$apply_label" || return "$?"
-    printf '  runs: %s disk-janitor --apply --scopes worktrees --yes --safe-only (daily 04:00)\n' "$launcher"
+    printf '  runs: %s disk-janitor --apply --yes --safe-only --dehydrate --scopes worktrees,caches,releases,pi,tmp,docker (daily 04:00)\n' "$launcher"
     printf '  reaps ONLY: merged + porcelain-clean + non-detached + non-secret worktrees\n'
     printf '  NEVER reaps: pushed-but-unmerged, dirty, secret-bearing, or ephemeral /private/tmp trees\n'
     printf '  logs: %s/%s.log\n' "$logs_dir" "$apply_label"
+  fi
+
+  if "$with_pi_watchdog"; then
+    printf '\ninstalling the PI SPILL WATCHDOG agent (every 60s).\n'
+    dj_agent_write_watchdog_entry "$trellis_home" || return "$?"
+    install_agent "$watchdog_label" || return "$?"
+    printf '  runs: %s (interval 60s)\n' "$trellis_home/state/disk-janitor/pi-spill-watchdog"
+    printf '  truncates: pi-bash-*.log > 2 GiB to 0 in pi roots\n'
+    printf '  logs: %s/%s.log\n' "$logs_dir" "$watchdog_label"
   fi
 }
 

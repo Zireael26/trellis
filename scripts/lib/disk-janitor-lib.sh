@@ -126,22 +126,42 @@ dj_human_bytes() {
 # If either capability is unavailable, scanning fails closed instead of guessing.
 #
 # Emits TSV, one row per verified cache dir:
-#   <kind>\t<abs_path>\t<bytes>\t<mtime_epoch>
-# kind ∈ turbo-cache | next-cache | next-dev.
+#   <kind>\t<abs_path>\t<bytes>\t<age_epoch>
+# kind ∈ turbo-cache | next-cache | next-dev, or a spec 069 D1 regenerable kind
+# named by its directory: node_modules, .venv, .mypy_cache, .pytest_cache,
+# .ruff_cache, __pycache__, and dist, build (beside a lockfile or build
+# manifest) and target (beside Cargo.toml or Cargo.lock). A D1 directory is
+# reported whole and never descended into, so nothing nested in node_modules is
+# listed. .next and .turbo stay walked for their cache/dev subdirectories, which
+# carry their footprint here; dehydrate reports them whole.
+#
+# age_epoch is the directory mtime for the three build caches, which every
+# build rewrites. A D1 directory's mtime does not move with use, so its age is
+# the tree's last git activity (hy_last_git_activity), and the current time
+# when that is unknown: an unknown age never reads as stale.
 dj_find_caches() {
-  local proj="$1"
+  local proj="$1" rows activity
   [ -d "$proj" ] || return 0
   command -v python3 >/dev/null 2>&1 || {
     echo "dj_find_caches: python3 with descriptor-relative mount checks is required" >&2
     return 1
   }
-  python3 - "$proj" <<'PY'
+  # shellcheck source=hygiene-common.sh
+  [ -n "${_HY_REGENERABLE_ALWAYS:-}" ] || . "$_DISK_JANITOR_LIB_DIR/hygiene-common.sh"
+  # The lists travel in the environment so the walker's argv stays `- ROOT`.
+  rows="$(DJ_REGENERABLE="$_HY_REGENERABLE_ALWAYS" DJ_BUILD_MARKERS="$_HY_DIST_BUILD_MARKERS" DJ_TARGET_MARKERS="$_HY_TARGET_MARKERS" \
+    python3 - "$proj" <<'PY'
 import ctypes
 import os
 import stat
 import sys
 
 root_path = sys.argv[1]
+# .next and .turbo hold the three build caches below; they are walked, not
+# reported whole.
+REGENERABLE = set(os.environ["DJ_REGENERABLE"].split()) - {".next", ".turbo"}
+BUILD_MARKERS = os.environ["DJ_BUILD_MARKERS"].split()
+TARGET_MARKERS = os.environ["DJ_TARGET_MARKERS"].split()
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -330,13 +350,27 @@ def measure_tree(directory_fd, root_device, root_mount):
     return total
 
 
-def cache_kind(parent_name, name):
+def has_file(directory_fd, names):
+    for marker in names:
+        found = stat_child(directory_fd, marker)
+        if found is not None and stat.S_ISREG(found.st_mode):
+            return True
+    return False
+
+
+def cache_kind(parent_name, name, parent_fd):
     if parent_name == ".turbo" and name == "cache":
         return "turbo-cache"
     if parent_name == ".next" and name == "cache":
         return "next-cache"
     if parent_name == ".next" and name == "dev":
         return "next-dev"
+    if name in REGENERABLE:
+        return name
+    if name in ("dist", "build") and has_file(parent_fd, BUILD_MARKERS):
+        return name
+    if name == "target" and has_file(parent_fd, TARGET_MARKERS):
+        return name
     return None
 
 
@@ -347,7 +381,11 @@ def walk(directory_fd, directory_path, root_device, root_mount):
         return
     parent_name = os.path.basename(directory_path)
     for name in names:
-        if name in (".", "..") or "/" in name or name in (".git", "node_modules"):
+        # A control character in a name could split or forge a TSV row
+        # downstream; such a directory is neither reported nor walked.
+        if name in (".", "..") or "/" in name or name == ".git" or any(
+            ord(ch) < 32 or ord(ch) == 127 for ch in name
+        ):
             continue
         opened = open_child_directory(directory_fd, name, root_device, root_mount)
         if opened is None:
@@ -355,7 +393,7 @@ def walk(directory_fd, directory_path, root_device, root_mount):
         child_fd, child_stat = opened
         child_path = os.path.join(directory_path, name)
         try:
-            kind = cache_kind(parent_name, name)
+            kind = cache_kind(parent_name, name, directory_fd)
             if kind is not None:
                 size = measure_tree(child_fd, root_device, root_mount)
                 current = stat_child(directory_fd, name)
@@ -380,6 +418,14 @@ except MountIdentityError as error:
 finally:
     os.close(root_fd)
 PY
+)" || return "$?"
+  [ -n "$rows" ] || return 0
+  if ! activity="$(hy_last_git_activity "$proj")"; then
+    activity="$(date +%s)"
+  fi
+  printf '%s\n' "$rows" | awk -F'\t' -v OFS='\t' -v activity="$activity" '
+    $1 != "turbo-cache" && $1 != "next-cache" && $1 != "next-dev" { $4 = activity }
+    { print }'
 }
 
 # dj_cache_is_stale <mtime> <ttl_days> <now_epoch>
@@ -883,23 +929,30 @@ dj_worktree_pushed() {
 # ===========================================================================
 
 # dj_pkg_store_plan
-# Echo a best-effort estimate (in bytes) of what `pnpm store prune` /
-# `npm cache verify` could reclaim — REPORT ONLY, mutates nothing. We never run
-# the prune itself here (only the OWNED functions delete). Estimating reclaim
-# without mutating is not reliably possible across pnpm/npm versions, so this
-# returns the on-disk store size as an upper bound, or 0 when nothing is found.
+# D6 (spec 069): total bytes across the per-store plan in disk-janitor-host.sh.
+# Retained as the legacy single-number entry point (STORES_PLAN); the detailed
+# per-store report + prune live in dj_host_store_report/apply. Falls back to
+# the legacy pnpm/npm probe when the host library is not yet sourced (unit
+# tests sourcing this file alone).
 dj_pkg_store_plan() {
-  local total=0 store
-
+  local total=0 bytes
+  if command -v dj_host_store_list >/dev/null 2>&1; then
+    while IFS="$(printf '\t')" read -r _kind _path bytes _mtime; do
+      case "$bytes" in ''|*[!0-9]*) continue ;; esac
+      total=$(( total + bytes ))
+    done <<EOF
+$(dj_host_store_list 2>/dev/null || true)
+EOF
+    printf '%s\n' "$total"
+    return 0
+  fi
+  local store
   if command -v pnpm >/dev/null 2>&1; then
     store="$(pnpm store path 2>/dev/null || echo '')"
     if [ -n "$store" ] && [ -d "$store" ]; then
       total=$(( total + $(dj_dir_bytes "$store") ))
     fi
   fi
-
-  # npm cache: prefer the configured cache dir, else the conventional default
-  # under the user home (resolved from config, never hardcoded).
   if command -v npm >/dev/null 2>&1; then
     local npm_cache
     npm_cache="$(npm config get cache 2>/dev/null || echo '')"
@@ -910,7 +963,6 @@ dj_pkg_store_plan() {
       total=$(( total + $(dj_dir_bytes "$npm_cache") ))
     fi
   fi
-
   echo "$total"
 }
 
@@ -920,16 +972,17 @@ dj_pkg_store_plan() {
 
 # dj_release_staging_name_parts <basename>
 #
-# Print VERSION<TAB>SUFFIX for one exact execution-snapshot basename. The
-# separator is taken from the final `.exec.` delimiter, then VERSION is
-# validated as a release SemVer. This is deliberately not a prefix/greedy
-# suffix test: a version containing an earlier `.exec.` token remains intact,
-# while a foreign-version snapshot cannot be accepted under a shorter prefix.
+# Print VERSION<TAB>SUFFIX for one exact execution-snapshot basename, for both
+# .tmp.<v>.exec.<s> and .tmp.<v>.verify.<s> (spec 069 D3 covers both). The
+# separator is taken from the final `.exec.`/`.verify.` delimiter, then VERSION
+# is validated as a release SemVer. Retained for the path-safety gate; the
+# scanner itself delegates to `release_store_reap_tmp` (dj_host_release_scan).
 dj_release_staging_name_parts() {
-  local name="${1:-}" rest suffix version marker
+  local name="${1:-}" rest suffix version marker kind
   [ "$#" -eq 1 ] || return 1
   case "$name" in
-    .tmp.*.exec.*) ;;
+    .tmp.*.exec.*) kind="exec" ;;
+    .tmp.*.verify.*) kind="verify" ;;
     *) return 1 ;;
   esac
   case "$name" in
@@ -937,12 +990,21 @@ dj_release_staging_name_parts() {
   esac
   rest="${name#.tmp.}"
   [ "$rest" != "$name" ] || return 1
-  suffix="${rest##*.exec.}"
-  [ "$suffix" != "$rest" ] || return 1
-  case "$suffix" in
-    ""|*[!A-Za-z0-9]*) return 1 ;;
-  esac
-  marker=".exec.$suffix"
+  if [ "$kind" = "verify" ]; then
+    suffix="${rest##*.verify.}"
+    [ "$suffix" != "$rest" ] || return 1
+    case "$suffix" in
+      ""|*[!A-Za-z0-9]*) return 1 ;;
+    esac
+    marker=".verify.$suffix"
+  else
+    suffix="${rest##*.exec.}"
+    [ "$suffix" != "$rest" ] || return 1
+    case "$suffix" in
+      ""|*[!A-Za-z0-9]*) return 1 ;;
+    esac
+    marker=".exec.$suffix"
+  fi
   version="${rest%"$marker"}"
   [ "$version" != "$rest" ] || return 1
   trellis_home_is_valid_semver "$version" || return 1

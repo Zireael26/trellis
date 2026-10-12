@@ -20,6 +20,7 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
 
   export TRELLIS_HOME="$SANDBOX/inert trellis home"
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/work trees"
   ROOT="$SANDBOX/root"
   MAIN="$SANDBOX/main"
 
@@ -83,11 +84,11 @@ teardown() {
 # An ordinary clone may carry no Trellis state. The wrapper must still be a
 # harmless worktree convenience rather than revive legacy direct-link state.
 # ---------------------------------------------------------------------------
-@test "'add <path>' leaves an unregistered clone inert" {
-  WT2="$SANDBOX/wt2"
+@test "'add <branch>' leaves an unregistered clone inert" {
+  WT2="$TRELLIS_WORKTREE_ROOT/_unregistered/main/wt2"
 
   cd "$MAIN"
-  run bash "$SCRIPT" add "$WT2"
+  run bash "$SCRIPT" add wt2
 
   [ "$status" -eq 0 ]
   [ -d "$WT2" ]
@@ -147,6 +148,13 @@ teardown() {
 
 # Observe wrapper invocations separately from the managed post-checkout hook.
 # Both still use the real seeder and sealed payload; no hook is disabled.
+# Point T14_WORKTREE at fixture-project's convention path for BRANCH, under a
+# root whose name holds a space.
+t14_use_convention_path() {
+  export TRELLIS_WORKTREE_ROOT="$T14_SANDBOX/work trees"
+  T14_WORKTREE="$TRELLIS_WORKTREE_ROOT/fixture-project/$1"
+}
+
 wrapper_counted_copy() {
   COUNTED_WRAPPER_DIR="$T14_SANDBOX/counted wrapper"
   export WRAPPER_SEED_LOG="$T14_SANDBOX/wrapper.seeds"
@@ -179,10 +187,10 @@ SH
   t14_make_project
   t14_attach
   wrapper_counted_copy
-  T14_WORKTREE="$T14_SANDBOX/counted worktree"
+  t14_use_convention_path t14-counted-wrapper
 
-  run bash -c 'cd "$1" && bash "$2" add -b t14-counted-wrapper "$3"' _ \
-    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+  run bash -c 'cd "$1" && bash "$2" add t14-counted-wrapper' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh"
 
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
@@ -198,11 +206,11 @@ SH
   t14_make_project
   t14_attach
   wrapper_counted_copy
-  T14_WORKTREE="$T14_SANDBOX/drifted hook worktree"
+  t14_use_convention_path t14-hook-drift
   export WRAPPER_DRIFT_HOOKS_ROOT="$T14_PROJECT"
 
-  run bash -c 'cd "$1" && bash "$2" add -b t14-hook-drift "$3"' _ \
-    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+  run bash -c 'cd "$1" && bash "$2" add t14-hook-drift' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh"
 
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 2 ]
@@ -217,14 +225,14 @@ SH
   t14_make_project
   t14_attach
   wrapper_counted_copy
-  T14_WORKTREE="$T14_SANDBOX/refused worktree"
+  t14_use_convention_path t14-refused-wrapper
   payload_attach="$TRELLIS_HOME/releases/1.2.3/payload/scripts/attach-project.sh"
   chmod u+w "$payload_attach"
   printf '\n# corruption\n' >> "$payload_attach"
   chmod 500 "$payload_attach"
 
-  run bash -c 'cd "$1" && bash "$2" add -b t14-refused-wrapper "$3"' _ \
-    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+  run bash -c 'cd "$1" && bash "$2" add t14-refused-wrapper' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh"
 
   [ "$status" -eq 4 ] || { echo "$output"; return 1; }
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
@@ -238,11 +246,11 @@ SH
   t14_make_project
   t14_attach
   wrapper_counted_copy
-  T14_WORKTREE="$T14_SANDBOX/post-checkout refused worktree"
+  t14_use_convention_path t14-hook-refused-wrapper
   export WRAPPER_TAMPER_RELEASE="$TRELLIS_HOME/releases/1.2.3/payload/scripts/attach-project.sh"
 
-  run bash -c 'cd "$1" && bash "$2" add -b t14-hook-refused-wrapper "$3"' _ \
-    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh" "$T14_WORKTREE"
+  run bash -c 'cd "$1" && bash "$2" add t14-hook-refused-wrapper' _ \
+    "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh"
 
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
@@ -257,11 +265,11 @@ SH
   t14_make_project
   t14_attach
   [ "$?" -eq 0 ]
-  T14_WORKTREE="$T14_SANDBOX/linked worktree"
+  t14_use_convention_path t14-linked
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
-    'cd "$1" && "$2" add -b t14-linked "$3"' \
-    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+    'cd "$1" && "$2" add t14-linked' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT"
 
   [ "$status" -eq 0 ]
   [ -L "$T14_WORKTREE/.trellis/runtime" ]
@@ -269,6 +277,10 @@ SH
   owner="$(t14_owner_for_root "$T14_WORKTREE")"
   [ -f "$owner" ]
   jq -e '.status == "committed" and .project_id == "fixture-project" and .fleet == "personal" and .release == "1.2.3"' "$owner"
+  # Spec 067 creation record survives the new grammar.
+  [ "$(git -C "$T14_PROJECT" config --get branch.t14-linked.trellisBase)" = "$(git -C "$T14_PROJECT" rev-parse HEAD)" ]
+  [ -n "$(git -C "$T14_PROJECT" config --get branch.t14-linked.trellisParent)" ]
+  [ -n "$(git -C "$T14_PROJECT" config --get branch.t14-linked.trellisSource)" ]
   [ -z "$(git -C "$T14_PROJECT" status --porcelain)" ]
   [ -z "$(git -C "$T14_WORKTREE" status --porcelain)" ]
 }
@@ -279,11 +291,11 @@ SH
   t14_make_project
   t14_attach
   [ "$?" -eq 0 ]
-  T14_WORKTREE="$T14_SANDBOX/deferred worktree"
+  t14_use_convention_path t14-deferred
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
-    'cd "$1" && "$2" add --no-checkout -b t14-deferred "$3"' \
-    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+    'cd "$1" && "$2" add --no-checkout t14-deferred' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT"
 
   [ "$status" -eq 0 ]
   [ -d "$T14_WORKTREE" ]
@@ -299,11 +311,11 @@ SH
   t14_make_project
   t14_attach
   [ "$?" -eq 0 ]
-  T14_WORKTREE="$T14_SANDBOX/idempotent linked worktree"
+  t14_use_convention_path t14-idempotent
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c \
-    'cd "$1" && "$2" add -b t14-idempotent "$3"' \
-    worktree-wrapper "$T14_PROJECT" "$SCRIPT" "$T14_WORKTREE"
+    'cd "$1" && "$2" add t14-idempotent' \
+    worktree-wrapper "$T14_PROJECT" "$SCRIPT"
   [ "$status" -eq 0 ]
   owner="$(t14_owner_for_root "$T14_WORKTREE")"
   before="$(t14_sha256_text "$(cat "$owner")")"

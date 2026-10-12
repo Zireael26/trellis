@@ -260,6 +260,83 @@
             "minLength": 1
           },
           "uniqueItems": true
+        },
+        "docker_cache_keep_gb": {
+          "description": "BuildKit cache space retained by Docker apply pruning (docker buildx prune --reserved-space). Default 20.",
+          "type": "number",
+          "minimum": 0
+        },
+        "dehydrate_idle_days": {
+          "description": "Spec 069 D1: --dehydrate acts only on a clean worktree idle longer than this many days by last git activity. Default 7.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pi_worktree_ttl_days": {
+          "description": "Spec 069 A9: an orphan pi-agent-* worktree under ~/.pi-worktrees older than this many days is removable. Default 7.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pi_apply": {
+          "description": "Spec 069 C3: false keeps the pi scope report-only under --apply. Default true.",
+          "type": "boolean"
+        },
+        "logs_min_mb": {
+          "description": "Spec 069 D5: the logs scope lists files larger than this many MB. Default 50.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "logs_min_age_days": {
+          "description": "Spec 069 D5: the logs scope lists files older than this many days. Default 7.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "tmp_ttl_days": {
+          "description": "Spec 069 D5: the tmp scope removes bats-run-* and rv-* entries older than this many days. Default 2.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "cc_worktree_idle_days": {
+          "description": "Spec 069 A7: the cc-* worktree sweep acts only on worktrees idle longer than this many days. Default 1.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "apply_disabled_scopes": {
+          "description": "Spec 069: scopes that --apply skips (report and dry-run still scan them). The per-scope rollback switch. Default [].",
+          "type": "array",
+          "items": {
+            "enum": ["caches", "worktrees", "stores", "docker", "releases", "pi", "orphans", "logs", "tmp", "transcripts"]
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "worktrees": {
+      "description": "Optional. Spec 069 worktree layout. root is the central worktree root (default ~/projects/worktrees; TRELLIS_WORKTREE_ROOT overrides it). known_parents lists the directories outside the sanctioned roots that migrate and the janitor search for repositories and their worktrees (default []). push_owners lists the origin owners migrate may push preserve branches to (default []). Paths are absolute or ~-relative and carry no . or .. component.",
+      "type": "object",
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(/|~(/|$))(?!.*(^|/)\\.{1,2}(/|$))[^\\u0000-\\u001F\\u007F]*$"
+        },
+        "known_parents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(/|~(/|$))(?!.*(^|/)\\.{1,2}(/|$))[^\\u0000-\\u001F\\u007F]*$"
+          },
+          "uniqueItems": true
+        },
+        "push_owners": {
+          "description": "GitHub owners (or owner/repo) whose origins `trellis worktree migrate --apply` may push preserve branches to. A repository whose origin is not listed (a partner repository) keeps its preserve commit local. Default [] (push nothing).",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9._-]+)?$"
+          },
+          "uniqueItems": true
         }
       },
       "additionalProperties": true

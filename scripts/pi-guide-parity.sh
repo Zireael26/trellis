@@ -37,7 +37,7 @@
 #   - every file the guide copies from the repository is byte-identical to its
 #     tracked source (node_modules, build output and lockfiles excluded).
 #
-# --against-live (read-only) additionally compares five rendered files with
+# --against-live (read-only) additionally compares six rendered files with
 # <live-home>/.pi/agent after the same placeholder substitution on both sides:
 # the home directory becomes __HOME__. A residual /Users/ path fails. Byte identity is required.
 # Nothing under the live home is written, and auth.json is never read.
@@ -93,6 +93,7 @@ EXPECTED = [
     "~/.pi/agent/settings.json",
     "~/.pi/agent/extensions/opencode-go-2.ts",
     "~/.pi/agent/extensions/trellis-web-search.ts",
+    "~/.pi/agent/extensions/trellis-bash-guard.ts",
     "~/.pi/agent/extensions/omp-statusline/",
     "~/.pi/agent/subagents.json",
     "~/.pi/agent/pi-statusline.json",
@@ -102,6 +103,7 @@ EXPECTED = [
 COPIES = {
     "~/.pi/agent/extensions/opencode-go-2.ts": "core-rules/pi/extensions/opencode-go-2.ts",
     "~/.pi/agent/extensions/trellis-web-search.ts": "core-rules/pi/extensions/trellis-web-search.ts",
+    "~/.pi/agent/extensions/trellis-bash-guard.ts": "core-rules/pi/extensions/trellis-bash-guard.ts",
     "~/.pi/agent/extensions/omp-statusline/": "core-rules/pi/statusline/omp-statusline",
 }
 COPY_EXCLUDES = {"node_modules", "dist", "build", "package-lock.json", "npm-shrinkwrap.json"}
@@ -111,6 +113,7 @@ LIVE_FILES = [
     ".pi/agent/pi-statusline.json",
     ".pi/agent/extensions/opencode-go-2.ts",
     ".pi/agent/extensions/trellis-web-search.ts",
+    ".pi/agent/extensions/trellis-bash-guard.ts",
 ]
 # Only for naming untagged blocks in the skipped list; replay safety comes from
 # the allowlist interpreter, not from these patterns.

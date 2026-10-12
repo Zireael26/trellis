@@ -32,6 +32,9 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS" "$TRELLIS_HOME"
   chmod 700 "$TRELLIS_HOME"
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
+  # The worktrees scope also enumerates the central worktree root (spec 069
+  # A11); keep it in the sandbox, never the operator's ~/projects/worktrees.
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/worktrees"
   # Mock build liveness for cache orchestration; not a native process observation.
   export DJ_BUILD_ACTIVE_OVERRIDE=0
   build_canonical_min

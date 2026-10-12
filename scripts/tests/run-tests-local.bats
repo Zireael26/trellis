@@ -11,6 +11,8 @@ setup() {
     /tmp/tg-*|/private/tmp/tg-*) parent="$TMPDIR" ;;
   esac
   SANDBOX="$(mktemp -d "$parent/run-tests-local.XXXXXX")"
+  # Keep the existing containment fixtures deterministic on every host.
+  export TRELLIS_TEST_SHARDS=8
   export TRELLIS_GATE_STATE_DIR="$SANDBOX/state"
   export TRELLIS_LOCAL_GATE_RUNNER="$SANDBOX/fake-runner.sh"
   export TRELLIS_LOCAL_GATE_RECEIPT="$SANDBOX/aggregate.tsv"
@@ -50,6 +52,7 @@ SH
   cat > "$TRELLIS_LOCAL_GATE_RUNNER" <<'SH'
 #!/usr/bin/env bash
 set -uo pipefail
+count="${TRELLIS_TEST_SHARDS:-$(python3 -c 'import os; print(min(12, max(8, (os.cpu_count() or 10) - 2)))')}"
 python3 "$FAKE_SANDBOX/admission.py" || exit 78
 if [ "${3:-}" = --plan ]; then
   printf 'planner\n' >> "$FAKE_SANDBOX/planner"
@@ -59,12 +62,12 @@ if [ "${3:-}" = --plan ]; then
   fi
   printf 'shard\tstage\tweight\n'
   if [ "$FAKE_MODE" != empty-plan ]; then
-    for shard in 1 2 3 4 5 6 7 8; do printf '%s\tfake-stage-%s\t1\n' "$shard" "$shard"; done
+    for ((shard=1; shard<=count; shard++)); do printf '%s\tfake-stage-%s\t1\n' "$shard" "$shard"; done
     if [ "$FAKE_MODE" = multi-receipt ]; then
-      for shard in 1 2 3 4 5 6 7 8; do printf '%s\tfake-stage-%s\t1\n' "$shard" "$((shard + 8))"; done
+      for ((shard=1; shard<=count; shard++)); do printf '%s\tfake-stage-%s\t1\n' "$shard" "$((shard + count))"; done
     fi
   fi
-  for shard in 1 2 3 4 5 6 7 8; do printf 'total\t%s\t100\n' "$shard"; done
+  for ((shard=1; shard<=count; shard++)); do printf 'total\t%s\t100\n' "$shard"; done
   exit 0
 fi
 shard_arg="${2#--shard=}"
@@ -93,7 +96,7 @@ case "$FAKE_MODE" in
     ;;
   receipt|multi-receipt)
     if [ "$FAKE_MODE" = multi-receipt ]; then
-      ordinal=$((shard + 8))
+      ordinal=$((shard + count))
       printf '%s\tfake-stage-%s\t%s\t0\n' "$ordinal" "$ordinal" "$ordinal" >> "$TRELLIS_TEST_TSV"
     fi
     ;;
@@ -285,7 +288,7 @@ if mutation:
         'atomic': ('os.replace(temporary, path)\n        _fsync_directory(path.parent)', 'os.replace(temporary, path)'),
         'corrupt': ('return 70 if corrupt else 1 if records else 0', 'return 1 if records else 0'),
         'deadline': ('productive_at = deadline_at - reserve', 'productive_at = deadline_at'),
-        'shards': ('SHARD_COUNT = 8', 'SHARD_COUNT = 4'),
+        'shards': ('SHARD_COUNT = select_shard_count()', 'SHARD_COUNT = 4'),
         'aggregate': ('rows.sort()', 'rows.reverse()'),
         'empty-plan': ('if not expected:\n            raise ValueError("empty shard plan")', 'if False:\n            raise ValueError("empty shard plan")'),
         'aggregate-empty': ('if expected is not None and not expected:', 'if False:'),
@@ -969,6 +972,39 @@ start_wrapper() {
   wait_ready || { cat "$SANDBOX/background.out"; false; }
 }
 
+@test "shard CPU derivation override validation and historical record paths" {
+  run python3 "$BATS_TEST_DIRNAME/test_gate_shard_count.py"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "valid shard overrides control the plan launches and progress messages" {
+  for count in 1 12 16; do
+    : > "$FAKE_INVOCATIONS"
+    run env TRELLIS_TEST_SHARDS="$count" TRELLIS_LOCAL_GATE_DEADLINE=30 \
+      TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq "$count" ]
+    [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]]
+    [ "$(awk 'END {print NR-1}' "$TRELLIS_LOCAL_GATE_RECEIPT")" -eq "$count" ]
+  done
+}
+
+@test "default CPU-selected count controls the plan and launches" {
+  count="$(python3 -c 'import os; print(min(12, max(8, (os.cpu_count() or 10) - 2)))')"
+  run env -u TRELLIS_TEST_SHARDS TRELLIS_LOCAL_GATE_DEADLINE=30 \
+    TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq "$count" ]
+  [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]]
+}
+
+@test "non-eight failing shard retention names the selected count" {
+  run env TRELLIS_TEST_SHARDS=12 FAKE_MODE=fail TRELLIS_LOCAL_GATE_DEADLINE=30 \
+    TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"shard 3/12"*"status=7"*"retained failing shard 3/12 output:"* ]]
+}
+
 @test "launches exactly eight local shards with distinct receipts and deterministic output" {
   # Inversion: four shards, shared receipts, omitted planner, or reordered replay.
   run_wrapper
@@ -1431,6 +1467,16 @@ PY
   # Inversion: EIO (exec or exit in progress) raises ContainmentError and turns a
   # clean gate into a spurious 71, as gate 2 at 9f6621af recorded under load.
   run_driver eio-env
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "vanished process inspections cannot become preflight or teardown survivors" {
+  run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "live unreadable process inspections retain fail-closed containment" {
+  run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 

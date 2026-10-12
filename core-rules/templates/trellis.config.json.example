@@ -43,7 +43,23 @@
     "reap_pushed_worktrees": true,
     "ephemeral_tmp_ttl_days": 2,
     "worktree_count_ceiling": 25,
-    "worktree_total_gb_ceiling": 80
+    "worktree_total_gb_ceiling": 80,
+    "docker_cache_keep_gb": 20,
+    "dehydrate_idle_days": 7,
+    "pi_worktree_ttl_days": 7,
+    "pi_apply": true,
+    "logs_min_mb": 50,
+    "logs_min_age_days": 7,
+    "tmp_ttl_days": 2,
+    "cc_worktree_idle_days": 1,
+    "apply_disabled_scopes": []
+  },
+
+  "comment_worktrees": "Optional (spec 069). root is the central worktree root; every new worktree goes to <root>/<registry project id>/<branch slug>, and repositories with no registry row go to <root>/_unregistered/<repo name>. known_parents lists the directories outside the sanctioned roots where migrate and the janitor look for repositories and their worktrees. push_owners lists the GitHub owners (or owner/repo) whose origins migrate may push preserve branches to; any other origin keeps its preserve commit local. Paths are absolute or ~-relative. TRELLIS_WORKTREE_ROOT overrides root for one process.",
+  "worktrees": {
+    "root": "~/projects/worktrees",
+    "known_parents": [],
+    "push_owners": []
   },
 
   "comment_mandatory_pipeline": "Optional (spec 006; core-rules/hooks.md). When enabled, a branch whose net gated diff over spec_required_diff_lines cannot be pushed without ONE of: a spec triad added on this branch (+ interview artifact), a size-capped `/surgical` declaration (<= surgical_max_diff_lines), or a logged `/surgical --emergency` override. Enforced deterministically at pre-push (equal on Claude + Codex by construction) with a Stop-hook early-warning. Default OFF: absence or enabled:false is byte-identical to prior behavior; a present-but-malformed block fails CLOSED. Leave enabled:false until your team is ready to require specs for feature-sized changes.",

@@ -24,10 +24,11 @@
     <string>__USER_HOME__/.local/bin/trellis</string>
     <string>disk-janitor</string>
     <string>--apply</string>
-    <string>--scopes</string>
-    <string>worktrees</string>
     <string>--yes</string>
     <string>--safe-only</string>
+    <string>--dehydrate</string>
+    <string>--scopes</string>
+    <string>worktrees,caches,releases,pi,tmp,docker</string>
   </array>
 
   <key>RunAtLoad</key>

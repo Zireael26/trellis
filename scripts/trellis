@@ -218,6 +218,7 @@ case "$cmd" in
   task)         shift; exec "$SCRIPT_DIR/materialize-scheduled-task.sh" "$@" ;;
   usage)        shift; exec "$SCRIPT_DIR/usage-federation.py" "$@" ;;
   heavy)        shift; exec "$SCRIPT_DIR/heavy.sh" "$@" ;;
+  pi-spill-watchdog) shift; exec "$SCRIPT_DIR/pi-spill-watchdog.sh" "$@" ;;
   help|-h|--help) usage ;;
   *)            usage >&2; exit 2 ;;
 esac

@@ -94,16 +94,90 @@ hc_container_runtime_rows() {
 # Read-only; an explicit USER_HOME keeps the predicate hermetic in tests.
 hc_disk_janitor_agent_rows() {
   local user_home="$1" trellis_home="$2" rows state path detail mismatched=false
+  local tool_path_file line legacy_path dir entry
+  local -a legacy_dirs=()
   [ -n "$user_home" ] || return 0
-  if [ ! -d "$user_home/Library/LaunchAgents" ]; then
-    printf '%s\t%s\n' "$HC_INFO" 'disk-janitor agents: none installed'
-    return 0
-  fi
   # Compare against the canonical spellings the installer renders.
   user_home="$(CDPATH='' cd "$user_home" && pwd -P)" || return 0
   if [ -d "$trellis_home" ]; then
     trellis_home="$(CDPATH='' cd "$trellis_home" && pwd -P)" || return 0
   fi
+
+  # D8: Doctor warns when TRELLIS_HOME/state/disk-janitor/tool-path names a missing directory
+  # and warns when tool-path lacks gh.
+  tool_path_file="$trellis_home/state/disk-janitor/tool-path"
+  if [ -f "$tool_path_file" ]; then
+    local has_gh=false
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        ''|'#'*) continue ;;
+      esac
+      if [ ! -d "$line" ]; then
+        printf '%s\t%s\n' "$HC_WARN" "disk-janitor tool-path: entry names a missing directory: $line"
+      else
+        if [ -x "$line/gh" ] && [ ! -d "$line/gh" ]; then
+          has_gh=true
+        fi
+      fi
+    done < "$tool_path_file"
+    if [ "$has_gh" = false ]; then
+      printf '%s\t%s\n' "$HC_WARN" "disk-janitor tool-path: lacks gh"
+    fi
+  fi
+
+  # Watchdog entry check when plist is absent but entry point file exists
+  local watchdog_plist="$user_home/Library/LaunchAgents/org.trellis.pi-spill-watchdog.plist"
+  local watchdog_entry="$trellis_home/state/disk-janitor/pi-spill-watchdog"
+  if [ ! -f "$watchdog_plist" ] && [ -f "$watchdog_entry" ]; then
+    if ! dj_agent_verify_watchdog_entry "$trellis_home"; then
+      printf '%s\t%s\n' "$HC_WARN" "disk-janitor agent: $watchdog_entry is degraded (watchdog entry point bytes or mode mismatch; remedy: trellis launchd --with-pi-watchdog)"
+    fi
+  fi
+
+  if [ ! -d "$user_home/Library/LaunchAgents" ]; then
+    printf '%s\t%s\n' "$HC_INFO" 'disk-janitor agents: none installed'
+    return 0
+  fi
+
+  # D8: Doctor warns when a legacy plist's EnvironmentVariables.PATH names a missing directory.
+  for entry in "$user_home/Library/LaunchAgents"/org.trellis.disk-janitor* "$user_home/Library/LaunchAgents"/org.trellis.pi-spill-watchdog*; do
+    [ -f "$entry" ] || continue
+    case "$entry" in
+      *.disabled-*|*.disabled) continue ;;
+      *.plist) ;;
+      *) continue ;;
+    esac
+    if dj_agent_has "$entry" EnvironmentVariables.PATH; then
+      if dj_agent_value "$entry" EnvironmentVariables.PATH string; then
+        legacy_path="$DJ_AGENT_VALUE"
+        local old_ifs="$IFS"
+        IFS=':'
+        # shellcheck disable=SC2206
+        legacy_dirs=($legacy_path)
+        IFS="$old_ifs"
+        for dir in "${legacy_dirs[@]+"${legacy_dirs[@]}"}"; do
+          [ -n "$dir" ] || continue
+          if [ ! -d "$dir" ]; then
+            printf '%s\t%s\n' "$HC_WARN" "disk-janitor agent: $entry EnvironmentVariables.PATH names a missing directory: $dir"
+          fi
+        done
+      fi
+    fi
+    if dj_agent_value "$entry" ProgramArguments array; then
+      local count="$DJ_AGENT_VALUE"
+      case "$count" in ''|*[!0-9]*) count=0 ;; esac
+      local pi=0 p_str=" "
+      while [ "$pi" -lt "$count" ]; do
+        if dj_agent_value "$entry" "ProgramArguments.$pi" string; then
+          p_str="$p_str$DJ_AGENT_VALUE "
+        fi
+        pi=$((pi + 1))
+      done
+      if dj_agent_has_forbidden_docker_args "$p_str"; then
+        printf '%s\t%s\n' "$HC_ERROR" "disk-janitor agent: $entry contains forbidden docker volume/image/container removal arguments"
+      fi
+    fi
+  done
   rows="$(dj_agent_scan "$user_home/Library/LaunchAgents" "$user_home" "$trellis_home")"
   if [ -z "$rows" ]; then
     printf '%s\t%s\n' "$HC_INFO" 'disk-janitor agents: none installed'
@@ -113,6 +187,8 @@ hc_disk_janitor_agent_rows() {
     case "$state" in
       match)
         printf '%s\t%s\n' "$HC_OK" "disk-janitor agent: $path matches the installer's expected arguments and schedule" ;;
+      degraded)
+        printf '%s\t%s\n' "$HC_WARN" "disk-janitor agent: $path is degraded ($detail)" ;;
       mismatch)
         printf '%s\t%s\n' "$HC_ERROR" "disk-janitor agent: $path does not match the installer's expected arguments and schedule ($detail); remedy: $(dj_agent_remedy "$path")"
         mismatched=true

@@ -261,6 +261,18 @@ class FastInventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_excluded_skill_child_is_not_a_project_leaf(self):
+        for name in ('kept', 'user-only'):
+            (self.payload / 'core-rules/skills' / name).mkdir(parents=True)
+            (self.payload / 'core-rules/skills' / name / 'SKILL.md').write_text('# skill\n')
+        self.manifest['harnesses']['claude']['links'].append({'source_children': 'core-rules/skills', 'destination_dir': '.claude/skills', 'entry_type': 'directory', 'required_file': 'SKILL.md', 'exclude_dirs': ['user-only']})
+        self.save_manifest()
+        self.donor['artifacts'].append({'path': '.claude/skills/kept', 'kind': 'symlink', 'target': '../../.trellis/runtime/core-rules/skills/kept'})
+        self.check()
+        self.donor['artifacts'].append({'path': '.claude/skills/user-only', 'kind': 'symlink', 'target': '../../.trellis/runtime/core-rules/skills/user-only'})
+        with self.assertRaises(ValueError):
+            self.check()
+
     def test_owner_publish_never_replaces_a_project_file(self):
         path = self.root / 'owner.json'
         path.write_text('keep')

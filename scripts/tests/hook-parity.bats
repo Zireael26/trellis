@@ -58,6 +58,13 @@ _basenames() {
   local missing=""
   while IFS= read -r h; do
     [ -n "$h" ] || continue
+    # Claude-Code-native worktree events (spec 069 A7): Claude Code fires
+    # WorktreeCreate/WorktreeRemove; Codex has no such events (its rotation
+    # is app-managed, spec 069 A8), so these two hooks have no Codex twin
+    # by design, not by omission.
+    case "$h" in
+      trellis-worktree-create.sh|trellis-worktree-remove.sh) continue ;;
+    esac
     [ -f "$CODEX_HOOKS/$h" ] || missing="$missing $h"
   done < <(_basenames "$CLAUDE_HOOKS")
   [ -z "$missing" ] || {

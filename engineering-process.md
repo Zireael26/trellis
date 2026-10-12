@@ -323,6 +323,54 @@ worktree only after the clone opted in. A raw clone and an unregistered worktree
 remain inert; diagnosis may request a restart when a harness has already
 snapshotted discovery.
 
+**Where worktrees live (spec 069).** Every harness's worktrees sit under one
+central root, `worktrees.root` (default `~/projects/worktrees`), at
+`<root>/<project-id>/<branch-slug>`: the slug is the branch with `/` as `-`,
+and a detached HEAD is `detached-<shortsha>`. A repository with no registry
+row uses `<root>/_unregistered/<repo-basename>/`. The sanctioned roots are:
+
+- the central root itself;
+- `<root>/_codex` for the Codex app and `<root>/_pi` for pi-subagents (both
+  inside the central root);
+- `<root>/_unregistered/<repo-basename>/`;
+- each repository's main checkout.
+
+Nothing else is sanctioned: not a directory inside a repository
+(`.claude/worktrees`), not `$CODEX_HOME/worktrees` or `~/.cursor/worktrees`,
+and not the legacy pi roots `~/.pi-worktrees` and `~/.trellis/pi-worktrees`,
+which `migrate` drains.
+
+- `trellis worktree add <branch> [<start-point>]` (or `--detach
+  [<commit-ish>]`, plus `--no-checkout`) creates only at the convention path.
+  An existing branch is checked out; a new one starts at `<start-point>`
+  (default `HEAD`). A path argument is accepted only when it equals the
+  convention path. It refuses with exit 3, creating nothing, a target inside
+  any git tree and a slug already taken by another branch (`a/b` and `a-b`).
+  The old `add <path> [git args]` form and raw `-b`/`-B`/`--reason` are
+  refused with a hint.
+- `trellis worktree root-init` creates the root, writes its
+  `.metadata_never_index` marker and excludes it from Time Machine
+  (`tmutil addexclusion`). `doctor` reports all three and prints the manual
+  Spotlight Privacy step when `mdfind` still finds files under the root;
+  `doctor --fix` runs `root-init`.
+- `trellis worktree migrate` plans (by default) or applies the one-time move
+  of every linked worktree on the machine into the sanctioned roots; see §10.3.
+
+**Codex app.** In the Codex app set Settings > Worktrees > Worktree root to
+`~/projects/worktrees/_codex`. It is a GUI setting with no config-file key, so
+Trellis cannot set it; `doctor` warns while `$CODEX_HOME/worktrees` holds any
+worktree. Codex keeps its own rotation and snapshots there, so the janitor
+reports `_codex` and never deletes from it.
+
+**Cursor is not adopted.** Its worktree cleanup keeps 25 worktrees and can
+delete worktrees it did not create, so never point Cursor at the central
+root. `doctor` warns while `~/.cursor/worktrees` exists, and `migrate` holds
+the worktrees in it.
+
+**Claude Desktop is not managed.** Its worktree location is left alone until
+a probe shows it honours a path outside the repository. Claude Code's
+worktrees come from the user-level `WorktreeCreate`/`WorktreeRemove` hooks.
+
 ### 5.4 Local lifecycle commands
 
 The canonical commands are intentionally narrow:
@@ -608,11 +656,56 @@ rollback, and five-project rollout requirements.
 ### 10.3 Worktrees
 
 Attach the main worktree or an explicitly selected worktree, then use
-`trellis worktree add` for new worktrees in an opted-in clone. It reconciles the
+`trellis worktree add <branch>` for new worktrees in an opted-in clone. It
+creates them at the convention path (§5.3) and reconciles the
 manifest-defined local leaves early enough for harness discovery. Do not copy
 local attachment artifacts from one worktree to another and do not remove a
 common-dir exclude block by hand: clone/worktree ownership reference counting
 is what makes detach safe.
+
+**Migrating existing worktrees.** `trellis worktree migrate` enumerates the
+worktrees of every registry checkout and of every repository found by its
+`.git` under `worktrees.known_parents`, the central root and the legacy and
+foreign roots, and gives each one class with its reasons:
+
+| Class | When | Action |
+|---|---|---|
+| `prune` | registered but missing, unlocked, no owner record names it, and every missing entry in its repository is prune | `git worktree prune` |
+| `remove` | clean, only regenerable ignored content, PR merged (`gh` only), local head equal to the merged PR head or already on origin's default branch, idle at least a day, no open handle | detach if attached, `git worktree remove` (never `--force`, never `rm`) |
+| `preserve` | outside the sanctioned roots with uncommitted, untracked or non-regenerable ignored files | archive the ignored files, commit, push if allowed, then move |
+| `move` | any other healthy worktree outside the sanctioned roots | detach, dehydrate `.venv`, `git worktree move`, `git worktree repair`, attach at the group's release |
+| `keep` | already in a sanctioned root | none |
+| `hold` | locked, an open handle or cwd, a Cursor or Codex managed root, an ambiguous owner record or project, an owner record naming a missing path, a stale detach journal, a taken target, or any command error | none; the reason is printed |
+
+`migrate` alone is a dry run: a table of path, project, branch, action, size
+and reasons, then totals (`--json` prints one row per line). `migrate --apply`
+asks for confirmation (or takes `--yes`), re-checks each entry just before
+touching it, and journals every step to
+`$TRELLIS_HOME/state/worktree-migrate/<stamp>.jsonl` (0600). A failing entry
+is put back as it was and held; the run continues and exits 4. A killed run
+continues with `migrate --apply --resume <journal>`, and `migrate --revert
+<journal>` moves the journal's worktrees back. Removals cannot be reverted,
+which is why `remove` is limited to clean worktrees whose head a merge covers.
+
+**No work is lost.** A `preserve` entry's non-regenerable ignored files
+(`.env*`, databases, local config) are copied into the journal's `.archive/`
+directory (0700) and never committed. Tracked and untracked changes are
+committed with the repository's own hooks, on the worktree's branch, or on
+`preserve/<dir>` when it is detached or on the default branch, with the subject
+`chore: wip: preserve <path> before worktree migration`. The branch is pushed
+only when origin's owner (or `owner/repo`) is listed in
+`worktrees.push_owners`; a partner repository stays local. The journal
+records the pushed ref only once origin's ref equals the local sha. A refused
+commit restores the index and HEAD and holds the entry; a refused push is
+journaled and the worktree still moves with its commit.
+
+Merge checks need `gh`. The launcher gives `migrate` the control PATH, so it
+appends the caller's PATH after it; without `gh` every merge reads
+`unverified` and nothing is removed. Take the doctor baseline before
+`migrate --apply` and compare by worktree identity through the journal,
+because moved worktrees change path. Archive any stale `detach-*.json`
+attachment journal first: `migrate` holds every attached entry while one
+exists, since a detach resumes it.
 
 ### 10.4 Moves, repair, recovery, and opt-out
 

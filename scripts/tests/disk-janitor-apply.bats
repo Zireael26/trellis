@@ -48,6 +48,9 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS" "$TRELLIS_HOME"
   chmod 700 "$TRELLIS_HOME"
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
+  # The worktrees scope also enumerates the central worktree root (spec 069
+  # A11); keep it in the sandbox, never the operator's ~/projects/worktrees.
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/worktrees"
   # Mock build liveness for cache orchestration; not a native process observation.
   export DJ_BUILD_ACTIVE_OVERRIDE=0
   build_canonical_min
@@ -281,12 +284,20 @@ make_release_execution_snapshot() {
 # write_release_execution_owner <snapshot> <pid> <process-birth>
 # The owner record is deliberately closed: the janitor must reject any extra
 # key instead of treating a merely plausible pid as ownership evidence.
+# D3 (spec 069): reap-tmp ages by max(dir, owner) mtime, so aged fixtures
+# backdate the owner sibling too via `age_release_owner` below.
 write_release_execution_owner() {
   local snapshot="$1" pid="$2" process_birth="$3"
   jq -cn --argjson pid "$pid" --arg process_birth "$process_birth" \
     '{schema_version:1,pid:$pid,process_birth:$process_birth}' \
     > "$snapshot.owner.json"
   chmod 600 "$snapshot.owner.json"
+}
+
+# age_release_owner <snapshot>: backdate the owner sibling past reap-tmp's
+# 1h/24h thresholds so an aged dir stays aged after the owner is written.
+age_release_owner() {
+  touch -t "$STALE_TOUCH" "$1.owner.json"
 }
 
 release_process_birth() {
@@ -330,6 +341,7 @@ release_process_birth() {
   # retention. The impossible pid keeps this independent of the host process
   # table while still exercising the strict owner-record parser.
   write_release_execution_owner "$snapshot" 2147483647 "dead-process"
+  age_release_owner "$snapshot"
 
   # First capture the complete plan row; --apply may print only rows that will
   # be deleted, so the report is the non-vacuous planned-target control.
@@ -428,8 +440,10 @@ EOF
     FAIL_PS_PID="$LIVE_PID" bash "$DJ" --report --scopes releases
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
+  # D3 delegates to reap-tmp, which treats an indeterminate birth probe as
+  # alive (fail closed). The row stays a retained candidate either way.
   [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"could not be determined"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"could not be determined"* || "$output" == *"owner process is live"* || "$output" == *"owner=alive"* ]] || { echo "$output"; false; }
 
   run env PATH="$fake_bin:$PATH" REAL_PS="$real_ps" REAL_PYTHON3="$real_python3" \
     FAIL_PS_PID="$LIVE_PID" bash "$DJ" --apply --yes --scopes releases </dev/null
@@ -438,23 +452,30 @@ EOF
   [ -f "$owner" ] && [ ! -L "$owner" ]
 }
 
-@test "an aged execution snapshot with a malformed owner fails closed" {
-  local snapshot owner
+@test "an aged execution snapshot with a malformed owner is reapable via reap-tmp" {
+  # D3 (spec 069): the janitor delegates to `release reap-tmp`, which reaps
+  # unreadable/malformed staging after 24h. The legacy fail-closed candidate
+  # is retired; the inversion check is that a fresh malformed snapshot stays.
+  local snapshot owner fresh
   snapshot="$(make_release_execution_snapshot 1.2.3 MalformedA1 "$STALE_TOUCH")"
   owner="$snapshot.owner.json"
   jq -cn '{schema_version:1,pid:1,process_birth:"not-authoritative",extra:true}' > "$owner"
   chmod 600 "$owner"
+  age_release_owner "$snapshot"
+  fresh="$(make_release_execution_snapshot 1.2.3 MalformedFresh fresh)"
+  jq -cn '{schema_version:1,pid:1,process_birth:"x",extra:true}' > "$fresh.owner.json"
+  chmod 600 "$fresh.owner.json"
 
   run_dj --report --scopes releases
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"$snapshot"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"[candidate]"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"malformed"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[delete] $snapshot "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $fresh "* ]] || { echo "fresh malformed deleted: $output"; false; }
 
   run_dj --apply --yes --scopes releases </dev/null
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -d "$snapshot" ] && [ ! -L "$snapshot" ]
-  [ -f "$owner" ] && [ ! -L "$owner" ]
+  [ ! -e "$snapshot" ] && [ ! -e "$owner" ] || { echo "aged malformed survived"; false; }
+  [ -d "$fresh" ] || { echo "fresh malformed removed"; false; }
 }
 
 

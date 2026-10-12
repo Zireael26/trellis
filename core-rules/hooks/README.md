@@ -33,11 +33,13 @@ surfaces.
 | `core-rules/hooks/hookspath-guard.sh` | PostToolUse (Bash, advisory: core.hooksPath drift) | new |
 | `core-rules/codex/hooks/hookspath-guard.sh` | PostToolUse (Bash, advisory: core.hooksPath drift) | new |
 
-**User-global SessionStart**
+**User-global** (linked into `~/.claude/hooks/` by the user surface, wired in `templates/claude-user-settings.json`)
 
 | Script | Event | Origin |
 |---|---|---|
 | `herdr-foreman-session.sh` | SessionStart (Herdr user-global) | new |
+| `trellis-worktree-create.sh` | WorktreeCreate (central-root `cc-<name>` worktree, detached attach) | new |
+| `trellis-worktree-remove.sh` | WorktreeRemove (refuses unsaved work; detach, `git worktree remove`, merged-branch delete) | new |
 
 The local-template-only twins' inventory basenames are
 `wiki-skill-suggest.sh` and `hookspath-guard.sh`; their exact Claude and Codex

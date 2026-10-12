@@ -1454,3 +1454,68 @@ teardown() {
   jq -e '.release == "2.0.1"' "$(user_owner_path)" >/dev/null
 }
 
+
+# spec 069 A7: the WorktreeCreate/WorktreeRemove hooks ship at user level, so a
+# release reaches every Claude Code session without a project detach+attach.
+@test "attach --user delivers the worktree hooks and configure --release relinks them" {
+  local configure_source settings name link
+  configure_source="$(make_configure_source)"
+  settings="$HOME/.claude/settings.json"
+  make_full_user_release 2.0.0
+
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for name in create remove; do
+    link="$HOME/.claude/hooks/trellis-worktree-$name.sh"
+    [ -L "$link" ]
+    [ "$(readlink "$link")" = "$TRELLIS_HOME/releases/2.0.0/payload/core-rules/hooks/trellis-worktree-$name.sh" ]
+    [ -x "$link" ]
+  done
+  jq -e '
+    .hooks.WorktreeCreate == [{hooks: [{type: "command",
+      command: "bash \"$HOME/.claude/hooks/trellis-worktree-create.sh\"", timeout: 60}]}] and
+    .hooks.WorktreeRemove == [{hooks: [{type: "command",
+      command: "bash \"$HOME/.claude/hooks/trellis-worktree-remove.sh\"", timeout: 120}]}] and
+    .hooks.PreToolUse[0].hooks[0].command == "operator-owned pre-tool hook" and
+    .operator.keep == true
+  ' "$settings" >/dev/null
+  # The linked hook finds its libraries in the payload: outside a repository it
+  # reaches its own input check (exit 2), not a missing-library failure.
+  run bash "$HOME/.claude/hooks/trellis-worktree-create.sh" \
+    <<< "{\"name\":\"probe\",\"cwd\":\"$SANDBOX\"}"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  assert_output_has "$output" "not inside a git worktree"
+
+  make_full_user_release 2.0.1
+  run "$USER_CLI" configure --source "$configure_source" \
+    --home "$TRELLIS_HOME" --release 2.0.1 --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for name in create remove; do
+    [ "$(readlink "$HOME/.claude/hooks/trellis-worktree-$name.sh")" = \
+      "$TRELLIS_HOME/releases/2.0.1/payload/core-rules/hooks/trellis-worktree-$name.sh" ]
+  done
+  jq -e '.hooks.WorktreeCreate[0].hooks[0].timeout == 60' "$settings" >/dev/null
+  jq -e '.release == "2.0.1" and .status == "committed"' "$(user_owner_path)" >/dev/null
+}
+
+@test "an operator-owned hooks.WorktreeCreate makes attach --user refuse and leaves settings untouched" {
+  local settings changed before_hash
+  settings="$HOME/.claude/settings.json"
+  changed="$settings.changed"
+  jq '.hooks.WorktreeCreate = [{hooks: [{type: "command", command: "operator worktree hook"}]}]' \
+    "$settings" > "$changed"
+  chmod 640 "$changed"
+  mv "$changed" "$settings"
+  before_hash="$(sha256_file "$settings")"
+  make_full_user_release 2.0.0
+
+  run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 2.0.0
+
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  assert_output_has "$output" "$settings"
+  [ "$(sha256_file "$settings")" = "$before_hash" ]
+  [ "$(file_mode "$settings")" = 640 ]
+  [ ! -e "$HOME/.claude/hooks/trellis-worktree-create.sh" ]
+  [ ! -L "$HOME/.claude/hooks/trellis-worktree-create.sh" ]
+  [ ! -e "$(user_owner_path)" ]
+}

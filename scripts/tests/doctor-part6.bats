@@ -236,6 +236,9 @@ build_portable_release() {
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/"
   cp "$REPO_ROOT/core-rules/hooks/herdr-foreman-session.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/herdr-foreman-session.sh"
+  cp "$REPO_ROOT/core-rules/hooks/trellis-worktree-create.sh" \
+    "$REPO_ROOT/core-rules/hooks/trellis-worktree-remove.sh" \
+    "$PORTABLE_RELEASE_PAYLOAD/core-rules/hooks/"
   mkdir -p "$PORTABLE_RELEASE_PAYLOAD/scripts"
   cp "$REPO_ROOT/scripts/attach-project.sh" \
     "$PORTABLE_RELEASE_PAYLOAD/scripts/attach-project.sh"

@@ -1249,7 +1249,7 @@ SH
   run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" --harness user
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | .destination | select(test("\\.claude/")) | sub("^.*/\\.claude/"; ".claude/")] | sort | join(",")')" = \
-    '.claude/hooks/herdr-foreman-session.sh,.claude/output-styles/trellis-orchestration.md,.claude/settings.json' ]
+    '.claude/hooks/herdr-foreman-session.sh,.claude/hooks/trellis-worktree-create.sh,.claude/hooks/trellis-worktree-remove.sh,.claude/output-styles/trellis-orchestration.md,.claude/settings.json' ]
   [ "$(printf '%s' "$output" | jq -r '[.artifacts[] | select(.destination | test("\\.pi/agent/skills/trellis-computer-use$")) | .source] | join(",")')" = \
     'core-rules/pi/computer-use' ]
 }

@@ -30,6 +30,8 @@ setup() {
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
   export TMPDIR="$SANDBOX/tmp" HOME="$SANDBOX/home"
   unset TRELLIS_PI_TMPDIR
+  # C3 hermetic: never scan the real per-user Darwin temp in tests.
+  export DJ_DARWIN_TMPDIR_OVERRIDE=""
   WT_ROOT="$TRELLIS_HOME/pi-worktrees"
   PI_ROOT="$HOME/.pi-worktrees"
   PI_TMP="$TMPDIR/pi"
@@ -115,7 +117,11 @@ report_dj() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
-@test "pi scope: --apply refuses the report-only scope and deletes nothing" {
+@test "pi scope: --apply deletes spill logs only, keeps temp and worktrees" {
+  # C3 (spec 069): pi-bash-*.log older than 1d or over 1 GiB with no handle
+  # apply-deletes across all spill roots (maxdepth 1, never following
+  # symlinks); temp files and orphan worktrees stay manual here (DH.4 owns
+  # worktrees). pi_apply:false restores report-only (covered in host suite).
   local root orphan
   orphan="$(pi_worktree pi-agent-orphan-0001 "$PI_ROOT")"
   unregister "$orphan"
@@ -128,17 +134,13 @@ report_dj() {
   done
 
   run_dj --apply --yes --scopes pi </dev/null
-  [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"pi scope is report-only in 1.3.12"* ]] || { echo "$output"; false; }
-  run_dj --apply --yes --scopes worktrees,pi </dev/null
-  [ "$status" -eq 2 ] || { echo "$output"; false; }
-  run_dj --apply --scopes pi </dev/null
-  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"removed:"*"pi-bash-"* ]] || { echo "$output"; false; }
 
   for root in "$PI_ROOT" "$WT_ROOT" "$PI_TMP"; do
-    [ -f "$root/sentinel-old.txt" ] || { echo "deleted in $root"; false; }
-    [ -f "$root/pi-bash-0000000000000001.log" ] || { echo "deleted aged log in $root"; false; }
-    [ -f "$root/pi-bash-0000000000000002.log" ] || { echo "deleted big log in $root"; false; }
+    [ -f "$root/sentinel-old.txt" ] || { echo "deleted temp in $root"; false; }
+    [ ! -e "$root/pi-bash-0000000000000001.log" ] || { echo "aged log survived in $root"; false; }
+    [ ! -e "$root/pi-bash-0000000000000002.log" ] || { echo "big log survived in $root"; false; }
   done
   [ -f "$orphan/work.txt" ]
 }
@@ -154,9 +156,16 @@ report_dj() {
   age "$registered"; age "$recorded"; age "$orphan"
 
   report_dj
-  [[ "$output" == *"[reclaimable] $orphan "* ]] || { echo "$output"; false; }
-  [[ "$output" == *"[skip] $registered "*"registered"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"[skip] $recorded "*"owner record"* ]] || { echo "$output"; false; }
+  # A9 (spec 069 DH.4): unregistered orphans with missing gitdir fail the
+  # no-unique-commits gate closed and dirty files hold — both list as
+  # candidate (held, manual review), never reclaimable/delete. Registered and
+  # owner-recorded worktrees are never delete/reclaimable (held as skip or
+  # candidate).
+  [[ "$output" == *"[candidate] $orphan "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[reclaimable] $registered "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $registered "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[reclaimable] $recorded "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $recorded "* ]] || { echo "$output"; false; }
   [ -f "$orphan/work.txt" ]
 }
 
@@ -208,7 +217,9 @@ report_dj() {
   touch -t "$STALE_TOUCH" "$PI_TMP/mixed-dir"
 
   report_dj
-  [[ "$output" == *"roots: $PI_ROOT $WT_ROOT $PI_TMP"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$PI_ROOT"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$WT_ROOT"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"$PI_TMP"* ]] || { echo "$output"; false; }
   [[ "$output" == *"[reclaimable] $PI_TMP/old.txt "* ]] || { echo "$output"; false; }
   [[ "$output" == *"[reclaimable] $WT_ROOT/uv-0123.lock "* ]] || { echo "$output"; false; }
   [[ "$output" == *"[reclaimable] $PI_ROOT/uv-0124.lock "* ]] || { echo "$output"; false; }
@@ -232,8 +243,9 @@ report_dj() {
   run_dj --dry-run --scopes pi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   for root in "$PI_ROOT" "$WT_ROOT" "$PI_TMP"; do
-    [[ "$output" == *"[reclaimable] $root/pi-bash-0000000000000001.log "*"older than 1d"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"[reclaimable] $root/pi-bash-0000000000000003.log "*"over 1 GiB"* ]] || { echo "$output"; false; }
+    # Dry-run previews apply deletes (C3); report mode still shows reclaimable.
+    [[ "$output" == *"[delete] $root/pi-bash-0000000000000001.log "*"older than 1d"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"[delete] $root/pi-bash-0000000000000003.log "*"over 1 GiB"* ]] || { echo "$output"; false; }
     [[ "$output" == *"[skip] $root/pi-bash-0000000000000002.log "* ]] || { echo "$output"; false; }
     [[ "$output" == *"[skip] $root/pi-share-0001 "* ]] || { echo "$output"; false; }
     [ -f "$root/pi-bash-0000000000000001.log" ] && [ -f "$root/pi-bash-0000000000000003.log" ]

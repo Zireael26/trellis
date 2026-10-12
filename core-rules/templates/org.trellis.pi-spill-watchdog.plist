@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Trellis pi spill log watchdog LaunchAgent template.
+  scripts/install-disk-janitor-launchd.sh renders canonical paths at install
+  time. The agent starts with an empty environment, sets only canonical home,
+  TRELLIS_HOME, and a fixed system PATH, then invokes fixed .local/bin/trellis.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.trellis.pi-spill-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>-i</string>
+    <string>HOME=__USER_HOME__</string>
+    <string>TRELLIS_HOME=__TRELLIS_HOME__</string>
+    <string>PATH=/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/bin/bash</string>
+    <string>--noprofile</string>
+    <string>--norc</string>
+    <string>__TRELLIS_HOME__/state/disk-janitor/pi-spill-watchdog</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>__USER_HOME__/Library/Logs/org.trellis.pi-spill-watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>__USER_HOME__/Library/Logs/org.trellis.pi-spill-watchdog.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>
