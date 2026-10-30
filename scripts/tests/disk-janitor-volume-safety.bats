@@ -38,6 +38,8 @@ setup() {
   chmod 700 "$TRELLIS_HOME"
   export TRELLIS_CONFIG="$CFG" TRELLIS_HOME
   export DJ_BUILD_ACTIVE_OVERRIDE=0
+  # Without this the orphans scan walks the host's real worktree root.
+  export TRELLIS_WORKTREE_ROOT="$SANDBOX/worktrees"
   write_config
   write_stubs
 }

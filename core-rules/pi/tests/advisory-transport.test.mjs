@@ -2,7 +2,7 @@
 // Run with Node >=24: node --test core-rules/pi/tests/advisory-transport.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -12,11 +12,11 @@ const dispatcher = new URL('../hooks/dispatch.sh', import.meta.url);
 function fixture(t) {
   const cwd = mkdtempSync(resolve(tmpdir(), 'trellis-advisory-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.agents/rules', '.pi/hooks']) mkdirSync(resolve(cwd, dir), { recursive: true });
+  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.agents/rules', '.trellis/runtime/core-rules/codex/hooks']) mkdirSync(resolve(cwd, dir), { recursive: true });
   copyFileSync(dispatcher, resolve(cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh'));
   writeFileSync(resolve(cwd, '.trellis/runtime/trellis.config.json'), '{}');
   writeFileSync(resolve(cwd, '.agents/rules/trellis.md'), 'Scratch policy');
-  const hook = (name, body) => writeFileSync(resolve(cwd, '.pi/hooks', name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+  const hook = (name, body) => writeFileSync(resolve(cwd, '.trellis/runtime/core-rules/codex/hooks', name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
   const event = (phase, native_event, family = 'file_read') => ({ schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase, native_event, action: { family, tool_name: family === 'shell' ? 'bash' : 'read', input: { path: 'file' }, targets: [] }, result: phase === 'post_action' ? { status: 'succeeded', is_error: false, output: [] } : null });
   const run = (event, env = {}) => {
     const result = spawnSync('bash', [dispatcher.pathname, '--base64', Buffer.from(JSON.stringify(event)).toString('base64')], { cwd, env: { ...process.env, ...env }, encoding: 'utf8' });
@@ -30,7 +30,8 @@ function fixture(t) {
     getAllTools: () => [],
     sendMessage: (...args) => messages.push(args),
     exec: async (_script, args) => {
-      const result = run(JSON.parse(Buffer.from(args[1], 'base64').toString()));
+      const event = args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString());
+      const result = run(event);
       return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
     },
   };
@@ -187,7 +188,10 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
   await f.handlers.get('tool_call')(call, f.ctx);
   assert.equal(f.notifications.length, 0);
   const result = await f.handlers.get('tool_result')({ ...call, content: [], isError: false }, f.ctx);
-  assert.match(result.content[0].text, /unsupported.*no pre-action handler/);
+  assert.equal(result, undefined); // Capability-only notices must not alter read content.
+  assert.equal(f.messages[0][0].customType, 'trellis-context');
+  assert.match(f.messages[0][0].content, /unsupported.*no pre-action handler/);
+  assert.deepEqual(f.messages[0][1], { triggerTurn: false });
   for (const response of [
     { capability_status: 'unknown', decision: 'warn', reason: 'unknown sentinel' },
     { capability_status: 'unsupported', decision: 'deny', reason: 'deny sentinel' },
@@ -198,6 +202,116 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
     await f.handlers.get('tool_call')({ toolCallId: 'shell-errors', toolName: 'bash', input: { command: 'pwd' } }, f.ctx);
   }
   assert.equal(f.notifications.length, 3);
+});
+
+test('capability-only successful reads remain byte-exact, dedupe across turns, and reset per session', async t => {
+  const f = fixture(t);
+  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'enforced', decision: 'allow' }), stderr: '', code: 0 });
+  const content = [
+    { type: 'text', text: 'first\r\n\u0000é e\u0301\n' },
+    { type: 'image', data: 'AAECA/8=', mimeType: 'image/png' },
+    { type: 'text', text: 'last\t  \n' },
+  ];
+  const bytes = Buffer.from(JSON.stringify(content));
+  async function read(id, ctx = f.ctx) {
+    const call = { toolCallId: id, toolName: 'read', input: { path: 'file' } };
+    const before = f.messages.length;
+    assert.equal(await f.handlers.get('tool_call')(call, ctx), undefined);
+    assert.equal(f.messages.length, before, 'wait for a successful result before separate delivery');
+    const event = { ...call, content, details: { retained: true }, isError: false };
+    const patch = await f.handlers.get('tool_result')(event, ctx);
+    assert.equal(patch, undefined, 'pure capability notices must not patch a successful read');
+    assert.strictEqual(event.content, content);
+    assert.deepEqual(Buffer.from(JSON.stringify(patch?.content ?? event.content)), bytes);
+  }
+  await read('first');
+  assert.equal(f.messages.length, 1);
+  assert.equal(f.messages[0][0].customType, 'trellis-context');
+  assert.equal(f.messages[0][0].display, false);
+  assert.match(f.messages[0][0].content, /pre-action advisory.*capability: unsupported/);
+  assert.match(f.messages[0][0].content, /no pre-action handler/);
+  assert.deepEqual(f.messages[0][1], { triggerTurn: false }); // Not steering, nextTurn, or followUp.
+  await read('repeat');
+  f.handlers.get('before_agent_start')({ systemPrompt: 'parent' }, f.ctx);
+  await read('next-turn');
+  assert.equal(f.messages.length, 1);
+  const nextCtx = { ...f.ctx, sessionManager: { getSessionId: () => 'new', getSessionFile: () => undefined } };
+  await f.handlers.get('session_start')({ reason: 'new' }, nextCtx);
+  await read('new-session', nextCtx);
+  assert.equal(f.messages.length, 2);
+  assert.deepEqual(f.messages[1], f.messages[0]);
+  assert.equal(f.notifications.length, 0);
+});
+
+for (const capability_status of ['unsupported', 'advisory']) {
+  test(`capability-only ${capability_status} post-read notices go out-of-band once`, async t => {
+    const f = fixture(t);
+    f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status, decision: 'allow', reason: 'post capability sentinel' }), stderr: '', code: 0 });
+    const content = [{ type: 'text', text: 'exact\r\n' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
+    for (const toolCallId of ['first', 'repeat']) {
+      // No pre entry also exercises post classification independently.
+      const patch = await f.handlers.get('tool_result')({ toolCallId, toolName: 'read', input: {}, content, isError: false }, f.ctx);
+      assert.equal(patch, undefined);
+    }
+    assert.equal(f.messages.length, 1);
+    assert.equal(f.messages[0][0].customType, 'trellis-context');
+    assert.match(f.messages[0][0].content, /post capability sentinel/);
+    assert.equal(f.messages[0][0].display, false);
+    assert.deepEqual(f.messages[0][1], { triggerTurn: false });
+  });
+}
+
+test('pure pre/post read capability notices share one context-only message without result pollution', async t => {
+  const f = fixture(t);
+  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'allow', reason: 'post sentinel' }), stderr: '', code: 0 });
+  const content = [{ type: 'text', text: 'exact\r\n' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
+  const bytes = Buffer.from(JSON.stringify(content));
+  for (const toolCallId of ['first', 'repeat']) {
+    const call = { toolCallId, toolName: 'read', input: { path: 'file' } };
+    await f.handlers.get('tool_call')(call, f.ctx);
+    assert.equal(await f.handlers.get('tool_result')({ ...call, content, isError: false }, f.ctx), undefined);
+    assert.deepEqual(Buffer.from(JSON.stringify(content)), bytes);
+  }
+  assert.equal(f.messages.length, 1);
+  assert.equal(f.messages[0][0].customType, 'trellis-context');
+  assert.match(f.messages[0][0].content, /no pre-action handler/);
+  assert.match(f.messages[0][0].content, /post sentinel/);
+  assert.deepEqual(f.messages[0][1], { triggerTurn: false });
+});
+
+for (const response of [
+  { capability_status: 'advisory', decision: 'allow', context: 'real context sentinel', reason: 'real context reason' },
+  { capability_status: 'unsupported', decision: 'warn', reason: 'warn sentinel' },
+  { capability_status: 'unsupported', decision: 'deny', reason: 'deny sentinel' },
+]) {
+  test(`read ${response.decision} with ${response.context ? 'real context' : 'non-allow reason'} stays inline`, async t => {
+    const f = fixture(t);
+    f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: '', code: 0 });
+    const call = { toolCallId: 'read-control', toolName: 'read', input: { path: 'file' } };
+    await f.handlers.get('tool_call')(call, f.ctx);
+    const original = [{ type: 'text', text: 'original' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
+    const patch = await f.handlers.get('tool_result')({ ...call, content: original, isError: false }, f.ctx);
+    assert.deepEqual(patch.content.slice(0, original.length), original);
+    assert.match(patch.content.at(-1).text, new RegExp(response.reason));
+    if (response.context) assert.match(patch.content.at(-1).text, new RegExp(response.context));
+    assert.doesNotMatch(patch.content.at(-1).text, /no pre-action handler/);
+    assert.equal(f.messages.length, 1); // Only the pure pre-read capability moves out-of-band.
+    assert.doesNotMatch(f.messages[0][0].content, /sentinel|real context reason/);
+    assert.equal(f.notifications.length, response.decision === 'allow' ? 0 : 1);
+  });
+}
+
+test('failed read capability notices retain existing inline behavior', async t => {
+  const f = fixture(t);
+  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'unsupported', decision: 'allow', reason: 'failed post sentinel' }), stderr: '', code: 0 });
+  const call = { toolCallId: 'failed', toolName: 'read', input: { path: 'file' } };
+  await f.handlers.get('tool_call')(call, f.ctx);
+  const original = [{ type: 'text', text: 'read failure' }];
+  const patch = await f.handlers.get('tool_result')({ ...call, content: original, isError: true }, f.ctx);
+  assert.deepEqual(patch.content.slice(0, original.length), original);
+  assert.match(patch.content.at(-1).text, /no pre-action handler/);
+  assert.match(patch.content.at(-1).text, /failed post sentinel/);
+  assert.equal(f.messages.length, 0);
 });
 
 for (const reason of ['startup', 'resume']) {

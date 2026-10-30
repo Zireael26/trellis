@@ -17,6 +17,7 @@ usage() {
   cat <<'EOF'
 trellis — Trellis management dispatcher
 Usage: trellis <command> [args...]
+       trellis --version  (configured release; skips payload verification)
 
 Local setup and release commands:
   configure     Configure local machine state and install the stable launcher
@@ -216,7 +217,18 @@ case "$cmd" in
                 ;;
   worktree)     shift; exec "$SCRIPT_DIR/worktree.sh" "$@" ;;
   task)         shift; exec "$SCRIPT_DIR/materialize-scheduled-task.sh" "$@" ;;
-  usage)        shift; exec "$SCRIPT_DIR/usage-federation.py" "$@" ;;
+  usage)
+                shift
+                # The usage library needs Python >=3.12; the unversioned
+                # macOS python3 may be 3.9 and lacks typing.TypeAlias.
+                for usage_python in python3.14 python3.13 python3.12 python3; do
+                  command -v "$usage_python" >/dev/null 2>&1 || continue
+                  "$usage_python" -c 'import sys; sys.exit(sys.version_info < (3, 12))' >/dev/null 2>&1 || continue
+                  exec "$usage_python" -S "$SCRIPT_DIR/usage-federation.py" "$@"
+                done
+                printf '%s\n' 'trellis usage: Python 3.12 or newer is required' >&2
+                exit 2
+                ;;
   heavy)        shift; exec "$SCRIPT_DIR/heavy.sh" "$@" ;;
   pi-spill-watchdog) shift; exec "$SCRIPT_DIR/pi-spill-watchdog.sh" "$@" ;;
   help|-h|--help) usage ;;

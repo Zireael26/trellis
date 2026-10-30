@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 load helpers/payload-fixture
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   SRC="$BATS_TEST_TMPDIR/src"
   payload_fixture_source "$SRC" 7.7.7
 }
@@ -132,7 +133,8 @@ scripts/trellis" ] || { echo "$output"; false; }
 # ---------------------------------------------------------------------------
 
 # Whole files exempt from the reference scan. The first six are the spec's
-# source-checkout tools (R3.4). The last two were found by this scan on the real
+# source-checkout tools (R3.4). The pre-seal checker also stages source tests,
+# not installed payload tests. The last two were found by this scan on the real
 # tree and are exempt for the same reason (R3.4, accepted 2026-09-28):
 #   scripts/harness-conformance.py  its header says "source-only adapter fixture
 #                                   corpus"; run-tests.sh drives it, no command does.
@@ -141,6 +143,7 @@ SCAN_EXEMPT_FILES='scripts/run-tests.sh
 scripts/lib/test-suites.sh
 scripts/lib/mirror-lint.sh
 scripts/sync-to-template.sh
+scripts/check-mirror-preseal.sh
 scripts/pi-web-search-tests.sh
 core-rules/skills/process-gate/scripts/check-tests.sh
 scripts/harness-conformance.py

@@ -267,10 +267,9 @@ release_fingerprint() {
 }
 
 @test "an inherited memo from another process is ignored" {
-  # The memo is exported so a `$(...)` capture in the same shell keeps it, which
-  # means an exec'd child inherits it too. Each key carries the owning shell's
-  # $$, so the child must re-verify -- otherwise a stale success verdict would
-  # survive across a process boundary and mask a tamper.
+  # The memo is never exported and each key carries the owning shell's $$, so
+  # the child must re-verify -- otherwise a stale success verdict would survive
+  # across a process boundary and mask a tamper.
   rel="$(install_small_release 1.0.0)"
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
     . "$1"
@@ -279,11 +278,29 @@ release_fingerprint() {
     chmod -R u+w "$2"
     printf "tampered\n" > "$2/payload/core-rules/CLAUDE.md"
     chmod -R a-w "$2"
-    # A child process inherits the exported memo but must not honour it.
+    # Even a memo exported by the caller must not be honoured by a child.
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
     bash -c ". \"$1\"; release_store_verify_path \"$2\" \"$3\""
     printf "child=%s\n" "$?"
   ' release-store-verify-inherit-memo "$RELEASE_STORE_LIB" "$rel" "1.0.0"
   [[ "$output" == *"child=4"* ]] || { echo "$output"; false; }
+}
+
+@test "a memo handed over by same-PID exec is discarded when the library loads" {
+  # exec keeps $$, so only the load-time reset stops this stale verdict.
+  rel="$(install_small_release 1.0.0)"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    . "$1"
+    release_store_verify_path "$2" "$3" || exit 90
+    [ -n "$_TRELLIS_RELEASE_STORE_VERIFY_MEMO" ] || exit 91
+    chmod -R u+w "$2"
+    printf "tampered\n" > "$2/payload/core-rules/CLAUDE.md"
+    chmod -R a-w "$2"
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+    exec bash -c ". \"$1\"; release_store_verify_path \"$2\" \"$3\"; printf \"exec=%s\n\" \"\$?\""
+  ' release-store-verify-exec-memo "$RELEASE_STORE_LIB" "$rel" "1.0.0"
+  [[ "$output" == *"exec=4"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"changed release content: core-rules/CLAUDE.md"* ]] || { echo "$output"; false; }
 }
 
 @test "fresh process re-verifies and refuses tamper" {
@@ -391,20 +408,32 @@ release_fingerprint() {
   chmod u+w "$TRELLIS_HOME/releases"
 }
 
-# Calibrated on a /tmp copy of rc.40 (2834 entries): old per-entry spawn path
-# took 57.8s; batched verify took 5.8s. 20s is the CI-margin bound (task e.g.
-# was 60s). Synthetic files, never ~/.trellis.
-@test "synthetic 2800-entry fixture verifies within the calibrated bound" {
+# The per-entry spawn path took 57.8s on a /tmp copy of rc.40 (2834 entries);
+# the batched verify took 5.8s. A wall-clock bound around that went red under
+# shared gate load, so assert the batching itself: one --stdin-paths hash for
+# the regular files, and a hash-object spawn count that does not grow with the
+# 2800 entries. Synthetic files, never ~/.trellis.
+@test "synthetic 2800-entry fixture verifies with one batched hash" {
   rel="$(install_perf_release 2800)"
-  local started ended elapsed
-  started="$(python3 -c 'import time; print("%.3f" % time.time())')"
+  mkdir "$SANDBOX/bin"
+  TEST_REAL_GIT="$(command -v git)"
+  TEST_GIT_LOG="$SANDBOX/git-calls.log"
+  export TEST_REAL_GIT TEST_GIT_LOG
+  : > "$TEST_GIT_LOG"
+  cat > "$SANDBOX/bin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TEST_GIT_LOG"
+exec "$TEST_REAL_GIT" "$@"
+SH
+  chmod 755 "$SANDBOX/bin/git"
+  export PATH="$SANDBOX/bin:$PATH"
   run verify_release "$rel" "9.9.9"
-  ended="$(python3 -c 'import time; print("%.3f" % time.time())')"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  elapsed="$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$started" "$ended")"
-  echo "perf_verify_elapsed=${elapsed}s bound=20s"
-  python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 20 else 1)' "$elapsed" || {
-    echo "verify took ${elapsed}s, bound is 20s"
+  batched="$(grep -c -- 'hash-object .*--stdin-paths' "$TEST_GIT_LOG")" || true
+  hashes="$(grep -c 'hash-object' "$TEST_GIT_LOG")" || true
+  [ "$batched" -eq 1 ] && [ "$hashes" -lt 10 ] || {
+    echo "batched=$batched hash-object calls=$hashes; first calls:"
+    sed -n '1,5p' "$TEST_GIT_LOG"
     false
   }
 }

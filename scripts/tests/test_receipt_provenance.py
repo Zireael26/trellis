@@ -67,7 +67,8 @@ class ReceiptProvenanceTests(unittest.TestCase):
 
     def runner_fixture(self, mode="pass"):
         files = ["scripts/run-tests.sh", "scripts/lib/receipt_provenance.py",
-                 "scripts/lib/test-suites.sh", "scripts/tests/stage-weights.tsv",
+                 "scripts/lib/test-suites.sh", "scripts/lib/bats-jobs.sh",
+                 "scripts/tests/stage-weights.tsv",
                  "scripts/tests/helpers/git-fence/git", "scripts/tests/helpers/git-fence/mktemp"]
         for relative in files:
             target = self.root / relative

@@ -3134,12 +3134,21 @@ launcher_main() {
     launcher_die "$TRELLIS_EX_UNAVAILABLE" "jq is required to read machine configuration"
   TRELLIS_HOME="$home"
   export TRELLIS_HOME
-  command -v git >/dev/null 2>&1 ||
-    launcher_die "$TRELLIS_EX_UNAVAILABLE" "git is required to verify immutable releases"
   launcher_validate_machine_config "$config" ||
     launcher_die "$TRELLIS_EX_STATE" "machine config failed validation: $config"
   version="$(jq -r '.active_cli_release' "$config")" ||
     launcher_die "$TRELLIS_EX_STATE" "could not read active_cli_release from $config"
+
+  # Metadata only: name the configured selection, never claim it is verified.
+  # No Git, scratch directory, release traversal, or execution snapshot is
+  # needed. All executable routes retain the full preflight below.
+  if [ "${1:-}" = --version ]; then
+    [ "$#" -eq 1 ] || launcher_die "$TRELLIS_EX_USAGE" "--version takes no arguments"
+    printf 'trellis %s (configured; not verified)\n' "$version"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1 ||
+    launcher_die "$TRELLIS_EX_UNAVAILABLE" "git is required to verify immutable releases"
 
   releases="$home/releases"
   if [ -L "$releases" ]; then

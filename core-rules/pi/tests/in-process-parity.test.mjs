@@ -119,7 +119,7 @@ for (const native of ['tool_call', 'user_bash']) {
     assert.equal(native === 'tool_call' ? denial.block : denial.result.exitCode, native === 'tool_call' ? true : 1);
     assert.match(native === 'tool_call' ? denial.reason : denial.result.output, /Blocked destructive rm/);
     assert.equal(await fire('printf harmless'), undefined);
-    rmSync(resolve(f.cwd, '.pi/hooks/block-destructive.sh'));
+    rmSync(resolve(f.runtime, 'core-rules/codex/hooks/block-destructive.sh'));
     const missing = await fire('printf harmless');
     assert.equal(native === 'tool_call' ? missing.block : missing.result.exitCode, native === 'tool_call' ? true : 1);
   });
@@ -213,6 +213,92 @@ for (const toolName of ['grep', 'find', 'ls']) {
     assert.equal((await blocked(f, toolName, { path: '.' })).block, true);
   });
 }
+
+function subagentControlSource(f) {
+  const root = resolve(f.base, 'node_modules/@tintinweb/pi-subagents');
+  const path = resolve(root, 'src/index.ts');
+  mkdirSync(resolve(root, 'src'), { recursive: true });
+  writeFileSync(resolve(root, 'package.json'), JSON.stringify({ name: '@tintinweb/pi-subagents', version: '0.22.0' }));
+  writeFileSync(path, 'fixture extension');
+  return { path, source: 'npm:@tintinweb/pi-subagents@0.22.0', origin: 'package', scope: 'user' };
+}
+
+for (const toolName of ['get_subagent_result', 'steer_subagent']) {
+  for (const source of ['npm:@tintinweb/pi-subagents', 'npm:@tintinweb/pi-subagents@0.22.0']) {
+    test(`subagent control ${toolName} permits verified package source ${source}`, async t => {
+      const f = await deliveredFixture(t), sourceInfo = { ...subagentControlSource(f), source };
+      f.pi.getAllTools = () => [{ name: toolName, sourceInfo }];
+      assert.equal(await blocked(f, toolName, { agent_id: 'fixture', message: 'guidance' }), undefined);
+      assert.equal(f.calls.length, 1, 'allowed controls still use the dispatcher');
+    });
+  }
+  for (const invalid of ['foreign-source', 'prefix-collision', 'alias-spec', 'npm-alias', 'top-level', 'wrong-package', 'missing-path', 'symlink-escape', 'nested-package']) {
+    test(`subagent control ${toolName} refuses ${invalid} provenance`, async t => {
+      const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);
+      const root = resolve(sourceInfo.path, '../..');
+      if (invalid === 'foreign-source') sourceInfo.source = 'npm:other-extension';
+      if (invalid === 'prefix-collision') sourceInfo.source = 'npm:@tintinweb/pi-subagents-impostor';
+      if (invalid === 'alias-spec') sourceInfo.source = 'npm:@tintinweb/pi-subagents@file:evil.tgz';
+      if (invalid === 'npm-alias') sourceInfo.source = 'npm:@tintinweb/pi-subagents@npm:evil-pkg@1.0.0';
+      if (invalid === 'top-level') sourceInfo.origin = 'top-level';
+      if (invalid === 'wrong-package') writeFileSync(resolve(root, 'package.json'), '{"name":"other-extension"}');
+      if (invalid === 'missing-path') sourceInfo.path += '.missing';
+      if (invalid === 'symlink-escape' || invalid === 'nested-package') {
+        const foreign = resolve(invalid === 'nested-package' ? root : f.base, 'foreign');
+        mkdirSync(foreign, { recursive: true });
+        writeFileSync(resolve(foreign, 'package.json'), '{"name":"other-extension"}');
+        writeFileSync(resolve(foreign, 'index.ts'), 'foreign extension');
+        if (invalid === 'nested-package') sourceInfo.path = resolve(foreign, 'index.ts');
+        else { rmSync(sourceInfo.path); symlinkSync(resolve(foreign, 'index.ts'), sourceInfo.path); }
+      }
+      f.pi.getAllTools = () => [{ name: toolName, sourceInfo, annotations: { readOnlyHint: true } }];
+      assert.equal((await blocked(f, toolName, {})).block, true);
+      assert.equal(f.calls.length, 0);
+    });
+  }
+  test(`subagent control ${toolName} resolves a legitimate linked entry`, async t => {
+    const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);
+    const alias = resolve(f.base, 'linked-extension.ts');
+    symlinkSync(sourceInfo.path, alias);
+    f.pi.getAllTools = () => [{ name: toolName, sourceInfo: { ...sourceInfo, path: alias } }];
+    assert.equal(await blocked(f, toolName, {}), undefined);
+  });
+}
+
+for (const toolName of ['shell_mutator', 'delete', 'list_agents']) {
+  test(`subagent package provenance does not authorize unclassified ${toolName}`, async t => {
+    const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);
+    f.pi.getAllTools = () => [{ name: toolName, sourceInfo }];
+    assert.equal((await blocked(f, toolName, { command: 'rm -rf fixture' })).block, true);
+    assert.equal(f.calls.length, 0);
+  });
+}
+for (const toolName of ['Agent', 'SubagentWorkflow']) {
+  test(`subagent control fix preserves existing ${toolName} delegation behavior`, async t => {
+    const f = await deliveredFixture(t);
+    f.pi.getAllTools = () => [{ name: toolName, sourceInfo: { source: 'local' } }];
+    assert.equal(await blocked(f, toolName, {}), undefined);
+  });
+}
+
+for (const toolName of ['Agent', 'SubagentWorkflow', 'steer_subagent']) {
+  test(`subagent policy gate blocks ${toolName} without parent policy`, async t => {
+    const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);
+    f.pi.getAllTools = () => [{ name: toolName, sourceInfo }];
+    rmSync(resolve(f.cwd, '.agents/rules/trellis.md'));
+    assert.equal((await blocked(f, toolName, {})).block, true);
+    assert.equal(f.calls.length, 0);
+    const start = f.fire('before_agent_start', { systemPrompt: 'parent' });
+    assert.match(start.message.content, /Agent, SubagentWorkflow, and steer_subagent tools are blocked/);
+  });
+}
+test('subagent policy gate preserves result retrieval without parent policy', async t => {
+  const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);
+  f.pi.getAllTools = () => [{ name: 'get_subagent_result', sourceInfo }];
+  rmSync(resolve(f.cwd, '.agents/rules/trellis.md'));
+  assert.equal(await blocked(f, 'get_subagent_result', {}), undefined);
+  assert.equal(f.calls.length, 1);
+});
 
 for (const input of [
   { path: 'file', filePath: 'other' },
@@ -388,4 +474,22 @@ test('safe slash skill and duplicate physical aliases allow; runtime rechecks ch
   assert.equal(await f.fire('input', { text: '/skill:safe', source: 'rpc' }), undefined);
   writeFileSync(path, 'x'.repeat(65537));
   assert.equal((await f.fire('input', { text: '/skill:safe', source: 'rpc' })).action, 'handled');
+});
+
+test('session start runs the payload hook set and nothing exists under the reserved .pi/hooks', async t => {
+  const f = await deliveredFixture(t);
+  const startup = () => {
+    const event = { schema_version: 1, harness: 'pi', cwd: f.cwd, session_id: 'fixture-session', phase: 'lifecycle', native_event: 'session_start', reason: 'startup' };
+    const r = spawnSync('bash', [resolve(f.cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh'), '--base64', Buffer.from(JSON.stringify(event)).toString('base64')],
+      { cwd: f.cwd, encoding: 'utf8', timeout: 30_000, env: { PATH: process.env.PATH, HOME: f.cwd, TMPDIR: resolve(f.cwd, 'tmp') } });
+    assert.equal(r.error, undefined);
+    return JSON.parse(r.stdout).reason ?? '';
+  };
+  assert.equal(existsSync(resolve(f.cwd, '.pi/hooks')), false);
+  const ran = startup();
+  assert.doesNotMatch(ran, /session-context\.sh: unknown/);
+  assert.doesNotMatch(ran, /inject-primer-index\.sh: unknown/);
+  // The hook resolves from the runtime payload: without it there, it is unavailable.
+  rmSync(resolve(f.runtime, 'core-rules/codex/hooks/session-context.sh'));
+  assert.match(startup(), /session-context\.sh: unknown — hook unavailable/);
 });

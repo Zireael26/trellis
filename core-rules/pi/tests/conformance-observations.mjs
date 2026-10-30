@@ -9,7 +9,7 @@ import extension from '../extensions/trellis.ts';
 const [id, scratch] = process.argv.slice(2);
 const cwd = resolve(scratch, id);
 const observations = {}, commands = [], handlers = new Map(), messages = [], notifications = [];
-for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.agents/rules', '.pi/hooks']) {
+for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.agents/rules', '.trellis/runtime/core-rules/codex/hooks']) {
   mkdirSync(resolve(cwd, dir), { recursive: true });
 }
 const dispatcher = resolve(cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh');
@@ -22,7 +22,7 @@ writeFileSync(resolve(cwd, '.agents/rules/trellis.md'), 'Fixture inherited paren
 const hook = (name, body) => {
   // Only denial/advisory transport bodies are stubs. Never replace policy consumers.
   const text = `#!/bin/bash\n# Explicit conformance transport stub, not policy implementation.\n${body}\n`;
-  writeFileSync(resolve(cwd, '.pi/hooks', name), text, { mode: 0o755 });
+  writeFileSync(resolve(cwd, '.trellis/runtime/core-rules/codex/hooks', name), text, { mode: 0o755 });
   observations.stub_hooks = { ...observations.stub_hooks, [name]: text };
 };
 const envelopes = [], decisions = [];
@@ -38,7 +38,7 @@ function run(script, args, options) {
   commands.push({ argv: [process.env.CONFORMANCE_BASH, script, ...args], cwd: options.cwd,
     exit_code: result.status, status: result.error?.code === 'ETIMEDOUT' ? 'timeout' : result.error ? 'not_run' : 'exited',
     stdout_path: stdoutPath, stderr_path: stderrPath });
-  envelopes.push(JSON.parse(Buffer.from(args[1], 'base64').toString()));
+  envelopes.push(args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString()));
   if (result.error) throw result.error;
   decisions.push(JSON.parse(result.stdout));
   return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };

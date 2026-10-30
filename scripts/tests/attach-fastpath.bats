@@ -56,6 +56,307 @@ shutil.rmtree(sys.argv[1])
 PY
 }
 
+@test "L2 exact current attach skips full sibling reconcile but keeps target guards" {
+  fast_attach
+  [ "$status" -eq 0 ]
+  printf 'unrelated sibling drift\n' >> "$PROJECT/.claude/settings.local.json"
+  run bash -c '
+    . "$1"
+    attach_reconcile_verify_group() { echo full-sibling-reconcile >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' incremental "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'already attached:'* ]]
+  printf 'drift\n' >> "$TARGET/.claude/settings.local.json"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 3 ]
+}
+
+@test "L2 exact current attach keeps registry postconditions under its locks" {
+  cp "$DONOR" "$SANDBOX/owner-before"
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attach_reconcile_verify_owners)"
+    eval "${definition/_attach_reconcile_verify_owners /real_verify_owners }"
+    _attach_reconcile_verify_owners() {
+      real_verify_owners "$@" || return "$?"
+      jq '\''.projects["personal/a5b-fixture"].checkouts[] .release = "8.8.8"'\'' "$1/registry.json" > "$1/registry.race"
+      chmod 600 "$1/registry.race"
+      mv "$1/registry.race" "$1/registry.json"
+    }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' incremental "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  printf '%s\n' "$output"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+}
+
+@test "L2 shared exclude checks ownership not unrelated sibling artifacts" {
+  printf 'drift\n' >> "$PROJECT/.claude/settings.local.json"
+  run bash -c '
+    . "$1"
+    block="$4/block"; before="$4/before"; after="$4/after"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$block"
+    common="$(jq -r .exclude.git_common_dir "$3")"
+    : > "$before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$common" "$block" "$before" "$after"
+  ' incremental "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX"
+  [ "$status" -eq 0 ]
+}
+
+@test "L2 healthy donor permits attach despite another sibling artifact drift" {
+  fast_attach
+  [ "$status" -eq 0 ]
+  printf 'drift\n' >> "$PROJECT/.claude/settings.local.json"
+  NEW_TARGET="$SANDBOX/third"
+  git -C "$PROJECT" worktree add -q -b third "$NEW_TARGET"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'attached (donor fast path):'* ]]
+  NEW_TARGET="$SANDBOX/fourth"
+  git -C "$PROJECT" worktree add -q -b fourth "$NEW_TARGET"
+  mkdir -p "$NEW_TARGET/.claude"
+  printf '{"project_note":"keep"}\n' > "$NEW_TARGET/.claude/settings.local.json"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'donor fast path'* ]]
+  [ "$(jq -r .project_note "$NEW_TARGET/.claude/settings.local.json")" = keep ]
+}
+
+@test "F2 tampered shared dispatcher refuses full attach before any publication" {
+  local checkout owner_dir
+  checkout="$(jq -r .checkout_id "$DONOR")"
+  owner_dir="$TRELLIS_HOME/state/attachments/$checkout"
+  cp -R "$owner_dir" "$SANDBOX/owners-before"
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
+  mkdir -p "$TARGET/.claude"
+  printf '{"project_note":"keep"}\n' > "$TARGET/.claude/settings.local.json"
+  cp "$TARGET/.claude/settings.local.json" "$SANDBOX/guard-before"
+  printf '# tampered\n' >> "$TRELLIS_HOME/state/git-hooks/$checkout/post-checkout"
+  fast_attach
+  [ "$status" -eq 3 ]
+  diff -r "$SANDBOX/owners-before" "$owner_dir"
+  cmp "$SANDBOX/registry-before" "$TRELLIS_HOME/registry.json"
+  cmp "$SANDBOX/guard-before" "$TARGET/.claude/settings.local.json"
+  [ ! -e "$TARGET/.trellis/runtime" ]
+  [ ! -L "$TARGET/.trellis/runtime" ]
+  [ ! -e "$TARGET/.agents" ]
+  [[ "$output" == *"shared exclude managed hooks verification failed for owner $DONOR"* ]]
+  # Adoption owns hook validation/repair at its own boundary, not this helper.
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$(jq -r .exclude.git_common_dir "$3")" "$4/block" "$4/before" "$4/after" adoption
+  ' f2 "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX"
+  [ "$status" -eq 0 ]
+}
+
+@test "F2 shared exclude owner binding refusal names the record" {
+  local checkout
+  checkout="$(jq -r .checkout_id "$DONOR")"
+  jq '.checkout_id = ("0" * 64)' "$DONOR" > "$SANDBOX/changed"
+  chmod 600 "$SANDBOX/changed"
+  mv "$SANDBOX/changed" "$DONOR"
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$5" "$(jq -r .exclude.git_common_dir "$3")" "$4/block" "$4/before" "$4/after"
+  ' f2 "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX" "$checkout"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"shared exclude owner binding mismatch for owner $DONOR"* ]]
+}
+
+@test "F2 current-owner sibling hook refusal names the record" {
+  fast_attach
+  [ "$status" -eq 0 ]
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
+  printf '# tampered\n' >> "$TRELLIS_HOME/state/git-hooks/$(jq -r .checkout_id "$DONOR")/post-checkout"
+  fast_attach
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"managed hooks verification failed for owner $DONOR"* ]]
+  cmp "$SANDBOX/registry-before" "$TRELLIS_HOME/registry.json"
+}
+
+@test "F2 current-owner snapshot refusal names the record" {
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
+  run bash -c '
+    . "$1"
+    definition="$(declare -f _attach_reconcile_verify_owners)"
+    eval "${definition/_attach_reconcile_verify_owners /real_verify_owners }"
+    _attach_reconcile_verify_owners() {
+      real_verify_owners "$@" || return "$?"
+      jq '\''.toolchain_path += ["/f2-snapshot-race"]'\'' "$2" > "$2.race"
+      chmod 600 "$2.race"
+      mv "$2.race" "$2"
+    }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' f2 "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  printf '%s\n' "$output"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"owner snapshot conflict at $DONOR"* ]]
+  cmp "$SANDBOX/registry-before" "$TRELLIS_HOME/registry.json"
+}
+
+@test "F2 donor selection skips a refreshed first candidate" {
+  local first root
+  fast_attach
+  [ "$status" -eq 0 ]
+  first="$(printf '%s\n' "$TRELLIS_HOME"/state/attachments/*/*.json | LC_ALL=C sort | head -1)"
+  root="$(jq -r .worktree_root "$first")"
+  rm "$root/.agents/rules/trellis.md"
+  printf '# project-authored replacement\n' > "$root/.agents/rules/trellis.md"
+  git -C "$root" add -f .agents/rules/trellis.md
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$root"
+  [ "$status" -eq 0 ]
+  cp "$first" "$SANDBOX/refreshed-before"
+  NEW_TARGET="$SANDBOX/third"
+  git -C "$PROJECT" worktree add -q -b third "$NEW_TARGET"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'attached (donor fast path):'* ]]
+  cmp "$SANDBOX/refreshed-before" "$first"
+}
+
+@test "F2 doctor repair hint quotes the checkout and selects its home" {
+  local root owner worktree hint
+  root="$SANDBOX/doctor target ' quoted"
+  git -C "$PROJECT" worktree add -q -b doctor-quoted "$root"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$root"
+  [ "$status" -eq 0 ]
+  worktree="$(jq -r --arg root "$root" 'select(.worktree_root == $root) | .worktree_id' "$TRELLIS_HOME"/state/attachments/*/*.json)"
+  owner="$TRELLIS_HOME/state/attachments/$(jq -r .checkout_id "$DONOR")/$worktree.json"
+  printf 'drift\n' >> "$root/.claude/settings.local.json"
+  run bash -c '
+    . "$1"; . "$2"
+    hc_portable_owner "$3" "$4" "$5" personal a5b-fixture "$(jq -r .checkout_id "$4")" "$(jq -r .worktree_id "$4")" "$(jq -r .attachment_id "$4")" 1.2.3 2>/dev/null
+  ' f2 "$ATTACH" "$REPO_ROOT/scripts/lib/health-checks.sh" "$TRELLIS_HOME" "$owner" "$root"
+  [ "$status" -ne 0 ]
+  LC_ALL=C printf -v hint 'trellis attach --refresh-artifacts --home %q %q' "$TRELLIS_HOME" "$root"
+  [[ "$output" == *"$hint"* ]]
+}
+
+@test "L2 exclude refusal diagnoses invalid ownership rather than claiming no owner" {
+  jq '.exclude.managed_block_sha256 = ("0" * 64) | .exclude_block_hash = ("0" * 64)' "$DONOR" > "$SANDBOX/changed"
+  chmod 600 "$SANDBOX/changed"
+  mv "$SANDBOX/changed" "$DONOR"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'shared exclude block hash mismatch for owner'* ]]
+  [[ "$output" != *'managed exclude block has no matching committed checkout ownership'* ]]
+}
+
+@test "L2 refresh artifacts retires only tracked native takeovers without changing shared state" {
+  local leaf="$PROJECT/.agents/rules/trellis.md"
+  cp "$DONOR" "$SANDBOX/owner-before"
+  cp "$PROJECT/.git/info/exclude" "$SANDBOX/exclude-before"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  rm "$leaf"
+  printf '# project-owned policy\n' > "$leaf"
+  git -C "$PROJECT" add -f .agents/rules/trellis.md
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [ "$(< "$leaf")" = '# project-owned policy' ]
+  cmp "$SANDBOX/exclude-before" "$PROJECT/.git/info/exclude"
+  jq -e '.pre_existing | any(.[]; .path == ".agents/rules/trellis.md" and .reason == "project-authored-file")' "$DONOR"
+  [ "$(jq -cS 'del(.artifacts,.pre_existing)' "$DONOR")" = "$(jq -cS 'del(.artifacts,.pre_existing)' "$SANDBOX/owner-before")" ]
+  run "$ATTACH" attach --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ]
+}
+
+@test "L2 refresh artifacts refuses untracked replacements and modified guards" {
+  cp "$DONOR" "$SANDBOX/owner-before"
+  rm "$PROJECT/.agents/rules/trellis.md"
+  printf 'untracked replacement\n' > "$PROJECT/.agents/rules/trellis.md"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  git -C "$PROJECT" add -f .agents/rules/trellis.md
+  : > "$PROJECT/.agents/rules/trellis.md"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  cp "$TRELLIS_HOME/releases/1.2.3/payload/core-rules/CLAUDE.md" "$PROJECT/.agents/rules/trellis.md"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  printf '# project-authored replacement\n' > "$PROJECT/.agents/rules/trellis.md"
+  printf 'drift\n' >> "$PROJECT/.claude/settings.local.json"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+}
+
+@test "L2 refresh artifacts preserves pending-operation and binding refusals" {
+  cp "$DONOR" "$SANDBOX/owner-before"
+  local journal="$TRELLIS_HOME/state/attachment-journals/reconcile-$(jq -r .attachment_id "$DONOR").json"
+  printf '{}\n' > "$journal"
+  chmod 600 "$journal"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *'pending journal:'* ]]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  rm "$journal"
+  printf '{"schema_version":1,"project_id":"foreign-project"}\n' > "$PROJECT/.trellis.json"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 3 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+  run "$ATTACH" attach --refresh-artifacts --release 1.2.3 --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 2 ]
+  cmp "$SANDBOX/owner-before" "$DONOR"
+}
+
+@test "L2 doctor names drifted rendered path in its report" {
+  printf 'drift\n' >> "$PROJECT/.claude/settings.local.json"
+  run bash -c '
+    . "$1"; . "$2"
+    hc_portable_owner "$3" "$4" "$5" personal a5b-fixture "$(jq -r .checkout_id "$4")" "$(jq -r .worktree_id "$4")" "$(jq -r .attachment_id "$4")" 1.2.3 2>/dev/null
+  ' incremental "$ATTACH" "$REPO_ROOT/scripts/lib/health-checks.sh" "$TRELLIS_HOME" "$DONOR" "$PROJECT"
+  printf '%s\n' "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$PROJECT/.claude/settings.local.json"* ]]
+  [[ "$output" == *'--refresh-artifacts'* ]]
+}
+
+@test "L2 checkout lock waits beyond a twelve minute attach and remains bounded" {
+  run bash -c '
+    . "$1"
+    attempts=0
+    attachment_checkout_lock_reclaim() { return 0; }
+    attachment_checkout_lock_acquire() { attempts=$((attempts + 1)); [ "$attempts" -gt 3000 ] || return 3; }
+    sleep() { :; }
+    attachment_checkout_lock_wait unused checkout common
+    [ "$?" -eq 0 ] && [ "$attempts" -eq 3001 ] || exit 1
+    attachment_checkout_lock_reclaim() { return 4; }
+    attachment_checkout_lock_wait unused checkout common
+    [ "$?" -eq 4 ] || exit 1
+    attachment_checkout_lock_reclaim() { return 3; }
+    waits=0
+    sleep() { waits=$((waits + 1)); [ "$waits" -le 3600 ] || exit 1; }
+    attachment_checkout_lock_wait unused checkout common
+    [ "$?" -eq 3 ] && [ "$waits" -eq 3600 ]
+  ' incremental "$REPO_ROOT/scripts/lib/attachment.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "L2 benchmark exact current attach with ten siblings" {
+  [ -n "${L2_BENCH_REPORT:-}" ] || skip 'set L2_BENCH_REPORT for the serial timing fixture'
+  run /usr/bin/python3 -I "$BATS_TEST_DIRNAME/helpers/bench-attach-incremental.py" "$ATTACH" "$TRELLIS_HOME" "$PROJECT" "$SANDBOX" "$L2_BENCH_REPORT" "${L2_BENCH_BASELINE:-2f101f0d}"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .baseline "$L2_BENCH_REPORT")" = "$(git -C "$REPO_ROOT" rev-parse --verify "${L2_BENCH_BASELINE:-2f101f0d}^{commit}")" ]
+  [ "$(jq -r .baseline_ref "$L2_BENCH_REPORT")" = "${L2_BENCH_BASELINE:-2f101f0d}" ]
+}
+
 fast_attach() {
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
   printf '%s\n' "$output"

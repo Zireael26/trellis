@@ -55,9 +55,47 @@ setup() {
   export DJ_BUILD_ACTIVE_OVERRIDE=0
   build_canonical_min
   write_config
+
+  # Apply assertions exercise disposition, not the duration of a host-wide
+  # lsof walk or the host's changing free-space figure. Keep these shims local
+  # to this Bats test; the library suite covers real lsof integration.
+  local fixture_bin="$SANDBOX/fixture-bin"
+  mkdir -p "$fixture_bin"
+  cat > "$fixture_bin/lsof" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 3 ] && [ "$1" = -n ] && [ "$2" = -P ] && [ "$3" = -Fn ] || {
+  printf 'lsof %s\n' "$*" >> "$DJ_TEST_SHIM_MISUSE"
+  exit 72
+}
+# A pathless record keeps the successful snapshot nonempty. The only cwd
+# record, when present, belongs to the explicitly live fixture in this test.
+printf 'p1\n'
+if [ -n "${DJ_TEST_LSOF_CWD:-}" ]; then
+  kill -0 "$DJ_TEST_LSOF_PID" 2>/dev/null || exit 73
+  printf 'p%s\nfcwd\nn%s\n' "$DJ_TEST_LSOF_PID" "$DJ_TEST_LSOF_CWD"
+fi
+EOF
+  cat > "$fixture_bin/df" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && { [ "$1" = -Pk ] || [ "$1" = -k ]; } || {
+  printf 'df %s\n' "$*" >> "$DJ_TEST_SHIM_MISUSE"
+  exit 72
+}
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fixture-fs 104857600 0 104857600 0%% %s\n' "$2"
+EOF
+  chmod +x "$fixture_bin/lsof" "$fixture_bin/df"
+  # An argv the shims don't model would make the janitor fail closed and could
+  # hide a production invocation change; teardown fails the test instead.
+  export PATH="$fixture_bin:$PATH" DJ_TEST_LSOF_CWD="" DJ_TEST_LSOF_PID=""
+  export DJ_TEST_SHIM_MISUSE="$SANDBOX/shim-misuse.log"
 }
 
 teardown() {
+  local shim_misuse=""
+  if [ -n "${DJ_TEST_SHIM_MISUSE:-}" ] && [ -s "$DJ_TEST_SHIM_MISUSE" ]; then
+    shim_misuse="$(cat "$DJ_TEST_SHIM_MISUSE")"
+  fi
   if [ -n "${LIVE_PID:-}" ]; then
     kill "$LIVE_PID" 2>/dev/null || true
     wait "$LIVE_PID" 2>/dev/null || true
@@ -71,11 +109,43 @@ teardown() {
   if [ -n "${TMP_WT_ROOT:-}" ] && [ -d "$TMP_WT_ROOT" ]; then
     rm -rf "$TMP_WT_ROOT"
   fi
+  [ -z "$shim_misuse" ] || { echo "unexpected shim invocation: $shim_misuse"; return 1; }
 }
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+# The worker changes cwd before signaling readiness. It belongs to this test's
+# teardown, with a 600-second fallback if the test process disappears. Unlike
+# a fixed sleep 30/300, it cannot silently expire during a slow janitor pass.
+start_live_cwd() {
+  local dir="$1" ready="$SANDBOX/live-cwd-ready" failed="$SANDBOX/live-cwd-failed"
+  local ready_deadline=$(( $(date +%s) + 60 )) parent="$$"
+  shift
+  [ "$#" -gt 0 ] || set -- /bin/bash -c '
+    parent="$1"; deadline=$(( $(date +%s) + 600 ))
+    while [ "$(date +%s)" -lt "$deadline" ] && kill -0 "$parent" 2>/dev/null; do
+      /bin/sleep 1
+    done
+  ' _ "$parent"
+  rm -f "$ready" "$failed"
+  (
+    cd "$dir" || { : > "$failed"; exit 1; }
+    : > "$ready" || { : > "$failed"; exit 1; }
+    exec "$@"
+  ) >/dev/null 2>&1 &
+  LIVE_PID=$!
+  while [ ! -e "$ready" ]; do
+    if [ -e "$failed" ] || [ "$(date +%s)" -ge "$ready_deadline" ]; then
+      echo "live cwd fixture did not become ready in $dir"
+      return 1
+    fi
+    /bin/sleep 0.05
+  done
+  kill -0 "$LIVE_PID" 2>/dev/null || { echo "live cwd fixture exited after readiness"; return 1; }
+  export DJ_TEST_LSOF_CWD="$dir" DJ_TEST_LSOF_PID="$LIVE_PID"
+}
 
 build_canonical_min() {
   mkdir -p "$CANON/audits"
@@ -367,7 +437,12 @@ release_process_birth() {
 
 @test "an aged execution snapshot with a strict live owner is retained without argv matching" {
   local snapshot owner birth argument
-  local -a owner_command=(/bin/sleep 300)
+  local -a owner_command=(/bin/bash -c '
+    parent="$1"; deadline=$(( $(date +%s) + 600 ))
+    while [ "$(date +%s)" -lt "$deadline" ] && kill -0 "$parent" 2>/dev/null; do
+      /bin/sleep 1
+    done
+  ' _ "$$")
   snapshot="$(make_release_execution_snapshot 1.2.3 LiveA1 "$STALE_TOUCH")"
 
   # Construct the exact command vector without the snapshot path; this is a
@@ -379,8 +454,7 @@ release_process_birth() {
       false
     }
   done
-  ( cd "$SANDBOX" && exec "${owner_command[@]}" ) >/dev/null 2>&1 &
-  LIVE_PID=$!
+  start_live_cwd "$SANDBOX" "${owner_command[@]}"
   birth="$(release_process_birth "$LIVE_PID")"
   [ -n "$birth" ] || { echo "could not read live process birth"; false; }
   write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
@@ -403,8 +477,7 @@ release_process_birth() {
 @test "an aged live owner fails closed when its process birth probe fails" {
   local snapshot owner birth fake_bin real_ps real_python3
   snapshot="$(make_release_execution_snapshot 1.2.3 ProbeFailA1 "$STALE_TOUCH")"
-  ( cd "$SANDBOX" && exec /bin/sleep 300 ) >/dev/null 2>&1 &
-  LIVE_PID=$!
+  start_live_cwd "$SANDBOX"
   birth="$(release_process_birth "$LIVE_PID")"
   [ -n "$birth" ] || { echo "could not read live process birth"; false; }
   write_release_execution_owner "$snapshot" "$LIVE_PID" "$birth"
@@ -964,29 +1037,18 @@ EOF
 # ===========================================================================
 
 @test "registered current root reaps exactly one absent ephemeral phantom, never broad-pruning" {
-  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   git_init_at "$PROJECTS/alpha"
   TMP_WT_ROOT="$(ephemeral_tmp_root dj-phantom)" ||
     skip "TMPDIR is outside the /private/tmp ephemeral namespace"
   local phantom="$TMP_WT_ROOT/stale"
   local held="$TMP_WT_ROOT/held"
-  local tries=0
 
   add_unregistered_worktree "$PROJECTS/alpha" "$phantom" "phantom/stale"
   add_unregistered_worktree "$PROJECTS/alpha" "$held" "phantom/held"
   # A real process whose cwd is the second tree; `git worktree prune` would
   # sweep BOTH absent registrations, so `held` surviving is the narrowness
-  # proof. Start it and wait until lsof observes OUR OWN pid holding that cwd —
-  # never a sleep guess — before deleting either directory.
-  ( cd "$held" && exec sleep 30 ) >/dev/null 2>&1 &
-  LIVE_PID=$!
-  while [ "$tries" -lt 100 ]; do
-    lsof -a -d cwd -p "$LIVE_PID" -- "$held" >/dev/null 2>&1 && break
-    sleep 0.05
-    tries=$((tries + 1))
-  done
-  lsof -a -d cwd -p "$LIVE_PID" -- "$held" >/dev/null 2>&1 ||
-    { echo "own live process cwd never observed inside $held"; false; }
+  # proof. The post-chdir marker proves its cwd before deleting either tree.
+  start_live_cwd "$held"
   rm -rf "$phantom" "$held"
 
   run_dj --report --scopes worktrees
@@ -1061,7 +1123,6 @@ EOF
 }
 
 @test "phantom pruning refuses an active deleted cwd plus existing dirty and outside worktrees" {
-  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   git_init_at "$PROJECTS/alpha"
   TMP_WT_ROOT="$(ephemeral_tmp_root dj-phantom-guards)" ||
     skip "TMPDIR is outside the /private/tmp ephemeral namespace"
@@ -1069,7 +1130,6 @@ EOF
   local existing="$TMP_WT_ROOT/existing"
   local dirty="$TMP_WT_ROOT/dirty"
   local outside
-  local tries=0
 
   add_unregistered_worktree "$PROJECTS/alpha" "$active" "phantom/active"
   add_unregistered_worktree "$PROJECTS/alpha" "$existing" "phantom/existing"
@@ -1080,16 +1140,8 @@ EOF
     { echo "could not mint the non-ephemeral absent registration"; false; }
   [ ! -e "$outside" ] && [ ! -L "$outside" ]
   printf 'precious WIP\n' > "$dirty/UNCOMMITTED.txt"
-  # Wait for lsof to observe OUR OWN pid holding that cwd, not a sleep guess.
-  ( cd "$active" && exec sleep 30 ) >/dev/null 2>&1 &
-  LIVE_PID=$!
-  while [ "$tries" -lt 100 ]; do
-    lsof -a -d cwd -p "$LIVE_PID" -- "$active" >/dev/null 2>&1 && break
-    sleep 0.05
-    tries=$((tries + 1))
-  done
-  lsof -a -d cwd -p "$LIVE_PID" -- "$active" >/dev/null 2>&1 ||
-    { echo "own live process cwd never observed inside $active"; false; }
+  # The post-chdir marker establishes its cwd before it becomes a phantom.
+  start_live_cwd "$active"
   rm -rf "$active"
 
   run_dj --report --scopes worktrees
@@ -1215,22 +1267,13 @@ EOF
 }
 
 @test "safe-only PROTECTS a merged + clean tree while a process cwd is inside it" {
-  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   git_init_at "$PROJECTS/alpha"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   add_worktree "$PROJECTS/alpha" "$wt" "feat/x"
 
   # The ADR historically used merged-ness as the proxy for "nobody is there."
   # Exercise the residual case directly: merged + clean, but a real live cwd.
-  ( cd "$wt" && exec sleep 30 ) >/dev/null 2>&1 &
-  LIVE_PID=$!
-  local tries=0
-  while [ "$tries" -lt 50 ]; do
-    lsof -a -d cwd -- "$wt" >/dev/null 2>&1 && break
-    sleep 0.05
-    tries=$((tries + 1))
-  done
-  lsof -a -d cwd -- "$wt" >/dev/null 2>&1
+  start_live_cwd "$wt"
 
   DJ_MERGED_OVERRIDE=merged DJ_PUSHED_OVERRIDE=unpushed \
     run_dj --report --safe-only --scopes worktrees
@@ -1388,7 +1431,6 @@ EOF
 }
 
 @test "apply skips a worktree made dirty after its delete plan" {
-  command -v lsof >/dev/null 2>&1 || skip "lsof not installed"
   local wt="$PROJECTS/alpha/.claude/worktrees/feat-x"
   local fake_bin="$SANDBOX/worktree-race-bin" real_git
   git_init_at "$PROJECTS/alpha"

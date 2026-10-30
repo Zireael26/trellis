@@ -23,6 +23,8 @@
 # Not intercepted: `builtin source`, `builtin .`, `command .`, helpers that a
 # validator executes rather than sources, and other interpreters. Those are
 # the reviewed-code boundary (see SKILL.md and LB-6).
+# Toolchain programs outside the trusted roots and the checkout are not
+# guarded at all (see pg_validator_guarded).
 
 # pg_validator_path <file>: print the physical path of a trusted file to
 # source; on refusal print why (stderr) and fail. Runs in a subshell.
@@ -64,5 +66,26 @@ pg_validator_source() {
   builtin source "$__pg_vs_path"
 }
 
-source() { pg_validator_source "$@"; }
-.() { pg_validator_source "$@"; }
+# pg_validator_guarded: true when this bash process runs validator or project
+# code, which is what the guard polices: a script inside a trusted root or the
+# checkout under review, or inline code (`bash -c`, stdin) a validator started.
+# A program from the toolchain outside all of those, such as the bash program
+# behind a pyenv shim sourcing its own pyenv.d hooks, is left alone.
+pg_validator_guarded() {
+  local self="$0" phys root
+  case "$self" in */*) ;; *) return 0 ;; esac
+  [ -f "$self" ] || return 0
+  phys="$(cd -P "${self%/*}" 2>/dev/null && pwd -P)" || return 0
+  phys="$phys/${self##*/}"
+  for root in "${PG_TRUSTED_ROOT:-}" "${PG_SKILL_ROOT:-}" "${PROCESS_GATE_PROJECT_DIR:-}"; do
+    [ -n "$root" ] || continue
+    root="$(cd -P "$root" 2>/dev/null && pwd -P)" || continue
+    case "$phys" in "$root"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+if pg_validator_guarded; then
+  source() { pg_validator_source "$@"; }
+  .() { pg_validator_source "$@"; }
+fi

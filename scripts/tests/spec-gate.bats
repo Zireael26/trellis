@@ -324,6 +324,49 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "root project records and their archives do not count toward the gated diff" {
+  _config true 80 400
+  # gotchas.md and decisions-log.md are the project's own records (CLAUDE.md
+  # rules); archiving them moves hundreds of lines and is not feature code.
+  _write_lines gotchas.md 600
+  _write_lines gotchas-archive.md 600
+  _write_lines decisions-log.md 300
+  mkdir -p decisions-log-archive
+  _write_lines decisions-log-archive/2026-08.md 900
+  git checkout -q -b docs/records-archive
+  git add -A && git commit -qm "docs(records): archive" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "root CLAUDE.md and AGENTS.md do not count toward the gated diff; nested ones do" {
+  _config true 80 400
+  _write_lines CLAUDE.md 500
+  _write_lines AGENTS.md 300
+  git checkout -q -b docs/instructions-sweep
+  git add -A && git commit -qm "docs: sweep agent instructions" >/dev/null
+  run _gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  mkdir -p pkg
+  _write_lines pkg/CLAUDE.md 200
+  git add -A && git commit -qm "docs: package instructions" >/dev/null
+  run _gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BLOCKED"* ]] || { echo "$output"; false; }
+}
+
+@test "record-like names outside the root records still count toward the gated diff" {
+  _config true 80 400
+  mkdir -p src
+  _write_lines src/decisions-log.ts 200
+  git checkout -q -b feat/decisions-log-viewer
+  git add -A && git commit -qm "feat: viewer" >/dev/null
+  run _gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"BLOCKED"* ]] || { echo "$output"; false; }
+}
+
 @test "AGENT_ prefixed source files still count toward the gated diff" {
   _config true 80 400
   # The exemption is for .md guides only; it must not launder code.
@@ -737,6 +780,20 @@ NODE
   run _verdict_with_triad_grep_failure
   [ "$status" -eq 0 ]
   [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+}
+
+@test "failed grep triad discovery preserves status 2 without leaking producer stderr" {
+  run bash -c '
+    . "$1"
+    # More than a pipe can buffer: an early-exiting grep must break a piped
+    # producer regardless of scheduling. Ignore SIGPIPE to expose its stderr.
+    git() { python3 -c '\''print("src/f.js\n" * 262144, end="")'\''; }
+    grep() { exec 0<&-; return 2; }
+    trap "" PIPE
+    sg_triad_in_range "$2" HEAD
+  ' _ "$CORE" "$REPO_DIR"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ] || { echo "$output"; false; }
 }
 
 @test "detached HEAD -> advisory (fail-open, exit 0)" {

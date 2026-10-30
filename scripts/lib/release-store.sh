@@ -635,11 +635,12 @@ release_store_json_valid() {
 }
 
 # Successful verification is memoized for the shell process that performed it
-# and its subshells (call sites capture through `$(...)`, which is why the
-# value is exported rather than plain). Every key is prefixed with that
-# shell's `$$`, so a value inherited by an exec'd child -- which would carry
-# an arbitrarily old success verdict across a fresh process boundary -- can
-# never match and the child re-verifies. Failure is never recorded.
+# and its subshells (a `$(...)` capture sees the plain variable). Sourcing this
+# library discards any inherited value and the memo is never exported, so an
+# exec'd or spawned child -- which would otherwise carry an arbitrarily old
+# success verdict across a fresh process boundary -- starts empty and
+# re-verifies. Every key is also prefixed with that shell's `$$`. Failure is
+# never recorded.
 # Key: canonical release dir, sha256(release.json) from
 # release_store_release_json_sha256_no_follow, plus skip_writable, allow_stage,
 # and expected_version.
@@ -647,7 +648,8 @@ release_store_json_valid() {
 # verifies and then uses the payload; a same-process tamper after a successful
 # verify was already outside that check. The memo is not shared across processes,
 # so a cross-process tamper is still refused on the next invocation.
-: "${_TRELLIS_RELEASE_STORE_VERIFY_MEMO:=}"
+unset _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+_TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
 
 release_store_verify_memo_key() {
   local release_dir="${1:-}" expected_version="${2:-}" skip_writable="${3:-0}" allow_stage="${4:-0}"
@@ -687,7 +689,6 @@ release_store_verify_path() {
   release_store_verify_path_body "$release_dir" "$expected_version" "$skip_writable" "$allow_stage" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$key" ]; then
     _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\n'
-    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
   fi
   return "$rc"
 }

@@ -1,6 +1,6 @@
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
@@ -127,11 +127,33 @@ function nativeSkillReason(pi: ExtensionAPI, path: string): string | undefined {
   return basename(path) === "SKILL.md" || (physical && basename(physical) === "SKILL.md") || declared ? skillManifestReason(path) : undefined;
 }
 
+function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
+  if (!["get_subagent_result", "steer_subagent"].includes(name)) return false;
+  const source = pi.getAllTools().find(tool => tool.name === name)?.sourceInfo;
+  if (source?.origin !== "package" || !/^npm:@tintinweb\/pi-subagents(?:@[^/\s:]+)?$/.test(source.source)) return false;
+  try {
+    const entry = realpathSync.native(source.path);
+    if (!statSync(entry).isFile()) return false;
+    let directory = resolve(entry, "..");
+    for (;;) {
+      const manifest = resolve(directory, "package.json");
+      // The nearest package owns the entry; never inherit an enclosing identity.
+      if (lstatSync(manifest, { throwIfNoEntry: false })) {
+        return JSON.parse(readFileSync(manifest, "utf8")).name === "@tintinweb/pi-subagents";
+      }
+      const parent = resolve(directory, "..");
+      if (parent === directory) return false;
+      directory = parent;
+    }
+  } catch { return false; }
+}
+
 function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cwd: string, root: string, state: ReadState): Decision | undefined {
   if (action.tool_name === "powershell") return deny("Trellis PowerShell destructive protection is unavailable; refusing pre-action execution");
   if (action.family === "mcp" || action.family === "local_tool" || action.family === "unknown") {
     // Child guard loading is a launcher/roster contract, not parent argument parsing.
     if (action.tool_name === "Agent" || action.tool_name === "SubagentWorkflow") return undefined;
+    if (action.family === "local_tool" && isSubagentControl(pi, action.tool_name)) return undefined;
     const builtin = ["grep", "find", "ls"].includes(action.tool_name)
       && pi.getAllTools().some(tool => tool.name === action.tool_name && tool.sourceInfo.source === "builtin");
     if (!builtin) return deny(`Trellis refuses unmediated ${action.family} tool '${action.tool_name}': shell/mutation protection is unavailable`);
@@ -248,6 +270,12 @@ function session(ctx: ExtensionContext) {
   };
 }
 
+const MAX_DISPATCH_EVENT_BYTES = 64 * 1024 * 1024;
+
+function missingPath(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
 async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<string, unknown>, ctx: ExtensionContext, cwd = ctx.cwd): Promise<Decision> {
   const root = attachedRoot(cwd);
   if (!root) return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: runtimeUnavailable };
@@ -255,12 +283,52 @@ async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<strin
   if (!existsSync(script)) {
     return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: "Trellis Pi dispatcher is missing from the attached immutable runtime" };
   }
-  const encoded = Buffer.from(JSON.stringify(event), "utf8").toString("base64");
-  let result;
+  let payload: Buffer;
   try {
-    result = await pi.exec(script, ["--base64", encoded], { cwd: root ?? cwd, timeout: 300_000, signal: ctx.signal });
+    const serialized = JSON.stringify(event);
+    if (serialized === undefined) throw new Error("event is not JSON serializable");
+    payload = Buffer.from(serialized, "utf8");
+  } catch {
+    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: "Trellis Pi event could not be serialized; refusing dispatcher call" };
+  }
+  if (payload.byteLength > MAX_DISPATCH_EVENT_BYTES) {
+    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: `Trellis Pi event exceeds the ${MAX_DISPATCH_EVENT_BYTES}-byte dispatcher transport limit; refusing event` };
+  }
+
+  let eventDirectory: string | undefined;
+  let eventFile: string | undefined;
+  let result: Awaited<ReturnType<ExtensionAPI["exec"]>> | undefined;
+  let dispatchError: string | undefined;
+  const cleanupErrors: string[] = [];
+  try {
+    eventDirectory = mkdtempSync(resolve(tmpdir(), "trellis-pi-event-"));
+    chmodSync(eventDirectory, 0o700);
+    eventFile = resolve(eventDirectory, "event.json");
+    writeFileSync(eventFile, payload, { flag: "wx", mode: 0o600 });
+    chmodSync(eventFile, 0o600);
+    result = await pi.exec(script, ["--event-file", eventFile], { cwd: root, timeout: 300_000, signal: ctx.signal });
   } catch (error) {
-    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: `Trellis Pi dispatcher could not run: ${error instanceof Error ? error.message : String(error)}` };
+    dispatchError = `Trellis Pi dispatcher could not run: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    if (eventFile) {
+      try { unlinkSync(eventFile); } catch (error) {
+        if (!missingPath(error)) cleanupErrors.push(`event file: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (eventDirectory) {
+      try { rmdirSync(eventDirectory); } catch (error) {
+        if (!missingPath(error)) cleanupErrors.push(`private directory: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  if (cleanupErrors.length) {
+    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: `Trellis Pi dispatcher event transport cleanup failed: ${cleanupErrors.join("; ")}` };
+  }
+  if (dispatchError) {
+    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: dispatchError };
+  }
+  if (!result) {
+    return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: "Trellis Pi dispatcher returned no result" };
   }
   const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
   try {
@@ -304,6 +372,12 @@ function resultFailed(event: ToolResultEvent, family: NormalizedAction["action"]
   return false; // Successful reads contain arbitrary file text, never failure evidence.
 }
 
+function isCapabilityOnly(decision: Decision): boolean {
+  return decision.decision === "allow"
+    && (decision.capability_status === "unsupported" || decision.capability_status === "advisory")
+    && !decision.context;
+}
+
 function show(ctx: ExtensionContext, decision: Decision) {
   if (decision.reason && decision.decision !== "allow") {
     ctx.ui.notify(decision.reason, decision.decision === "deny" ? "error" : "warning");
@@ -311,7 +385,7 @@ function show(ctx: ExtensionContext, decision: Decision) {
 }
 
 export default function trellisPiExtension(pi: ExtensionAPI) {
-  const pending = new Map<string, { action: NormalizedAction["action"]; context: string; state: ReadState; generation: number }>();
+  const pending = new Map<string, { action: NormalizedAction["action"]; context: string; capabilityOnly: boolean; state: ReadState; generation: number }>();
   const readStates = new Map<string, ReadState>();
   let generation = 0;
   let userBashSequence = 0;
@@ -356,7 +430,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
     const action = actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
     const root = attachedRoot(ctx.cwd);
-    if ((action.family === "file_mutation" || action.family === "shell" || event.toolName === "Agent" || event.toolName === "SubagentWorkflow") && (!root || !readPolicy(root))) {
+    if ((action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName)) && (!root || !readPolicy(root))) {
       return { block: true, reason: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md" };
     }
     if (!root) return { block: true, reason: runtimeUnavailable };
@@ -371,7 +445,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     show(ctx, decision);
     if (decision.decision === "deny") return { block: true, reason: decision.reason ?? "Blocked by Trellis" };
     const context = advisoryContext(decision);
-    pending.set(event.toolCallId, { action, state, generation, context: context ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${context}` : "" });
+    pending.set(event.toolCallId, { action, state, generation, capabilityOnly: isCapabilityOnly(decision), context: context ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${context}` : "" });
   });
 
   pi.on("tool_result", async (event: ToolResultEvent, ctx) => {
@@ -389,7 +463,16 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     const decision = await dispatch(pi, { ...envelope, in_process_read_tracking: true }, ctx);
     show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
     const postContext = advisoryContext(decision);
-    const context = [pre?.context, postContext ? `[Trellis post-action advisory; capability: ${decision.capability_status}]\n${postContext}` : undefined].filter(Boolean).join("\n\n");
+    const postAdvisory = postContext ? `[Trellis post-action advisory; capability: ${decision.capability_status}]\n${postContext}` : "";
+    const successfulRead = action.family === "file_read" && !failed;
+    const separatePre = successfulRead && pre?.capabilityOnly;
+    const separatePost = successfulRead && isCapabilityOnly(decision);
+    const capabilityContext = [separatePre ? pre?.context : undefined, separatePost ? postAdvisory : undefined].filter(Boolean).join("\n\n");
+    if (capabilityContext) {
+      // Pi flushes context-only messages at turn_end after tool results, without steering or another turn.
+      pi.sendMessage({ customType: "trellis-context", content: capabilityContext, display: false }, { triggerTurn: false });
+    }
+    const context = [separatePre ? undefined : pre?.context, separatePost ? undefined : postAdvisory].filter(Boolean).join("\n\n");
     if (context) return { content: [...event.content, { type: "text" as const, text: context }] };
   });
 
@@ -447,7 +530,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     pendingContext = undefined;
     const policyContext = !root ? runtimeUnavailable : policy
       ? undefined
-      : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md; shell, file mutation, Agent, and SubagentWorkflow tools are blocked.";
+      : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md; shell, file mutation, Agent, SubagentWorkflow, and steer_subagent tools are blocked.";
     return {
       systemPrompt,
       ...((context || policyContext) ? { message: { customType: "trellis-context", content: [policyContext, context].filter(Boolean).join("\n\n"), display: false } } : {}),

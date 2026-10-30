@@ -211,8 +211,8 @@ def cases(cfg, policy_bytes, workspace, pane, nonce):
     # Every eligible verdict fallback obeys the rules, not only the chosen row.
     add("i-fallbacks-ok", "accept", "cheap-2",
         "eligible fallbacks in allowed families: reviewer sol, security opus "
-        "and sol-xhigh behind astra, merge sol-xhigh",
-        art("cheap-2", ["gemini", "sol"], ["astra", "opus", "sol-xhigh"],
+        "behind sol-xhigh, merge sol-xhigh",
+        art("cheap-2", ["gemini", "sol"], ["sol-xhigh", "opus"],
             ["opus", "sol-xhigh"], ["sol", "opus"]))
     add("i-reviewer-trail", "reject", "luna",
         "reviewer cheap-2 is chosen but sol, the producer's family, is an "

@@ -19,6 +19,7 @@
 # whole point of the test.
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
   STUB="$(mktemp -d)"
   mkdir -p "$STUB/scripts/lib"

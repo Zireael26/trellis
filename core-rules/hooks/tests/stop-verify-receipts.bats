@@ -182,6 +182,148 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+# --- last_assistant_message (Stop envelope) ------------------------------------
+# Claude Code can fire Stop before the final assistant message reaches the
+# transcript file. The envelope's last_assistant_message carries that text, so a
+# receipt there must count even when the transcript still ends at the prompt.
+
+# Envelope with transcript_path = $1 (empty → key omitted) and
+# last_assistant_message = $2.
+make_envelope_msg() {
+  jq -nc --arg t "$1" --arg m "$2" \
+    'if $t == "" then {} else {transcript_path: $t} end + {last_assistant_message: $m}'
+}
+
+# Transcript whose final assistant line has not been written yet.
+write_transcript_lagging() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+EOF
+}
+
+@test "last message: receipt + marker in envelope, transcript lagging → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_lagging "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "$tx" 'Done. <!-- dod-receipt cmd="node -e 1" exit=0 diff="+1/-0 (1 files)" --> <!-- follow-ups: none -->')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "issue #476: first Stop uses only the pending envelope without a transcript retry" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  local hook="${STOP_VERIFY_476_HOOK:-$HOOK}"
+  write_transcript_lagging "$tx"
+  cp "$tx" "$tx.before"
+
+  run bash "$hook" <<<"$(make_envelope_msg "$tx" 'Done. <!-- dod-receipt cmd="node -e 1" exit=0 diff="+1/-0 (1 files)" --> <!-- follow-ups: none -->')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  cmp -s "$tx.before" "$tx"
+
+  # No receipt has landed in the transcript: removing the pending message
+  # must still block, rather than inheriting a pass from the first Stop.
+  run bash "$hook" <<<"$(make_envelope_msg "$tx" 'Done.')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+  cmp -s "$tx.before" "$tx"
+}
+
+@test "last message: receipt without marker, transcript lagging → warn, not block (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_lagging "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "$tx" 'Done. <!-- dod-receipt cmd="node -e 1" exit=0 diff="+1/-0 (1 files)" -->')"
+  [ "$status" -eq 0 ]
+  printf '%s' "$output" | jq -e '.additionalContext | contains("follow-ups")' >/dev/null
+}
+
+@test "last message: unfilled template in envelope → block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_lagging "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "$tx" 'Done. <!-- dod-receipt cmd="<verification command>" exit=<int> diff="+N/-M (K files)" -->')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+@test "last message: no receipt in envelope, stale receipt in transcript → block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_stale_receipt "$tx"
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "$tx" 'Made the second change.')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+@test "last message: receipt in envelope, no transcript_path → pass without advisory (0)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "" 'Done. <!-- dod-receipt cmd="node -e 1" exit=0 diff="+1/-0 (1 files)" --> <!-- follow-ups: 2 -->')"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "last message: no receipt in envelope, no transcript_path → block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "" 'All done.')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+@test "last message: non-string envelope value carrying a receipt → block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  write_transcript_lagging "$tx"
+
+  run bash "$HOOK" <<<"$(jq -nc --arg t "$tx" '{transcript_path: $t, last_assistant_message: {hidden: "<!-- dod-receipt cmd=\"true\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: none -->"}}')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+@test "transcript: receipt only inside a thinking block → block (2, receipts)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  cat > "$tx" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"<!-- dod-receipt cmd=\"true\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: none -->"},{"type":"text","text":"Done."}]}}
+EOF
+
+  run bash "$HOOK" <<<"$(make_envelope_msg "$tx" 'Done.')"
+  [ "$status" -eq 2 ]
+  printf '%s' "$output" | jq -e '.reason | startswith("receipts:")' >/dev/null
+}
+
+@test "transcript: receipt in a text block of array content → silent pass (0)" {
+  seed_todos_none
+  make_dirty_code
+  local tx="$BATS_TEST_TMPDIR/transcript.jsonl"
+  cat > "$tx" <<'EOF'
+{"type":"user","message":{"role":"user","content":"please implement add()"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done. <!-- dod-receipt cmd=\"node -e 1\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: none -->"}]}}
+EOF
+
+  run bash "$HOOK" <<<"$(make_envelope "$tx")"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # --- Follow-ups marker fixtures (spec 012) -------------------------------------
 
 # Current-turn receipt AND a follow-ups count marker on the assistant line.

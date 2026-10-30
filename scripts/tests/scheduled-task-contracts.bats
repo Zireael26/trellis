@@ -339,6 +339,28 @@ materialize_task() {
   [[ "$output" == *"no eligible active checkout targets"* ]] || { echo "$output"; false; }
 }
 
+# exec keeps the caller's $$, so a verification memo it exports would match.
+# The materializer must load the release store with an empty memo and catch the
+# payload change made after the caller's own successful verification.
+@test "materialize ignores a verification memo handed over by exec" {
+  local personal="$SANDBOX/personal/alpha"
+  make_repo "$personal" alpha
+  register_repo personal alpha "$personal"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c '
+    . "$1" || exit 90
+    release_store_locate 1.2.3 >/dev/null || exit 91
+    [ -n "$_TRELLIS_RELEASE_STORE_VERIFY_MEMO" ] || exit 92
+    version="$TRELLIS_HOME/releases/1.2.3/payload/core-rules/VERSION"
+    chmod u+w "$version" && printf "tampered\n" > "$version" && chmod a-w "$version" || exit 93
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+    exec "$2" materialize --home "$TRELLIS_HOME" --fleet personal daily-project-digest
+  ' _ "$RELEASE_STORE_LIB" "$MATERIALIZER"
+  [ "$status" -eq 4 ] || { echo "rc=$status; $output"; false; }
+  [[ "$output" == *"changed release content: core-rules/VERSION"* ]] || { echo "$output"; false; }
+  [ ! -e "$TRELLIS_HOME_FIX/tasks/personal/daily-project-digest" ]
+}
+
 @test "AEO materialization refuses missing local URL and marker metadata" {
   local personal="$SANDBOX/personal/alpha"
   local root="$TRELLIS_HOME_FIX/tasks/personal/aeo-baseline"

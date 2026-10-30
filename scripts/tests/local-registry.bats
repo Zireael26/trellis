@@ -935,7 +935,7 @@ LEGACY
   # ENVIRONMENT fault, not a per-row state: class 5 for the listing itself, so a
   # consumer can never read an all-rows-unavailable snapshot as a clean exit 0.
   [ "$status" -eq 5 ]
-  [[ "$output" == *"a SHA-256 command (shasum or sha256sum) is required"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"a SHA-256 command (sha256sum, openssl, or shasum) is required"* ]] || { echo "$output"; false; }
   [[ "$output" != *'"availability": "unavailable"'* ]] || { echo "$output"; false; }
 }
 

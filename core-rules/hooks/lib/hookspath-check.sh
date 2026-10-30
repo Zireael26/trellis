@@ -15,13 +15,18 @@
 # Read-only: it never writes git config, an owner record, or any file. It reads
 # `git config --local --get-all`, never the effective value, because the harness
 # git wrappers pin `-c core.hooksPath=/dev/null`. The authority classifier is
-# not consulted: the recorded previous value counts as drift too. The line names
-# the guarded repair, never a bare `git config` write.
+# not consulted: the recorded previous value counts as drift too. That exact
+# value names the restore command; other drift names the guarded doctor repair.
+# Commands are advisory text only, never executed here. Every remedy follows
+# the operator-remedy prefix, never an imperative: session context reaches
+# agents as instructions,
+# and a worker once ran `trellis doctor --fix` from the stale advisory against
+# its brief (2026-10-19).
 #
 # Bash 3.2 compatible; sourcing this file has no side effects.
 
 trellis_hookspath_drift_line() {
-  local root="${1:-}" home common checkout worktree owner enabled managed values rc count current husky=""
+  local root="${1:-}" home common checkout worktree owner enabled managed values rc count current previous="" husky=""
   command -v jq >/dev/null 2>&1 || return 0
   [ -n "$root" ] && [ -d "$root" ] || return 0
   if [ -n "${TRELLIS_HOME:-}" ]; then
@@ -43,6 +48,7 @@ trellis_hookspath_drift_line() {
   enabled="$(jq -r '.git_hooks.enabled // false' "$owner" 2>/dev/null)" || return 0
   if [ "$enabled" = true ]; then
     managed="$(jq -r '.git_hooks.managed_hooks_path // empty' "$owner" 2>/dev/null)" || return 0
+    previous="$(jq -r '.git_hooks.previous_hooks_path // empty' "$owner" 2>/dev/null)" || return 0
   else
     managed=""
     for owner in "$home/state/attachments/$checkout/"*.json; do
@@ -50,7 +56,10 @@ trellis_hookspath_drift_line() {
       managed="$(jq -r '
         if .git_hooks.enabled == true then .git_hooks.managed_hooks_path // empty else empty end
       ' "$owner" 2>/dev/null)" || continue
-      [ -z "$managed" ] || break
+      if [ -n "$managed" ]; then
+        previous="$(jq -r '.git_hooks.previous_hooks_path // empty' "$owner" 2>/dev/null)" || return 0
+        break
+      fi
     done
     if [ -z "$managed" ] && [ -d "$home/state/git-hooks/$checkout" ]; then
       managed="$home/state/git-hooks/$checkout"
@@ -70,13 +79,18 @@ trellis_hookspath_drift_line() {
   if [ "$rc" -eq 0 ]; then
     count="$(printf '%s\n' "$values" | wc -l | tr -d ' ')"
     [ "$count" -ne 1 ] || [ "$values" != "$managed" ] || return 0
+    if [ "$count" -eq 1 ] && [ -n "$previous" ] && [ "$values" = "$previous" ]; then
+      printf 'Trellis git hooks are not running in this worktree: local core.hooksPath is the recorded previous value "%s", not the managed dispatcher, so pushes are ungated. Operator remedy (report it; never run it yourself): git -C %q config --local --replace-all core.hooksPath %q\n' \
+        "$values" "$root" "$managed"
+      return 0
+    fi
     current="$(printf '%s\n' "$values" | sed 's/.*/"&"/' | paste -sd ',' - | sed 's/,/, /g')"
     [ "$count" -eq 1 ] || current="$count values ($current)"
     [ "$values" != ".husky/_" ] || husky=" (husky's \`prepare\` sets .husky/_ after a package install)"
   else
     current="unset"
   fi
-  printf 'Trellis git hooks are not running in this worktree: local core.hooksPath is %s%s, not the managed dispatcher "%s", so pushes are ungated. Repair with `trellis doctor --fix`.\n' \
+  printf 'Trellis git hooks are not running in this worktree: local core.hooksPath is %s%s, not the managed dispatcher "%s", so pushes are ungated. Operator remedy (report it; never run it yourself): `trellis doctor --fix`.\n' \
     "$current" "$husky" "$managed"
 }
 
@@ -136,17 +150,17 @@ EOF2
   age=$(( $(date +%s) - at ))
   case "$state" in
     failed)
-      printf 'Trellis attachment checks FAILED in this worktree (%s): pushes are refused until it is fixed. Remedy: %s\n' "$check" "$remedy"
+      printf 'Trellis attachment checks FAILED in this worktree (%s): pushes are refused until it is fixed. Operator remedy (report it; never run it yourself): %s\n' "$check" "$remedy"
       ;;
     blocked-by-journal)
-      printf 'Trellis attachment checks are blocked by an unfinished Trellis operation: %s\n' "$remedy"
+      printf 'Trellis attachment checks are blocked by an unfinished Trellis operation. Operator remedy (report it; never run it yourself): %s\n' "$remedy"
       ;;
     stale)
-      printf 'Trellis attachment checks are stale for this worktree (recorded for an earlier attachment state); pre-push re-runs them inline. Refresh with `trellis doctor --fix`.\n'
+      printf 'Trellis attachment checks are stale for this worktree (recorded for an earlier attachment state); pre-push re-runs them inline. Operator remedy (report it; never run it yourself): `trellis doctor --fix`.\n'
       ;;
     pending|running)
       [ "$age" -gt 900 ] || return 0
-      printf 'Trellis attachment checks have been %s for %s min; pre-push runs them inline until they finish. Run `trellis doctor --fix` to finish them now.\n' \
+      printf 'Trellis attachment checks have been %s for %s min; pre-push runs them inline until they finish. Operator remedy (report it; never run it yourself): `trellis doctor --fix` finishes them now.\n' \
         "$state" "$((age / 60))"
       ;;
   esac

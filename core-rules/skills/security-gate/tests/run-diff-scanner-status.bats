@@ -1259,3 +1259,53 @@ seed_go_module() {
     bash "$SCRIPT_ROOT/../process-gate/scripts/check-security-diff.sh" --range=HEAD~1..HEAD
   assert_blocked semgrep SAST
 }
+
+record_semgrep_args() {
+  rm "$BIN/semgrep"
+  mkdir -p "$BIN/.inner"
+  ln -s ../scanner "$BIN/.inner/semgrep"
+  cat > "$BIN/semgrep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$SCANNER_FIXTURES/semgrep.args"
+exec "$(dirname "$0")/.inner/semgrep" "$@"
+SH
+  chmod +x "$BIN/semgrep"
+}
+
+semgrep_timeout_arg() {
+  awk 'prev == "--timeout" { print; exit } { prev = $0 }' "$TEST_ROOT/semgrep.args"
+}
+
+@test "semgrep gets a per-file rule timeout, 30 s by default" {
+  record_semgrep_args
+  commit_change
+  run_diff
+  assert_mergeable
+  [ "$(semgrep_timeout_arg)" = 30 ] || { cat "$TEST_ROOT/semgrep.args"; false; }
+}
+
+@test "SECURITY_GATE_SEMGREP_TIMEOUT sets the semgrep rule timeout" {
+  record_semgrep_args
+  commit_change
+  run_diff SECURITY_GATE_SEMGREP_TIMEOUT=90
+  assert_mergeable
+  [ "$(semgrep_timeout_arg)" = 90 ]
+}
+
+@test "an invalid or zero semgrep timeout falls back to the default, never to no timeout" {
+  record_semgrep_args
+  commit_change
+  for value in 0 abc 601 -5; do
+    run_diff SECURITY_GATE_SEMGREP_TIMEOUT="$value"
+    assert_mergeable
+    [ "$(semgrep_timeout_arg)" = 30 ] || { echo "value=$value"; cat "$TEST_ROOT/semgrep.args"; false; }
+    [[ "$output" == *"SECURITY_GATE_SEMGREP_TIMEOUT"* ]] || { echo "no warning for $value: $output"; false; }
+  done
+}
+
+@test "a semgrep rule timeout still blocks SAST" {
+  printf '%s\n' '{"results":[],"errors":[{"message":"Timeout","type":"Timeout","path":"changed.ts"}],"paths":{"scanned":["changed.ts"]}}' > "$TEST_ROOT/semgrep.json"
+  commit_change
+  run_diff SECURITY_GATE_SEMGREP_TIMEOUT=90
+  assert_blocked semgrep SAST
+}

@@ -100,6 +100,28 @@ owner_for_root() {
   return 0
 }
 
+# Keep a healthy shared-state manager and a non-managing sibling. The latter
+# must retain worktree identity checks even though its native leaves may drift.
+attach_identity_sibling() {
+  local root="$1"
+  attach_root "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  add_worktree "$root" identity-sibling
+  attach_root "$root"
+  [ "$status" -eq 0 ] || { echo "$stderr"; return 1; }
+  SIBLING_OWNER="$(owner_for_root "$root")"
+  [ -f "$SIBLING_OWNER" ]
+  [ "$(jq -r '.git_hooks.enabled' "$SIBLING_OWNER")" = false ]
+}
+
+assert_owner_identity_refusal() {
+  [ "$status" -eq 3 ] || {
+    printf 'expected attach exit 3, got %s\nstdout: %s\nstderr: %s\n' "$status" "$output" "$stderr"
+    return 1
+  }
+  [[ "$stderr" == *"$1: $SIBLING_OWNER"* ]] || { echo "$stderr"; return 1; }
+}
+
 # The uv-migration shape: the worktree is pruned and its registry row dropped,
 # but the owner record stays behind. `kept` leaves the pruned directory on disk.
 orphan_worktree() {
@@ -257,7 +279,105 @@ EOF
 
   [ "$status" -eq 3 ]
   [[ "$stderr" != *orphan-owner-record* ]] || { echo "$stderr"; false; }
-  [[ "$stderr" == *"managed exclude block has no matching committed checkout ownership"* ]]
+  [[ "$stderr" == *"shared exclude owner has no live worktree"* ]] || { echo "$stderr"; false; }
+}
+
+@test "owner identity: an undetermined pruned worktree with a retained registry row refuses" {
+  sibling="$SANDBOX/wt one"
+  target="$SANDBOX/wt two"
+  attach_identity_sibling "$sibling"
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before-prune"
+  orphan_worktree "$sibling" kept
+  # Retain the row: dropping it would let a later registry check mask the
+  # missing identity check while the dangling Git file passed the entry test.
+  cp "$SANDBOX/registry-before-prune" "$TRELLIS_HOME/registry.json"
+  [ -d "$sibling" ] && [ -f "$sibling/.git" ]
+  run git -C "$sibling" rev-parse --git-common-dir
+  [ "$status" -ne 0 ]
+  [ "$(classify "$SIBLING_OWNER")" = not-a-worktree ]
+  add_worktree "$target" identity-target
+
+  mkdir "$SANDBOX/stub"
+  printf '#!/usr/bin/env bash\ncase " $* " in *" safe.directory=* worktree list "*) exit 128 ;; esac\nexec %q "$@"\n' \
+    "$(command -v git)" > "$SANDBOX/stub/git"
+  chmod 755 "$SANDBOX/stub/git"
+  run env PATH="$SANDBOX/stub:$PATH" bash -c \
+    '. "$1"; attachment_owner_orphan_reason "$2"' _ "$ATTACH" "$SIBLING_OWNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "undetermined "* ]]
+
+  run --separate-stderr env PATH="$SANDBOX/stub:$PATH" "$ATTACH" attach --home "$TRELLIS_HOME" \
+    --fleet personal --release 1.2.3 "$target"
+
+  assert_owner_identity_refusal "shared exclude owner no longer names its canonical worktree in this checkout"
+  [[ "$stderr" != *orphan-owner-record* ]]
+  [ -z "$(owner_for_root "$target")" ]
+}
+
+@test "owner identity: a still-listed root pointing at another checkout refuses" {
+  sibling="$SANDBOX/wt one"
+  target="$SANDBOX/wt two"
+  attach_identity_sibling "$sibling"
+  add_worktree "$target" identity-target
+  git init -q "$SANDBOX/foreign"
+  printf 'gitdir: %s/.git\n' "$SANDBOX/foreign" > "$sibling/.git"
+  # The old checkout still lists this path; the orphan predicate cannot catch
+  # its Git file now resolving to a different checkout.
+  [ "$(classify "$SIBLING_OWNER")" = live ]
+
+  attach_root "$target"
+
+  assert_owner_identity_refusal "shared exclude owner no longer names its canonical worktree in this checkout"
+  [ -z "$(owner_for_root "$target")" ]
+}
+
+@test "owner identity: a still-listed root behind a symlinked ancestor refuses" {
+  sibling="$SANDBOX/parent/wt one"
+  target="$SANDBOX/wt two"
+  mkdir "$SANDBOX/parent"
+  attach_identity_sibling "$sibling"
+  add_worktree "$target" identity-target
+  mv "$SANDBOX/parent" "$SANDBOX/moved-parent"
+  ln -s "$SANDBOX/moved-parent" "$SANDBOX/parent"
+  [ -d "$sibling" ] && [ ! -L "$sibling" ] && [ -L "$SANDBOX/parent" ]
+  [ "$(classify "$SIBLING_OWNER")" = live ]
+
+  attach_root "$target"
+
+  assert_owner_identity_refusal "shared exclude owner no longer names its canonical worktree in this checkout"
+  [ -z "$(owner_for_root "$target")" ]
+}
+
+@test "owner identity: current attach refuses a sibling now pointing at another checkout" {
+  sibling="$SANDBOX/wt one"
+  attach_identity_sibling "$sibling"
+  git init -q "$SANDBOX/foreign"
+  printf 'gitdir: %s/.git\n' "$SANDBOX/foreign" > "$sibling/.git"
+  [ "$(classify "$SIBLING_OWNER")" = live ]
+
+  # Already-current attach returns before shared-exclude preflight. This must
+  # exercise the non-target branch of _attach_reconcile_verify_owners instead.
+  attach_root "$PROJECT"
+
+  assert_owner_identity_refusal "exact-owner reconcile refused: owner no longer names its canonical worktree in this checkout"
+}
+
+@test "owner identity: unrelated native drift still permits sibling attach and current retry" {
+  sibling="$SANDBOX/wt one"
+  target="$SANDBOX/wt two"
+  attach_identity_sibling "$sibling"
+  printf 'unrelated native drift\n' >> "$sibling/.claude/settings.local.json"
+  run bash -c '. "$1"; attachment_verify "$2" "$3"' _ \
+    "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$SIBLING_OWNER"
+  [ "$status" -eq 3 ]
+  add_worktree "$target" identity-target
+
+  attach_root "$target"
+  [ "$status" -eq 0 ] || { echo "$stderr"; false; }
+  [ -f "$(owner_for_root "$target")" ]
+  attach_root "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$stderr"; false; }
+  [[ "$output" == *"already attached:"* ]]
 }
 
 @test "the orphan predicate classifies every O1 fixture" {

@@ -13,6 +13,22 @@ pre_existing = owner.get("pre_existing", [])
 owned = owner["artifacts"] + pre_existing
 deferred = {e["path"] for e in pre_existing
             if e["kind"] == "symlink" and e.get("reason") == "project-authored-file"}
+
+
+def declared_by_payload(relative):
+    # A requirement holds only where the attachment's own release declares the
+    # leaf: 1.3.18 stopped rendering .pi/hooks, older pinned releases still do.
+    # An unreadable manifest keeps every requirement (fail closed).
+    try:
+        with open(os.path.join(payload, "core-rules/inheritance-manifest.json"), "rb") as source:
+            links = json.load(source)["harnesses"]["pi"]["links"]
+        return any(link.get("destination") == relative
+                   or relative.startswith(link.get("destination_dir", "\0") + "/") for link in links)
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
+required = [relative for relative in required if declared_by_payload(relative)]
 paths = sorted(set(required + [e["path"] for e in owned if e["path"].startswith(".pi/")]))
 
 

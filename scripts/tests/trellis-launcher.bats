@@ -274,6 +274,33 @@ EOF
   chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
 }
 
+@test "--version reports configured release without payload preflight or state writes" {
+  # No release store is needed, and the mutable source must never execute.
+  rmdir "$TRELLIS_HOME/releases"
+  run_launcher --version
+  [ "$status" -eq 0 ]
+  [ "$output" = 'trellis 1.2.3 (configured; not verified)' ]
+  [ ! -e "$TRELLIS_HOME/state" ]
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+
+  # A malformed installed release must not turn this metadata query into a
+  # verification attempt, nor may extra arguments acquire the cheap route.
+  mkdir -p "$TRELLIS_HOME/releases/1.2.3"
+  printf 'broken record\n' > "$TRELLIS_HOME/releases/1.2.3/release.json"
+  run_launcher --version
+  [ "$status" -eq 0 ]
+  [ "$output" = 'trellis 1.2.3 (configured; not verified)' ]
+  run_launcher --version doctor
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'--version takes no arguments'* ]]
+  [ ! -e "$TRELLIS_HOME/state" ]
+
+  chmod 644 "$TRELLIS_HOME/config.json"
+  run_launcher --version
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'machine config is missing, not private'* ]]
+}
+
 run_launcher() {
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" "$@"
 }

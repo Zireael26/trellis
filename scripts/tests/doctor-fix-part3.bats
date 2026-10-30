@@ -194,7 +194,42 @@ EOF
   [[ "$output" == *"not exactly one value equal to .husky/_"* ]] || { echo "$output"; false; }
 }
 
-@test "A4.4 (g) and (h): a sibling worktree with hooks disabled, or not attached, is refused by name" {
+@test "A4.4 (h): an unattached sibling no longer blocks the repair; it is named for sync and stays unattached" {
+  local sibling wid
+  hooks_fix_attach null
+  sibling="$SANDBOX/sibling wt"
+  git -C "$PORTABLE_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b sibling "$sibling"
+  sibling="$(cd "$sibling" && pwd -P)"
+  husky_prepare
+  wid="$(printf '%s' "$sibling" | shasum -a 256 | awk '{print $1}')"
+  run_portable_doctor_fix --fix
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"core.hooksPath repaired in"*": .husky/_ -> "* ]] || { echo "$output"; false; }
+  [ "$(git -C "$PORTABLE_PROJECT" config --local --get-all core.hooksPath)" = "$HF_MANAGED" ]
+  [[ "$output" == *"trellis worktree sync $(printf '%q' "$sibling")"* ]] || { echo "$output"; false; }
+  [ ! -e "$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$wid.json" ] || { echo "$output"; false; }
+  # The sibling stays gated: its shared dispatcher refuses the push until it is synced.
+  run bash -c 'cd "$1" && env HOME="$2" "$3" origin /dev/null </dev/null' _ "$sibling" "$PORTABLE_ACCOUNT_HOME" "$HF_MANAGED/pre-push"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"not attached"* ]] || { echo "$output"; false; }
+}
+
+@test "A4.4 (h'): a sibling owner symlink, even dangling, is refused as present and invalid, not as absent" {
+  local before sibling wid
+  hooks_fix_attach null
+  sibling="$SANDBOX/sibling-link"
+  git -C "$PORTABLE_PROJECT" -c core.hooksPath=/dev/null worktree add -q -b sibling-link "$sibling"
+  sibling="$(cd "$sibling" && pwd -P)"
+  husky_prepare
+  before="$(config_digest)"
+  wid="$(printf '%s' "$sibling" | shasum -a 256 | awk '{print $1}')"
+  ln -s "$SANDBOX/no-such-owner.json" "$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$wid.json"
+  run_portable_doctor_fix --fix
+  assert_refused_unchanged "$before" 'detach every worktree of the checkout, then attach the owning worktree first'
+  [[ "$output" == *"worktree $sibling has an owner record that is a symlink or not a regular file"* ]] || { echo "$output"; false; }
+}
+
+@test "A4.4 (g): a sibling worktree with hooks disabled is refused by name" {
   local before sibling wid
   hooks_fix_attach null
   sibling="$SANDBOX/sibling-wt"
@@ -202,11 +237,6 @@ EOF
   sibling="$(cd "$sibling" && pwd -P)"
   husky_prepare
   before="$(config_digest)"
-
-  # (h) unattached sibling
-  run_portable_doctor_fix --fix
-  assert_refused_unchanged "$before" "trellis worktree sync $sibling"
-  [[ "$output" == *"worktree $sibling is not attached"* ]] || { echo "$output"; false; }
 
   # (g) sibling attached with hooks disabled
   wid="$(printf '%s' "$sibling" | shasum -a 256 | awk '{print $1}')"

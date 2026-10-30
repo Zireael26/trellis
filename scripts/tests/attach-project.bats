@@ -730,6 +730,109 @@ reconcile_counted_registry() {
   [ ! -e "$RECONCILE_JOURNAL" ]
 }
 
+@test "attach over N>=3 sibling owners verifies the sealed release at most once" {
+  local idx sibling real_git trace_bin body_log hash_log
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  for idx in 1 2 3; do
+    sibling="$SANDBOX/sibling-$idx"
+    git -C "$PROJECT" worktree add -q -b "sibling-$idx" "$sibling"
+    run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$sibling"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  done
+  [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' | wc -l | tr -d ' ')" -eq 4 ]
+
+  real_git="$(command -v git)"
+  trace_bin="$SANDBOX/trace-bin"
+  mkdir -p "$trace_bin"
+  chmod 755 "$trace_bin"
+  cat > "$trace_bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "hash-object" ] && [ "\${2:-}" = "--no-filters" ] && [ "\${3:-}" = "--stdin-paths" ] && [ -n "\${VERIFY_HASH_LOG:-}" ]; then
+  printf 'hash\n' >> "\$VERIFY_HASH_LOG"
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod 755 "$trace_bin/git"
+
+  body_log="$SANDBOX/verify-body.log"
+  hash_log="$SANDBOX/verify-hash.log"
+  : > "$body_log"
+  : > "$hash_log"
+  run env PATH="$trace_bin:$PATH" VERIFY_BODY_LOG="$body_log" VERIFY_HASH_LOG="$hash_log" bash -c '
+    . "$1"
+    definition="$(declare -f release_store_verify_path_body)"
+    eval "${definition/release_store_verify_path_body /real_release_store_verify_path_body }"
+    release_store_verify_path_body() {
+      printf "%s\n" "$1" >> "$VERIFY_BODY_LOG"
+      real_release_store_verify_path_body "$@"
+    }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' _ "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$body_log" | tr -d ' ')" -eq 1 ] || { echo "attach body_count=$(wc -l < "$body_log")"; return 1; }
+  [ "$(wc -l < "$hash_log" | tr -d ' ')" -eq 1 ] || { echo "attach hash_count=$(wc -l < "$hash_log")"; return 1; }
+}
+
+run_inherited_verify_memo() {
+  local kind="$1" handoff="${2:-child}" entry="${3:-attach}"
+  run_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run bash -c '
+    . "$1/scripts/lib/release-store.sh" || exit 90
+    _TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
+    handoff="$5"
+    if [ "$4" = stale ]; then
+      release_store_verify 1.2.3 || exit 91
+    else
+      key="$(release_store_verify_memo_key "$2/releases/1.2.3" 1.2.3)" || exit 92
+      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${key}"$'"'"'\n'"'"'
+    fi
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+    [ -n "$_TRELLIS_RELEASE_STORE_VERIFY_MEMO" ] || exit 93
+    # The owner and hook inputs stay exact; only a full seal check sees this.
+    chmod u+w "$2/releases/1.2.3/payload/core-rules/VERSION" || exit 94
+    printf "tampered\n" > "$2/releases/1.2.3/payload/core-rules/VERSION" || exit 94
+    chmod a-w "$2/releases/1.2.3/payload/core-rules/VERSION" || exit 94
+    export _TRELLIS_RELEASE_STORE_VERIFY_MEMO_PPID="$$"
+    if [ "$6" = seed ]; then
+      set -- bash "$1/scripts/seed-inheritance-symlinks.sh" --target "$3" --quiet
+    else
+      set -- "$1/scripts/attach-project.sh" attach --home "$2" --fleet personal --release 1.2.3 "$3"
+    fi
+    if [ "$handoff" = exec ]; then exec "$@"; fi
+    "$@"
+    rc=$?
+    exit "$rc"
+  ' inherited-verify-memo "$REPO_ROOT" "$TRELLIS_HOME" "$PROJECT" "$kind" "$handoff" "$entry"
+  [ "$status" -eq 4 ] || { echo "rc=$status; $output"; return 1; }
+  [[ "$output" == *"changed release content: core-rules/VERSION"* ]] || { echo "$output"; return 1; }
+}
+
+@test "attach entrypoint refuses a fabricated parent verification memo" {
+  run_inherited_verify_memo fabricated
+}
+
+@test "attach entrypoint refuses a stale parent verification memo" {
+  run_inherited_verify_memo stale
+}
+
+@test "attach entrypoint refuses an exec-inherited verification memo" {
+  run_inherited_verify_memo fabricated exec
+}
+
+@test "seed entrypoint refuses an exec-inherited verification memo" {
+  run_inherited_verify_memo fabricated exec seed
+}
+
+@test "attach entrypoint refuses a stale exec-inherited verification memo" {
+  run_inherited_verify_memo stale exec
+}
+
+@test "seed entrypoint refuses a stale exec-inherited verification memo" {
+  run_inherited_verify_memo stale exec seed
+}
+
 reconcile_exposed_verifier() {
   run bash -c '
     . "$1"
@@ -894,9 +997,9 @@ reconcile_adopted_group_state() {
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$HOME/.local/bin/trellis" release adopt 1.3.10 --project fixture-project
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   # Spec 066 (u): migrate only release/runtime and shared-exclude snapshots.
-  # Build exact expected owners from the prior records and bytes, independently
+  # Build exact expected owners from their restoration snapshots, independently
   # of the product planner. native-growth adds exactly this one native leaf.
-  python3 - "$SANDBOX" "$TRELLIS_HOME/releases/1.3.10/payload" <<'PYTHON' || return 1
+  python3 -I - "$SANDBOX" "$TRELLIS_HOME/releases/1.3.10/payload" <<'PYTHON' || return 1
 import base64, hashlib, json, pathlib, sys
 sandbox, payload = map(pathlib.Path, sys.argv[1:])
 owners = json.loads((sandbox / "prior-group.json").read_text())
@@ -911,10 +1014,15 @@ for owner in owners:
             or base64.b64decode(owner["exclude"]["after_base64"], validate=True) != live):
         sys.exit("prior owners must agree with the shared live exclude bytes")
 new_block = block.replace(runtime_line, native_lines + runtime_line, 1)
-after = live.replace(block, new_block, 1)
+candidate = live.replace(block, new_block, 1)
 b64 = lambda data: base64.b64encode(data).decode()
 sha = lambda data: hashlib.sha256(data).hexdigest()
 for owner in owners:
+    after = base64.b64decode(owner["exclude"]["before_base64"], validate=True)
+    if owner["exclude"]["managed_by_attachment"]:
+        if after and not after.endswith(b"\n"):
+            after += b"\n"
+        after += new_block
     owner["release"] = "1.3.10"
     for artifact in owner["artifacts"]:
         if artifact["path"] == ".trellis/runtime":
@@ -923,14 +1031,15 @@ for owner in owners:
                             managed_block_base64=b64(new_block), managed_block_sha256=sha(new_block))
     owner["exclude_block_hash"] = sha(new_block)
 (sandbox / "expected-group.json").write_text(json.dumps(owners))
-(sandbox / "expected-exclude").write_bytes(after)
+(sandbox / "expected-exclude").write_bytes(candidate)
 PYTHON
   run diff -u "$SANDBOX/expected-exclude" "$PROJECT/.git/info/exclude"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")" || return 1
   jq -s -e --slurpfile expected "$SANDBOX/expected-group.json" --arg hash "$exclude_hash" '
     sort_by(.worktree_root) == ($expected[0] | sort_by(.worktree_root))
-    and all(.exclude.after_sha256 == $hash)' "$TRELLIS_HOME"/state/attachments/*/*.json || return 1
+    and all(.[] | select(.exclude.managed_by_attachment == true);
+      .exclude.after_sha256 == $hash)' "$TRELLIS_HOME"/state/attachments/*/*.json || return 1
   [ "$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")" = "$registry_before" ] || return 1
   jq -e '.projects["personal/fixture-project"].checkouts | length == 1 and all(.release == "1.3.10" and .harnesses == ["claude","codex"] and (.worktrees | length == 2))' "$TRELLIS_HOME/registry.json" || return 1
   before="$(reconcile_adopted_group_state)" || return 1
@@ -2031,6 +2140,20 @@ run_deferral_attach() {
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release "$DEFERRAL_RELEASE" "$@" "$PROJECT"
 }
 
+make_deferral_owner_with_managed_agents_exclude() {
+  make_deferral_release 3.4.5 || return 1
+  make_deferral_project || return 1
+  commit_deferral_project || return 1
+  git -C "$PROJECT" checkout -q -b tracked-agents || return 1
+  printf '# Project-owned codex guidance\n' > "$PROJECT/AGENTS.md"
+  git -C "$PROJECT" add AGENTS.md || return 1
+  git -C "$PROJECT" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm 'track AGENTS.md' || return 1
+  git -C "$PROJECT" checkout -q - >/dev/null || return 1
+  run_deferral_attach --harness codex
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -Fxq '/AGENTS.md' "$PROJECT/.git/info/exclude"
+}
+
 deferral_owner() {
   find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -print | head -1
 }
@@ -2136,6 +2259,82 @@ deferral_owner() {
   [ "$(readlink "$PROJECT/AGENTS.md")" = README.md ]
   [ -z "$(git -C "$PROJECT" status --porcelain)" ]
   [ ! -e "$PROJECT/.trellis/runtime" ]
+}
+
+@test "L2 tracked AGENTS takeover refreshes ownership and detach preserves project bytes" {
+  local owner before exclude_hash
+  make_deferral_release 3.4.5
+  make_deferral_project
+  commit_deferral_project
+  run_deferral_attach --harness codex
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  owner="$(deferral_owner)"
+  exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")"
+  rm "$PROJECT/AGENTS.md"
+  printf '# tracked project codex guidance\n' > "$PROJECT/AGENTS.md"
+  git -C "$PROJECT" add -f AGENTS.md
+  before="$(sha256_file "$PROJECT/AGENTS.md")"
+  run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$before" ]
+  [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_hash" ]
+  jq -e '
+    any(.pre_existing[]; .path == "AGENTS.md" and .target == "CLAUDE.md" and .reason == "project-authored-file")
+    and all(.artifacts[]; .path != "AGENTS.md")
+  ' "$owner"
+  run_deferral_attach --harness codex
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$before" ]
+}
+
+@test "tracked AGENTS.md worktree reuses the exact committed exclude block" {
+  local first_owner first_owner_hash exclude_hash block_hash block64 new_owner
+  make_deferral_owner_with_managed_agents_exclude
+  first_owner="$(deferral_owner)"
+  first_owner_hash="$(sha256_file "$first_owner")"
+  exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")"
+  block_hash="$(jq -r '.exclude.managed_block_sha256' "$first_owner")"
+  block64="$(jq -r '.exclude.managed_block_base64' "$first_owner")"
+  WORKTREE="$SANDBOX/tracked AGENTS worktree"
+  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q "$WORKTREE" tracked-agents
+
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release "$DEFERRAL_RELEASE" --harness codex "$WORKTREE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  [ "$(cat "$WORKTREE/AGENTS.md")" = '# Project-owned codex guidance' ]
+  [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_hash" ]
+  [ "$(sha256_file "$first_owner")" = "$first_owner_hash" ]
+  [ "$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -print | wc -l | tr -d ' ')" -eq 2 ]
+  jq -s -e --arg root "$WORKTREE" --arg hash "$block_hash" --arg block "$block64" '
+    length == 2
+    and any(.[]; .worktree_root == $root and .exclude.managed_by_attachment == false
+      and .exclude.managed_block_sha256 == $hash and .exclude.managed_block_base64 == $block)
+    and all(.[]; .exclude.managed_block_sha256 == $hash and .exclude.managed_block_base64 == $block)
+  ' "$TRELLIS_HOME"/state/attachments/*/*.json
+  [ -z "$(git -C "$WORKTREE" status --porcelain)" ]
+}
+
+@test "untracked deferred AGENTS.md does not account for an omitted shared exclude entry" {
+  local first_owner first_owner_hash exclude_hash
+  make_deferral_owner_with_managed_agents_exclude
+  first_owner="$(deferral_owner)"
+  first_owner_hash="$(sha256_file "$first_owner")"
+  exclude_hash="$(sha256_file "$PROJECT/.git/info/exclude")"
+  WORKTREE="$SANDBOX/untracked AGENTS worktree"
+  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q --detach "$WORKTREE" HEAD
+  printf '# Untracked project guidance\n' > "$WORKTREE/AGENTS.md"
+
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release "$DEFERRAL_RELEASE" --harness codex "$WORKTREE"
+
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"stale owned exclude plan"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"AGENTS.md"* ]] || { echo "$output"; false; }
+  [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_hash" ]
+  [ "$(sha256_file "$first_owner")" = "$first_owner_hash" ]
+  [ "$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -print | wc -l | tr -d ' ')" -eq 1 ]
+  [ ! -e "$WORKTREE/.trellis/runtime" ]
 }
 
 # The shape that made the codex harness unattachable for any project owning its

@@ -614,6 +614,9 @@ payload_no_publish=(
   # The guide-parity script publishes with the guide, which names it. Its bats
   # suite stays withheld: its synthetic /Users/ paths fail the mirror lint.
   'scripts/tests/pi-guide-parity.bats'
+  # This test asserts the operator's live routes, like the withheld roster.
+  # Keep provider IDs exact in the source; publish neither this leaf nor a stale copy.
+  'scripts/tests/herdr-task-routing.bats'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -630,6 +633,7 @@ delist_prune=(
   'scripts/tests/usage-federation.bats'
   'core-rules/pi/extensions/tests'
   'scripts/tests/pi-guide-parity.bats'
+  'scripts/tests/herdr-task-routing.bats'
   'core-rules/pi/agents'
   'core-rules/usage-federation'
   'docs/antigravity-steering.md'

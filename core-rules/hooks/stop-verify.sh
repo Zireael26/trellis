@@ -159,15 +159,11 @@ fi
 # in _se_find_subtree. cwd-independent (git -C PROJECT_DIR) so it's stable on
 # both sides of the subtree cd. `git diff HEAD --name-only` alone OMITS untracked
 # new files — a turn that only Writes new code files would otherwise look empty.
-# Filter the hook's OWN state file: where .claude/ is committed (not gitignored,
-# as in Trellis projects) ls-files would otherwise surface .claude/.fail-counter,
-# (a) destabilising the file-set hash between consecutive blocks (counter never
-# reaches 2) and (b) making a code-revert-plus-doc-edit turn read as non-doc.
-# Exact path only — a genuine .claude/settings.json edit still needs a receipt.
+# The shared Git pathspec filters checkout-local hook state even when tracked;
+# real settings and rule edits remain visible.
 _se_changed_files() {
-  { git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
-    git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
-    | grep -vxF '.claude/.fail-counter' \
+  { _se_hook_state_git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
+    _se_hook_state_git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
     | sort -u
 }
 
@@ -242,11 +238,22 @@ _se_find_subtree() {
       return 0
     fi
   done < <(
-    { git diff --name-only HEAD 2>/dev/null; \
-      git ls-files --others --exclude-standard 2>/dev/null; } | sort -u
+    _se_changed_files
   )
 
   printf '%s' "$common"
+}
+
+# Keep unavailable checks visible on every receipt/advisory exit, without
+# emitting multiple Stop objects or manufacturing executed verification evidence.
+VERIFICATION_UNAVAILABLE=""
+_se_verification_advisory() {
+  local message="$1"
+  if [ -n "$VERIFICATION_UNAVAILABLE" ]; then
+    message="${VERIFICATION_UNAVAILABLE}${message:+$'\n'}${message}"
+  fi
+  [ -n "$message" ] || return 0
+  jq -nc --arg m "$message" '{additionalContext: $m}'
 }
 
 # _se_receipt_gate — Step 5, the receipts gate (structural done-detection).
@@ -268,13 +275,22 @@ _se_receipt_gate() {
       | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
       | awk 'END{print NR}')
     if [ "$NONDOC_COUNT" != "0" ]; then
-      # Read transcript path from the Stop envelope. Missing or absent file → the
-      # receipt is unverifiable in this harness (e.g. Codex / no transcript_path):
-      # fail OPEN with an advisory rather than block.
+      # Two sources, same as the Codex hook. (a) last_assistant_message: the
+      # final message's text, carried in the Stop envelope. Claude Code can fire
+      # Stop before that message reaches the transcript file, so the transcript
+      # alone misses a receipt in it. (b) the turn-scoped transcript parse:
+      # catches a receipt written before the turn's last tool call. Only when
+      # BOTH are unavailable is the receipt unverifiable: fail OPEN with an
+      # advisory rather than block.
+      # A non-string value is not message text; treat it as unavailable.
+      LAST_MSG=$(printf '%s' "$INPUT" | jq -r 'if (.last_assistant_message | type) == "string" then .last_assistant_message else empty end')
       TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
-      if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
+      if [ -n "$TRANSCRIPT" ] && [ ! -f "$TRANSCRIPT" ]; then
+        TRANSCRIPT=""
+      fi
+      if [ -z "$LAST_MSG" ] && [ -z "$TRANSCRIPT" ]; then
         rm -f "$STATE_FILE"
-        jq -nc '{additionalContext: "stop-verify: receipts unverifiable (no transcript_path in this harness envelope); state your DoD receipt to the user."}'
+        _se_verification_advisory 'stop-verify: receipts unverifiable (no last_assistant_message and no transcript_path in this harness envelope); state your DoD receipt to the user.'
         exit 0
       fi
 
@@ -282,8 +298,25 @@ _se_receipt_gate() {
       # THIS turn. The transcript is JSONL. Emit one role per input line (1:1 map,
       # robust to malformed lines via fromjson? // "null"), find the LAST user-role
       # line, and search ONLY lines after it. No user line → scope whole file.
-      LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
-        | grep -n '^user$' | tail -1 | cut -d: -f1)
+      # _se_turn_text prints this turn's text: the envelope message, then the
+      # assistant text blocks of the scoped transcript lines. Thinking, tool
+      # input and tool output are not text the user saw, so a receipt there
+      # does not count.
+      LAST_USER=""
+      if [ -n "$TRANSCRIPT" ]; then
+        LAST_USER=$(jq -rR '(fromjson? | (.message.role // .role)) // "null"' "$TRANSCRIPT" 2>/dev/null \
+          | grep -n '^user$' | tail -1 | cut -d: -f1)
+      fi
+      _se_turn_text() {
+        printf '%s\n' "$LAST_MSG"
+        [ -n "$TRANSCRIPT" ] && awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
+          | jq -rR 'fromjson? | select((.message.role // .role) == "assistant")
+              | (.message.content // .content)
+              | if type == "string" then .
+                elif type == "array" then .[]? | select(type == "object" and (.type == "text" or .type == "output_text")) | .text | select(type == "string")
+                else empty end' 2>/dev/null
+        return 0
+      }
       # Canonical marker: <!-- dod-receipt cmd="…" exit=<int> diff="+N/-M (K files)" -->
       # ERE matches the fields IN ORDER and requires FILLED values, not just field
       # names: `exit=[0-9]` (a digit must follow, rejecting the literal `exit=<int>`)
@@ -301,7 +334,7 @@ _se_receipt_gate() {
       # marker carries no quote characters, so it is immune to JSONL
       # \"-escaping differences by construction.
       FOLLOWUPS_RE='<!-- follow-ups: (none|[0-9]+) -->'
-      if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" \
+      if _se_turn_text \
            | grep -Eq '<!-- dod-receipt .*cmd=.*exit=[0-9].*diff=.*\+[0-9].*-->'; then
         rm -f "$STATE_FILE"
         # Follow-ups nudge (spec 012 D4): receipt present — re-scan the SAME
@@ -311,10 +344,11 @@ _se_receipt_gate() {
         # dod-receipt spans are stripped first (perl non-greedy; the transcript is
         # JSONL so a receipt quoting the marker inside cmd="…" would otherwise
         # false-satisfy the scan — 012 review F1).
-        if awk -v n="${LAST_USER:-0}" 'NR>n' "$TRANSCRIPT" | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+        if _se_turn_text | perl -pe 's/<!--\s*dod-receipt\b.*?-->//g' | grep -Eq "$FOLLOWUPS_RE"; then
+          _se_verification_advisory ''
           exit 0
         fi
-        jq -nc --arg m 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->' '{additionalContext: $m}'
+        _se_verification_advisory 'stop-verify: DoD receipt found but no follow-ups marker. End the message with a Follow-ups block — numbered, decreasing priority (blocking-risk > correctness > cost/quota > hygiene), one line each, disposition fold/new-spec/surgical, derived ONLY from context already read this session (no new exploration) — or state none. Then paste the marker: <!-- follow-ups: <count-or-none> -->'
         exit 0
       fi
       emit_block "receipts" 'no Definition-of-Done receipt found for this turn. A code change is not done without one. State the verification command, its exit code, and the diff lines that prove the change, then paste the canonical marker (CLAUDE.md:43):
@@ -345,6 +379,21 @@ ${OPEN_TODOS}"
   fi
 fi
 
+# _se_all_doc_paths: stdin is one path per line. Succeeds iff every non-empty
+# path is a doc file (.md/.mdx/.rst/.txt). A rename ("old -> new"), a quoted
+# path and a directory entry are never a plain doc, so they read as code.
+_se_all_doc_paths() {
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      *' -> '* | '"'* | */) return 1 ;;
+    esac
+    printf '%s\n' "$p" | grep -qE '(^|/)[^/]+\.(md|mdx|rst|txt)$' || return 1
+  done
+  return 0
+}
+
 # --- Guard 2: no file edits this turn → pure chat; skip typecheck/lint/test.
 # Best-effort: check git worktree dirtiness. If git isn't here, fall through
 # and let downstream steps no-op when no config files exist.
@@ -352,17 +401,33 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   # Porcelain output is empty iff worktree matches HEAD (no staged, unstaged, or untracked changes).
   # NOTE: earlier versions used `grep -c '^' || echo 0` here — that doubles output to "0\n0"
   # when empty (grep -c prints 0 AND exits non-zero), breaking the numeric test.
-  if ! WORKTREE_STATUS=$(git status --porcelain 2>&1); then
+  if ! WORKTREE_STATUS=$(git status --porcelain --untracked-files=all 2>&1); then
     emit_block "git status" "could not inspect worktree changes:
 ${WORKTREE_STATUS}"
   fi
-  if [ -z "$WORKTREE_STATUS" ]; then
-    # Nothing changed this turn → treat as pure chat and skip checks. C01: a
-    # turn that is not "same" (it committed, or its baseline is unknown in an
-    # armed project) still goes to the receipt gate; checks stay skipped.
+  if [ "$TURN_STATE" = "same" ]; then
+    # Existing dirty code is not a new edit: the authenticated fingerprint
+    # already covers its bytes and the index. Todos were checked above.
+    _se_receipt_gate
+    exit 0
+  fi
+  if [ -z "$WORKTREE_STATUS" ] && [ -z "$TURN_RANGE_FILES" ]; then
+    # Preserve the clean-tree fallback only when no committed range is known.
     if [ "$TURN_STATE" = "changed" ]; then
       _se_receipt_gate
     fi
+    exit 0
+  fi
+
+  # bug #6: a dirty tree whose every path is a doc, on a turn whose baseline is
+  # known, changed no code. Skip the heavy typecheck/lint/test; only the receipt
+  # gate runs (it owes no receipt for docs). A code path, a rename, a quoted or
+  # directory entry, a committed code path (TURN_RANGE_FILES) or an unknown
+  # baseline keeps the full run.
+  if [ "$TURN_STATE" != "unknown" ] \
+     && { printf '%s\n' "$WORKTREE_STATUS" | cut -c4-; printf '%s\n' "$TURN_RANGE_FILES"; } \
+        | _se_all_doc_paths; then
+    _se_receipt_gate
     exit 0
   fi
 fi
@@ -381,6 +446,40 @@ fi
 
 CHECKS_RUN=0
 
+# Parse before ANY JS runner/version probe: absent installs cannot mask a bad
+# manifest. Dependency-free package scripts do not require node_modules.
+HAS_TEST=""
+JS_HAS_DEPS=false
+if [ -f package.json ]; then
+  if ! PACKAGE_INFO=$(jq -c '{test: (.scripts.test // ""), needs_dependencies:
+      ([.dependencies, .devDependencies, .optionalDependencies, .peerDependencies]
+       | any(. != null and length > 0))}' package.json 2>&1) || [ -z "$PACKAGE_INFO" ]; then
+    emit_block "package.json" "could not parse package.json while detecting verification dependencies:
+${PACKAGE_INFO}"
+  fi
+  HAS_TEST=$(printf '%s' "$PACKAGE_INFO" | jq -r '.test')
+  JS_HAS_DEPS=$(printf '%s' "$PACKAGE_INFO" | jq -r '.needs_dependencies')
+fi
+
+# Search only this checkout: workspaces may hoist dependencies, including via
+# directory symlinks. Yarn PnP installs need no node_modules directory.
+_se_js_install_present() {
+  local dir="$PWD" root
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || root="$PROJECT_DIR"
+  root=$(CDPATH='' cd "$root" 2>/dev/null && pwd -P) || root="$PWD"
+  case "$dir/" in "$root/"*) ;; *) root="$dir" ;; esac
+  while :; do
+    [ -d "$dir/node_modules" ] || [ -f "$dir/.pnp.cjs" ] || [ -f "$dir/.pnp.js" ] && return 0
+    [ "$dir" != "$root" ] && [ "$dir" != / ] || return 1
+    dir=$(dirname "$dir")
+  done
+}
+JS_AVAILABLE=0
+_se_js_install_present && JS_AVAILABLE=1
+_se_js_unavailable() {
+  VERIFICATION_UNAVAILABLE="stop-verify: verification unavailable: dependencies not installed ($PWD; no node_modules directory or installed Yarn PnP artifact in checkout ancestors)."
+}
+
 # _se_resolve_python_tool <tool> — echo a command with pinned-project
 # precedence. A direct .venv path prevents a global tool shim from winning.
 _se_resolve_python_tool() {
@@ -395,9 +494,26 @@ _se_resolve_python_tool() {
   fi
 }
 
+# _se_mypy_pyproject_files — succeed when mypy reads pyproject.toml here and its
+# [tool.mypy] table declares `files`. mypy.ini and .mypy.ini win over
+# pyproject.toml in the same directory, so they keep the '.' default. Scoped awk,
+# not a TOML parse: comments and other tables never count.
+_se_mypy_pyproject_files() {
+  if [ -f "mypy.ini" ] || [ -f ".mypy.ini" ] || [ ! -f "pyproject.toml" ]; then
+    return 1
+  fi
+  awk '
+    /^[[:space:]]*\[/ { in_mypy = ($0 ~ /^[[:space:]]*\[[[:space:]]*tool\.mypy[[:space:]]*\]/); next }
+    in_mypy && /^[[:space:]]*files[[:space:]]*=/ { found = 1 }
+    END { exit (found ? 0 : 1) }
+  ' pyproject.toml
+}
+
 # --- Step 2: Typecheck ---
 # TypeScript
-if [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
+if [ -f "tsconfig.json" ] && [ "$JS_AVAILABLE" -eq 0 ]; then
+  _se_js_unavailable
+elif [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
   CHECKS_RUN=$((CHECKS_RUN + 1))
   _vr_run typecheck.tsc argv npx --no-install tsc --noEmit
   OUT="$_VR_OUTPUT"
@@ -417,7 +533,13 @@ if [ -n "$MYPY_CMD" ]; then
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
-    _vr_run typecheck.mypy shell "$MYPY_CMD ."
+    # A configured [tool.mypy] files list is mypy's own target set; a positional
+    # '.' would override it and re-collect conftest modules.
+    if _se_mypy_pyproject_files; then
+      _vr_run typecheck.mypy shell "$MYPY_CMD"
+    else
+      _vr_run typecheck.mypy shell "$MYPY_CMD ."
+    fi
     OUT="$_VR_OUTPUT"
     if [ "$_VR_STATUS" -ne 0 ]; then
       SLICED=$(printf '%s' "$OUT" | head -30)
@@ -453,7 +575,9 @@ fi
 if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-  if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
+  if [ "$JS_AVAILABLE" -eq 0 ]; then
+    _se_js_unavailable
+  elif command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
     CHECKS_RUN=$((CHECKS_RUN + 1))
     _vr_run lint.eslint argv npx --no-install eslint . --quiet
     OUT="$_VR_OUTPUT"
@@ -509,19 +633,18 @@ fi
 
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
 TEST_CMD=""
+_PM=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
-  if ! HAS_TEST=$(jq -r '.scripts.test // empty' package.json 2>&1); then
-    emit_block "package.json" "could not parse package.json while detecting the test script:
-${HAS_TEST}"
-  fi
   if [ -n "$HAS_TEST" ] && [ "$HAS_TEST" != "echo \"Error: no test specified\" && exit 1" ]; then
-    if command -v trellis_resolve_pm >/dev/null 2>&1; then
+    if [ "$JS_AVAILABLE" -eq 0 ] && [ "$JS_HAS_DEPS" = true ]; then
+      _se_js_unavailable
+    elif command -v trellis_resolve_pm >/dev/null 2>&1; then
       _PM="$(trellis_resolve_pm "$PROJECT_DIR")"
     else
       _PM="npm"
     fi
     # Configured-but-missing PM → skip the test step rather than hard-fail.
-    if [ -n "$_PM" ] && command -v "$_PM" >/dev/null 2>&1; then
+    if [ -n "${_PM:-}" ] && command -v "$_PM" >/dev/null 2>&1; then
       TEST_CMD="$_PM run test"
     fi
   fi
@@ -553,6 +676,11 @@ fi
 _se_receipt_gate
 
 # --- Pass / no-check advisory ---
+if [ -n "$VERIFICATION_UNAVAILABLE" ]; then
+  rm -f "$STATE_FILE"
+  _se_verification_advisory ''
+  exit 0
+fi
 if [ "$CHECKS_RUN" -eq 0 ]; then
   rm -f "$STATE_FILE"
   jq -nc '{additionalContext: "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."}'

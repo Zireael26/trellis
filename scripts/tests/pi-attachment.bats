@@ -53,7 +53,70 @@ setup() {
   PAYLOAD="$TRELLIS_HOME/releases/9.9.9/payload"
 }
 
+wait_for_attach_postjobs() {
+  # These are detached grandchildren, so shell wait cannot reap them. Wait for
+  # process exit, not lock removal: the EXIT trap removes scratch after the lock.
+  python3 - "$TRELLIS_HOME" "$PAYLOAD/scripts/lib/attach-postjob.sh" "$PROJECT" <<'PY'
+import errno
+import os
+from pathlib import Path
+import select
+import subprocess
+import sys
+
+home, postjob, project = sys.argv[1:]
+pids = set()
+for record in Path(home, "state/attachment-status").glob("*/*.job/pid"):
+    try:
+        fields = record.read_text().split()
+        if fields:
+            pids.add(int(fields[0]))
+    except FileNotFoundError:
+        pass  # The job finished while its lock was being inspected.
+# Spawn returns before the child necessarily publishes its lock. The detached
+# Perl child already exists then, and its argv includes these same exact paths.
+for line in subprocess.check_output(["ps", "-axww", "-o", "pid=,command="], text=True).splitlines():
+    fields = line.strip().split(None, 1)
+    if len(fields) == 2 and postjob in fields[1] and project in fields[1]:
+        pids.add(int(fields[0]))
+
+def still_our_job(pid):
+    command = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                             stdout=subprocess.PIPE, text=True).stdout
+    return postjob in command and project in command
+
+for pid in pids - {os.getpid()}:
+    try:
+        if hasattr(os, "pidfd_open"):
+            with os.fdopen(os.pidfd_open(pid), "rb") as process:
+                if not still_our_job(pid):
+                    continue  # A stale lock must not wait for an unrelated PID.
+                poller = select.poll()
+                poller.register(process, select.POLLIN)
+                if not poller.poll(300000):
+                    raise TimeoutError(f"attachment postjob {pid} did not exit")
+        else:
+            # select.kqueue is not a context manager, so close it explicitly.
+            queue = select.kqueue()
+            try:
+                event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                                      flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                      fflags=select.KQ_NOTE_EXIT)
+                queue.control([event], 0, 0)
+                if not still_our_job(pid):
+                    continue
+                if not queue.control(None, 1, 300):
+                    raise TimeoutError(f"attachment postjob {pid} did not exit")
+            finally:
+                queue.close()
+    except OSError as error:
+        if error.errno != errno.ESRCH:
+            raise
+PY
+}
+
 teardown() {
+  wait_for_attach_postjobs || return 1
   chmod -R u+w "$SANDBOX" 2>/dev/null || true
   rm -rf "$SANDBOX"
 }
@@ -131,17 +194,39 @@ PY
   [ "$status" -eq 0 ]
   [ "$(registry_harnesses)" = '["pi"]' ]
   [ -L "$PROJECT/.pi/extensions/trellis.ts" ]
-  [ -L "$PROJECT/.pi/hooks/lib/action-normalize.sh" ]
+  # Pi reserves .pi/hooks: attach renders nothing there.
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
   [ -L "$PROJECT/.agents/agents/sol-rw.md" ]
 
+  local leaf
+  jq -r '.artifacts[] | select(.kind != "parent" and .kind != "directory") | .path' \
+    "$(owner_file)" > "$SANDBOX/pi-owned-leaves.before"
+  [ -s "$SANDBOX/pi-owned-leaves.before" ]
+  grep -Fxq .pi/extensions/trellis.ts "$SANDBOX/pi-owned-leaves.before"
   run "$LAUNCHER" detach "$PROJECT"
   [ "$status" -eq 0 ]
-  [ ! -e "$PROJECT/.pi/extensions/trellis.ts" ] && [ ! -L "$PROJECT/.pi/extensions/trellis.ts" ]
-  [ ! -e "$PROJECT/.pi/hooks/dispatch.sh" ] && [ ! -L "$PROJECT/.pi/hooks/dispatch.sh" ]
-  [ ! -e "$PROJECT/.agents/agents/sol-rw.md" ] && [ ! -L "$PROJECT/.agents/agents/sol-rw.md" ]
-  [ ! -e "$PROJECT/.agents/rules/trellis.md" ] && [ ! -L "$PROJECT/.agents/rules/trellis.md" ]
-  [ ! -e "$PROJECT/AGENTS.md" ] && [ ! -L "$PROJECT/AGENTS.md" ]
-  [ ! -e "$PROJECT/.trellis/runtime" ] && [ ! -L "$PROJECT/.trellis/runtime" ]
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
+  [ ! -e "$PROJECT/.pi/extensions/trellis.ts" ]
+  [ ! -L "$PROJECT/.pi/extensions/trellis.ts" ]
+  while IFS= read -r leaf; do
+    [ ! -e "$PROJECT/$leaf" ]
+    [ ! -L "$PROJECT/$leaf" ]
+  done < "$SANDBOX/pi-owned-leaves.before"
+  # Detach retains structural parents, not managed files or links.
+  [ ! -L "$PROJECT/.pi" ]
+  if [ -d "$PROJECT/.pi" ]; then
+    [ -z "$(find "$PROJECT/.pi" \( -type l -o -type f \) -print)" ]
+  fi
+  [ ! -e "$PROJECT/.agents/agents/sol-rw.md" ]
+  [ ! -L "$PROJECT/.agents/agents/sol-rw.md" ]
+  [ ! -e "$PROJECT/.agents/rules/trellis.md" ]
+  [ ! -L "$PROJECT/.agents/rules/trellis.md" ]
+  [ ! -e "$PROJECT/AGENTS.md" ]
+  [ ! -L "$PROJECT/AGENTS.md" ]
+  [ ! -e "$PROJECT/.trellis/runtime" ]
+  [ ! -L "$PROJECT/.trellis/runtime" ]
   jq -e '[.. | objects | .attachment_id? // empty] | length == 0' "$TRELLIS_HOME/registry.json" >/dev/null
   jq -e '[.projects[].checkouts[].worktrees[]] | length == 1' "$TRELLIS_HOME/registry.json" >/dev/null
 }
@@ -194,13 +279,16 @@ PY
     | any(startswith(".claude/")) and any(startswith(".pi/")) and any(. == "AGENTS.md")' "$owner" >/dev/null
   [ -L "$PROJECT/.claude/rules/trellis.md" ]
   [ -L "$PROJECT/.pi/extensions/trellis.ts" ]
-  [ -L "$PROJECT/.pi/hooks/lib/action-normalize.sh" ]
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
   [ -L "$PROJECT/.agents/agents/sol-rw.md" ]
   [ -L "$PROJECT/AGENTS.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]
-  [ ! -e "$PROJECT/.codex/hooks/lib/action-normalize.sh" ] && [ ! -L "$PROJECT/.codex/hooks/lib/action-normalize.sh" ]
-  [ ! -e "$PROJECT/.codex/hooks.json" ] && [ ! -L "$PROJECT/.codex/hooks.json" ]
+  [ ! -e "$PROJECT/.codex/hooks/lib/action-normalize.sh" ]
+  [ ! -L "$PROJECT/.codex/hooks/lib/action-normalize.sh" ]
+  [ ! -e "$PROJECT/.codex/hooks.json" ]
+  [ ! -L "$PROJECT/.codex/hooks.json" ]
 }
 
 @test "single-owner partial Pi detach retains Codex and shared owned surfaces with registry agreement" {
@@ -240,7 +328,7 @@ pi_aux_verdict() {
   else
     [ "$status" -ne 0 ] || { echo "$output"; false; }
     [[ "$output" == *"$path"*"$reason"* ]] || { echo "$output"; false; }
-    if [ "$path" = .pi/hooks/lib ] && [ -z "$reason" ]; then
+    if [ "$path" = .pi/extensions ] && [ -z "$reason" ]; then
       # A missing child must not mask missing/type-redirected literal parents.
       [[ "$output" == *"$path (recorded parent)"* || "$output" == *"$path: native Pi hook artifact"* ]]
     fi
@@ -269,9 +357,9 @@ pi_aux_leaf_control() {
   pi_aux_verdict 1 "$relative"
 }
 
-@test "Pi auxiliary healthy attachment including literal parents passes bypass and doctor" {
+@test "Pi healthy attachment including literal parents passes bypass and doctor" {
   pi_aux_attach
-  jq -e 'any(.artifacts[]; .path == ".pi/hooks/lib" and .kind == "parent")' "$(owner_file)" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".pi/extensions" and .kind == "parent")' "$(owner_file)" >/dev/null
   local mode parent
   while IFS= read -r parent; do
     chgrp "$(id -g)" "$PROJECT/$parent"
@@ -287,100 +375,83 @@ pi_aux_leaf_control() {
 }
 
 pi_aux_deferred_fixture() {
-  mkdir -p "$PROJECT/.pi/hooks/lib"
-  printf '# project-owned dependency helper\n' > "$PROJECT/.pi/hooks/lib/deps.sh"
+  mkdir -p "$PROJECT/.pi/extensions"
+  printf '// project-owned extension\n' > "$PROJECT/.pi/extensions/trellis.ts"
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
-  jq -e 'any(.pre_existing[]; .path == ".pi/hooks/lib/deps.sh" and .kind == "symlink" and .reason == "project-authored-file")
-    and (any(.artifacts[]; .path == ".pi/hooks/lib/deps.sh") | not)' "$(owner_file)" >/dev/null
-  grep -Fxq '# project-owned dependency helper' "$PROJECT/.pi/hooks/lib/deps.sh"
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — '
+  jq -e 'any(.pre_existing[]; .path == ".pi/extensions/trellis.ts" and .kind == "symlink" and .reason == "project-authored-file")
+    and (any(.artifacts[]; .path == ".pi/extensions/trellis.ts") | not)' "$(owner_file)" >/dev/null
+  grep -Fxq '// project-owned extension' "$PROJECT/.pi/extensions/trellis.ts"
 }
 
-@test "Pi auxiliary project-authored deferral fails both readers with a repair hint" {
+@test "Pi project-authored deferral fails both readers with a repair hint" {
   pi_aux_deferred_fixture
-  printf '# edited project-owned helper\n' > "$PROJECT/.pi/hooks/lib/deps.sh"
-  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
+  printf '// edited project-owned extension\n' > "$PROJECT/.pi/extensions/trellis.ts"
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
 }
 
-@test "Pi auxiliary project-authored deferral repair via detach and attach passes both readers" {
+@test "Pi project-authored deferral repair via detach and attach passes both readers" {
   pi_aux_deferred_fixture
-  mv "$PROJECT/.pi/hooks/lib/deps.sh" "$SANDBOX/project-deps.sh"
+  mv "$PROJECT/.pi/extensions/trellis.ts" "$SANDBOX/project-trellis.ts"
   run "$LAUNCHER" detach "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  jq -e 'any(.artifacts[]; .path == ".pi/hooks/lib/deps.sh" and .kind == "symlink")
-    and (any(.pre_existing[]; .path == ".pi/hooks/lib/deps.sh") | not)' "$(owner_file)" >/dev/null
+  jq -e 'any(.artifacts[]; .path == ".pi/extensions/trellis.ts" and .kind == "symlink")
+    and (any(.pre_existing[]; .path == ".pi/extensions/trellis.ts") | not)' "$(owner_file)" >/dev/null
   pi_aux_verdict 0
 }
 
-@test "Pi auxiliary absent project-authored deferral has a distinct diagnostic in both readers" {
+@test "Pi absent project-authored deferral has a distinct diagnostic in both readers" {
   pi_aux_deferred_fixture
-  rm "$PROJECT/.pi/hooks/lib/deps.sh"
-  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
-  : > "$PROJECT/.pi/hooks/lib/deps.sh"
-  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
-  rm "$PROJECT/.pi/hooks/lib/deps.sh"
-  ln -s "$PAYLOAD/core-rules/pi/hooks/lib/deps.sh" "$PROJECT/.pi/hooks/lib/deps.sh"
-  pi_aux_verdict 1 .pi/hooks/lib/deps.sh 'deferred to project file — '
+  rm "$PROJECT/.pi/extensions/trellis.ts"
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — '
+  : > "$PROJECT/.pi/extensions/trellis.ts"
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — '
+  rm "$PROJECT/.pi/extensions/trellis.ts"
+  ln -s "$PAYLOAD/core-rules/pi/extensions/trellis.ts" "$PROJECT/.pi/extensions/trellis.ts"
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — '
 }
 
 @test "Pi native registrations cannot defer to project-authored regular files" {
-  local relative
-  mkdir -p "$PROJECT/.pi/extensions" "$PROJECT/.pi/hooks"
-  for relative in .pi/extensions/trellis.ts .pi/hooks/dispatch.sh; do
-    printf 'project-authored native registration\n' > "$PROJECT/$relative"
-  done
+  mkdir -p "$PROJECT/.pi/extensions"
+  printf 'project-authored native registration\n' > "$PROJECT/.pi/extensions/trellis.ts"
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  for relative in .pi/extensions/trellis.ts .pi/hooks/dispatch.sh; do
-    jq -e --arg path "$relative" 'any(.pre_existing[]; .path == $path and .reason == "project-authored-file")' "$(owner_file)" >/dev/null
-    pi_aux_verdict 1 "$relative" 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
-  done
+  jq -e 'any(.pre_existing[]; .path == ".pi/extensions/trellis.ts" and .reason == "project-authored-file")' "$(owner_file)" >/dev/null
+  pi_aux_verdict 1 .pi/extensions/trellis.ts 'deferred to project file — symlink differs from owner; move the project file aside, then detach and attach again'
 }
 
-@test "Pi auxiliary required hook removal and hash mismatch fail both readers" {
-  pi_aux_leaf_control .pi/hooks/block-destructive.sh
+@test "Pi extension removal and hash mismatch fail both readers" {
+  pi_aux_leaf_control .pi/extensions/trellis.ts
 }
 
-@test "Pi auxiliary advisory hook removal and hash mismatch fail both readers" {
-  pi_aux_leaf_control .pi/hooks/decision-receipt.sh
-}
-
-@test "Pi auxiliary helper removal and hash mismatch fail both readers" {
-  pi_aux_leaf_control .pi/hooks/lib/deps.sh
-}
-
-@test "Pi auxiliary dormant executable removal and hash mismatch fail both readers" {
-  pi_aux_leaf_control .pi/hooks/code-review-subagent.sh
-}
-
-@test "Pi auxiliary literal parent removal fails both readers" {
+@test "Pi literal parent removal fails both readers" {
   pi_aux_attach
-  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/saved-lib"
-  pi_aux_verdict 1 .pi/hooks/lib
+  mv "$PROJECT/.pi/extensions" "$SANDBOX/saved-extensions"
+  pi_aux_verdict 1 .pi/extensions
 }
 
-@test "Pi auxiliary literal parent replaced by a file fails both readers" {
+@test "Pi literal parent replaced by a file fails both readers" {
   pi_aux_attach
-  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/saved-lib"
-  printf 'not a directory\n' > "$PROJECT/.pi/hooks/lib"
-  pi_aux_verdict 1 .pi/hooks/lib
+  mv "$PROJECT/.pi/extensions" "$SANDBOX/saved-extensions"
+  printf 'not a directory\n' > "$PROJECT/.pi/extensions"
+  pi_aux_verdict 1 .pi/extensions
 }
 
-@test "Pi auxiliary literal parent unsafe mode fails both readers" {
+@test "Pi literal parent unsafe mode fails both readers" {
   pi_aux_attach
-  chmod 0777 "$PROJECT/.pi/hooks/lib"
-  pi_aux_verdict 1 .pi/hooks/lib 'safe mode'
+  chmod 0777 "$PROJECT/.pi/extensions"
+  pi_aux_verdict 1 .pi/extensions 'safe mode'
 }
 
-@test "Pi auxiliary redirected parent fails despite intact linked helper bytes" {
+@test "Pi redirected parent fails despite intact linked extension bytes" {
   pi_aux_attach
-  mkdir -p "$SANDBOX/decoy/.pi/hooks" "$SANDBOX/decoy/.trellis"
+  mkdir -p "$SANDBOX/decoy/.pi" "$SANDBOX/decoy/.trellis"
   ln -s "$PAYLOAD" "$SANDBOX/decoy/.trellis/runtime"
-  mv "$PROJECT/.pi/hooks/lib" "$SANDBOX/decoy/.pi/hooks/lib"
-  ln -s "$SANDBOX/decoy/.pi/hooks/lib" "$PROJECT/.pi/hooks/lib"
-  [ -s "$PROJECT/.pi/hooks/lib/deps.sh" ]
-  pi_aux_verdict 1 .pi/hooks/lib
+  mv "$PROJECT/.pi/extensions" "$SANDBOX/decoy/.pi/extensions"
+  ln -s "$SANDBOX/decoy/.pi/extensions" "$PROJECT/.pi/extensions"
+  [ -s "$PROJECT/.pi/extensions/trellis.ts" ]
+  pi_aux_verdict 1 .pi/extensions
 }

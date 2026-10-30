@@ -9,17 +9,13 @@ export async function deliveredFixture(t, source = process.env.B10_SOURCE_ROOT ?
   const base = mkdtempSync(resolve(tmpdir(), 'b10-delivered-'));
   t?.after(() => rmSync(base, { recursive: true, force: true }));
   const cwd = resolve(base, 'project'), runtime = resolve(base, 'release');
-  for (const dir of ['.trellis', '.pi/extensions', '.pi/hooks', '.agents/rules', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
+  for (const dir of ['.trellis', '.pi/extensions', '.agents/rules', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
   for (const dir of ['pi', 'codex/hooks', 'hooks/lib']) cpSync(resolve(source, 'core-rules', dir), resolve(runtime, 'core-rules', dir), { recursive: true });
   writeFileSync(resolve(runtime, 'trellis.config.json'), '{}');
   symlinkSync(runtime, resolve(cwd, '.trellis/runtime'));
   symlinkSync(resolve(runtime, 'core-rules/pi/extensions/trellis.ts'), resolve(cwd, '.pi/extensions/trellis.ts'));
-  symlinkSync(resolve(runtime, 'core-rules/codex/hooks/lib'), resolve(cwd, '.pi/hooks/lib'));
-  // Attachment supplies this shared helper beside the Codex hook libraries.
-  symlinkSync(resolve(runtime, 'core-rules/hooks/lib/action-normalize.sh'), resolve(runtime, 'core-rules/codex/hooks/lib/action-normalize.sh'));
-  for (const name of ['block-destructive', 'reread-guard', 'track-read', 'stamp-turn', 'post-edit-verify', 'slop-tripwire', 'wiki-skill-suggest', 'truncation-check', 'pr-gate-shiftleft']) {
-    symlinkSync(resolve(runtime, `core-rules/codex/hooks/${name}.sh`), resolve(cwd, `.pi/hooks/${name}.sh`));
-  }
+  // The dispatcher runs the Codex hook set straight from the runtime payload;
+  // nothing is rendered under .pi/hooks, which pi reserves.
   writeFileSync(resolve(cwd, '.agents/rules/trellis.md'), 'Fixture parent policy');
   const handlers = new Map(), calls = [], messages = [], notifications = [], commands = [];
   const pi = {

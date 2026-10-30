@@ -111,6 +111,16 @@ if not mode & 0o400:
   { echo "# immutable leaf $link mode $mode"; } >&3 2>/dev/null || true
 }
 
+assert_detached_harness_tree() {
+  local root="$1"
+  [ ! -L "$root" ] || return 1
+  if [ -d "$root" ]; then
+    [ -z "$(find "$root" \( -type l -o -type f \) -print)" ] || return 1
+  else
+    [ ! -e "$root" ] || return 1
+  fi
+}
+
 @test "disposable attach covers claude, codex, pi, and mixed selectors with exact targets and isolation" {
   # 1. Claude-only attach
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness claude "$PROJECT"
@@ -122,13 +132,15 @@ if not mode & 0o400:
   [ "$(target_of "$PROJECT/.claude/hooks/lib/verification-bash.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/verification-bash.py" ]
   assert_immutable_leaf "$PROJECT/.claude/hooks/lib/task-state.py"
   assert_immutable_leaf "$PROJECT/.claude/hooks/lib/verification-bash.py"
-  [ ! -e "$PROJECT/.codex" ] && [ ! -L "$PROJECT/.codex" ]
-  [ ! -e "$PROJECT/.pi" ] && [ ! -L "$PROJECT/.pi" ]
+  [ ! -e "$PROJECT/.codex" ]
+  [ ! -L "$PROJECT/.codex" ]
+  [ ! -e "$PROJECT/.pi" ]
+  [ ! -L "$PROJECT/.pi" ]
 
-  # Detach Claude
+  # Detach removes owned leaves; empty structural parents may remain.
   run "$LAUNCHER" detach "$PROJECT"
-  [ "$status" -eq 0 ]
-  [ ! -e "$PROJECT/.claude" ] && [ ! -L "$PROJECT/.claude" ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_detached_harness_tree "$PROJECT/.claude"
 
   # 2. Codex-only attach
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness codex "$PROJECT"
@@ -138,27 +150,29 @@ if not mode & 0o400:
   [ -L "$PROJECT/.codex/hooks/lib/verification-bash.py" ]
   [ "$(target_of "$PROJECT/.codex/hooks/lib/task-state.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/task-state.py" ]
   [ "$(target_of "$PROJECT/.codex/hooks/lib/verification-bash.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/verification-bash.py" ]
-  [ ! -e "$PROJECT/.claude" ] && [ ! -L "$PROJECT/.claude" ]
-  [ ! -e "$PROJECT/.pi" ] && [ ! -L "$PROJECT/.pi" ]
+  assert_detached_harness_tree "$PROJECT/.claude"
+  [ ! -e "$PROJECT/.pi" ]
+  [ ! -L "$PROJECT/.pi" ]
 
   # Detach Codex
   run "$LAUNCHER" detach "$PROJECT"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 
   # 3. Pi-only attach
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness pi "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(registry_harnesses)" = '["pi"]' ]
-  [ -L "$PROJECT/.pi/hooks/lib/task-state.py" ]
-  [ -L "$PROJECT/.pi/hooks/lib/verification-bash.py" ]
-  [ "$(target_of "$PROJECT/.pi/hooks/lib/task-state.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/task-state.py" ]
-  [ "$(target_of "$PROJECT/.pi/hooks/lib/verification-bash.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/verification-bash.py" ]
-  [ ! -e "$PROJECT/.claude" ] && [ ! -L "$PROJECT/.claude" ]
-  [ ! -e "$PROJECT/.codex" ] && [ ! -L "$PROJECT/.codex" ]
+  # Pi runs the payload helpers in place; the reserved .pi/hooks stays absent.
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
+  [ -f "$PROJECT/.trellis/runtime/core-rules/hooks/lib/task-state.py" ]
+  [ -f "$PROJECT/.trellis/runtime/core-rules/hooks/lib/verification-bash.py" ]
+  assert_detached_harness_tree "$PROJECT/.claude"
+  assert_detached_harness_tree "$PROJECT/.codex"
 
   # Detach Pi
   run "$LAUNCHER" detach "$PROJECT"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 
   # 4. Mixed Codex + Pi attach: assert shared surface deduplicated and both present
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness codex --harness pi "$PROJECT"
@@ -166,20 +180,22 @@ if not mode & 0o400:
   [ "$(registry_harnesses)" = '["codex","pi"]' ]
   [ -L "$PROJECT/.codex/hooks/lib/task-state.py" ]
   [ -L "$PROJECT/.codex/hooks/lib/verification-bash.py" ]
-  [ -L "$PROJECT/.pi/hooks/lib/task-state.py" ]
-  [ -L "$PROJECT/.pi/hooks/lib/verification-bash.py" ]
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
-  [ ! -e "$PROJECT/.claude" ] && [ ! -L "$PROJECT/.claude" ]
+  assert_detached_harness_tree "$PROJECT/.claude"
 
   # Detach mixed
   run "$LAUNCHER" detach "$PROJECT"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  # 5. Three-harness attach: assert all six exact targets exist and point to runtime
+  # 5. Three-harness attach: assert all four exact targets exist and point to runtime
   run "$LAUNCHER" attach --fleet personal --release 9.9.9 --harness claude --harness codex --harness pi "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(registry_harnesses)" = '["claude","codex","pi"]' ]
-  for harness in claude codex pi; do
+  [ ! -e "$PROJECT/.pi/hooks" ]
+  [ ! -L "$PROJECT/.pi/hooks" ]
+  for harness in claude codex; do
     [ -L "$PROJECT/.$harness/hooks/lib/task-state.py" ]
     [ -L "$PROJECT/.$harness/hooks/lib/verification-bash.py" ]
     [ "$(target_of "$PROJECT/.$harness/hooks/lib/task-state.py")" = "../../../.trellis/runtime/core-rules/hooks/lib/task-state.py" ]
@@ -226,8 +242,8 @@ EOF
     and ([.documents[0].tasks[] | select(.checked)] | length) == 0
   ' >/dev/null
 
-  # Read via Pi mapped helper with EXACT CLI `read --cwd`
-  run python3 -I "$PROJECT/.pi/hooks/lib/task-state.py" read --cwd "$PROJECT"
+  # Read via the payload helper Pi runs, with EXACT CLI `read --cwd`
+  run python3 -I "$PROJECT/.trellis/runtime/core-rules/hooks/lib/task-state.py" read --cwd "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   echo "$output" | jq -e '
     .status == "available"
@@ -248,7 +264,7 @@ EOF
 
   # Missing source => missing
   rm "$PROJECT/specs/045/tasks.md"
-  run python3 -I "$PROJECT/.pi/hooks/lib/task-state.py" read --cwd "$PROJECT"
+  run python3 -I "$PROJECT/.trellis/runtime/core-rules/hooks/lib/task-state.py" read --cwd "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   echo "$output" | jq -e '
     .status == "available"
@@ -306,7 +322,7 @@ EOF
   echo "$output" | jq -e '.status == "reused" and .exit_status == 0' >/dev/null
 
   # Subsequent run via Pi => reused
-  run python3 -I "$PROJECT/.pi/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
+  run python3 -I "$PROJECT/.trellis/runtime/core-rules/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   echo "$output" | jq -e '.status == "reused" and .exit_status == 0' >/dev/null
 
@@ -317,7 +333,7 @@ EOF
   echo "$output" | jq -e '.status == "executed" and .exit_status == 0' >/dev/null
 
   # Verify subsequent run reuses modified file
-  run python3 -I "$PROJECT/.pi/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
+  run python3 -I "$PROJECT/.trellis/runtime/core-rules/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   echo "$output" | jq -e '.status == "reused" and .exit_status == 0' >/dev/null
 
@@ -328,7 +344,7 @@ EOF
   echo "$output" | jq -e '.status == "executed" and .exit_status != 0' >/dev/null
 
   # Re-run after failed syntax parsing => rerun executed and nonzero preserved, never reused
-  run python3 -I "$PROJECT/.pi/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
+  run python3 -I "$PROJECT/.trellis/runtime/core-rules/hooks/lib/verification-bash.py" --cwd "$PROJECT" --harness pi
   [ "$status" -ne 0 ]
   echo "$output" | jq -e '.status == "executed" and .exit_status != 0' >/dev/null
 }
@@ -387,6 +403,8 @@ EOF
     echo "owner record published despite a fail-closed attach: $owner_count record(s)"
     false
   }
-  [ ! -e "$PROJECT/.claude" ] && [ ! -L "$PROJECT/.claude" ]
-  [ ! -e "$PROJECT/.trellis/runtime" ] && [ ! -L "$PROJECT/.trellis/runtime" ]
+  [ ! -e "$PROJECT/.claude" ]
+  [ ! -L "$PROJECT/.claude" ]
+  [ ! -e "$PROJECT/.trellis/runtime" ]
+  [ ! -L "$PROJECT/.trellis/runtime" ]
 }

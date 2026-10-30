@@ -14,6 +14,7 @@ load config-fixture
 
 setup() {
   config_fixture_setup
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
 }
 
 @test "a range adding an exit-0 local.config.sh never passes without a verdict" {

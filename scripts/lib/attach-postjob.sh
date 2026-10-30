@@ -22,11 +22,12 @@
 # artifacts, exclude, toolchain, registry (consistency, and the exact-owner
 # reconcile only when the row disagrees).
 #
-# Locks (no new lock): the job never waits for one. The per-checkout attachment
-# lock is taken briefly, non-blocking, for the hooksPath repair and for the
-# final commit (journal and owner re-check, registry reconcile, status write);
-# the registry reconcile takes the registry lock as it always has. Contention
-# leaves the status pending and, in the background, retries with backoff. A
+# Locks (no new lock): the per-checkout attachment lock is acquired non-blocking
+# for hooksPath repair and the final commit (journal/owner re-check, registry
+# reconcile, status write). Registry reconciliation may wait through the bounded
+# 300-second registry budget while holding that checkout lock; lock ordering
+# stays checkout -> registry. Unavailable registry state leaves status pending
+# and the background job retries with backoff. A
 # second job for the same worktree exits at once (mkdir lock, pid + birth).
 #
 # Surfaces: SessionStart reads the file as data (core-rules/hooks/lib/
@@ -403,9 +404,14 @@ EOF
   _attach_postjob_checkout_lock || { _attach_postjob_status pending; return "$ATTACH_POSTJOB_EX_PENDING"; }
   _attach_postjob_locked_recheck || { rc=$?; _attachment_checkout_lock_release >/dev/null 2>&1; return "$rc"; }
   if ! _attach_postjob_registry_consistent; then
-    if ! (attach_reconcile_owner_registry "$_APJ_HOME" "$_APJ_OWNER" "$_APJ_IDENTITY"); then
+    if (attach_reconcile_owner_registry "$_APJ_HOME" "$_APJ_OWNER" "$_APJ_IDENTITY"); then :; else
       rc=$?
       _attachment_checkout_lock_release >/dev/null 2>&1
+      if [ "$rc" -eq "$TRELLIS_EX_UNAVAILABLE" ]; then
+        _attach_postjob_log 'registry reconciliation is temporarily unavailable; staying pending for retry'
+        _attach_postjob_status pending
+        return "$ATTACH_POSTJOB_EX_PENDING"
+      fi
       _attach_postjob_fail registry "$rc" 'the registry row disagrees with the owner record and the exact-owner reconcile refused; run trellis doctor and resolve that row'
       return "$ATTACH_POSTJOB_EX_FAILED"
     fi

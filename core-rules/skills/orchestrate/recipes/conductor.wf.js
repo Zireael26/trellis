@@ -95,7 +95,7 @@ const AGENT_FAMILIES = {
   'security-reviewer': 'openai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
   cheap: 'meta', 'cheap-1': 'meta', 'cheap-2': 'meta', 'muse-meta': 'meta',
-  gemini: 'google', flash: 'google',
+  gemini: 'google', flash: 'google', argon: 'google', 'glm-flash': 'zai',
 }
 function familyOf(agent) {
   if (typeof agent !== 'string') return null

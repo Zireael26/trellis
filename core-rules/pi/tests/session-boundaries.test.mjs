@@ -1,7 +1,7 @@
 // Stub ExtensionAPI boundary regressions; not native execution or trust/loading proof.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import extension from '../extensions/trellis.ts';
@@ -37,7 +37,8 @@ function fixture(t) {
     ],
     sendMessage: (...args) => messages.push(args),
     exec: async (script, args, options) => {
-      calls.push({ script, options, event: JSON.parse(Buffer.from(args[1], 'base64').toString()) });
+      const event = args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString());
+      calls.push({ script, options, event });
       return { stdout: JSON.stringify(f.decision), stderr: '', code: 0 };
     },
   };

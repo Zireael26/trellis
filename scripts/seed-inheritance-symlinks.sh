@@ -27,6 +27,9 @@
 
 set -euo pipefail
 
+# Never import a seal verdict from the invoking environment.
+_TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
+
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
@@ -116,7 +119,6 @@ fi
 # release's older attach payload can reject a stale plan without explaining it.
 seed_exclude_diagnostic() (
   local script_dir="$1" source_owner="$2" payload="$3" harnesses_json="$4"
-  # shellcheck disable=SC2034  # root is read by attach_exclude_preflight via dynamic scope
   local home="$5" checkout="$6" common="$7" release="$8" root="$9"
   local surfaces scratch
   set +e
@@ -125,7 +127,7 @@ seed_exclude_diagnostic() (
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/trellis.worktree-plan.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   trap 'rm -rf "$scratch"' EXIT
   attach_exclude_preflight "$home" "$checkout" "$common" \
-    "$scratch/before" "$scratch/after" "$surfaces" >/dev/null
+    "$scratch/before" "$scratch/after" "$surfaces" "$root" >/dev/null
 )
 
 # ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ seed_exclude_diagnostic() (
 # ---------------------------------------------------------------------------
 attachment_reconcile() {
   local script_dir home registry state identity checkout worktree common registration
-  local fleet project_id release payload owner rc harness attachment_id harnesses_json
+  local fleet project_id release payload owner rc harness attachment_id harnesses_json verified_memo
   local donor_worktree donor_root donor_attachment donor_owner donor_identity donor_ok
   local donor_checkout donor_worktree_actual donor_root_actual donor_common
   local -a attach_args=() expected_args=() donor_args=()
@@ -241,7 +243,8 @@ attachment_reconcile() {
   ' >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
   harnesses_json="$(local_registry_normalize_harnesses "$(printf '%s\n' "$registration" | jq -c '.harnesses')")" || return "$?"
   [ "$harnesses_json" != '[]' ] || return "$TRELLIS_EX_STATE"
-  payload="$(TRELLIS_HOME="$home" release_store_locate "$release")" || return "$?"
+  TRELLIS_HOME="$home" release_store_locate "$release" >/dev/null || return "$?"
+  payload="$(TRELLIS_HOME="$home" release_store_release_path "$release")" || return "$?"
   payload="$payload/payload"
   [ -d "$payload" ] && [ ! -L "$payload" ] || return "$TRELLIS_EX_STATE"
   [ -x "$payload/scripts/attach-project.sh" ] || return "$TRELLIS_EX_STATE"
@@ -360,15 +363,24 @@ attachment_reconcile() {
       return "$rc"
     fi
   fi
-  if [ "$QUIET" -eq 1 ]; then
-    TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
-      --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
-      "${attach_args[@]}" "$TARGET" >/dev/null || rc=$?
-  else
-    TRELLIS_HOME="$home" "$payload/scripts/attach-project.sh" attach --home "$home" \
-      --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
-      "${attach_args[@]}" "$TARGET" || rc=$?
-  fi
+  # Load only the release just verified here, not an invoking checkout's attach.
+  # Keep its memo in this fork tree: no exec or caller-supplied PID handoff.
+  verified_memo="$_TRELLIS_RELEASE_STORE_VERIFY_MEMO"
+  (
+    set +e
+    set +o pipefail
+    . "$payload/scripts/attach-project.sh" || exit "$?"
+    _TRELLIS_RELEASE_STORE_VERIFY_MEMO="$verified_memo"
+    if [ "$QUIET" -eq 1 ]; then
+      TRELLIS_HOME="$home" attach_cmd_attach --home "$home" \
+        --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
+        "${attach_args[@]}" "$TARGET" >/dev/null
+    else
+      TRELLIS_HOME="$home" attach_cmd_attach --home "$home" \
+        --fleet "$fleet" --release "$release" "${expected_args[@]}" "${donor_args[@]+"${donor_args[@]}"}" \
+        "${attach_args[@]}" "$TARGET"
+    fi
+  ) || rc=$?
   rc="${rc:-0}"
   if [ "$rc" -eq "$TRELLIS_EX_CONFLICT" ]; then
     seed_exclude_diagnostic "$script_dir" "${donor_owner:-$owner}" "$payload" "$harnesses_json" \

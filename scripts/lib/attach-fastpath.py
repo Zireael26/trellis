@@ -262,15 +262,18 @@ def write_json(path, value, exclusive=False, on_publish=None):
 
 PREFLIGHT = r'''
 . "$1" || exit 1
-home="$2"; registry="$3"; proposal="$4"; plan="$5"; authority="$6"
+home="$2"; registry="$3"; proposal="$4"; plan="$5"; authority="$6"; donor_owner="$7"
 trap 'surface_plan_cleanup' EXIT
 _SURFACE_PLAN_HARNESSES=()
 while IFS= read -r harness; do _SURFACE_PLAN_HARNESSES+=("$harness"); done < <(jq -r '.[]' "$plan.harnesses")
 release="$(jq -r .release "$plan")"
 surface_plan_validate_manifest "$home/releases/$release/payload/core-rules/inheritance-manifest.json" || exit 1
-shift 6
+shift 7
 for owner in "$@"; do
-  _attachment_verify_owner_artifacts_impl "$home" "$owner" || { printf 'non-exact donor owner\n' >&2; exit 1; }
+  _attachment_owner_json_valid "$owner" && attach_exclude_verify_state "$(jq -c '.exclude' "$owner")" || { printf 'invalid exclude owner\n' >&2; exit 1; }
+  if [ "$owner" = "$donor_owner" ]; then
+    _attachment_verify_owner_artifacts_impl "$home" "$owner" || { printf 'non-exact donor owner\n' >&2; exit 1; }
+  fi
 done
 _attachment_verify_managed_hooks "$home" "$authority" || { printf 'invalid managed hooks\n' >&2; exit 1; }
 _attachment_validate_plan_file "$plan" || { printf 'invalid donor plan\n' >&2; exit 1; }
@@ -334,15 +337,25 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         require(manifest.get('project_id') == project_id, 'donor project differs')
         for field, value in [('status', 'committed'), ('fleet', fleet), ('project_id', project_id), ('checkout_id', checkout), ('worktree_id', key), ('attachment_id', row['attachment_id']), ('release', release), ('project_root', donor_root), ('worktree_root', donor_root)]:
             require(record.get(field) == value, 'donor binding differs')
-        for artifact in record['artifacts']:
-            artifact_exact(donor_root, artifact)
         if record.get('git_hooks', {}).get('enabled'):
             require(authority is None, 'multiple hook authorities')
             authority = path
         owners[key] = record
         owner_files.append(path)
     require(authority is not None, 'missing hook authority')
-    donor = owners[next(iter(owners))] if not expected_donor else owners[expected_donor['worktree_id']]
+    donor = None
+    candidates = [owners[expected_donor['worktree_id']]] if expected_donor else owners.values()
+    for candidate in candidates:
+        if not expected_donor and candidate.get('pre_existing'):
+            continue  # Deferred leaves need fresh planning; try another donor.
+        try:
+            for artifact in candidate['artifacts']:
+                artifact_exact(candidate['worktree_root'], artifact)
+        except (OSError, ValueError):
+            continue  # Native drift disqualifies this donor, not exclude ownership.
+        donor = candidate
+        break
+    require(donor is not None, 'no exact donor')
     if expected_donor:
         require(donor['attachment_id'] == expected_donor['attachment_id'] and donor['worktree_root'] == expected_donor['root'], 'expected donor changed')
     require(not donor.get('pre_existing'), 'donor deferred leaves need fresh planning')
@@ -407,7 +420,8 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     require(set(paths) <= set(ignored), 'exclude not effective')
     plan = copy.deepcopy(donor)
     plan.update(status='prepared', project_root=root, worktree_root=root, checkout_id=checkout, worktree_id=worktree, attachment_id=attachment_id, artifacts=owned_parents + leaves, exclude=exclude, git_hooks={'enabled': False})
-    return plan, registry_path, registry_bytes, owner_path, journal_dir + '/' + attachment_id + '.json', authority, owner_files, owner_snapshots
+    donor_owner = owner_dir + '/' + donor['worktree_id'] + '.json'
+    return plan, registry_path, registry_bytes, owner_path, journal_dir + '/' + attachment_id + '.json', authority, donor_owner, owner_files, owner_snapshots
 
 
 def publish(plan, owner_path, journal_path, root_pin, common_pin):
@@ -477,14 +491,14 @@ def main():
         plan_file, proposal = workspace + '/plan.json', workspace + '/registry.json'
         if mode == '--begin':
             home, root, fleet, project, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin = sys.argv[3:]
-            plan, registry_path, registry_before, owner_path, candidate, authority, owners, snapshots = prepare(home, root, fleet, project, json.loads(binding), release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin)
+            plan, registry_path, registry_before, owner_path, candidate, authority, donor_owner, owners, snapshots = prepare(home, root, fleet, project, json.loads(binding), release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin)
             # No project or persistent-state writes during eligibility validation.
             write_json(plan_file, plan, exclusive=True)
             with open(plan_file + '.harnesses', 'x') as stream:
                 stream.write(harnesses)
             os.chmod(plan_file + '.harnesses', 0o600)
             env = dict(os.environ, TRELLIS_LIBS_PRELOADED='0')
-            result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, registry_path, proposal, plan_file, authority, *owners], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, registry_path, proposal, plan_file, authority, donor_owner, *owners], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             require(result.returncode == 0, 'existing attachment preflight refused: ' + result.stderr.decode(errors='replace')[-2000:])
             json.loads(read_regular(proposal))
             # The only persistent write in begin: a recoverable v1 journal.

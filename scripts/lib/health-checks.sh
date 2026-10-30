@@ -2505,7 +2505,9 @@ _hc_hooks_path_refuse() {
 # shares. Attach enables hooks only on the worktree that owns the shared
 # exclude block and records every linked worktree as {"enabled":false}, so
 # exactly one record has hooks enabled with this managed path and every other
-# is a valid disabled record. Leaves every owner record, one per line in list
+# attached worktree has a valid disabled record. Unattached siblings stay gated
+# by the restored dispatcher until sync; they do not block repair. Leaves every
+# owner record, one per line in list
 # order, in HC_HOOKS_PATH_OWNERS; the enabled one in HC_HOOKS_PATH_ENABLED; the
 # disabled ones in HC_HOOKS_PATH_DISABLED as "<sha256> <path>" lines.
 HC_HOOKS_PATH_OWNERS=""
@@ -2535,9 +2537,14 @@ _hc_hooks_path_worktrees_ok() {
     wroot="$(CDPATH='' cd -P "$path" && pwd -P)" || return 1
     wid="$(hc_portable_sha256_text "$wroot")" || return 1
     wowner="$home/state/attachments/$checkout/$wid.json"
+    if [ ! -e "$wowner" ] && [ ! -L "$wowner" ]; then
+      printf 'worktree %s is not attached; its pushes are refused by the managed dispatcher until synced: trellis worktree sync %s\n' \
+        "$(hc_diagnostic_escape "$wroot")" "$(hc_diagnostic_escape "$wroot")"
+      path=""
+      continue
+    fi
     if [ ! -f "$wowner" ] || [ -L "$wowner" ]; then
-      _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$wroot") is not attached but shares this core.hooksPath" \
-        "trellis worktree sync $(hc_diagnostic_escape "$wroot"), or git worktree remove $(hc_diagnostic_escape "$wroot")"
+      _hc_hooks_path_refuse "$root" "worktree $(hc_diagnostic_escape "$wroot") has an owner record that is a symlink or not a regular file" "$remedy"
       return 1
     fi
     enabled="$(jq -r '.git_hooks.enabled // false' "$wowner" 2>/dev/null)" || enabled=""
@@ -3306,8 +3313,12 @@ hc_portable_owner() {
     echo "attachment ownership: runtime anchor is missing and another Trellis-owned artifact or managed hook changed"
     return "$HC_ERROR"
   fi
-  if ! _attachment_verify_owner_artifacts "$owner" "$home"; then
+  local artifact_diagnostic
+  if ! artifact_diagnostic="$(_attachment_verify_owner_artifacts "$owner" "$home" 2>&1)"; then
     HC_PORTABLE_OWNER_STATE="conflict"
+    # show-config reports the last line, so the finding goes after its detail.
+    [ -z "$artifact_diagnostic" ] || printf '%s\n' "$artifact_diagnostic"
+    echo "attachment ownership: for a tracked regular file replacing a native symlink, run trellis attach --refresh-artifacts --home $(hc_diagnostic_escape "$home") $(hc_diagnostic_escape "$root"); restore other drift before retrying"
     echo "attachment ownership: a Trellis-owned artifact is missing, modified, or escapes its recorded state"
     return "$HC_ERROR"
   fi

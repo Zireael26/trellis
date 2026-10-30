@@ -11,6 +11,7 @@ HOOK="$HOOKS_DIR/pr-gate-shiftleft.sh"
 CODEX_HOOK="$CODEX_HOOKS_DIR/pr-gate-shiftleft.sh"
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   setup_project_dir
   git -C "$PROJECT_DIR" branch -M main
   git -C "$PROJECT_DIR" checkout -qb feature/x

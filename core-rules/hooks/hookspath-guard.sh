@@ -16,7 +16,8 @@
 #     core_hookspath and `worktree add`. Anything else exits 0 at once.
 #   - Otherwise the shared lib/hookspath-check.sh runs the read-only R4.1 check.
 #   - `git ... worktree add` with a core.hooksPath override also gets the
-#     unseeded-worktree advisory: run `trellis worktree sync <path>` first.
+#     unseeded-worktree advisory, naming `trellis worktree sync <path>` as an
+#     operator remedy.
 #   - Advisory only: never writes git config or any file. Exit 0 always.
 #
 # Dependencies: bash; jq and git only past the pre-filter (absent → silent).
@@ -69,7 +70,7 @@ if [ "$__hp_override" = true ] && [[ "$CMD" =~ worktree\ add ]]; then
       *) __hp_path="$__hp_word"; break ;;
     esac
   done
-  __hp_sync="\`git worktree add\` ran with core.hooksPath overridden, so the new worktree was never seeded with Trellis hooks: run \`trellis worktree sync $__hp_path\` before its first push."
+  __hp_sync="\`git worktree add\` ran with core.hooksPath overridden, so the new worktree was never seeded with Trellis hooks. Operator remedy (report it; never run it yourself): \`trellis worktree sync $__hp_path\`, before its first push."
   MSG="${MSG}${MSG:+
 }${__hp_sync}"
 fi

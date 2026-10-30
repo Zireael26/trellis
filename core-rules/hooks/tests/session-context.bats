@@ -226,12 +226,37 @@ hookspath_ctx() {
   [[ "$ctx" == *"2 values (\"$HP_MANAGED\", \"\")"*'trellis doctor --fix'* ]] || { echo "$ctx"; false; }
 }
 
-@test "R4.1: the recorded previous value .husky/_ is still drift" {
+@test "R4.1: the recorded previous value .husky/_ names the exact restore command and changes no config" {
+  local root expected
   hookspath_fixture '".husky/_"'
   git -C "$PROJECT_DIR" config --local core.hooksPath .husky/_
   hookspath_ctx "$HOOK"
-  [[ "$ctx" == *'core.hooksPath is ".husky/_"'*'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
-  [[ "$ctx" != *'git config'* ]]
+  root="$(cd "$PROJECT_DIR" && pwd -P)"
+  expected="git -C $(printf '%q' "$root") config --local --replace-all core.hooksPath $(printf '%q' "$HP_MANAGED")"
+  [[ "$ctx" == *"local core.hooksPath is the recorded previous value \".husky/_\""*"Operator remedy (report it; never run it yourself): $expected"* ]] || { echo "$ctx"; false; }
+  [ "$(grep -c 'Trellis git hooks are not running' <<<"$ctx")" -eq 1 ] || { echo "$ctx"; false; }
+  [ "$(git -C "$PROJECT_DIR" config --local --get-all core.hooksPath)" = ".husky/_" ]
+}
+
+@test "R4.1: the restore command quotes a root and managed path with spaces and metacharacters" {
+  local weird expected home root checkout worktree managed out
+  weird="$BATS_TEST_TMPDIR/we ird;x"
+  mkdir -p "$weird"
+  git -C "$weird" init -q
+  home="$BATS_TEST_TMPDIR/home d;x"
+  root="$(cd "$weird" && pwd -P)"
+  checkout="$(printf '%s' "$root/.git" | shasum -a 256 | awk '{print $1}')"
+  worktree="$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')"
+  managed="$home/state/git-hooks/$checkout"
+  mkdir -p "$home/state/attachments/$checkout" "$managed"
+  jq -n --arg managed "$managed" \
+    '{git_hooks: {enabled: true, managed_hooks_path: $managed, previous_hooks_path: ".husky/_", pre_push_source: "core-rules/githooks/pre-push"}}' \
+    > "$home/state/attachments/$checkout/$worktree.json"
+  git -C "$weird" config --local core.hooksPath .husky/_
+  out="$(TRELLIS_HOME="$home" bash -c '. "$1"; trellis_hookspath_drift_line "$2"' _ "$HOOKS_DIR/lib/hookspath-check.sh" "$weird")"
+  expected="git -C $(printf '%q' "$root") config --local --replace-all core.hooksPath $(printf '%q' "$managed")"
+  [[ "$out" == *"Operator remedy (report it; never run it yourself): $expected" ]] || { echo "$out"; false; }
+  [ "$(git -C "$weird" config --local --get-all core.hooksPath)" = ".husky/_" ]
 }
 
 @test "R4.1: the managed value alone gives no line" {
@@ -294,6 +319,31 @@ write_session_status() {
     write_session_status blocked-by-journal
     hookspath_ctx "$hook"
     [[ "$ctx" == *'Trellis attachment checks are blocked'*'trellis recover /x'* ]] || { echo "$hook: $ctx"; false; }
+  done
+}
+
+# Session context reaches agents as instructions. A worker once ran
+# `trellis doctor --fix` from the stale advisory against its brief (2026-10-19),
+# so every remedy is introduced as an operator remedy, never as an imperative.
+@test "every drift and attachment-check remedy is marked as an operator remedy, in both copies" {
+  local hook state op='Operator remedy (report it; never run it yourself): '
+  export TRELLIS_ROOT
+  TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  status_fixture
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    for state in failed blocked-by-journal pending stale; do
+      case "$state" in
+        stale) write_session_status ok 0 "$(printf '0%.0s' $(seq 64))" ;;
+        *) write_session_status "$state" 7200 ;;
+      esac
+      hookspath_ctx "$hook"
+      [ "$(printf '%s\n' "$ctx" | grep -c 'Trellis attachment checks')" -eq 1 ] || { echo "$hook $state: $ctx"; false; }
+      [[ "$(printf '%s\n' "$ctx" | grep 'Trellis attachment checks')" == *"$op"* ]] || { echo "$hook $state: $ctx"; false; }
+    done
+    git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_HOME/state/git-hooks/other"
+    hookspath_ctx "$hook"
+    [[ "$(printf '%s\n' "$ctx" | grep 'Trellis git hooks are not running')" == *"$op"'`trellis doctor --fix`'* ]] || { echo "$hook drift: $ctx"; false; }
+    git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
   done
 }
 

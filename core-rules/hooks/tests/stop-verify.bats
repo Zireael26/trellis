@@ -293,6 +293,160 @@ EOF
 }
 
 
+# mypy files fixtures: pyproject-only config (no mypy.ini) plus a fake global
+# mypy that records its argv. Both independent Stop-hook copies must honor
+# the same configured targets and tool precedence.
+prepare_mypy_files_project() {
+  local fake_bin="$1"
+
+  mkdir -p "$fake_bin"
+  ln -s "$(command -v jq)" "$fake_bin/jq"
+  make_dirty
+  make_python_command "$fake_bin/mypy" global-mypy
+}
+
+run_mypy_files_hook() {
+  local fake_bin="$1"
+  local call_log="$2"
+
+  : > "$call_log"
+  run env PROCESS_GATE_NO_RECEIPTS=1 PYTHON_TOOL_LOG="$call_log" \
+    PATH="$fake_bin:/usr/bin:/bin" bash "${3:-$HOOK}" <<<'{}'
+}
+
+@test "mypy files: configured [tool.mypy] files drops the positional . target" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '%s\n' '[tool.ruff]' 'line-length = 100' \
+    '[tool.mypy] # typed' 'files=["src"]' > "$PROJECT_DIR/pyproject.toml"
+
+  # Trailing space: make_python_command prints label, space, then empty argv.
+  assert_python_hook_calls "$fake_bin" "$call_log" 'global-mypy '
+}
+
+@test "mypy files: [tool.mypy] without files keeps the . default" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '%s\n' '[tool.mypy]' 'strict = true' > "$PROJECT_DIR/pyproject.toml"
+
+  assert_python_hook_calls "$fake_bin" "$call_log" 'global-mypy .'
+}
+
+@test "mypy files: commented, other-table, and override files keys keep the . default" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '%s\n' \
+    '# files = ["commented"]' \
+    '[tool.ruff]' 'files = ["ruff-only"]' \
+    '[tool.mypy]' \
+    '# files = ["also-commented"]' \
+    'strict = true # files = ["trailing-comment"]' \
+    '[tool.pytest.ini_options]' 'files = ["tests"]' \
+    '[[tool.mypy.overrides]]' 'module = "pkg.*"' 'files = ["override"]' \
+    > "$PROJECT_DIR/pyproject.toml"
+
+  assert_python_hook_calls "$fake_bin" "$call_log" 'global-mypy .'
+}
+
+@test "mypy files: mypy.ini keeps the . default over pyproject files" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '[mypy]\n' > "$PROJECT_DIR/mypy.ini"
+  printf '[tool.mypy]\nfiles = ["src"]\n' > "$PROJECT_DIR/pyproject.toml"
+
+  assert_python_hook_calls "$fake_bin" "$call_log" 'global-mypy .'
+}
+
+@test "mypy files: .mypy.ini keeps the . default over pyproject files" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '[mypy]\n' > "$PROJECT_DIR/.mypy.ini"
+  printf '[tool.mypy]\nfiles = ["src"]\n' > "$PROJECT_DIR/pyproject.toml"
+
+  assert_python_hook_calls "$fake_bin" "$call_log" 'global-mypy .'
+}
+
+@test "mypy files: empty or malformed [tool.mypy] files still blocks on mypy failure" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+  local body candidate
+
+  prepare_mypy_files_project "$fake_bin"
+  cat > "$fake_bin/mypy" <<'EOF'
+#!/usr/bin/env bash
+printf '%s %s\n' 'global-mypy' "$*" >> "$PYTHON_TOOL_LOG"
+printf '%s\n' 'mypy: error: fixture failure'
+exit 2
+EOF
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    for body in 'files = []' 'files = ['; do
+      printf '[tool.mypy]\n%s\n' "$body" > "$PROJECT_DIR/pyproject.toml"
+      run_mypy_files_hook "$fake_bin" "$call_log" "$candidate"
+      if [ "$candidate" = "$CODEX_HOOK" ]; then
+        [ "$status" -eq 0 ]
+      else
+        [ "$status" -eq 2 ]
+      fi
+      printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+      printf '%s' "$output" | jq -e '.reason | startswith("typecheck (mypy):")' >/dev/null
+      printf '%s' "$output" | jq -e '.reason | contains("fixture failure")' >/dev/null
+      [ "$(cat "$call_log")" = 'global-mypy ' ]
+    done
+  done
+}
+
+@test "mypy files: venv mypy beats uv and global with no positional target" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+  local local_log="$BATS_TEST_TMPDIR/mypy-venv.log"
+  local tool candidate
+
+  prepare_mypy_files_project "$fake_bin"
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  printf '%s\n' '[tool.mypy]' 'files = ["src"]' > "$PROJECT_DIR/pyproject.toml"
+  touch "$PROJECT_DIR/uv.lock"
+  make_python_command "$fake_bin/uv" uv
+  for tool in mypy pytest; do
+    cat > "$PROJECT_DIR/.venv/bin/$tool" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$LOCAL_TOOL_LOG"
+EOF
+    chmod +x "$PROJECT_DIR/.venv/bin/$tool"
+  done
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    : > "$local_log"
+    : > "$call_log"
+    run env PROCESS_GATE_NO_RECEIPTS=1 LOCAL_TOOL_LOG="$local_log" \
+      PYTHON_TOOL_LOG="$call_log" PATH="$fake_bin:/usr/bin:/bin" bash "$candidate" <<<'{}'
+    [ "$status" -eq 0 ]
+    [ "$(cat "$local_log")" = $'mypy \npytest --tb=short -q' ]
+    [ ! -s "$call_log" ]
+  done
+}
+
+@test "mypy files: uv run gets no positional target when files is configured" {
+  local fake_bin="$BATS_TEST_TMPDIR/mypy-files-bin"
+  local call_log="$BATS_TEST_TMPDIR/mypy-files.log"
+
+  prepare_mypy_files_project "$fake_bin"
+  printf '%s\n' '[tool.mypy]' 'files = ["src"]' > "$PROJECT_DIR/pyproject.toml"
+  touch "$PROJECT_DIR/uv.lock"
+  make_python_command "$fake_bin/uv" uv
+
+  assert_python_hook_calls "$fake_bin" "$call_log" "$(printf '%s\n' 'uv run mypy' 'uv run pytest --tb=short -q')"
+}
+
 @test "mixed Python and Rust manifests fall through when pytest is unavailable" {
   local fake_bin="$BATS_TEST_TMPDIR/bin"
   local cargo_log="$BATS_TEST_TMPDIR/cargo.log"

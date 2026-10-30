@@ -383,7 +383,9 @@ fi
 # test ceiling, and while there was only one variable that raise silently removed
 # the guard from typecheck and lint too — the two checks that should never take
 # more than a few minutes and whose runaway is exactly what a timeout is for.
-PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-300}"
+# test-postgres.mjs can spend up to 900 s acquiring its shared database
+# lock; leave another 600 s for the battery after acquisition.
+PROCESS_GATE_TEST_TIMEOUT="${PROCESS_GATE_TEST_TIMEOUT:-1500}"
 PROCESS_GATE_CHECK_TIMEOUT="${PROCESS_GATE_CHECK_TIMEOUT:-300}"
 
 # Portable hard ceiling for every bounded command in this script -- the main
@@ -467,6 +469,101 @@ if [ -n "${PROCESS_GATE_TEST_CMD:-}" ] && [ -z "$docs_only_files" ]; then
   pg_heavy_preflight
 fi
 
+# Preserve complete failed-check output beside failed local-gate shard evidence.
+# Keep only owner-private process-gate directories here; run-tests-local owns
+# its separate token directories under the same failed-shards parent.
+pg_failure_dir_mtime() {
+  local dir="$1" stamp
+  if [ "$(uname -s)" = Darwin ]; then
+    stamp="$(stat -f '%m' "$dir" 2>/dev/null)" || return 1
+  else
+    stamp="$(stat -c '%Y' "$dir" 2>/dev/null)" || return 1
+  fi
+  case "$stamp" in ""|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$stamp"
+}
+
+pg_prune_failure_outputs() {
+  local root="$1" uid candidate stamp best_index i kept=0
+  local -a dirs=() mtimes=()
+  uid="$(id -u)" || return 1
+  find "$root" -mindepth 1 -maxdepth 1 -type d -name 'process-gate-failure.*' \
+    -uid "$uid" -perm 0700 -mmin +10080 -exec rm -rf {} + 2>/dev/null || true
+  while IFS= read -r -d '' candidate; do
+    stamp="$(pg_failure_dir_mtime "$candidate" 2>/dev/null || true)"
+    case "$stamp" in ""|*[!0-9]*) stamp=0 ;; esac
+    dirs+=("$candidate")
+    mtimes+=("$stamp")
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'process-gate-failure.*' \
+    -uid "$uid" -perm 0700 -print0 2>/dev/null)
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+
+  while [ "$kept" -lt 7 ]; do
+    best_index=-1
+    for i in "${!dirs[@]}"; do
+      [ -n "${dirs[$i]}" ] || continue
+      if [ "$best_index" -lt 0 ] || [ "${mtimes[$i]}" -gt "${mtimes[$best_index]}" ]; then
+        best_index="$i"
+      fi
+    done
+    [ "$best_index" -ge 0 ] || break
+    dirs[$best_index]=""
+    mtimes[$best_index]=""
+    kept=$((kept + 1))
+  done
+  for candidate in "${dirs[@]}"; do
+    [ -z "$candidate" ] || rm -rf "$candidate" 2>/dev/null || true
+  done
+}
+
+pg_private_directory() {
+  local path="$1" owner mode info
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  if [ "$(uname -s)" = Darwin ]; then
+    info="$(stat -f '%u %Lp' "$path" 2>/dev/null)" || return 1
+  else
+    info="$(stat -c '%u %a' "$path" 2>/dev/null)" || return 1
+  fi
+  read -r owner mode <<<"$info"
+  [ "$owner" = "$(id -u)" ] && [ "$mode" = 700 ]
+}
+
+pg_add_failure_output() {
+  local label="$1" output="$2" state_root failure_root failure_dir failure_file line
+  state_root="${TRELLIS_GATE_STATE_DIR:-${HOME:-}/.local/state/trellis-gate}"
+  failure_root="$state_root/failed-shards"
+  if [ -L "$state_root" ] || [ -L "$failure_root" ] ||
+    ! (umask 077; mkdir -p "$failure_root" 2>/dev/null) ||
+    ! pg_private_directory "$state_root" || ! pg_private_directory "$failure_root"; then
+    findings+=("$label: full output could not be saved in an owner-private failed-shards directory")
+    return 0
+  fi
+
+  pg_prune_failure_outputs "$failure_root" || true
+  if ! failure_dir="$(umask 077; mktemp -d "$failure_root/process-gate-failure.XXXXXXXXXXXX" 2>/dev/null)"; then
+    findings+=("$label: full output could not be saved under $failure_root")
+    return 0
+  fi
+  failure_file="$failure_dir/output.txt"
+  if ! pg_private_directory "$failure_dir" ||
+    ! (umask 077; printf '%s' "${output:0:5242880}" > "$failure_file") ||
+    ! chmod 0600 "$failure_file" 2>/dev/null; then
+    rm -rf "$failure_dir" 2>/dev/null || true
+    findings+=("$label: full output could not be saved privately under $failure_root")
+    return 0
+  fi
+
+  if [ "${#output}" -gt 5242880 ]; then
+    printf '\n[check-tests: output truncated at 5 MiB]\n' >> "$failure_file"
+    findings+=("$label: full output saved at $failure_file (truncated at 5 MiB)")
+  else
+    findings+=("$label: full output saved at $failure_file")
+  fi
+  while IFS= read -r line; do
+    findings+=("    $line")
+  done < <(printf '%s\n' "$output" | grep '^not ok ' | head -n 20 || true)
+}
+
 run_check() {
   local label="$1" cmd="$2" limit
   case "$label" in
@@ -506,6 +603,19 @@ run_check() {
   fi
   set -e
 
+  # A cooperating test runner can distinguish database-lock starvation from a
+  # failing assertion with this exact marker. Keep the gate blocking, but name
+  # the failure as infrastructure; the tests did not complete.
+  if [ "$label" = tests ] && {
+    printf '%s\n' "$out" | grep -Fxq 'process-gate-infra: test-database lock wait timed out' ||
+    printf '%s\n' "$out" | grep -Eiq 'timed out.*(test[- ]?postgres|test[- ]?database).*lock|(test[- ]?postgres|test[- ]?database).*lock.*timed out';
+  }; then
+    findings+=("tests: infrastructure failure: test-database lock wait timed out — battery did not complete; retry after the lock is available")
+    pg_add_failure_output "$label" "$out"
+    worst="fail"
+    return 0
+  fi
+
   # 124 (GNU timeout) and 142 (the perl fallback's SIGALRM path) both mean the
   # ceiling fired. Say so: "exited 124" reads like a test failure and sends the
   # operator hunting for a bug that is not there. Only meaningful when a runner
@@ -513,6 +623,7 @@ run_check() {
   if { [ -n "$PG_TIMEOUT_RUNNER" ] || { [ "$label" = tests ] && [ -n "$PG_HEAVY_LAUNCHER" ]; }; } &&
     { [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; }; then
     findings+=("$label: \`$cmd\` exceeded ${limit}s and was killed")
+    pg_add_failure_output "$label" "$out"
     while IFS= read -r line; do
       findings+=("    $line")
     done < <(printf "%s\n" "$out" | tail -n 10)
@@ -522,6 +633,7 @@ run_check() {
 
   if [ "$rc" -ne 0 ]; then
     findings+=("$label: \`$cmd\` exited $rc")
+    pg_add_failure_output "$label" "$out"
     # Last 10 lines of output for context
     while IFS= read -r line; do
       findings+=("    $line")

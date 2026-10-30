@@ -202,6 +202,8 @@ EOF
   seed_todos_none
   echo '{"compilerOptions":{"noEmit":true}}' > "$PROJECT_DIR/tsconfig.json"
   echo 'export const x: number = "nope"' > "$PROJECT_DIR/index.ts"
+  # An installed project: without node_modules the typecheck is "unavailable".
+  mkdir -p "$PROJECT_DIR/node_modules"
 
   local npxdir
   npxdir="$(make_failing_npx_dir)"

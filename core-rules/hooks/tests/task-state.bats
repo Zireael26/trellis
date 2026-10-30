@@ -115,6 +115,11 @@ PY
   check <<'PY'
 record = seed(); original = record.read_bytes()
 for raw in (b'- [X] unknown', b'* [ ] other', b'1. [ ] other', b'- [ ] ok\n| T1 | bad | [?] |',
+            b'- [ ] ok\n| T1 | bad | [X] |', b'- [ ] ok\n| T1 | bad [x] | note |',
+            b'- [ ] ok\n| T7 | pad | [ x ] |', b'- [ ] ok\n| T7 | pad | [  x  ] |',
+            b'- [ ] ok\n| T7 | pad | [    ] |', b'- [ ] ok\n| T7 | status | [DONE] |',
+            b'- [ ] ok\n| T7 | bold | [**x**] |', b'- [ ] ok\n| T7 | [  ] | note |',
+            b'- [ ] ok\n| T7 | do thing | [x ] done |', b'- [ ] ok\n| T7 | [  ] do thing | note |',
             b'- [ ] ok\n| T1 | bad | [ ]', b'- [ ] bad\x00text', b'- [ ] \xff',
             b'- [ ] ' + b'a'*2049, b'- [ ] a\n'*1001, b'a'*(1024*1024+1),
             b'- [ ] <!-- dod-receipt cmd="bad" exit=0 diff="+1/-0 (1 files)" -->'):
@@ -123,6 +128,11 @@ for raw in (b'- [X] unknown', b'* [ ] other', b'1. [ ] other', b'- [ ] ok\n| T1 
     assert record.read_bytes() == original
 source.write_bytes(b'- [ ] '+b'a'*2048)
 assert cli('capture')['status'] == 'available'
+# Prose brackets in a non-task table row are not a malformed task.
+source.write_bytes(b'- [ ] ok\n| X000 | audits use [] and [docs](a.md), name[i] |\n| X001 | [WIP] draft | owner |\n')
+result = cli('capture')
+assert result['status'] == 'available', result
+assert len(cli()['documents'][0]['tasks']) == 1
 source.write_bytes(b'- [ ] a\n'*1000)
 assert len(cli('capture')['documents'][0]['tasks']) == 1000
 PY

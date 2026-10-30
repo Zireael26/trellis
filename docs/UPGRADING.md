@@ -13,6 +13,37 @@ upgrade end to end — any harness, with per-step verification, stop conditions,
 and a rollback path — use [AGENT_UPGRADE.md](../AGENT_UPGRADE.md); this document
 is the reference it cites.
 
+## Repair a tracked file takeover after a merge
+
+If a merge starts tracking a regular file where Trellis owned a native symlink
+(for example `AGENTS.md`), review the path named by `trellis doctor`, then run:
+
+```sh
+trellis attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT_ROOT"
+```
+
+The repair retires only that symlink from this worktree's owned inventory and
+records the tracked file as project-owned. It does not overwrite project files,
+re-render templates, change the attachment identity or release, or edit the
+shared exclude block. Keeping the exact recorded block lets older sibling owners
+continue to verify. Empty or canonical-source-identical files are not authored
+replacements. Missing links, untracked replacements, changed render keys,
+runtime-anchor drift, retired native leaves, pending operations and foreign
+bindings still refuse the repair; restore those states or use their documented
+recovery route first.
+Only `--home` and one checkout path may accompany `--refresh-artifacts`.
+
+An already-exact attach (including post-checkout) with a current registry release
+and no reconcile journal skips full sibling artifact/inventory reconciliation.
+It still verifies the target, immutable release, registry identities, shared
+exclude ownership and managed hook authority. Non-donor native drift no longer
+blocks another worktree's attach; a reused donor must remain exact and have no
+deferred project leaves. Fresh attachment verifies shared managed hook authority
+before publishing worktree artifacts or owner/registry state. Release changes and
+reconcile-journal recovery retain full group verification. Concurrent attaches
+wait up to 15 minutes for the checkout lock, longer than the observed 9–12 minute
+large-group attach; unsafe locks and expired waits still refuse.
+
 ## What an upgrade changes
 
 An upgrade has four distinct operations:
@@ -290,7 +321,12 @@ repeat this command.
 
 Verification is required before any attachment or adoption. It rechecks the
 release record, expected paths, Git blob IDs, symlinks, modes, and read-only
-state.
+state. Attachment and worktree seeding reuse successful verification within
+one controlled shell tree across sibling owners. Within one attach or seed
+run, a payload changed after the first verification is caught by the next run,
+not the current one. Every script that loads the release store discards
+inherited verification memos; a parent PID or an exported success entry is not
+verification authority.
 
 ```sh
 "$TRELLIS" release verify "$TARGET_RELEASE"
@@ -709,7 +745,9 @@ at attach time. The documented route back to a fresh render is the detach/attach
 pair — the same pair
 [AGENT_SETUP.md](../AGENT_SETUP.md) §8 uses for a checkout move. This also
 applies to any new project leaf declared by a later release: adoption and
-`relink` do not materialize it. There is no repair, refresh, or force flag:
+`relink` do not materialize it. There is no template-refresh or force flag
+(the current [`--refresh-artifacts` repair](#repair-a-tracked-file-takeover-after-a-merge)
+only retires tracked-file takeovers, not rendered surfaces):
 `attach` against an already-attached row prints
 `already attached: <root>` and returns `0` without rendering, `relink` repairs
 the anchor and git hooks and verifies owned artifacts byte-exact against the
@@ -780,6 +818,331 @@ re-rendered under rc.26, repeat the detach/attach pair with
 render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
+
+## `1.3.19` → `1.3.20` adoption
+
+1.3.20 repairs managed-exclude owner metadata left by **any group adoption run
+by a CLI older than 1.3.20**, whether or not the release's block changed. Older
+CLIs recorded the live file as every owner's after-image; a non-manager must
+instead retain its own before-image. Changed blocks or surrounding user edits
+can therefore leave `show-config` / `doctor` exiting `4` with
+`owner after-image does not exactly derive from its immutable block and recorded
+user bytes`. Identical release manifests do not rule out this fault.
+
+1. Inspect the intended registry scope and **deregister confirmed dead worktree
+   rows before re-adoption**. Complete committed-owner coverage is required;
+   do not delete records for an unavailable volume or guess that a row is dead.
+   For each operator-confirmed dead path, use
+   `trellis registry deregister --fleet <fleet> --worktree-root <dead-path>`.
+2. Install and verify 1.3.20 through the stable launcher, then **switch
+   `active_cli_release` to 1.3.20 before invoking adoption**. The launcher runs
+   `release.sh` from the active management CLI, not the adoption target. Merely
+   installing 1.3.20 and adopting with the active CLI still at 1.3.19 runs the
+   old planner and does not deliver the repair.
+3. Re-adopt the reviewed scope, then require `trellis doctor --fleet <fleet>`
+   for each selected fleet and `trellis show-config` in each affected live
+   worktree to exit `0`.
+
+After the dead-row review/cleanup, the stepwise all-fleet route is:
+
+```sh
+(
+  set -e
+  TARGET_RELEASE=1.3.20
+  : "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+  : "${TRELLIS:=trellis}"
+  : "${TRELLIS_HOME:=$HOME/.trellis}"
+  export TRELLIS_HOME
+  "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+  "$TRELLIS" release verify "$TARGET_RELEASE"
+  "$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+  "$TRELLIS" release adopt "$TARGET_RELEASE" --all
+)
+```
+
+Use `--fleet NAME` or `--project ID --fleet NAME` instead of `--all` for narrower
+scope. If 1.3.20 is already installed, verify it rather than reinstalling it;
+the active-CLI switch must still precede adoption. Project attachments do not
+switch merely because the management CLI changes. Re-adoption rebuilds stale
+non-manager after-images from their unchanged restoration snapshots and
+preserves live user bytes; **no detach/fresh attach is needed for this fault**.
+
+After a block-changing adoption, a non-manager may report `exact immutable
+native-surface block matches; surrounding user bytes drifted`. This is
+informational (`HC_OK`), not damage or a reason to edit its restoration snapshot.
+
+## `1.3.18` → `1.3.19` adoption
+
+1.3.19 hardens the Pi hook-directory migration. Adoption removes an empty
+`.pi/hooks` or `.pi/hooks/lib` directory only when the old owner record owns
+that directory as a parent. Pre-existing, unowned directories stay in place
+with the operator-action notice; move them out yourself to stop Pi's startup
+warning. Interrupted adoption restores owned directories with their exact
+previous modes, including distinct non-default modes.
+
+Rolling back to a release that declares `.pi/hooks` links (1.3.17 or older)
+after those owned links have been retired now refuses in preflight with exit
+`3`, before changing the checkout's owner, runtime anchor or shared exclude.
+The error names the checkout and prints the exact `detach` and `attach`
+commands for the target release, preserving its fleet and harness selection.
+Follow those commands for each affected checkout, then run `doctor`; an
+ordinary reverse pin move cannot recreate the retired links. Forward adoption
+still does not add newly declared project leaves, as described in the
+Criterion 6 notice above.
+
+## `1.3.17` → `1.3.18` adoption
+
+1.3.18 stops rendering `.pi/hooks`. Pi treats that directory as a deprecated
+resource and waits for a keypress at startup while it exists, even empty, so a
+prompt sent too early was lost. The Pi dispatcher now runs the release-owned
+Codex hook set straight from the attachment's runtime payload
+(`.trellis/runtime/core-rules/codex/hooks`); the hooks and their behavior are
+unchanged.
+
+Adoption alone delivers it; no detach or fresh attach is needed. For every
+Pi-attached checkout, `release adopt` retires the owned `.pi/hooks` links and
+then removes the emptied `.pi/hooks/lib` and `.pi/hooks` directories. An
+interrupted adoption restores both the directories and the links. If the tree
+holds anything Trellis does not own, adoption leaves it in place and prints
+`left in place: <root>/.pi/hooks holds files Trellis does not own`; move those
+files out and Pi stops warning. Fresh attaches and `trellis worktree sync`
+never create `.pi/hooks`.
+
+Doctor and the bypass check still require `.pi/hooks/dispatch.sh` for a
+checkout pinned to an older release, because that release declares it.
+
+**Exclude-record caveat.** The 1.3.18 CLI could retire a singleton's links but
+retain the old block listing `/.pi/hooks/*`, yielding `owner block does not match
+the exact immutable native surface plan`. Separately, any group adoption by a
+CLI older than 1.3.20 can leave non-manager after-images stale, block change or
+not. See [1.3.19 → 1.3.20 adoption](#1319--1320-adoption) for the active-CLI-first
+repair instead of detaching a healthy group. A lone non-manager still refuses
+when its block needs re-planning: restore missing committed manager ownership;
+never promote the surviving owner or replace its restoration snapshot.
+
+## `1.3.16` → `1.3.17` adoption
+
+1.3.17 updates runtime hooks and the managed pre-push dispatcher without adding
+rendered leaves or changing settings. Existing 1.3.16 attachments need only a
+scoped pin move: **no detach or fresh attach is required**. Installation and
+configuration do not implicitly adopt projects.
+
+Install, verify and activate the exact published release through the stable
+launcher:
+
+```sh
+TARGET_RELEASE=1.3.17
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+: "${TRELLIS:=trellis}"
+: "${TRELLIS_HOME:?Set TRELLIS_HOME (or export it) before configuring}"
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+Then use `release adopt "$TARGET_RELEASE"` with the reviewed `--project`,
+`--fleet` or `--all` selector and verify the selected rows with `doctor`.
+
+The pin move delivers:
+
+- The SessionStart payload-symlink fix for false "Trellis attachment is missing"
+  warnings in attached worktrees.
+- Root `CLAUDE.md` and `AGENTS.md` exemptions from the spec-gate's gated diff;
+  nested instruction files remain counted.
+- Durable daily usage-store data checks rather than full scans on every open;
+  creation/migration checks, per-open schema/version checks and failed-scan
+  refusals remain. No retention or data-pruning change is included.
+- Pending-adoption refusal before the chained pre-push suite, while retaining
+  carrier and pending-operation rechecks after it.
+- A distinct `verification unavailable: dependencies not installed` advisory
+  for absent JS installations in Claude/Codex Stop verification, without
+  suppressing genuine installed-project failures or receipt/Todo gates. This
+  does not change which checkout Stop verifies.
+- Byte-exact Pi read results for capability-only notices, delivered separately
+  once per session; genuine context and warn/deny advisories are unchanged.
+
+### Repair older private-gate pnpm installations
+
+Worktrees whose dependencies were installed under the gate's private pnpm
+config before 1.3.16 can fail `verify-deps-before-run`: that private config had
+`enableGlobalVirtualStore` unset, whereas 1.3.16 mirrors the user's `true`.
+Adoption alone does not repair the existing installation. In each affected
+worktree, run this one-time migration from the **normal shell**:
+
+```sh
+cd /path/to/affected-worktree
+pnpm install --frozen-lockfile
+```
+
+Never install dependencies under the gate's private config. Do not use a gate
+invocation to perform this repair.
+
+### Fresh-worktree dependency recipe
+
+After `trellis worktree add <branch>` creates and attaches the new worktree,
+enter the reported path in the normal shell and install without lifecycle
+scripts:
+
+```sh
+cd /path/to/new-worktree
+pnpm install --frozen-lockfile --ignore-scripts
+```
+
+`--ignore-scripts` prevents Husky's `prepare` from resetting the checkout group's
+shared `core.hooksPath`. Never install under the gate's private config.
+
+### Known issue: Pi startup keypress
+
+Fixed in 1.3.18. The rendered `.pi/hooks` directory is still present in 1.3.17. Pi may print
+"Hooks have been renamed to extensions" and wait for a keypress. At startup,
+dismiss that prompt and **wait for Pi's footer before sending the first
+prompt**; a prompt sent earlier may be lost. Do not delete managed hooks as a
+workaround. The directory fix is deferred to the next release; this release
+does not migrate it.
+
+## `1.3.15` → `1.3.16` adoption
+
+For the Docker endpoint and hooks-path fixes, use the install, verify,
+configure and scoped release-adopt steps below with `TARGET_RELEASE=1.3.16`
+after the release is published. Adoption updates the managed dispatchers;
+passthrough shim bytes are unchanged, so these fixes do not require a detach
+or fresh attach.
+
+### Recover a husky-reset hooks path with an unattached sibling
+
+If husky's `prepare` reset the shared `core.hooksPath` to `.husky/_`, run
+`trellis doctor --fix --project <project-id>` for the owning checkout's
+project. The guarded repair still verifies its recorded owner and dispatcher,
+but an unattached sibling no longer blocks restoring the managed hooks path.
+Run each printed `trellis worktree sync <sibling-path>` command afterward.
+The shared dispatcher refuses that sibling's pushes until it is synced;
+doctor does not silently attach it or weaken donor verification.
+
+Session start now prints an exact, shell-quoted restore command when the live
+hooks path equals the recorded previous value rather than the managed path.
+This is a warning, not an automatic write; prefer the guarded doctor repair.
+Other hooks-path drift still requires inspection rather than an unconditional
+restore.
+
+### Archive an orphaned project attachment journal
+
+After activating 1.3.16, an operator can archive one prepared attach or detach
+journal whose recorded worktree root has vanished, using a surviving root of
+the **same checkout**:
+
+```sh
+trellis recover --discard-orphan-journal <attachment-uuid> <surviving-checkout-root>
+```
+
+This works at any journal phase, but refuses a live root, any remaining owner
+record, a live transaction/publisher, foreign checkout identity, unsafe paths
+or writes outside the vanished root. If the journal owned shared exclude or
+hooks state, another committed owner must verify both the current managed
+exclude block and dispatcher exactly. Partial-harness registry changes are
+not eligible. On refusal, restore the recorded root and use normal
+`trellis recover`; do not hand-delete the journal or edit registry JSON.
+
+The command clears only that exact registry `attachment_id`, retaining the
+inventory row. It then moves the journal and any progress log, preserving
+bytes and modes, to
+`$TRELLIS_HOME/backups/discarded-journals-<UTC-YYYY-MM-DD>/` (the default home
+is `~/.trellis`). It prints the retained paths and never overwrites an existing
+archive. It does not replay project writes, repair shared state or detach
+another owner. Ordinary `recover` still requires a live recorded root.
+
+### Refresh the process-audit task
+
+After activating 1.3.16, re-materialize `cross-project-process-audit` for each
+scheduled fleet:
+
+```sh
+trellis task materialize --fleet <fleet> cross-project-process-audit
+```
+
+Existing materialized prompts remain pinned to their old release until
+refreshed. The updated audit accepts either root
+instruction document and the verified managed hooks stack; it does not change
+audited projects or disable unmanaged-hook checks.
+
+### Refresh pi roster copies and use delivery receipts
+
+After scoped release adoption moves a project's `.trellis/runtime` pin, its
+managed `.agents/agents` links follow the updated roster without re-attachment.
+Separately copied rosters need an attended refresh from the 1.3.16 definitions
+before starting a new pi session. Preserve project-authored changes; the
+launcher still refuses differing files rather than blindly overwriting them.
+Writable profiles now omit `isolation`, so select `off` or `worktree` at each
+invocation instead of relying on a forced agent-file setting. Read-only
+profiles still explicitly select `off`.
+
+`foreman-prompt.sh` now submits once and reads a status snapshot without waiting
+for turn completion. Use the brief's callback/artifact receipt to establish
+completion; do not resend because the snapshot is `idle`. If status retrieval
+fails after submission, inspect the session before retrying: the brief may
+already have arrived.
+
+### Gate pnpm settings and interrupted detach
+
+Scoped adoption updates the managed dispatcher. It mirrors only the user's
+global pnpm `enableGlobalVirtualStore` boolean into the private gate config;
+workspace overrides still win, and an unset user value removes a stale private
+override. No user rc, credential store or caller HOME is forwarded to the gate.
+If the setting cannot be read, the gate warns and continues on pnpm's default.
+
+After a registry-contention failure (exit `5`), retry `trellis recover <root>`
+through 1.3.16 with the recorded root present. Other checkouts' stale journals
+no longer block that recovery and remain untouched. New full detaches clear
+the exact registry attachment ID before owner unlink: a timeout retains the
+owner and journal, and an already durable clear can finish without waiting on
+another registry writer. Existing ownerless journals remain retryable, not
+silently discarded. If the recorded root has vanished, use the guarded orphan
+archive command above; do not hand-delete state or a live lock.
+
+### Declare gate environment and Semgrep timeout in a manifest PR
+
+Merge the needed fields into the project's existing `.trellis.json` in a small,
+reviewed PR **before** relying on them in a code push:
+
+```json
+{
+  "gate": { "env_passthrough": ["A31_REQUIRE_DOCKER", "A31_BASE_SHA"] },
+  "security_gate": { "semgrep_timeout": 120 }
+}
+```
+
+The managed dispatcher reads env names only from the local protected
+`origin/HEAD` commit, never the candidate or working-tree manifest. Export the
+listed values in the pushing shell; explicitly empty values remain set and
+unset names stay absent. Only the gate payload and its heavy child inherit
+them, not prior hooks or the control interpreter. Secret-looking names and
+startup/control names or namespaces are denied, including caller internals,
+locale, Docker config, Git, Trellis, Python, Perl, Ruby and loader controls.
+Do not place credentials in an allowlisted value. Missing protected authority
+or invalid env config forwards no custom values; no network lookup is made.
+
+`security_gate.semgrep_timeout` is an integer from 1 through 600 seconds. The
+security gate reads it from the gated range BASE, overriding the older timeout
+setting; candidate/worktree edits cannot change their own scan. Use a range
+whose base already contains the reviewed setting. The existing default remains
+when the field is absent, and incomplete scans still block.
+
+## `1.3.14` → `1.3.15` adoption
+
+1.3.15 changes hook, resolver, gate and roster code inside the release payload. Attached projects run hooks through the `trellis hook` launcher from their pinned release, and no rendered surface changed: no manifest, settings, managed exclude block or owned-leaf changes. **No re-render, detach or fresh attach is needed** for projects already on 1.3.14; moving their pins is enough.
+
+Install, verify and activate the exact published release through the stable launcher:
+
+```sh
+TARGET_RELEASE=1.3.15
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+: "${TRELLIS:=trellis}"
+: "${TRELLIS_HOME:?Set TRELLIS_HOME (or export it) before configuring}"
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+"$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE"
+```
+
+Then move pins with `release adopt "$TARGET_RELEASE"` and the reviewed `--project`, `--fleet` or `--all` selector. Install the user-level pi extension copy (`~/.pi/agent/extensions/opencode-go-2.ts`) from the release so pi registers the new Go 2 models; `scripts/pi-guide-parity.sh` reports a stale copy.
 
 ## `1.3.13` → `1.3.14` adoption
 
@@ -1721,7 +2084,19 @@ has merged to `main`:
 
 1. `git fetch origin main`. The ancestry check in steps 4, 6 and 8 reads the
    fetched `origin/main`, so fetch first.
-2. Run the off-main tag consumer gate:
+2. From a clean checkout of the approved release commit, run
+   `bash scripts/check-mirror-preseal.sh` before building or tagging. This
+   mandatory pre-seal check runs the real mirror lint over a disposable staged
+   replica of the working tree, including published tests, the publisher's
+   allowlist/exclusions, manifest projection and empty fleet-data shells. It
+   refuses findings, changed extraction boundaries or an incomplete stage
+   (fewer than 1,000 regular files or a missing sentinel). It never opens the
+   installed release or mirror checkout. The lint requires the operator's
+   registry; `TRELLIS_MIRROR_IDENTITY_SOURCE=/path/to/registry.json` selects an
+   explicit offline copy. Never substitute a synthetic registry for a real
+   release. Fix findings in source and recut; immutable releases cannot be
+   repaired in place.
+   Then run the off-main tag consumer gate:
    `bats scripts/tests/release-tag-consumers.bats`. It must pass, including the
    case that pushes a payload tag through the managed pre-push. A new consumer
    hit means reviewing the consumer, not widening the allowlist to pass.
@@ -1769,7 +2144,7 @@ The portable command family uses these exit classes:
 | `2` | Invalid arguments | Correct the selector or flag; do not improvise another target. |
 | `3` | Ownership or identity conflict | Inspect the exact conflicting artifact/row; preserve project-owned bytes. |
 | `4` | Invalid, corrupt, or integrity-failed state | Stop using that state; verify/recover through the supported command. |
-| `5` | Unavailable path, remote, or local capability | Keep the row explicit and restore the real capability/path before retrying. |
+| `5` | Unavailable path, remote, local capability, or registry lock after bounded retry | Keep the row explicit; restore the capability/path, or wait for the reported lock holder to finish, then retry. Never delete a live lock. |
 
 Classes `4` and `5` are also the two reportable row states — see
 [Reading row state](#reading-row-state). A bulk command returns the highest

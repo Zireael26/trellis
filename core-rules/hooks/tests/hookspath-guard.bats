@@ -66,7 +66,7 @@ ctx() { printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext // 
 @test "git -c core.hooksPath=... worktree add names trellis worktree sync for the new path" {
   run_guard 'git -c core.hooksPath=/tmp/empty-hooks worktree add ../wt'
   [ "$status" -eq 0 ]
-  [[ "$(ctx)" == *'`trellis worktree sync ../wt`'* ]] || { echo "$output"; false; }
+  [[ "$(ctx)" == *'Operator remedy (report it; never run it yourself): `trellis worktree sync ../wt`'* ]] || { echo "$output"; false; }
   [[ "$(ctx)" == *'before its first push'* ]]
 }
 

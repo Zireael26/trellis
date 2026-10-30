@@ -242,6 +242,84 @@ wait_for_state() {
   [ "$(state_of)" = blocked-by-journal ]
 }
 
+# U2: a pending release adoption refuses the push before the chained prior hook
+# (husky's .husky/pre-push, which runs the project suite) starts. The sentinel is
+# the chained hook's marker file: absent on refusal, present on normal dispatch.
+@test "U2 pending adoption refuses before the chained suite starts; normal dispatch still runs it" {
+  TRELLIS_ATTACH_POSTJOB=off hooks_fix_attach husky
+  [ "$(jq -r '.git_hooks.previous_hooks_path' "$HF_OWNER")" = ".husky/_" ] || { cat "$HF_OWNER"; false; }
+  ST_DIR="$PORTABLE_HOME/state/attachment-status/$PORTABLE_CHECKOUT_ID"
+  ST="$ST_DIR/$PORTABLE_WORKTREE_ID.json"
+  local sentinel="$SANDBOX/husky-pre-push-ran"
+  rm -f "$sentinel"
+  mkdir -p "$PORTABLE_HOME/state/release-adoptions/$PORTABLE_CHECKOUT_ID"
+  run_pre_push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"trellis pre-push: attachment checks are blocked: a group release adoption is pending for this checkout; remedy: retry trellis release adopt with the same selector to recover"* ]] || { echo "$output"; false; }
+  [ ! -e "$sentinel" ] || { echo "chained suite started on pending adoption"; false; }
+  rmdir "$PORTABLE_HOME/state/release-adoptions/$PORTABLE_CHECKOUT_ID"
+  run_job run --sync --target "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(state_of)" = ok ] || { cat "$ST"; false; }
+  run_pre_push
+  [ -e "$sentinel" ] || { echo "normal dispatch did not reach the chained hook: $output"; false; }
+  # Exit 0 is reachable only when the carrier gate ran and passed: a refusal
+  # sets carrier_status 1, and a nonzero prior hook would have won.
+  [ "$status" -eq 0 ] || { echo "normal dispatch exit $status, expected 0 from the carrier: $output"; false; }
+  [[ "$output" != *"release adoption is pending"* ]] || { echo "$output"; false; }
+}
+
+# U2 remediation: the chained prior hook runs after the early preflight, so the
+# carrier must be verified again after it. A prior hook that replaces the
+# immutable carrier must be refused, and the replacement must never execute.
+@test "U2 prior hook that replaces the immutable carrier is refused before the carrier runs" {
+  TRELLIS_ATTACH_POSTJOB=off hooks_fix_attach husky
+  ST_DIR="$PORTABLE_HOME/state/attachment-status/$PORTABLE_CHECKOUT_ID"
+  ST="$ST_DIR/$PORTABLE_WORKTREE_ID.json"
+  run_job run --sync --target "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(state_of)" = ok ] || { cat "$ST"; false; }
+  local sentinel="$SANDBOX/husky-pre-push-ran" carrier_sentinel="$SANDBOX/carrier-ran" carrier
+  carrier="$(cat "$HF_MANAGED/release-payload")/$(cat "$HF_MANAGED/pre-push-source")"
+  [ -f "$carrier" ] && [ ! -L "$carrier" ] || { echo "carrier missing: $carrier"; false; }
+  # The prior hook rewrites the carrier in place (test-only, sandbox TRELLIS_HOME)
+  # into an exit-0 script that records its own execution.
+  cat > "$PORTABLE_PROJECT/.husky/pre-push" <<EOF
+#!/bin/sh
+printf chained > "$sentinel"
+chmod u+w "$carrier"
+printf '#!/bin/sh\nprintf carrier > "$carrier_sentinel"\nexit 0\n' > "$carrier"
+EOF
+  run_pre_push
+  [ -e "$sentinel" ] || { echo "prior hook did not run: $output"; false; }
+  [ ! -e "$carrier_sentinel" ] || { echo "replaced carrier executed: $output"; false; }
+  [ "$status" -eq 1 ] || { echo "tampered carrier not refused, status $status: $output"; false; }
+  [[ "$output" == *"trellis pre-push: managed immutable release carrier is unavailable"* ]] || { echo "$output"; false; }
+}
+
+# U2 remediation: a pending adoption published by the chained prior hook, after
+# the early preflight passed on an ok status, must still refuse before the carrier.
+@test "U2 adoption published during the chained suite refuses before the carrier runs" {
+  TRELLIS_ATTACH_POSTJOB=off hooks_fix_attach husky
+  ST_DIR="$PORTABLE_HOME/state/attachment-status/$PORTABLE_CHECKOUT_ID"
+  ST="$ST_DIR/$PORTABLE_WORKTREE_ID.json"
+  run_job run --sync --target "$PORTABLE_PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(state_of)" = ok ] || { cat "$ST"; false; }
+  local sentinel="$SANDBOX/husky-pre-push-ran" adoption="$PORTABLE_HOME/state/release-adoptions/$PORTABLE_CHECKOUT_ID"
+  [ ! -e "$adoption" ] || { echo "adoption marker preexists"; false; }
+  cat > "$PORTABLE_PROJECT/.husky/pre-push" <<EOF
+#!/bin/sh
+printf chained > "$sentinel"
+mkdir -p "$adoption"
+EOF
+  run_pre_push
+  [ -e "$sentinel" ] || { echo "prior hook did not run: $output"; false; }
+  [ -d "$adoption" ] || { echo "prior hook did not publish the marker"; false; }
+  [ "$status" -eq 1 ] || { echo "adoption published mid-suite not refused, status $status: $output"; false; }
+  [[ "$output" == *"trellis pre-push: attachment checks are blocked: a group release adoption is pending for this checkout; remedy: retry trellis release adopt with the same selector to recover"* ]] || { echo "$output"; false; }
+}
+
 @test "A4 attach spawns the detached job: pending at once, then ok; own session, stdin /dev/null, no caller pipes" {
   TRELLIS_ATTACH_POSTJOB=off build_portable_doctor_fix_home
   install_portable_doctor_release

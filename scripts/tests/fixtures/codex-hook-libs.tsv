@@ -4,7 +4,7 @@
 # references it extracts, in both directions, so a reference added or dropped
 # without editing this file fails. Every lib listed must resolve both in place
 # (core-rules/codex/hooks/lib/, or core-rules/hooks/lib/ behind the R1.1 guard)
-# and deployed (.codex/hooks/lib/ and .pi/hooks/lib/ in the manifest).
+# and deployed (.codex/hooks/lib/ in the manifest; pi runs the payload copies in place).
 block-destructive.sh	deps.sh
 code-review-subagent.sh	autonomy.sh
 code-review-subagent.sh	code-reviewer.sh

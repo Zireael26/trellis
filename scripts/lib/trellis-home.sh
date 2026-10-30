@@ -650,7 +650,8 @@ trellis_home_lock_try_recover_stale() {
 }
 
 trellis_home_lock_acquire() {
-  local home name timeout lock_root lock_dir elapsed pid recover_code
+  local home name timeout lock_root lock_dir elapsed pid recover_code wait_seconds=1 delay timeout_code
+  local started wall_elapsed recoveries=0
   home="$1"
   name="${2:-config}"
   timeout="${3:-30}"
@@ -674,6 +675,11 @@ trellis_home_lock_acquire() {
   lock_root="$home/locks"
   lock_dir="$lock_root/$name.lock"
   elapsed=0
+  started="$SECONDS"
+  # Contention is an unavailable capability, not evidence of corrupt state.
+  # Keep the existing exit contract for other machine-state locks.
+  timeout_code="$TRELLIS_EX_STATE"
+  [ "$name" != registry ] || timeout_code="$TRELLIS_EX_UNAVAILABLE"
   if [ -L "$lock_root" ] || { [ -e "$lock_root" ] && [ ! -d "$lock_root" ]; }; then
     printf 'trellis: refusing invalid Trellis locks directory: %s\n' "$lock_root" >&2
     return "$TRELLIS_EX_STATE"
@@ -688,6 +694,10 @@ trellis_home_lock_acquire() {
   chmod 700 "$lock_root" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
 
   while :; do
+    if [ "$name" = registry ]; then
+      wall_elapsed=$((SECONDS - started))
+      [ "$elapsed" -ge "$wall_elapsed" ] || elapsed="$wall_elapsed"
+    fi
     if mkdir -m 700 "$lock_dir" 2>/dev/null; then
       if ! printf '%s\n' "$$" > "$lock_dir/pid"; then
         rmdir "$lock_dir" 2>/dev/null || true
@@ -712,6 +722,13 @@ trellis_home_lock_acquire() {
       recover_code="$?"
     fi
     if [ "$recover_code" -eq 0 ]; then
+      recoveries=$((recoveries + 1))
+      # Allow the normal one-stale-holder recovery even for a zero probe, but
+      # repeated stale churn must not evade the registry's wall-time budget.
+      if [ "$name" = registry ] && [ "$recoveries" -gt 1 ] && [ "$elapsed" -ge "$timeout" ]; then
+        printf 'trellis: timed out waiting for registry lock at %s (stale holder kept changing)\n' "$lock_dir" >&2
+        return "$timeout_code"
+      fi
       continue
     fi
     if [ "$recover_code" -eq "$TRELLIS_EX_STATE" ] || [ "$recover_code" -eq "$TRELLIS_EX_UNAVAILABLE" ]; then
@@ -720,15 +737,26 @@ trellis_home_lock_acquire() {
     if [ "$elapsed" -ge "$timeout" ]; then
       if trellis_home_lock_is_initializing "$lock_dir"; then
         printf 'trellis: timed out waiting for %s lock at %s (still initializing)\n' "$name" "$lock_dir" >&2
-        return "$TRELLIS_EX_STATE"
+        return "$timeout_code"
       fi
       pid="$(trellis_home_lock_read_pid "$lock_dir/pid")" || return "$?"
       printf 'trellis: timed out waiting for %s lock at %s (held by pid %s)\n' "$name" "$lock_dir" "$pid" >&2
-      return "$TRELLIS_EX_STATE"
+      return "$timeout_code"
     fi
-    sleep 1 || return "$TRELLIS_EX_UNAVAILABLE"
-    elapsed=$((elapsed + 1))
+    delay="$wait_seconds"
+    [ "$delay" -le "$((timeout - elapsed))" ] || delay=$((timeout - elapsed))
+    sleep "$delay" || return "$TRELLIS_EX_UNAVAILABLE"
+    elapsed=$((elapsed + delay))
+    if [ "$name" = registry ] && [ "$wait_seconds" -lt 8 ]; then
+      wait_seconds=$((wait_seconds * 2))
+    fi
   done
+}
+
+# Attachment writers share a machine-wide registry: allow a busy sibling to
+# finish, with the bounded backoff above. Explicit zero remains a single probe.
+trellis_home_registry_lock_acquire() {
+  trellis_home_lock_acquire "$1" registry "${2:-300}"
 }
 
 trellis_home_real_dir() {

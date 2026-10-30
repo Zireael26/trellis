@@ -326,6 +326,13 @@ sg_is_excluded_path() {
     # path, so a nested docs/AGENT_*.md is covered by the docs/ rule instead.
     AGENT_*.md) return 0 ;;
     CHANGELOG.md) return 0 ;;
+    # The project's own records (CLAUDE.md: gotchas.md, decisions-log.md) and
+    # their archives, at the root only. Archiving moves many lines and is not
+    # feature code; a nested src/decisions-log.ts still counts.
+    gotchas.md|gotchas-archive.md|gotchas.archive.md|decisions-log.md|decisions-log-archive/*.md) return 0 ;;
+    # Root agent instructions are prose too; a memory sweep rewrites hundreds of
+    # lines. Root only: a nested pkg/CLAUDE.md still counts.
+    CLAUDE.md|AGENTS.md) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -359,7 +366,7 @@ sg_triad_in_range() {
   if ! paths=$(git -C "$dir" diff --name-only "$range" 2>/dev/null); then
     return 2
   fi
-  if changed=$(printf '%s\n' "$paths" | grep -E '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$' 2>/dev/null); then
+  if changed=$(grep -E '^specs/[0-9][^/]*/(spec|plan|tasks)\.md$' <<<"$paths" 2>/dev/null); then
     :
   else
     grep_status=$?

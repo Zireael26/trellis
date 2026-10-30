@@ -2,6 +2,7 @@
 # Tests for checker-preflight.sh's fail-closed binary identity contract.
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
   SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/checker-preflight.sh"
   BIN="$BATS_TEST_TMPDIR/bin"

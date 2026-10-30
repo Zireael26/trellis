@@ -272,6 +272,40 @@ done
 PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
 
 PROFILE="${SECURITY_GATE_STACK_PROFILE:-web-next}"
+# semgrep's own per-file rule timeout is 5 s, which a loaded machine exceeds on
+# large files. A rule that still times out leaves the scan partial, which
+# blocks. 0 would disable timeouts, so only 1-600 seconds is accepted.
+SEMGREP_RULE_TIMEOUT=30
+case "${SECURITY_GATE_SEMGREP_TIMEOUT:-}" in
+  '') ;;
+  *[!0-9]*|0*) echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2 ;;
+  *) if [ "$SECURITY_GATE_SEMGREP_TIMEOUT" -le 600 ]; then
+       SEMGREP_RULE_TIMEOUT="$SECURITY_GATE_SEMGREP_TIMEOUT"
+     else
+       echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2
+     fi ;;
+esac
+# The project manifest is another gate config input, but it is read only from
+# the resolved range base. A candidate cannot shorten its own Semgrep timeout.
+TRELLIS_MANIFEST="$WORK/trellis.json"
+if base_has .trellis.json; then
+  base_copy .trellis.json "$TRELLIS_MANIFEST"
+  jq -e '
+    def valid_security_gate:
+      type == "object"
+      and ((keys_unsorted - ["semgrep_timeout"]) | length == 0)
+      and ((has("semgrep_timeout") | not) or
+        (.semgrep_timeout | type == "number" and floor == . and . >= 1 and . <= 600));
+    type == "object"
+    and ((has("security_gate") | not) or (.security_gate | valid_security_gate))
+  ' "$TRELLIS_MANIFEST" >/dev/null 2>&1 \
+    || config_refuse "base .trellis.json security_gate.semgrep_timeout must be an integer from 1-600"
+  BASE_SEMGREP_TIMEOUT="$(jq -r 'if has("security_gate") and (.security_gate | has("semgrep_timeout")) then .security_gate.semgrep_timeout else empty end' "$TRELLIS_MANIFEST")" \
+    || config_refuse "could not read security_gate.semgrep_timeout from base .trellis.json"
+  [ -z "$BASE_SEMGREP_TIMEOUT" ] || SEMGREP_RULE_TIMEOUT="$BASE_SEMGREP_TIMEOUT"
+else
+  note_worktree_only .trellis.json
+fi
 AUDIT_DIR_REL="${SECURITY_GATE_AUDIT_DIR:-audits}"
 AUDIT_DIR_REL="${AUDIT_DIR_REL#./}"
 AUDIT_DIR_REL="${AUDIT_DIR_REL%/}"
@@ -836,7 +870,7 @@ if [ "${#SCOPE_FILES[@]}" -gt 0 ]; then
   RAW="$WORK/semgrep.raw.json"
   # Without --error, semgrep scan returns 0 even with findings (see
   # lib/semgrep.sh). Exit 1 is findings only WITH --error, not in this mode.
-  "$SEMGREP_BIN" scan --json --metrics=off --quiet "${CONFIGS[@]}" "${EXCLUDES[@]}" "${SCOPE_FILES[@]}" >"$RAW" 2>/dev/null
+  "$SEMGREP_BIN" scan --json --metrics=off --quiet --timeout "$SEMGREP_RULE_TIMEOUT" "${CONFIGS[@]}" "${EXCLUDES[@]}" "${SCOPE_FILES[@]}" >"$RAW" 2>/dev/null
   RC=$?
   [ "$RC" -eq 0 ] || REASON="scanner exit $RC"
   [ "$RAN" -eq 1 ] || REASON="binary not installed"

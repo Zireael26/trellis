@@ -2,21 +2,95 @@
 # Translate a normalized Trellis event into the existing release-owned hook set.
 set -u
 
-# The extension executes from the attached root. Never inherit an alternate hook set.
-HOOKS="$PWD/.pi/hooks"
-encoded="${2:-}"
-[ "${1:-}" = "--base64" ] && [ -n "$encoded" ] || {
-  printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge dispatcher requires one base64 event"}'
-  exit 2
-}
-if INPUT=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
-  :
-elif INPUT=$(printf '%s' "$encoded" | base64 -D 2>/dev/null); then
-  :
-else
-  printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge event is not valid base64"}'
-  exit 2
-fi
+# The extension executes from the attached root. Run the release-owned Codex hook
+# set straight from its runtime payload, never an alternate hook set. Pi reserves
+# .pi/hooks (a deprecated resource that stalls startup), so nothing is rendered there.
+HOOKS="$PWD/.trellis/runtime/core-rules/codex/hooks"
+mode="${1:-}"
+case "$mode" in
+  --base64)
+    encoded="${2:-}"
+    [ "$#" -eq 2 ] && [ -n "$encoded" ] || {
+      printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge dispatcher requires one base64 event"}'
+      exit 2
+    }
+    if INPUT=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
+      :
+    elif INPUT=$(printf '%s' "$encoded" | base64 -D 2>/dev/null); then
+      :
+    else
+      printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge event is not valid base64"}'
+      exit 2
+    fi
+    ;;
+  --event-file)
+    event_file="${2:-}"
+    [ "$#" -eq 2 ] && [ -n "$event_file" ] || {
+      printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge dispatcher requires one event file"}'
+      exit 2
+    }
+    command -v python3 >/dev/null 2>&1 || {
+      printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge event-file transport requires python3"}'
+      exit 2
+    }
+    if INPUT=$(python3 -I - "$event_file" <<'PY'
+import os
+import stat
+import sys
+
+MAX_BYTES = 64 * 1024 * 1024
+fd = None
+parent_fd = None
+try:
+    path = os.path.abspath(sys.argv[1])
+    parent, leaf = os.path.split(path)
+    if not leaf or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise ValueError("unsafe event path")
+    uid = os.getuid()
+    before = os.lstat(parent)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != uid or stat.S_IMODE(before.st_mode) != 0o700:
+        raise ValueError("unsafe event directory")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    opened_parent = os.fstat(parent_fd)
+    if (opened_parent.st_dev, opened_parent.st_ino) != (before.st_dev, before.st_ino):
+        raise ValueError("changed event directory")
+    fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_BYTES):
+        raise ValueError("unsafe or oversized event file")
+    chunks = []
+    total = 0
+    while total <= MAX_BYTES:
+        chunk = os.read(fd, min(65536, MAX_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    after = os.fstat(fd)
+    if total > MAX_BYTES or total != info.st_size or (after.st_dev, after.st_ino, after.st_size) != (info.st_dev, info.st_ino, info.st_size):
+        raise ValueError("changed or oversized event file")
+    sys.stdout.buffer.write(b"".join(chunks))
+except Exception:
+    raise SystemExit(1)
+finally:
+    if fd is not None:
+        os.close(fd)
+    if parent_fd is not None:
+        os.close(parent_fd)
+PY
+    ); then
+      :
+    else
+      printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge event file is unsafe, unreadable, or exceeds the byte limit"}'
+      exit 2
+    fi
+    ;;
+  *)
+    printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge dispatcher requires --event-file or legacy --base64"}'
+    exit 2
+    ;;
+esac
 command -v jq >/dev/null 2>&1 || {
   printf '%s\n' '{"schema_version":1,"capability_status":"unknown","decision":"deny","reason":"pi bridge requires jq"}'
   exit 2

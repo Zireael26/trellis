@@ -255,7 +255,7 @@ _guarded_fallbacks() {
 }
 
 @test "Codex hook libraries match the expected inventory and resolve in place and deployed" {
-  local expected actual hook lib codex_libs pi_libs guarded missing=""
+  local expected actual hook lib codex_libs guarded missing=""
   expected="$(grep -v '^#' "$ROOT/scripts/tests/fixtures/codex-hook-libs.tsv" | sed '/^$/d' | sort)"
   actual="$(_codex_hook_lib_refs | sort)"
   diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || {
@@ -264,7 +264,6 @@ _guarded_fallbacks() {
   }
 
   codex_libs="$(_deployed_hook_libs codex | sort -u)"
-  pi_libs="$(_deployed_hook_libs pi | sort -u)"
   while IFS=$'\t' read -r hook lib; do
     guarded="$(_guarded_fallbacks "$ROOT/core-rules/codex/hooks/$hook")" || { echo "$guarded"; return 1; }
     if [ ! -f "$ROOT/core-rules/codex/hooks/lib/$lib" ]; then
@@ -272,7 +271,6 @@ _guarded_fallbacks() {
         missing="$missing $hook->$lib(in-place)"
     fi
     grep -qxF -- "$lib" <<<"$codex_libs" || missing="$missing $hook->$lib(.codex)"
-    grep -qxF -- "$lib" <<<"$pi_libs" || missing="$missing $hook->$lib(.pi)"
   done <<<"$expected"
   [ -z "$missing" ] || { echo "unreachable hook libs:$missing"; false; }
 
@@ -366,7 +364,7 @@ _render_template() {
     if _check_rendered_roots "$out" "$project" >/dev/null; then echo "$name: mutated render accepted"; false; fi
   done
 
-  # pi runs its deployed .pi/hooks copies with the same binding.
+  # pi runs the payload hooks in place (1.3.18 renders no .pi/hooks), with the same binding.
   grep -qF 'TRELLIS_ROOT="$PWD/.trellis/runtime" TRELLIS_HARNESS=pi "$HOOKS/$name"' "$ROOT/core-rules/pi/hooks/dispatch.sh"
 }
 

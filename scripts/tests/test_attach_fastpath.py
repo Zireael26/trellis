@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 LIB = Path(__file__).resolve().parents[1] / 'lib'
 
@@ -312,6 +313,23 @@ class FastInventoryTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.module.native_directory_publish(fd, 'stage', 'destination')
             self.assertEqual(os.stat('destination', dir_fd=fd).st_ino, before)
+
+
+class IncrementalBenchBaselineTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('incremental_bench', Path(__file__).parent / 'helpers/bench-attach-incremental.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_default_baseline_is_pinned_instead_of_following_head(self):
+        with patch.object(self.module, 'run', return_value='resolved-commit\n') as command:
+            self.assertEqual(self.module.resolve_baseline(Path('/fixture/repo')), 'resolved-commit')
+        command.assert_called_once_with(['git', '-C', '/fixture/repo', 'rev-parse', '--verify', '2f101f0d^{commit}'])
+
+    def test_explicit_baseline_is_resolved_and_recordable(self):
+        with patch.object(self.module, 'run', return_value='other-commit\n') as command:
+            self.assertEqual(self.module.resolve_baseline(Path('/fixture/repo'), 'fixture-base'), 'other-commit')
+        command.assert_called_once_with(['git', '-C', '/fixture/repo', 'rev-parse', '--verify', 'fixture-base^{commit}'])
 
 
 class BenchSummaryTests(unittest.TestCase):

@@ -135,7 +135,7 @@ local_registry_empty_json() {
 # it is testing.
 LOCAL_REGISTRY_EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 
-# ENVIRONMENT probe, run ONCE per listing or validation pass. Neither SHA-256
+# ENVIRONMENT probe, run ONCE per listing or validation pass. No SHA-256
 # command being on PATH is a property of the machine, not of any registered row:
 # every row would fail identically, so classifying each one as a row-scoped
 # `unavailable` would hand a consumer a listing that exits 0 with nothing usable
@@ -153,12 +153,16 @@ LOCAL_REGISTRY_EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 # not use.
 local_registry_require_hash_command() {
   local digest='' rc=0
-  if command -v shasum >/dev/null 2>&1; then
-    digest="$(printf '%s' '' | shasum -a 256 2>/dev/null | awk '{print $1}')" || rc="$?"
-  elif command -v sha256sum >/dev/null 2>&1; then
+  # Native tools avoid starting Perl for each of the thousands of hashes in a
+  # registry walk. Probe the exact same preference order as the row hasher.
+  if command -v sha256sum >/dev/null 2>&1; then
     digest="$(printf '%s' '' | sha256sum 2>/dev/null | awk '{print $1}')" || rc="$?"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(printf '%s' '' | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')" || rc="$?"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' '' | shasum -a 256 2>/dev/null | awk '{print $1}')" || rc="$?"
   else
-    local_registry_err "a SHA-256 command (shasum or sha256sum) is required"
+    local_registry_err "a SHA-256 command (sha256sum, openssl, or shasum) is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
   if [ "$rc" -ne 0 ] || [ "$digest" != "$LOCAL_REGISTRY_EMPTY_SHA256" ]; then
@@ -170,12 +174,14 @@ local_registry_require_hash_command() {
 local_registry_sha256() {
   local value="${1:-}" digest
   trellis_home_require_safe_text "hash input" "$value" || return "$?"
-  if command -v shasum >/dev/null 2>&1; then
-    digest="$(printf '%s' "$value" | shasum -a 256 | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     digest="$(printf '%s' "$value" | sha256sum | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(printf '%s' "$value" | openssl dgst -sha256 | awk '{print $NF}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$value" | shasum -a 256 | awk '{print $1}')"
   else
-    local_registry_err "a SHA-256 command (shasum or sha256sum) is required"
+    local_registry_err "a SHA-256 command (sha256sum, openssl, or shasum) is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
   if ! printf '%s' "$digest" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
@@ -201,16 +207,17 @@ local_registry_real_directory() {
 }
 
 local_registry_git_common_dir() {
-  local root="${1:-}" common
+  local root="${1:-}" common record
   root="$(local_registry_real_directory "worktree root" "$root")" || return "$?"
-  if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    local_registry_err "worktree root is not inside a Git worktree: $root"
-    return "$TRELLIS_EX_STATE"
-  fi
-  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || {
+  record="$(git -C "$root" rev-parse --is-inside-work-tree --git-common-dir 2>/dev/null)" || {
     local_registry_err "could not resolve Git common directory for $root"
     return "$TRELLIS_EX_STATE"
   }
+  [ "${record%%$'\n'*}" = true ] && [ "$record" != "${record#*$'\n'}" ] || {
+    local_registry_err "worktree root is not inside a Git worktree: $root"
+    return "$TRELLIS_EX_STATE"
+  }
+  common="${record#*$'\n'}"
   case "$common" in
     /*) ;;
     *) common="$root/$common" ;;
@@ -264,18 +271,24 @@ local_registry_checkout_root_for_common_dir() {
 
 # Emits a deterministic JSON identity object for a real Git worktree ROOT.
 local_registry_identity_for_root() {
-  local input_root="${1:-}" root common checkout_root checkout_id worktree_id top
+  local input_root="${1:-}" root common checkout_root checkout_id worktree_id top record
   root="$(local_registry_real_directory "worktree root" "$input_root")" || return "$?"
-  top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || {
+  # Both facts come from one Git observation; do not re-run rev-parse for
+  # each field (or re-check inside-work-tree after show-toplevel succeeded).
+  record="$(git -C "$root" rev-parse --show-toplevel --git-common-dir 2>/dev/null)" || {
     local_registry_err "worktree root is not a Git worktree: $root"
     return "$TRELLIS_EX_STATE"
   }
+  [ "$record" != "${record#*$'\n'}" ] || return "$TRELLIS_EX_STATE"
+  top="${record%%$'\n'*}"
+  common="${record#*$'\n'}"
   top="$(local_registry_real_directory "Git worktree top level" "$top")" || return "$?"
   if [ "$top" != "$root" ]; then
     local_registry_err "project root must equal the Git worktree top level: $root"
     return "$TRELLIS_EX_STATE"
   fi
-  common="$(local_registry_git_common_dir "$root")" || return "$?"
+  case "$common" in /*) ;; *) common="$root/$common" ;; esac
+  common="$(local_registry_real_directory "Git common directory" "$common")" || return "$?"
   checkout_root="$(local_registry_checkout_root_for_common_dir "$common" "$root")" || return "$?"
   checkout_id="$(local_registry_sha256 "$common")" || return "$?"
   worktree_id="$(local_registry_sha256 "$root")" || return "$?"
@@ -763,7 +776,7 @@ local_registry_identity_class_verdict() {
 
 local_registry_classify_identity_row() {
   local row="${1:-}" kind checkout_id checkout_root common worktree_id root id rc scope
-  local actual_identity actual_root actual_checkout_root actual_common actual_checkout_id actual_worktree_id
+  local actual_identity actual_root actual_checkout_root actual_common actual_checkout_id actual_worktree_id fields
   kind="$(printf '%s\n' "$row" | jq -r '.kind')" || return "$TRELLIS_EX_STATE"
   case "$kind" in
     unavailable)
@@ -777,11 +790,18 @@ local_registry_classify_identity_row() {
     worktree|checkout) ;;
     *) return "$TRELLIS_EX_STATE" ;;
   esac
-  checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
-  checkout_root="$(printf '%s\n' "$row" | jq -r '.checkout_root')" || return "$TRELLIS_EX_STATE"
-  common="$(printf '%s\n' "$row" | jq -r '.git_common_dir')" || return "$TRELLIS_EX_STATE"
-  root="$(printf '%s\n' "$row" | jq -r '.root')" || return "$TRELLIS_EX_STATE"
-  worktree_id="$(printf '%s\n' "$row" | jq -r '.worktree_id // empty')" || return "$TRELLIS_EX_STATE"
+  # Decode once per record. Newlines are forbidden in identity fields, so a
+  # line-delimited record is lossless (including spaces and backslashes). The
+  # final sentinel preserves a nullable last field across command substitution.
+  fields="$(printf '%s\n' "$row" | jq -r '
+    [.checkout_id, .checkout_root, .git_common_dir, .root, (.worktree_id // "")]
+    | if all(.[]; type == "string" and (contains("\n") | not))
+      then .[], "." else error("invalid identity fields") end
+  ')" || return "$TRELLIS_EX_STATE"
+  { IFS= read -r checkout_id; IFS= read -r checkout_root; IFS= read -r common
+    IFS= read -r root; IFS= read -r worktree_id; } <<EOF
+$fields
+EOF
   if [ "$kind" = worktree ]; then scope=worktree; else scope=checkout; fi
 
   # 2. Stored checkout hash. Identical to the check the owning checkout row
@@ -832,11 +852,15 @@ local_registry_classify_identity_row() {
       'reachable root cannot be resolved as a canonical Git worktree'
     return "$?"
   fi
-  actual_root="$(printf '%s\n' "$actual_identity" | jq -r '.root')" || return "$TRELLIS_EX_STATE"
-  actual_checkout_root="$(printf '%s\n' "$actual_identity" | jq -r '.checkout_root')" || return "$TRELLIS_EX_STATE"
-  actual_common="$(printf '%s\n' "$actual_identity" | jq -r '.git_common_dir')" || return "$TRELLIS_EX_STATE"
-  actual_checkout_id="$(printf '%s\n' "$actual_identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
-  actual_worktree_id="$(printf '%s\n' "$actual_identity" | jq -r '.worktree_id')" || return "$TRELLIS_EX_STATE"
+  fields="$(printf '%s\n' "$actual_identity" | jq -r '
+    [.root, .checkout_root, .git_common_dir, .checkout_id, .worktree_id]
+    | if all(.[]; type == "string" and (contains("\n") | not))
+      then .[], "." else error("invalid live identity fields") end
+  ')" || return "$TRELLIS_EX_STATE"
+  { IFS= read -r actual_root; IFS= read -r actual_checkout_root; IFS= read -r actual_common
+    IFS= read -r actual_checkout_id; IFS= read -r actual_worktree_id; } <<EOF
+$fields
+EOF
   if [ "$actual_root" != "$root" ] || [ "$actual_checkout_root" != "$checkout_root" ] ||
      [ "$actual_common" != "$common" ] || [ "$actual_checkout_id" != "$checkout_id" ] ||
      { [ "$kind" = worktree ] && [ "$actual_worktree_id" != "$worktree_id" ]; }; then
@@ -1287,7 +1311,7 @@ local_registry_register_worktree() {
   root="$(printf '%s\n' "$identity" | jq -r '.root')"
   worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
   trellis_home_prepare_home "$home" || return "$?"
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trellis_home_registry_lock_acquire "$home" || return "$?"
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || { trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.proposal.XXXXXX")" || { rm -f "$base"; trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   local_registry_load "$home" "$base" || rc="$?"
@@ -1332,7 +1356,7 @@ local_registry_set_metadata() {
   # One functional hash probe per WRITE OPERATION, before the registry lock.
   local_registry_require_hash_command || return "$?"
   trellis_home_prepare_home "$home" || return "$?"
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trellis_home_registry_lock_acquire "$home" || return "$?"
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || { trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.metadata.XXXXXX")" || { rm -f "$base"; trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   local_registry_load "$home" "$base" || rc="$?"
@@ -1383,7 +1407,7 @@ local_registry_update_harnesses() (
   expected="$(printf '%s\n' "$update" | jq -cS '.expected')" || return "$TRELLIS_EX_STATE"
   after="$(printf '%s\n' "$update" | jq -cS '.after')" || return "$TRELLIS_EX_STATE"
   home="$(local_registry_home "$home")" || return "$?"
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trellis_home_registry_lock_acquire "$home" || return "$?"
   trap 'trellis_home_lock_release >/dev/null 2>&1' EXIT
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.proposal.XXXXXX")" || { rm -f "$base"; return "$TRELLIS_EX_UNAVAILABLE"; }
@@ -1475,7 +1499,7 @@ local_registry_clear_attachment() {
   # One functional hash probe per WRITE OPERATION, before the registry lock.
   local_registry_require_hash_command || return "$?"
   trellis_home_prepare_home "$home" || return "$?"
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trellis_home_registry_lock_acquire "$home" || return "$?"
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || { trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.proposal.XXXXXX")" || { rm -f "$base"; trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   local_registry_load "$home" "$base" || rc="$?"
@@ -1528,7 +1552,7 @@ local_registry_record_unavailable_root() {
   # fault for the operation, not a verdict about any row.
   local_registry_require_hash_command || return "$?"
   trellis_home_prepare_home "$home" || return "$?"
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  trellis_home_registry_lock_acquire "$home" || return "$?"
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.base.XXXXXX")" || { trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.proposal.XXXXXX")" || { rm -f "$base"; trellis_home_lock_release >/dev/null 2>&1 || true; return "$TRELLIS_EX_UNAVAILABLE"; }
   local_registry_load "$home" "$base" || rc="$?"
@@ -2197,8 +2221,20 @@ local_registry_manifest_project_id() {
       and ((has("enabled") | not) or (.enabled | type == "boolean"))
       and ((has("spec_required_diff_lines") | not) or (.spec_required_diff_lines | type == "number" and floor == . and . >= 1))
       and ((has("surgical_max_diff_lines") | not) or (.surgical_max_diff_lines | type == "number" and floor == . and . >= 1));
+    def env_name:
+      type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*$")
+      and (ascii_upcase as $name
+        | ($name | test("TOKEN|SECRET|KEY|PASSWORD") | not)
+        and (["PATH", "HOME", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "NODE_OPTIONS", "DOCKER_HOST", "DOCKER_CONTEXT", "POSIXLY_CORRECT", "ZDOTDIR", "RUBYOPT", "PERL5OPT", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "PWD", "OLDPWD", "SHLVL", "_", "LANG", "LANGUAGE", "TZ", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_EXTRA_CA_CERTS", "NODE_ICU_DATA", "NODE_V8_COVERAGE", "RANDOM", "SRANDOM", "SECONDS", "LINENO", "OPTIND", "OPTARG", "PPID", "UID", "EUID", "GROUPS", "DIRSTACK", "FUNCNAME", "PIPESTATUS", "SHELL", "PS1", "PS2", "PS3", "PS4"] | index($name) == null)
+        and ($name | test("^(XDG_|TMP|TEMP|GIT_|TRELLIS_|PROCESS_GATE_|SECURITY_GATE_|PYTHON|BASH|LD_|DYLD_|CALLER_|LC_|DOCKER_|COREPACK_|PERL|RUBY|GEM_|GH_)") | not));
+    def gate:
+      type == "object" and ((keys_unsorted - ["env_passthrough"]) | length == 0)
+      and ((has("env_passthrough") | not) or (.env_passthrough | type == "array" and all(.[]; env_name) and ((unique | length) == length)));
+    def security_gate:
+      type == "object" and ((keys_unsorted - ["semgrep_timeout"]) | length == 0)
+      and ((has("semgrep_timeout") | not) or (.semgrep_timeout | type == "number" and floor == . and . >= 1 and . <= 600));
     type == "object"
-    and ((keys_unsorted - ["$schema", "schema_version", "project_id", "presets", "autonomy", "package_manager", "loop_safety", "mandatory_pipeline", "gate_profiles"]) | length == 0)
+    and ((keys_unsorted - ["$schema", "schema_version", "project_id", "presets", "autonomy", "package_manager", "loop_safety", "mandatory_pipeline", "gate", "security_gate", "gate_profiles"]) | length == 0)
     and .schema_version == 1 and (.project_id | project)
     and ((has("$schema") | not) or (."$schema" | safe))
     and ((has("presets") | not) or (.presets | type == "array" and all(.[]; preset) and ((unique | length) == length)))
@@ -2206,6 +2242,8 @@ local_registry_manifest_project_id() {
     and ((has("package_manager") | not) or (.package_manager == "auto" or .package_manager == "pnpm" or .package_manager == "npm" or .package_manager == "bun" or .package_manager == "yarn"))
     and ((has("loop_safety") | not) or (.loop_safety | loop))
     and ((has("mandatory_pipeline") | not) or (.mandatory_pipeline | pipeline))
+    and ((has("gate") | not) or (.gate | gate))
+    and ((has("security_gate") | not) or (.security_gate | security_gate))
     and ((has("gate_profiles") | not) or (.gate_profiles | type == "object" and all(.[]; type == "object")))
   ' "$manifest" >/dev/null 2>&1; then
     local_registry_err "project manifest failed schema-aware validation: $manifest"

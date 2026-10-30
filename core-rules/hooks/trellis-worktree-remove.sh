@@ -317,7 +317,8 @@ reasons="$(unpushed "$WT" "$branch" "$proven")"
 
 if [ "$background" = true ]; then
   nohup bash "$src" --finish "$WT" "$main" "$branch" "$owned" < /dev/null >> "${LOG:-/dev/null}" 2>&1 &
-  say "detach and git worktree remove continue in the background; log: ${LOG:-none}"
+  background_pid=$!
+  say "detach and git worktree remove continue in the background (pid $background_pid); log: ${LOG:-none}"
   exit 0
 fi
 finish "$WT" "$main" "$branch" "$owned"

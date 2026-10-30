@@ -9,6 +9,7 @@
 # so "full" means the marker exists and "narrowed" means it does not.
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-tests.sh"
   PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/proj.XXXXXX")"
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"

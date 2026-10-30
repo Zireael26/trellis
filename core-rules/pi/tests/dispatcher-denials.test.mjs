@@ -13,7 +13,7 @@ const nested = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDe
 function fixture(t) {
   const cwd = mkdtempSync(resolve(tmpdir(), 'trellis-denials-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.pi/hooks', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
+  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.trellis/runtime/core-rules/codex/hooks', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
   const script = resolve(cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh');
   copyFileSync(dispatcher, script);
   // Required guards run through the runtime's supervisor, beside the dispatcher.
@@ -21,7 +21,7 @@ function fixture(t) {
   writeFileSync(resolve(cwd, '.trellis/runtime/trellis.config.json'), '{}');
   const hook = (name, output, rc, stderr = '') => {
     const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
-    writeFileSync(resolve(cwd, '.pi/hooks', name), `#!/bin/bash\nprintf '%s' ${quote(output)}\nprintf '%s' ${quote(stderr)} >&2\nexit ${rc}\n`, { mode: 0o755 });
+    writeFileSync(resolve(cwd, '.trellis/runtime/core-rules/codex/hooks', name), `#!/bin/bash\nprintf '%s' ${quote(output)}\nprintf '%s' ${quote(stderr)} >&2\nexit ${rc}\n`, { mode: 0o755 });
   };
   const run = (optional = false, command = 'printf harmless') => {
     const event = { schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase: optional ? 'post_action' : 'pre_action', native_event: optional ? 'tool_result' : 'tool_call', action: { family: 'shell', tool_name: 'bash', input: { command }, targets: [] }, result: optional ? { status: 'succeeded', is_error: false, output: [] } : null };
@@ -120,9 +120,9 @@ test('real deployed Codex destructive block stays enforced without repeating std
   const f = fixture(t);
   const hookDir = new URL('../../codex/hooks/', import.meta.url);
   // Use the actual release-owned hook and its sibling dependency, not a stub.
-  mkdirSync(resolve(f.cwd, '.pi/hooks/lib'), { recursive: true });
-  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.pi/hooks/block-destructive.sh'));
-  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.pi/hooks/lib/deps.sh'));
+  mkdirSync(resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib'), { recursive: true });
+  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/block-destructive.sh'));
+  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps.sh'));
   const result = f.run(false, 'rm -rf /absolute-fixture');
   assert.equal(result.status, 1);
   assert.equal(result.decision.decision, 'deny');
@@ -133,9 +133,9 @@ test('real deployed Codex destructive block stays enforced without repeating std
 test('real deployed non-block stderr remains unknown and warns', t => {
   const f = fixture(t);
   const hookDir = new URL('../../codex/hooks/', import.meta.url);
-  mkdirSync(resolve(f.cwd, '.pi/hooks/lib'), { recursive: true });
-  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.pi/hooks/block-destructive.sh'));
-  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.pi/hooks/lib/deps.sh'));
+  mkdirSync(resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib'), { recursive: true });
+  copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/block-destructive.sh'));
+  copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps.sh'));
   const result = f.run(false, 'cat .env');
   assert.equal(result.status, 0);
   assert.equal(result.decision.decision, 'warn');

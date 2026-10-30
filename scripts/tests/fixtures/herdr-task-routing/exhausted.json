@@ -34,7 +34,7 @@
           "id": "sol-window",
           "status": "exhausted",
           "scope": {
-            "modelId": "gpt-6-sol"
+            "modelId": "gpt-6.1-sol"
           }
         }
       ]

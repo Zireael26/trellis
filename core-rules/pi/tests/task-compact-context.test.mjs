@@ -35,8 +35,8 @@ function fixture(t, { lib = true, primitive = true } = {}) {
   const cwd = mkdtempSync(resolve(tmpdir(), 'trellis-task-compact-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const runtime = resolve(cwd, '.trellis/runtime');
-  for (const dir of ['core-rules/pi/hooks', 'core-rules/hooks/lib']) mkdirSync(resolve(runtime, dir), { recursive: true });
-  for (const dir of ['.agents/rules', '.pi/hooks', 'core-rules/hooks/lib']) mkdirSync(resolve(cwd, dir), { recursive: true });
+  for (const dir of ['core-rules/pi/hooks', 'core-rules/hooks/lib', 'core-rules/codex/hooks']) mkdirSync(resolve(runtime, dir), { recursive: true });
+  for (const dir of ['.agents/rules', 'core-rules/hooks/lib']) mkdirSync(resolve(cwd, dir), { recursive: true });
   // The dispatcher under test is executed from its installed runtime location,
   // so the library it resolves is the physical sibling of that copy.
   const script = resolve(runtime, 'core-rules/pi/hooks/dispatch.sh');
@@ -54,7 +54,7 @@ function fixture(t, { lib = true, primitive = true } = {}) {
     writeFileSync(resolve(installed, 'task-state.py'), STUB);
     writeFileSync(resolve(installed, 'protocol.json'), JSON.stringify({ raw, exit }));
   };
-  const hook = (name, body) => writeFileSync(resolve(cwd, '.pi/hooks', name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+  const hook = (name, body) => writeFileSync(resolve(runtime, 'core-rules/codex/hooks', name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
   hook('inject-primer-index.sh', 'exit 0');
   const event = (native_event, extra = {}) => ({
     schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase: 'lifecycle', native_event, ...extra,
@@ -70,7 +70,8 @@ function fixture(t, { lib = true, primitive = true } = {}) {
     getAllTools: () => [],
     sendMessage: (...args) => messages.push(args),
     exec: async (_script, args) => {
-      const result = run(JSON.parse(Buffer.from(args[1], 'base64').toString()));
+      const event = args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString());
+      const result = run(event);
       return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
     },
   };

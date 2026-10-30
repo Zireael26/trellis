@@ -4,6 +4,143 @@ All notable changes to Trellis are documented here.
 
 The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and this project uses Conventional Commits. Portable Trellis releases use semantic versions and annotated immutable tags. Earlier dated entries remain as historical records.
 
+## [Unreleased]
+
+## [1.3.21] - 2026-10-30
+
+### Fixed
+
+- The 1.3.20 size ADR no longer names local fleet projects, so the release passes the public-mirror lint and publishes. No code changes.
+
+## [1.3.20] - 2026-10-23
+
+### Added
+
+- `trellis --version` reports the configured release without payload preflight.
+
+### Fixed
+
+- Public mirror publication uses neutral project references and withholds the operator-specific task-routing test without changing its live provider IDs. Release preparation now lints the real staged public surface before sealing a payload, refusing findings or an incomplete stage.
+- Pi permits `get_subagent_result` and `steer_subagent` only with verified `npm:@tintinweb/pi-subagents` package provenance and a matching canonical nearest package manifest, so background subagents can be collected and steered again. Foreign same-named tools, npm alias/file specs and unclassified extension tools still refuse. Steering requires the parent policy; read-only result retrieval does not. Agent and workflow behavior is unchanged, including the documented child-loading residual.
+- Full-renderer attachment refuses modified shared Git-hook dispatchers before publishing worktree artifacts or owner/registry state. Shared ownership and hook refusals name the affected record, and doctor repair hints quote the checkout path and select its Trellis home (#478).
+- Already-current attachment retries skip full sibling artifact reconciliation while retaining target, release, shared exclude, registry and hook checks. Non-donor native drift no longer blocks another worktree's attach; donor reuse skips owners with deferred project leaves, and concurrent attaches wait up to 15 minutes for the checkout lock (#593, #478).
+- `trellis attach --refresh-artifacts PATH` retires an owned native symlink replaced by a tracked regular project file without changing project bytes or shared exclude ownership. Other artifact drift still refuses repair; doctor names the drifted path, and exclude refusals no longer misreport invalid ownership as absent (#478).
+- Project attachment and worktree seeding reuse in-process sealed-release verification across sibling owners instead of re-verifying for every worktree. Both entrypoints discard inherited verification memos; seeding loads the verified release's attach function without a PID-based environment handoff (#593).
+- The release store no longer imports or exports its verification memo. Every script that verifies a sealed release, including doctor, show-config, configure, sync, rollout and task materialization, starts with an empty memo, so a stale success verdict handed over by `exec` cannot stand in for verification (#593).
+- Reduce `trellis show-config` registry-walk overhead by batching Git and JSON identity reads and preferring native SHA-256 tools; retain all canonical identity checks.
+- Release adoption now refreshes a singleton's managed exclude block when the new release changes it, fixing stale Pi hook entries after 1.3.17 → 1.3.18. Unchanged blocks retain their attach-time record; external user bytes survive, block drift still refuses, and interruption restores the previous block and owner record.
+- The 1.3.20 CLI repairs stale non-manager after-images left by any group adoption run by an older CLI, whether or not the block changed. Re-adoption derives each owner's after-image from its unchanged restoration snapshot while preserving the live file's surrounding user bytes. Deregister confirmed dead rows and make 1.3.20 the active management CLI before re-adopting; installing the target alone is not enough. No detach/fresh attach is needed for this metadata fault. `docs/UPGRADING.md` gives the ordered hotfix steps and explains informational surrounding-byte drift.
+- Surgical-marker gate tests bind fixture markers to physical worktree paths and isolate HOME/TRELLIS_HOME, so symlinked temporary directories (such as macOS `/tmp`) no longer cause false R21 and legacy-marker failures. Regression coverage exercises both spec-gate twins and the pre-push carrier through a symlinked fixture.
+
+## [1.3.19] - 2026-10-22
+
+### Fixed
+
+- Pi release adoption refuses a reverse pin move to a release requiring retired `.pi/hooks` links before changing the checkout, and prints exact detach/attach recovery commands. Ordinary forward adoption is unchanged.
+- Pi hook-directory cleanup removes only directories recorded as owned parents; pre-existing unowned empty directories stay in place with an operator notice.
+- Interrupted-adoption coverage now proves exact restoration of distinct non-default modes on `.pi/hooks` and `.pi/hooks/lib`.
+- Pi migration tests use independent assertions instead of non-final shell AND-lists, so unexpected hook directories or missing links cannot silently pass.
+- Automatic security review prefers Sol at xhigh, then Opus; Astra remains available only by explicit operator selection. Verdict-independence rules are unchanged, so OpenAI producers still require Opus for the security seat.
+- Session and worktree advisories that name a repair command (`trellis doctor --fix`, `trellis worktree sync`, the `core.hooksPath` restore) now lead with "Operator remedy (report it; never run it yourself):", so an agent that receives them as context reports the finding instead of running the repair.
+- The task-state reader treats ordinary brackets in a Markdown table row (`[]`, `[docs](a.md)`, `name[i]`, `[WIP]`) as prose instead of refusing the whole file. Checkbox-shaped cells and tokens outside the task form, including padded boxes such as `[ x ]` or `[x ] done`, and bracket-only status cells such as `[DONE]`, still refuse it.
+- The local test gate reruns a Bats file with `--jobs 1` after the bats-core 1.14 `wait: pid N is not a child of this shell` race, and that serial run's exit decides; the parallel output is never accepted. The spec-gate test no longer fails on a broken pipe, and the pi-attachment test no longer races its teardown.
+- The local test gate classifies known environment errors before rereading full process info and uses short BSD exit status when an unreadable process loses its executable path. Its synthetic scanner also recovers membership after full-info races; wrapper-death fixtures keep their producer alive for the readiness budget instead of timing out after ten seconds.
+- The local test gate recovers membership from an independent short BSD read when full process info is unavailable, so unrelated same-user processes no longer poison teardown. Unknown identities in the run's groups, sessions or structural boundary still fail closed; transient retries wait briefly within the scan budget.
+- `release-store-verify` checks batched and total `hash-object` counts without dumping a potentially large call log.
+- `disk-janitor-apply` tests use local `lsof`/`df` shims and readiness markers instead of host-load-sensitive waits.
+- Worktree removal reports its background PID; local-gate signal and worktree-removal tests wait on observed readiness or completion while their producer remains alive, with a 120-second backstop, rather than short fixed polling windows.
+- The process gate saves full failing-check output in private, bounded-retention `failed-shards` entries and reports the path plus buried TAP failures.
+- The Go mutation-check test uses the gate's 30-second bounded control timeout instead of the fixture's 3-second default.
+- The heavy-slot failed-`ps` test and guard-supervisor pass-through tests wait for observed work or use the shipped 20-second test-copy deadline, avoiding load-sensitive short waits without relaxing their assertions.
+
+## [1.3.18] - 2026-10-18
+
+### Fixed
+
+- Pi no longer stalls at startup on a keypress for the deprecated `.pi/hooks` directory. Trellis stops rendering it: the Pi dispatcher runs the release-owned Codex hooks from the runtime payload, and adoption retires the owned `.pi/hooks` links and removes the emptied directories, restoring both if interrupted. Files Trellis does not own are left in place and named. Doctor and the bypass check derive the required Pi leaves from each checkout's pinned release.
+
+## [1.3.17] - 2026-10-18
+
+### Fixed
+
+- SessionStart accepts managed symlinks into the sealed payload instead of checking the symlink's own mode, avoiding false "Trellis attachment is missing" warnings in attached worktrees.
+- The spec-gate excludes root `CLAUDE.md` and `AGENTS.md` from its gated diff. Nested instruction files still count.
+- The usage store keeps schema/version checks on every open, but runs full data checks after creation or migration and otherwise at most once per day, recording the last clean check durably. Failed checks still refuse the store; append-only history and retention are unchanged.
+- Managed pre-push refuses a pending adoption before the chained project's suite starts, preserving the refusal text and exit status. Carrier verification and pending-operation checks still run after the prior hook, before the gate.
+- Claude and Codex Stop verification report `verification unavailable: dependencies not installed` before running JS checks when the dependency directory is absent. Hoisted installations and Yarn PnP are recognized; installed-project failures and receipt/Todo enforcement are preserved. Verification-directory selection is unchanged.
+- Pi keeps successful file read results byte-exact when the only notice concerns unsupported/advisory capability. Those notices use a separate once-per-session context message; genuine context and warn/deny advisories retain their existing transport.
+
+### Upgrade notes
+
+- Worktrees installed under the private gate's pnpm config before 1.3.16 can fail `verify-deps-before-run` when 1.3.16 starts mirroring the user's `enableGlobalVirtualStore=true`. Repair each affected worktree once with `pnpm install --frozen-lockfile` from the normal shell, never the gate's config.
+- After `trellis worktree add`, install fresh-worktree dependencies from the normal shell with `pnpm install --frozen-lockfile --ignore-scripts`, so Husky's `prepare` cannot reset the shared `core.hooksPath`.
+
+### Known issue
+
+- Pi still treats rendered `.pi/hooks` as deprecated and may wait for a startup keypress. Dismiss that prompt and wait for the footer before sending the first prompt, or it may be lost. The directory migration is deferred to the next release.
+
+## [1.3.16] - 2026-10-17
+
+**Highlights.** 1.3.16 fixes the gate and attachment failures the fleet hit on 2026-10-17: lost Docker contexts, husky resetting hooksPath, pnpm store mismatches, stale journals and registry-lock timeouts. It adds a project-declared gate env passthrough and semgrep timeout, safe orphan-journal recovery, and a hardened secrets skip list. Projects adopt it by pin move.
+
+### Fixed
+
+- Managed dispatchers resolve an explicit caller `DOCKER_CONTEXT` to its endpoint before isolation when `DOCKER_HOST` is unset, then forward only `DOCKER_HOST` to the pre-push prior hook and gate. An explicit host (including empty) is preserved; failed resolution warns once and leaves it unset. Context metadata stays outside the gate, and passthrough shim bytes are unchanged for existing attachments.
+- `trellis doctor --fix` can restore the managed `core.hooksPath` when an unattached sibling shares it, breaking the donor/doctor deadlock without relaxing donor verification. It names each sibling's sync command; that sibling's pushes stay refused until synced. Session start reports the exact restore command when the live hooks path has reverted to the recorded previous value; hooks never perform the repair themselves.
+- The shared diff-base resolver follows a valid remote default (`origin/HEAD`) ahead of the runtime template's fallback branch, even when `origin/main` also exists. Explicit caller and protected-base project policies still win, so stacked spec-gate ranges exclude already-landed changes without letting branch-local policy choose its own base.
+- Both Stop verifiers honor `pyproject.toml` `[tool.mypy] files` instead of overriding it with a positional `.`. The existing default remains when no files are configured or a higher-priority mypy ini file is present; venv/uv/global tool precedence and each harness's failure transport are unchanged.
+- Both Stop verifiers skip heavy checks for an authenticated unchanged turn or known docs-only changes, rather than rerunning the full suite for pre-existing dirt. Committed code, code-to-doc renames and unknown baselines remain checked; Todo and receipt enforcement stay in place.
+- `trellis recover --discard-orphan-journal UUID <surviving-checkout-root>` archives prepared attach or detach journals at any phase when their recorded root and owner are gone. Shared exclude and dispatcher state must verify against another committed owner of the same checkout. The command clears only the exact registry attachment ID and preserves journal/progress-log bytes and modes in dated backups; unsafe or ambiguous state still requires restoring the recorded root.
+- Attachment registry writers wait through contention with capped backoff and a 300-second retry budget. Registry-lock timeouts report unavailable state instead of corruption, post-checkout preserves the cause without calling the worktree unsafe, and deferred checks stay pending for retry. Unsafe locks still refuse immediately; permanent registry failures retain their actual exit code.
+- The cross-project process audit accepts `AGENTS.md` or `CLAUDE.md` and a valid codebase map in either. A doctor-verified managed dispatcher no longer requires project-local `.husky/*` or tracked hook files; effective merge-gate wiring and unmanaged hook checks remain enforced.
+- The nine writable pi roster profiles leave isolation to the caller instead of forcing `worktree`. Read-only profiles keep their explicit `off` veto, and launch-time roster copies remain byte-identical; the setup guide no longer reinstalls the forced policy.
+- `foreman-prompt.sh` confirms brief submission without waiting for a turn-state transition, avoiding false timeouts after delivery. It submits only once, treats the following status as a snapshot, and still fails explicitly on rejected prompts, invalid briefs or broken status receipts.
+- Managed gates mirror the caller's global pnpm `enableGlobalVirtualStore` boolean into their private XDG config, avoiding dependency-state mismatches after normal-shell installs. False, unset defaults and workspace overrides are preserved; caller config stores and credentials are not forwarded. An unreadable setting (offline Corepack, for example) prints a warning and the gate continues on pnpm's default.
+- Recovery ignores journals consistently bound to other checkouts before their live-root validation, while same-checkout corruption and unsafe entries still refuse. Full detach clears its exact registry binding before owner unlink, so an exhausted registry timeout retains the owner and journal for retry; a durable clear needs no second lock acquisition to finish.
+
+- The secrets checker honors `PROCESS_GATE_SECRETS_SKIP_PATHS` globs from range-base project config for both path and pattern findings. Excluded duplicates no longer hide the same hit in a non-excluded file; environment-only skip values are ignored. Paths come from Git's NUL-delimited name list and each remaining literal path is scanned separately, so added diff-header text cannot redirect attribution. `*` stays within one segment; `**` supports any depth. Literal paths are rooted at the repository even from a subdirectory, and a nonbinary added/modified path with an empty diff refuses as an incomplete scan.
+
+- Receipt begin/accept/bind failures include a stable cause code and bounded, sanitized exception class/message instead of an undiagnosable generic error; receipt arguments remain redacted and exit 5 is preserved.
+- Pi source-checkout validation accepts canonical `.agents/skills/<name>` links only when the complete source skill matches the protected base and contains no untracked files, symlinks or hardlinks.
+
+- Pi bridge events use bounded private JSON files (0600 files inside 0700 directories), not argv payloads, so image-sized results and large inputs no longer fail with `E2BIG`. Unsafe files refuse, and completion, cancellation and spawn errors clean up the owned transport.
+
+- New worktrees that track `AGENTS.md` can reuse the exact verified shared exclude block, retaining its harmless old ignore line without rewriting sibling ownership. Every omitted entry must be an exact tracked path; unaccounted drift still refuses.
+
+- Managed gates forward only exact exported environment names approved in the protected-default `.trellis.json` manifest, preserving empty/unset values while denying secret and control namespaces. Values reach the gate and heavy child, never prior hooks or the control interpreter; passthrough shim bytes stay unchanged. `security_gate.semgrep_timeout` now reads a validated 1–600-second setting from the gated range BASE.
+
+### Tests
+
+- Pin #477's native gitleaks allowlist behavior: the scanner receives `.gitleaks.toml` from the range BASE, never candidate or worktree config. This already worked; no new overlay format or runtime change.
+- Pin #476's first-Stop receipt behavior: a pending envelope receipt passes before its message reaches the transcript, while a missing receipt still blocks. The runtime fix already shipped in 1.3.15.
+
+## [1.3.15] - 2026-10-16
+
+**Highlights.** 1.3.15 fixes the hook problems found during a downstream project's parallel build, routes the Herdr roster to models that work today, and stops one expired account from blocking every route. Projects adopt it without a detach or fresh attach.
+
+### Added
+
+- OpenCode Go 2 registers Gemini 4 Argon (`gemini-4-argon-contributor`, Gemini wire) and GLM 5.3 Flash (`glm-5.3-flash`, Chat Completions), each with the `x-opencode-session` header. The roster adds `argon` (google family) to the reviewer and refuter chains and `glm-flash` to the scout chain only.
+
+### Changed
+
+- Every live GPT-6 Sol route uses GPT-6.1 Sol (`openai-codex/gpt-6.1-sol`); agent names, efforts and chains are unchanged.
+- The process gate gives tests 1,500 s by default, enough for a 900 s shared test-database lock wait plus the battery, and reports lock starvation as an infrastructure failure instead of a failed test.
+- A second worktree add now waits up to 300 s for the post-attach checkout lock instead of failing and leaving the worktree unattached.
+- The security gate passes semgrep a per-file rule timeout of 30 s (semgrep's own default is 5 s), settable as `SECURITY_GATE_SEMGREP_TIMEOUT` (1-600) in `security-gate-local/local.config.sh`. A rule that still times out leaves the scan partial and blocks SAST, as before. Reported by a downstream project, where a loaded machine timed out two large test files.
+
+### Fixed
+
+- `session-context` accepts the registry's schema-valid `legacy_path` on discovery-ignore entries. It had rejected the whole registry, so every linked worktree was told its attachment was missing, and the message told agents to run `trellis worktree sync`. The message now tells the agent to report to the operator.
+- The turn fingerprint and changed-file sets ignore checkout-local hook state (`.claude/.fail-counter`, `.claude/.reread-state/`, review markers, `session-surgical`, `spec-gate-audit.log`, `.pi/.reread-state/`), so a no-op turn no longer looks changed, demands a receipt, or starts the heavy test tier.
+- The process gate's validator source guard applies only to validator code, project code and inline scripts. A toolchain program outside those, such as the bash program behind a pyenv shim sourcing its `pyenv.d` hooks, is no longer refused, so a validator that runs `python3` through pyenv shims passes (reported by a downstream project). A project script still may not source a file outside the trusted tree.
+- The spec gate no longer counts a project's root `gotchas.md`, `decisions-log.md` or their archives as feature code, so archiving old records does not demand a spec triad.
+- Shipped pi agents (`general-purpose`, `Explore`, `Plan`, `cheap-ro`, `cheap-rw`) and the `cheap` catalog entry no longer route to the OpenCode free tier, which only the OpenCode app may call; they use Go 2 Muse.
+- `resolve-roles` resolves prepaid and unmetered routes when OpenUsage is unavailable; metered roles stay degraded. `trellis usage` runs on Python 3.12 or newer instead of an older `python3` on `PATH`.
+- `stop-verify` reads the receipt from the Stop envelope's `last_assistant_message` as well as the transcript. Claude Code could fire Stop before the final message was written to the transcript, so valid receipts in that message were rejected.
+- `stop-verify` counts a receipt only in text the user saw. A receipt inside a non-string envelope value, a thinking block, or tool input or output no longer passes the check.
+- The OpenUsage adapter no longer rejects the whole usage feed when an error names a second login of a provider (`claude@<account>`). That error now drops only that entry, so one expired secondary account cannot stop `resolve-roles` from approving a roster.
+
 ## [1.3.14] - 2026-10-12
 
 ### Changed

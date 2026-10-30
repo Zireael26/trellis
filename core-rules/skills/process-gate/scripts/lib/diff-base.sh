@@ -86,11 +86,19 @@ db_polname() {
 # template.branch names no existing branch: the caller refuses, never guesses.
 db_defbranch() {
   _dd_ref=""; _dd_reason=""; _dd_tip=""
-  local rm pol sym c ref
+  local rm pol sym c ref remote_tip
   rm="$(db_remote)"; pol="$(db_policy)"
   if [ -n "$pol" ]; then
     if ref="$(db_polname "$pol" "$rm")" && git show-ref --verify -q "$ref" &&
        _dd_tip="$(db_rev "$ref")" && [ -n "$_dd_tip" ]; then
+      # The runtime's template branch is a fallback, not this project's policy.
+      # A valid remote HEAD outranks it even when the template branch exists.
+      if [ -z "$DB_POLICY_OVERRIDE" ] && [ -z "$(db_base_policy)" ] && [ -n "$rm" ]; then
+        sym="$(git symbolic-ref -q "refs/remotes/$rm/HEAD" 2>/dev/null)" || sym=""
+        if [ -n "$sym" ] && remote_tip="$(db_rev "$sym")" && [ -n "$remote_tip" ]; then
+          _dd_ref="$sym"; _dd_tip="$remote_tip"; _dd_reason="default $(db_sref "$sym")"; return 0
+        fi
+      fi
       _dd_ref="$ref"
       if [ -z "$rm" ]; then _dd_reason="no remote"; else _dd_reason="policy $pol"; fi
       return 0

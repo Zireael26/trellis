@@ -690,3 +690,51 @@ kv() {
   [ "$status" -eq 1 ]
   [ "$(kv SOURCE)" = refused ]
 }
+
+@test "origin HEAD beats the runtime main default even when origin main exists" {
+  mk
+  M0="$(snap m0)"
+  git update-ref refs/remotes/origin/main "$M0"
+  git checkout -qb feat/slice-1-contracts
+  TRUNK="$(snap contracts)"
+  git update-ref refs/remotes/origin/feat/slice-1-contracts "$TRUNK"
+  git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/slice-1-contracts
+  git checkout -qb feature/x
+  A="$(snap child)"
+  git config branch.feature/x.trellisParent main
+  git config branch.feature/x.trellisBase "$M0"
+  mkdir -p "$BATS_TEST_TMPDIR/runtime"
+  printf '{"template":{"branch":"main"}}\n' > "$BATS_TEST_TMPDIR/runtime/trellis.config.json"
+
+  run env TRELLIS_ROOT="$BATS_TEST_TMPDIR/runtime" bash "$DB" resolve --format=kv
+  [ "$status" -eq 0 ]
+  [ "$(kv BASE_REF)" = origin/feat/slice-1-contracts ]
+  [ "$(kv RANGE)" = "$TRUNK..$A" ]
+  [ "$(kv REASON)" = 'parent main merged → default' ]
+
+  # A deliberate caller policy still outranks the remote default.
+  run env TRELLIS_ROOT="$BATS_TEST_TMPDIR/runtime" bash "$DB" resolve --policy main --format=kv
+  [ "$status" -eq 0 ]
+  [ "$(kv BASE_REF)" = origin/main ]
+  [ "$(kv RANGE)" = "$M0..$A" ]
+}
+
+@test "origin HEAD does not override a main policy declared by the protected base" {
+  mk
+  M0="$(snap m0)"
+  git update-ref refs/remotes/origin/main "$M0"
+  git checkout -qb feat/slice-1-contracts
+  printf '{"template":{"branch":"main"}}\n' > "$REPO/.trellis.json"
+  snap contracts >/dev/null
+  git update-ref refs/remotes/origin/feat/slice-1-contracts HEAD
+  git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/slice-1-contracts
+  git checkout -qb feature/x
+  A="$(snap child)"
+  git config branch.feature/x.trellisParent main
+  git config branch.feature/x.trellisBase "$M0"
+
+  run bash "$DB" resolve --format=kv
+  [ "$status" -eq 0 ]
+  [ "$(kv BASE_REF)" = origin/main ]
+  [ "$(kv RANGE)" = "$M0..$A" ]
+}

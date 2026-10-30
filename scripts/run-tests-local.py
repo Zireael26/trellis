@@ -114,6 +114,17 @@ class _BSDInfo(ctypes.Structure):
     ]
 
 
+class _ShortBSDInfo(ctypes.Structure):
+    # sys/proc_info.h: PROC_PIDT_SHORTBSDINFO (flavor 13), no birth time.
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "pid", "ppid", "pgid", "status",
+    )] + [("comm", ctypes.c_char * 16)] + [
+        (name, ctypes.c_uint32) for name in (
+            "flags", "uid", "gid", "ruid", "rgid", "svuid", "svgid", "reserved",
+        )
+    ]
+
+
 _LIBPROC = None
 if sys.platform == "darwin":
     try:
@@ -260,6 +271,8 @@ def _retry_pid(read: Any, end: float) -> Any:
         if isinstance(exc, UnreadableProcess) or exc.error in (errno.EPERM, errno.EACCES, errno.ESRCH):
             raise
         _bounded(end)
+        time.sleep(min(0.01, max(0, end - time.monotonic())))
+        _bounded(end)
         return read()
 
 
@@ -272,6 +285,26 @@ def bsd_info(pid: int) -> Optional[_BSDInfo]:
     if _pid_gone(pid, error):
         return None
     raise ContainmentError("PROC_PIDTBSDINFO unavailable for pid {}".format(pid), error)
+
+
+def _short_bsd_info(pid: int) -> Optional[_BSDInfo]:
+    """Recover membership metadata, NEVER a birth identity or signal authority."""
+    ctypes.set_errno(0)
+    short = _ShortBSDInfo()
+    size = ctypes.sizeof(short)
+    if _LIBPROC.proc_pidinfo(pid, 13, 0, ctypes.byref(short), size) != size:
+        error = ctypes.get_errno()
+        if _pid_gone(pid, error):
+            return None
+        raise ContainmentError("PROC_PIDT_SHORTBSDINFO unavailable for pid {}".format(pid), error)
+    if short.pid != pid:
+        raise ContainmentError("PROC_PIDT_SHORTBSDINFO pid mismatch for {}".format(pid))
+    info = _BSDInfo()
+    for field in ("pid", "ppid", "pgid", "status", "uid"):
+        setattr(info, field, getattr(short, field))
+    # Zero means UNKNOWN birth, not pre-run. Such rows still undergo every
+    # ownership check, but can never authorize a signal or exclusion receipt.
+    return info
 
 
 def process_table(end: float) -> Dict[int, _BSDInfo]:
@@ -297,10 +330,14 @@ def process_table(end: float) -> Dict[int, _BSDInfo]:
             continue
         try:
             info = _retry_pid(lambda: bsd_info(pid), end)
-        except ContainmentError:
-            if pid in own_pids:
-                raise
-            continue  # Unreadable other-UID processes cannot be members.
+        except ContainmentError as exc:
+            if pid not in own_pids:
+                continue  # Unreadable other-UID processes cannot be members.
+            _bounded(end)
+            try:
+                info = _short_bsd_info(pid)
+            except ContainmentError:
+                raise exc  # Preserve the original failure if both reads fail.
         if info is not None:
             table[pid] = info
     return table
@@ -352,16 +389,15 @@ def process_environment(pid: int) -> Optional[Set[bytes]]:
         error = ctypes.get_errno()
         if error == errno.ESRCH:
             return set()  # The inspected process exited before the argument read.
-        fresh = bsd_info(pid)
-        if fresh is None or fresh.status == 5:
-            return set()  # Positive exit during the scan, not unknown live work.
         if error in (errno.EPERM, errno.EACCES):
             raise UnreadableProcess("KERN_PROCARGS2 unreadable for pid {}".format(pid))
         if error == errno.EIO:
-            # Exec or exit in progress: the image has no readable argument area.
-            # Treat it as env-absent; file, sentinel, group and descendant signals
-            # still apply, as for a platform binary (Amendment 1 revision 6).
+            # Exec or exit in progress: do not require a full BSD reread to
+            # classify this known env-absent response. Other signals still apply.
             return None
+        fresh = bsd_info(pid)
+        if fresh is None or fresh.status == 5:
+            return set()  # Positive exit during the scan, not unknown live work.
         raise ContainmentError("KERN_PROCARGS2 unavailable for pid {} (errno {})".format(pid, error), error)
     return parse_environment(buffer.raw[:size.value])
 
@@ -427,7 +463,9 @@ def _unreadable_entry(pid: int, start_us: int) -> Dict[str, Any]:
     ctypes.set_errno(0)
     if _LIBPROC.proc_pidpath(pid, path, ctypes.sizeof(path)) <= 0:
         error = ctypes.get_errno()
-        fresh = bsd_info(pid)
+        # Only exit status is needed here; a full birth reread can fail during
+        # the same exec/exit transition that made the executable path unreadable.
+        fresh = _short_bsd_info(pid)
         if fresh is not None and fresh.status != 5:
             raise ContainmentError("proc_pidpath unavailable for unreadable pid {}".format(pid), error)
         executable = "<exited>"
@@ -656,7 +694,7 @@ class Boundary:
         started_us = _pre_run_bound(self.data, self.record_path)
         eligible = {pid for pid, entry in table.items()
                     if pid not in excluded and entry.uid == os.getuid() and entry.status != 5
-                    and _birth(entry) >= started_us}  # SZOMB; pre-run births NEVER own work.
+                    and (_birth(entry) == 0 or _birth(entry) >= started_us)}  # SZOMB; unknown births stay eligible.
         groups = set()
         if self.live:
             # These are this runner's registered, strongly-held Popen children.
@@ -666,6 +704,23 @@ class Boundary:
             groups = {group["pgid"] for group in self.data["groups"]}
         strong = {pid for pid in eligible if table[pid].pgid in groups}
         owned = set(strong)
+        recorded_groups = {entry["pgid"] for entry in self.data["groups"]}
+        for pid in list(eligible):
+            if _birth(table[pid]) != 0 or not recorded_groups:
+                continue
+            _bounded(end)
+            try:
+                session = os.getsid(pid)
+            except OSError as exc:
+                if _pid_gone(pid, exc.errno):
+                    eligible.discard(pid)
+                    owned.discard(pid)
+                    continue
+                raise ContainmentError("session unavailable for pid {}".format(pid), exc.errno) from exc
+            if table[pid].pgid in recorded_groups or session in recorded_groups:
+                # Even stale IDs are refusal hints for unknown births, never
+                # signal authority: a partial row may still be run work.
+                owned.add(pid)
 
         def descendants() -> None:
             while True:
@@ -706,6 +761,8 @@ class Boundary:
                 files = _retry_pid(lambda: process_files(pid, end), end)
                 environment = _retry_pid(lambda: process_environment(pid), end)
             except UnreadableProcess:
+                if _birth(table[pid]) == 0:
+                    raise ContainmentError("unreadable membership for pid {}".format(pid))
                 unreadable.add(pid)
                 continue
             for identity, name in files:
@@ -741,6 +798,12 @@ class Boundary:
             ambiguous.update(children)
         result = {}
         for pid in owned:
+            if _birth(table[pid]) == 0:
+                fresh = _retry_pid(lambda: bsd_info(pid), end)
+                if fresh is None or fresh.status == 5:
+                    continue  # Positive death still resolves a partial member.
+                result[pid] = None  # No pinned birth; never grant signal authority.
+                continue
             observed = _scan_identity(pid, end)
             if observed is None:
                 # A positively dead process is not an unreadable live identity.
@@ -928,11 +991,13 @@ def _capability(end: float, require_wait: bool = True, full_scan: bool = True,
     if full_scan:
         for pid, info in table.items():
             _bounded(end)
-            if info.uid == os.getuid() and info.status != 5 and _birth(info) >= started_us:
+            if info.uid == os.getuid() and info.status != 5 and (_birth(info) == 0 or _birth(info) >= started_us):
                 try:
                     _retry_pid(lambda: process_files(pid, end), end)
                     _retry_pid(lambda: process_environment(pid), end)
                 except UnreadableProcess:
+                    if _birth(info) == 0:
+                        raise ContainmentError("unreadable preflight membership for pid {}".format(pid))
                     unreadable.append(_retry_pid(lambda: _unreadable_entry(pid, _birth(info)), end))
     return unreadable
 

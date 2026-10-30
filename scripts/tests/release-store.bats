@@ -222,6 +222,25 @@ attachment_checkout_lock_acquire() {
   release_fixture_note_lock_busy "$?"
 }
 
+# The real checkout-lock wait is 300 s; a short-lock-wait marker bounds it at
+# 2 s so a test can exercise the named refusal without waiting it out.
+eval "$(declare -f attachment_checkout_lock_wait | /usr/bin/sed '1s/^attachment_checkout_lock_wait /release_fixture_original_checkout_lock_wait /')"
+attachment_checkout_lock_wait() {
+  local rc tries=0
+  [ -f "$release_fixture_adoption_barrier/short-lock-wait" ] || { release_fixture_original_checkout_lock_wait "$@"; return "$?"; }
+  while :; do
+    if attachment_checkout_lock_reclaim "$@"; then
+      attachment_checkout_lock_acquire "$@" && return 0
+      rc=$?
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 3 ] && [ "$tries" -lt 8 ] || return "$rc"
+    tries=$((tries + 1))
+    sleep 0.25
+  done
+}
+
 eval "$(declare -f adoption_publish_render | /usr/bin/sed '1s/^adoption_publish_render /release_fixture_original_publish_render /')"
 adoption_publish_render() {
   release_fixture_original_publish_render "$@" || return "$?"
@@ -308,6 +327,11 @@ EOF
   fixture="${4:-}"
   case "$fixture" in
     bootstrap-fixture)
+      cp "$REPO_ROOT/scripts/trellis" "$REPO_ROOT/scripts/show-config.sh" "$repo/scripts/" || return 1
+      cp "$REPO_ROOT/trellis.config.json" "$repo/trellis.config.json" || return 1
+      mkdir -p "$repo/core-rules/skills/process-gate/scripts/lib" || return 1
+      cp "$REPO_ROOT/core-rules/skills/process-gate/scripts/lib/pi-artifacts.py" \
+        "$repo/core-rules/skills/process-gate/scripts/lib/pi-artifacts.py" || return 1
       install_release_test_fixture "$repo" "$RELEASE_TEST_STORE_BARRIER" \
         "$RELEASE_TEST_ADOPTION_BARRIER" "$RELEASE_TEST_HOOK_BARRIER" || return 1
       ;;
@@ -382,6 +406,18 @@ directory_inode() {
     Darwin) stat -f '%i' "$1" ;;
     *) stat -c '%i' "$1" ;;
   esac
+}
+
+directory_mode() {
+  local candidate
+  candidate="$(stat -f '%Lp' "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 runtime_validate_release_record() {
@@ -564,13 +600,17 @@ GENERATOR
     .exclude.before_base64 == $old[0].exclude.before_base64
     and .exclude.before_sha256 == $old[0].exclude.before_sha256
     and .exclude.managed_by_attachment == $old[0].exclude.managed_by_attachment' "$GROUP_PLAN_OWNER"
-  for harness in claude codex pi; do
+  for harness in claude codex; do
     for leaf in hooks/hookspath-guard.sh hooks/lib/hookspath-check.sh; do
-      [ -L "$GROUP_PLAN_NEW/.$harness/$leaf" ] && [ -e "$GROUP_PLAN_NEW/.$harness/$leaf" ]
+      [ -L "$GROUP_PLAN_NEW/.$harness/$leaf" ]
+      [ -e "$GROUP_PLAN_NEW/.$harness/$leaf" ]
       grep -Fx "/.$harness/$leaf" "$GROUP_PLAN_EXCLUDE"
     done
   done
-  [ ! -e "$GROUP_PLAN_MAIN/.pi/hooks/hookspath-guard.sh" ] # No existing-root leaf migration.
+  # Pi runs the payload hooks in place, so a fresh checkout gets no .pi/hooks.
+  [ ! -e "$GROUP_PLAN_NEW/.pi/hooks" ]
+  [ ! -e "$GROUP_PLAN_MAIN/.pi/hooks" ]
+  ! grep -F '/.pi/hooks/' "$GROUP_PLAN_EXCLUDE"
   [ "$(tail -c 31 "$GROUP_PLAN_EXCLUDE")" = '# external tail without newline' ]
   managed="$(jq -r '.git_hooks.managed_hooks_path' "$GROUP_PLAN_OWNER")"
   [ "$(git -C "$GROUP_PLAN_NEW" config --local --get-all core.hooksPath)" = "$managed" ]
@@ -582,7 +622,8 @@ GENERATOR
   [ -z "$(git -C "$GROUP_PLAN_SIBLING" status --porcelain)" ]
   before="$(group_plan_state)"
   group_plan_sync "$GROUP_PLAN_NEW"
-  [ "$status" -eq 0 ] && [ ! -s "$SANDBOX/sync.err" ]
+  [ "$status" -eq 0 ]
+  [ ! -s "$SANDBOX/sync.err" ]
   [ "$(group_plan_state)" = "$before" ]
   group_plan_assert_no_journal
 }
@@ -644,7 +685,9 @@ GENERATOR
   GROUP_PLAN_NEW="$TRELLIS_WORKTREE_ROOT/group-plan/gp-deferred"
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add --no-checkout gp-deferred' _ \
     "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh"
-  [ "$status" -eq 0 ] && [ -d "$GROUP_PLAN_NEW" ] && [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
+  [ "$status" -eq 0 ]
+  [ -d "$GROUP_PLAN_NEW" ]
+  [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
   group_plan_assert_no_journal
 }
 
@@ -670,7 +713,7 @@ live.write_bytes(data)
 PY
   group_plan_adopt
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -Fx '/.pi/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
+  grep -Fx '/.codex/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
   group_plan_assert_no_journal
 }
 
@@ -684,7 +727,7 @@ PY
       duplicate) cat "$SANDBOX/exclude.good" >> "$GROUP_PLAN_EXCLUDE" ;;
       tamper) python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.write_bytes(p.read_bytes().replace(b"/.trellis/runtime",b"/.trellis/tampered"))' "$GROUP_PLAN_EXCLUDE" ;;
       disagreement) jq '.exclude.managed_block_sha256 = ("a" * 64) | .exclude_block_hash = ("a" * 64)' "$SANDBOX/owner.good" > "$GROUP_PLAN_OWNER" ;;
-      negation) printf '!.pi/hooks/hookspath-guard.sh\n' > "$GROUP_PLAN_MAIN/.gitignore"; git -C "$GROUP_PLAN_MAIN" add .gitignore ;;
+      negation) printf '!.codex/hooks/hookspath-guard.sh\n' > "$GROUP_PLAN_MAIN/.gitignore"; git -C "$GROUP_PLAN_MAIN" add .gitignore ;;
       divergent) rm "$GROUP_PLAN_SIBLING/.claude/primers/INDEX.md" ;;
     esac
     before="$(group_plan_state)"
@@ -751,7 +794,7 @@ PY
       : > "$RELEASE_TEST_ADOPTION_BARRIER/owner-after-publish.release"
       group_plan_adopt
       [ "$status" -eq 0 ] || { echo "$output"; false; }
-      grep -Fx '/.pi/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
+      grep -Fx '/.codex/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
       group_plan_assert_no_journal
     fi
   done
@@ -994,7 +1037,8 @@ wait_for_attachment_statuses() {
     bash "$RELEASE" adopt "$version_b" --project retiring-group > "$adopt_log" 2>&1 &
   RELEASE_PROCESS_PID_A=$!
   wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
-  [ ! -e "$project/.codex/hooks/retired.md" ] && [ ! -L "$project/.codex/hooks/retired.md" ]
+  [ ! -e "$project/.codex/hooks/retired.md" ]
+  [ ! -L "$project/.codex/hooks/retired.md" ]
   hook_swap_pid="$(cat "$barrier/hook-swap-after-exchange.pid")"
   kill -TERM "$hook_swap_pid"
   wait_for_release_process "$RELEASE_PROCESS_PID_A"
@@ -1013,7 +1057,8 @@ wait_for_attachment_statuses() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   for root in "$project" "$sibling"; do
     owner="$(owner_for_root "$root")"
-    [ ! -e "$root/.codex/hooks/retired.md" ] && [ ! -L "$root/.codex/hooks/retired.md" ]
+    [ ! -e "$root/.codex/hooks/retired.md" ]
+    [ ! -L "$root/.codex/hooks/retired.md" ]
     jq -e --arg version "$version_b" '.release == $version
       and all(.artifacts[]; .path != ".codex/hooks/retired.md")
       and any(.artifacts[]; .path == ".agents/rules/trellis.md")' "$owner" >/dev/null
@@ -1021,6 +1066,577 @@ wait_for_attachment_statuses() {
   done
   ! grep -Fx '/.codex/hooks/retired.md' "$project/.git/info/exclude"
   group_plan_assert_no_journal
+}
+
+# Pi releases before 1.3.18 render hooks under .pi/hooks; later ones render
+# nothing there, because pi stalls startup on that reserved directory.
+build_pi_release_repo() {
+  local version="$1" legacy="$2" repo manifest links
+  repo="$(build_release_repo "$version")" || return 1
+  mkdir -p "$repo/core-rules/hooks/lib" || return 1
+  cp "$REPO_ROOT/core-rules/hooks/lib/autonomy.sh" "$repo/core-rules/hooks/lib/autonomy.sh" || return 1
+  cp "$REPO_ROOT/trellis.config.json" "$repo/trellis.config.json" || return 1
+  manifest="$repo/core-rules/inheritance-manifest.json"
+  links='[{"source":"core-rules/CLAUDE.md","destination":".pi/extensions/trellis.md"}]'
+  [ "$legacy" != legacy ] || links='[{"source":"core-rules/CLAUDE.md","destination":".pi/extensions/trellis.md"},
+    {"source":"core-rules/CLAUDE.md","destination":".pi/hooks/dispatch.sh"},
+    {"source":"core-rules/CLAUDE.md","destination":".pi/hooks/lib/task-context.sh"}]'
+  jq --argjson links "$links" '.schema_version = 2
+    | .harnesses.pi = {links:$links,render:[]} | .harnesses.shared_agents = {links:[],render:[]}' \
+    "$manifest" > "$manifest.tmp" || return 1
+  mv "$manifest.tmp" "$manifest" || return 1
+  retag_release_repo "$repo" "$version" || return 1
+  printf '%s\n' "$repo"
+}
+
+attach_pi_project() {
+  local root="$1" version="$2"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    attach --home "$TRELLIS_HOME_FIX" --fleet personal --release "$version" --harness pi "$root"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "Pi old to new to old adoption refuses before mutation and names exact checkout recovery" {
+  local version_a=1.10.0 version_b=1.10.1 repo project sibling root owner payload_b index
+  local detach_expected attach_expected
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  payload_b="$RELEASE_DIR/payload"
+  project="$SANDBOX/pi reverse main"
+  sibling="$SANDBOX/pi reverse sibling"
+  make_portable_project "$project" pi-reverse
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    attach --home "$TRELLIS_HOME_FIX" --fleet personal --release "$version_a" \
+    --harness claude --harness pi "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    attach --home "$TRELLIS_HOME_FIX" --fleet personal --release "$version_a" \
+    --harness claude --harness pi "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  wait_for_attachment_statuses 2
+  for root in "$project" "$sibling"; do
+    [ -L "$root/.pi/hooks/dispatch.sh" ]
+    [ -L "$root/.pi/hooks/lib/task-context.sh" ]
+  done
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_b" --fleet personal --project pi-reverse
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  index=0
+  for root in "$project" "$sibling"; do
+    index=$((index + 1))
+    owner="$(owner_for_root "$root")"
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_b" ]
+    [ "$(registry_release_for_root "$root")" = "$version_b" ]
+    [ ! -e "$root/.pi/hooks" ]
+    [ ! -L "$root/.pi/hooks" ]
+    jq -e 'all(.artifacts[];
+      .kind != "symlink" or (.path | . != ".pi/hooks" and (startswith(".pi/hooks/") | not)))' \
+      "$owner" >/dev/null
+    cp "$owner" "$SANDBOX/pi-reverse-owner.$index.before"
+  done
+  cp "$project/.git/info/exclude" "$SANDBOX/pi-reverse-exclude.before"
+  cp "$TRELLIS_HOME_FIX/registry.json" "$SANDBOX/pi-reverse-registry.before"
+  group_plan_assert_no_journal
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$version_a" --fleet personal --project pi-reverse
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"cannot adopt $version_a for checkout $project:"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"adopted:"* ]] || { echo "$output"; false; }
+  printf -v detach_expected 'trellis detach --home %q --all-worktrees %q' "$TRELLIS_HOME_FIX" "$project"
+  [[ "$output" == *"$detach_expected"* ]] || { echo "$output"; false; }
+  index=0
+  for root in "$project" "$sibling"; do
+    index=$((index + 1))
+    printf -v attach_expected 'trellis attach --home %q --fleet personal --release %q --harness claude --harness pi %q' \
+      "$TRELLIS_HOME_FIX" "$version_a" "$root"
+    [[ "$output" == *"$attach_expected"* ]] || { echo "$output"; false; }
+    cmp "$SANDBOX/pi-reverse-owner.$index.before" "$(owner_for_root "$root")"
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_b" ]
+    [ "$(registry_release_for_root "$root")" = "$version_b" ]
+    [ ! -e "$root/.pi/hooks" ]
+    [ ! -L "$root/.pi/hooks" ]
+  done
+  cmp "$SANDBOX/pi-reverse-exclude.before" "$project/.git/info/exclude"
+  cmp "$SANDBOX/pi-reverse-registry.before" "$TRELLIS_HOME_FIX/registry.json"
+  group_plan_assert_no_journal
+}
+
+@test "Pi adoption permits missing new leaves and treats hooks-other as outside the hooks tree" {
+  local version_a=1.10.2 version_b=1.10.3 version_c=1.10.4 repo manifest project non_pi payload_b payload_c
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" legacy)"
+  manifest="$repo/core-rules/inheritance-manifest.json"
+  jq '.harnesses.pi.links += [{source:"core-rules/CLAUDE.md",destination:".pi/hooks/added.sh"}]' \
+    "$manifest" > "$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+  retag_release_repo "$repo" "$version_b"
+  install_release "$version_b" "$repo"
+  payload_b="$RELEASE_DIR/payload"
+  repo="$(build_pi_release_repo "$version_c" current)"
+  manifest="$repo/core-rules/inheritance-manifest.json"
+  jq '.harnesses.pi.links += [
+    {source:"core-rules/CLAUDE.md",destination:".pi/hooks-other/dispatch.sh"},
+    {source:"core-rules/CLAUDE.md",destination:".pi/extensions/added.md"}]' \
+    "$manifest" > "$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+  retag_release_repo "$repo" "$version_c"
+  install_release "$version_c" "$repo"
+  payload_c="$RELEASE_DIR/payload"
+
+  project="$SANDBOX/pi-forward-leaves"
+  make_portable_project "$project" pi-forward-leaves
+  attach_pi_project "$project" "$version_a"
+  non_pi="$SANDBOX/non-pi-forward"
+  make_portable_project "$non_pi" non-pi-forward
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    attach --home "$TRELLIS_HOME_FIX" --fleet personal --release "$version_a" --harness claude "$non_pi"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  wait_for_attachment_statuses 2
+
+  # A retained hook inventory permits forward adoption with a new missing hook.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-forward-leaves
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
+  [ -L "$project/.pi/hooks/dispatch.sh" ]
+  [ ! -e "$project/.pi/hooks/added.sh" ]
+  [ ! -L "$project/.pi/hooks/added.sh" ]
+  # A manifest's Pi hooks do not constrain an attachment without Pi selected.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project non-pi-forward
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$non_pi/.trellis/runtime")" = "$payload_b" ]
+  [ ! -e "$non_pi/.pi" ]
+  [ ! -L "$non_pi/.pi" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_c" --project pi-forward-leaves
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_c" ]
+  [ ! -e "$project/.pi/hooks" ]
+  [ ! -L "$project/.pi/hooks" ]
+  [ ! -e "$project/.pi/hooks-other/dispatch.sh" ]
+  [ ! -L "$project/.pi/hooks-other/dispatch.sh" ]
+  [ ! -e "$project/.pi/extensions/added.md" ]
+  [ ! -L "$project/.pi/extensions/added.md" ]
+  # With no hook inventory left, the prefix neighbour still must not refuse.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_c" --project pi-forward-leaves
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(registry_release_for_root "$project")" = "$version_c" ]
+  [ "$(registry_release_for_root "$non_pi")" = "$version_b" ]
+  group_plan_assert_no_journal
+}
+
+@test "group adoption removes the retired .pi/hooks tree and restores it on interruption" {
+  local version_a=1.9.6 version_b=1.9.7 repo project sibling root owner payload_a barrier adopt_log hook_swap_pid
+  local hooks_mode lib_mode
+  local -a owners_before=()
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-hooks-group"
+  sibling="$SANDBOX/pi-hooks-sibling"
+  make_portable_project "$project" pi-hooks-group
+  attach_pi_project "$project" "$version_a"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_pi_project "$sibling" "$version_a"
+  wait_for_attachment_statuses 2
+  for root in "$project" "$sibling"; do
+    [ -L "$root/.pi/hooks/dispatch.sh" ]
+    [ -L "$root/.pi/hooks/lib/task-context.sh" ]
+    chmod 0700 "$root/.pi/hooks"
+    chmod 0750 "$root/.pi/hooks/lib"
+    owners_before+=("$(cat "$(owner_for_root "$root")")")
+  done
+
+  barrier="$RELEASE_TEST_HOOK_BARRIER"
+  adopt_log="$SANDBOX/pi-hooks-adopt.log"
+  mkdir "$barrier"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    bash "$RELEASE" adopt "$version_b" --project pi-hooks-group > "$adopt_log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
+  [ ! -e "$project/.pi/hooks" ]
+  [ ! -L "$project/.pi/hooks" ]
+  hook_swap_pid="$(cat "$barrier/hook-swap-after-exchange.pid")"
+  kill -TERM "$hook_swap_pid"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  [ "$RELEASE_PROCESS_STATUS" -ne 0 ] || { cat "$adopt_log"; false; }
+  RELEASE_PROCESS_PID_A=""
+  rm -rf "$barrier"
+  for root in "$project" "$sibling"; do
+    [ "$(readlink "$root/.pi/hooks/dispatch.sh")" = ../../.trellis/runtime/core-rules/CLAUDE.md ]
+    [ "$(readlink "$root/.pi/hooks/lib/task-context.sh")" = ../../../.trellis/runtime/core-rules/CLAUDE.md ]
+    hooks_mode="$(directory_mode "$root/.pi/hooks")"
+    lib_mode="$(directory_mode "$root/.pi/hooks/lib")"
+    [ "$hooks_mode" = 700 ]
+    [ "$lib_mode" = 750 ]
+    [ "$(readlink "$root/.trellis/runtime")" = "$payload_a" ]
+  done
+  [ "$(cat "$(owner_for_root "$project")")" = "${owners_before[0]}" ]
+  [ "$(cat "$(owner_for_root "$sibling")")" = "${owners_before[1]}" ]
+  group_plan_assert_no_journal
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-group
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    [ ! -e "$root/.pi/hooks" ]
+    [ ! -L "$root/.pi/hooks" ]
+    [ -L "$root/.pi/extensions/trellis.md" ]
+    jq -e --arg version "$version_b" '.release == $version
+      and all(.artifacts[]; .path | startswith(".pi/hooks") | not)' "$owner" >/dev/null
+    [ -z "$(git -C "$root" status --porcelain)" ] || { git -C "$root" status --porcelain; false; }
+  done
+  ! grep -F '/.pi/hooks/' "$project/.git/info/exclude"
+  group_plan_assert_no_journal
+}
+
+# The strict predicate behind show-config's "valid strict local attachment"
+# and doctor's managed-excludes row, run against the registry row for ROOT.
+strict_attachment_check() {
+  local root="$1" owner row
+  owner="$(owner_for_root "$root")" || return 1
+  row="$(jq -c --arg root "$root" '
+    .projects | to_entries[] | .key as $key | .value.checkouts | to_entries[] as $checkout
+    | $checkout.value.worktrees | to_entries[] | select(.value.root == $root)
+    | {fleet:($key | split("/")[0]), project:($key | split("/")[1]), checkout:$checkout.key,
+       worktree:.key, attachment:.value.attachment_id, release:$checkout.value.release,
+       harnesses:($checkout.value.harnesses // [])}' "$TRELLIS_HOME_FIX/registry.json")" || return 1
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c '
+    lib="$1"; shift
+    . "$lib/trellis-home.sh"; . "$lib/release-store.sh"; . "$lib/local-registry.sh"
+    . "$lib/attachment.sh"; . "$lib/health-checks.sh"
+    hc_portable_attachment "$@"
+  ' strict-attachment "$REPO_ROOT/scripts/lib" "$TRELLIS_HOME_FIX" "$owner" "$root" \
+    "$(jq -r '.fleet' <<< "$row")" "$(jq -r '.project' <<< "$row")" \
+    "$(jq -r '.checkout' <<< "$row")" "$(jq -r '.worktree' <<< "$row")" \
+    "$(jq -r '.attachment' <<< "$row")" "$(jq -r '.release' <<< "$row")" \
+    "$(jq -c '.harnesses' <<< "$row")"
+}
+
+show_attachment_config() {
+  local root="$1"
+  jq -n --arg source "$SANDBOX/repo-0.0.0" --arg root "$SANDBOX" '{
+    schema_version:1, source_root:$source, release_remote:"fixture://bootstrap",
+    active_cli_release:"0.0.0", default_fleet:"personal",
+    fleets:{personal:{discovery_roots:[$root]}}}' > "$TRELLIS_HOME_FIX/config.json"
+  chmod 600 "$TRELLIS_HOME_FIX/config.json"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && "$2" show-config' _ \
+    "$root" "$OPERATOR_HOME/.local/bin/trellis"
+}
+
+# 1.3.18 shipped this gap: a checkout with one owner record had its .pi/hooks
+# retired but kept the old release's exclude block, which the strict check
+# then rejected, so show-config and doctor exited 4.
+@test "single-owner adoption re-plans the exclude block when .pi/hooks retires" {
+  local version_a=1.9.12 version_b=1.9.13 repo project owner exclude user_bytes stale_record restoration
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-hooks-single"
+  exclude="$project/.git/info/exclude"
+  make_portable_project "$project" pi-hooks-single
+  user_bytes=$'# project-authored\n/scratch/'
+  printf '%s' "$user_bytes" > "$exclude"
+  attach_pi_project "$project" "$version_a"
+  wait_for_attachment_statuses 1
+  [ "$(find "$TRELLIS_HOME_FIX/state/attachments" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ]
+  grep -Fx '/.pi/hooks/dispatch.sh' "$exclude"
+  printf '/external-cache/\n' >> "$exclude"
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(owner_for_root "$project")"
+  stale_record="$(jq -c '{exclude,exclude_block_hash}' "$owner")"
+  restoration="$(jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner")"
+  cp "$exclude" "$SANDBOX/single-stale.exclude"
+  show_attachment_config "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-single
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(owner_for_root "$project")"
+  [ ! -e "$project/.pi/hooks" ]
+  [ ! -L "$project/.pi/hooks" ]
+  [ "$(grep -cF '/.pi/hooks' "$exclude")" = 0 ]
+  grep -Fx '/.pi/extensions/trellis.md' "$exclude"
+  [ "$(head -c "${#user_bytes}" "$exclude")" = "${user_bytes%$'\n'}" ]
+  grep -Fx '/external-cache/' "$exclude"
+  [ "$(jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner")" = "$restoration" ]
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e --arg version "$version_b" '.release == $version
+    and (.exclude.after_base64 | @base64d | contains("/external-cache/") | not)
+    and .exclude_block_hash == .exclude.managed_block_sha256
+    and (.exclude.managed_block_base64 | @base64d | contains("/.pi/hooks") | not)' "$owner" >/dev/null
+  show_attachment_config "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$(git -C "$project" status --porcelain)" ] || { git -C "$project" status --porcelain; false; }
+  group_plan_assert_no_journal
+
+  # A checkout a 1.3.18 CLI already left stale (new release, links retired, old
+  # block) is repaired by adopting its pinned release again.
+  jq --argjson stale "$stale_record" '. + $stale' "$owner" > "$owner.next"
+  chmod 600 "$owner.next"
+  mv "$owner.next" "$owner"
+  cp "$SANDBOX/single-stale.exclude" "$exclude"
+  strict_attachment_check "$project"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"managed excludes: owner block does not match the exact immutable native surface plan"* ]] ||
+    { echo "$output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-single
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(grep -cF '/.pi/hooks' "$exclude")" = 0 ]
+  grep -Fx '/external-cache/' "$exclude"
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  show_attachment_config "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  group_plan_assert_no_journal
+}
+
+@test "interrupted single-owner adoption restores the exclude block and owner record" {
+  local version_a=1.9.14 version_b=1.9.15 repo project owner owner_before exclude barrier adopt_log hook_swap_pid
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-hooks-single-interrupted"
+  exclude="$project/.git/info/exclude"
+  make_portable_project "$project" pi-hooks-single-interrupted
+  attach_pi_project "$project" "$version_a"
+  wait_for_attachment_statuses 1
+  owner="$(owner_for_root "$project")"
+  owner_before="$(cat "$owner")"
+  printf '/external-interrupted/\n' >> "$exclude"
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cp "$exclude" "$SANDBOX/single-exclude.before"
+
+  # The exclude CAS publishes before the hook swap, so this barrier proves the
+  # rollback restores the published block, not just an untouched file.
+  barrier="$RELEASE_TEST_HOOK_BARRIER"
+  adopt_log="$SANDBOX/single-adopt.log"
+  mkdir "$barrier"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    bash "$RELEASE" adopt "$version_b" --project pi-hooks-single-interrupted > "$adopt_log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
+  [ "$(grep -cF '/.pi/hooks' "$exclude")" = 0 ]
+  hook_swap_pid="$(cat "$barrier/hook-swap-after-exchange.pid")"
+  kill -TERM "$hook_swap_pid"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  [ "$RELEASE_PROCESS_STATUS" -ne 0 ] || { cat "$adopt_log"; false; }
+  RELEASE_PROCESS_PID_A=""
+  rm -rf "$barrier"
+  cmp "$SANDBOX/single-exclude.before" "$exclude"
+  [ "$(cat "$owner")" = "$owner_before" ]
+  [ -L "$project/.pi/hooks/dispatch.sh" ]
+  [ "$(registry_release_for_root "$project")" = "$version_a" ]
+  group_plan_assert_no_journal
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-single-interrupted
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(grep -cF '/.pi/hooks' "$exclude")" = 0 ]
+  strict_attachment_check "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  group_plan_assert_no_journal
+}
+
+@test "group adoption preserves external excludes and recorded restoration snapshots" {
+  local version_a=1.9.16 version_b=1.9.17 repo project sibling root owner
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-external-group"
+  sibling="$SANDBOX/pi-external-sibling"
+  make_portable_project "$project" pi-external-group
+  attach_pi_project "$project" "$version_a"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_pi_project "$sibling" "$version_a"
+  wait_for_attachment_statuses 2
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner" > "$root.before"
+  done
+  printf '/external-group/\n' >> "$project/.git/info/exclude"
+  for root in "$project" "$sibling"; do
+    strict_attachment_check "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-external-group
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Fx '/external-group/' "$project/.git/info/exclude"
+  [ "$(grep -cF '/.pi/hooks' "$project/.git/info/exclude")" = 0 ]
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner" > "$root.after"
+    cmp "$root.before" "$root.after"
+    strict_attachment_check "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    show_attachment_config "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+  group_plan_assert_no_journal
+}
+
+@test "group re-adoption repairs an already-stale non-manager after-image without changing the block" {
+  local version=1.9.20 repo project sibling root owner exclude block
+  repo="$(build_pi_release_repo "$version" current)"
+  install_release "$version" "$repo"
+  project="$SANDBOX/pi-stale-group"
+  sibling="$SANDBOX/pi-stale-sibling"
+  make_portable_project "$project" pi-stale-group
+  attach_pi_project "$project" "$version"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_pi_project "$sibling" "$version"
+  wait_for_attachment_statuses 2
+  exclude="$project/.git/info/exclude"
+  for root in "$project" "$sibling"; do
+    owner="$(owner_for_root "$root")"
+    jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner" > "$root.before"
+  done
+  owner="$(owner_for_root "$sibling")"
+  jq -e '.exclude.managed_by_attachment == false' "$owner" >/dev/null
+  block="$(jq -r '.exclude.managed_block_sha256' "$owner")"
+  # An old CLI recorded live bytes even when the release/block was unchanged.
+  printf '/external-stale-row/\n' >> "$exclude"
+  cp "$exclude" "$SANDBOX/stale-live.before"
+  jq --rawfile live "$exclude" --arg hash "$(sha256_file "$exclude")" \
+    '.exclude.after_base64 = ($live | @base64) | .exclude.after_sha256 = $hash' \
+    "$owner" > "$SANDBOX/stale-owner.json"
+  cp "$SANDBOX/stale-owner.json" "$owner"
+  strict_attachment_check "$sibling"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"owner after-image does not exactly derive"* ]] || { echo "$output"; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version" --project pi-stale-group
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cmp "$SANDBOX/stale-live.before" "$exclude"
+  for root in "$sibling" "$project"; do
+    owner="$(owner_for_root "$root")"
+    jq -cS '.exclude | {before_exists,before_sha256,before_base64}' "$owner" > "$root.after"
+    cmp "$root.before" "$root.after"
+    jq -e --arg block "$block" '.exclude.managed_block_sha256 == $block' "$owner" >/dev/null
+    strict_attachment_check "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+  show_attachment_config "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  group_plan_assert_no_journal
+}
+
+@test "single-owner adoption refuses a lone non-manager without mutation" {
+  local version_a=1.9.18 version_b=1.9.19 repo project sibling manager owner exclude managed hooks_before root
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-missing-manager"
+  sibling="$SANDBOX/pi-lone-follower"
+  make_portable_project "$project" pi-missing-manager
+  attach_pi_project "$project" "$version_a"
+  payload_fixture_git -C "$project" worktree add --detach "$sibling"
+  attach_pi_project "$sibling" "$version_a"
+  wait_for_attachment_statuses 2
+  manager="$(owner_for_root "$project")"
+  owner="$(owner_for_root "$sibling")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$manager")"
+  jq -e '.exclude.managed_by_attachment == false' "$owner" >/dev/null
+  mv "$manager" "$SANDBOX/manager.saved"
+  jq --arg root "$project" '(.projects[].checkouts[].worktrees) |=
+    with_entries(select(.value.root != $root))' "$TRELLIS_HOME_FIX/registry.json" > "$SANDBOX/registry.next"
+  cp "$SANDBOX/registry.next" "$TRELLIS_HOME_FIX/registry.json"
+  exclude="$project/.git/info/exclude"
+  cp "$exclude" "$SANDBOX/exclude.before"
+  cp "$owner" "$SANDBOX/owner.before"
+  cp "$TRELLIS_HOME_FIX/registry.json" "$SANDBOX/registry.before"
+  hooks_before="$(hook_state_listing "$managed")"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-missing-manager
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"shared exclude requires exactly one manager"* ]] || { echo "$output"; false; }
+  cmp "$SANDBOX/exclude.before" "$exclude"
+  cmp "$SANDBOX/owner.before" "$owner"
+  cmp "$SANDBOX/registry.before" "$TRELLIS_HOME_FIX/registry.json"
+  [ "$(hook_state_listing "$managed")" = "$hooks_before" ]
+  for root in "$project" "$sibling"; do
+    [ "$(readlink "$root/.trellis/runtime")" = "$TRELLIS_HOME_FIX/releases/$version_a/payload" ]
+    [ -L "$root/.pi/hooks/dispatch.sh" ]
+    [ "$(git -C "$root" config --local --get core.hooksPath)" = "$managed" ]
+  done
+  [ ! -e "$manager" ]
+  group_plan_assert_no_journal
+}
+
+@test "adoption retires owned .pi/hooks leaves but leaves a project file and names it" {
+  local version_a=1.9.8 version_b=1.9.9 repo project owner
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-hooks-authored"
+  make_portable_project "$project" pi-hooks-authored
+  attach_pi_project "$project" "$version_a"
+  wait_for_attachment_statuses 1
+  printf 'mine\n' > "$project/.pi/hooks/notes.txt"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-authored
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"left in place: $project/.pi/hooks holds files Trellis does not own"* ]] || { echo "$output"; false; }
+  [ "$(cat "$project/.pi/hooks/notes.txt")" = mine ]
+  [ ! -e "$project/.pi/hooks/dispatch.sh" ]
+  [ ! -L "$project/.pi/hooks/dispatch.sh" ]
+  [ ! -e "$project/.pi/hooks/lib/task-context.sh" ]
+  [ ! -L "$project/.pi/hooks/lib/task-context.sh" ]
+  owner="$(owner_for_root "$project")"
+  # The directories stay, so their parent entries stay owned; the leaves do not.
+  jq -e --arg version "$version_b" '.release == $version
+    and any(.artifacts[]; .path == ".pi/hooks" and .kind == "parent")
+    and all(.artifacts[]; ((.path | startswith(".pi/hooks")) | not) or .kind == "parent")' "$owner" >/dev/null
+}
+
+@test "adoption preserves pre-existing unowned .pi/hooks directories" {
+  local version_a=1.9.10 version_b=1.9.11 repo project owner
+  repo="$(build_pi_release_repo "$version_a" legacy)"
+  install_release "$version_a" "$repo"
+  repo="$(build_pi_release_repo "$version_b" current)"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/pi-hooks-pre-existing"
+  make_portable_project "$project" pi-hooks-pre-existing
+  mkdir -p "$project/.pi/hooks/lib"
+  attach_pi_project "$project" "$version_a"
+  wait_for_attachment_statuses 1
+  owner="$(owner_for_root "$project")"
+  jq -e 'all(.artifacts[]; .kind != "parent" or (.path != ".pi/hooks" and .path != ".pi/hooks/lib"))' \
+    "$owner" >/dev/null
+  [ -d "$project/.pi/hooks" ]
+  [ ! -L "$project/.pi/hooks" ]
+  [ -d "$project/.pi/hooks/lib" ]
+  [ ! -L "$project/.pi/hooks/lib" ]
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-hooks-pre-existing
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$project/.pi/hooks/dispatch.sh" ]
+  [ ! -L "$project/.pi/hooks/dispatch.sh" ]
+  [ ! -e "$project/.pi/hooks/lib/task-context.sh" ]
+  [ ! -L "$project/.pi/hooks/lib/task-context.sh" ]
+  [ -d "$project/.pi/hooks" ]
+  [ ! -L "$project/.pi/hooks" ]
+  [ -d "$project/.pi/hooks/lib" ]
+  [ ! -L "$project/.pi/hooks/lib" ]
+  [[ "$output" == *"left in place: $project/.pi/hooks holds files Trellis does not own"* ]] || { echo "$output"; false; }
+  jq -e --arg version "$version_b" '.release == $version
+    and all(.artifacts[]; (.path | startswith(".pi/hooks")) | not)' "$owner" >/dev/null
 }
 
 @test "explicit-json adoption names an absent render target and changes nothing" {
@@ -1369,7 +1985,8 @@ wait_for_attachment_statuses() {
   owner="$(owner_for_root "$project")"
   owner_before="$(cat "$owner")"
   managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
-  [ -d "$managed" ] && [ ! -L "$managed" ]
+  [ -d "$managed" ]
+  [ ! -L "$managed" ]
   [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
   managed_inode_before="$(directory_inode "$managed")"
   managed_state_before="$(hook_state_listing "$managed")"
@@ -1382,7 +1999,8 @@ wait_for_attachment_statuses() {
   RELEASE_PROCESS_PID_A=$!
   wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
   for _ in {1..50}; do
-    [ -d "$managed" ] && [ ! -L "$managed" ]
+    [ -d "$managed" ]
+    [ ! -L "$managed" ]
     [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
     [ "$(cat "$managed/release-payload")" = "$ADOPTION_PAYLOAD_B" ]
     sleep 0.01
@@ -1393,7 +2011,8 @@ wait_for_attachment_statuses() {
   wait_for_release_process "$RELEASE_PROCESS_PID_A"
   [ "$RELEASE_PROCESS_STATUS" -eq 4 ] || { cat "$adopt_log"; false; }
   RELEASE_PROCESS_PID_A=""
-  [ -d "$managed" ] && [ ! -L "$managed" ]
+  [ -d "$managed" ]
+  [ ! -L "$managed" ]
   [ "$(git -C "$project" config --local --get core.hooksPath)" = "$managed" ]
   [ "$(directory_inode "$managed")" = "$managed_inode_before" ]
   [ "$(hook_state_listing "$managed")" = "$managed_state_before" ]
@@ -1463,7 +2082,8 @@ wait_for_attachment_statuses() {
   # sibling remains report-only, so the eligible target's class 3 failure must
   # determine the command status. Corrupting the runtime anchor itself would
   # also fail preflight but would break the "runtime remains on A" invariant.
-  [ -n "$managed" ] && [ -f "$managed/release-payload" ]
+  [ -n "$managed" ]
+  [ -f "$managed/release-payload" ]
   printf 'corrupted-payload\n' > "$managed/release-payload"
   chmod 600 "$managed/release-payload"
   record_unavailable_root personal unavailable-outrank "$SANDBOX/missing-unavailable-outrank"
@@ -1492,7 +2112,8 @@ wait_for_attachment_statuses() {
   failed_owner="$(owner_for_root "$failed")"
   failed_owner_before="$(cat "$failed_owner")"
   failed_managed="$(jq -r '.git_hooks.managed_hooks_path' "$failed_owner")"
-  [ -n "$failed_managed" ] && [ -f "$failed_managed/release-payload" ]
+  [ -n "$failed_managed" ]
+  [ -f "$failed_managed/release-payload" ]
   printf 'corrupted-payload\n' > "$failed_managed/release-payload"
   chmod 600 "$failed_managed/release-payload"
 
@@ -1753,14 +2374,18 @@ stage_checkout_lock_holder() {
   grep -qF 'adopted: personal/lock-held-healthy' "$SANDBOX/adopt.log"
   [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
 
-  # The wait is bounded: a holder that outlives it is refused by name, and the
-  # target keeps its release.
+  # The wait is bounded (300 s; the fixture shortens it to 2 s): a holder that
+  # outlives it is refused by name, and the target keeps its release.
   sleep 30 &
   holder=$!
   stage_checkout_lock_holder "$project" "$holder"
+  mkdir "$RELEASE_TEST_ADOPTION_BARRIER"
+  : > "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.release"
+  : > "$RELEASE_TEST_ADOPTION_BARRIER/short-lock-wait"
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_A" --all
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+  rm -rf "$RELEASE_TEST_ADOPTION_BARRIER"
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   grep -qF 'another Trellis operation still holds the checkout lock' <<<"$output"
   [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]

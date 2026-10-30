@@ -258,6 +258,46 @@ teardown() {
   done
 }
 
+@test "a payload symlink like core-rules/AGENTS.md does not trip the missing-attachment warning" {
+  build_attachment_fixture
+  chmod -R u+w "$RELEASE_DIR"
+  ln -s CLAUDE.md "$RUNTIME/core-rules/AGENTS.md"
+  link_oid="$(printf '%s' CLAUDE.md | git hash-object --stdin)"
+  jq --arg oid "$link_oid" '.tree += [{path:"core-rules/AGENTS.md",mode:"120000",oid:$oid}]' \
+    "$RELEASE_DIR/release.json" > "$SANDBOX/release.json"
+  mv "$SANDBOX/release.json" "$RELEASE_DIR/release.json"
+  chmod -R a-w "$RELEASE_DIR"
+  # BSD chmod -R also strips the link's own mode; a real install leaves it
+  # writable (0700 under umask 077). Linux links always report 0777.
+  chmod -h u+w "$RUNTIME/core-rules/AGENTS.md" 2>/dev/null || true
+
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    ctx="$(extract_ctx "$out")"
+    [[ "$ctx" != *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate: $ctx"; false; }
+  done
+}
+
+@test "legacy discovery ignore path is accepted only when safe and does not suggest sync" {
+  build_attachment_fixture
+  for legacy in "$SANDBOX/previous location" /../unsafe relative; do
+    jq --arg path "$SANDBOX/ignored" --arg legacy "$legacy" '
+      .discovery_ignores.personal = [{path:$path,reason:"migrated",legacy_path:$legacy}]
+    ' "$TRELLIS_HOME/registry.json" > "$SANDBOX/registry.next.json"
+    mv "$SANDBOX/registry.next.json" "$TRELLIS_HOME/registry.json"
+    chmod 600 "$TRELLIS_HOME/registry.json"
+    out="$(run_session_context "$HOOK" "$WT")"
+    ctx="$(extract_ctx "$out")"
+    if [ "$legacy" = "$SANDBOX/previous location" ]; then
+      [[ "$ctx" != *"Trellis attachment is missing"* ]] || { echo "$ctx"; return 1; }
+    else
+      [[ "$ctx" == *"Trellis attachment is missing"* ]] || { echo "unsafe legacy_path accepted: $legacy: $ctx"; return 1; }
+      [[ "$ctx" == *"Report this finding to the operator"* ]] || { echo "$ctx"; return 1; }
+    fi
+    [[ "$ctx" != *"trellis worktree sync"* ]] || { echo "$ctx"; return 1; }
+  done
+}
+
 @test "Pi-only and mixed harness selectors are valid through both session hooks" {
   build_attachment_fixture
   # Shared ownership proof only: this fixture does not load a native Pi extension.
@@ -293,7 +333,8 @@ teardown() {
     out="$(run_session_context "$candidate" "$WT")"
     ctx="$(extract_ctx "$out")"
     [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
-    [[ "$ctx" == *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
+    [[ "$ctx" == *"Report this finding to the operator"* ]] || { echo "$ctx"; false; }
+    [[ "$ctx" != *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
     [ ! -e "$MARKER" ]
   done
 }
@@ -479,7 +520,8 @@ EOF
       printf '%s' "$out" | jq . >/dev/null
       ctx="$(extract_ctx "$out")"
       [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate $mutation: $ctx"; false; }
-      [[ "$ctx" == *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
+      [[ "$ctx" == *"Report this finding to the operator"* ]] || { echo "$ctx"; false; }
+      [[ "$ctx" != *"trellis worktree sync"* ]] || { echo "$ctx"; false; }
       [ ! -e "$MARKER" ]
     done
   done

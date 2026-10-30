@@ -35,9 +35,19 @@ For other non-Node, non-Python stacks the commands are project-supplied: `cargo 
 | All three commands pass | **pass** |
 | Typecheck or lint fails | **fail** — non-negotiable; same gate that `stop-verify` enforces in-session |
 | Tests fail | **fail** |
-| Tests timeout (default 5 min, override via `PROCESS_GATE_TEST_TIMEOUT`) | **fail** |
+| Tests timeout (default 25 min: up to 15 min database-lock wait plus 10 min battery; override via `PROCESS_GATE_TEST_TIMEOUT`) | **fail** |
 | Typecheck command not declared AND not auto-detectable | **fail** — typecheck is non-negotiable per `engineering-process.md` §7 (Definition of done); a project that cannot typecheck cannot meet the bar |
 | Lint or test command not declared AND not auto-detectable | **warn** — declare them in `local.config.sh` |
+
+## Failed-check output
+
+A failed or timed-out typecheck, lint, or test command keeps its complete output under
+`<TRELLIS_GATE_STATE_DIR>/failed-shards/process-gate-failure.*/output.txt`; the default state root is
+`~/.local/state/trellis-gate`. The directory is mode `0700`, the output is mode `0600`, and each
+file is capped at 5 MiB. The gate prints the path, includes up to 20 buried TAP `not ok` lines in
+the finding, and keeps the last 10 lines for context. On a new failure, entries older than seven
+days are pruned and at most eight process-gate failure directories are retained. This storage is
+separate from the local gate's own token-named shard artifacts in the same `failed-shards` parent.
 
 ## Coverage
 

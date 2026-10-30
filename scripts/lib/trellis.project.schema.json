@@ -50,6 +50,35 @@
         "surgical_max_diff_lines": { "type": "integer", "minimum": 1 }
       }
     },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env_passthrough": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+            "allOf": [
+              { "not": { "pattern": "^(?:[Ss]?[Rr][Aa][Nn][Dd][Oo][Mm]|[Ss][Ee][Cc][Oo][Nn][Dd][Ss]|[Ll][Ii][Nn][Ee][Nn][Oo]|[Oo][Pp][Tt](?:[Ii][Nn][Dd]|[Aa][Rr][Gg])|[Pp][Pp][Ii][Dd]|[Ee]?[Uu][Ii][Dd]|[Gg][Rr][Oo][Uu][Pp][Ss]|[Dd][Ii][Rr][Ss][Tt][Aa][Cc][Kk]|[Ff][Uu][Nn][Cc][Nn][Aa][Mm][Ee]|[Pp][Ii][Pp][Ee][Ss][Tt][Aa][Tt][Uu][Ss]|[Ss][Hh][Ee][Ll][Ll]|[Pp][Ss][1-4])$" } },
+              { "not": { "pattern": "^(?:[Pp][Ww][Dd]|[Oo][Ll][Dd][Pp][Ww][Dd]|[Ss][Hh][Ll][Vv][Ll]|_|[Ll][Aa][Nn][Gg]|[Ll][Aa][Nn][Gg][Uu][Aa][Gg][Ee]|[Tt][Zz]|[Nn][Oo][Dd][Ee]_(?:[Pp][Aa][Tt][Hh]|[Rr][Ee][Pp][Ll]_[Ee][Xx][Tt][Ee][Rr][Nn][Aa][Ll]_[Mm][Oo][Dd][Uu][Ll][Ee]|[Ee][Xx][Tt][Rr][Aa]_[Cc][Aa]_[Cc][Ee][Rr][Tt][Ss]|[Ii][Cc][Uu]_[Dd][Aa][Tt][Aa]|[Vv]8_[Cc][Oo][Vv][Ee][Rr][Aa][Gg][Ee]))$" } },
+              { "not": { "pattern": "^(?:[Cc][Aa][Ll][Ll][Ee][Rr]_|[Ll][Cc]_|[Dd][Oo][Cc][Kk][Ee][Rr]_|[Cc][Oo][Rr][Ee][Pp][Aa][Cc][Kk]_|[Bb][Aa][Ss][Hh]|[Pp][Ee][Rr][Ll]|[Rr][Uu][Bb][Yy]|[Gg][Ee][Mm]_|[Gg][Hh]_)" } },
+              { "not": { "pattern": "[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Kk][Ee][Yy]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]" } },
+              { "not": { "pattern": "^(?:[Pp][Aa][Tt][Hh]|[Hh][Oo][Mm][Ee]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]|[Ss][Hh][Ee][Ll][Ll][Oo][Pp][Tt][Ss]|[Bb][Aa][Ss][Hh][Oo][Pp][Tt][Ss]|[Ii][Ff][Ss]|[Cc][Dd][Pp][Aa][Tt][Hh]|[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Dd][Oo][Cc][Kk][Ee][Rr]_[Hh][Oo][Ss][Tt]|[Dd][Oo][Cc][Kk][Ee][Rr]_[Cc][Oo][Nn][Tt][Ee][Xx][Tt]|[Pp][Oo][Ss][Ii][Xx][Ll][Yy]_[Cc][Oo][Rr][Rr][Ee][Cc][Tt]|[Zz][Dd][Oo][Tt][Dd][Ii][Rr]|[Rr][Uu][Bb][Yy][Oo][Pp][Tt]|[Pp][Ee][Rr][Ll]5[Oo][Pp][Tt]|[Jj][Aa][Vv][Aa]_[Tt][Oo][Oo][Ll]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Jj][Dd][Kk]_[Jj][Aa][Vv][Aa]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss])$" } },
+              { "not": { "pattern": "^(?:[Xx][Dd][Gg]_|[Tt][Mm][Pp]|[Tt][Ee][Mm][Pp]|[Gg][Ii][Tt]_|[Tt][Rr][Ee][Ll][Ll][Ii][Ss]_|[Pp][Rr][Oo][Cc][Ee][Ss][Ss]_[Gg][Aa][Tt][Ee]_|[Ss][Ee][Cc][Uu][Rr][Ii][Tt][Yy]_[Gg][Aa][Tt][Ee]_|[Pp][Yy][Tt][Hh][Oo][Nn]|[Bb][Aa][Ss][Hh]_[Ff][Uu][Nn][Cc]_|[Ll][Dd]_|[Dd][Yy][Ll][Dd]_)" } }
+            ]
+          }
+        }
+      }
+    },
+    "security_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "semgrep_timeout": { "type": "integer", "minimum": 1, "maximum": 600 }
+      }
+    },
     "gate_profiles": {
       "type": "object",
       "additionalProperties": {

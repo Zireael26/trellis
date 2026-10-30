@@ -60,7 +60,7 @@ Real keys in `.env.example`: **fail**.
 
 ## Lockfiles, build artifacts, generated configs
 
-Lockfiles can contain registry tokens. The validator skips known lockfiles by default (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `Cargo.lock`, `go.sum`). If your project commits a lockfile that the validator doesn't recognize, add a path-glob exclusion in `local.config.sh`:
+Lockfiles can contain registry tokens and are scanned like other files. For reviewed false positives, add project-relative, segment-aware glob exclusions in the project-owned `process-gate-local/local.config.sh`. `*`, `?` and character classes match within one path segment only; a whole `**` segment matches zero or more directory levels. For example, `fixtures/*.key` excludes direct children only, while `fixtures/**/*.key` also excludes nested files:
 
 ```bash
 PROCESS_GATE_SECRETS_SKIP_PATHS=(
@@ -68,6 +68,8 @@ PROCESS_GATE_SECRETS_SKIP_PATHS=(
   "build/output/manifest.json"
 )
 ```
+
+These exclusions cover both secret-bearing paths and added-line patterns, not other gates or the independent gitleaks scanner. Only config at the range BASE is loaded; environment-only values and exclusions added by the gated range cannot suppress its findings. Keep exclusions narrow: all content in a matching path is exempt from this scanner.
 
 ## Remediation
 

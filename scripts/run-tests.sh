@@ -91,6 +91,8 @@ unset TRELLIS_TEST_PROVENANCE_RECEIPT
 
 # shellcheck source=scripts/lib/test-suites.sh
 . "$ROOT/scripts/lib/test-suites.sh"
+# shellcheck source=scripts/lib/bats-jobs.sh
+. "$ROOT/scripts/lib/bats-jobs.sh"
 
 QUICK=0
 LIST=0
@@ -584,8 +586,8 @@ if [ "$QUICK" -eq 0 ]; then
         # These suites allocate all mutable fixtures per test. Keep the outer
         # four-shard bound; Bats uses two internal semaphore slots per file.
         # Disabling cross-file parallelism avoids a GNU parallel dependency.
-        stage "bats scripts/tests/$suite.bats" bats --jobs 2 \
-          --no-parallelize-across-files "scripts/tests/$suite.bats"
+        # bats_jobs_file reruns a file serially after the bats-core wait race (scripts/lib/bats-jobs.sh).
+        stage "bats scripts/tests/$suite.bats" bats_jobs_file "scripts/tests/$suite.bats"
         ;;
       *) stage "bats scripts/tests/$suite.bats" bats "scripts/tests/$suite.bats" ;;
     esac

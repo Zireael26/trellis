@@ -426,7 +426,7 @@ partial_registry_proposal() {
 
   run_detach --all-worktrees
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { printf 'detach status=%s\n%s\n' "$status" "$output"; false; }
   [ -z "$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -print)" ]
   [ ! -e "$PROJECT/.trellis/runtime" ]
   [ ! -e "$WORKTREE/.trellis/runtime" ]

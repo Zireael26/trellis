@@ -160,7 +160,13 @@ def parse(raw):
             if cells[-1] == "" and len(cells) >= 4 and cells[-2] in ("[ ]", "[x]"):
                 task = {"line": number, "kind": "table", "id": cells[1],
                         "checked": cells[-2] == "[x]", "text": " | ".join(cells[2:-2])}
-            elif re.search(r"\[[^\]]*\]", row):
+            elif (any(re.fullmatch(r"\[\s*[xX]?\s*\]", cell) for cell in cells)
+                  or re.search(r"\[(?:\s+|\s*[xX]\s*)\]", row)
+                  or (cells[-1] == "" and len(cells) >= 4
+                      and re.fullmatch(r"\[[^\]]*\]", cells[-2]))):
+                # A checkbox-shaped cell or token ([x ] done), or a bracket-only
+                # status cell ([DONE], [  x  ]), outside the task form. Other
+                # brackets are prose: `[]` in text, `[a](b)` links, `name[i]`.
                 raise Unavailable("malformed_table_task")
         elif re.match(r"^[ \t]*(?:>[ \t]*)*(?:[-+*]|\d+[.)])\s*\[", row):
             raise Unavailable("unsupported_task_row")

@@ -99,6 +99,38 @@ baseline_file() {
   assert_no_receipt_demand
 }
 
+@test "hook state churn does not alter the fingerprint but a real rule edit does" {
+  local before after
+  source "$HOOKS_DIR/lib/deps.sh"
+  before="$(_se_tree_fingerprint "$PROJECT_DIR")"
+  mkdir -p "$PROJECT_DIR/.claude/.reread-state" "$PROJECT_DIR/.pi/.reread-state"
+  for path in .claude/.fail-counter .claude/.reread-state/turn \
+    .claude/.review-done-123 .claude/session-surgical \
+    .claude/spec-gate-audit.log .pi/.reread-state/turn; do
+    printf 'first\n' > "$PROJECT_DIR/$path"
+  done
+  after="$(_se_tree_fingerprint "$PROJECT_DIR")"
+  [ "$after" = "$before" ] || { echo "hook state changed fingerprint"; return 1; }
+  printf 'second\n' > "$PROJECT_DIR/.claude/.reread-state/turn"
+  [ "$(_se_tree_fingerprint "$PROJECT_DIR")" = "$before" ]
+  printf 'real change\n' > "$PROJECT_DIR/.claude/rules.json"
+  [ "$(_se_tree_fingerprint "$PROJECT_DIR")" != "$before" ]
+}
+
+@test "doc-only turn with hook state churn does not demand a code receipt" {
+  ( cd "$PROJECT_DIR" && git show HEAD:app.js > app.js && rm scratch.js )
+  turn_entry
+  mkdir -p "$PROJECT_DIR/.claude/.reread-state" "$PROJECT_DIR/.pi/.reread-state"
+  for path in .claude/.fail-counter .claude/.reread-state/turn \
+    .claude/.review-done-123 .claude/session-surgical \
+    .claude/spec-gate-audit.log .pi/.reread-state/turn; do
+    printf 'state\n' > "$PROJECT_DIR/$path"
+  done
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_no_receipt_demand
+}
+
 @test "a turn that edits a file: receipt demanded" {
   turn_entry
   printf 'edited this turn\n' >> "$PROJECT_DIR/app.js"
@@ -425,4 +457,145 @@ EOT
     jq -e '[.. | strings | select(contains("turn-baseline.sh"))] | length == 1' \
       "$HOOKS_DIR/../templates/$template" >/dev/null || { echo "wired elsewhere too: $template"; return 1; }
   done
+}
+
+# --- bug #6: non-code dirty status must not run the heavy checks -------------
+# A fake TypeScript toolchain (npx for tsc, npm for the test script) logs every
+# call to FULL_LOG. A non-empty log means typecheck, lint or the suite ran.
+suite_project() {
+  local fake_bin="$BATS_TEST_TMPDIR/suite-bin" tool
+  FULL_LOG="$BATS_TEST_TMPDIR/full-suite.log"
+  export FULL_LOG
+  : > "$FULL_LOG"
+  mkdir -p "$fake_bin"
+  for tool in npx npm; do
+    cat > "$fake_bin/$tool" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$FULL_LOG"
+exit 0
+EOF
+    chmod +x "$fake_bin/$tool"
+  done
+  export PATH="$fake_bin:$PATH"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf '{"scripts":{"test":"fake-test"}}\n' > package.json
+    printf '{}\n' > tsconfig.json
+    git add package.json tsconfig.json
+    git commit -q -m "toolchain manifests"
+  )
+}
+
+# Drop the setup's pre-existing code edits so only the turn's dirt is in play.
+clean_code_dirt() {
+  ( cd "$PROJECT_DIR" && git show HEAD:app.js > app.js && rm -f scratch.js )
+}
+
+assert_no_heavy_checks() {
+  [ ! -s "$FULL_LOG" ] || { echo "heavy checks ran:"; cat "$FULL_LOG"; return 1; }
+}
+
+assert_heavy_checks_ran() {
+  [ -s "$FULL_LOG" ] || { echo "heavy checks did not run"; return 1; }
+}
+
+@test "bug #6: a doc-only edit on a dirty tree runs no typecheck, lint or test" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_no_receipt_demand
+  assert_no_heavy_checks
+}
+
+@test "bug #6: a no-op turn with doc-only dirt runs no typecheck, lint or test" {
+  suite_project
+  clean_code_dirt
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_entry
+  turn_stop
+  assert_no_receipt_demand
+  assert_no_heavy_checks
+}
+
+@test "bug #6: a code edit still runs the checks and demands a receipt" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  printf 'x\n' >> "$PROJECT_DIR/lib.js"
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_heavy_checks_ran
+  assert_receipt_demanded
+}
+
+@test "bug #6: a committed code change plus doc dirt still runs the checks" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  printf 'x\n' >> "$PROJECT_DIR/lib.js"
+  ( cd "$PROJECT_DIR" && git add lib.js && git commit -q -m "code change" )
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_heavy_checks_ran
+  assert_receipt_demanded
+}
+
+@test "bug #6: pre-existing dirty code does not rerun checks on a known no-op turn" {
+  suite_project
+  turn_entry
+  turn_stop
+  assert_no_receipt_demand
+  assert_no_heavy_checks
+}
+
+@test "bug #6: committed code with a clean tree still runs checks" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  printf 'new code\n' >> "$PROJECT_DIR/lib.js"
+  ( cd "$PROJECT_DIR" && git add lib.js && git commit -q -m "code committed this turn" )
+  turn_stop
+  assert_heavy_checks_ran
+  assert_receipt_demanded
+}
+
+@test "bug #6: a committed code-to-doc rename plus doc dirt still runs checks" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  ( cd "$PROJECT_DIR" && git mv lib.js guide.md && git commit -q -m "rename code to doc" )
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_heavy_checks_ran
+  assert_receipt_demanded
+}
+
+@test "bug #6: a new doc in a new directory runs no typecheck, lint or test" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  mkdir -p "$PROJECT_DIR/docs/new"
+  printf 'notes\n' > "$PROJECT_DIR/docs/new/guide.md"
+  turn_stop
+  assert_no_receipt_demand
+  assert_no_heavy_checks
+}
+
+@test "bug #6: a staged code-to-doc rename still runs the checks" {
+  suite_project
+  clean_code_dirt
+  turn_entry
+  ( cd "$PROJECT_DIR" && git mv lib.js guide.md )
+  turn_stop
+  assert_heavy_checks_ran
+}
+
+@test "bug #6: an unknown baseline keeps the checks on doc-only dirt" {
+  suite_project
+  clean_code_dirt
+  printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_heavy_checks_ran
 }

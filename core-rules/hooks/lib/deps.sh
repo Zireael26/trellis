@@ -229,6 +229,20 @@ _se_fp_classify() {
   done
 }
 
+# Restrict Git's view at the source, including tracked hook-state files and
+# porcelain metadata (filtering only the content hash would still churn).
+# The :/ pathspec keeps the whole repository in view; the root-anchored
+# excludes do not hide real changes elsewhere in .claude/.pi.
+_se_hook_state_git() {
+  git "$@" -- ':/' \
+    ':(exclude,top).claude/.fail-counter' \
+    ':(exclude,top).claude/.reread-state' \
+    ':(exclude,top,glob).claude/.review-done-*' \
+    ':(exclude,top).claude/session-surgical' \
+    ':(exclude,top).claude/spec-gate-audit.log' \
+    ':(exclude,top).pi/.reread-state'
+}
+
 # _se_tree_fingerprint <dir>
 #   - prints "<head|unborn> <sha256>" over HEAD, the full porcelain-v2 status
 #     (HEAD and index object ids, modes, renames, untracked paths) and the
@@ -239,10 +253,10 @@ _se_tree_fingerprint() (
   set -o pipefail
   top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && cd "$top" || exit 1
   head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=unborn
-  paths=$( { git diff --no-ext-diff --name-only -z && git ls-files --others --exclude-standard -z; } \
+  paths=$( { _se_hook_state_git diff --no-ext-diff --name-only -z && _se_hook_state_git ls-files --others --exclude-standard -z; } \
     | _se_fp_classify) || exit 1
   sum=$( { printf 'head\t%s\n' "$head" &&
-           git --no-optional-locks status --porcelain=v2 -z --untracked-files=all &&
+           _se_hook_state_git --no-optional-locks status --porcelain=v2 -z --untracked-files=all &&
            printf '\n%s\n' "$paths" &&
            printf '%s\n' "$paths" | awk -F '\t' '$1 == "F" { print $2 }' \
              | git hash-object --no-filters --stdin-paths
@@ -339,6 +353,6 @@ _se_turn_range_files() {
     else
       from="$h"
     fi
-    git -C "$dir" diff --no-ext-diff --name-only "$from" "$now" || return 1
+    git -C "$dir" diff --no-ext-diff --no-renames --name-only "$from" "$now" || return 1
   done
 }

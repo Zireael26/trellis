@@ -81,6 +81,30 @@ wait_for_grep() {
   grep -q -- "$pattern" "$path" || { echo "timed out waiting for '$pattern' in $path"; cat "$path" 2>/dev/null; false; }
 }
 
+wait_for_grep_while_live() {
+  local pattern="$1" path="$2" producer_pid="$3" event="$4" started="$SECONDS" state
+  while ! grep -q -- "$pattern" "$path" 2>/dev/null; do
+    if ! kill -0 "$producer_pid" 2>/dev/null; then
+      grep -q -- "$pattern" "$path" 2>/dev/null && return 0
+      echo "producer $producer_pid exited before $event" >&2
+      return 1
+    fi
+    state="$(/bin/ps -p "$producer_pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+    case "$state" in
+      ""|*Z*)
+        grep -q -- "$pattern" "$path" 2>/dev/null && return 0
+        echo "producer $producer_pid exited before $event" >&2
+        return 1
+        ;;
+    esac
+    if (( SECONDS - started >= 120 )); then
+      echo "producer $producer_pid did not reach $event within 120 seconds" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
 pid_gone() {
   local pid="$1" tries="${2:-60}"
   while kill -0 "$pid" 2>/dev/null && [ "$tries" -gt 0 ]; do
@@ -354,24 +378,33 @@ open(d + "/leader", "w").close()
 
 @test "H3: a failed or incomplete ps never reads as an empty group" {
   mkdir -p "$SANDBOX/stub-bin"
+  : > "$SANDBOX/ps-observed"
   cat > "$SANDBOX/stub-bin/ps" <<EOF
 #!/bin/sh
-case "\$(cat '$SANDBOX/ps-mode')" in
+mode="\$(cat '$SANDBOX/ps-mode')"
+printf '%s\\n' "\$mode" >> '$SANDBOX/ps-observed'
+case "\$mode" in
   fail) exit 1 ;;
-  empty) exit 0 ;;
+  empty)
+    if [ "\$(grep -c '^empty$' '$SANDBOX/ps-observed')" -ge 2 ]; then
+      printf '%s\\n' empty-rechecked >> '$SANDBOX/ps-observed'
+    fi
+    exit 0
+    ;;
 esac
 exec /bin/ps "\$@"
 EOF
   chmod 755 "$SANDBOX/stub-bin/ps"
   echo fail > "$SANDBOX/ps-mode"
   PATH="$SANDBOX/stub-bin:$PATH" heavy_bg probe -- sh -c 'exit 7'
-  sleep 1
-  kill -0 "$BG_PID"
+  wait_for_grep_while_live '^fail$' "$SANDBOX/ps-observed" "$BG_PID" "the failed ps probe"
+  wait_for_grep_while_live 'cannot read the workload' "$SANDBOX/probe.out" "$BG_PID" "the failed-ps warning"
   run "${HEAVY[@]}" --status
   [[ "$output" == *"slot 1: held"* ]] || { echo "$output"; false; }
   echo empty > "$SANDBOX/ps-mode"
-  sleep 1
-  kill -0 "$BG_PID"
+  wait_for_grep_while_live '^empty-rechecked$' "$SANDBOX/ps-observed" "$BG_PID" "repeated incomplete ps probes"
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *"slot 1: held"* ]] || { echo "$output"; false; }
   echo ok > "$SANDBOX/ps-mode"
   local rc=0
   wait "$BG_PID" || rc=$?
@@ -810,8 +843,8 @@ held_mismatch() {
   [ ! -e "$ignored" ]
   expected="$(perl -e '@s = stat($ARGV[0]); print "$s[0]:$s[1]"' "$TRELLIS_HOME/locks/heavy")"
   [ "$output" = "$expected" ] || { echo "$output != $expected"; false; }
-  [ "$(stat -f %Lp "$TRELLIS_HOME/locks/heavy" 2>/dev/null || stat -c %a "$TRELLIS_HOME/locks/heavy")" = 700 ]
-  [ "$(stat -f %Lp "$TRELLIS_HOME/locks/heavy/slot-1.lock" 2>/dev/null || stat -c %a "$TRELLIS_HOME/locks/heavy/slot-1.lock")" = 600 ]
+  [ "$(stat -c %a "$TRELLIS_HOME/locks/heavy" 2>/dev/null || stat -f %Lp "$TRELLIS_HOME/locks/heavy")" = 700 ]
+  [ "$(stat -c %a "$TRELLIS_HOME/locks/heavy/slot-1.lock" 2>/dev/null || stat -f %Lp "$TRELLIS_HOME/locks/heavy/slot-1.lock")" = 600 ]
 }
 
 # ---------------------------------------------------------------- usage

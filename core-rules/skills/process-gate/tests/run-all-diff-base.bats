@@ -8,6 +8,7 @@ RECEIPT_RE='^diff-base: ([0-9a-f]{12}|-) ([^ ]+) via (explicit|pr-cache|recorded
 ROWS="check-pr.sh check-secrets.sh check-bypass.sh check-tests.sh check-docs.sh check-security-diff.sh check-analyze.sh check-slop.sh"
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   local real name
   real="$(cd "$BATS_TEST_DIRNAME/.." && pwd)/scripts"
   STUB="$BATS_TEST_TMPDIR/skill"

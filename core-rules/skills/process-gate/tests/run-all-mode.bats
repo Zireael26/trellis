@@ -16,6 +16,7 @@
 # keeps idx 5 (inline, not a script) at n/a so it never affects the verdict.
 
 setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
   STUB="$(mktemp -d "$BATS_TEST_TMPDIR/process-gate.XXXXXX")"
   mkdir -p "$STUB/scripts/lib"

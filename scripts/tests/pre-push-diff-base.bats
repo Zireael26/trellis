@@ -7,13 +7,13 @@ setup() {
   SOURCE="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)" || return 1
   REPO="$BATS_TEST_TMPDIR/repo"
   SCRIPTS="$REPO/.claude/skills/process-gate/scripts"
-  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
+  export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   export PROCESS_GATE_CAPTURE="$BATS_TEST_TMPDIR/runner.log"
   export SPEC_GATE_CAPTURE="$BATS_TEST_TMPDIR/spec.log"
   export AEO_GATE_CAPTURE="$BATS_TEST_TMPDIR/aeo.log"
   unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR TRELLIS_ROOT TRELLIS_ALLOW_MAIN_PUSH
-  mkdir -p "$SCRIPTS/lib" "$REPO/.claude/hooks/lib" || return 1
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$SCRIPTS/lib" "$REPO/.claude/hooks/lib" || return 1
   cp "$SOURCE/core-rules/skills/process-gate/scripts/lib/diff-base.sh" "$SCRIPTS/lib/" || return 1
   # The carrier refuses a passing rc without exactly one Overall line in one
   # verdict block, so the stand-in renders one.
@@ -21,6 +21,9 @@ setup() {
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "$SPEC_GATE_CAPTURE"\n' > "$REPO/.claude/hooks/spec-gate.sh" || return 1
   printf '#!/bin/bash\nprintf "%%s\\n" "$AEO_GATE_RANGE" > "$AEO_GATE_CAPTURE"\n' > "$REPO/.claude/hooks/lib/aeo-gate-warn.sh" || return 1
   cd "$REPO" || return 1
+  # Match sg_write_marker's Git-resolved worktree binding, even when TMPDIR
+  # contains a symlink (for example /tmp -> /private/tmp on macOS).
+  REPO="$(pwd -P)" || return 1
   git init -q -b main || return 1
   git config user.email carrier@test.invalid || return 1
   git config user.name carrier-test || return 1
@@ -200,7 +203,7 @@ install_real_spec_gate() {
   [ -f "$PROCESS_GATE_CAPTURE" ] || return 1
 }
 
-@test "R21 carrier honours X-bound marker while HEAD is Y" {
+x_bound_marker_push() {
   install_real_spec_gate || return 1
   git checkout -qb feature/x main || return 1
   local i head
@@ -213,6 +216,21 @@ install_real_spec_gate() {
   printf '%s\n' feature/x "$REPO" "$M0" "$head" carrier-session surgical R21 > .claude/session-surgical || return 1
   push_ref "refs/heads/feature/x $head refs/heads/feature/x $ZERO" || return 1
   [ "$status" -eq 0 ] || return 1
+}
+
+@test "R21 carrier honours X-bound marker while HEAD is Y" {
+  x_bound_marker_push || return 1
+}
+
+@test "R21 carrier marker fixture survives a symlinked temp directory" {
+  mkdir -p "$BATS_TEST_TMPDIR/physical" || return 1
+  ln -s "$BATS_TEST_TMPDIR/physical" "$BATS_TEST_TMPDIR/linked" || return 1
+  (
+    export BATS_TEST_TMPDIR="$BATS_TEST_TMPDIR/linked"
+    setup || return 1
+    x_bound_marker_push || return 1
+    [ -f "$PROCESS_GATE_CAPTURE" ] || return 1
+  ) || return 1
 }
 
 @test "R21 carrier passes the supplied head even when X's branch tip has moved" {

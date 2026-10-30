@@ -321,3 +321,34 @@ checkout_validator_case() {
   [[ "$output" == *"PRIVATE-COPY"* ]] || { echo "$output"; false; }
   [[ "$output" != *"SEES-CHECKOUT"* ]] || { echo "$output"; false; }
 }
+
+@test "a toolchain bash program a validator runs may source its own hooks" {
+  # pyenv's shims run a bash program that sources pyenv.d hooks; it is
+  # toolchain code outside the project and the trusted tree, not a validator.
+  local tool="$BATS_TEST_TMPDIR/toolchain/libexec"
+  mkdir -p "$tool"
+  printf '#!/usr/bin/env bash\n. "%s/hook.bash"\nprintf ran > "%s/ran"\n' "$tool" "$tool" > "$tool/fake-exec"
+  printf 'true\n' > "$tool/hook.bash"
+  chmod 755 "$tool/fake-exec"
+  stack_config validators/check.sh
+  put .claude/skills/process-gate-local/validators/check.sh "'$tool/fake-exec' || exit 1"$'\nexit 0\n'
+  commit_all 'validator running a toolchain program' || return 1
+
+  run_gate push
+  [[ "$output" == *"Stack profile:"*"pass"* ]] || { echo "$output"; false; }
+  [ "$(cat "$tool/ran")" = ran ] || { echo "$output"; false; }
+  [[ "$output" != *"outside the trusted validator tree"* ]] || { echo "$output"; false; }
+}
+
+@test "a project script a validator runs still may not source an outside file" {
+  printf 'echo OUTSIDE-SOURCED\n' > "$BATS_TEST_TMPDIR/outside.sh"
+  stack_config validators/check.sh
+  put .claude/skills/process-gate-local/validators/check.sh $'bash "$PROCESS_GATE_PROJECT_DIR/scripts/run.sh"\n'
+  put scripts/run.sh ". '$BATS_TEST_TMPDIR/outside.sh'"$'\necho RAN-ON\n'
+  commit_all 'validator running a project script' || return 1
+
+  run_gate push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"outside.sh is outside the trusted validator tree"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"OUTSIDE-SOURCED"* ]] || { echo "$output"; false; }
+}

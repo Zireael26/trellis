@@ -600,28 +600,32 @@ resolve_verified_adoption_target() {
 }
 
 owner_replacement() {
-  local original="$1" replacement="$2" version="$3" payload="$4" retired="$5"
-  jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" '
+  local original="$1" replacement="$2" version="$3" payload="$4" retired="$5" pruned="${6:-[]}"
+  jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" --argjson pruned "$pruned" '
     if ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink")] | length) != 1
     then error("missing owned runtime anchor")
     else .release = $version
       | .artifacts |= map(if .path == ".trellis/runtime" then .target = $payload else . end)
       | .artifacts |= map(.path as $path | select(any($retired[]; .path == $path) | not))
+      | .artifacts |= map(.path as $path
+          | select(.kind == "parent" and any($pruned[]; .path == $path) | not))
     end
   ' "$original" > "$replacement" || return "$TRELLIS_EX_STATE"
   chmod 600 "$replacement" || return "$TRELLIS_EX_UNAVAILABLE"
   _attachment_owner_json_valid "$replacement" || return "$TRELLIS_EX_STATE"
 }
 
-# A release can retire a native leaf (1.3.12 drops grok-ro/rw). A group adopt
-# re-plans the shared exclude from the new release, so an owned link the new
-# plan no longer selects would dangle untracked in every checkout. Only exact
-# owned symlinks retire; renders and deferred project files are left alone.
+# A release can retire a native leaf (1.3.12 drops grok-ro/rw). Adoption
+# re-plans the exclude from the new release whenever the block changes, for a
+# group or a singleton, so an owned link the new plan no longer selects would
+# dangle untracked. Only exact owned symlinks retire; renders and deferred
+# project files are left alone.
 adoption_retired_leaves() {
   local owner="$1" payload="$2" selection="$3" surfaces harness
   local -a harnesses=()
-  # Without the planner a single-owner adopt keeps its exclude block, which
-  # still covers the leaf; a group adopt refuses at exclude planning.
+  # Without the planner nothing retires: a single-owner adopt then keeps both
+  # its leaves and its old exclude block; a group adopt refuses at exclude
+  # planning.
   command -v surface_plan_emit >/dev/null 2>&1 || { printf '[]\n'; return 0; }
   while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
   surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
@@ -663,6 +667,71 @@ adoption_retire_leaf() (
     *) return "$TRELLIS_EX_STATE" ;;
   esac
 )
+
+# 1.3.18 stops rendering .pi/hooks: pi treats that directory as a deprecated
+# resource and holds startup on a keypress while it exists, even empty. Once
+# its leaves retire, the emptied directories go too, deepest first. Anything
+# Trellis does not own keeps the tree in place, with a notice naming it.
+adoption_pi_hooks_prune_plan() {
+  local root="$1" retired="$2" old_owner="$3" dirs others owned_dirs pruned
+  if [ ! -e "$root/.pi/hooks" ] && [ ! -L "$root/.pi/hooks" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  if ! _attachment_parent_safe "$root" .pi/hooks/lib || [ -L "$root/.pi/hooks" ] || [ ! -d "$root/.pi/hooks" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  dirs="$(cd "$root" && find .pi/hooks -mindepth 1 -type d | jq -R . | jq -cs .)" || return "$TRELLIS_EX_UNAVAILABLE"
+  others="$(cd "$root" && find .pi/hooks -mindepth 1 ! -type d | jq -R . | jq -cs .)" || return "$TRELLIS_EX_UNAVAILABLE"
+  owned_dirs="$(jq -c '[.artifacts[] | select(.kind == "parent") | .path]' "$old_owner")" ||
+    return "$TRELLIS_EX_STATE"
+  if jq -en --argjson dirs "$dirs" --argjson others "$others" --argjson retired "$retired" '
+    ($dirs - [".pi/hooks/lib"]) == [] and ($others - [$retired[].path]) == []' >/dev/null; then
+    pruned="$(jq -cn --argjson dirs "$dirs" --argjson owned "$owned_dirs" \
+      --arg top "$(_attachment_mode "$root/.pi/hooks")" \
+      --arg lib "$( [ -d "$root/.pi/hooks/lib" ] && _attachment_mode "$root/.pi/hooks/lib")" '
+      [
+        ($dirs[] | select(. as $path | $owned | index($path) != null) | {path:., mode:$lib}),
+        (".pi/hooks" | select(
+          ($owned | index(".pi/hooks")) != null
+          and all($dirs[]; . as $path | ($owned | index($path)) != null)
+        ) | {path:., mode:$top})
+      ]')" || return "$TRELLIS_EX_STATE"
+    if jq -en --argjson dirs "$dirs" --argjson owned "$owned_dirs" \
+      '((($dirs + [".pi/hooks"]) - $owned) | length) > 0' >/dev/null; then
+      release_err "left in place: $root/.pi/hooks holds files Trellis does not own; move them out so pi stops warning at startup"
+    fi
+    printf '%s\n' "$pruned"
+  else
+    release_err "left in place: $root/.pi/hooks holds files Trellis does not own; move them out so pi stops warning at startup"
+    printf '[]\n'
+  fi
+}
+
+# Forward removes an emptied directory; a late arrival only leaves it in
+# place, unowned: the owner record already dropped its parent entry, so
+# detach never removes a directory that now holds a project file. Rollback
+# recreates it, with its recorded mode, before leaves return.
+adoption_prune_dir() {
+  local root="$1" dir="$2" direction="$3" path mode
+  path="$(printf '%s\n' "$dir" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  mode="$(printf '%s\n' "$dir" | jq -r '.mode')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$path" || return "$TRELLIS_EX_CONFLICT"
+  case "$direction" in
+    forward)
+      [ -d "$root/$path" ] && [ ! -L "$root/$path" ] || return 0
+      rmdir -- "$root/$path" 2>/dev/null ||
+        release_err "left in place: $root/$path is not empty; move its files out so pi stops warning at startup"
+      ;;
+    rollback)
+      [ -d "$root/$path" ] && [ ! -L "$root/$path" ] && return 0
+      [ ! -e "$root/$path" ] && [ ! -L "$root/$path" ] || return "$TRELLIS_EX_CONFLICT"
+      mkdir -m "$mode" -- "$root/$path" || return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+}
 
 replace_owned_file() (
   local destination="$1" expected="$2" replacement="$3" parent base actual_parent temporary=''
@@ -1187,7 +1256,8 @@ adoption_publish_render() (
 preflight_target() {
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0 retired
+  local renders='[]' render render_plan index=0 retired pruned='[]'
+  local pi_hooks_required pi_hooks_owned checkout_root fleet recovery_roots recovery_root recovery_harnesses
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
   binding="$(printf '%s\n' "$target" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
@@ -1201,11 +1271,44 @@ preflight_target() {
   trellis_identity="$(printf '%s\n' "$target" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
   hook_authority="$(printf '%s\n' "$target" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
 
+  # Adoption does not add newly declared leaves. Refuse only a legacy Pi
+  # target whose entire owned hook-symlink inventory is absent.
+  pi_hooks_required="$(jq -r '
+    any(.harnesses.pi.links[]?;
+      (.destination // .destination_dir // "")
+      | . == ".pi/hooks" or startswith(".pi/hooks/"))
+  ' "$new_payload/core-rules/inheritance-manifest.json")" || return "$TRELLIS_EX_STATE"
+  if printf '%s\n' "$binding" | jq -e '.harnesses | index("pi")' >/dev/null &&
+    [ "$pi_hooks_required" = true ]; then
+    pi_hooks_owned="$(jq -r '
+      any(.artifacts[];
+        .kind == "symlink"
+        and (.path | . == ".pi/hooks" or startswith(".pi/hooks/")))
+    ' "$owner")" || return "$TRELLIS_EX_STATE"
+    if [ "$pi_hooks_owned" = false ]; then
+      checkout_root="$(printf '%s\n' "$binding" | jq -r '.checkout_root')" || return "$TRELLIS_EX_STATE"
+      fleet="$(printf '%s\n' "$binding" | jq -r '.fleet')" || return "$TRELLIS_EX_STATE"
+      recovery_harnesses="$(printf '%s\n' "$binding" | jq -r '.harnesses | map("--harness " + .) | join(" ")')" || return "$TRELLIS_EX_STATE"
+      recovery_roots="$(jq -r '.worktree_root' "${owner%/*}"/*.json)" || return "$TRELLIS_EX_STATE"
+      release_err "cannot adopt $new_version for checkout $checkout_root: target release requires .pi/hooks links but attachment at $root owns none; detach the whole checkout and reattach every worktree at the target release:"
+      printf '  trellis detach --home %q --all-worktrees %q\n' "$home" "$checkout_root" >&2
+      while IFS= read -r recovery_root; do
+        printf '  trellis attach --home %q --fleet %q --release %q %s %q\n' \
+          "$home" "$fleet" "$new_version" "$recovery_harnesses" "$recovery_root" >&2
+      done <<< "$recovery_roots"
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  fi
+
   old_owner="$work/$number.old.json"
   new_owner="$work/$number.new.json"
   cp "$owner" "$old_owner" && chmod 600 "$old_owner" || return "$TRELLIS_EX_UNAVAILABLE"
   retired="$(adoption_retired_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
-  owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" || return "$?"
+  if printf '%s\n' "$binding" | jq -e '.harnesses | index("pi")' >/dev/null &&
+    [ "$pi_hooks_required" = false ]; then
+    pruned="$(adoption_pi_hooks_prune_plan "$root" "$retired" "$old_owner")" || return "$?"
+  fi
+  owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" || return "$?"
   while IFS= read -r render; do
     index=$((index + 1))
     render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload")" || return "$?"
@@ -1237,11 +1340,11 @@ preflight_target() {
     --arg new_version "$new_version" --arg new_payload "$new_payload" \
     --arg root_identity "$root_identity" --arg trellis_identity "$trellis_identity" \
     --arg hooks "$hooks" --arg managed "$managed" --arg hook_authority "$hook_authority" \
-    --argjson renders "$renders" --argjson retired "$retired" \
+    --argjson renders "$renders" --argjson retired "$retired" --argjson pruned "$pruned" \
     '{row:$row,binding:$binding,identity:$identity,owner:$owner,old_owner:$old_owner,new_owner:$new_owner,
       old_version:$old_version,old_payload:$old_payload,new_version:$new_version,new_payload:$new_payload,
       root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed,
-      hook_authority:$hook_authority,renders:$renders,retired:$retired}'
+      hook_authority:$hook_authority,renders:$renders,retired:$retired,pruned:$pruned}'
 }
 
 plan_matches_old() {
@@ -1328,6 +1431,9 @@ apply_plan() {
   while IFS= read -r leaf; do
     adoption_retire_leaf "$root" "$leaf" forward || return "$?"
   done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
+  while IFS= read -r leaf; do
+    adoption_prune_dir "$root" "$leaf" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '(.pruned // [])[]')
 }
 
 rollback_plan() {
@@ -1366,6 +1472,11 @@ rollback_plan() {
     rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
 
+  while IFS= read -r leaf; do
+    adoption_prune_dir "$root" "$leaf" rollback
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  done < <(printf '%s\n' "$plan" | jq -c '(.pruned // []) | reverse[]')
   while IFS= read -r leaf; do
     adoption_retire_leaf "$root" "$leaf" rollback
     one=$?
@@ -1625,13 +1736,19 @@ live = (work / 'exclude.source').read_bytes()
 if sum(json.loads(pathlib.Path(p['old_owner']).read_text())['exclude']['managed_by_attachment'] for p in plans) != 1:
     sys.exit('trellis release: shared exclude requires exactly one manager')
 # The strict parser above establishes the unique exact old block boundaries.
-after = live.replace(old, new, 1)
-(work / 'exclude.candidate').write_bytes(after)
+candidate = live.replace(old, new, 1)
+(work / 'exclude.candidate').write_bytes(candidate)
 sha = lambda b: hashlib.sha256(b).hexdigest()
 b64 = lambda b: base64.b64encode(b).decode()
 for p in plans:
     path = pathlib.Path(p['new_owner'])
     owner = json.loads(path.read_text())
+    # Ownership derives from the preserved restoration snapshot, not live drift.
+    after = base64.b64decode(owner['exclude']['before_base64'], validate=True)
+    if owner['exclude']['managed_by_attachment']:
+        if after and not after.endswith(b'\n'):
+            after += b'\n'
+        after += new
     owner['exclude'].update(managed_block_base64=b64(new), managed_block_sha256=sha(new),
                            after_base64=b64(after), after_sha256=sha(after), after_exists=True)
     owner['exclude_block_hash'] = sha(new)
@@ -1646,6 +1763,19 @@ PY
     --arg source_sha256 "$(_attachment_hash "$work/exclude.source")" \
     --arg candidate_sha256 "$(_attachment_hash "$work/exclude.candidate")" \
     --arg source_mode "$mode" --arg candidate_mode "$mode" '$ARGS.named' > "$work/exclude.json"
+}
+
+# The strict health check derives the expected block from the owner's release,
+# so a singleton whose block the new release changes must re-plan it. An
+# unchanged block keeps its exact attach-time record, and without the planner
+# a singleton adopts as before. Status 0 means stale, 1 unchanged.
+adoption_singleton_exclude_stale() {
+  local owner="$1" payload="$2" selection="$3" work="$4" surfaces recorded
+  command -v attach_owner_surface_plan >/dev/null 2>&1 || return 1
+  surfaces="$(attach_owner_surface_plan "$owner" "$payload" "$selection")" || return "$?"
+  attach_exclude_block "$surfaces" > "$work/exclude.singleton" || return "$?"
+  recorded="$(jq -r '.exclude.managed_block_sha256' "$owner")" || return "$TRELLIS_EX_STATE"
+  [ "$(_attachment_hash "$work/exclude.singleton")" != "$recorded" ]
 }
 
 adoption_exclude_rollback() {
@@ -1766,7 +1896,7 @@ adopt_group() (
   local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state dropped_key
   local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
-  local durable=false exclude_applied=false
+  local durable=false exclude_applied=false replan=false
   local -a group_owners=()
 
   adopt_group_cleanup() {
@@ -1834,11 +1964,24 @@ adopt_group() (
   lock_held=true
   trap 'adopt_group_exit "$?"' EXIT
   trap 'adopt_group_signal' HUP INT TERM
-  # Spec 066 (u) migrates shared excludes, not ordinary single-owner adopts.
+  # Spec 066 (u) migrates shared excludes for a group. A singleton takes the
+  # same durable re-plan only when the new release changes its block.
   # Count all owner records under the checkout lock, not just selected rows:
   # an unavailable sibling must not turn a real group into a singleton bypass.
   group_owners=("$home/state/attachments/$checkout"/*.json)
   if [ "${#group_owners[@]}" -gt 1 ]; then
+    replan=true
+  elif [ -f "${group_owners[0]}" ]; then
+    adoption_singleton_exclude_stale "${group_owners[0]}" "$payload" \
+      "$(printf '%s\n' "$first" | jq -c '.harnesses')" "$work"
+    rc=$?
+    case "$rc" in
+      0) replan=true; rc=0 ;;
+      1) rc=0 ;;
+      *) return "$rc" ;;
+    esac
+  fi
+  if [ "$replan" = true ]; then
     work="$home/state/release-adoptions/$checkout"
     mkdir -p "$home/state/release-adoptions" || return "$TRELLIS_EX_UNAVAILABLE"
     _attachment_canonical_dir "$home/state/release-adoptions" || return "$TRELLIS_EX_STATE"

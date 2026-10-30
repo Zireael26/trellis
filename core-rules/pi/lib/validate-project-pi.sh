@@ -29,6 +29,10 @@
 #     exact ../.trellis/runtime/<source> text attach writes, with an untracked
 #     .trellis/runtime symlink into $TRELLIS_HOME/releases/ and the link
 #     resolving inside it;
+#   - a source-checkout .agents/skills/<name> link with exact
+#     ../../core-rules/skills/<name> text, when that canonical source tree is
+#     unchanged at the protected base and has no untracked files, symlinks or
+#     hardlinks;
 #   - otherwise, tracked and byte-identical at the protected base: the remote
 #     default branch tip, resolved as pre-push's default_branch_ref does. If it
 #     merged there, it went through the owner-approved gate.
@@ -188,6 +192,31 @@ managed_link() {
   return 1
 }
 
+# A source-checkout link is trusted only when it names the exact canonical
+# sibling, and that entire skill directory still matches the protected base.
+source_skill_link() {
+  local rel="$1" name text source_rel source untracked symlinks hardlinks
+  $in_git || return 1
+  case "$rel" in .agents/skills/*) name="${rel#.agents/skills/}" ;; *) return 1 ;; esac
+  case "$name" in ''|.|..|*/*) return 1 ;; esac
+  text="$(readlink "$top/$rel")" || return 1
+  [ "$text" = "../../core-rules/skills/$name" ] || return 1
+  [ ! -L "$top/core-rules" ] && [ ! -L "$top/core-rules/skills" ] || return 1
+  source_rel="core-rules/skills/$name"
+  source="$top/$source_rel"
+  [ -d "$source" ] && [ ! -L "$source" ] && [ -f "$source/SKILL.md" ] && [ ! -L "$source/SKILL.md" ] || return 1
+  protected_base || return 1
+  git -C "$top" cat-file -e "$base_ref:$source_rel/SKILL.md" 2>/dev/null || return 1
+  git -C "$top" diff --quiet "$base_ref" -- "$source_rel" || return 1
+  untracked="$(git -C "$top" ls-files --others -- "$source_rel")" || return 1
+  [ -z "$untracked" ] || return 1
+  symlinks="$(find "$source" -type l -print -quit 2>/dev/null)" || return 1
+  [ -z "$symlinks" ] || return 1
+  hardlinks="$(find "$source" -type f -links +1 -print -quit 2>/dev/null)" || return 1
+  [ -z "$hardlinks" ] || return 1
+  return 0
+}
+
 # Tracked and byte-identical at the protected base, or a refusal naming why.
 check_at_base() {
   local rel="$1" why="$2" blob
@@ -237,7 +266,7 @@ check_entry() {
   local path="$1" rel links name
   rel="$(relpath "$path")"
   if [ -L "$path" ]; then
-    managed_link "$rel" || refuse "'$rel' is a symlink; $REMEDY"
+    managed_link "$rel" || source_skill_link "$rel" || refuse "'$rel' is a symlink; $REMEDY"
     return
   fi
   [ ! -d "$path" ] || return 0

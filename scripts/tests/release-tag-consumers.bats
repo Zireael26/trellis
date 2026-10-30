@@ -206,6 +206,7 @@ overlay_hits() {
 # that commit. Process-gate config is read at the range base too, so it is
 # committed there; $1 is an optional extra config line.
 tag_push_setup() {
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   local hooks="$BATS_TEST_TMPDIR/hooks" gate_local
   WORK="$BATS_TEST_TMPDIR/work"
   REMOTE="$BATS_TEST_TMPDIR/remote.git"

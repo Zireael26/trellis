@@ -4,6 +4,9 @@ if [ "${TRELLIS_LIBS_PRELOADED:-}" != 1 ]; then
   _ATTACHMENT_DIR=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 1
   # shellcheck source=scripts/lib/trellis-home.sh
   source "$_ATTACHMENT_DIR/trellis-home.sh"
+  # Full detach commits clear their exact registry identity before owner unlink.
+  # shellcheck source=scripts/lib/local-registry.sh
+  source "$_ATTACHMENT_DIR/local-registry.sh"
 fi
 
 # The BSD and GNU stat forms MUST be captured separately. GNU `stat -f` is
@@ -1099,14 +1102,145 @@ _attachment_hooks_dispatcher_common_body() {
   library="$(_attachment_library_source)" || return 1
   predicate="$(_attachment_extract_shell_function "$library" trellis_toolchain_control_only)" || return 1
   cat <<'EOF'
-#!/bin/sh
+#!/bin/bash -p
 caller_path=${PATH-}
 caller_home=${HOME-}
 caller_tmpdir=${TMPDIR-}
-# Carry the set/unset distinction across the control-plane env -i without
-# exporting the variable into the control-plane process.
+caller_xdg_config_set=${XDG_CONFIG_HOME+x}
+caller_xdg_config=${XDG_CONFIG_HOME-}
+trellis_gate_env_name_safe() {
+  local name=${1:-}
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+caller_gate_env=()
+trellis_collect_gate_env() {
+  local trellis_env_root=${1:-} trellis_env_names="" trellis_env_name trellis_env_ifs trellis_env_decl
+  local -a trellis_env_names_array=()
+  caller_gate_env=()
+  [ -x /usr/bin/git ] && [ -x /usr/bin/python3 ] || return 0
+  trellis_env_names="$(/usr/bin/env -i \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 \
+    /usr/bin/python3 -I -c '
+import json, re, subprocess, sys
+
+root = sys.argv[1]
+env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/dev/null",
+       "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+       "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0"}
+
+
+def git(*args):
+    try:
+        return subprocess.run(["/usr/bin/git", "-C", root, *args],
+                              env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+symbolic = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+if symbolic is None or symbolic.returncode != 0:
+    sys.exit(0)
+resolved = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}")
+if resolved is None or resolved.returncode != 0:
+    sys.exit(0)
+commit = resolved.stdout.decode("ascii", "strict").strip()
+if re.fullmatch("[0-9a-f]{40}|[0-9a-f]{64}", commit) is None:
+    sys.exit(0)
+tree = git("ls-tree", "-z", commit, "--", ".trellis.json")
+if tree is None or tree.returncode != 0:
+    sys.exit(0)
+records = tree.stdout.split(b"\0")
+if len(records) != 2 or not records[0]:
+    sys.exit(0)
+match = re.fullmatch(rb"(?:100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t\.trellis\.json", records[0])
+if match is None:
+    sys.exit(0)
+manifest = git("cat-file", "blob", match.group(1).decode("ascii"))
+if manifest is None or manifest.returncode != 0:
+    sys.exit(0)
+try:
+    document = json.loads(manifest.stdout.decode("utf-8"), object_pairs_hook=unique_object)
+except (UnicodeError, ValueError):
+    sys.exit(0)
+if not isinstance(document, dict):
+    sys.exit(0)
+gate = document.get("gate", {})
+if not isinstance(gate, dict) or set(gate) - {"env_passthrough"}:
+    sys.exit(0)
+names = gate.get("env_passthrough", [])
+if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+    sys.exit(0)
+if len(names) != len(set(names)):
+    sys.exit(0)
+reserved = {"PATH", "HOME", "TMP", "TMPDIR", "TEMP", "BASH_ENV", "ENV", "SHELLOPTS",
+            "BASHOPTS", "IFS", "CDPATH", "NODE_OPTIONS", "DOCKER_HOST", "DOCKER_CONTEXT",
+            "POSIXLY_CORRECT", "ZDOTDIR", "RUBYOPT", "PERL5OPT", "JAVA_TOOL_OPTIONS",
+            "JDK_JAVA_OPTIONS", "PWD", "OLDPWD", "SHLVL", "_", "LANG", "LANGUAGE", "TZ",
+            "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_EXTRA_CA_CERTS", "NODE_ICU_DATA", "NODE_V8_COVERAGE",
+            "RANDOM", "SRANDOM", "SECONDS", "LINENO", "OPTIND", "OPTARG", "PPID", "UID", "EUID",
+            "GROUPS", "DIRSTACK", "FUNCNAME", "PIPESTATUS", "SHELL", "PS1", "PS2", "PS3", "PS4"}
+prefixes = ("XDG_", "TMP", "TEMP", "GIT_", "TRELLIS_", "PROCESS_GATE_",
+            "SECURITY_GATE_", "PYTHON", "BASH", "LD_", "DYLD_", "CALLER_", "LC_",
+            "DOCKER_", "COREPACK_", "PERL", "RUBY", "GEM_", "GH_")
+for name in names:
+    if re.fullmatch("[A-Za-z_][A-Za-z0-9_]*", name) is None:
+        sys.exit(0)
+    upper = name.upper()
+    if any(secret in upper for secret in ("TOKEN", "SECRET", "KEY", "PASSWORD")):
+        sys.exit(0)
+    if upper in reserved or upper.startswith(prefixes):
+        sys.exit(0)
+for name in names:
+    print(name)
+' "$trellis_env_root" 2>/dev/null)" || trellis_env_names=""
+  trellis_env_ifs=$IFS
+  IFS=$'\n'
+  set -f
+  trellis_env_names_array=( $trellis_env_names )
+  set +f
+  IFS=$trellis_env_ifs
+  for trellis_env_name in "${trellis_env_names_array[@]}"; do
+    [ -n "$trellis_env_name" ] || continue
+    trellis_gate_env_name_safe "$trellis_env_name" || return 1
+    trellis_env_decl="$(declare -p "$trellis_env_name" 2>/dev/null)" || continue
+    trellis_env_decl="${trellis_env_decl#declare -}"
+    trellis_env_decl="${trellis_env_decl%% *}"
+    # Only exported caller values, never non-exported shell internals. All
+    # collector locals use the denied TRELLIS_ namespace to avoid shadowing.
+    case "$trellis_env_decl" in
+      *x*) caller_gate_env+=("$trellis_env_name=${!trellis_env_name}") ;;
+    esac
+  done
+}
+# Resolve a context with the caller's HOME before isolation, forwarding only
+# its endpoint. The caller's XDG config path is retained as a positional input
+# for the single pnpm-setting query; neither value is exported to payloads.
+# An explicit DOCKER_HOST, including an empty one, always wins.
 caller_docker_host_set=${DOCKER_HOST+x}
 caller_docker_host=${DOCKER_HOST-}
+if [ "$caller_docker_host_set" != x ] && [ "${DOCKER_CONTEXT+x}" = x ]; then
+  if caller_docker_host=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}' </dev/null 2>/dev/null) && [ -n "$caller_docker_host" ]; then
+    caller_docker_host_set=x
+  else
+    printf 'Trellis: cannot resolve Docker context "%s"; continuing without DOCKER_HOST.\n' \
+      "$(printf '%s' "$DOCKER_CONTEXT" | LC_ALL=C /usr/bin/tr '[:cntrl:]' '?')" >&2
+  fi
+fi
+trellis_env_project_root="$(CDPATH='' cd . && pwd -P)" || exit 1
+if ! trellis_collect_gate_env "$trellis_env_project_root"; then
+  caller_gate_env=()
+  printf 'trellis gate: refused (env-passthrough): invalid protected gate environment list\n' >&2
+fi
 exec /usr/bin/env -i \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   HOME=/dev/null \
@@ -1122,14 +1256,26 @@ caller_home=$3
 caller_tmpdir=$4
 caller_docker_host_set=$5
 caller_docker_host=$6
-shift 6
+caller_xdg_config_set=$7
+caller_xdg_config=$8
+[ "$#" -ge 9 ] || exit 1
+caller_gate_env_count=$9
+case "$caller_gate_env_count" in ""|*[!0-9]*) exit 1 ;; esac
+shift 9
+caller_gate_env=()
+while [ "$caller_gate_env_count" -gt 0 ]; do
+  [ "$#" -gt 0 ] || exit 1
+  caller_gate_env+=("$1")
+  shift
+  caller_gate_env_count=$((caller_gate_env_count - 1))
+done
 /usr/bin/grep -qx "# trellis-managed-dispatcher-body" "$dispatcher" || exit 1
 body="$(/usr/bin/awk "seen { print } /^# trellis-managed-dispatcher-body\$/ { seen=1 }" "$dispatcher")" || exit 1
 [ -n "$body" ] || exit 1
 TRELLIS_MANAGED_DISPATCHER="$dispatcher"
 export TRELLIS_MANAGED_DISPATCHER
 eval "$body"
-' trellis-managed-dispatcher "$0" "$caller_path" "$caller_home" "$caller_tmpdir" "$caller_docker_host_set" "$caller_docker_host" "$@"
+' trellis-managed-dispatcher "$0" "$caller_path" "$caller_home" "$caller_tmpdir" "$caller_docker_host_set" "$caller_docker_host" "$caller_xdg_config_set" "$caller_xdg_config" "${#caller_gate_env[@]}" "${caller_gate_env[@]}" "$@"
 # trellis-managed-dispatcher-body
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -1842,6 +1988,63 @@ trellis_run_prior_hook() {
   /usr/bin/env -i "${prior_env[@]}" "$hook" "$@"
 }
 
+# Mirror only pnpm's global enableGlobalVirtualStore setting into the private
+# gate XDG config. The isolated query sees caller HOME/XDG only to read this
+# setting; payloads never receive the caller HOME, config store, credentials or
+# unrelated variables. Writing at global scope keeps project/workspace overrides
+# ahead of it; an absent user value deletes a stale private override and leaves
+# pnpm's default.
+trellis_sync_pnpm_global_virtual_store() {
+  [ "$#" -eq 9 ] || return 1
+  local toolchain_path="$1" caller_home="$2" caller_xdg_config_set="$3" caller_xdg_config="$4"
+  local gate_home="$5" gate_xdg_config="$6" gate_xdg_cache="$7" corepack_home="$8" scratch="$9"
+  local pnpm_bin="" setting="" action=""
+  pnpm_bin="$(/usr/bin/env -i PATH="$toolchain_path" /bin/sh -c 'command -v pnpm' 2>/dev/null)" || pnpm_bin=""
+  [ -n "$pnpm_bin" ] || return 0
+  case "$pnpm_bin" in /*) ;; *) return 1 ;; esac
+  [ -f "$pnpm_bin" ] && [ -x "$pnpm_bin" ] || return 1
+  if [ "$caller_xdg_config_set" = x ]; then
+    setting="$(/usr/bin/env -i \
+      PATH="$toolchain_path" HOME="$caller_home" XDG_CONFIG_HOME="$caller_xdg_config" \
+      COREPACK_HOME="$corepack_home" TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" LC_ALL=C \
+      "$pnpm_bin" --dir "$scratch" config get --location=global enableGlobalVirtualStore \
+      </dev/null 2>/dev/null)" || return 1
+  else
+    setting="$(/usr/bin/env -i \
+      PATH="$toolchain_path" HOME="$caller_home" \
+      COREPACK_HOME="$corepack_home" TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" LC_ALL=C \
+      "$pnpm_bin" --dir "$scratch" config get --location=global enableGlobalVirtualStore \
+      </dev/null 2>/dev/null)" || return 1
+  fi
+  setting="$(printf '%s' "$setting" | LC_ALL=C tr -d '[:space:]')" || return 1
+  case "$setting" in
+    true|false) action=set ;;
+    ''|undefined) action=delete ;;
+    *) return 1 ;;
+  esac
+  if [ "$action" = set ]; then
+    (
+      umask 077
+      /usr/bin/env -i \
+        PATH="$toolchain_path" HOME="$gate_home" XDG_CONFIG_HOME="$gate_xdg_config" \
+        XDG_CACHE_HOME="$gate_xdg_cache" COREPACK_HOME="$corepack_home" \
+        TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" LC_ALL=C \
+        "$pnpm_bin" --dir "$scratch" config set --location=global enableGlobalVirtualStore "$setting" \
+        </dev/null >/dev/null 2>&1
+    ) || return 1
+  else
+    (
+      umask 077
+      /usr/bin/env -i \
+        PATH="$toolchain_path" HOME="$gate_home" XDG_CONFIG_HOME="$gate_xdg_config" \
+        XDG_CACHE_HOME="$gate_xdg_cache" COREPACK_HOME="$corepack_home" \
+        TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" LC_ALL=C \
+        "$pnpm_bin" --dir "$scratch" config delete --location=global enableGlobalVirtualStore \
+        </dev/null >/dev/null 2>&1
+    ) || return 1
+  fi
+}
+
 trellis_run_control_payload() {
   local executable="$1"
   shift
@@ -1864,7 +2067,7 @@ trellis_run_control_payload() {
 }
 
 trellis_run_gate_payload() {
-  local executable="$1" toolchain_path="" gate_home="" owner="" mode="" reason=""
+  local executable="$1" toolchain_path="" gate_home="" owner="" mode="" reason="" gate_env_entry
   local -a gate_env
   shift
   if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ] || [ -L "$TMPDIR" ]; then
@@ -1890,10 +2093,16 @@ trellis_run_gate_payload() {
     return 1
   fi
   toolchain_path="$(trellis_gate_toolchain_path)" || return 1
-  # The caller's DOCKER_HOST reaches the gate exactly when it was set
-  # (empty-but-set stays set, unset stays absent), mirroring
-  # trellis_run_prior_hook. The set/unset pair crossed the control-plane
-  # env -i as positional args and is never exported there.
+  if ! trellis_sync_pnpm_global_virtual_store \
+    "$toolchain_path" "$caller_home" "$caller_xdg_config_set" "$caller_xdg_config" \
+    "$gate_home" "$gate_xdg_config" "$gate_xdg_cache" "$COREPACK_HOME" "$TMPDIR"; then
+    # Convenience only: an unreadable setting (offline Corepack, no node on the
+    # recorded toolchain) leaves pnpm's default and must not block the gate.
+    printf 'trellis gate: warning: could not mirror pnpm enableGlobalVirtualStore; using the gate default\n' >&2
+  fi
+  # Forward the caller's explicit DOCKER_HOST (including empty), or the
+  # endpoint resolved from its context before isolation. The set/unset pair
+  # crossed the control-plane env -i as positional args, never exports.
   gate_env=(
     "PATH=$toolchain_path"
     "HOME=$gate_home"
@@ -1911,6 +2120,9 @@ trellis_run_gate_payload() {
     TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}"
     SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}"
   )
+  for gate_env_entry in ${caller_gate_env[@]+"${caller_gate_env[@]}"}; do
+    gate_env+=("$gate_env_entry")
+  done
   if [ "${caller_docker_host_set:-}" = x ]; then
     gate_env+=("DOCKER_HOST=$caller_docker_host")
   fi
@@ -2107,7 +2319,7 @@ if [ "$prior_status" -ne 0 ]; then
   exit "$prior_status"
 fi
 if [ "$reconcile_status" -ne 0 ]; then
-  printf 'trellis post-checkout: attachment reconciliation failed in an unsafe worktree; run `trellis worktree sync` and restart this session.\n' >&2
+  printf 'trellis post-checkout: attachment reconciliation failed (status %s); see the cause below, then retry `trellis worktree sync` and restart this session.\n' "$reconcile_status" >&2
   [ -z "$reconcile_output" ] || printf '%s\n' "$reconcile_output" >&2
   exit "$reconcile_status"
 fi
@@ -2148,21 +2360,18 @@ refs_file="$(mktemp "$TMPDIR/trellis-pre-push.XXXXXX")" || exit 1
 chmod 600 "$refs_file" || exit 1
 cat > "$refs_file" || exit 1
 previous="$(trellis_read_sidecar "$managed_dir/previous-hooks-path" true)" || exit 1
-prior_status=0
-prior_hook="$(trellis_prior_hook "$previous" pre-push)" || prior_hook=""
-if [ -n "$prior_hook" ] && { [ -f "$prior_hook" ] || [ -L "$prior_hook" ]; } && [ -x "$prior_hook" ]; then
-  trellis_run_prior_hook "$prior_hook" "$@" < "$refs_file"
-  prior_status=$?
-fi
 carrier_status=0
+attach_status=0
 payload=""
 source=""
+carrier=""
 if payload="$(trellis_read_sidecar "$managed_dir/release-payload")" &&
    source="$(trellis_read_sidecar "$managed_dir/pre-push-source")" &&
    [ "$source" = "$expected_pre_push_source" ] &&
    carrier="$(trellis_managed_payload_file "$payload" "$source")"; then
-  # The deferred attachment checks decide first: FAILED or blocked refuses,
-  # ok passes, anything else runs them inline. Only then does the gate run.
+  # The deferred attachment checks decide first, before any suite: FAILED or
+  # blocked refuses, ok passes, anything else runs them inline. A refusal
+  # starts neither the chained prior hook nor the gate.
   if postjob="$(trellis_managed_payload_file "$payload" scripts/lib/attach-postjob.sh verified)"; then
     trellis_run_control_payload "$postjob" prepush --target "$project_root" < /dev/null
     attach_status=$?
@@ -2170,15 +2379,45 @@ if payload="$(trellis_read_sidecar "$managed_dir/release-payload")" &&
     attach_status=1
     printf 'trellis pre-push: managed attachment checks are unavailable\n' >&2
   fi
-  if [ "$attach_status" -eq 0 ]; then
-    trellis_run_gate_payload "$carrier" "$@" < "$refs_file"
-    carrier_status=$?
-  else
-    carrier_status=1
-  fi
 else
   carrier_status=1
   printf 'trellis pre-push: managed immutable release carrier is unavailable\n' >&2
+fi
+prior_status=0
+if [ "$attach_status" -eq 0 ]; then
+  prior_hook="$(trellis_prior_hook "$previous" pre-push)" || prior_hook=""
+  if [ -n "$prior_hook" ] && { [ -f "$prior_hook" ] || [ -L "$prior_hook" ]; } && [ -x "$prior_hook" ]; then
+    trellis_run_prior_hook "$prior_hook" "$@" < "$refs_file"
+    prior_status=$?
+  fi
+fi
+# The chained prior hook ran after the early verdict, so the release payload, the
+# pre-push source and the carrier are read and fully verified again, and the
+# deferred attachment checks decide again, before the gate. The early verdict is
+# not reused across that hook boundary: a prior hook may replace the carrier or
+# publish a pending adoption while the suite runs.
+if [ "$attach_status" -eq 0 ] && [ "$carrier_status" -eq 0 ]; then
+  if payload="$(trellis_read_sidecar "$managed_dir/release-payload")" &&
+     source="$(trellis_read_sidecar "$managed_dir/pre-push-source")" &&
+     [ "$source" = "$expected_pre_push_source" ] &&
+     carrier="$(trellis_managed_payload_file "$payload" "$source")"; then
+    if postjob="$(trellis_managed_payload_file "$payload" scripts/lib/attach-postjob.sh verified)"; then
+      trellis_run_control_payload "$postjob" prepush --target "$project_root" < /dev/null
+      attach_status=$?
+    else
+      attach_status=1
+      printf 'trellis pre-push: managed attachment checks are unavailable\n' >&2
+    fi
+  else
+    carrier_status=1
+    printf 'trellis pre-push: managed immutable release carrier is unavailable\n' >&2
+  fi
+fi
+if [ "$attach_status" -eq 0 ] && [ "$carrier_status" -eq 0 ]; then
+  trellis_run_gate_payload "$carrier" "$@" < "$refs_file"
+  carrier_status=$?
+else
+  carrier_status=1
 fi
 # Check after BOTH hooks, even when no carrier ran. Mirror common.sh/doctor:
 # one literal local value plus the effective value, never last-local-value wins.
@@ -3343,8 +3582,8 @@ _attachment_verify_owner_artifacts() {
   _attachment_validate_ids "$record" || return 3
   _attachment_render_pairings_valid "$record" || return 3
   while IFS= read -r artifact; do
-    _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || return 3
-    if ! _attachment_artifact_exact "$root" "$artifact"; then
+    if ! _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" ||
+       ! _attachment_artifact_exact "$root" "$artifact"; then
       _attachment_diag "owned artifact does not match its record: $(printf '%s\n' "$artifact" | jq -r '"\(.path) (recorded \(.kind))"') under $root"
       return 3
     fi
@@ -3356,7 +3595,10 @@ _attachment_verify_owner_artifacts() {
     | $artifact
   ')
   while IFS= read -r render; do
-    _attachment_render_owned_keys_exact "$root" "$render" || return 3
+    _attachment_render_owned_keys_exact "$root" "$render" || {
+      _attachment_diag "owned render does not match its record: $root/$(printf '%s\n' "$render" | jq -r '.path')"
+      return 3
+    }
   done < <(printf '%s\n' "$record" | jq -c '(.renders // [])[]')
 }
 
@@ -5171,7 +5413,8 @@ _attachment_detach_owner_data_valid() {
   return "$rc"
 }
 
-_attachment_detach_journal_valid() {
+# Record shape and canonical control-plane paths, without requiring a live root.
+_attachment_detach_journal_data_valid() {
   local file=$1 original next transfer expected after attachment journal_dir state_dir home transfer_path transfer_checkout transfer_worktree
   _attachment_valid_absolute "$file" || return 2
   _attachment_json_file "$file" || return 2
@@ -5411,21 +5654,27 @@ _attachment_detach_journal_valid() {
                 end)
          end)
   ' "$file" >/dev/null 2>&1 || return 2
-  _attachment_validate_roots "$original" || return 2
-  _attachment_validate_ids "$original" || return 2
   attachment=$(jq -r '.attachment_id' "$file") || return 2
   journal_dir=$(dirname "$file") || return 2
   state_dir=$(dirname "$journal_dir") || return 2
   home=$(dirname "$state_dir") || return 2
   [ "$journal_dir" = "$home/state/attachment-journals" ] || return 2
   [ "$file" = "$(_attachment_detach_journal_path "$home" "$attachment")" ] || return 2
-  _attachment_detach_render_pending_runtime_valid "$file" || return $?
   if [ "$transfer" != null ]; then
     transfer_path=$(printf '%s\n' "$transfer" | jq -r '.owner_path') || return 2
     transfer_checkout=$(printf '%s\n' "$expected" | jq -r '.checkout_id') || return 2
     transfer_worktree=$(printf '%s\n' "$expected" | jq -r '.worktree_id') || return 2
     [ "$transfer_path" = "$(_attachment_ownership_path "$home" "$transfer_checkout" "$transfer_worktree")" ] || return 2
   fi
+}
+
+_attachment_detach_journal_valid() {
+  local file=$1 original
+  _attachment_detach_journal_data_valid "$file" || return $?
+  original=$(jq -c '.original_owner' "$file") || return 2
+  _attachment_validate_roots "$original" || return 2
+  _attachment_validate_ids "$original" || return 2
+  _attachment_detach_render_pending_runtime_valid "$file"
 }
 
 _attachment_detach_file_matches_data() {
@@ -5898,6 +6147,18 @@ _attachment_detach_commit_locked() {
     return 3
   }
   if [ "$next_owner" = null ]; then
+    # Exhausted registry contention must leave the owner and journal available
+    # for retry, not strand an ownerless transaction at the final registry phase.
+    local_registry_clear_attachment "$home" \
+      "$(printf '%s\n' "$original" | jq -r '.fleet')" \
+      "$(printf '%s\n' "$original" | jq -r '.project_id')" \
+      "$(printf '%s\n' "$original" | jq -r '.checkout_id')" \
+      "$(printf '%s\n' "$original" | jq -r '.worktree_id')" \
+      "$(printf '%s\n' "$original" | jq -r '.attachment_id')" || return $?
+    _attachment_detach_file_matches_data "$owner" "$original" || {
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
+      return 3
+    }
     rm -- "$owner" || return 1
   else
     _attachment_write_json "$owner" "$next_owner" || return $?
@@ -8747,9 +9008,10 @@ attachment_checkout_lock_reclaim() {
   _attachment_map_public_status "$status"
 }
 
-# Reclaim and acquire, waiting a bounded 10 s while the lock is held. The
-# detached post-attach job holds it for brief steps right after every attach,
-# so an attach or adopt landing in that window must wait rather than refuse.
+# Reclaim and acquire, waiting a bounded 900 s while the lock is held.
+# This exceeds the observed 9-12 minute foreground attach on large groups. The
+# detached post-attach job can hold it for minutes while verifying siblings,
+# so an immediate second worktree add must wait rather than refuse.
 # Still held when the wait runs out: 3, and the caller names the lock.
 attachment_checkout_lock_wait() {
   local rc tries=0
@@ -8761,7 +9023,7 @@ attachment_checkout_lock_wait() {
     else
       rc=$?
     fi
-    [ "$rc" -eq "${TRELLIS_EX_CONFLICT:-3}" ] && [ "$tries" -lt 40 ] || return "$rc"
+    [ "$rc" -eq "${TRELLIS_EX_CONFLICT:-3}" ] && [ "$tries" -lt 3600 ] || return "$rc"
     tries=$((tries + 1))
     sleep 0.25
   done

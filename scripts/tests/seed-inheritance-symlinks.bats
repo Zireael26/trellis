@@ -423,6 +423,44 @@ t14_add_broken_sibling_row() {
   git -C "$T14_PROJECT" worktree remove --force "$linked"
 }
 
+# Seed's own locate verifies the release and hands that verdict to the sourced
+# sealed attach, whose exact-owner reconcile then walks every sibling owner.
+@test "seed over N>=3 sibling owners verifies the sealed release at most once" {
+  local idx sibling real_git trace_bin hash_log
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  t14_attach
+  for idx in 1 2 3; do
+    sibling="$T14_SANDBOX/sibling $idx"
+    seed_unattached_worktree "t14-sibling-$idx" "$sibling"
+    run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$sibling" --quiet
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$(t14_owner_for_root "$sibling")" ]
+  done
+  [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' | wc -l | tr -d ' ')" -eq 4 ]
+
+  real_git="$(command -v git)"
+  trace_bin="$T14_SANDBOX/trace-bin"
+  hash_log="$T14_SANDBOX/verify-hash.log"
+  mkdir -p "$trace_bin"
+  cat > "$trace_bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "hash-object" ] && [ "\${2:-}" = "--no-filters" ] && [ "\${3:-}" = "--stdin-paths" ]; then
+  printf 'hash\n' >> "$hash_log"
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod 755 "$trace_bin/git"
+  : > "$hash_log"
+
+  run env PATH="$trace_bin:$PATH" TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$T14_PROJECT"
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"already attached: $T14_PROJECT"* ]] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$hash_log" | tr -d ' ')" -eq 1 ] || { echo "hash_count=$(wc -l < "$hash_log")"; return 1; }
+}
+
 # The detached post-attach job takes this checkout's lock for brief steps right
 # after an attach; a `git worktree add` in that window must not refuse.
 checkout_lock_common() {
@@ -449,6 +487,24 @@ checkout_lock_common() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; false; }
   [ -f "$(t14_owner_for_root "$linked")" ]
   [ -L "$linked/.claude/rules/trellis.md" ]
+}
+
+@test "a new worktree waits for post-attach checkout lock beyond ten seconds" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  TRELLIS_ATTACH_POSTJOB=off t14_attach
+  linked="$T14_SANDBOX/long-lock linked worktree"
+  seed_unattached_worktree t14-long-lock "$linked"
+  sleep 45 &
+  holder=$!
+  TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/attachment.sh"
+    _attachment_test_stage_checkout_lock "$2" "$3" "$4" "$5"' _ \
+    "$REPO_ROOT" "$TRELLIS_HOME" "$(t14_checkout_id "$T14_PROJECT")" "$(checkout_lock_common)" "$holder"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$linked" --quiet
+  wait "$holder" || true
+  [ "$status" -eq 0 ] || { printf 'status %s\n%s\n' "$status" "$output" >&2; false; }
+  [ -f "$(t14_owner_for_root "$linked")" ]
 }
 
 @test "a checkout lock released mid-reclaim is retried; a lasting broken lock still refuses" {

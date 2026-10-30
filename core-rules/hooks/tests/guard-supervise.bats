@@ -54,6 +54,17 @@ slow_lib() {
   mv "$lib.next" "$lib"
 }
 
+extend_test_deadline() {
+  local supervisor="$RT/$SUP"
+  [ "$(grep -c '^my \$DEADLINE_SECS = 3;$' "$supervisor")" -eq 1 ] || {
+    echo "expected the test-copy supervisor deadline to be 3s"
+    return 1
+  }
+  sed 's/^my \$DEADLINE_SECS = 3;$/my $DEADLINE_SECS = 20;/' "$supervisor" > "$supervisor.next"
+  mv "$supervisor.next" "$supervisor"
+  grep -qx 'my $DEADLINE_SECS = 20;' "$supervisor"
+}
+
 stub() {
   printf '#!/bin/bash\n%s\n' "$2" > "$STUBS/$1"
   chmod 755 "$STUBS/$1"
@@ -187,10 +198,9 @@ edit_event() {
 
 @test "pi: a stalled required guard is denied at the deadline" {
   local event
-  mkdir -p "$PROJECT_DIR/.pi/hooks"
-  printf '#!/bin/bash\nsleep 6\n' > "$PROJECT_DIR/.pi/hooks/block-destructive.sh"
-  printf '#!/bin/bash\nexit 0\n' > "$PROJECT_DIR/.pi/hooks/pr-gate-shiftleft.sh"
-  chmod 755 "$PROJECT_DIR/.pi/hooks/"*.sh
+  # pi runs the runtime payload's hooks in place.
+  printf '#!/bin/bash\nsleep 6\n' > "$RT/core-rules/codex/hooks/block-destructive.sh"
+  printf '#!/bin/bash\nexit 0\n' > "$RT/core-rules/codex/hooks/pr-gate-shiftleft.sh"
   event="$(jq -nc --arg cwd "$PROJECT_DIR" '{schema_version:1,harness:"pi",cwd:$cwd,session_id:"s",
     phase:"pre_action",native_event:"tool_call",action:{family:"shell",tool_name:"bash",input:{command:"ls"},targets:[]}}' |
     base64 | tr -d '\n')"
@@ -306,6 +316,7 @@ exit 0"
 }
 
 @test "anything but empty output or one valid decision is denied for both harnesses" {
+  extend_test_deadline
   local harness target
   stub two.sh "printf '{}\\n{}\\n'"
   stub malformed.sh "printf '{\"decision\"'"
@@ -346,6 +357,7 @@ exit 0"
 }
 
 @test "pi mode blocks malformed exit-0 output and passes valid results through" {
+  extend_test_deadline
   local out
   stub empty-object.sh "printf '{}'"
   stub advice.sh "printf '%s\n' '{\"hookSpecificOutput\":{\"additionalContext\":\"note\"}}'"
@@ -353,23 +365,29 @@ exit 0"
   out="$(printf '{}' | perl "$RT/$SUP" pi test-guard "$STUBS/empty-object.sh" 2>/dev/null)"
   status=$?
   set -e
-  [ "$status" -eq 2 ] && [[ "$out" == *'"decision":"block"'* ]] || { echo "$status $out"; false; }
+  [ "$status" -eq 2 ] || { echo "$status $out"; false; }
+  [[ "$out" == *'"decision":"block"'* ]] || { echo "$status $out"; false; }
   out="$(printf '{}' | perl "$RT/$SUP" pi test-guard "$STUBS/advice.sh")"
   [ "$out" = '{"hookSpecificOutput":{"additionalContext":"note"}}' ]
 }
 
 @test "a valid single decision and an allow pass through unchanged" {
+  extend_test_deadline
   local deny='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"stub says no"}}'
   stub claude-deny.sh "printf '%s\\n' '$deny'"
   stub codex-block.sh "printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"stub says no\"}'; echo 'stub says no' >&2; exit 2"
   stub allow.sh 'echo advisory >&2; exit 0'
   supervise claude claude-deny.sh
-  [ "$status" -eq 0 ] && [ "$output" = "$deny" ] || { echo "$status $output"; false; }
+  [ "$status" -eq 0 ] || { echo "$status $output"; false; }
+  [ "$output" = "$deny" ] || { echo "$status $output"; false; }
   supervise codex codex-block.sh
-  [ "$status" -eq 2 ] && [ "$output" = '{"decision":"block","reason":"stub says no"}' ] && [ "$stderr" = 'stub says no' ] ||
-    { echo "$status $output $stderr"; false; }
+  [ "$status" -eq 2 ] || { echo "$status $output $stderr"; false; }
+  [ "$output" = '{"decision":"block","reason":"stub says no"}' ] || { echo "$status $output $stderr"; false; }
+  [ "$stderr" = 'stub says no' ] || { echo "$status $output $stderr"; false; }
   supervise claude allow.sh
-  [ "$status" -eq 0 ] && [ -z "$output" ] && [ "$stderr" = advisory ] || { echo "$status $output $stderr"; false; }
+  [ "$status" -eq 0 ] || { echo "$status $output $stderr"; false; }
+  [ -z "$output" ] || { echo "$status $output $stderr"; false; }
+  [ "$stderr" = advisory ] || { echo "$status $output $stderr"; false; }
   supervise codex allow.sh
   [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$status $output"; false; }
 }
@@ -377,11 +395,13 @@ exit 0"
 # --- the real guards through their registrations ------------------------------
 
 @test "real guard decisions pass through the registered supervisor unchanged" {
+  extend_test_deadline
   run_registered "$CLAUDE_TEMPLATE" block-destructive '{"tool_input":{"command":"git push --force origin main"}}'
   printf '%s' "$output" | jq -se 'length == 1 and (.[0].hookSpecificOutput.permissionDecisionReason | startswith("Blocked force push"))' \
     >/dev/null || { echo "$output"; false; }
   run_registered "$CLAUDE_TEMPLATE" block-destructive "$BASH_EVENT"
-  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$status $output"; false; }
+  [ "$status" -eq 0 ] || { echo "$status $output"; false; }
+  [ -z "$output" ] || { echo "$status $output"; false; }
   run_registered "$CODEX_TEMPLATE" block-destructive '{"tool_input":{"command":"git push --force origin main"}}'
   assert_codex_block '^Blocked force push'
   run_registered "$CODEX_TEMPLATE" block-destructive "$BASH_EVENT"
@@ -416,7 +436,10 @@ EOF
 
 @test "the inheritance manifest links guard-supervise.pl for every harness, without widening a suffix" {
   local h
-  for h in claude codex pi; do
+  # pi renders no hook leaves; its dispatcher runs the payload supervisor.
+  jq -e '[.harnesses.pi.links[] | .destination // .destination_dir | select(startswith(".pi/hooks"))] | length == 0' \
+    "$REPO/core-rules/inheritance-manifest.json" >/dev/null
+  for h in claude codex; do
     jq -e --arg h "$h" '[.harnesses[$h].links[] | select(.source == "core-rules/hooks/lib/guard-supervise.pl"
         and .destination == ".\($h)/hooks/lib/guard-supervise.pl")] | length == 1' \
       "$REPO/core-rules/inheritance-manifest.json" >/dev/null || { echo "$h"; return 1; }

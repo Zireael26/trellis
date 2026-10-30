@@ -44,6 +44,7 @@ setup() {
   # ~/.trellis: every test takes the fallback path unless it builds a sandboxed
   # gate with heavy_gate_setup (spec 054, H8).
   export PROCESS_GATE_HEAVY_LAUNCHER="$BATS_TEST_TMPDIR/no-trellis-launcher"
+  export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID HEAVY_HOLDER_PID
 }
 
@@ -61,6 +62,46 @@ teardown() {
 
 run_gate() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+}
+
+@test "database-lock budget leaves 900 seconds of wait plus 600 seconds of tests" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/timeout" <<'SH'
+#!/bin/sh
+printf '%s\n' "$1" >> "$PG_TIMEOUT_LOG"
+shift
+exec "$@"
+SH
+  chmod +x "$BATS_TEST_TMPDIR/bin/timeout"
+  export PG_TIMEOUT_LOG="$BATS_TEST_TMPDIR/timeout-limits"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true \
+    PROCESS_GATE_TEST_CMD=true run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -qx '1500' "$PG_TIMEOUT_LOG"
+}
+
+@test "test-database lock wait timeout is an infrastructure failure, not a failed test" {
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  export PROCESS_GATE_TEST_CMD='printf "process-gate-infra: test-database lock wait timed out\\n"; exit 75'
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"infrastructure failure: test-database lock wait timed out"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"exited 75"* ]] || { echo "$output"; return 1; }
+  local failure_file
+  failure_file="$(printf '%s\n' "$output" | awk '/full output saved at / { sub(/^.*full output saved at /, ""); print; exit }')"
+  [[ "$failure_file" == "$TRELLIS_GATE_STATE_DIR/failed-shards/process-gate-failure."*/output.txt ]] ||
+    { echo "test-database lock failure output path missing: $output"; return 1; }
+  [ -f "$failure_file" ] || { echo "test-database lock failure output was not saved: $failure_file"; return 1; }
+  [ "$(<"$failure_file")" = 'process-gate-infra: test-database lock wait timed out' ] ||
+    { echo "unexpected saved test-database lock output: $failure_file"; return 1; }
+  export PROCESS_GATE_TEST_CMD='printf "Error: timed out waiting for test-postgres lock after 900s\\n"; exit 75'
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"infrastructure failure: test-database lock wait timed out"* ]] || { echo "$output"; return 1; }
+  export PROCESS_GATE_TEST_CMD='printf "lock-related assertion failed\\n"; exit 1'
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"exited 1"* ]] || { echo "$output"; return 1; }
 }
 
 # make_mutation_fixture <js|python|go>
@@ -796,6 +837,8 @@ JSON
 
 @test "Go testing comparison inversion is recognized and killed" {
   make_mutation_fixture go
+  # Match the gate's 30-second control bound; Go startup can exceed the 3-second fixture default under load.
+  PROCESS_GATE_MUTATION_TIMEOUT=30
   run_mutation_gate
   local gate_status="$status" gate_output="$output"
 
@@ -834,6 +877,129 @@ JSON
 # The bats `timeout` on each test is the inversion guard: revert run_check to the
 # unbounded path and these do not merely fail, they hang, which is the defect.
 
+@test "failing checks surface buried TAP failures and save complete output privately" {
+  local test_cmd='printf "not ok 3 foo\n"; for i in {1..12}; do printf "filler %s\n" "$i"; done; exit 1'
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD="$test_cmd"
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"not ok 3 foo"* ]] || { echo "$output"; false; }
+  local failure_file expected_output i dir_mode file_mode
+  failure_file="$(printf '%s\n' "$output" | awk '/full output saved at / { sub(/^.*full output saved at /, ""); print; exit }')"
+  [[ "$failure_file" == "$TRELLIS_GATE_STATE_DIR/failed-shards/process-gate-failure."*/output.txt ]] ||
+    { echo "missing durable failure path: $output"; false; }
+  [ -f "$failure_file" ] || { echo "missing saved output: $failure_file"; false; }
+  dir_mode="$(stat -c %a "$(dirname "$failure_file")" 2>/dev/null || stat -f %Lp "$(dirname "$failure_file")")"
+  [ "$dir_mode" = 700 ] ||
+    { echo "saved output directory is not mode 0700: $failure_file"; false; }
+  file_mode="$(stat -c %a "$failure_file" 2>/dev/null || stat -f %Lp "$failure_file")"
+  [ "$file_mode" = 600 ] ||
+    { echo "saved output is not mode 0600: $failure_file"; false; }
+  expected_output='not ok 3 foo'
+  for i in {1..12}; do expected_output+=$'\n'filler\ "$i"; done
+  [ "$(<"$failure_file")" = "$expected_output" ] || { echo "saved output was incomplete: $failure_file"; false; }
+}
+
+@test "passing checks create no failed-shards output" {
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true
+  run_gate
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$TRELLIS_GATE_STATE_DIR/failed-shards" ] ||
+    { echo "green run created failure output: $TRELLIS_GATE_STATE_DIR/failed-shards"; false; }
+}
+
+@test "failed output refuses a symlinked state root" {
+  local target="$BATS_TEST_TMPDIR/state-target"
+  mkdir -m 700 "$target"
+  ln -s "$target" "$TRELLIS_GATE_STATE_DIR"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "state-root failure\\n"; exit 1'
+
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"full output could not be saved in an owner-private failed-shards directory"* ]] ||
+    { echo "$output"; false; }
+  [ ! -e "$target/failed-shards" ] || { echo "wrote through symlinked state root: $target"; false; }
+}
+
+@test "failed output refuses a non-private state root" {
+  mkdir -m 700 "$TRELLIS_GATE_STATE_DIR"
+  chmod 755 "$TRELLIS_GATE_STATE_DIR"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "state-mode failure\\n"; exit 1'
+
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"full output could not be saved in an owner-private failed-shards directory"* ]] ||
+    { echo "$output"; false; }
+  [ -z "$(find "$TRELLIS_GATE_STATE_DIR" -type f -name output.txt -print 2>/dev/null)" ] ||
+    { echo "saved output under non-private state root: $TRELLIS_GATE_STATE_DIR"; false; }
+}
+
+@test "failed output refuses a non-private failed-shards directory" {
+  local failure_root="$TRELLIS_GATE_STATE_DIR/failed-shards"
+  mkdir -m 700 "$TRELLIS_GATE_STATE_DIR" "$failure_root"
+  chmod 755 "$failure_root"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "failed-shards mode failure\\n"; exit 1'
+
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"full output could not be saved in an owner-private failed-shards directory"* ]] ||
+    { echo "$output"; false; }
+  [ -z "$(find "$failure_root" -type f -name output.txt -print 2>/dev/null)" ] ||
+    { echo "saved output under non-private failed-shards directory: $failure_root"; false; }
+}
+
+@test "failed output refuses a symlinked failed-shards directory" {
+  local target="$BATS_TEST_TMPDIR/failed-shards-target"
+  mkdir -m 700 "$TRELLIS_GATE_STATE_DIR" "$target"
+  ln -s "$target" "$TRELLIS_GATE_STATE_DIR/failed-shards"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "failed-shards failure\\n"; exit 1'
+
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"full output could not be saved in an owner-private failed-shards directory"* ]] ||
+    { echo "$output"; false; }
+  [ -z "$(find "$target" -mindepth 1 -print 2>/dev/null)" ] ||
+    { echo "wrote through symlinked failed-shards directory: $target"; false; }
+}
+
+@test "failure-output retention prunes only old private process-gate directories" {
+  local failure_root="$TRELLIS_GATE_STATE_DIR/failed-shards" i
+  mkdir -m 700 "$TRELLIS_GATE_STATE_DIR"
+  mkdir -m 700 "$failure_root"
+  for i in {1..9}; do
+    mkdir -m 700 "$failure_root/process-gate-failure.old-$i"
+  done
+  local expired="$failure_root/process-gate-failure.expired"
+  mkdir -m 700 "$expired"
+  touch -t 200001010000 "$expired"
+  local wrong_mode="$failure_root/process-gate-failure.wrong-mode"
+  mkdir -m 755 "$wrong_mode"
+  local wrong_prefix="$failure_root/process-gate-failure-not-exact"
+  mkdir -m 700 "$wrong_prefix"
+
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='exit 1'
+  run_gate
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  local private_count
+  private_count="$(find "$failure_root" -mindepth 1 -maxdepth 1 -type d \
+    -name 'process-gate-failure.*' -uid "$(id -u)" -perm 0700 -print | wc -l | tr -d '[:space:]')"
+  [ "$private_count" -eq 8 ] || {
+    echo "expected 8 private dirs, found $private_count"
+    echo "$output"
+    find "$failure_root" -mindepth 1 -maxdepth 1 -print
+    false
+  }
+  [ ! -e "$expired" ] || { echo "expired failure directory was retained: $expired"; false; }
+  [ -d "$wrong_mode" ] || { echo "non-private same-prefix directory was pruned: $wrong_mode"; false; }
+  [ -d "$wrong_prefix" ] || { echo "non-matching prefix directory was pruned: $wrong_prefix"; false; }
+}
+
 @test "a hanging declared test command is killed at the ceiling and reported as a timeout" {
   printf '%s' '{"name":"x","scripts":{"test":"sleep 120"}}' > "$PROJECT_DIR/package.json"
 
@@ -841,6 +1007,11 @@ JSON
 
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"exceeded 2s and was killed"* ]] || { echo "$output"; false; }
+  local failure_file
+  failure_file="$(printf '%s\n' "$output" | awk '/full output saved at / { sub(/^.*full output saved at /, ""); print; exit }')"
+  [[ "$failure_file" == "$TRELLIS_GATE_STATE_DIR/failed-shards/process-gate-failure."*/output.txt ]] ||
+    { echo "timeout output path missing: $output"; false; }
+  [ -f "$failure_file" ] || { echo "timeout output was not saved: $failure_file"; false; }
   # It must not read as an ordinary nonzero exit: that sends the operator
   # hunting for a test bug that is not there.
   [[ "$output" != *"exited 124"* && "$output" != *"exited 142"* ]] ||

@@ -213,6 +213,7 @@ LLM_PROVIDER="anthropic"                    # anthropic | openai | gemini | olla
 LLM_MODEL="claude-opus-5"                   # anthropic defaults to claude-opus-5; openai/gemini/ollama require an explicit LLM_MODEL (no default)
 SECURITY_GATE_AUDIT_DIR="audits"            # default; relative to project root
 SECURITY_GATE_LLM_TIMEOUT_S=120             # per-call ceiling
+SECURITY_GATE_SEMGREP_TIMEOUT=30            # semgrep per-file rule timeout, 1-600 s; a rule that still times out blocks SAST
 
 # web-rag-llm only — declare which LLM endpoint Garak should probe.
 # SECURITY_GATE_GARAK_TARGET="openai:gpt-4o-mini"

@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
-# End-to-end delegated hooks: DOCKER_HOST is caller-owned, DOCKER_CONTEXT is not.
+# End-to-end hooks: resolve caller contexts before isolation; forward only DOCKER_HOST.
 REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 
 setup() {
+  bats_require_minimum_version 1.5.0
   ROOT="$(mktemp -d "${TMPDIR:-/tmp}/docker-host-forward.XXXXXX")"
   ROOT="$(CDPATH= cd "$ROOT" && pwd -P)"
   export HOME="$ROOT/home" TRELLIS_HOME="$ROOT/trellis-home"
@@ -49,6 +50,9 @@ prepare_pre_push() {
   cat > "$carrier" <<GATE
 #!/bin/sh
 printf 'DOCKER_HOST=%s\\n' "\${DOCKER_HOST-__UNSET__}" > "$ROOT/gate-env"
+printf 'DOCKER_CONTEXT=%s\\n' "\${DOCKER_CONTEXT-__UNSET__}" >> "$ROOT/gate-env"
+printf 'DOCKER_CONFIG=%s\\n' "\${DOCKER_CONFIG-__UNSET__}" >> "$ROOT/gate-env"
+printf 'HOME=%s\\n' "\${HOME-__UNSET__}" >> "$ROOT/gate-env"
 exit 0
 GATE
   chmod 700 "$carrier"
@@ -100,7 +104,7 @@ GATE
 
 run_prior() {
   prepare_pre_push || return 1
-  run /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
     "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
     "TMPDIR=$ROOT/tmp" "HOOK_RECORD=$RECORD" "$@" \
     /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
@@ -108,8 +112,8 @@ run_prior() {
 }
 
 run_shim() {
-  run /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
-    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
+    "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
     "HOOK_RECORD=$RECORD" "$@" \
     /bin/bash -c 'cd "$1" && "$2"' _ "$PROJECT" "$MANAGED/pre-commit"
 }
@@ -183,7 +187,7 @@ assert_hook_env() {
 run_gate() {
   prepare_pre_push || return 1
   rm -f "$ROOT/gate-env"
-  run /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
     "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
     "TMPDIR=$ROOT/tmp" "$@" \
     /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
@@ -208,4 +212,87 @@ assert_gate_env() {
 @test "gate payload receives an explicitly empty DOCKER_HOST as empty" {
   run_gate DOCKER_HOST=
   assert_gate_env ''
+}
+
+stub_docker_context() {
+  mkdir -p "$ROOT/bin"
+  printf 'unix://%s/docker.sock\n' "$ROOT" > "$HOME/docker-endpoint"
+  cat > "$ROOT/bin/docker" <<SH
+#!/bin/sh
+printf '%s\\n' "\$HOME" > "$ROOT/docker-home"
+printf '%s\\n' "\$@" > "$ROOT/docker-args"
+[ "${1:-0}" -eq 0 ] || exit 1
+/bin/cat "\$HOME/docker-endpoint"
+SH
+  chmod 700 "$ROOT/bin/docker"
+}
+
+assert_context_resolution() {
+  grep -Fx "$HOME" "$ROOT/docker-home"
+  printf '%s\n' context inspect "$1" --format '{{.Endpoints.docker.Host}}' > "$ROOT/expected-args"
+  cmp "$ROOT/expected-args" "$ROOT/docker-args"
+}
+
+@test "pre-push resolves caller DOCKER_CONTEXT before isolation" {
+  stub_docker_context
+  run_prior DOCKER_CONTEXT=colima
+  assert_hook_env "unix://$ROOT/docker.sock"
+  assert_context_resolution colima
+  [ -z "$stderr" ] || { printf 'unexpected stderr: %s\n' "$stderr"; false; }
+}
+
+@test "passthrough shim bytes remain compatible with existing husky attachments" {
+  local digest
+  digest="$(printf '%s\n' "$(_attachment_hooks_passthrough_shim_body pre-commit)" | shasum -a 256)"
+  # Pin the pre-1.3.16 bytes: shim verification is not release-versioned.
+  [ "${digest%% *}" = 36b82c9dd9a6bb366ca127f7d3ff22d30eb2ad0a907dad6da442fdf2a952369f ]
+}
+
+@test "gate receives only the resolved Docker endpoint without context metadata" {
+  stub_docker_context
+  run_gate DOCKER_CONTEXT=colima "DOCKER_CONFIG=$HOME/context-store"
+  assert_gate_env "unix://$ROOT/docker.sock"
+  assert_context_resolution colima
+  grep -Fx 'DOCKER_CONTEXT=__UNSET__' "$ROOT/gate-env"
+  grep -Fx 'DOCKER_CONFIG=__UNSET__' "$ROOT/gate-env"
+  ! grep -Fx "HOME=$HOME" "$ROOT/gate-env"
+}
+
+@test "pre-push does not resolve DOCKER_CONTEXT when DOCKER_HOST is explicitly empty" {
+  stub_docker_context
+  run_prior DOCKER_HOST= DOCKER_CONTEXT=colima
+  assert_hook_env ''
+  [ ! -e "$ROOT/docker-args" ]
+}
+
+@test "passthrough shim does not resolve DOCKER_CONTEXT when DOCKER_HOST is explicitly empty" {
+  stub_docker_context
+  run_shim DOCKER_HOST= DOCKER_CONTEXT=colima
+  assert_hook_env ''
+  [ ! -e "$ROOT/docker-args" ]
+}
+
+@test "pre-push context resolution failure warns on stderr and preserves unset host" {
+  stub_docker_context 1
+  run_prior DOCKER_CONTEXT=missing
+  assert_hook_env __UNSET__
+  assert_context_resolution missing
+  [ -z "$output" ]
+  [ "$stderr" = 'Trellis: cannot resolve Docker context "missing"; continuing without DOCKER_HOST.' ]
+}
+
+@test "pre-push context resolution failure prints one sanitized stderr line" {
+  stub_docker_context 1
+  run_prior "DOCKER_CONTEXT="$'missing\ncontext'
+  assert_hook_env __UNSET__
+  [ -z "$output" ]
+  [ "$stderr" = 'Trellis: cannot resolve Docker context "missing?context"; continuing without DOCKER_HOST.' ]
+}
+
+@test "gate continues with unset host when Docker context endpoint is empty" {
+  stub_docker_context
+  : > "$HOME/docker-endpoint"
+  run_gate DOCKER_CONTEXT=empty
+  assert_gate_env __UNSET__
+  [ "$stderr" = 'Trellis: cannot resolve Docker context "empty"; continuing without DOCKER_HOST.' ]
 }

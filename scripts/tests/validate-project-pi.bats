@@ -308,6 +308,29 @@ attach_fixture() {
   [[ "$output" == *".agents/agents/$name"* ]]
 }
 
+@test "a source-canonical skill link at the protected base passes" {
+  mkdir -p "$WT/core-rules/skills/process-gate" "$WT/.agents/skills"
+  printf -- '---\nname: process-gate\n---\n' >"$WT/core-rules/skills/process-gate/SKILL.md"
+  git -C "$WT" add -f core-rules/skills/process-gate/SKILL.md
+  git -C "$WT" commit -qm 'add protected source skill'
+  publish_base
+  ln -s ../../core-rules/skills/process-gate "$WT/.agents/skills/process-gate"
+  run "$VALIDATOR" "$WT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a source-canonical skill link absent from the protected base refuses" {
+  publish_base
+  mkdir -p "$WT/core-rules/skills/process-gate" "$WT/.agents/skills"
+  printf -- '---\nname: process-gate\n---\n' >"$WT/core-rules/skills/process-gate/SKILL.md"
+  git -C "$WT" add -f core-rules/skills/process-gate/SKILL.md
+  git -C "$WT" commit -qm 'add unprotected source skill'
+  ln -s ../../core-rules/skills/process-gate "$WT/.agents/skills/process-gate"
+  run "$VALIDATOR" "$WT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *".agents/skills/process-gate"* ]]
+}
+
 @test "a managed .agents/skills link listed in the exclude block passes" {
   mkdir -p "$TRELLIS_HOME/releases/9.9.9/payload/core-rules/skills/process-gate" "$WT/.trellis" "$WT/.agents/skills"
   ln -s "$TRELLIS_HOME/releases/9.9.9/payload" "$WT/.trellis/runtime"

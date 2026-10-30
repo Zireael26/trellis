@@ -300,15 +300,15 @@ if mutation:
         'failure': ('e["process"] is not None and observe_exit(e["process"]) == 0 for e in shards', 'e["process"] is not None for e in shards'),
         'state': ('environment["TRELLIS_GATE_STATE_DIR"] = str(run_root / "state")', 'pass'),
         'heavy': ('pass_fds=(fd, ready_read) + _heavy_fds(),', 'pass_fds=(fd, ready_read),'),
-        'preexisting': ('and _birth(entry) >= started_us}', 'and True}'),
+        'preexisting': ('and (_birth(entry) == 0 or _birth(entry) >= started_us)}', 'and True}'),
         'clock': ('bound = reconstructed', 'bound = started_us'),
         'retry': ('return read()\n\n\ndef bsd_info', 'raise ContainmentError("retry disabled")\n\n\ndef bsd_info'),
         'empty-argv': ('offset = 4 + ((offset - 4 + 1 + alignment - 1) // alignment) * alignment',
                        'offset += 1\n    while offset < len(raw) and raw[offset] == 0:\n        offset += 1'),
         'earlier-boot-root': ('_remove_run_root(data)\n                _receipt(data, 0, False)', 'pass\n                _receipt(data, 0, False)'),
         'unreadable-member': ('unreadable.add(pid)\n                continue', 'owned.add(pid)\n                continue'),
-        'unreadable-fail': ('except UnreadableProcess:\n                unreadable.add(pid)',
-                            'except UnreadableProcess:\n                raise ContainmentError("unreadable inversion")\n                unreadable.add(pid)'),
+        'unreadable-fail': ('except UnreadableProcess:\n                if _birth(table[pid]) == 0:',
+                            'except UnreadableProcess:\n                raise ContainmentError("unreadable inversion")\n                if _birth(table[pid]) == 0:'),
         'wait-reap': ('0x04 | 0x01 | 0x20', '0x04 | 0x01'),
         'registration': ('save_record(path, data)\n        os.write(ready_write, b"g")',
                          'os.write(ready_write, b"g")\n        while not (Path(os.environ["FAKE_SANDBOX"]) / "admission-view").exists():\n            time.sleep(.01)\n        save_record(path, data)'),
@@ -359,7 +359,11 @@ def fixture_table(end):
         gate._bounded(end)
         if pid <= 1 or pid not in allowed or (pid in baseline and pid not in ancestors):
             continue
-        info = gate.bsd_info(pid)
+        try:
+            info = gate._retry_pid(lambda: gate.bsd_info(pid), end)
+        except gate.ContainmentError:
+            gate._bounded(end)
+            info = gate._short_bsd_info(pid)
         if info is not None:
             result[pid] = info
     declared = {baseline_data['owner'], os.getpid()}
@@ -380,6 +384,18 @@ def fixture_table(end):
         declared.update(children)
     return {pid: info for pid, info in result.items() if pid in declared or pid in ancestors}
 gate.process_table = fixture_table
+
+# Deterministically exercise slow admission without changing production clocks.
+# Reproduction tool only, no committed test sets it: FAKE_STARTUP_DELAY=11 bats -f
+# '^synthetic supervisor and coordinator wrapper deaths' replays the slow-start path.
+if os.environ.get('FAKE_STARTUP_DELAY') and os.environ.get('FAKE_MODE') == 'signal':
+    original_capability = gate._capability
+    def delayed_capability(*args, **kwargs):
+        import time
+        gate._capability = original_capability
+        time.sleep(float(os.environ['FAKE_STARTUP_DELAY']))
+        return original_capability(*args, **kwargs)
+    gate._capability = delayed_capability
 
 original_popen = gate.subprocess.Popen
 def checked_popen(*args, **kwargs):
@@ -957,19 +973,39 @@ assert_empty() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
+fake_shards_ready() {
+  [ -s "$FAKE_CHILD_PIDS" ] && [ -f "$FAKE_INVOCATIONS" ] &&
+    [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
+}
+
 wait_ready() {
-  local attempt
-  for ((attempt=0; attempt<300; attempt++)); do
-    if [ -s "$FAKE_CHILD_PIDS" ] && [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]; then return 0; fi
-    sleep 0.02
+  local producer_pid="$1" started="$SECONDS" state
+  while ! fake_shards_ready; do
+    if ! kill -0 "$producer_pid" 2>/dev/null; then
+      fake_shards_ready && return 0
+      echo "producer $producer_pid exited before the eight fake shards were ready" >&2
+      return 1
+    fi
+    state="$(ps -p "$producer_pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+    case "$state" in
+      ""|*Z*)
+        fake_shards_ready && return 0
+        echo "producer $producer_pid exited before the eight fake shards were ready" >&2
+        return 1
+        ;;
+    esac
+    if (( SECONDS - started >= 120 )); then
+      echo "producer $producer_pid did not start the eight fake shards within 120 seconds" >&2
+      return 1
+    fi
+    sleep 0.05
   done
-  return 1
 }
 
 start_wrapper() {
   FAKE_MODE=signal python3 "$WRAPPER" > "$SANDBOX/background.out" 2>&1 &
   SIGNAL_WRAPPER_PID=$!
-  wait_ready || { cat "$SANDBOX/background.out"; false; }
+  wait_ready "$SIGNAL_WRAPPER_PID" || { cat "$SANDBOX/background.out"; false; }
 }
 
 @test "shard CPU derivation override validation and historical record paths" {
@@ -1327,13 +1363,20 @@ PY
 
 @test "synthetic supervisor and coordinator wrapper deaths do not release durable quarantine" {
   # Inversion: wrapper/holder death is mistaken for gate-owned boundary emptiness.
+  # Keep the productive budget aligned with wait_ready's 120-second backstop.
+  export TRELLIS_LOCAL_GATE_DEADLINE=125
   local role
   for role in supervisor coordinator; do
     : > "$FAKE_INVOCATIONS"; : > "$FAKE_CHILD_PIDS"
+    rm -f "$SANDBOX/runner.pid"
     FAKE_MODE=signal bash -c 'python3 "$1" & echo "$!" > "$2"; wait' \
       "$role" "$WRAPPER" "$SANDBOX/runner.pid" > "$SANDBOX/outer.out" 2>&1 &
     OUTER_PID=$!
-    wait_ready || { cat "$SANDBOX/outer.out"; false; }
+    wait_ready "$OUTER_PID" || {
+      if [ -s "$SANDBOX/runner.pid" ]; then GATE_PID="$(cat "$SANDBOX/runner.pid")"; fi
+      cat "$SANDBOX/outer.out"
+      false
+    }
     GATE_PID="$(cat "$SANDBOX/runner.pid")"
     kill -KILL "$OUTER_PID"
     wait "$OUTER_PID" || [ "$?" -eq 137 ]
@@ -1470,6 +1513,16 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
+@test "secondary environment and path reads tolerate mid-exit metadata races" {
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" SecondaryReadTests
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "fixture process scanner preserves membership on full BSD races" {
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" FixtureTableRaceTests
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
 @test "vanished process inspections cannot become preflight or teardown survivors" {
   run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -1477,6 +1530,23 @@ PY
 
 @test "live unreadable process inspections retain fail-closed containment" {
   run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "unrelated failed BSD reads use independent membership without quarantine" {
+  # Inversion: a same-UID full-info failure permanently poisons clean teardown.
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_unrelated_failed_bsd_read_does_not_quarantine
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "transient PID retries wait within the remaining containment budget" {
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_transient_retry_waits_once_without_overrunning_budget
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "partial BSD membership preserves fail-closed groups sessions and detached work" {
+  # Inversion: unknown birth is treated as pre-run, or PGID alone excludes work.
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 

@@ -8,6 +8,9 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
 . "$SKILL_DIR/scripts/lib/common.sh"
 
+# Skip rules are authority only when declared in the range-base config, not
+# supplied by the caller's environment.
+unset PROCESS_GATE_SECRETS_SKIP_PATHS
 pg_load_config "$@" || exit 1
 RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
@@ -120,6 +123,31 @@ if [ -n "$LEGACY_ALLOWLIST" ]; then
 fi
 unset _cs_rel _cs_content _cs_allow_source _cs_new_path
 
+path_glob_matches() {
+  local path="$1" pattern="$2" part="${1%%/*}" glob="${2%%/*}"
+  if [ "$glob" = '**' ]; then
+    [ "$pattern" != '**' ] || return 0
+    path_glob_matches "$path" "${pattern#*/}" && return 0
+    case "$path" in */*) path_glob_matches "${path#*/}" "$pattern" && return 0 ;; esac
+    return 1
+  fi
+  # Match one segment only; '*' and '?' cannot consume a slash.
+  # shellcheck disable=SC2053 # $glob is deliberately an unquoted pattern
+  [[ "$part" == $glob ]] || return 1
+  case "$pattern" in
+    */*) case "$path" in */*) path_glob_matches "${path#*/}" "${pattern#*/}" ;; *) return 1 ;; esac ;;
+    *) [[ "$path" != */* ]] ;;
+  esac
+}
+
+is_skipped() {
+  local pat
+  for pat in ${PROCESS_GATE_SECRETS_SKIP_PATHS[@]+"${PROCESS_GATE_SECRETS_SKIP_PATHS[@]}"}; do
+    [ -n "$pat" ] && path_glob_matches "$1" "$pat" && return 0
+  done
+  return 1
+}
+
 is_allowed() {
   local file="$1" hit="$2"
   local entry pat
@@ -136,38 +164,22 @@ is_allowed() {
   return 1
 }
 
-# .env-style file blocklist
 worst="pass"
 findings=()
 
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  case "$f" in
-    .env|.env.*|*.pem|*.key|*.keystore|*.p12|*.pfx|*/secrets/*)
-      # .env.example with placeholder values is a special case: pattern scan handles it.
-      if [ "$f" != ".env.example" ] && ! [[ "$f" == *.example ]] && ! [[ "$f" == *.sample ]] && ! [[ "$f" == *.template ]]; then
-        findings+=("$f: secret-bearing path committed")
-        worst="fail"
-      fi
-      ;;
-  esac
-done < <(pg_diff_files "$RANGE")
-
-# Pattern scan over added lines.
-#
-# Invariant: added-line lookup is built in one awk pass (file<TAB>lineno<TAB>content);
-# each pattern hit resolves its location via a single tab-delimited content-column lookup.
-# See secrets tests for file:line locator coverage.
-# SAFETY: the first form creates the required private file where template-free mktemp is supported; BSD mktemp requires the -t fallback.
-LOOKUP="$(mktemp 2>/dev/null || mktemp -t check-secrets)"
-# Preserve $? so the trap does not mask a non-zero exit from the script body.
-# shellcheck disable=SC2154  # `rc` is assigned inside the trap, which shellcheck cannot see
-trap 'rc=$?; rm -f "$LOOKUP"; exit "$rc"' EXIT
+# Paths/status come only from Git's NUL-delimited list, never text diff headers.
+# Each remaining path gets its own literal-path diff and line/content lookup.
+# An added line resembling '+++ b/...' therefore cannot change attribution.
+_cs_work="$(mktemp -d "${TMPDIR:-/tmp}/check-secrets.XXXXXX")"
+LOOKUP="$_cs_work/lookup"
+_cs_paths="$_cs_work/paths"
+umask 077
+# shellcheck disable=SC2154  # assigned inside the trap
+trap 'rc=$?; (cd "$_cs_work" && rm -f ./lookup ./paths ./err ./diff ./numstat); rmdir "$_cs_work"; exit "$rc"' EXIT
 
 # Invariant: diff failure must never be reported as an empty clean scan; unresolvable
 # range or misrouted repository aborts with a preflight failure. Capture exit status before lookup.
-# SAFETY: the first form creates the required private file where template-free mktemp is supported; BSD mktemp requires the -t fallback.
-_cs_diff_err="$(mktemp 2>/dev/null || mktemp -t check-secrets-err)"
+_cs_diff_err="$_cs_work/err"
 # `if !` rather than a bare call: under `set -e` a failing git aborts the script
 # before the diagnostic below can run, which fails closed but says nothing.
 # `|| _cs_diff_rc=$?` rather than `if ! ...; then _cs_diff_rc=$?`: inside the
@@ -184,13 +196,56 @@ if [ "$_cs_diff_rc" -ne 0 ]; then
 fi
 rm -f "$_cs_diff_err"
 
+if ! git diff --no-renames --name-status -z "$RANGE" > "$_cs_paths"; then
+  pg_log fail "Secrets (range=$RANGE): changed paths unavailable; scan did not run"
+  exit 1
+fi
+
+while IFS= read -r -d '' _cs_change; do
+  if ! IFS= read -r -d '' file; then
+    pg_log fail "Secrets (range=$RANGE): scan incomplete; malformed changed-path record"
+    exit 1
+  fi
+  case "$_cs_change" in
+    A|M|D|T|U|X|B) ;;
+    *) pg_log fail "Secrets (range=$RANGE): scan incomplete; unknown changed-path status"; exit 1 ;;
+  esac
+  is_skipped "$file" && continue
+  case "$file" in
+    .env|.env.*|*.pem|*.key|*.keystore|*.p12|*.pfx|*/secrets/*)
+      if [ "$file" != .env.example ] && ! [[ "$file" == *.example ]] && ! [[ "$file" == *.sample ]] && ! [[ "$file" == *.template ]]; then
+        findings+=("$file: secret-bearing path committed")
+        worst=fail
+      fi
+      ;;
+  esac
 _cs_lookup_pipeline_rc=0
-git diff --no-color --unified=0 "$RANGE" \
-  | awk 'BEGIN{file=""; line=0} \
-      /^\+\+\+ b\// {file=substr($0,7); next} \
-      /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; next} \
-      /^\+/ && !/^\+\+\+/ {printf "%s\t%d\t%s\n", file, line, substr($0,2); line++}' \
-  > "$LOOKUP" || _cs_lookup_pipeline_rc=$?
+git diff --no-color --unified=0 "$RANGE" -- ":(top,literal)$file" \
+  > "$_cs_work/diff" || _cs_lookup_pipeline_rc=$?
+if [ "$_cs_lookup_pipeline_rc" -eq 0 ]; then
+  case "$_cs_change" in
+    A|M)
+      if [ ! -s "$_cs_work/diff" ]; then
+        # Metadata-only/empty-text changes still have diff headers. Only a
+        # positively identified binary path may lack a text diff here.
+        if ! git diff --numstat -z "$RANGE" -- ":(top,literal)$file" > "$_cs_work/numstat"; then
+          pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot classify $file"
+          exit 1
+        fi
+        _cs_numstat=""
+        IFS= read -r -d '' _cs_numstat < "$_cs_work/numstat" || _cs_numstat=""
+        case "$_cs_numstat" in
+          $'-\t-\t'*) ;;
+          *) pg_log fail "Secrets (range=$RANGE): scan incomplete; added/modified path has no diff: $file"; exit 1 ;;
+        esac
+      fi
+      ;;
+  esac
+  awk 'BEGIN{line=0; hunk=0}
+      /^@@ / {match($0, /\+[0-9]+/); line=substr($0,RSTART+1,RLENGTH-1)+0; hunk=1; next}
+      hunk && /^\+/ {printf "%d\t%s\n", line, substr($0,2); line++}' \
+    "$_cs_work/diff" > "$LOOKUP" || _cs_lookup_pipeline_rc=$?
+fi
 if [ "$_cs_lookup_pipeline_rc" -ne 0 ]; then
   printf 'check-secrets: could not build the added-line lookup for range %s (pipeline exit %s) — refusing to report a verdict\n' \
     "$RANGE" "$_cs_lookup_pipeline_rc" >&2
@@ -199,7 +254,7 @@ if [ "$_cs_lookup_pipeline_rc" -ne 0 ]; then
 fi
 
 _cs_lookup_parse_rc=0
-added_lines="$(awk -F'\t' '{print "+"$3}' "$LOOKUP")" || _cs_lookup_parse_rc=$?
+added_lines="$(awk '{sub(/^[^\t]*\t/, ""); print "+"$0}' "$LOOKUP")" || _cs_lookup_parse_rc=$?
 if [ "$_cs_lookup_parse_rc" -ne 0 ]; then
   printf 'check-secrets: could not parse the added-line lookup for range %s (awk exit %s) — refusing to report a verdict\n' \
     "$RANGE" "$_cs_lookup_parse_rc" >&2
@@ -212,12 +267,9 @@ if [ -n "$added_lines" ]; then
     # Use `--` so patterns that start with `-` don't get parsed as flags by BSD grep
     while IFS= read -r hit; do
       [ -z "$hit" ] && continue
-      # Resolve file:line via fixed-string lookup against the content column.
-      # First match wins to preserve prior behavior.
-      loc="$(awk -F'\t' -v h="$hit" 'index($3, h) {print $1":"$2; exit}' "$LOOKUP")"
-      file="${loc%%:*}"
-      lineno="${loc##*:}"
-      if [ -n "${file:-}" ] && is_allowed "$file" "$hit"; then
+      # The file is the literal Git path being scanned, never parsed content.
+      lineno="$(awk -F'\t' -v h="$hit" 'index(substr($0,index($0,"\t")+1), h) {print $1; exit}' "$LOOKUP")"
+      if is_allowed "$file" "$hit"; then
         continue
       fi
       findings+=("${file:-?}:${lineno:-?} — $name")
@@ -225,6 +277,7 @@ if [ -n "$added_lines" ]; then
     done < <(printf "%s" "$added_lines" | grep -oE -- "$regex" | sort -u)
   done < <(printf "%s\n" "${PATTERNS[@]}")
 fi
+done < "$_cs_paths"
 
 case "$worst" in
   pass) pg_log pass "Secrets (range=$RANGE)" ;;

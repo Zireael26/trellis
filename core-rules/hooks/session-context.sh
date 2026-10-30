@@ -495,9 +495,10 @@ _se_wt_registry_valid() {
       and ((keys_unsorted - ($required + $optional)) | length == 0)
       and (($required - keys_unsorted) | length == 0);
     def discovery_ignore:
-      closed(["path", "reason"]; [])
+      closed(["path", "reason"]; ["legacy_path"])
       and (.path | safe_path)
-      and (.reason | safe_text and length > 0);
+      and (.reason | safe_text and length > 0)
+      and ((has("legacy_path") | not) or (.legacy_path | safe_path));
     def worktree:
       closed(["root"]; ["attachment_id"])
       and (.root | safe_path)
@@ -884,7 +885,9 @@ _se_wt_release_verify() (
     fi
     actual_oid="$(_se_wt_blob_oid "$full")" || return 1
     [ "$actual_oid" = "$oid" ] || return 1
-    _se_wt_readonly "$full" || return 1
+    # A symlink's own mode is meaningless (macOS reports the link's 0700, Linux
+    # 0777); the read-only parent directory checked below is what pins it.
+    [ "$actual_mode" = 120000 ] || _se_wt_readonly "$full" || return 1
     printf '%s\n' "$path" >> "$tmp/manifest.paths"
     rel="$path"
     while [ "${rel%/*}" != "$rel" ]; do
@@ -1004,7 +1007,7 @@ _se_wt_diagnose() (
 
 _se_worktree_warn="$(_se_wt_diagnose 3>&2 2>/dev/null || printf 'WARN\n')"
 if [ "${_se_worktree_warn:-}" = "WARN" ]; then
-  _se_wt_msg="Trellis attachment is missing in this opted-in worktree. Harness discovery already ran, so no repair was attempted. Reconcile with \`trellis worktree sync\` (or recreate through \`trellis worktree add\`) and restart this session."
+  _se_wt_msg="Trellis attachment is missing in this opted-in worktree. Harness discovery already ran, so no repair was attempted. Report this finding to the operator; do not run attachment repair commands from this session."
   CTX="${_se_wt_msg}
 
 ${CTX}"

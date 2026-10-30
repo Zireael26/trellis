@@ -7,9 +7,10 @@ setup() {
   SANDBOX="$BATS_TEST_TMPDIR/spec-gate"
   REPO_DIR="$SANDBOX/repo"
   RUNTIME="$SANDBOX/runtime"
+  export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/trellis-home"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR
-  mkdir -p "$REPO_DIR" "$RUNTIME/core-rules/hooks/lib" \
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$REPO_DIR" "$RUNTIME/core-rules/hooks/lib" \
     "$RUNTIME/core-rules/codex/hooks" "$RUNTIME/core-rules/skills/process-gate/scripts/lib" || return 1
   cp "$SOURCE/core-rules/hooks/spec-gate.sh" "$RUNTIME/core-rules/hooks/" || return 1
   cp "$SOURCE/core-rules/codex/hooks/spec-gate.sh" "$RUNTIME/core-rules/codex/hooks/" || return 1
@@ -20,6 +21,9 @@ setup() {
   GATE="$RUNTIME/core-rules/hooks/spec-gate.sh"
   CODEX_GATE="$RUNTIME/core-rules/codex/hooks/spec-gate.sh"
   cd "$REPO_DIR" || return 1
+  # Hand-written legacy/ref markers must bind the same physical root as the
+  # real writer, not the caller's possibly symlinked TMPDIR spelling.
+  REPO_DIR="$(pwd -P)" || return 1
   git init -q -b main || return 1
   git config user.email t@t.invalid || return 1
   git config user.name t || return 1
@@ -267,6 +271,26 @@ foreign_marker() {
   printf '%s\n' feature/x "$REPO_DIR" "${2:-$M0}" "$XTIP" ref-session "$1" R21 > .claude/session-surgical || return 1
 }
 
+@test "R21 marker fixtures survive a symlinked temp directory in both twins" {
+  mkdir -p "$BATS_TEST_TMPDIR/physical" || return 1
+  ln -s "$BATS_TEST_TMPDIR/physical" "$BATS_TEST_TMPDIR/linked" || return 1
+  (
+    export BATS_TEST_TMPDIR="$BATS_TEST_TMPDIR/linked"
+    setup || return 1
+    foreign_ref no-triad || return 1
+    local gate mode
+    for gate in "$GATE" "$CODEX_GATE"; do
+      for mode in surgical emergency; do
+        foreign_marker "$mode" || return 1
+        run bash "$gate" --gate --ref feature/x --head "$XTIP" --range "$M0..$XTIP"
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+        receipt "$M0" "$output" feature/x || return 1
+      done
+    done
+    grep -Fq $'emergency-override\tfeature/x\tdiff=120\tR21' .claude/spec-gate-audit.log || return 1
+  ) || return 1
+}
+
 @test "R21 ref alone judges X, not the sub-floor checked-out Y" {
   foreign_ref no-triad || return 1
   run bash "$GATE" --gate --ref feature/x
@@ -429,4 +453,31 @@ foreign_marker() {
   receipt "$M0" "$output" feature/x || { echo "$output"; return 1; }
   [[ "$output" == *"range=${M0:0:12}..${XTIP:0:12}"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *'over floor 80'* ]] || { echo "$output"; return 1; }
+}
+
+@test "spec-gate follows origin HEAD rather than the runtime main default in both twins" {
+  git checkout -qb feat/slice-1-contracts main || return 1
+  jq 'del(.template)' .trellis.json > "$SANDBOX/project-policy.json" || return 1
+  mv "$SANDBOX/project-policy.json" .trellis.json || return 1
+  lines src/contracts.js 120 || return 1
+  git add -A || return 1
+  git commit -qm 'remote default contracts' || return 1
+  local trunk gate
+  trunk="$(git rev-parse HEAD)" || return 1
+  git update-ref refs/remotes/origin/feat/slice-1-contracts "$trunk" || return 1
+  git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/feat/slice-1-contracts || return 1
+  printf '{"template":{"branch":"main"}}\n' > "$RUNTIME/trellis.config.json" || return 1
+  git checkout -qb feature/b || return 1
+  git config branch.feature/b.trellisParent main || return 1
+  git config branch.feature/b.trellisBase "$M0" || return 1
+  lines src/child.js 20 || return 1
+  git add -A || return 1
+  git commit -qm 'small child on remote default' || return 1
+
+  for gate in "$GATE" "$CODEX_GATE"; do
+    run bash "$gate" --gate
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    receipt "$trunk" "$output" || { echo "$output"; return 1; }
+    [[ "$output" == *'origin/feat/slice-1-contracts via default (parent main merged → default)'* ]] || { echo "$output"; return 1; }
+  done
 }

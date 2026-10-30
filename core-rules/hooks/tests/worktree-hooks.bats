@@ -283,6 +283,44 @@ run_remove() {
   run_with_stderr "$REMOVE_HOOK" "$(remove_input "$1")"
 }
 
+remove_background_pid() {
+  local pid
+  pid="$(printf '%s\n' "$stderr" | sed -nE 's/.*continue in the background \(pid ([0-9]+)\); log:.*/\1/p' | tail -n 1)"
+  [ -n "$pid" ] || { echo "background remover pid missing from hook diagnostic" >&2; return 1; }
+  printf '%s\n' "$pid"
+}
+
+wait_for_remove_event() {
+  local producer_pid="$1" event="$2" started="$SECONDS" state
+  shift 2
+  while ! "$@"; do
+    if ! kill -0 "$producer_pid" 2>/dev/null; then
+      "$@" && return 0
+      echo "background remover $producer_pid exited before $event" >&2
+      [ "$1" != log_has ] || { echo "observed log contents:" >&2; cat "$2" >&2; }
+      return 1
+    fi
+    state="$(ps -p "$producer_pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+    case "$state" in
+      ""|*Z*)
+        "$@" && return 0
+        echo "background remover $producer_pid exited before $event" >&2
+        [ "$1" != log_has ] || { echo "observed log contents:" >&2; cat "$2" >&2; }
+        return 1
+        ;;
+    esac
+    if (( SECONDS - started >= 120 )); then
+      echo "background remover $producer_pid did not reach $event within 120 seconds" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+path_missing() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+branch_missing() { ! branch_exists "$1"; }
+log_has() { grep -qF -- "$2" "$1" 2>/dev/null; }
+
 # make_cc NAME — a cc-<name> worktree through the create hook (unregistered).
 make_cc() {
   run_create "$1"
@@ -481,13 +519,11 @@ STUB
   run_remove "$WT"
 
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
-  local tries=0
-  while [ -e "$WT" ] && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
-  [ ! -e "$WT" ]
+  local producer_pid
+  producer_pid="$(remove_background_pid)"
+  wait_for_remove_event "$producer_pid" "worktree removal" path_missing "$WT"
   [ "$(cat "$SANDBOX/trellis-calls")" = "detach $WT" ]
-  tries=0
-  while branch_exists worktree-feat1 && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
-  if branch_exists worktree-feat1; then echo "branch survived"; false; fi
+  wait_for_remove_event "$producer_pid" "branch deletion" branch_missing worktree-feat1
 }
 
 @test "A7.2: an attached worktree with an unowned ignored file is refused before detach" {
@@ -503,7 +539,9 @@ STUB
   [ -d "$WT" ]
   [[ "$stderr" == *".env.local"* ]]
   [[ "$stderr" != *".trellis-leaf"* ]]
-  sleep 1
+  local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
+  grep -qF "kept $WT: ignored, not regenerable: .env.local" "$log"
+  [[ "$stderr" != *"continue in the background"* ]]
   [ ! -e "$SANDBOX/trellis-calls" ]
 }
 
@@ -518,10 +556,10 @@ STUB
 
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
-  local tries=0
-  while ! grep -q 'kept' "$log" 2>/dev/null && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
+  local producer_pid
+  producer_pid="$(remove_background_pid)"
+  wait_for_remove_event "$producer_pid" "the detach-failure log entry" log_has "$log" kept
   grep -q 'detach refused' "$log"
-  grep -q 'kept' "$log"
   [ -d "$WT" ]
   branch_exists worktree-feat1
 }
@@ -631,8 +669,9 @@ fake_sync() {
 
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
-  local tries=0
-  while ! grep -q 'kept' "$log" 2>/dev/null && [ "$tries" -lt 80 ]; do sleep 0.1; tries=$((tries + 1)); done
+  local producer_pid
+  producer_pid="$(remove_background_pid)"
+  wait_for_remove_event "$producer_pid" "the background ignored-file check" log_has "$log" kept
   grep -q 'ignored, not regenerable: .env.local' "$log"
   [ "$(cat "$WT/.env.local")" = "SECRET=1" ]
 }
@@ -645,8 +684,9 @@ fake_sync() {
 
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
-  local tries=0
-  while ! grep -q 'kept' "$log" 2>/dev/null && [ "$tries" -lt 50 ]; do sleep 0.1; tries=$((tries + 1)); done
+  local producer_pid
+  producer_pid="$(remove_background_pid)"
+  wait_for_remove_event "$producer_pid" "the pending-sync timeout log entry" log_has "$log" kept
   grep -q 'still running' "$log"
   [ -d "$WT" ]
 }
@@ -685,8 +725,9 @@ STUB
 
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
-  local tries=0
-  while ! grep -q 'kept' "$log" 2>/dev/null && [ "$tries" -lt 80 ]; do sleep 0.1; tries=$((tries + 1)); done
+  local producer_pid
+  producer_pid="$(remove_background_pid)"
+  wait_for_remove_event "$producer_pid" "the owned-list re-check" log_has "$log" kept
   grep -q 'ignored, not regenerable: local.db' "$log"
   if grep -q 'ignored, not regenerable: .trellis-leaf' "$log"; then false; fi
   [ -d "$WT" ]

@@ -156,8 +156,8 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
 {
   "lastChangelogVersion": "1.1.0",
   "theme": "dark",
-  "defaultProvider": "opencode",
-  "defaultModel": "muse-spark-1.3-contributor-free",
+  "defaultProvider": "opencode-go-2",
+  "defaultModel": "muse-spark-1.3-contributor",
   "packages": [
     "npm:@tintinweb/pi-subagents",
     "npm:@narumitw/pi-codex-compact@0.54.0",
@@ -177,12 +177,10 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
   "shellCommandPrefix": "if [ -d \"${TRELLIS_PI_TMPDIR:-}\" ]; then export TMPDIR=\"$TRELLIS_PI_TMPDIR\"; fi",
   "modelThinkingLevels": {
     "openai-codex/gpt-6-luna": "max",
-    "openai-codex/gpt-6-sol": "high",
+    "openai-codex/gpt-6.1-sol": "high",
     "openai-codex/gpt-6-astra": "high",
     "openai-codex/gpt-5.3-codex-spark": "xhigh",
-    "opencode/ling-3.0-flash-fin-free": "high",
     "openrouter/minimax/minimax-m3:free": "high",
-    "opencode/muse-spark-1.3-contributor-free": "xhigh",
     "opencode-go/muse-spark-1.3-contributor": "xhigh",
     "opencode-go-2/muse-spark-1.3-contributor": "xhigh",
     "antigravity/gemini-3.8-flash": "high"
@@ -294,14 +292,15 @@ raw = (agent / "settings.json").read_bytes()
 assert raw == (json.dumps(json.loads(raw), indent=2) + "\n").encode(), "settings.json: not the step-2 rendering"
 settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
 assert settings["modelThinkingLevels"]["openai-codex/gpt-6-luna"] == "max", settings
-assert settings["defaultModel"] == "muse-spark-1.3-contributor-free", settings
+assert settings["defaultProvider"] == "opencode-go-2", settings
+assert settings["defaultModel"] == "muse-spark-1.3-contributor", settings
 assert settings["extensions"] == ["-builtin:mcp"], settings
 print(f"settings.json keys={len(settings)} thinking_levels={len(settings['modelThinkingLevels'])}")
 PY
 pi list
 ```
 
-Expected: `settings-packages=3`, three exact npm `name@version` lines, `local:opencode-go-2.ts=ready`, `local:trellis-web-search.ts=ready`, `local:omp-statusline=0.50.0-omp.1`, `settings.json keys=17 thinking_levels=10`, and the three npm packages under `User packages`. Local `.ts` files are auto-discovered and therefore do not appear in `pi list`; the forked statusline directory is auto-discovered via its `package.json` `pi.extensions` entry. Runtime registration is verified in step 8 after its Keychain-backed environment variable exists.
+Expected: `settings-packages=3`, three exact npm `name@version` lines, `local:opencode-go-2.ts=ready`, `local:trellis-web-search.ts=ready`, `local:omp-statusline=0.50.0-omp.1`, `settings.json keys=17 thinking_levels=8`, and the three npm packages under `User packages`. Local `.ts` files are auto-discovered and therefore do not appear in `pi list`; the forked statusline directory is auto-discovered via its `package.json` `pi.extensions` entry. Runtime registration is verified in step 8 after its Keychain-backed environment variable exists.
 
 `trellis-web-search.ts` is not the opt-in grounding adapter under `core-rules/pi/web-search/` ([Web search in Pi](docs/pi-web-search.md)); both register the tool name `trellis_web_search`. This one is always loaded and asks pi's model registry for the `antigravity` credential at call time, so it works after step 5. It allows 20 calls per pi process by default (`TRELLIS_WEB_SEARCH_MAX_CALLS`, 1-100), one at a time, each under a 90 s deadline. Load the opt-in adapter with `-e` only in a profile that does not carry this file.
 
@@ -337,7 +336,7 @@ Expected: three `keychain:...=ready` lines. No key value is printed.
 
 ## 4. Configure command-backed API-key entries in `auth.json`
 
-Keep the three API-key bytes in Keychain. Merge these four objects into `~/.pi/agent/auth.json`; do not replace OAuth objects already present. Both `opencode` (used by `cheap-ro`) and `opencode-go` use account 1. The local `opencode-go-2` provider reads `OPENCODE_GO_2_API_KEY` at runtime, while the matching command-backed entry keeps the provider/account mapping explicit in the auth store.
+Keep the three API-key bytes in Keychain. Merge these four objects into `~/.pi/agent/auth.json`; do not replace OAuth objects already present. The legacy `opencode` and `opencode-go` auth entries use account 1; shipped `cheap-ro` now uses `opencode-go-2`. The local `opencode-go-2` provider reads `OPENCODE_GO_2_API_KEY` at runtime, while the matching command-backed entry keeps the provider/account mapping explicit in the auth store.
 
 ```json
 {
@@ -654,7 +653,11 @@ One Markdown file per agent, YAML frontmatter then a plain-prose body that is th
 | `tools` | comma-separated | read-only seats: `read, grep, find, ls` — nothing else |
 | `model` | `<provider>/<model-id>` | `<provider>` must match a provider id in your `auth.json` from step 4 |
 | `thinking` | `max` | |
-| `isolation` | `off` or `worktree` | read-only: `off`, stated explicitly. Mutating: `worktree` |
+| `isolation` | `off` or omitted | read-only: `off`, stated explicitly. Mutating: omit the field so the caller decides |
+
+Mutating seats omit the `isolation` field rather than forcing either `off` or
+`worktree`. Request the appropriate isolation on each invocation; the agent-file
+field takes precedence over a caller's choice when present.
 
 Never set `isolated: true` on any agent — see the reasoning section below.
 
@@ -678,9 +681,10 @@ Do not commit, push, or merge.
 Yield: findings, evidence checked, residual uncertainty.
 ```
 
-Mutating seat: same shape with `tools: read, grep, find, ls, bash, edit, write` and `isolation: worktree`.
+Mutating seat: same shape with `tools: read, grep, find, ls, bash, edit, write`
+and no `isolation` field. The caller selects `off` or `worktree` for that unit.
 
-A useful roster is a small matrix — one read-only and one mutating seat per provider account you hold, plus a dedicated `security-reviewer` that is always read-only. Name the read-only ones with a `-ro` suffix and the mutating ones `-rw`; the verify below keys off that convention.
+A useful roster is a small matrix — one read-only and one mutating seat per provider account you hold, plus a dedicated `security-reviewer` that is always read-only. Name the read-only ones with a `-ro` suffix and the mutating ones `-rw`; the verification below checks tool capabilities as well as the read-only naming convention.
 
 ### Materialize before launch
 
@@ -717,15 +721,17 @@ for src in source_files:
     text = src.read_text(encoding="utf-8")
     assert f"\nname: {src.stem}\n" in text, f"name must equal the filename stem: {src.name}"
     assert "\nisolated: true\n" not in text, f"isolated:true unloads extensions: {src.name}"
-    if src.stem.endswith("-ro") or src.stem == "security-reviewer":
+    tools = next(line for line in text.splitlines() if line.startswith("tools:"))
+    tools = tools.split(":", 1)[1].replace(",", " ").split()
+    if (src.stem.endswith("-ro") or src.stem == "security-reviewer"
+            or not ("write" in tools or "edit" in tools)):
         assert "\nisolation: off\n" in text, f"read-only isolation veto absent: {src.name}"
-        tools = next(line for line in text.splitlines() if line.startswith("tools:"))
         for forbidden in ("bash", "write", "edit"):
-            assert forbidden not in tools.split(":", 1)[1].replace(",", " ").split(), (
-                f"read-only tool {forbidden} present: {src.name}"
-            )
+            assert forbidden not in tools, f"read-only tool {forbidden} present: {src.name}"
     else:
-        assert "\nisolation: worktree\n" in text, f"mutating worktree policy absent: {src.name}"
+        assert not any(line.startswith("isolation:") for line in text.splitlines()), (
+            f"mutating isolation must remain caller-owned: {src.name}"
+        )
 print(f"discovery=.agents/agents source={len(source_files)} materialized={len(source_files)} boundaries=pass")
 PY
 ```
@@ -923,9 +929,23 @@ Each line below names the measured failure, not a preference.
 
 **Demonstration:** step 9 fails if any read-only file omits the explicit veto.
 
+### Mutating agents leave isolation to the caller
+
+**Customization:** omit `isolation` from mutating agent files; the invocation
+chooses `off` or `worktree`. Keep read-only seats' explicit `off` veto.
+
+**What breaks without it:** `agentConfig?.isolation ?? params.isolation` gives
+agent metadata precedence, so a mutating file pinned to `worktree` defeats an
+explicit caller request to work in the current checkout. Replacing it with
+`off` would make the opposite choice equally impossible.
+
+**Demonstration:** step 9's verification accepts verbatim copied mutating
+metadata only when it leaves this field absent.
+
 ### No agent uses `isolated: true`
 
-**Customization:** use `isolation: off` or `isolation: worktree`; never add `isolated: true`.
+**Customization:** read-only seats use `isolation: off`; mutating seats omit
+`isolation` and callers choose it. Never add `isolated: true`.
 
 **What breaks without it:** `agent-runner.ts:636` forces `extensions: false`, unloading every extension for that child, including the subagent surface the harness depends on.
 
