@@ -6,6 +6,18 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-02
+
+**Hotfix.** On 1.4.0, every pi tool call in an attached project was refused with "Trellis guard rules are unavailable". pi loads the extension through the worktree's `.pi/extensions/trellis.ts` symlink, and the guard-rule loader resolved `../../hooks/rules/` from that link, which lands in `<worktree>/hooks/rules`. Claude Code and Codex hooks were unaffected.
+
+### Fixed
+
+- `core-rules/pi/extensions/trellis.ts`: `guardRulesDirectory()` resolves the extension's real path before locating `core-rules/hooks/rules`, so the rules load from the release payload whatever link pi used. The guards stay fail-closed; only the lookup changed.
+
+### Tests
+
+- `core-rules/pi/tests/guard-rules-symlink.test.mjs` loads the extension's rules through the attached symlink chain. Reverting the fix fails it.
+
 ## [1.4.0] - 2026-11-01
 
 **Highlights.** 1.4.0 removes most of the waiting Trellis adds to agent work, without dropping a check (spec 072). Guards decide in process or with shell builtins, the launcher and session start stop re-hashing an unchanged release, checkouts skip reconciles they do not need, a passing Stop is reused on an unchanged tree, a second gate queues instead of failing "state busy", and branch pushes can select covering test suites from the range base. `trellis bench` measures all of it on your own machine. The gains ship in the payload and the launcher; `docs/UPGRADING.md` covers the launcher reinstall, the Claude Code floor and rollback. It also moves Trellis's Herdr integration to the Herdr desktop app's core, `hc` (spec 073): the old `herdr` CLI is no longer supported.

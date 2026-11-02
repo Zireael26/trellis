@@ -819,6 +819,19 @@ render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
 
+## `1.4.0` → `1.4.1` adoption
+
+1.4.1 fixes one 1.4.0 regression: pi lanes in attached projects refused every tool call ("Trellis guard rules are unavailable"). The launcher is unchanged, so no launcher reinstall is needed.
+
+```sh
+trellis release install 1.4.1 && trellis release verify 1.4.1
+trellis configure --release 1.4.1
+trellis release adopt 1.4.1 --all
+trellis doctor
+```
+
+Restart running pi sessions so they load the fixed extension. Roll back with `trellis release adopt 1.4.0 --all`; that brings the regression back for pi lanes.
+
 ## `1.3.21` → `1.4.0` adoption
 
 1.4.0 removes most of the latency Trellis adds to agent work (spec 072) and

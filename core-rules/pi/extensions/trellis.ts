@@ -1,5 +1,5 @@
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type {
@@ -80,7 +80,14 @@ function compileExemption(exempt: GuardExemption, ignoreCase: boolean) {
   };
 }
 
-export function loadGuardRules(directory = fileURLToPath(new URL("../../hooks/rules/", import.meta.url))) {
+// pi loads an attached project's extension through its .pi/extensions symlink,
+// so import.meta.url names the symlink, not the release file. Resolve it first:
+// the rules live beside the real file, under the release's core-rules/hooks.
+export function guardRulesDirectory(moduleUrl: string | URL = import.meta.url) {
+  return resolve(dirname(realpathSync(fileURLToPath(moduleUrl))), "../../hooks/rules");
+}
+
+export function loadGuardRules(directory = guardRulesDirectory()) {
   const destructive = JSON.parse(readFileSync(resolve(directory, "destructive.json"), "utf8"));
   const reread = JSON.parse(readFileSync(resolve(directory, "reread.json"), "utf8"));
   checkKeys(destructive, ["schema_version", "guard", "description", "semantics", "rules"]);
