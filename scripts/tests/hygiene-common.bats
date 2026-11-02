@@ -614,7 +614,7 @@ SH
 
   run_janitor_from "$REPO_ROOT/scripts" --report --scopes caches,bogus
   [ "$status" -eq 2 ]
-  [[ "$output" == *"valid: caches, worktrees, stores, docker, releases, pi, orphans, logs, tmp, transcripts"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"valid: caches, worktrees, stores, docker, releases, release-tmp, pi, orphans, logs, tmp, transcripts"* ]] || { echo "$output"; false; }
 }
 
 @test "janitor calls both lane libraries from its scan, render and apply sites" {

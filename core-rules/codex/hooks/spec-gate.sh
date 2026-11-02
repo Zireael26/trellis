@@ -18,6 +18,8 @@
 # Codex Stop block contract: stdout JSON on exit 0 (exit 2 needs a stderr prompt).
 # Set outside the shared prefix below.
 _SG_STOP_BLOCK_EXIT=0
+_SG_HARNESS=codex
+[ "${TRELLIS_HARNESS:-codex}" = "pi" ] && _SG_HARNESS=pi
 DIR=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 _sg_rt=$(unset CDPATH; [ -n "${TRELLIS_ROOT:-}" ] && cd -P -- "$TRELLIS_ROOT" 2>/dev/null && pwd -P)
 _sg_core="$DIR/lib/spec-gate-core.sh"
@@ -76,6 +78,19 @@ if [ "${1:-}" = "--mark" ] || [ "${1:-}" = "--mark-emergency" ]; then
   exit 1
 fi
 
+# Stop-hook pass cache (spec 072 U8, see sg_stop_cache_key). The CLI modes
+# never read it; a hit is a pass the full path would also give.
+_sg_cache="" _sg_key=""
+if [ -z "${1:-}" ] && command -v _se_stop_receipt_match >/dev/null 2>&1 \
+   && _sg_cache=$(sg_stop_cache_file "$PWD" "$_SG_HARNESS") && _sg_key=$(sg_stop_cache_key "$PWD"); then
+  if _se_stop_receipt_match "$_sg_cache" "$_sg_key"; then
+    cat >/dev/null 2>&1 || true
+    exit 0
+  fi
+else
+  _sg_key=""
+fi
+
 verdict_line=$(sg_verdict "$PWD" "${SG_REQUEST_RANGE:-}" "${SG_REQUEST_REF:-}" "${SG_REQUEST_HEAD:-}")
 verdict=${verdict_line%%$'\t'*}
 reason=${verdict_line#*$'\t'}
@@ -121,5 +136,11 @@ case "$verdict" in
     # Codex reads the JSON decision only on exit 0; exit 2 reads stderr instead.
     exit 0 ;;
   *)
+    if [ "$verdict" = pass ] && [ -n "$_sg_key" ]; then
+      case "$reason" in
+        *surgical-marker) ;;
+        *) _se_stop_receipt_write "$_sg_cache" "$_sg_key" "spec-gate ${reason##*$'\n'}" ;;
+      esac
+    fi
     exit 0 ;;
 esac

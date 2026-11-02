@@ -22,6 +22,26 @@
       "type": "integer",
       "minimum": 1
     },
+    "projects": {
+      "description": "Per-project host settings, keyed by the physical path of the project's main checkout (spec 072). Only the Stop hook reads and types it, so a bad value disables only that setting. Honoured only while this file is owned by the current user with mode 0600 or stricter, in a directory with no group or other write bit.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "stop_checks": {
+            "type": "object",
+            "properties": {
+              "fast": {
+                "description": "A faster suite that replaces the Stop hook's detected test step for this project. Runs from the project root; never reused; the merge gate ignores it.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              }
+            }
+          }
+        }
+      }
+    },
     "fleets": {
       "type": "object",
       "minProperties": 1,

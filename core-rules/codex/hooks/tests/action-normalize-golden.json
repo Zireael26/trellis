@@ -1,0 +1,1318 @@
+[
+  {
+    "name": "stream ''",
+    "phase": "pre_action",
+    "input": "",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream 'null'",
+    "phase": "pre_action",
+    "input": "null",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '42'",
+    "phase": "pre_action",
+    "input": "42",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '\"scalar\"'",
+    "phase": "pre_action",
+    "input": "\"scalar\"",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream 'true'",
+    "phase": "pre_action",
+    "input": "true",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '[]'",
+    "phase": "pre_action",
+    "input": "[]",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '[{}]'",
+    "phase": "pre_action",
+    "input": "[{}]",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '{'",
+    "phase": "pre_action",
+    "input": "{",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '{\"a\":1}\\n{\"a\":2}'",
+    "phase": "pre_action",
+    "input": "{\"a\":1}\n{\"a\":2}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '{\"a\":1}{\"a\":2}'",
+    "phase": "pre_action",
+    "input": "{\"a\":1}{\"a\":2}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '{\"a\":1}\\n{'",
+    "phase": "pre_action",
+    "input": "{\"a\":1}\n{",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "stream '{}'",
+    "phase": "pre_action",
+    "input": "{}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"\",\"cwd\":\"\",\"session_id\":null,\"turn_id\":null,\"action\":{\"id\":null,\"tool_name\":\"\",\"family\":\"unknown\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "stream '{\"tool_name\":\"Read\"}'",
+    "phase": "pre_action",
+    "input": "{\"tool_name\":\"Read\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"\",\"cwd\":\"\",\"session_id\":null,\"turn_id\":null,\"action\":{\"id\":null,\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "stream ' \\n{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"x\"}}\\n\\n'",
+    "phase": "pre_action",
+    "input": " \n{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"x\"}}\n\n",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"\",\"cwd\":\"\",\"session_id\":null,\"turn_id\":null,\"action\":{\"id\":null,\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"a.py\", \"old_string\": \"x\", \"new_string\": \"y\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"file_path\":\"a.py\",\"old_string\":\"x\",\"new_string\":\"y\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"a.py\", \"old_string\": \"x\", \"new_string\": \"y\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"file_path\":\"a.py\",\"old_string\":\"x\",\"new_string\":\"y\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit camel path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"filePath\": \"b.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"b.py\"}],\"input\":{\"filePath\":\"b.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit camel path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"filePath\": \"b.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"b.py\"}],\"input\":{\"filePath\":\"b.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit plain path key (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"path\": \"c.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"c.py\"}],\"input\":{\"path\":\"c.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit plain path key (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"path\": \"c.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"c.py\"}],\"input\":{\"path\":\"c.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit file_path null falls through (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": null, \"path\": \"d.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"d.py\"}],\"input\":{\"file_path\":null,\"path\":\"d.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit file_path null falls through (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": null, \"path\": \"d.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"d.py\"}],\"input\":{\"file_path\":null,\"path\":\"d.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit numeric path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": 5}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":5},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "edit numeric path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": 5}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":5},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit control char path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"bad\\u0001name.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"bad\\u0001name.py\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "edit control char path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"bad\\u0001name.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"bad\\u0001name.py\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit del char path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"bad\u007fname.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"bad\\u007fname.py\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "edit del char path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"bad\u007fname.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"bad\\u007fname.py\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit empty path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "edit empty path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit no input (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "edit no input (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit input alias (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"input\": {\"file_path\": \"alias.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"alias.py\"}],\"input\":{\"file_path\":\"alias.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit input alias (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"input\": {\"file_path\": \"alias.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"alias.py\"}],\"input\":{\"file_path\":\"alias.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit string input (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": \"a.py\"}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "edit string input (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": \"a.py\"}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "edit array input (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": [\"a.py\"]}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "edit array input (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": [\"a.py\"]}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "edit backslash and spaces (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \" dir\\\\n ame.py \"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\" dir\\\\n ame.py \"}],\"input\":{\"file_path\":\" dir\\\\n ame.py \"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit backslash and spaces (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \" dir\\\\n ame.py \"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\" dir\\\\n ame.py \"}],\"input\":{\"file_path\":\" dir\\\\n ame.py \"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "edit unicode (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"café/naïve.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"café/naïve.py\"}],\"input\":{\"file_path\":\"café/naïve.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "edit unicode (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"café/naïve.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"café/naïve.py\"}],\"input\":{\"file_path\":\"café/naïve.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "write (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Write\", \"tool_input\": {\"file_path\": \"/abs/w.py\", \"content\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Write\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"/abs/w.py\"}],\"input\":{\"file_path\":\"/abs/w.py\",\"content\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "write (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Write\", \"tool_input\": {\"file_path\": \"/abs/w.py\", \"content\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Write\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"/abs/w.py\"}],\"input\":{\"file_path\":\"/abs/w.py\",\"content\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "read (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "read (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "read no path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "read no path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "multiedit outer (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"file_path\": \"m.py\", \"edits\": [{\"old_string\": \"a\"}]}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"m.py\"}],\"input\":{\"file_path\":\"m.py\",\"edits\":[{\"old_string\":\"a\"}]},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "multiedit outer (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"file_path\": \"m.py\", \"edits\": [{\"old_string\": \"a\"}]}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"m.py\"}],\"input\":{\"file_path\":\"m.py\",\"edits\":[{\"old_string\":\"a\"}]},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "multiedit nested sorted unique (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"file_path\": \"z.py\", \"edits\": [{\"file_path\": \"b.py\"}, {\"filePath\": \"a.py\"}, {\"path\": \"z.py\"}, {\"file_path\": \"\"}, {\"file_path\": \"c\\u0002.py\"}, {\"file_path\": 7}]}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"},{\"operation\":\"update\",\"path\":\"b.py\"},{\"operation\":\"update\",\"path\":\"z.py\"}],\"input\":{\"file_path\":\"z.py\",\"edits\":[{\"file_path\":\"b.py\"},{\"filePath\":\"a.py\"},{\"path\":\"z.py\"},{\"file_path\":\"\"},{\"file_path\":\"c\\u0002.py\"},{\"file_path\":7}]},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "multiedit nested sorted unique (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"file_path\": \"z.py\", \"edits\": [{\"file_path\": \"b.py\"}, {\"filePath\": \"a.py\"}, {\"path\": \"z.py\"}, {\"file_path\": \"\"}, {\"file_path\": \"c\\u0002.py\"}, {\"file_path\": 7}]}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"},{\"operation\":\"update\",\"path\":\"b.py\"},{\"operation\":\"update\",\"path\":\"z.py\"}],\"input\":{\"file_path\":\"z.py\",\"edits\":[{\"file_path\":\"b.py\"},{\"filePath\":\"a.py\"},{\"path\":\"z.py\"},{\"file_path\":\"\"},{\"file_path\":\"c\\u0002.py\"},{\"file_path\":7}]},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "multiedit none (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": []}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"edits\":[]},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "multiedit none (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": []}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"edits\":[]},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "multiedit edits object (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": {\"k\": {\"file_path\": \"o.py\"}}}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"o.py\"}],\"input\":{\"edits\":{\"k\":{\"file_path\":\"o.py\"}}},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "multiedit edits object (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": {\"k\": {\"file_path\": \"o.py\"}}}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"MultiEdit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"o.py\"}],\"input\":{\"edits\":{\"k\":{\"file_path\":\"o.py\"}}},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "multiedit edits string (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": \"x\"}}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "multiedit edits string (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"MultiEdit\", \"tool_input\": {\"edits\": \"x\"}}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "bash (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"ls\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Bash\",\"family\":\"shell\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"ls\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "bash (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"ls\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Bash\",\"family\":\"shell\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"ls\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "exec_command (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"exec_command\", \"tool_input\": {\"cmd\": \"cat secret.txt\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"exec_command\",\"family\":\"shell\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"cmd\":\"cat secret.txt\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "exec_command (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"exec_command\", \"tool_input\": {\"cmd\": \"cat secret.txt\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"exec_command\",\"family\":\"shell\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"cmd\":\"cat secret.txt\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "mcp (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"mcp__fs__read\", \"tool_input\": {\"path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"mcp__fs__read\",\"family\":\"mcp\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "mcp (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"mcp__fs__read\", \"tool_input\": {\"path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"mcp__fs__read\",\"family\":\"mcp\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "unknown tool (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Grep\", \"tool_input\": {\"pattern\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Grep\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"pattern\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "unknown tool (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Grep\", \"tool_input\": {\"pattern\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Grep\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"pattern\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "legacy no tool_name (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_input\": {\"file_path\": \"legacy.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"legacy.py\"}],\"input\":{\"file_path\":\"legacy.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "legacy no tool_name (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_input\": {\"file_path\": \"legacy.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"legacy.py\"}],\"input\":{\"file_path\":\"legacy.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "legacy no tool_name no path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_input\": {\"command\": \"ls\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"\",\"family\":\"unknown\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"ls\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "legacy no tool_name no path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_input\": {\"command\": \"ls\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"\",\"family\":\"unknown\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"ls\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "toolName alias (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"toolName\": \"Edit\", \"tool_input\": {\"file_path\": \"t.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"t.py\"}],\"input\":{\"file_path\":\"t.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "toolName alias (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"toolName\": \"Edit\", \"tool_input\": {\"file_path\": \"t.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"t.py\"}],\"input\":{\"file_path\":\"t.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "tool_name trailing newline (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\\n\", \"tool_input\": {\"file_path\": \"nl.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"nl.py\"}],\"input\":{\"file_path\":\"nl.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "tool_name trailing newline (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\\n\", \"tool_input\": {\"file_path\": \"nl.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"nl.py\"}],\"input\":{\"file_path\":\"nl.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "tool_name object (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": {\"x\": [1, {\"y\": \"z\"}]}, \"tool_input\": {\"file_path\": \"o.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"{\\n  \\\"x\\\": [\\n    1,\\n    {\\n      \\\"y\\\": \\\"z\\\"\\n    }\\n  ]\\n}\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"o.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "tool_name object (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": {\"x\": [1, {\"y\": \"z\"}]}, \"tool_input\": {\"file_path\": \"o.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"{\\n  \\\"x\\\": [\\n    1,\\n    {\\n      \\\"y\\\": \\\"z\\\"\\n    }\\n  ]\\n}\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"o.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "tool_name number (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": 3, \"tool_input\": {\"file_path\": \"n.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"3\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"n.py\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "tool_name number (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": 3, \"tool_input\": {\"file_path\": \"n.py\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"3\",\"family\":\"local_tool\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"file_path\":\"n.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "cwd object (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": {\"a\": 1}, \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"{\\n  \\\"a\\\": 1\\n}\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "cwd object (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": {\"a\": 1}, \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"{\\n  \\\"a\\\": 1\\n}\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "cwd number (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": 1.5, \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"1.5\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "cwd number (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": 1.5, \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"1.5\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "cwd with nul and trailing newlines (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\\u0000x\\n\\n\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/wx\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "cwd with nul and trailing newlines (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\\u0000x\\n\\n\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/wx\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "type alias and ids (pre)",
+    "phase": "pre_action",
+    "input": "{\"type\": \"post-tool-use\", \"toolCallId\": \"tc-9\", \"session_id\": 12, \"turn_id\": 1.0, \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"post-tool-use\",\"cwd\":\"\",\"session_id\":12,\"turn_id\":1.0,\"action\":{\"id\":\"tc-9\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "type alias and ids (post)",
+    "phase": "post_action",
+    "input": "{\"type\": \"post-tool-use\", \"toolCallId\": \"tc-9\", \"session_id\": 12, \"turn_id\": 1.0, \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"post-tool-use\",\"cwd\":\"\",\"session_id\":12,\"turn_id\":1.0,\"action\":{\"id\":\"tc-9\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "big numbers (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": 12345678901234567890, \"turn_id\": 1e+300, \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\", \"n\": 1.0}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":12345678901234567890,\"turn_id\":1E+300,\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\",\"n\":1.0},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "big numbers (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": 12345678901234567890, \"turn_id\": 1e+300, \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\", \"n\": 1.0}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":12345678901234567890,\"turn_id\":1E+300,\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\",\"n\":1.0},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "false ids (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": false, \"turn_id\": null, \"tool_use_id\": false, \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":null,\"turn_id\":null,\"action\":{\"id\":null,\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "false ids (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": false, \"turn_id\": null, \"tool_use_id\": false, \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":null,\"turn_id\":null,\"action\":{\"id\":null,\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"x\"}],\"input\":{\"file_path\":\"x\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch all directives (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: one file.py\\n+pass\\n*** End of File\\n*** Update File: old.py\\n*** Move to: moved.py\\n@@\\n-old\\n+new\\n*** Delete File: gone.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"one file.py\"},{\"operation\":\"rename\",\"path\":\"old.py\",\"destination\":\"moved.py\"},{\"operation\":\"delete\",\"path\":\"gone.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: one file.py\\n+pass\\n*** End of File\\n*** Update File: old.py\\n*** Move to: moved.py\\n@@\\n-old\\n+new\\n*** Delete File: gone.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch all directives (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: one file.py\\n+pass\\n*** End of File\\n*** Update File: old.py\\n*** Move to: moved.py\\n@@\\n-old\\n+new\\n*** Delete File: gone.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"one file.py\"},{\"operation\":\"rename\",\"path\":\"old.py\",\"destination\":\"moved.py\"},{\"operation\":\"delete\",\"path\":\"gone.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: one file.py\\n+pass\\n*** End of File\\n*** Update File: old.py\\n*** Move to: moved.py\\n@@\\n-old\\n+new\\n*** Delete File: gone.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch empty (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"\"},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch empty (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"\"},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch only begin (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\"},\"diagnostics\":[\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch only begin (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\"},\"diagnostics\":[\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch no begin (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Update File: a.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Update File: a.py\\n*** End Patch\"},\"diagnostics\":[\"apply_patch does not start with *** Begin Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch no begin (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Update File: a.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Update File: a.py\\n*** End Patch\"},\"diagnostics\":[\"apply_patch does not start with *** Begin Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch blank lines before begin (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"\\n\\n*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"\\n\\n*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch blank lines before begin (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"\\n\\n*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"\\n\\n*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch content after end (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\nmore\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\nmore\"},\"diagnostics\":[\"content follows *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch content after end (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\nmore\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\nmore\"},\"diagnostics\":[\"content follows *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch blank after end (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch blank after end (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch unknown directive (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: known.py\\n+pass\\n*** Mystery: opaque\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"known.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: known.py\\n+pass\\n*** Mystery: opaque\\n\"},\"diagnostics\":[\"unknown apply_patch directive: *** Mystery: opaque\",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch unknown directive (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: known.py\\n+pass\\n*** Mystery: opaque\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"known.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: known.py\\n+pass\\n*** Mystery: opaque\\n\"},\"diagnostics\":[\"unknown apply_patch directive: *** Mystery: opaque\",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch move without update (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":null}"
+  },
+  {
+    "name": "patch move without update (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch move after end of file (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** End of File\\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** End of File\\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":null}"
+  },
+  {
+    "name": "patch move after end of file (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** End of File\\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** End of File\\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch move empty destination (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: \\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: \\n*** End Patch\"},\"diagnostics\":[\"empty destination in *** Move to directive\"]},\"result\":null}"
+  },
+  {
+    "name": "patch move empty destination (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: \\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: \\n*** End Patch\"},\"diagnostics\":[\"empty destination in *** Move to directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch two moves (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b.py\\n*** Move to: c.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"rename\",\"path\":\"a.py\",\"destination\":\"b.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b.py\\n*** Move to: c.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":null}"
+  },
+  {
+    "name": "patch two moves (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b.py\\n*** Move to: c.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"rename\",\"path\":\"a.py\",\"destination\":\"b.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b.py\\n*** Move to: c.py\\n*** End Patch\"},\"diagnostics\":[\"*** Move to directive does not follow an update\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch update empty path then move (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: \\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: \\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"empty file path in mutation directive\",\"*** Move to directive does not follow an update\"]},\"result\":null}"
+  },
+  {
+    "name": "patch update empty path then move (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: \\n*** Move to: b.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: \\n*** Move to: b.py\\n*** End Patch\"},\"diagnostics\":[\"empty file path in mutation directive\",\"*** Move to directive does not follow an update\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch add empty path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: \\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: \\n*** End Patch\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":null}"
+  },
+  {
+    "name": "patch add empty path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: \\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: \\n*** End Patch\"},\"diagnostics\":[\"empty file path in mutation directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch control char path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: bad\\u0000name.py\\n+x\\n*** Add File: safe.py\\n+y\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"safe.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: bad\\u0000name.py\\n+x\\n*** Add File: safe.py\\n+y\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":null}"
+  },
+  {
+    "name": "patch control char path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: bad\\u0000name.py\\n+x\\n*** Add File: safe.py\\n+y\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"safe.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: bad\\u0000name.py\\n+x\\n*** Add File: safe.py\\n+y\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch control char destination (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b\\u0007.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b\\u0007.py\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":null}"
+  },
+  {
+    "name": "patch control char destination (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b\\u0007.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Move to: b\\u0007.py\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch tab in path (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a\\tb.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a\\tb.py\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":null}"
+  },
+  {
+    "name": "patch tab in path (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a\\tb.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a\\tb.py\\n*** End Patch\"},\"diagnostics\":[\"unknown apply_patch directive: *** Invalid Path Directive\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch crlf lines (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\r\\n*** Add File: a.py\\r\\n+x\\r\\n*** End Patch\\r\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\r\\n*** Add File: a.py\\r\\n+x\\r\\n*** End Patch\\r\\n\"},\"diagnostics\":[\"apply_patch does not start with *** Begin Patch\",\"unknown apply_patch directive: *** Invalid Path Directive\",\"unknown apply_patch directive: *** End Patch\\r\",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch crlf lines (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\r\\n*** Add File: a.py\\r\\n+x\\r\\n*** End Patch\\r\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":\"*** Begin Patch\\r\\n*** Add File: a.py\\r\\n+x\\r\\n*** End Patch\\r\\n\"},\"diagnostics\":[\"apply_patch does not start with *** Begin Patch\",\"unknown apply_patch directive: *** Invalid Path Directive\",\"unknown apply_patch directive: *** End Patch\\r\",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch end patch with trailing space (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n*** End Patch \"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n*** End Patch \"},\"diagnostics\":[\"unknown apply_patch directive: *** End Patch \",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch end patch with trailing space (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n*** End Patch \"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"partial\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n*** End Patch \"},\"diagnostics\":[\"unknown apply_patch directive: *** End Patch \",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch nul inside hunk (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\u0000y\\n+z\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\u0000y\\n+z\\n*** End Patch\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch nul inside hunk (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\u0000y\\n+z\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\u0000y\\n+z\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch trailing newlines (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\\n\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch trailing newlines (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\\n\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"create\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Add File: a.py\\n+x\\n*** End Patch\\n\\n\\n\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch directive-like hunk lines (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n *** Add File: not.py\\n+*** Delete File: no.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n *** Add File: not.py\\n+*** Delete File: no.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch directive-like hunk lines (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n *** Add File: not.py\\n+*** Delete File: no.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n *** Add File: not.py\\n+*** Delete File: no.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch duplicate targets (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Update File: a.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"},{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Update File: a.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":null}"
+  },
+  {
+    "name": "patch duplicate targets (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n*** Update File: a.py\\n*** End Patch\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"},{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n*** Update File: a.py\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch command number (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": 7}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":7},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch command number (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": 7}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{\"command\":7},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch no command (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"pre_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":null}"
+  },
+  {
+    "name": "patch no command (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"none\",\"targets\":[],\"input\":{},\"diagnostics\":[\"apply_patch is empty\",\"apply_patch does not end with *** End Patch\"]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "patch string input (pre)",
+    "phase": "pre_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": \"*** Begin Patch\"}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "patch string input (post)",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": \"*** Begin Patch\"}",
+    "status": 1,
+    "output": ""
+  },
+  {
+    "name": "result object is_error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"is_error\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"is_error\":true}}}"
+  },
+  {
+    "name": "result read object is_error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"is_error\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"is_error\":true}}}"
+  },
+  {
+    "name": "result object isError",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"isError\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"isError\":true}}}"
+  },
+  {
+    "name": "result read object isError",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"isError\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"isError\":true}}}"
+  },
+  {
+    "name": "result object error string",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"error\": \"boom\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"error\":\"boom\"}}}"
+  },
+  {
+    "name": "result read object error string",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"error\": \"boom\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"error\":\"boom\"}}}"
+  },
+  {
+    "name": "result object error empty",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"error\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"error\":\"\"}}}"
+  },
+  {
+    "name": "result read object error empty",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"error\": \"\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"error\":\"\"}}}"
+  },
+  {
+    "name": "result object error false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"error\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"error\":false}}}"
+  },
+  {
+    "name": "result read object error false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"error\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"error\":false}}}"
+  },
+  {
+    "name": "result object error zero",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"error\": 0}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"error\":0}}}"
+  },
+  {
+    "name": "result read object error zero",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"error\": 0}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"error\":0}}}"
+  },
+  {
+    "name": "result object tool_use_error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"tool_use_error\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"tool_use_error\":\"x\"}}}"
+  },
+  {
+    "name": "result read object tool_use_error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"tool_use_error\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":{\"tool_use_error\":\"x\"}}}"
+  },
+  {
+    "name": "result object success",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"success\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"success\":true}}}"
+  },
+  {
+    "name": "result read object success",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"success\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"success\":true}}}"
+  },
+  {
+    "name": "result object is_error false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"is_error\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"is_error\":false}}}"
+  },
+  {
+    "name": "result read object is_error false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"is_error\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"is_error\":false}}}"
+  },
+  {
+    "name": "result object isError false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"isError\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"isError\":false}}}"
+  },
+  {
+    "name": "result read object isError false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"isError\": false}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"isError\":false}}}"
+  },
+  {
+    "name": "result object plain",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": {\"stdout\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"stdout\":\"x\"}}}"
+  },
+  {
+    "name": "result read object plain",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": {\"stdout\": \"x\"}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":{\"stdout\":\"x\"}}}"
+  },
+  {
+    "name": "result string success",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"Success. Updated the following files:\\nM a.py\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":\"Success. Updated the following files:\\nM a.py\"}}"
+  },
+  {
+    "name": "result read string success",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"Success. Updated the following files:\\nM a.py\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":\"Success. Updated the following files:\\nM a.py\"}}"
+  },
+  {
+    "name": "result string error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"Error: failed\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"Error: failed\"}}"
+  },
+  {
+    "name": "result read string error",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"Error: failed\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"Error: failed\"}}"
+  },
+  {
+    "name": "result string errors word",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"Errors happen\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"Errors happen\"}}"
+  },
+  {
+    "name": "result read string errors word",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"Errors happen\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"Errors happen\"}}"
+  },
+  {
+    "name": "result string no files",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"No files were modified.\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"No files were modified.\"}}"
+  },
+  {
+    "name": "result read string no files",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"No files were modified.\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"No files were modified.\"}}"
+  },
+  {
+    "name": "result string marker",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"old_string does not match\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"old_string does not match\"}}"
+  },
+  {
+    "name": "result read string marker",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"old_string does not match\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":\"old_string does not match\"}}"
+  },
+  {
+    "name": "result string marker upper",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"STRING TO REPLACE NOT FOUND\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"STRING TO REPLACE NOT FOUND\"}}"
+  },
+  {
+    "name": "result read string marker upper",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"STRING TO REPLACE NOT FOUND\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":\"STRING TO REPLACE NOT FOUND\"}}"
+  },
+  {
+    "name": "result string plain",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": \"done\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":\"done\"}}"
+  },
+  {
+    "name": "result read string plain",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": \"done\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":\"done\"}}"
+  },
+  {
+    "name": "result number",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": 3}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":3}}"
+  },
+  {
+    "name": "result read number",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": 3}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":3}}"
+  },
+  {
+    "name": "result array",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": [\"Error\"]}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":[\"Error\"]}}"
+  },
+  {
+    "name": "result read array",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": [\"Error\"]}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":[\"Error\"]}}"
+  },
+  {
+    "name": "result null",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": null}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "result read null",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": null}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "result false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"apply_patch\", \"tool_input\": {\"command\": \"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"}, \"tool_response\": false}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"apply_patch\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"command\":\"*** Begin Patch\\n*** Update File: a.py\\n@@\\n-x\\n+y\\n*** End Patch\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "result read false",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Read\", \"tool_input\": {\"file_path\": \"r.py\"}, \"tool_response\": false}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Read\",\"family\":\"file_read\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"read\",\"path\":\"r.py\"}],\"input\":{\"file_path\":\"r.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"unknown\",\"is_error\":null,\"output\":null}}"
+  },
+  {
+    "name": "result alias",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"a.py\"}, \"result\": \"Error: x\"}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"file_path\":\"a.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"failed\",\"is_error\":true,\"output\":\"Error: x\"}}"
+  },
+  {
+    "name": "result false then alias",
+    "phase": "post_action",
+    "input": "{\"hook_event_name\": \"PreToolUse\", \"cwd\": \"/w\", \"session_id\": \"s-1\", \"turn_id\": \"t-1\", \"tool_use_id\": \"c-1\", \"tool_name\": \"Edit\", \"tool_input\": {\"file_path\": \"a.py\"}, \"tool_response\": false, \"result\": {\"success\": true}}",
+    "status": 0,
+    "output": "{\"schema_version\":1,\"harness\":\"codex\",\"phase\":\"post_action\",\"native_event\":\"PreToolUse\",\"cwd\":\"/w\",\"session_id\":\"s-1\",\"turn_id\":\"t-1\",\"action\":{\"id\":\"c-1\",\"tool_name\":\"Edit\",\"family\":\"file_mutation\",\"target_coverage\":\"complete\",\"targets\":[{\"operation\":\"update\",\"path\":\"a.py\"}],\"input\":{\"file_path\":\"a.py\"},\"diagnostics\":[]},\"result\":{\"status\":\"succeeded\",\"is_error\":false,\"output\":{\"success\":true}}}"
+  }
+]

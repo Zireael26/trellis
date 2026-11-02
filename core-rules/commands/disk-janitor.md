@@ -23,7 +23,9 @@ Run:
 scripts/disk-janitor.sh
 ```
 
-To scope to a single project, add `--project <registry-name>`. To limit which scopes are scanned, add `--scopes caches,worktrees,stores` (any subset; default is caches,worktrees,stores,docker,releases). Opt-in host scopes: `pi,orphans,logs,tmp,transcripts` (never in the default set). Add `--dehydrate` to delete only regenerable directories in idle clean trees (D1, worktree lane). This run is read-only — it deletes nothing. It writes the report to `audits/YYYY-MM-DD-disk-janitor.md` as well as stdout.
+To scope to a single project, add `--project <registry-name>`. To limit which scopes are scanned, add `--scopes caches,worktrees,stores` (any subset; default is caches,worktrees,stores,docker,releases). Opt-in host scopes: `release-tmp,pi,orphans,logs,tmp,transcripts` (never in the default set). Add `--dehydrate` to delete only regenerable directories in idle clean trees (D1, worktree lane). This run is read-only — it deletes nothing. It writes the report to `audits/YYYY-MM-DD-disk-janitor.md` as well as stdout.
+
+`--scopes release-tmp` reports orphaned persistent execution work under `releases/.exec`, snapshots and verification stamps for uninstalled releases, and interrupted stamp writes. Dead owners (PID plus process birth) are reclaimable; ownerless work and stamp-write temporaries must be older than one day. Active/installed releases, live owners and snapshots with open handles are kept; uncertain ownership or failed lsof checks fail closed. Use `--dry-run` to preview and `--apply` to confirm deletion. Legacy `.tmp.*.exec.*`/`.tmp.*.verify.*` staging remains in the `releases` scope.
 
 `--scopes pi` is opt-in, never part of the default. Spill logs (`pi-bash-*.log` older than 1 day or over 1 GiB, no open handle) apply-delete across `~/projects/worktrees/_pi`, `~/.pi-worktrees`, the legacy `TRELLIS_HOME/pi-worktrees`, bare `$TMPDIR`, `$TMPDIR/pi` and the per-user `DARWIN_USER_TEMP_DIR` + `pi/` (all maxdepth 1, never following symlinks); `disk_janitor.pi_apply:false` restores report-only. Temp files older than 3 days stay manual. Orphan `pi-agent-*` worktrees older than `pi_worktree_ttl_days` (7) with no unique commits and no dirty files apply-remove via `git worktree remove` (no `--force`); all else is held with a reason. A repository is never listed. Nothing is listed while lsof shows a process using it, or when lsof cannot run.
 
@@ -97,6 +99,7 @@ All optional; the whole object may be absent and the defaults apply.
 - `free_space_floor_gb` (default `30`) — the free-space tripwire threshold.
 - `cache_ceiling_gb` (default `20`) — the largest-single-cache tripwire threshold.
 - `skip_projects` (default `[]`) — registry names disk-janitor never scans.
+- `apply_disabled_scopes` (default `[]`) — scopes to skip only during apply, including `release-tmp`; report/dry-run still scan them.
 
 <!--
 /disk-janitor is a maintainer command run from the canonical Trellis checkout —

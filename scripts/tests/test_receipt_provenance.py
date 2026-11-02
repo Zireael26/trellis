@@ -34,7 +34,7 @@ class ReceiptProvenanceTests(unittest.TestCase):
         self.home.mkdir()
         (self.home / "config.json").write_text('{"active_cli_release":"1.3.9"}')
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("TRELLIS_", "GIT_", "HERDR_"))}
+                    if not k.startswith(("TRELLIS_", "GIT_", "HC_"))}
         self.env.update(PATH=str(self.bin) + ":/usr/bin:/bin", TMPDIR=str(self.base),
                         TRELLIS_HOME=str(self.home), ORDER=str(self.order),
                         TRELLIS_TEST_TSV=str(self.receipt))
@@ -67,7 +67,9 @@ class ReceiptProvenanceTests(unittest.TestCase):
 
     def runner_fixture(self, mode="pass"):
         files = ["scripts/run-tests.sh", "scripts/lib/receipt_provenance.py",
+                 "scripts/lib/gate_receipts.py", "scripts/lib/gate_verdict.py",
                  "scripts/lib/test-suites.sh", "scripts/lib/bats-jobs.sh",
+                 "scripts/lib/trellis-python.sh",
                  "scripts/tests/stage-weights.tsv",
                  "scripts/tests/helpers/git-fence/git", "scripts/tests/helpers/git-fence/mktemp"]
         for relative in files:
@@ -88,6 +90,8 @@ class ReceiptProvenanceTests(unittest.TestCase):
         (self.root / "scripts/tests/aeo-gate.test.sh").write_text('exit 0\n')
         for name in ("ruff", "mypy"):
             self.script(name, 'exit 0\n')
+        # Keep the synthetic interpreter selected after the runner pins Python.
+        self.env["TRELLIS_PYTHON"] = str(self.bin / "python3")
         # Only this fixture's AEO unittest stage is skipped, never the subject helper.
         self.script("python3", 'if [ "${1:-}" = -m ]; then exit 0; fi\nexec '
                     + self.quote(sys.executable) + ' "$@"\n')
@@ -230,6 +234,7 @@ class ReceiptProvenanceTests(unittest.TestCase):
                         patch.object(gate.tempfile, "mkstemp") as allocate, \
                         patch.object(gate.sys, "stderr", err):
                     state.return_value.records.return_value = []
+                    state.return_value.root = self.base / "state"
                     self.assertEqual(gate.main([]), status)
                     allocate.assert_not_called()
                     if status == 70:
@@ -260,6 +265,7 @@ class ReceiptProvenanceTests(unittest.TestCase):
                         patch.object(gate, "_delete_empty_record"), patch.object(gate, "_receipt"), \
                         patch.object(gate.sys, "stderr", io.StringIO()):
                     state.return_value.records.return_value = []
+                    state.return_value.root = self.base / "state"
                     boundary.return_value.teardown.return_value = 0
                     self.assertEqual(gate.main([]), 1)
                     allocate.assert_called_once_with(prefix="trellis-run-tests-aggregate-", suffix=".tsv")

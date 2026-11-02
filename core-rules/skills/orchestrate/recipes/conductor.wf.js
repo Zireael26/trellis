@@ -94,8 +94,7 @@ const AGENT_FAMILIES = {
   opus: 'anthropic', haiku: 'anthropic', 'haiku-xhigh': 'anthropic', sonnet: 'anthropic',
   'security-reviewer': 'openai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
-  cheap: 'meta', 'cheap-1': 'meta', 'cheap-2': 'meta', 'muse-meta': 'meta',
-  gemini: 'google', flash: 'google', argon: 'google', 'glm-flash': 'zai',
+  gemini: 'google', flash: 'google', argon: 'google',
 }
 function familyOf(agent) {
   if (typeof agent !== 'string') return null

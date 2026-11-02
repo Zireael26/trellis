@@ -62,13 +62,17 @@ let assertion = 'pass', reason = 'Real callback/dispatcher fixture assertions pa
 try {
   switch (id) {
     case 'pi.pre-denial': {
-      hook('block-destructive.sh', `printf '%s\\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"fixture deny sentinel"}}'`);
-      observations.response = await fire('tool_call', { toolCallId: 'shell', toolName: 'bash', input: { command: 'pwd' } });
-      assert.equal(observations.response.block, true);
-      assert.equal(observations.response.reason, decisions[0].reason);
-      assert.equal(decisions[0].reason, 'block-destructive.sh: fixture deny sentinel');
-      assert.equal(decisions[0].decision, 'deny');
-      assert.equal(commands[0].exit_code, 1);
+      // Spec 072 T10: the shared destructive rules run in process; a shell call
+      // reaches no dispatcher before or after it is decided.
+      const rule = JSON.parse(readFileSync(new URL('../../hooks/rules/destructive.json', import.meta.url), 'utf8'))
+        .rules.find(entry => entry.id === 'git-force-push');
+      observations.allowed = (await fire('tool_call', { toolCallId: 'benign', toolName: 'bash', input: { command: 'pwd' } })) ?? null;
+      observations.response = await fire('tool_call', { toolCallId: 'shell', toolName: 'bash', input: { command: 'git push --force origin main' } });
+      assert.equal(observations.allowed, null);
+      assert.equal(observations.response?.block, true);
+      assert.equal(observations.response?.reason, rule.reason);
+      assert.deepEqual(notifications, [[rule.reason, 'error']]);
+      assert.deepEqual(envelopes, []);
       break;
     }
     case 'pi.post-advisory': {
@@ -99,13 +103,14 @@ try {
       break;
     }
     case 'pi.failed-mutation': {
+      // Spec 072 T10: a failed mutation is labelled unchecked in process and
+      // never dispatched; only a successful one reaches the post-action hooks.
       observations.response = await fire('tool_result', { toolCallId: 'write', toolName: 'write', input: { path: 'file' }, content: [], isError: true });
-      assert.equal(envelopes[0].result.status, 'failed');
-      assert.equal(envelopes[0].action.family, 'file_mutation');
-      assert.equal(decisions[0].capability_status, 'unsupported');
-      assert.match(decisions[0].reason, /checks skipped due to failed result/);
-      assert.doesNotMatch(decisions[0].reason, /hook unavailable/);
-      assert.equal(commands[0].exit_code, 0);
+      assert.deepEqual(envelopes, []);
+      assert.equal(observations.response.content.length, 1);
+      assert.match(observations.response.content[0].text, /^\[Trellis post-action advisory; capability: unsupported\]\n/);
+      assert.match(observations.response.content[0].text, /post_action\/file_mutation: unsupported — checks skipped due to failed result/);
+      assert.doesNotMatch(observations.response.content[0].text, /hook unavailable/);
       break;
     }
     case 'pi.spawner-boundary': {

@@ -18,8 +18,9 @@ launcher_ssh_auth_sock=${SSH_AUTH_SOCK-}
 launcher_attach_caller_path=
 # Every operator route that can attach a worktree forwards the caller PATH, so
 # its recorded toolchain is the operator's, never the sanitized control PATH.
+# `bench` forwards it too: it times hooks under the toolchain agents really use.
 case "${1-}" in
-  attach|onboard|worktree|doctor) launcher_attach_caller_path=${PATH-} ;;
+  attach|onboard|worktree|doctor|bench) launcher_attach_caller_path=${PATH-} ;;
 esac
 # `trellis heavy` wraps an arbitrary workload that must see the caller's whole
 # environment. Carry it as data, never as shell text: the launcher only relays
@@ -312,8 +313,10 @@ launcher_validate_machine_config() {
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
     # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
+    # alone (spec 054), so a bad value disables only the heavy gate. projects
+    # (per-project host settings such as stop_checks.fast) is typed by the
+    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
     and ((has("$schema") | not) or (."$schema" | no_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -1361,8 +1364,16 @@ launcher_snapshot_payload_matches() {
   [ "$payload" = "$home/releases/$version/payload" ] && return 0
   snapshot_root="${payload%/payload}"
   [ "$snapshot_root" != "$payload" ] || return 1
-  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   snapshot_base="${snapshot_root##*/}"
+  if [ "${snapshot_root%/*}" = "$home/releases/.exec" ]; then
+    suffix="${snapshot_base#"$version"-}"
+    [ "$suffix" != "$snapshot_base" ] && [ "${#suffix}" -eq 64 ] || return 1
+    case "$suffix" in
+      *[!0-9a-f]*) return 1 ;;
+    esac
+    return 0
+  fi
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   rest="${snapshot_base#.tmp.}"
   [ "$rest" != "$snapshot_base" ] || return 1
   suffix="${rest#"$version".exec.}"
@@ -1373,12 +1384,12 @@ launcher_snapshot_payload_matches() {
   return 0
 }
 
-# Is $2 a safe execution-snapshot directory name inside release store $1 for
-# release $3? Delegates the parse to the pinned predicate above so the launcher
-# and the library answer the delimiter-exact question the same way. The earlier
-# form took the name alone and stripped the LAST `.exec.` greedily, which
-# accepts `.tmp.<other-version>.exec.<n>.exec.<suffix>` — a snapshot belonging
-# to a different release — under any version whose name is a prefix.
+# Is $2 a safe per-run execution-snapshot directory name inside release store $1
+# for release $3? Delegates the parse to the pinned predicate above so the
+# launcher and the library answer the delimiter-exact question the same way. The
+# earlier form took the name alone and stripped the LAST `.exec.` greedily,
+# which accepts `.tmp.<other-version>.exec.<n>.exec.<suffix>` — a snapshot
+# belonging to a different release — under any version whose name is a prefix.
 launcher_snapshot_name_is_safe() {
   local releases="${1:-}" name="${2:-}" version="${3:-}"
   case "$name" in
@@ -1387,6 +1398,28 @@ launcher_snapshot_name_is_safe() {
   esac
   launcher_snapshot_payload_matches \
     "${releases%/releases}" "$releases/$name/payload" "$version"
+}
+
+# Is $2 a safe name for a work directory of release $3's persistent execution
+# snapshot, inside $1/.exec ($1 being the release store)? Work directories (a
+# snapshot being built, or a rejected one moved aside) are
+# `.tmp.<version>-<digest>.<s>` with an alphanumeric suffix: the final snapshot
+# name with a `.tmp.` prefix and a suffix. The final name is parsed by the
+# pinned predicate above; `.tmp.1.2.3-rc-<digest>.<s>` is not a work directory
+# of release 1.2.3.
+launcher_exec_work_name_is_safe() {
+  local releases="${1:-}" name="${2:-}" version="${3:-}" rest suffix
+  case "$name" in
+    .tmp.*) ;;
+    *) return 1 ;;
+  esac
+  rest="${name#.tmp.}"
+  suffix="${rest##*.}"
+  case "$suffix" in
+    ""|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  launcher_snapshot_payload_matches \
+    "${releases%/releases}" "$releases/.exec/${rest%."$suffix"}/payload" "$version"
 }
 
 # Pinned copies of `trellis_process_birth_python` and `trellis_process_birth`
@@ -1588,15 +1621,23 @@ PY
   fi
 }
 
-# Recover snapshots created by this shell if a command substitution returned
-# between creation and the caller arming its normal cleanup state.
+# Recover snapshot work directories created by this shell if a command
+# substitution returned between creation and its own cleanup. Most runs own
+# none, and they return before spending a process-birth read on the question.
 launcher_remove_owned_snapshots() {
-  local releases="${1:-}" version="${2:-}" owner owner_pid owner_birth snapshot owner_rc rc=0
+  local releases="${1:-}" version="${2:-}" owner owner_pid owner_birth snapshot owner_rc rc=0 found=""
   [ "$#" -eq 2 ] || return "$TRELLIS_EX_USAGE"
   launcher_absolute_path_is_clean "$releases" || return "$TRELLIS_EX_USAGE"
   case "$version" in
     ''|*/*|*$'\t'*|*$'\n'*|*$'\r'*) return "$TRELLIS_EX_USAGE" ;;
   esac
+  for owner in "$releases/.tmp.$version.exec."*.owner.json "$releases/.exec/.tmp.$version-"*.owner.json; do
+    if [ -e "$owner" ] || [ -L "$owner" ]; then
+      found=1
+      break
+    fi
+  done
+  [ -n "$found" ] || return 0
   owner_pid="$$"
   case "$owner_pid" in
     ''|*[!0-9]*) return "$TRELLIS_EX_UNAVAILABLE" ;;
@@ -1605,7 +1646,7 @@ launcher_remove_owned_snapshots() {
   owner_birth="$(launcher_process_birth "$owner_pid")" || return "$TRELLIS_EX_UNAVAILABLE"
   [ -n "$owner_birth" ] || return "$TRELLIS_EX_UNAVAILABLE"
   command -v jq >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
-  for owner in "$releases/.tmp.$version.exec."*.owner.json; do
+  for owner in "$releases/.tmp.$version.exec."*.owner.json "$releases/.exec/.tmp.$version-"*.owner.json; do
     [ -e "$owner" ] || [ -L "$owner" ] || continue
     if [ -L "$owner" ] || [ ! -f "$owner" ]; then
       launcher_error "snapshot owner path is not a regular file: $owner"
@@ -1622,7 +1663,11 @@ launcher_remove_owned_snapshots() {
       continue
     fi
     snapshot="${owner%.owner.json}"
-    launcher_snapshot_name_is_safe "$releases" "${snapshot##*/}" "$version" || continue
+    if [ "${snapshot%/*}" = "$releases" ]; then
+      launcher_snapshot_name_is_safe "$releases" "${snapshot##*/}" "$version" || continue
+    else
+      launcher_exec_work_name_is_safe "$releases" "${snapshot##*/}" "$version" || continue
+    fi
     if launcher_remove_snapshot "$releases" "$snapshot" "$version" >/dev/null 2>&1; then
       :
     else
@@ -1636,27 +1681,35 @@ launcher_remove_owned_snapshots() {
 }
 
 launcher_copy_snapshot_no_follow() {
-  local releases="${1:-}" version="${2:-}" snapshot_base="${3:-}" digest="${4:-}" python_bin
+  local releases="${1:-}" version="${2:-}" snapshot_base="${3:-}" digest="${4:-}" python_bin store
   launcher_absolute_path_is_clean "$releases" || return "$TRELLIS_EX_USAGE"
-  launcher_snapshot_name_is_safe "$releases" "$snapshot_base" "$version" ||
-    return "$TRELLIS_EX_USAGE"
   case "$digest" in
     ''|*[!0-9a-f]*) return "$TRELLIS_EX_USAGE" ;;
   esac
   [ "${#digest}" -eq 64 ] || return "$TRELLIS_EX_USAGE"
+  if launcher_snapshot_name_is_safe "$releases" "$snapshot_base" "$version"; then
+    store=""
+  elif launcher_exec_work_name_is_safe "$releases" "$snapshot_base" "$version"; then
+    case "$snapshot_base" in
+      ".tmp.$version-$digest."*) store=.exec ;;
+      *) return "$TRELLIS_EX_USAGE" ;;
+    esac
+  else
+    return "$TRELLIS_EX_USAGE"
+  fi
   command -v python3 >/dev/null 2>&1 || {
     launcher_error "python3 with descriptor-relative snapshot support is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$version" "$snapshot_base" "$digest" <<'PY'
+  "$python_bin" - "$releases" "$version" "$snapshot_base" "$digest" "$store" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-releases, version, snapshot_name, expected_digest = sys.argv[1:5]
+releases, version, snapshot_name, expected_digest, store = sys.argv[1:6]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -1868,9 +1921,20 @@ def digest_regular(parent_fd, name, label):
             os.close(descriptor)
 
 
+def fresh_names(directory_fd):
+    # listdir(fd) duplicates the descriptor and can inherit its old EOF
+    # cursor after the directory gains entries (Linux/Btrfs). Open a fresh
+    # description relative to the pinned directory.
+    scan_fd = os.open(".", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        return sorted(os.listdir(scan_fd))
+    finally:
+        os.close(scan_fd)
+
+
 def seal_tree(directory_fd, label):
     try:
-        names = sorted(os.listdir(directory_fd))
+        names = fresh_names(directory_fd)
     except OSError as error:
         state("could not enumerate snapshot output %s: %s" % (label, error))
     for name in names:
@@ -1908,6 +1972,7 @@ if not O_DIRECTORY or not O_NOFOLLOW:
     unavailable("descriptor-relative no-follow snapshot support is unavailable")
 
 releases_fd = None
+exec_fd = None
 source_fd = None
 snapshot_fd = None
 payload_source_fd = None
@@ -1920,7 +1985,9 @@ try:
     if not stat.S_ISDIR(os.fstat(releases_fd).st_mode):
         state("release snapshot store is not a directory")
     source_fd = open_directory(releases_fd, version, "release snapshot source")
-    snapshot_fd = open_directory(releases_fd, snapshot_name, "release snapshot destination")
+    if store:
+        exec_fd = open_directory(releases_fd, store, "release execution snapshot store")
+    snapshot_fd = open_directory(releases_fd if exec_fd is None else exec_fd, snapshot_name, "release snapshot destination")
     if os.listdir(snapshot_fd):
         state("release snapshot destination is not empty")
     if sorted(os.listdir(source_fd)) != ["payload", "release.json"]:
@@ -1939,7 +2006,7 @@ try:
     payload_snapshot_fd = None
     os.close(payload_source_fd)
     payload_source_fd = None
-    if sorted(os.listdir(source_fd)) != ["payload", "release.json"]:
+    if fresh_names(source_fd) != ["payload", "release.json"]:
         state("release snapshot source changed while copying")
     seal_tree(snapshot_fd, "")
     os.fchmod(snapshot_fd, 0o500)
@@ -1954,6 +2021,8 @@ finally:
         os.close(payload_source_fd)
     if snapshot_fd is not None:
         os.close(snapshot_fd)
+    if exec_fd is not None:
+        os.close(exec_fd)
     if source_fd is not None:
         os.close(source_fd)
     if releases_fd is not None:
@@ -1969,9 +2038,12 @@ launcher_remove_snapshot() {
     launcher_absolute_path_is_clean "$snapshot" || return "$TRELLIS_EX_USAGE"
   parent="${snapshot%/*}"
   base="${snapshot##*/}"
-  [ "$parent" = "$releases" ] &&
-    launcher_snapshot_name_is_safe "$releases" "$base" "$version" ||
-    return "$TRELLIS_EX_USAGE"
+  if [ "$parent" = "$releases" ]; then
+    launcher_snapshot_name_is_safe "$releases" "$base" "$version" || return "$TRELLIS_EX_USAGE"
+  else
+    [ "$parent" = "$releases/.exec" ] &&
+      launcher_exec_work_name_is_safe "$releases" "$base" "$version" || return "$TRELLIS_EX_USAGE"
+  fi
   owner="${snapshot}.owner.json"
   if [ -e "$owner" ] || [ -L "$owner" ]; then
     [ ! -L "$owner" ] && [ -f "$owner" ] || {
@@ -1995,7 +2067,7 @@ launcher_remove_snapshot() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$base" "${base}.owner.json" <<'PY'
+  "$python_bin" - "$parent" "$base" "${base}.owner.json" <<'PY'
 import errno
 import os
 import stat
@@ -2177,74 +2249,857 @@ PY
   return "$rc"
 }
 
+# Pinned copy of scripts/lib/release_stamp.py (spec 072 D-A), byte-identical
+# by contract: scripts/tests/launcher-exec-snapshot.bats compares the heredoc
+# with the file. The launcher carries it for the same reason it carries its own
+# verification: it never runs code from a checkout, nor from the payload it is
+# still deciding whether to trust.
+launcher_release_stamp_python() {
+  cat <<'TRELLIS_RELEASE_STAMP_PY'
+"""Release stamp (spec 072 D-A): a stat manifest of a sealed release, written
+right after a full verify passed, so an unchanged release is re-proved by one
+lstat sweep instead of a re-hash.
+
+    release_stamp.py check HOME RELEASE_DIR
+        exit 0: the stamp matches the release as it is now; prints "hit".
+        exit 1: anything else; prints the sweep token when the sweep itself
+        succeeded, for the write that follows the full verify of the caller.
+    release_stamp.py write HOME RELEASE_DIR TOKEN
+        exit 0: written. exit 1: refused, nothing written.
+
+The stamp is $HOME/state/release-stamps/<version>-<release.json sha256>.json
+(0600 in a 0700 directory, written to a temporary name, then renamed). It
+records, for the release directory and every entry under it, the path, type,
+mode, size, mtime_ns, ctime_ns, inode and device, the directory set, the
+release.json digest and the schema version. A write, rename, link, or change
+of mode, owner or ACL moves ctime, and no ordinary tool can set ctime back, so
+any such change since the stamp makes check miss, and the caller falls back to
+its full verify. A missing, unreadable, truncated or garbage stamp, or one for
+another release.json, is a miss: check never passes on absence.
+
+The token is the digest of the stamp this sweep would write. check computes it
+before the full verify and write recomputes it after, and write refuses when
+they differ, so nothing that changed while the full verify ran is stamped.
+
+The stamp needs fine-grained ctime: where ctime is coarse (HFS+ keeps whole
+seconds, exFAT 10 ms, a kernel that stamps from a coarse clock one tick) a
+change and restore within one tick could go unseen. So the release must sit on
+one device, a mounted subtree being free to be coarser than the rest, and
+every ctime in the sweep must have digits below a millisecond; otherwise check
+misses without a token and write refuses. write also proves the device: the
+stamp directory must be on it, and two metadata changes in a row on the new
+stamp file must each move its ctime. A filesystem that fails any of this
+always takes the full verify.
+
+Schema 2 is the first written under that proof. A schema 1 stamp may have been
+written on a filesystem the proof now refuses, so it is a miss like any other
+stale stamp, and the full verify that follows writes schema 2.
+
+Trust: this resists accidents, other Unix users and same-user changes made
+with ordinary tools. A same-user attacker can forge a stamp, but that user can
+already rewrite ~/.local/bin/trellis. The sweep is not atomic; its window is
+the verify-then-use window callers already accept.
+
+The managed git-hook dispatcher carries this file as text (attachment.sh,
+_attachment_release_stamp_emitter) and runs it with python3 -I -c, so the file
+must never contain a single quote. Python 3.6 or later, stdlib only.
+"""
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+SCHEMA_VERSION = 2
+STAMP_LIMIT = 64 * 1024 * 1024
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+FIELDS = ("type", "mode", "size", "mtime_ns", "ctime_ns", "ino", "dev")
+
+
+class Refuse(Exception):
+    pass
+
+
+def open_directory(path):
+    """Open a canonical absolute directory without following any component."""
+    parts = path.split("/")[1:]
+    if not path.startswith("/") or path == "/" or any(p in ("", ".", "..") for p in parts):
+        raise Refuse()
+    fd = os.open("/", DIRECTORY_FLAGS)
+    try:
+        for part in parts:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def describe(info):
+    if stat.S_ISREG(info.st_mode):
+        kind = "f"
+    elif stat.S_ISLNK(info.st_mode):
+        kind = "l"
+    elif stat.S_ISDIR(info.st_mode):
+        kind = "d"
+    else:
+        raise Refuse()
+    return (kind, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino, info.st_dev)
+
+
+def sweep(root_fd):
+    """lstat the release directory and everything under it, following nothing.
+
+    Each directory is opened through the root descriptor and must be the inode
+    its parent listing recorded, so a directory swapped during the sweep refuses.
+    """
+    entries = {".": describe(os.fstat(root_fd))}
+    pending = ["."]
+    while pending:
+        rel = pending.pop()
+        fd = root_fd if rel == "." else os.open(rel, DIRECTORY_FLAGS, dir_fd=root_fd)
+        try:
+            info = os.fstat(fd)
+            if (info.st_ino, info.st_dev) != entries[rel][5:7]:
+                raise Refuse()
+            for name in os.listdir(fd):
+                child = name if rel == "." else rel + "/" + name
+                entry = describe(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                entries[child] = entry
+                if entry[0] == "d":
+                    pending.append(child)
+        finally:
+            if fd != root_fd:
+                os.close(fd)
+    return entries
+
+
+def read_regular(name, dir_fd, limit):
+    # O_NONBLOCK: a FIFO opens at once and is refused below, never waited on.
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise Refuse()
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1048576)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return info, b"".join(chunks)
+
+
+def locate(home, release_dir):
+    """Return (stamp directory, stamp name, release.json bytes, sweep)."""
+    if not home.startswith("/") or not release_dir.startswith("/"):
+        raise Refuse()
+    home = os.path.realpath(home)
+    version = release_dir.rsplit("/", 1)[-1]
+    if re.fullmatch("[0-9A-Za-z][0-9A-Za-z.+-]*", version) is None:
+        raise Refuse()
+    if release_dir != home + "/releases/" + version:
+        raise Refuse()
+    root_fd = open_directory(release_dir)
+    try:
+        raw = read_regular("release.json", root_fd, STAMP_LIMIT)[1]
+        entries = sweep(root_fd)
+    finally:
+        os.close(root_fd)
+    digest = hashlib.sha256(raw).hexdigest()
+    return home + "/state/release-stamps", version + "-" + digest + ".json", raw, entries
+
+
+def fine_ctime(entries):
+    """True when the sweep is on one device and every ctime in it is finer
+    than a millisecond."""
+    if len({entry[6] for entry in entries.values()}) != 1:
+        return False
+    return all(entry[4] % 1000000 for entry in entries.values())
+
+
+def ctime_moves(fd):
+    """True when two metadata changes in a row on fd each move its ctime: a
+    filesystem that stamps ctime from a coarse clock gives both one value."""
+    before = os.fstat(fd).st_ctime_ns
+    for mode in (0o400, 0o600):
+        os.fchmod(fd, mode)
+        after = os.fstat(fd).st_ctime_ns
+        if after == before:
+            return False
+        before = after
+    return True
+
+
+def render(release_dir, raw, entries):
+    """The exact stamp bytes for this sweep; check compares bytes, not JSON."""
+    rows = {"f": [], "l": [], "d": []}
+    for path in sorted(entries):
+        entry = entries[path]
+        row = {"path": path}
+        row.update(zip(FIELDS, entry))
+        rows[entry[0]].append(row)
+    stamp = {
+        "schema_version": SCHEMA_VERSION,
+        "version": release_dir.rsplit("/", 1)[-1],
+        "root": release_dir,
+        "release_json_sha256": hashlib.sha256(raw).hexdigest(),
+        "entries": sorted(rows["f"] + rows["l"], key=lambda row: row["path"]),
+        "directories": rows["d"],
+    }
+    return (json.dumps(stamp, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def private_directory(path, create):
+    """The stamp directory: a real 0700 directory this user owns."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if not create:
+            raise Refuse()
+        os.mkdir(path, 0o700)
+        info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise Refuse()
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        if not create:
+            raise Refuse()
+        os.chmod(path, 0o700)
+
+
+def check(home, release_dir):
+    directory, name, raw, entries = locate(home, release_dir)
+    if not fine_ctime(entries):
+        return 1
+    expected = render(release_dir, raw, entries)
+    try:
+        private_directory(directory, False)
+        fd = open_directory(directory)
+        try:
+            info, recorded = read_regular(name, fd, STAMP_LIMIT)
+        finally:
+            os.close(fd)
+        if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and recorded == expected:
+            print("hit")
+            return 0
+    except (OSError, Refuse):
+        pass
+    print(hashlib.sha256(expected).hexdigest())
+    return 1
+
+
+def sealed(raw, entries):
+    """The layout a full verify has just proved, re-checked from the sweep alone:
+    release.json and payload only, payload equal to the manifest tree, link and
+    executable bits as recorded, and no write bit on any file or directory."""
+    tree = json.loads(raw.decode("utf-8"))["tree"]
+    modes = {}
+    for item in tree:
+        modes["payload/" + item["path"]] = item["mode"]
+    if len(modes) != len(tree):
+        raise Refuse()
+    directories = {".", "payload"}
+    for path in modes:
+        while path.count("/") > 1:
+            path = path.rsplit("/", 1)[0]
+            directories.add(path)
+    files = set(modes)
+    files.add("release.json")
+    if {p for p, e in entries.items() if e[0] == "d"} != directories:
+        raise Refuse()
+    if {p for p, e in entries.items() if e[0] != "d"} != files:
+        raise Refuse()
+    for path, entry in entries.items():
+        if entry[0] != "l" and entry[1] & 0o222:
+            raise Refuse()
+    if entries["release.json"][0] != "f":
+        raise Refuse()
+    for path, mode in modes.items():
+        kind, bits = entries[path][0], entries[path][1]
+        if mode == "120000":
+            if kind != "l":
+                raise Refuse()
+        elif kind != "f" or bool(bits & 0o111) != (mode == "100755"):
+            raise Refuse()
+
+
+def write(home, release_dir, token):
+    if re.fullmatch("[0-9a-f]{64}", token) is None:
+        raise Refuse()
+    directory, name, raw, entries = locate(home, release_dir)
+    if not fine_ctime(entries):
+        raise Refuse()
+    stamp = render(release_dir, raw, entries)
+    if hashlib.sha256(stamp).hexdigest() != token or len(stamp) > STAMP_LIMIT:
+        raise Refuse()
+    sealed(raw, entries)
+    state = directory.rsplit("/", 1)[0]
+    try:
+        info = os.lstat(state)
+    except FileNotFoundError:
+        os.mkdir(state, 0o700)
+        info = os.lstat(state)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise Refuse()
+    private_directory(directory, True)
+    fd = open_directory(directory)
+    try:
+        if os.fstat(fd).st_dev != entries["."][6]:
+            raise Refuse()
+        temporary = ".%s.%s.tmp" % (name, os.urandom(8).hex())
+        out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            os.fchmod(out, 0o600)
+            if not ctime_moves(out):
+                raise Refuse()
+            view = memoryview(stamp)
+            while view:
+                view = view[os.write(out, view):]
+        except BaseException:
+            os.close(out)
+            os.unlink(temporary, dir_fd=fd)
+            raise
+        os.close(out)
+        try:
+            os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+        except BaseException:
+            os.unlink(temporary, dir_fd=fd)
+            raise
+    finally:
+        os.close(fd)
+    return 0
+
+
+def main(argv):
+    if len(argv) == 3 and argv[0] == "check":
+        return check(argv[1], argv[2])
+    if len(argv) == 4 and argv[0] == "write":
+        return write(argv[1], argv[2], argv[3])
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, Refuse):
+        sys.exit(1)
+TRELLIS_RELEASE_STAMP_PY
+}
+
+# The execution snapshot driver. argv[1] is the text above; it runs twice, as is
+# for the installed release (state/release-stamps, shared with attachment.sh),
+# and with locate() bound to releases/.exec/<version>-<release.json sha256> for
+# the execution snapshot (state/exec-stamps), so both get the same check and
+# the same write.
+#
+#   fast HOME VERSION              DIGEST, SOURCE and EXEC, tab separated: the
+#                                  sha256 of releases/VERSION/release.json; hit,
+#                                  or the token for the write after a full
+#                                  verify, or -; and hit, absent, a token, or -.
+#   source-write HOME VERSION TOKEN
+#   exec-check HOME VERSION DIGEST EXEC as above.
+#   exec-write HOME VERSION DIGEST TOKEN
+#   exec-token HOME VERSION DIGEST WORK
+#                                  the token of the snapshot still under its work
+#                                  name .exec/WORK, taken before its full verify,
+#                                  with the root times left out.
+#   exec-seal HOME VERSION DIGEST TOKEN
+#                                  once WORK has its final name: stamp it when its
+#                                  sweep still gives TOKEN.
+#   exec-identity HOME VERSION DIGEST
+#                                  dev:ino of the final name, or absent.
+#   exec-work HOME VERSION DIGEST PID BIRTH
+#                                  create a work directory and its owner sidecar
+#                                  through the store's descriptor; prints its name.
+#   exec-retire HOME VERSION DIGEST IDENTITY PID BIRTH
+#                                  only if the final name is still IDENTITY (the
+#                                  instance that failed verification): move it to
+#                                  a fresh work name with a sidecar (unlink it if
+#                                  it is no directory) and print that name; exit 3
+#                                  if it is another instance or gone.
+#
+# Every command that touches releases/.exec opens it without following any
+# component and refuses it unless it is a 0700 directory this user owns.
+#
+# Exit 0 on success; anything else is a miss or a refusal, never a pass.
+launcher_exec_snapshot_python() {
+  cat <<'TRELLIS_EXEC_SNAPSHOT_PY'
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import stat
+import sys
+
+HEX64 = re.compile("[0-9a-f]{64}")
+VERSION = re.compile("[0-9A-Za-z][0-9A-Za-z.+-]*")
+SUFFIX = re.compile("[0-9A-Za-z]+")
+CODE = compile(sys.argv[1], "release_stamp.py", "exec")
+SOURCE = {"__name__": "release_stamp"}
+exec(CODE, SOURCE)
+EXEC = {"__name__": "release_stamp"}
+exec(CODE, EXEC)
+MISS = (OSError, ValueError, KeyError, TypeError, AttributeError, SOURCE["Refuse"], EXEC["Refuse"])
+
+
+def refuse():
+    raise EXEC["Refuse"]()
+
+
+def snapshot_path(home, version, digest):
+    if not home.startswith("/") or VERSION.fullmatch(version) is None or HEX64.fullmatch(digest) is None:
+        refuse()
+    return os.path.realpath(home) + "/releases/.exec/" + version + "-" + digest
+
+
+def read_tree(path):
+    fd = EXEC["open_directory"](path)
+    try:
+        raw = EXEC["read_regular"]("release.json", fd, EXEC["STAMP_LIMIT"])[1]
+        entries = EXEC["sweep"](fd)
+    finally:
+        os.close(fd)
+    return raw, entries
+
+
+def exec_locate(home, snapshot):
+    """locate() for a snapshot, whose name binds its version and release.json."""
+    version, _, digest = snapshot.rsplit("/", 1)[-1].rpartition("-")
+    if snapshot != snapshot_path(home, version, digest):
+        refuse()
+    raw, entries = read_tree(snapshot)
+    if hashlib.sha256(raw).hexdigest() != digest:
+        refuse()
+    return os.path.realpath(home) + "/state/exec-stamps", version + "-" + digest + ".json", raw, entries
+
+
+EXEC["locate"] = exec_locate
+
+
+def verdict(namespace, home, release_dir):
+    """check() as a word: hit, the token it prints on a miss, or - ."""
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(printed):
+            if namespace["check"](home, release_dir) == 0:
+                return "hit"
+    except MISS:
+        return "-"
+    return printed.getvalue().strip() or "-"
+
+
+def exec_verdict(home, version, digest):
+    snapshot = snapshot_path(home, version, digest)
+    try:
+        os.lstat(snapshot)
+    except FileNotFoundError:
+        return "absent"
+    return verdict(EXEC, home, snapshot)
+
+
+def portable_token(snapshot, raw, entries):
+    """The token of a sweep without the root times, which the publishing rename
+    may move; every entry below the root, and the root mode and inode, stay."""
+    entries = dict(entries)
+    entries["."] = entries["."][:3] + (0, 0) + entries["."][5:]
+    return hashlib.sha256(EXEC["render"](snapshot, raw, entries)).hexdigest()
+
+
+def work_name(version, digest, name):
+    prefix = ".tmp." + version + "-" + digest + "."
+    if not name.startswith(prefix) or SUFFIX.fullmatch(name[len(prefix):]) is None:
+        refuse()
+    return name
+
+
+def store_fd(home):
+    """releases/.exec, opened without following any component: a 0700
+    directory this user owns, or a refusal."""
+    store = os.path.realpath(home) + "/releases/.exec"
+    EXEC["private_directory"](store, False)
+    return EXEC["open_directory"](store)
+
+
+def write_owner(fd, name, pid, birth):
+    """NAME.owner.json beside a work directory, in the launcher's owner schema."""
+    if re.fullmatch("[1-9][0-9]*", pid) is None or not birth or "\n" in birth:
+        refuse()
+    record = {"schema_version": 1, "pid": int(pid), "process_birth": birth}
+    data = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+    out = os.open(name + ".owner.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(out, view):]
+        os.fsync(out)
+    finally:
+        os.close(out)
+
+
+def identity_of(fd, name):
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, "absent"
+    return info, "%d:%d" % (info.st_dev, info.st_ino)
+
+
+def main(argv):
+    if len(argv) < 3:
+        return 2
+    command, home, version = argv[:3]
+    if command == "fast" and len(argv) == 3:
+        release_dir = home + "/releases/" + version
+        fd = SOURCE["open_directory"](release_dir)
+        try:
+            raw = SOURCE["read_regular"]("release.json", fd, SOURCE["STAMP_LIMIT"])[1]
+        finally:
+            os.close(fd)
+        digest = hashlib.sha256(raw).hexdigest()
+        print("%s\t%s\t%s" % (digest, verdict(SOURCE, home, release_dir), exec_verdict(home, version, digest)))
+        return 0
+    if command == "source-write" and len(argv) == 4:
+        return SOURCE["write"](home, home + "/releases/" + version, argv[3])
+    if len(argv) < 4:
+        return 2
+    digest = argv[3]
+    snapshot = snapshot_path(home, version, digest)
+    if command == "exec-check" and len(argv) == 4:
+        print(exec_verdict(home, version, digest))
+        return 0
+    if command == "exec-write" and len(argv) == 5:
+        return EXEC["write"](home, snapshot, argv[4])
+    if command == "exec-token" and len(argv) == 5:
+        raw, entries = read_tree(snapshot.rsplit("/", 1)[0] + "/" + work_name(version, digest, argv[4]))
+        if hashlib.sha256(raw).hexdigest() != digest:
+            refuse()
+        print(portable_token(snapshot, raw, entries))
+        return 0
+    if command == "exec-seal" and len(argv) == 5:
+        raw, entries = read_tree(snapshot)
+        if hashlib.sha256(raw).hexdigest() != digest or portable_token(snapshot, raw, entries) != argv[4]:
+            refuse()
+        return EXEC["write"](home, snapshot, hashlib.sha256(EXEC["render"](snapshot, raw, entries)).hexdigest())
+    if command == "exec-identity" and len(argv) == 4:
+        fd = store_fd(home)
+        try:
+            print(identity_of(fd, snapshot.rsplit("/", 1)[-1])[1])
+        finally:
+            os.close(fd)
+        return 0
+    if command == "exec-work" and len(argv) == 6:
+        fd = store_fd(home)
+        try:
+            name = work_name(version, digest, ".tmp.%s-%s.%s" % (version, digest, os.urandom(6).hex()))
+            write_owner(fd, name, argv[4], argv[5])
+            os.mkdir(name, 0o700, dir_fd=fd)
+        finally:
+            os.close(fd)
+        print(name)
+        return 0
+    if command == "exec-retire" and len(argv) == 7:
+        name = snapshot.rsplit("/", 1)[-1]
+        fd = store_fd(home)
+        try:
+            aside = work_name(version, digest, ".tmp.%s-%s.%s" % (version, digest, os.urandom(6).hex()))
+            write_owner(fd, aside, argv[5], argv[6])
+            info, identity = identity_of(fd, name)
+            if info is None or identity != argv[4]:
+                os.unlink(aside + ".owner.json", dir_fd=fd)
+                return 3
+            if stat.S_ISDIR(info.st_mode):
+                os.rename(name, aside, src_dir_fd=fd, dst_dir_fd=fd)
+            else:
+                os.unlink(name, dir_fd=fd)
+        finally:
+            os.close(fd)
+        print(aside)
+        return 0
+    return 2
+
+
+try:
+    sys.exit(main(sys.argv[2:]))
+except MISS:
+    sys.exit(1)
+TRELLIS_EXEC_SNAPSHOT_PY
+}
+
+launcher_exec_stamp() {
+  local python_bin program stamp
+  command -v python3 >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
+  python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
+  program="$(launcher_exec_snapshot_python)" || return "$TRELLIS_EX_UNAVAILABLE"
+  stamp="$(launcher_release_stamp_python)" || return "$TRELLIS_EX_UNAVAILABLE"
+  LC_ALL=C "$python_bin" -I -c "$program" "$stamp" "$@" 2>/dev/null
+}
+
+launcher_is_sha256() {
+  case "${1:-}" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  [ "${#1}" -eq 64 ]
+}
+
+# Full verify of releases/.exec/NAME as release VERSION whose release.json is
+# DIGEST, exactly as the installed release is verified.
+launcher_verify_snapshot() {
+  local exec_store="${1:-}" name="${2:-}" version="${3:-}" digest="${4:-}" cli
+  cli="$(launcher_verify_release "$exec_store/$name" "$version")" || return $?
+  [ "$cli" = "$exec_store/$name/payload/scripts/trellis" ] || {
+    launcher_error "verified release snapshot has an invalid payload path"
+    return "$TRELLIS_EX_STATE"
+  }
+  [ "$(launcher_release_json_sha256_no_follow "$exec_store" "$name")" = "$digest" ] || {
+    launcher_error "release snapshot record changed during verification: $version"
+    return "$TRELLIS_EX_STATE"
+  }
+}
+
+# Does the verified payload at $1 run from the persistent execution snapshot?
+# Releases before 1.4.0 attest only their installed path and the per-run
+# `.tmp.<version>.exec.<s>` snapshot, so their gates refuse `.exec/`; a payload
+# whose predicate accepts it declares so by this line in its normative copy
+# (scripts/lib/trellis-home.sh). The answer selects a layout only: both are
+# fully verified before anything runs, so a wrong answer can break a route but
+# never runs unverified bytes.
+launcher_payload_runs_from_exec_store() {
+  /usr/bin/grep -qxF '# trellis-payload-capability: exec-snapshot' "${1:-}/scripts/lib/trellis-home.sh" 2>/dev/null
+}
+
+# releases/.exec must be a real, canonical, private directory this user owns
+# before any stamp in it is believed or anything is allocated in it.
+launcher_exec_store_is_private() {
+  local exec_store="${1:-}"
+  [ ! -L "$exec_store" ] && [ -d "$exec_store" ] && [ -O "$exec_store" ] &&
+    launcher_private_directory "$exec_store" &&
+    [ "$(launcher_real_directory "$exec_store")" = "$exec_store" ]
+}
+
+# Releases 1.4.0 and later run from a persistent execution snapshot shared by
+# every run: releases/.exec/<version>-<sha256 of release.json>, sealed
+# read-only. Each run proves it with stamps (spec 072 D-A): the installed
+# release's own stamp, and the snapshot's, both checked in one process. A hit
+# runs the snapshot with no copy and no re-hash. Any miss falls back to the full
+# verify of whatever missed, and only that verify's verdict lets the run go on:
+#
+#   - installed release: full verify, as before stamps existed; refused means
+#     refused, whatever state the snapshot is in. The snapshot verdict is then
+#     taken afresh, never carried across that verify.
+#   - snapshot present: under the per-snapshot repair lock, checked again, then
+#     fully verified; refused means that very instance (by device and inode) is
+#     moved aside, removed, and rebuilt. It never runs.
+#   - snapshot absent: under the same lock, copied into a work directory
+#     .exec/.tmp.<version>-<digest>.<s> (owner sidecar beside it), fully
+#     verified there, then renamed to the final name without replacing
+#     anything. Only a complete, verified copy ever has the final name.
+#
+# Older payloads (launcher_payload_runs_from_exec_store) keep the per-run
+# snapshot releases/.tmp.<version>.exec.<s>: copied after the installed release
+# is proved, fully verified, and removed by launcher_cleanup.
+#
+# Stamps are written only after a full verify passed and only when a fresh sweep
+# equals the one taken before that verify. Prints "<snapshot>\t<digest>".
 launcher_snapshot_verified_release() (
   set +e
-  local releases="${1:-}" version="${2:-}" source pinned_digest current_digest snapshot="" snapshot_base copied_digest final_digest snapshot_cli
+  local releases="${1:-}" version="${2:-}" home source exec_store snapshot="" name verdict rest
+  local digest="" source_state="-" exec_state="-" current work="" retired="" legacy="" work_token="" rc attempts=0
+  local owner_birth identity cli
 
   launcher_absolute_path_is_clean "$releases" || return "$TRELLIS_EX_USAGE"
   case "$version" in
     ''|*/*|*$'\t'*|*$'\n'*|*$'\r'*) return "$TRELLIS_EX_USAGE" ;;
   esac
+  home="${releases%/releases}"
   source="$releases/$version"
+  exec_store="$releases/.exec"
   cleanup_snapshot() {
-    if [ -n "${snapshot:-}" ]; then
-      launcher_remove_snapshot "$releases" "$snapshot" "$version" >/dev/null 2>&1 ||
-        launcher_error "could not clean failed release execution snapshot: $snapshot"
-    fi
+    local leftover
+    for leftover in "${work:-}" "${retired:-}" "${legacy:-}"; do
+      [ -n "$leftover" ] || continue
+      launcher_remove_snapshot "$releases" "$leftover" "$version" >/dev/null 2>&1 ||
+        launcher_error "could not clean release execution snapshot work directory: $leftover"
+    done
   }
   trap cleanup_snapshot EXIT
   trap 'cleanup_snapshot; exit 129' HUP
   trap 'cleanup_snapshot; exit 130' INT
   trap 'cleanup_snapshot; exit 143' TERM
 
-  pinned_digest="$(launcher_release_json_sha256_no_follow "$releases" "$version")" || return $?
-  launcher_verify_release "$source" "$version" >/dev/null || return $?
-  current_digest="$(launcher_release_json_sha256_no_follow "$releases" "$version")" || return $?
-  if [ "$current_digest" != "$pinned_digest" ]; then
-    launcher_error "configured release changed while preparing execution snapshot: $version"
-    return "$TRELLIS_EX_STATE"
+  if [ -e "$exec_store" ] || [ -L "$exec_store" ]; then
+    launcher_exec_store_is_private "$exec_store" || {
+      launcher_error "release execution snapshot store is not a private real directory: $exec_store"
+      return "$TRELLIS_EX_STATE"
+    }
   fi
 
-  snapshot="$(mktemp -d "$releases/.tmp.$version.exec.XXXXXX")" || {
-    launcher_error "could not create private release execution snapshot"
-    return "$TRELLIS_EX_UNAVAILABLE"
-  }
-  launcher_write_snapshot_owner "$snapshot" || return $?
-  chmod 700 "$snapshot" || {
-    launcher_error "could not secure release execution snapshot"
-    return "$TRELLIS_EX_UNAVAILABLE"
-  }
-  snapshot_base="${snapshot##*/}"
-  [ "${snapshot%/*}" = "$releases" ] &&
-    launcher_snapshot_name_is_safe "$releases" "$snapshot_base" "$version" || {
-    launcher_error "generated release execution snapshot is unsafe"
-    return "$TRELLIS_EX_UNAVAILABLE"
-  }
-  [ ! -L "$snapshot" ] && [ -d "$snapshot" ] &&
-    [ "$(launcher_real_directory "$snapshot")" = "$snapshot" ] || {
-    launcher_error "release execution snapshot is unavailable"
-    return "$TRELLIS_EX_UNAVAILABLE"
-  }
+  if verdict="$(launcher_exec_stamp fast "$home" "$version")"; then
+    rest="${verdict#*$'\t'}"
+    digest="${verdict%%$'\t'*}"
+    source_state="${rest%%$'\t'*}"
+    exec_state="${rest#*$'\t'}"
+    launcher_is_sha256 "$digest" || { digest=""; source_state="-"; exec_state="-"; }
+  fi
 
-  launcher_copy_snapshot_no_follow "$releases" "$version" "$snapshot_base" "$pinned_digest" || return $?
-  copied_digest="$(launcher_release_json_sha256_no_follow "$releases" "$snapshot_base")" || return $?
-  if [ "$copied_digest" != "$pinned_digest" ]; then
-    launcher_error "release snapshot record changed after copy: $version"
-    return "$TRELLIS_EX_STATE"
+  if [ "$source_state" != hit ]; then
+    if [ -z "$digest" ]; then
+      digest="$(launcher_release_json_sha256_no_follow "$releases" "$version")" || return $?
+    fi
+    launcher_verify_release "$source" "$version" >/dev/null || return $?
+    current="$(launcher_release_json_sha256_no_follow "$releases" "$version")" || return $?
+    if [ "$current" != "$digest" ]; then
+      launcher_error "configured release changed while preparing execution snapshot: $version"
+      return "$TRELLIS_EX_STATE"
+    fi
+    if launcher_is_sha256 "$source_state"; then
+      launcher_exec_stamp source-write "$home" "$version" "$source_state" >/dev/null
+    fi
+    # The snapshot may have changed during that verify: decide on it afresh.
+    exec_state="$(launcher_exec_stamp exec-check "$home" "$version" "$digest")" || exec_state="-"
   fi
-  snapshot_cli="$(launcher_verify_release "$snapshot" "$version")" || return $?
-  [ "$snapshot_cli" = "$snapshot/payload/scripts/trellis" ] || {
-    launcher_error "verified release snapshot has an invalid payload path"
-    return "$TRELLIS_EX_STATE"
+
+  if ! launcher_payload_runs_from_exec_store "$source/payload"; then
+    legacy="$(mktemp -d "$releases/.tmp.$version.exec.XXXXXX")" || {
+      launcher_error "could not create private release execution snapshot"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    launcher_write_snapshot_owner "$legacy" || return $?
+    chmod 700 "$legacy" || {
+      launcher_error "could not secure release execution snapshot"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    [ "${legacy%/*}" = "$releases" ] &&
+      launcher_snapshot_name_is_safe "$releases" "${legacy##*/}" "$version" &&
+      [ ! -L "$legacy" ] && [ -d "$legacy" ] &&
+      [ "$(launcher_real_directory "$legacy")" = "$legacy" ] || {
+      launcher_error "generated release execution snapshot is unsafe"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    launcher_copy_snapshot_no_follow "$releases" "$version" "${legacy##*/}" "$digest" || return $?
+    cli="$(launcher_verify_release "$legacy" "$version")" || return $?
+    [ "$cli" = "$legacy/payload/scripts/trellis" ] || {
+      launcher_error "verified release snapshot has an invalid payload path"
+      return "$TRELLIS_EX_STATE"
+    }
+    [ "$(launcher_release_json_sha256_no_follow "$releases" "${legacy##*/}")" = "$digest" ] || {
+      launcher_error "release snapshot record changed during verification: $version"
+      return "$TRELLIS_EX_STATE"
+    }
+    trap - EXIT HUP INT TERM
+    printf '%s\t%s\n' "$legacy" "$digest"
+    return 0
+  fi
+
+  name="$version-$digest"
+  snapshot="$exec_store/$name"
+  launcher_snapshot_payload_matches "$home" "$snapshot/payload" "$version" || {
+    launcher_error "release execution snapshot name is unsafe: $name"
+    return "$TRELLIS_EX_USAGE"
   }
-  final_digest="$(launcher_release_json_sha256_no_follow "$releases" "$snapshot_base")" || return $?
-  if [ "$final_digest" != "$pinned_digest" ]; then
-    launcher_error "release snapshot record changed during verification: $version"
-    return "$TRELLIS_EX_STATE"
+  if [ "$exec_state" != hit ]; then
+    if [ ! -e "$exec_store" ] && [ ! -L "$exec_store" ]; then
+      mkdir -m 700 "$exec_store" 2>/dev/null
+    fi
+    launcher_exec_store_is_private "$exec_store" || {
+      launcher_error "release execution snapshot store is not a private real directory: $exec_store"
+      return "$TRELLIS_EX_STATE"
+    }
+    # One repair per snapshot at a time: flock on a lock file in the store,
+    # held by this subshell's descriptor 9 until it exits. Whoever held it
+    # before may have repaired the snapshot, so check again under it.
+    exec 9>>"$exec_store/.lock.$name" &&
+      /usr/bin/perl -MFcntl=:flock -e 'open(my $fh, ">>&=", 9) or exit 1; flock($fh, LOCK_EX) or exit 1' || {
+      launcher_error "could not lock release execution snapshot: $snapshot"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    exec_state="$(launcher_exec_stamp exec-check "$home" "$version" "$digest")" || exec_state="-"
+    owner_birth="$(launcher_process_birth "$$")" && [ -n "$owner_birth" ] || {
+      launcher_error "could not determine snapshot owner process birth"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
   fi
+  while [ "$exec_state" != hit ]; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 3 ] || {
+      launcher_error "could not prepare a verified release execution snapshot: $version"
+      return "$TRELLIS_EX_STATE"
+    }
+    if [ "$exec_state" != absent ]; then
+      identity="$(launcher_exec_stamp exec-identity "$home" "$version" "$digest")" || identity=""
+      if launcher_verify_snapshot "$exec_store" "$name" "$version" "$digest" 2>/dev/null; then
+        if launcher_is_sha256 "$exec_state"; then
+          launcher_exec_stamp exec-write "$home" "$version" "$digest" "$exec_state" >/dev/null
+        fi
+        break
+      fi
+      launcher_error "release execution snapshot failed verification and is rebuilt: $snapshot"
+      retired="$(launcher_exec_stamp exec-retire "$home" "$version" "$digest" "$identity" "$$" "$owner_birth")"
+      rc=$?
+      case "$rc" in
+        0)
+          retired="$exec_store/$retired"
+          launcher_remove_snapshot "$releases" "$retired" "$version" || return $?
+          retired=""
+          ;;
+        3)
+          # Not the instance that failed: decide on whatever is there now.
+          retired=""
+          exec_state="$(launcher_exec_stamp exec-check "$home" "$version" "$digest")" || exec_state="-"
+          continue
+          ;;
+        *)
+          retired=""
+          launcher_error "could not move aside rejected release execution snapshot: $snapshot"
+          return "$TRELLIS_EX_STATE"
+          ;;
+      esac
+    fi
+
+    work="$(launcher_exec_stamp exec-work "$home" "$version" "$digest" "$$" "$owner_birth")" || {
+      work=""
+      launcher_error "could not create private release execution snapshot"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    work="$exec_store/$work"
+    launcher_exec_work_name_is_safe "$releases" "${work##*/}" "$version" &&
+      [ ! -L "$work" ] && [ -d "$work" ] &&
+      [ "$(launcher_real_directory "$work")" = "$work" ] || {
+      launcher_error "generated release execution snapshot is unsafe"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    launcher_copy_snapshot_no_follow "$releases" "$version" "${work##*/}" "$digest" || return $?
+    work_token="$(launcher_exec_stamp exec-token "$home" "$version" "$digest" "${work##*/}")" || work_token=""
+    launcher_verify_snapshot "$exec_store" "${work##*/}" "$version" "$digest" || return $?
+    launcher_atomic_publish_no_replace "$work" "$snapshot"
+    rc=$?
+    case "$rc" in
+      0)
+        rm -f "$work.owner.json"
+        work=""
+        exec_state="-"
+        if launcher_is_sha256 "$work_token" &&
+          launcher_exec_stamp exec-seal "$home" "$version" "$digest" "$work_token" >/dev/null; then
+          exec_state=hit
+        fi
+        ;;
+      "$TRELLIS_EX_CONFLICT")
+        launcher_remove_snapshot "$releases" "$work" "$version" || return $?
+        work=""
+        exec_state="$(launcher_exec_stamp exec-check "$home" "$version" "$digest")" || exec_state="-"
+        ;;
+      *) return "$rc" ;;
+    esac
+  done
 
   trap - EXIT HUP INT TERM
-  printf '%s\t%s\n' "$snapshot" "$pinned_digest"
+  printf '%s\t%s\n' "$snapshot" "$digest"
 )
 
 # Buffer the command carrier, every sourced helper, and the command bodies from
@@ -2290,8 +3145,12 @@ launcher_emit_verified_command_bundle() {
   releases="${snapshot%/*}"
   base="${snapshot##*/}"
   launcher_absolute_path_is_clean "$releases" &&
-    [ "$releases/$base" = "$snapshot" ] &&
-    launcher_snapshot_name_is_safe "$releases" "$base" "$version" || {
+    [ "$releases/$base" = "$snapshot" ] && {
+      launcher_snapshot_name_is_safe "$releases" "$base" "$version" || {
+        [ "$base" = "$version-$expected_digest" ] &&
+          launcher_snapshot_payload_matches "${releases%/releases/.exec}" "$snapshot/payload" "$version"
+      }
+    } || {
       launcher_error "release command snapshot is unsafe"
       return "$TRELLIS_EX_USAGE"
     }
@@ -3088,6 +3947,266 @@ launcher_heavy_test_hook() {
   fi
 }
 
+# Metadata-only routes, like --version: neither needs the payload, so neither
+# pays for a release verify or an execution snapshot.
+#
+# launcher_usage is a pinned copy of usage() in scripts/trellis, so `trellis
+# help` prints this launcher's own command list. A launcher is installed by
+# `trellis configure` from the release it configures, so the two agree unless a
+# release was adopted without reconfiguring.
+launcher_usage() {
+  cat <<'EOF'
+trellis — Trellis management dispatcher
+Usage: trellis <command> [args...]
+       trellis --version  (configured release; skips payload verification)
+
+Local setup and release commands:
+  configure     Configure local machine state and install the stable launcher
+  fleet         Manage local fleet settings
+  launchd       Install or remove local disk-janitor LaunchAgents
+  release       Install, verify, list, locate, or adopt immutable releases
+  registry      Import, list, rebuild, or annotate the local registry
+  show-config   Print portable policy plus validated local machine context
+  attach        Attach one checkout to an immutable release
+  detach        Remove owned local attachment surfaces
+  recover       Recover an interrupted attachment transaction
+  relink        Repair local release anchors
+  task          Materialize a local scheduled-task input
+
+Existing commands:
+  doctor        Diagnose (and --fix) inheritance health
+  conformance  Verify live documentation path citations
+  disk-janitor  Reclaim build caches, dead worktrees, package stores
+  onboard       Onboard a project into Trellis
+  upgrade       Install, verify, and explicitly adopt a named immutable release
+                (launcher-only route; not runnable from this dispatcher)
+  mirror        Publish the verified immutable policy payload to a mirror
+  sync          Sync Claude hooks into managed projects
+  skills        Manage Trellis-owned user skills (list, import, link, unlink)
+  worktree      Create/repair a worktree with Trellis inheritance seeded
+  usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
+  heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
+  bench         Measure Trellis hook, lifecycle and gate latency in a sandbox (--suite hooks|lifecycle|gate, --n N)
+EOF
+}
+
+# `trellis heavy --check` and `--status` read the slot table. Everything between
+# each `#@pin` and `#@end` is a verbatim copy of scripts/lib/heavy-supervisor.pl;
+# scripts/tests/launcher-exec-snapshot.bats requires each block to occur in that
+# file as is, and runs both against the same slot directories.
+launcher_heavy_metadata_perl() {
+  cat <<'TRELLIS_HEAVY_METADATA_PL'
+use strict;
+use warnings;
+use Fcntl qw(:DEFAULT :flock);
+use JSON::PP ();
+use MIME::Base64 ();
+
+my $EX_CONFIG = 78;
+
+sub fail {
+  my ($code, $message) = @_;
+  print STDERR "trellis heavy: $message\n";
+  exit $code;
+}
+
+#@pin
+my %caller;
+if (defined $ENV{TRELLIS_HEAVY_CALLER_ENV}) {
+  my $blob = $ENV{TRELLIS_HEAVY_CALLER_ENV};
+  $blob =~ s/^v1:// or fail($EX_CONFIG, 'unrecognised caller environment encoding from the launcher');
+  for my $pair (split /\0/, MIME::Base64::decode_base64($blob)) {
+    my ($key, $value) = split /=/, $pair, 2;
+    $caller{$key} = $value if defined $value && length $key;
+  }
+} else {
+  %caller = %ENV;
+}
+delete $caller{TRELLIS_HEAVY_CALLER_ENV};
+
+my $test_mode = ($caller{TRELLIS_HEAVY_TEST} // '') eq '1';
+sub test_knob { my $name = shift; return $test_mode ? $caller{$name} : undef; }
+
+my $home = $ENV{TRELLIS_HOME} // '';
+if ($home eq '') {
+  length($ENV{HOME} // '') or fail($EX_CONFIG, 'HOME is required when TRELLIS_HOME is unset');
+  $home = "$ENV{HOME}/.trellis";
+}
+my $config = "$home/config.json";
+my $dir = "$home/locks/heavy";
+my $override = test_knob('TRELLIS_HEAVY_DIR');
+$dir = $override if defined $override && length $override;
+
+my %POOL = (
+  heavy => {key => 'heavy_slots',       default => 2, prefix => 'slot'},
+  light => {key => 'heavy_light_slots', default => 4, prefix => 'light'},
+);
+
+# Slot counts per pool: heavy_slots (absent means 2) and heavy_light_slots
+# (absent means 4), each a JSON integer >= 1. Re-read on every poll. Returns
+# ({heavy => N, light => L}) or (undef, one-line reason).
+sub read_slots {
+  open(my $fh, '<', $config) or return (undef, "cannot read machine config $config: $!");
+  my $text = do { local $/; <$fh> };
+  close $fh;
+  my $data = eval { JSON::PP->new->decode($text) };
+  return (undef, "machine config is not a JSON object: $config") unless ref $data eq 'HASH';
+  my %n;
+  for my $p (qw(heavy light)) {
+    my $key = $POOL{$p}{key};
+    if (!exists $data->{$key}) {
+      $n{$p} = $POOL{$p}{default};
+      next;
+    }
+    my $encoded = JSON::PP->new->allow_nonref->canonical->encode($data->{$key});
+    return (undef, "$key must be an integer >= 1 (found $encoded) in $config") unless $encoded =~ /^[1-9][0-9]{0,5}$/;
+    $n{$p} = $encoded + 0;
+  }
+  return (\%n);
+}
+
+# The slot directory is private: mode 700, a real directory, owned by us.
+sub prepare_dir {
+  my $parent = $dir;
+  $parent =~ s{/[^/]+/?$}{};
+  for my $path ($parent, $dir) {
+    next if $path eq '' || -e $path || -l $path;
+    mkdir($path, 0700) or $!{EEXIST} or return "cannot create slot directory $path: $!";
+  }
+  my @st = lstat($dir);
+  return "slot directory is missing: $dir" unless @st;
+  return "slot directory must be a real directory, not a symlink: $dir" if -l _ || !-d _;
+  return "slot directory must be owned by uid $<: $dir" unless $st[4] == $<;
+  return sprintf('slot directory must have mode 700, found %03o: %s', $st[2] & 07777, $dir) if $st[2] & 077;
+  return undef;
+}
+
+sub dir_id {
+  my @st = stat($dir) or return undef;
+  return "$st[0]:$st[1]";
+}
+
+sub slot_path { my ($p, $i) = @_; return "$dir/$POOL{$p}{prefix}-$i.lock"; }
+sub info_path { my ($p, $i) = @_; return "$dir/$POOL{$p}{prefix}-$i.info"; }
+sub token_path { my ($p, $i) = @_; return "$dir/$POOL{$p}{prefix}-$i.token"; }
+
+# The holder's ownership token: written under the lock right after acquiring,
+# removed while still holding just before release. Present means the holder
+# has not released; nobody else can write one while the lock is held.
+sub read_token {
+  my ($p, $i) = @_;
+  # A token is only a regular file of ours, mode 600, never reached through a
+  # symlink; anything else is no token at all.
+  sysopen(my $fh, token_path($p, $i), O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return undef;
+  my @st = stat($fh);
+  unless (@st && -f _ && $st[4] == $< && ($st[2] & 07777) == 0600) {
+    close $fh;
+    return undef;
+  }
+  my $line = <$fh>;
+  close $fh;
+  return undef unless defined $line;
+  chomp $line;
+  return $line;
+}
+
+# Open (creating when absent) one slot file: O_NOFOLLOW, mode 600, never deleted.
+sub open_slot {
+  my ($p, $i) = @_;
+  sysopen(my $fh, slot_path($p, $i), O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or return undef;
+  unless (-f $fh) { close $fh; return undef; }
+  return $fh;
+}
+
+# Highest slot index present on disk, so retired slots stay visible.
+sub max_slot_on_disk {
+  my $p = shift;
+  my $max = 0;
+  opendir(my $dh, $dir) or return 0;
+  for (readdir $dh) { $max = $1 if /^\Q$POOL{$p}{prefix}\E-([1-9][0-9]*)\.lock$/ && $1 > $max; }
+  closedir $dh;
+  return $max;
+}
+
+# The status probe: try LOCK_NB on a fresh description and release at once.
+sub slot_is_held {
+  my ($p, $i) = @_;
+  return 0 unless -e slot_path($p, $i);
+  my $fh = open_slot($p, $i) or return 0;
+  my $held = !flock($fh, LOCK_EX | LOCK_NB);
+  close $fh;
+  return $held;
+}
+
+sub read_info {
+  my ($p, $i) = @_;
+  open(my $fh, '<', info_path($p, $i)) or return undef;
+  my $line = <$fh>;
+  close $fh;
+  return undef unless defined $line;
+  chomp $line;
+  my @fields = split /\t/, $line, 4;
+  return @fields == 4 ? \@fields : undef;
+}
+#@end
+
+#@pin
+my $mode = shift @ARGV // '';
+
+if ($mode eq 'check') {
+  my ($n, $why) = read_slots();
+  fail($EX_CONFIG, $why) unless $n;
+  my $problem = prepare_dir();
+  fail($EX_CONFIG, $problem) if $problem;
+  print "trellis heavy: ok (heavy_slots=$n->{heavy}, heavy_light_slots=$n->{light}, slots in $dir)\n";
+  exit 0;
+}
+
+if ($mode eq 'status') {
+  my ($n, $why) = read_slots();
+  fail($EX_CONFIG, $why) unless $n;
+  my $problem = prepare_dir();
+  fail($EX_CONFIG, $problem) if $problem;
+  print "heavy_slots=$n->{heavy} heavy_light_slots=$n->{light} dir=$dir\n";
+  for my $p (qw(heavy light)) {
+    my $label = $POOL{$p}{prefix};
+    my $max = max_slot_on_disk($p);
+    $max = $n->{$p} if $n->{$p} > $max;
+    for my $i (($p eq 'heavy' ? (0) : ()), 1 .. $max) {
+      my $retired = $i > $n->{$p} ? ' (retired)' : '';
+      if (!slot_is_held($p, $i)) {
+        print "$label $i: free$retired\n";
+        next;
+      }
+      my $info = read_info($p, $i);
+      if ($info) {
+        print "$label $i: held$retired lane=$info->[1] pid=$info->[0] since=$info->[2] argv=$info->[3]\n";
+      } else {
+        print "$label $i: held$retired unknown\n";
+      }
+    }
+  }
+  exit 0;
+}
+#@end
+exit 2;
+TRELLIS_HEAVY_METADATA_PL
+}
+
+launcher_heavy_metadata() {
+  local home="${1:-}" mode="${2:-}" perl_bin program
+  perl_bin="$(command -v perl)" || {
+    printf '%s\n' 'trellis heavy: perl is required' >&2
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  program="$(launcher_heavy_metadata_perl)" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env -i \
+    "HOME=$HOME" "TRELLIS_HOME=$home" \
+    "TRELLIS_HEAVY_CALLER_ENV=$launcher_heavy_caller_env" \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$perl_bin" -e "$program" "$mode"
+}
+
 trap 'launcher_cleanup' EXIT
 trap 'launcher_cleanup; exit 129' HUP
 trap 'launcher_cleanup; exit 130' INT
@@ -3147,6 +4266,24 @@ launcher_main() {
     printf 'trellis %s (configured; not verified)\n' "$version"
     return 0
   fi
+  # The dispatcher answers help for an empty or absent first word and ignores
+  # what follows; heavy takes --check and --status alone.
+  case "${1:-}" in
+    ''|help|-h|--help)
+      launcher_usage
+      return 0
+      ;;
+    heavy)
+      if [ "$#" -eq 2 ]; then
+        case "$2" in
+          --check|--status)
+            launcher_heavy_metadata "$home" "${2#--}"
+            return $?
+            ;;
+        esac
+      fi
+      ;;
+  esac
   command -v git >/dev/null 2>&1 ||
     launcher_die "$TRELLIS_EX_UNAVAILABLE" "git is required to verify immutable releases"
 
@@ -3191,12 +4328,14 @@ launcher_main() {
   TMPDIR="$command_scratch"
   export TMPDIR
 
-  # Freeze a complete, independently verified payload before any executable
-  # path is selected.  Never hand the just-verified installed release path to
-  # a child: the only executable payload is the sealed private snapshot.
+  # Select a complete, verified payload before any executable path is chosen.
+  # Never hand the installed release path to a child: the only executable
+  # payload is a sealed execution snapshot of its exact release.json.
   # Arm the release-store cleanup context before command substitution starts.
-  # The producer records the owning shell in its sidecar; cleanup can recover
-  # that exact snapshot if the substitution returns during a signal handoff.
+  # The producer records the owning shell in the sidecar of any directory it
+  # creates; cleanup can recover that directory if the substitution returns
+  # during a signal handoff. A persistent snapshot is not cleaned up; a per-run
+  # one (older payloads) is, on the way out.
   LAUNCHER_EXECUTION_SNAPSHOT_STORE="$releases"
   LAUNCHER_EXECUTION_SNAPSHOT_VERSION="$version"
   snapshot_info="$(launcher_snapshot_verified_release "$releases" "$version")" || exit "$?"
@@ -3212,9 +4351,15 @@ launcher_main() {
   esac
   [ "${#release_json_sha256}" -eq 64 ] ||
     launcher_die "$TRELLIS_EX_STATE" "verified release snapshot returned an invalid record digest"
-  LAUNCHER_EXECUTION_SNAPSHOT="$snapshot"
-  LAUNCHER_EXECUTION_SNAPSHOT_STORE="$releases"
-  LAUNCHER_EXECUTION_SNAPSHOT_VERSION="$version"
+  if [ "$snapshot" = "$releases/.exec/$version-$release_json_sha256" ]; then
+    LAUNCHER_EXECUTION_SNAPSHOT_STORE=""
+    LAUNCHER_EXECUTION_SNAPSHOT_VERSION=""
+  else
+    [ "${snapshot%/*}" = "$releases" ] &&
+      launcher_snapshot_name_is_safe "$releases" "${snapshot##*/}" "$version" ||
+      launcher_die "$TRELLIS_EX_STATE" "verified release snapshot returned an unexpected path"
+    LAUNCHER_EXECUTION_SNAPSHOT="$snapshot"
+  fi
   cli="$snapshot/payload/scripts/trellis"
   payload="$snapshot/payload"
   [ -f "$cli" ] && [ ! -L "$cli" ] && [ -x "$cli" ] || {
@@ -3223,7 +4368,7 @@ launcher_main() {
   ssh_auth_sock="$(launcher_verified_ssh_auth_sock)"
   attach_environment=("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
   case "${1:-}" in
-    attach|onboard|worktree|doctor)
+    attach|onboard|worktree|doctor|bench)
       attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
       ;;
   esac

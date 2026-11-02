@@ -194,18 +194,18 @@ a = m.runtime(time.monotonic()+30)
 assert m.verify(str(root), 'claude')['status'] == 'executed'
 alias = temp / 'alias.py'; alias.symlink_to(copy)
 n = load(alias)
-assert n.runtime(time.monotonic()+30) == a
-assert n.verify(str(root), 'pi')['status'] == 'reused'
+assert n.runtime(time.monotonic()+30) == a, 'filename-only alias changed runtime identity'
+assert n.verify(str(root), 'pi')['status'] == 'reused', 'filename-only alias prevented reuse'
 copy.write_bytes(copy.read_bytes() + b'\n# source changed after load\n')
 b = m.runtime(time.monotonic()+30)
 assert b['implementation']['source'] != a['implementation']['source']
-assert b['implementation']['loaded'] == a['implementation']['loaded']
+assert b['implementation']['loaded'] == a['implementation']['loaded'], 'unchanged loaded code changed identity'
 assert m.verify(str(root), 'pi')['status'] == 'executed'
 copy.write_bytes(copy.read_bytes().replace(b'OUTPUT_CAP = 65536', b'OUTPUT_CAP = 65535'))
 c = load(copy).runtime(time.monotonic()+30)
-assert c['implementation']['loaded'] != b['implementation']['loaded']
+assert c['implementation']['loaded'] != b['implementation']['loaded'], 'loaded-code change escaped identity'
 PY
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
 @test "streaming parser bounds output and reaps only its owned child" {

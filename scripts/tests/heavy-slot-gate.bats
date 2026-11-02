@@ -16,13 +16,14 @@ setup() {
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/home"
   export TRELLIS_HOME="$SANDBOX/trellis-home"
+  export TMPDIR="$SANDBOX/tmp"
   export TRELLIS_HEAVY_TEST=1
   export TRELLIS_HEAVY_DIR="$SANDBOX/slots"
   export TRELLIS_HEAVY_TEST_POLL=0.1
   unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID TRELLIS_HEAVY_POOL TRELLIS_HEAVY_CALLER_ENV
   unset TRELLIS_HEAVY_LIGHT_WARN TRELLIS_HEAVY_KILL_AFTER TRELLIS_HEAVY_TEST_PAUSE TRELLIS_HEAVY_TEST_TRACE
   unset TRELLIS_HEAVY_TEST_HEARTBEAT TRELLIS_HEAVY_TEST_FAIL TRELLIS_VERIFIED_PAYLOAD
-  mkdir -p "$HOME" "$TRELLIS_HOME" "$SANDBOX/bin"
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR" "$SANDBOX/bin"
   chmod 700 "$TRELLIS_HOME"
   # `trellis` on the workload's PATH, for nested calls.
   printf '#!/bin/bash\nexec %q "$@"\n' "$REPO_ROOT/scripts/trellis" > "$SANDBOX/bin/trellis"
@@ -209,6 +210,140 @@ EOF
   for job in "${pids[@]}"; do wait "$job"; done
   [ "$(grep -c ' end ' "$SANDBOX/events")" -eq 4 ] || { cat "$SANDBOX/events"; false; }
   [ "$(max_overlap)" -eq 2 ] || { cat "$SANDBOX/events"; false; }
+}
+
+# ---------------------------------------------------------------- Spec 072 T18
+
+@test "T18: process-gate with --light is refused before creating a slot or launching" {
+  local order args=()
+  for order in light-first lane-first; do
+    case "$order" in
+      light-first) args=(--light --lane process-gate) ;;
+      lane-first) args=(--lane=process-gate --light) ;;
+    esac
+    run "${HEAVY[@]}" "${args[@]}" -- touch "$SANDBOX/launched"
+    [ "$status" -eq 2 ] || { echo "$order: status=$status $output"; false; }
+    [[ "$output" == *"--lane process-gate requires the heavy pool (drop --light)"* ]] || { echo "$output"; false; }
+    [ ! -e "$TRELLIS_HEAVY_DIR" ]
+    [ ! -e "$SANDBOX/launched" ]
+  done
+}
+
+@test "T18: a gate has its reserved slot while ordinary lanes queue and resume as before" {
+  write_config 1
+  hold_slot 1 30
+  local holder=$HOLD_PID
+  TRELLIS_HEAVY_TEST_HEARTBEAT=0.1 heavy_bg lane --lane worker -- sh -c "echo \$TRELLIS_HEAVY_SLOT > '$SANDBOX/lane-slot'"
+  local lane=$BG_PID
+  wait_for_grep 'waiting.*heavy slot' "$SANDBOX/lane.out"
+  [ ! -e "$SANDBOX/lane-slot" ]
+
+  heavy_bg gate --lane process-gate -- sh -c "echo \$\$ > '$SANDBOX/gate-child'; echo \$TRELLIS_HEAVY_SLOT > '$SANDBOX/gate-slot'; exec sleep 30"
+  local gate=$BG_PID
+  wait_for_file "$SANDBOX/gate-slot"
+  PIDS+=("$(<"$SANDBOX/gate-child")")
+  [ "$(<"$SANDBOX/gate-slot")" = 0 ]
+  [ ! -e "$SANDBOX/lane-slot" ]
+  run "${HEAVY[@]}" --status
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"slot 0: held lane=process-gate pid=$gate"* ]] || { echo "$output"; false; }
+
+  kill -KILL "$holder"
+  wait "$holder" 2>/dev/null || true
+  wait_for_file "$SANDBOX/lane-slot"
+  wait "$lane"
+  [ "$(<"$SANDBOX/lane-slot")" = 1 ]
+  kill -0 "$gate"
+  kill -TERM "$gate"
+  local rc=0
+  wait "$gate" || rc=$?
+  [ "$rc" -eq 143 ]
+  run "${HEAVY[@]}" --status
+  [ "$status" -eq 0 ] && [[ "$output" == *"slot 0: free"* ]] || { echo "$output"; false; }
+}
+
+@test "T18: gates serialize even with free ordinary slots and a killed holder frees the reservation" {
+  write_config 2
+  heavy_bg first-gate --lane process-gate -- sh -c "echo \$\$ > '$SANDBOX/gate-child'; exec sleep 30"
+  local first=$BG_PID
+  wait_for_file "$SANDBOX/gate-child"
+  local child
+  child="$(<"$SANDBOX/gate-child")"
+  PIDS+=("$child")
+  TRELLIS_HEAVY_TEST_HEARTBEAT=0.1 heavy_bg second-gate --lane process-gate -- sh -c "echo \$TRELLIS_HEAVY_SLOT > '$SANDBOX/second-slot'"
+  local second=$BG_PID
+  wait_for_grep 'waiting.*process-gate slot.*held: 0=process-gate/' "$SANDBOX/second-gate.out"
+  [ ! -e "$SANDBOX/second-slot" ]
+  kill -KILL "$first"
+  wait "$first" 2>/dev/null || true
+  kill -0 "$child"
+  run "${HEAVY[@]}" --status
+  [ "$status" -eq 0 ] && [[ "$output" == *"slot 0: held"* ]] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/second-slot" ]
+  kill -KILL "$child"
+  wait_for_file "$SANDBOX/second-slot"
+  wait "$second"
+  [ "$(<"$SANDBOX/second-slot")" = 0 ]
+  assert_no_holder_files killed-gate
+}
+
+@test "T18: nested calls in a gate keep its verified reservation and process group" {
+  local probe
+  probe="$(report_marker)"
+  run "${HEAVY[@]}" --lane process-gate --timeout 3 -- trellis heavy --lane process-gate -- sh -c "$probe"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=0')" ] || { echo "$output"; false; }
+  assert_no_holder_files nested-gate
+}
+
+@test "T18: a gate inside an ordinary heavy or light wrapper is refused before admission" {
+  local pool flag
+  for pool in heavy light; do
+    flag=""
+    [ "$pool" = heavy ] || flag=--light
+    run "${HEAVY[@]}" ${flag:+"$flag"} --timeout 3 -- sh -c '
+      trellis heavy --lane process-gate -- touch "$1"
+      rc=$?
+      [ "$rc" -eq 2 ] || exit 11
+      trellis heavy -- sh -c '\''echo "$TRELLIS_HEAVY_POOL/$TRELLIS_HEAVY_SLOT"'\''
+    ' _ "$SANDBOX/launched"
+    [ "$status" -eq 0 ] || { echo "$pool: status=$status $output"; false; }
+    [[ "$output" == *"run process-gate outside the enclosing ordinary heavy/light wrapper"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"$pool/1" ]] || { echo "$output"; false; }
+    [ ! -e "$SANDBOX/launched" ]
+    [ ! -e "$TRELLIS_HEAVY_DIR/slot-0.lock" ]
+    assert_no_holder_files "$pool-to-gate"
+  done
+}
+
+@test "T18: a close-fds descendant keeps the gate reservation after its leader exits" {
+  TRELLIS_HEAVY_TEST_TRACE="$SANDBOX/gate-trace" heavy_bg descendants --lane process-gate -- python3 -I -c '
+import os, subprocess, sys
+code = """
+import os, sys, time
+root = sys.argv[1]
+with open(root + "/descendant", "w") as ready:
+    ready.write(str(os.getpid()))
+while not os.path.exists(root + "/release"):
+    time.sleep(0.05)
+"""
+subprocess.Popen([sys.executable, "-I", "-c", code, sys.argv[1]], close_fds=True)
+' "$SANDBOX"
+  local first=$BG_PID
+  wait_for_file "$SANDBOX/descendant"
+  PIDS+=("$(<"$SANDBOX/descendant")")
+  wait_for_grep 'leader-zombie' "$SANDBOX/gate-trace"
+  TRELLIS_HEAVY_TEST_HEARTBEAT=0.1 heavy_bg successor --lane process-gate -- touch "$SANDBOX/successor"
+  local second=$BG_PID
+  wait_for_grep 'waiting.*process-gate slot' "$SANDBOX/successor.out"
+  [ ! -e "$SANDBOX/successor" ]
+  run "${HEAVY[@]}" --status
+  [ "$status" -eq 0 ] && [[ "$output" == *"slot 0: held lane=process-gate pid=$first"* ]] || { echo "$output"; false; }
+  touch "$SANDBOX/release"
+  wait "$first"
+  wait_for_file "$SANDBOX/successor"
+  wait "$second"
+  assert_no_holder_files descendants
 }
 
 # ---------------------------------------------------------------- H2
@@ -412,6 +547,88 @@ EOF
   [ "$(grep -c 'cannot read the workload' "$SANDBOX/probe.out")" -eq 1 ] || { cat "$SANDBOX/probe.out"; false; }
 }
 
+@test "H3: a zombie-only ps snapshot requires a fresh scan before group-empty or reap" {
+  write_config 1
+  mkdir -p "$SANDBOX/stub-bin"
+  cat > "$SANDBOX/stub-bin/ps" <<'EOF'
+#!/bin/bash
+# Intercept only the supervisor's group scan, never the test's live probes.
+if [ "$#" -ne 3 ] || [ "$1" != -A ] || [ "$2" != -o ] || [ "$3" != pid=,pgid=,stat= ]; then
+  exec /bin/ps "$@"
+fi
+root="${0%/*}/.."
+deadline=$((SECONDS + 120))
+if [ ! -e "$root/stale-scan-returned" ]; then
+  while (( SECONDS < deadline )); do
+    if [ -s "$root/leader" ] && [ -s "$root/descendant" ] && [ -e "$root/descendant-ready" ]; then
+      leader="$(<"$root/leader")"
+      descendant="$(<"$root/descendant")"
+      leader_state="$(/bin/ps -p "$leader" -o stat=)"
+      descendant_row="$(/bin/ps -p "$descendant" -o pgid=,stat=)"
+      read -r descendant_group descendant_state <<< "$descendant_row"
+      if [[ "$leader_state" == *Z* && "$descendant_group" = "$leader" && -n "$descendant_state" && "$descendant_state" != *Z* ]]; then
+        # A successful, non-atomic scan can miss a final fork even though it
+        # observes the leader's later zombie state. Hide the live descendant.
+        : > "$root/stale-scan-returned"
+        printf '%s %s Z\n' "$leader" "$leader"
+        exit 0
+      fi
+    fi
+    sleep 0.05
+  done
+  echo 'timed out waiting for the zombie leader and its live descendant' >&2
+  exit 1
+fi
+if [ ! -e "$root/fresh-scan-entered" ]; then
+  printf '%s\n' fresh-scan-entered > "$root/fresh-scan-entered"
+  while [ ! -e "$root/release-fresh-scan" ]; do
+    if (( SECONDS >= deadline )); then
+      echo 'timed out waiting for the fresh-scan release' >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  printf '%s\n' fresh-scan-released > "$root/fresh-scan-released"
+fi
+exec /bin/ps "$@"
+EOF
+  chmod 755 "$SANDBOX/stub-bin/ps"
+  PATH="$SANDBOX/stub-bin:$PATH" TRELLIS_HEAVY_KILL_AFTER=1 TRELLIS_HEAVY_TEST_TRACE="$SANDBOX/trace" \
+    heavy_bg fresh-scan --lane fresh-scan -- sh -c '
+      echo "$$" > "$1/leader"
+      (trap "" TERM; : > "$1/descendant-ready"; exec sleep 30) 3>&- &
+      echo "$!" > "$1/descendant"
+      exit 0
+    ' _ "$SANDBOX"
+  local supervisor=$BG_PID descendant leader state rc=0
+  wait_for_grep_while_live '^[0-9][0-9]*$' "$SANDBOX/descendant" "$supervisor" "the descendant PID"
+  descendant="$(<"$SANDBOX/descendant")"
+  PIDS+=("$descendant")
+  # Old code reaps/exits 0 after the first successful scan; it never enters
+  # this barrier. Observe liveness as well as the marker, not a fixed delay.
+  wait_for_grep_while_live '^fresh-scan-entered$' "$SANDBOX/fresh-scan-entered" "$supervisor" "the post-zombie scan"
+  leader="$(<"$SANDBOX/leader")"
+  kill -0 "$supervisor" "$descendant"
+  state="$(/bin/ps -p "$supervisor" -o stat=)"
+  [[ -n "$state" && "$state" != *Z* ]]
+  state="$(/bin/ps -p "$descendant" -o stat=)"
+  [[ -n "$state" && "$state" != *Z* ]]
+  [[ "$(/bin/ps -p "$leader" -o stat=)" == *Z* ]]
+  run "${HEAVY[@]}" --status
+  [ "$status" -eq 0 ] && [[ "$output" == *"slot 1: held lane=fresh-scan pid=$supervisor"* ]] || { echo "$output"; false; }
+  [ "$(cat "$SANDBOX/trace")" = "$(printf '%s\n' fork exec leader-zombie)" ] || { cat "$SANDBOX/trace"; false; }
+
+  touch "$SANDBOX/release-fresh-scan"
+  # Do not queue TERM while the fresh scan is still behind its barrier.
+  wait_for_grep_while_live '^fresh-scan-released$' "$SANDBOX/fresh-scan-released" "$supervisor" "the fresh-scan release"
+  kill -TERM "$supervisor"
+  wait "$supervisor" || rc=$?
+  [ "$rc" -eq 143 ] || { echo "rc=$rc"; cat "$SANDBOX/fresh-scan.out" "$SANDBOX/trace"; false; }
+  pid_gone "$descendant"
+  [ "$(cat "$SANDBOX/trace")" = "$(printf '%s\n' fork exec leader-zombie 'signal TERM group' 'signal KILL group' group-empty reap)" ] ||
+    { cat "$SANDBOX/trace"; false; }
+}
+
 @test "H3: --timeout 1 on sleep 5 exits 124" {
   local start end
   start="$(now)"
@@ -436,7 +653,11 @@ EOF
 @test "H3: no group signal is sent after the leader is reaped" {
   TRELLIS_HEAVY_KILL_AFTER=1 TRELLIS_HEAVY_TEST_TRACE="$SANDBOX/trace" run "${HEAVY[@]}" --timeout 1 -- \
     sh -c "(trap '' TERM; exec sleep 30) 3>&- & exit 0"
-  [ "$status" -eq 124 ] || { echo "status=$status $output"; false; }
+  [ "$status" -eq 124 ] || {
+    echo "status=$status $output"
+    [ ! -f "$SANDBOX/trace" ] || cat "$SANDBOX/trace"
+    false
+  }
   [ "$(cat "$SANDBOX/trace")" = "$(printf '%s\n' fork exec leader-zombie 'signal TERM group' 'signal KILL group' group-empty reap)" ] ||
     { cat "$SANDBOX/trace"; false; }
   [ "$(tail -n 1 "$SANDBOX/trace")" = reap ]

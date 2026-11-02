@@ -6,9 +6,11 @@
 #   trellis heavy --status    list every slot of both pools, retired included
 #
 # Waits for one of N slots (`heavy_slots` in $TRELLIS_HOME/config.json, default
-# 2; with --light, one of `heavy_light_slots`, default 4), runs the command in its own process group, and holds the slot until that
-# whole group has exited. --timeout counts from launch, not from the wait. This
-# file validates the argument shape and then execs the perl supervisor, which
+# 2; with --light, one of `heavy_light_slots`, default 4). Heavy lane process-gate
+# uses reserved slot 0 instead, without reducing ordinary lane capacity. Runs the
+# command in its own process group and holds the slot until that group has exited.
+# --timeout counts from launch, not from the wait. This file validates the
+# argument shape and then execs the perl supervisor, which
 # never returns; see scripts/lib/heavy-supervisor.pl for the lock and teardown.
 
 set -euo pipefail
@@ -28,7 +30,10 @@ until every process in the command's process group has exited.
   --light            use the light pool (heavy_light_slots, default 4): single-file
                      or targeted runs expected under 2 minutes; a light run that
                      passes 120 s prints one advisory line and keeps running
-  --lane NAME        label shown to waiting callers (letters, digits, . _ -)
+  --lane NAME        label shown to waiting callers (letters, digits, . _ -);
+                     process-gate reserves heavy slot 0, separate from the
+                     heavy_slots ordinary slots and never used by other lanes;
+                     cannot use --light or run inside an ordinary heavy/light wrapper
   --timeout SECONDS  TERM the workload this long after launch (then KILL after
                      TRELLIS_HEAVY_KILL_AFTER, default 10); exit 124
   --check            validate heavy_slots and the slot directory; exit 78 if not
@@ -69,6 +74,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 [[ "$lane" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || usage_error "invalid --lane: $lane"
+if [ "$lane" = process-gate ] && [ "$pool" != heavy ]; then
+  usage_error '--lane process-gate requires the heavy pool (drop --light)'
+fi
 [[ "$timeout" =~ ^[0-9]{1,7}$ ]] || usage_error "--timeout must be a whole number of seconds: $timeout"
 case "$mode" in
   run) [ "$#" -gt 0 ] || usage_error 'a command is required after --' ;;

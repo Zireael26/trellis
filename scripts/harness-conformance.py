@@ -239,7 +239,8 @@ class Corpus:
             hooks = json.loads(path.read_text())['hooks']
             registrations = [{'event': event, 'matcher': group.get('matcher'), 'hook': hook}
                              for event, groups in hooks.items() for group in groups
-                             for hook in group.get('hooks', []) if 'track-read.sh' in hook.get('command', '')]
+                             for hook in group.get('hooks', [])
+                             if any('track-read.sh' in part for part in [hook.get('command', '')] + hook.get('args', []))]
             obs.update(template_path=name, template_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), registrations=registrations)
             assert any(r['event'] == 'PostToolUse' and r['matcher'] == 'Read|Write|Edit|MultiEdit' for r in registrations), 'successful Read registration absent'
             assert not any(r['event'] == 'PostToolUseFailure' for r in registrations), 'tracker registered for failed calls'

@@ -49,8 +49,16 @@ show_config_payload_matches_release() {
   [ "$payload" = "$home/releases/$version/payload" ] && return 0
   snapshot_root="${payload%/payload}"
   [ "$snapshot_root" != "$payload" ] || return 1
-  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   snapshot_base="${snapshot_root##*/}"
+  if [ "${snapshot_root%/*}" = "$home/releases/.exec" ]; then
+    suffix="${snapshot_base#"$version"-}"
+    [ "$suffix" != "$snapshot_base" ] && [ "${#suffix}" -eq 64 ] || return 1
+    case "$suffix" in
+      *[!0-9a-f]*) return 1 ;;
+    esac
+    return 0
+  fi
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   rest="${snapshot_base#.tmp.}"
   [ "$rest" != "$snapshot_base" ] || return 1
   suffix="${rest#"$version".exec.}"

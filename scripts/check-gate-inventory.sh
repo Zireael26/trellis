@@ -5,7 +5,7 @@ if [ "$#" -ne 3 ]; then
   printf 'inventory: FAIL usage: scripts/check-gate-inventory.sh <base-sha> <head-sha> <aggregate.tsv>\n' >&2
   exit 64
 fi
-exec python3 - "$@" <<'PY'
+exec python3 -I - "$@" <<'PY'
 import collections
 import csv
 import os
@@ -24,8 +24,9 @@ def snapshot_list(sha, destination):
     # Archive base's own code and inventory; never fire post-checkout hooks
     # through git worktree add in an attached checkout.
     destination.mkdir(parents=True)
+    core_files = core_suites(sha)
     subprocess.run(["tar", "-x", "-C", str(destination)],
-                   input=git("archive", sha, "scripts"), check=True,
+                   input=git("archive", sha, "scripts", *core_files), check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     environment = os.environ.copy()
     environment.pop("TRELLIS_STAGE_WEIGHTS_TSV", None)
@@ -38,6 +39,17 @@ def snapshot_list(sha, destination):
     if not stages or len(stages) != len(set(stages)):
         raise ValueError("empty or duplicate canonical inventory")
     return stages
+
+
+def core_suites(sha, group=None):
+    patterns = {
+        "hooks (claude + codex)": r'core-rules/(?:codex/)?hooks/tests/[^/]+\.bats',
+        "skill gates": r'core-rules/skills/[^/]+/tests/[^/]+\.bats',
+    }
+    paths = git("ls-tree", "-r", "--name-only", sha, "--", "core-rules").decode().splitlines()
+    return sorted(path for path in paths
+                  if any(re.fullmatch(pattern, path) for name, pattern in patterns.items()
+                         if group is None or name == group))
 
 
 def names(text):
@@ -98,13 +110,24 @@ def check_range(base, head):
     changed = git("diff", "--name-only", "--no-renames", base, head).decode().splitlines()
     split_paths = {"scripts/tests/doctor-fix.bats", "scripts/tests/doctor-fix-common.bash"} | {
         "scripts/tests/doctor-fix-part{}.bats".format(i) for i in range(1, 5)}
+    doctor_source = "scripts/tests/doctor-fix.bats"
+    splitting_doctor = (bool(git("ls-tree", "--name-only", base, "--", doctor_source).strip())
+                       and not git("ls-tree", "--name-only", head, "--", doctor_source).strip())
     for name in changed:
+        if name in split_paths and not splitting_doctor:
+            raise ValueError("doctor-fix files changed without a doctor split: " + name)
         if name.startswith("core-rules/skills/process-gate/"):
             raise ValueError("protected process-gate path changed: " + name)
         test_path = (name.startswith(("scripts/tests/", "tests/", "test/"))
                      or '/tests/' in name or '/test/' in name
                      or Path(name).name.startswith(('test_', 'test-'))
                      or re.search(r'(?:_test\.[^/]+|\.(?:test|spec)\.[^/]+|\.bats)$', name) is not None)
+        if name == "scripts/tests/suite-coverage.bats":
+            _, before = split_blocks(git("show", base + ":" + name))
+            _, after = split_blocks(git("show", head + ":" + name))
+            if collections.Counter(before) - collections.Counter(after):
+                raise ValueError("existing suite-coverage @test blocks changed")
+            continue
         if test_path and name not in split_paths and not re.fullmatch(r'scripts/tests/run-tests-local[^/]*\.bats', name) and name != "scripts/tests/stage-weights.tsv" and not payload_scan_pair_only(base, head, name):
             raise ValueError("test file outside the split changed: " + name)
     config = ".claude/skills/process-gate-local/local.config.sh"
@@ -139,13 +162,22 @@ try:
         raise ValueError("aggregate missing, duplicate, or changed ordinal/stage")
     old = "bats scripts/tests/doctor-fix.bats"
     parts = ["bats scripts/tests/doctor-fix-part{}.bats".format(i) for i in range(1, 5)]
-    if base_stages.count(old) != 1:
-        raise ValueError("base doctor-fix stage missing")
     expected = []
     for stage in base_stages:
-        expected.extend(parts if stage == old else [stage])
+        if stage == old and old not in head_stages:
+            expected.extend(parts)
+        elif stage in ("hooks (claude + codex)", "skill gates") and stage not in head_stages:
+            files = core_suites(base, stage)
+            if not files or files != core_suites(head, stage):
+                raise ValueError("core suite file inventory changed: " + stage)
+            expected.extend("bats " + path for path in files)
+        else:
+            expected.append(stage)
     if head_stages != expected:
-        raise ValueError("head inventory changed beyond the four-part doctor split")
+        raise ValueError("head inventory changed beyond the four-part doctor split or per-file core stages")
+    if old not in base_stages or old in head_stages:
+        print("inventory: PASS aggregate/head/base and exact-once per-file core stages")
+        sys.exit(0)
     original = names(git("show", base + ":scripts/tests/doctor-fix.bats").decode())
     split = collections.Counter()
     for i in range(1, 5):

@@ -6,11 +6,15 @@ REPO_ROOT="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 WRAPPER="$REPO_ROOT/scripts/run-tests-local.py"
 
 setup() {
+  unset PG_PUSH_TEST_SCOPE
   local parent=/tmp
   case "${TMPDIR:-}" in
     /tmp/tg-*|/private/tmp/tg-*) parent="$TMPDIR" ;;
   esac
   SANDBOX="$(mktemp -d "$parent/run-tests-local.XXXXXX")"
+  SANDBOX="$(cd "$SANDBOX" && pwd -P)"
+  export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/trellis" TMPDIR="$SANDBOX/tmp"
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
   # Keep the existing containment fixtures deterministic on every host.
   export TRELLIS_TEST_SHARDS=8
   export TRELLIS_GATE_STATE_DIR="$SANDBOX/state"
@@ -24,6 +28,19 @@ setup() {
   : > "$FAKE_CHILD_PIDS"
   export FAKE_REAL_PYTHON FAKE_GATE_MODULE="$WRAPPER"
   FAKE_REAL_PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
+  unset FAKE_PRIORITY_ONLY
+  # The new priority assertions are portable; the older containment fixture is
+  # not. Keep its native macOS coverage unchanged, and isolate only these three
+  # cases from libproc on other hosts (real main/priority/receipts/children).
+  case "$BATS_TEST_DESCRIPTION" in
+    'shards run at nice -n 10 '*|'a missing nice runs shards '*|'shard prefix is nice -n 10 '*)
+      if [ "$("$FAKE_REAL_PYTHON" -c 'import sys; print(sys.platform)')" != darwin ]; then
+        export FAKE_PRIORITY_ONLY=1
+      fi
+      ;;
+  esac
+  if [ "${FAKE_PRIORITY_ONLY:-}" != 1 ]; then
+  [ "$("$FAKE_REAL_PYTHON" -c 'import sys; print(sys.platform)')" = darwin ] || skip "Darwin libproc containment fixture"
   "$FAKE_REAL_PYTHON" - "$SANDBOX/baseline.json" <<'PY'
 import ctypes, json, sys
 lib = ctypes.CDLL('/usr/lib/libproc.dylib')
@@ -34,6 +51,7 @@ with open(sys.argv[1], 'w') as stream:
     import os
     json.dump({'pids': list(pids[:used]), 'owner': os.getppid()}, stream)
 PY
+  fi
   # Test-only virtual process namespace: pre-existing host applications are
   # outside the fixture UID, while all newly created fixture work is real.
   # Exit observation is the production libc waitid implementation, unchanged.
@@ -53,9 +71,18 @@ SH
 #!/usr/bin/env bash
 set -uo pipefail
 count="${TRELLIS_TEST_SHARDS:-$(python3 -c 'import os; print(min(12, max(8, (os.cpu_count() or 10) - 2)))')}"
-python3 "$FAKE_SANDBOX/admission.py" || exit 78
+if [ "${FAKE_PRIORITY_ONLY:-}" != 1 ]; then
+  python3 "$FAKE_SANDBOX/admission.py" || exit 78
+fi
+if [ -n "${FAKE_SELECTED_FILE:-}" ]; then
+  case " $* " in *" --test-file=$FAKE_SELECTED_FILE "*) ;; *) exit 79 ;; esac
+fi
+if [ -n "${FAKE_GATE_SCOPE_RECEIPT:-}" ]; then
+  [ -z "${PG_TESTS_BASE:-}${PG_TESTS_HEAD:-}${PG_TESTS_RECEIPT_FILE:-}${PG_PUSH_TEST_SCOPE+x}" ] || exit 80
+fi
 if [ "${3:-}" = --plan ]; then
   printf 'planner\n' >> "$FAKE_SANDBOX/planner"
+  ps -o ni= -p $$ | tr -d ' ' >> "$FAKE_SANDBOX/planner-nice"
   if [ "$FAKE_MODE" = planner-hang ]; then
     python3 "$FAKE_SANDBOX/fake-runner-child.py" sentinel
     while :; do sleep 0.05; done
@@ -74,6 +101,7 @@ shard_arg="${2#--shard=}"
 shard="${shard_arg%%/*}"
 printf '%s %s %s\n' "$$" "$1" "$2" >> "$FAKE_INVOCATIONS"
 printf '%s\n' "$TRELLIS_TEST_TSV" >> "$FAKE_SANDBOX/receipts"
+ps -o ni= -p $$ | tr -d ' ' >> "$FAKE_SANDBOX/shard-nice"
 ordinal="$shard"; stage="fake-stage-$shard"; row_exit=0
 if [ "$shard" -eq 3 ]; then
   case "$FAKE_MODE" in
@@ -287,7 +315,7 @@ if mutation:
         'empty': ('if empty_scans >= 2 and not self.ambiguous:', 'if empty_scans >= 1 and not self.ambiguous:'),
         'atomic': ('os.replace(temporary, path)\n        _fsync_directory(path.parent)', 'os.replace(temporary, path)'),
         'corrupt': ('return 70 if corrupt else 1 if records else 0', 'return 1 if records else 0'),
-        'deadline': ('productive_at = deadline_at - reserve', 'productive_at = deadline_at'),
+        'deadline': ('        productive_at = deadline_at - reserve', '        productive_at = deadline_at'),
         'shards': ('SHARD_COUNT = select_shard_count()', 'SHARD_COUNT = 4'),
         'aggregate': ('rows.sort()', 'rows.reverse()'),
         'empty-plan': ('if not expected:\n            raise ValueError("empty shard plan")', 'if False:\n            raise ValueError("empty shard plan")'),
@@ -299,7 +327,7 @@ if mutation:
         'replay': ('for record in records:\n        data = record["output"].read_bytes()', 'for record in reversed(records):\n        data = record["output"].read_bytes()'),
         'failure': ('e["process"] is not None and observe_exit(e["process"]) == 0 for e in shards', 'e["process"] is not None for e in shards'),
         'state': ('environment["TRELLIS_GATE_STATE_DIR"] = str(run_root / "state")', 'pass'),
-        'heavy': ('pass_fds=(fd, ready_read) + _heavy_fds(),', 'pass_fds=(fd, ready_read),'),
+        'heavy': ('pass_fds=(fd, ready_read) + _heavy_fds()', 'pass_fds=(fd, ready_read)'),
         'preexisting': ('and (_birth(entry) == 0 or _birth(entry) >= started_us)}', 'and True}'),
         'clock': ('bound = reconstructed', 'bound = started_us'),
         'retry': ('return read()\n\n\ndef bsd_info', 'raise ContainmentError("retry disabled")\n\n\ndef bsd_info'),
@@ -325,6 +353,53 @@ if mutation:
 else:
     spec.loader.exec_module(gate)
 mode = sys.argv[2]
+
+if os.environ.get('FAKE_PRIORITY_ONLY') == '1':
+    # These fixtures run only short-lived foreground shell commands. Replace
+    # Darwin containment observations, NOT the planner/shard command assembly,
+    # priority decision, actual nice execution, aggregate or provenance writer.
+    # This is a priority test, not a claim of qualified containment on Linux.
+    import tempfile
+    children = []
+
+    def new_run(state, root, end, *args):
+        private = Path(tempfile.mkdtemp(prefix='priority-', dir=os.environ['FAKE_SANDBOX']))
+        (private / 'tmp').mkdir()
+        sentinel = private / 'sentinel'
+        fd = os.open(sentinel, os.O_CREAT | os.O_RDWR, 0o600)
+        data = {'token': 'priority-fixture', 'run_root': str(private),
+                'head': gate._command(['git', '-C', str(root), 'rev-parse', 'HEAD'], end).strip()}
+        record = state.runs / 'priority-fixture.json'
+        gate.save_record(record, data)
+        return data, record, fd
+
+    def spawn(data, path, fd, processes, command, root, environment, output):
+        child = subprocess.Popen(command, cwd=root, env=environment,
+                                 stdin=subprocess.DEVNULL, stdout=output,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+        processes.append(child)
+        children.append(child)
+        return child
+
+    class ForegroundBoundary:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def teardown(self, end, grace):
+            return sum(child.poll() is None for child in children)
+
+    gate._capability = lambda *args, **kwargs: []
+    gate._new_run = new_run
+    gate._spawn = spawn
+    gate.observe_exit = lambda child: child.poll()
+    gate.Boundary = ForegroundBoundary
+    try:
+        sys.exit(gate.main(sys.argv[3:]))
+    finally:
+        for child in children:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
 
 # Hermetic fixture UID provider. Real vnode/env/identity/signal calls are NOT
 # faked. The fixture owner tree and declared orphan/record PIDs form the virtual
@@ -1008,6 +1083,33 @@ start_wrapper() {
   wait_ready "$SIGNAL_WRAPPER_PID" || { cat "$SANDBOX/background.out"; false; }
 }
 
+@test "selected files reach the planner and every shard with one narrowed receipt" {
+  export FAKE_SELECTED_FILE=scripts/tests/check-decisions-log.bats
+  export PG_TESTS_BASE=base PG_TESTS_HEAD=head PG_PUSH_TEST_SCOPE=branch
+  export PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt" FAKE_GATE_SCOPE_RECEIPT=1
+  run python3 "$WRAPPER" "--test-file=$FAKE_SELECTED_FILE" "--test-file=$FAKE_SELECTED_FILE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
+  [ "$(< "$PG_TESTS_RECEIPT_FILE")" = 'PG_TESTS_RECEIPT narrowed 1' ]
+}
+
+@test "full contained runs publish full only at the aggregate boundary" {
+  export PG_TESTS_BASE=base PG_TESTS_HEAD=head PG_PUSH_TEST_SCOPE=full
+  export PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt" FAKE_GATE_SCOPE_RECEIPT=1
+  run_wrapper
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$PG_TESTS_RECEIPT_FILE")" = 'PG_TESTS_RECEIPT full' ]
+}
+
+@test "failed selected shards never publish a successful scope receipt" {
+  export FAKE_SELECTED_FILE=scripts/tests/check-decisions-log.bats FAKE_MODE=fail
+  export PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt"
+  run python3 "$WRAPPER" "--test-file=$FAKE_SELECTED_FILE"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [ ! -s "$PG_TESTS_RECEIPT_FILE" ]
+  [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
+}
+
 @test "shard CPU derivation override validation and historical record paths" {
   run python3 "$BATS_TEST_DIRNAME/test_gate_shard_count.py"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -1039,6 +1141,57 @@ start_wrapper() {
     TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"shard 3/12"*"status=7"*"retained failing shard 3/12 output:"* ]]
+}
+
+@test "shards run at nice -n 10 relative to the planner, and the receipt names it" {
+  # Inversion: a planner or shard at the inherited priority, a shard offset that
+  # is not +10, or a receipt that omits the shard priority decision.
+  base="$(ps -o ni= -p $$ | tr -d ' ')"
+  run python3 "$WRAPPER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$SANDBOX/shard-nice" | tr -d ' ')" -eq 8 ]
+  [ "$(sort -u "$SANDBOX/shard-nice")" = "$((base + 10))" ]
+  [ "$(cat "$SANDBOX/planner-nice")" = "$base" ]
+  python3 -I -B - "$TRELLIS_LOCAL_GATE_RECEIPT.provenance.jsonl" <<'PY'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+assert [r for r in records if r.get('phase') == 'shard-priority'] == [{'phase': 'shard-priority', 'priority': 'applied: nice -n 10'}], records
+PY
+}
+
+@test "a missing nice runs shards at inherited priority and the receipt names the fallback" {
+  # Inversion: a missing nice that fails the run, is dropped from the receipt,
+  # is kept off stderr, or is reported as applied while shards are unprefixed.
+  base="$(ps -o ni= -p $$ | tr -d ' ')"
+  mkdir "$SANDBOX/tools"
+  for tool in bash env git ps tr; do ln -s "$(command -v "$tool")" "$SANDBOX/tools/$tool"; done
+  run env PATH="$SANDBOX/tools" bash -c 'command -v nice'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  run env PATH="$SANDBOX/bin:$SANDBOX/tools" python3 "$WRAPPER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '%s\n' "$output" | grep -F -- 'unavailable: nice not on PATH' >/dev/null
+  [ "$(wc -l < "$SANDBOX/shard-nice" | tr -d ' ')" -eq 8 ]
+  [ "$(sort -u "$SANDBOX/shard-nice")" = "$base" ]
+  python3 -I -B - "$TRELLIS_LOCAL_GATE_RECEIPT.provenance.jsonl" <<'PY'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
+assert [r for r in records if r.get('phase') == 'shard-priority'] == [{'phase': 'shard-priority', 'priority': 'unavailable: nice not on PATH; shards run at inherited priority'}], records
+PY
+}
+
+@test "shard prefix is nice -n 10 when nice is on PATH and a named fallback when it is not" {
+  # Inversion: a bare shard command when nice is present, a prefix naming an
+  # absent executable, or an empty fallback that hides the missing nice.
+  mkdir "$SANDBOX/no-nice"
+  run python3 -I -B - "$WRAPPER" "$SANDBOX/no-nice" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('observations', sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+assert gate._shard_priority({'PATH': os.environ['PATH']}) == (['nice', '-n', '10'], 'applied: nice -n 10')
+assert gate._shard_priority({'PATH': sys.argv[2]}) == ([], 'unavailable: nice not on PATH; shards run at inherited priority')
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "launches exactly eight local shards with distinct receipts and deterministic output" {
@@ -1082,6 +1235,7 @@ start_wrapper() {
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
   [[ "$output" == *"shard 3/8"*"status=7"*"aggregate receipt:"* ]]
+  [ ! -e "$SANDBOX/state/passing-runs" ]
   assert_empty
 }
 
@@ -1107,6 +1261,19 @@ start_wrapper() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ ! -e "$SANDBOX/state/failed-shards" ]
   [[ "$output" != *"retained failing shard"* ]]
+  python3 -I - "$SANDBOX/state/passing-runs" "$TRELLIS_LOCAL_GATE_RECEIPT" <<'PY'
+import hashlib, json, pathlib, stat, sys
+runs = list(pathlib.Path(sys.argv[1]).iterdir())
+assert len(runs) == 1
+kept = runs[0]
+content = (kept / 'aggregate.tsv').read_bytes()
+assert content == pathlib.Path(sys.argv[2]).read_bytes()
+record = json.loads((kept / 'run.json').read_text())
+assert record['id'] == kept.name and record['head'] and record['tree'] and record['completed_at'] > 0
+assert record['aggregate_sha256'] == hashlib.sha256(content).hexdigest()
+assert stat.S_IMODE(kept.stat().st_mode) == 0o700
+assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in kept.iterdir())
+PY
   assert_empty
 }
 
@@ -1346,13 +1513,19 @@ PY
 
 @test "live owner quarantines admission and explicit reap without launching another planner" {
   # Inversion: owner-alive record is reaped or permits double booking.
+  export TRELLIS_LOCAL_GATE_DEADLINE=125 TRELLIS_LOCAL_GATE_QUEUE_WAIT=0.2
   start_wrapper
   run_wrapper
   [ "$status" -eq 70 ] || { echo "$output"; false; }
-  [[ "$output" == *".json"* ]]
+  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+  kill -0 "$SIGNAL_WRAPPER_PID"
   [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" reap
-  [ "$status" -eq 70 ]
+  [ "$status" -eq 70 ] || { echo "$output"; false; }
+  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+  [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
+  [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status
   [ "$status" -eq 1 ]
   kill -TERM "$SIGNAL_WRAPPER_PID"
@@ -1364,10 +1537,10 @@ PY
 @test "synthetic supervisor and coordinator wrapper deaths do not release durable quarantine" {
   # Inversion: wrapper/holder death is mistaken for gate-owned boundary emptiness.
   # Keep the productive budget aligned with wait_ready's 120-second backstop.
-  export TRELLIS_LOCAL_GATE_DEADLINE=125
+  export TRELLIS_LOCAL_GATE_DEADLINE=125 TRELLIS_LOCAL_GATE_QUEUE_WAIT=0.2
   local role
   for role in supervisor coordinator; do
-    : > "$FAKE_INVOCATIONS"; : > "$FAKE_CHILD_PIDS"
+    : > "$FAKE_INVOCATIONS"; : > "$FAKE_CHILD_PIDS"; : > "$SANDBOX/planner"
     rm -f "$SANDBOX/runner.pid"
     FAKE_MODE=signal bash -c 'python3 "$1" & echo "$!" > "$2"; wait' \
       "$role" "$WRAPPER" "$SANDBOX/runner.pid" > "$SANDBOX/outer.out" 2>&1 &
@@ -1384,7 +1557,11 @@ PY
     run bash "$REPO_ROOT/scripts/gate-runs.sh" status
     [ "$status" -eq 1 ]
     run_wrapper
-    [ "$status" -eq 70 ]
+    [ "$status" -eq 70 ] || { echo "$output"; false; }
+    [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+    kill -0 "$GATE_PID"
+    [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
+    [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
     kill -KILL "$GATE_PID"
     # Orphan reaping is asynchronous; reap refuses a live owner until it dies.
     local attempt

@@ -16,8 +16,9 @@
 #     timeout is 30 s.
 #   - stdin: read here, under the deadline, and given to the guard from a spool
 #     file; the guard and its descendants never hold the client's stdin.
-#   - stdout/stderr: the guard writes to pipes owned here. If the guard exits
-#     with its stdout still open after a short drain, that is a refusal.
+#   - stdout/stderr: the guard writes to pipes owned here, drained together
+#     with no polling interval. If the guard exits with its stdout still open
+#     after a short drain, that is a refusal.
 #   - Deadline: kill the guard's process group, then refuse.
 #   - claude: no-op = exit 0 + empty stdout; decision = exactly one
 #     {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":
@@ -57,8 +58,10 @@ sub refuse {
   if ($pid) {
     # -$pid is the group the guard made with setsid(); before that call no
     # group has that id and the group kill fails harmlessly. TERM is ignored
-    # here so a signal that reaches our own group cannot cut the refusal.
+    # here so a signal that reaches our own group cannot cut the refusal, and
+    # the guard's SIGCHLD cannot cut the pause before KILL.
     local $SIG{TERM} = 'IGNORE';
+    local $SIG{CHLD} = 'DEFAULT';
     kill('TERM', -$pid, $pid);
     select(undef, undef, undef, 0.2);
     kill('KILL', -$pid, $pid);
@@ -129,12 +132,18 @@ sub main {
 
   pipe(my $out_r, my $out_w) or refuse('supervisor could not create its pipes');
   pipe(my $err_r, my $err_w) or refuse('supervisor could not create its pipes');
+  # Self-pipe: the guard's exit wakes the wait below at once. A SIGCHLD that
+  # lands between the reap check and select() leaves its byte here.
+  pipe(my $chld_r, my $chld_w) or refuse('supervisor could not create its pipes');
+  $SIG{CHLD} = sub { syswrite($chld_w, 'x') };
   my $child = fork();
   defined $child or refuse('supervisor could not start the guard');
   if ($child == 0) {
-    $SIG{PIPE} = 'DEFAULT';
+    $SIG{PIPE} = $SIG{CHLD} = 'DEFAULT';
     close $out_r;
     close $err_r;
+    close $chld_r;
+    close $chld_w;
     POSIX::setsid() or POSIX::_exit(125);
     open(STDIN, '<&', $spool) or POSIX::_exit(125);
     open(STDOUT, '>&', $out_w) or POSIX::_exit(125);
@@ -162,12 +171,14 @@ sub main {
       refuse('guard exited with its output still open') if $fh{out};
       last;
     }
-    my $wait = $deadline - $now;
-    $wait = 0.05 if $wait > 0.05;
-    if (!%fh) { select(undef, undef, undef, $wait); next; }
+    # Sleep until a pipe is readable, the guard exits, or the budget (or the
+    # drain grace, once the guard is reaped) runs out. Both pipes are read as
+    # they fill, so a guard writing more than a pipe buffer never blocks.
+    my $until = defined $status && $grace_until < $deadline ? $grace_until : $deadline;
     my $rin = '';
-    vec($rin, fileno($fh{$_}), 1) = 1 for keys %fh;
-    next unless select(my $rout = $rin, undef, undef, $wait) > 0;
+    vec($rin, fileno($_), 1) = 1 for $chld_r, values %fh;
+    next unless select(my $rout = $rin, undef, undef, $until - $now) > 0;
+    sysread($chld_r, my $woke, 64) if vec($rout, fileno($chld_r), 1);
     for my $k (keys %fh) {
       next unless vec($rout, fileno($fh{$k}), 1);
       my $n = sysread($fh{$k}, my $chunk, 65536);

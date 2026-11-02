@@ -92,7 +92,32 @@ fi
 if [ -z "$RUNNER" ] || [ ! -x "$RUNNER" ]; then
   _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=AEO gate runner unavailable"
 fi
-if ! command -v python3 >/dev/null 2>&1; then
+# A real CPython, never a pyenv-style shim (~0.4 s a call). Only the payload's
+# own resolver is trusted: pre-push runs this through a .claude/.codex link,
+# which is followed to the payload file it runs; a copy keeps the PATH lookup.
+__aeo_src="${BASH_SOURCE[0]}"
+__aeo_hops=0
+while [ -L "$__aeo_src" ] && [ "$__aeo_hops" -lt 40 ]; do
+  __aeo_link="$(readlink "$__aeo_src")"
+  case "$__aeo_link" in
+    /*) __aeo_src="$__aeo_link" ;;
+    *) __aeo_src="${__aeo_src%/*}/$__aeo_link" ;;
+  esac
+  __aeo_hops=$((__aeo_hops + 1))
+done
+# A cycle, or a chain past 40 links, keeps the PATH lookup.
+__aeo_dir=""
+if [ ! -L "$__aeo_src" ]; then
+  __aeo_dir="$(CDPATH='' cd -P -- "${__aeo_src%/*}" 2>/dev/null && pwd -P)" || __aeo_dir=""
+fi
+case "$__aeo_dir" in
+  */core-rules/hooks/lib)
+    # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+    . "$__aeo_dir/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+esac
+unset __aeo_src __aeo_link __aeo_dir __aeo_hops
+command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=python3
+if ! command -v "$TRELLIS_PYTHON" >/dev/null 2>&1; then
   _emit "warn-only: status=INDETERMINATE; merge_policy=non-blocking; reason=python3 unavailable for AEO watchdog"
 fi
 
@@ -121,7 +146,7 @@ case "$HOOK_TIMEOUT:$STAGE_TIMEOUT" in
   *[!0-9:]* | :* | *:) HOOK_TIMEOUT=45; STAGE_TIMEOUT=8 ;;
 esac
 TIMEOUT_MARKER="$TMP.timeout"
-python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' "$RUNNER" \
+"$TRELLIS_PYTHON" -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' "$RUNNER" \
   --project "$PROJECT" \
   --url "$URL" \
   --checkout "$ROOT" \
@@ -132,7 +157,7 @@ python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' "$R
   --range "$RANGE" \
   --timeout "$STAGE_TIMEOUT" >"$TMP" 2>&1 &
 RUNNER_PID=$!
-python3 -c '
+"$TRELLIS_PYTHON" -c '
 import os
 import signal
 import sys

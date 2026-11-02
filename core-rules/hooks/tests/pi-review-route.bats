@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Cross-family pi review route in lib/code-reviewer.sh and Herdr SessionStart
+# Cross-family pi review route in lib/code-reviewer.sh and the hc SessionStart
 # writer authority. The retired omp-review-route suite is deleted; these cases
 # prove the ported deciding-artifact contract against ~/.trellis/state.
 
@@ -61,15 +61,15 @@ make_session_resolver_stubs() {
 #!/usr/bin/env bash
 exit 0
 EOF
-  cat >"$dir/herdr" <<'EOF'
+  cat >"$dir/hc" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = agent ] && [ "${2:-}" = list ]; then
-  printf '{"result":{"agents":[]}}\n'
+if [ "${1:-}" = ls ]; then
+  printf '{"terminals":[]}\n'
   exit 0
 fi
 exit 64
 EOF
-  chmod +x "$dir/pi" "$dir/herdr"
+  chmod +x "$dir/pi" "$dir/hc"
   printf '%s' "$dir"
 }
 
@@ -117,9 +117,9 @@ make_active_release_resolver() {
 
 make_deciding_reviewer_state() {
   local home="$1"
-  local nonce="${2:-fixture-workspace:fixture-pane:fixture-pass}"
-  local workspace="${3:-fixture-workspace}"
-  local pane="${4:-fixture-pane}"
+  local nonce="${2:-fixture-scope:fixture-pass}"
+  local workspace="${3:-fixture-scope}"
+  local pane="${4:-fixture-terminal}"
   local state="$home/.trellis/state/roles-resolved.json"
   local implementer="${5:-haiku-xhigh}"  # the default roster's implementer head (unit H)
   local resolver
@@ -136,10 +136,9 @@ import sys
 resolver_path, home, nonce, workspace, pane, implementer = sys.argv[1:]
 os.environ["HOME"] = home
 os.environ["TRELLIS_HOME"] = os.path.join(home, ".trellis")
-os.environ["HERDR_ENV"] = "1"
-os.environ["HERDR_WORKSPACE_ID"] = workspace
-os.environ["HERDR_PANE_ID"] = pane
-os.environ["HERDR_RESOLUTION_NONCE"] = nonce
+os.environ["HC_SCOPE"] = workspace
+os.environ["HC_TERMINAL_ID"] = pane
+os.environ["TRELLIS_RESOLUTION_NONCE"] = nonce
 
 usage = {
     "reports": [
@@ -171,8 +170,8 @@ PY
 
 assert_pi_reviewer_fail_closed() {
   local fake_home="$1"
-  local workspace="${2:-fixture-workspace}"
-  local pane="${3:-fixture-pane}"
+  local workspace="${2:-fixture-scope}"
+  local pane="${3:-fixture-terminal}"
   local marker stub_dir path_backup claude_dir
   marker="$(mktemp "$BATS_TMPDIR/failclosed.XXXXXX")"
   stub_dir="$(make_pi_stub "$marker")"
@@ -181,7 +180,7 @@ assert_pi_reviewer_fail_closed() {
   export PATH="$stub_dir:$claude_dir:$PATH"
   run env -u CODE_REVIEWER_CMD \
     HOME="$fake_home" TRELLIS_HOME="$fake_home/.trellis" \
-    HERDR_ENV=1 HERDR_WORKSPACE_ID="$workspace" HERDR_PANE_ID="$pane" \
+    HC_SCOPE="$workspace" HC_TERMINAL_ID="$pane" \
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$path_backup"
   [ "$status" -eq 0 ]
@@ -218,8 +217,8 @@ EOF
   PI_MARKER="$(mktemp "$BATS_TMPDIR/nopi.XXXXXX")"
   PI_DIR="$(make_pi_stub "$PI_MARKER")"
   export PATH="$PI_DIR:$CLAUDE_DIR:$PATH"
-  run env CODE_REVIEWER_CMD="$dir/myreviewer" HERDR_ENV=1 \
-    HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+  run env CODE_REVIEWER_CMD="$dir/myreviewer" \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$PATH_BACKUP"
   rm -rf "$dir" "$CLAUDE_DIR" "$PI_DIR"
@@ -243,7 +242,7 @@ EOF
   export PATH="$STUB_DIR:$CLAUDE_DIR:$PATH"
   run env -u CODE_REVIEWER_CMD \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
-    HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$PATH_BACKUP"
 
@@ -256,7 +255,7 @@ EOF
   teardown_tombstone
 }
 
-@test "pi-review: healthy current Herdr artifact uses its resolved model and documented flags" {
+@test "pi-review: healthy current hc artifact uses its resolved model and documented flags" {
   setup_tombstone
   FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
   STATE="$(make_deciding_reviewer_state "$FAKE_HOME")"
@@ -275,7 +274,7 @@ PY
   export PATH="$STUB_DIR:$CLAUDE_DIR:$PATH"
   run env -u CODE_REVIEWER_CMD \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
-    HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$PATH_BACKUP"
 
@@ -298,7 +297,7 @@ PY
   teardown_tombstone
 }
 
-@test "pi-review: never consumes a deciding artifact outside Herdr" {
+@test "pi-review: never consumes a deciding artifact outside hc" {
   setup_tombstone
   FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
   STATE="$(make_deciding_reviewer_state "$FAKE_HOME")"
@@ -308,14 +307,14 @@ PY
   PATH_BACKUP="$PATH"
   CLAUDE_DIR="$(make_tombstone_claude)"
   export PATH="$STUB_DIR:$CLAUDE_DIR:$PATH"
-  run env -u CODE_REVIEWER_CMD -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID \
+  run env -u CODE_REVIEWER_CMD -u HC_SCOPE -u HC_TERMINAL_ID \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
     bash "$LIB" <<<"$REVIEW_INPUT"
   export PATH="$PATH_BACKUP"
 
   [ "$status" -eq 0 ]
-  grep -q RAN_PI "$MARKER" && { echo "pi should not have run outside Herdr"; false; }
-  # Outside Herdr the Claude rung may run; tombstone records that, which is allowed.
+  grep -q RAN_PI "$MARKER" && { echo "pi should not have run outside hc"; false; }
+  # Outside hc the Claude rung may run; tombstone records that, which is allowed.
   rm -rf "$FAKE_HOME" "$STUB_DIR" "$CLAUDE_DIR"
   rm -f "$MARKER"
   teardown_tombstone
@@ -411,15 +410,56 @@ PY
   rm -rf "$FAKE_HOME" "$FOREIGN_PROJECT"
 }
 
-@test "pi-review: rejects a prefix-only cross-pane artifact" {
+@test "pi-review: rejects a prefix-only cross-terminal artifact" {
   setup_tombstone
   FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
   STATE="$(make_deciding_reviewer_state \
     "$FAKE_HOME" \
-    "this-workspace:this-pane:fixture-pass" \
-    "other-workspace" \
-    "other-pane")"
-  assert_pi_reviewer_fail_closed "$FAKE_HOME" "this-workspace" "this-pane"
+    "this-scope:fixture-pass" \
+    "other-scope" \
+    "other-terminal")"
+  assert_pi_reviewer_fail_closed "$FAKE_HOME" "this-scope" "this-terminal"
+  rm -rf "$FAKE_HOME"
+  teardown_tombstone
+}
+
+@test "pi-review: a reused terminal id with a different HC_SCOPE is rejected" {
+  # hc reuses addresses (t3) after `hc rm`; HC_SCOPE is what tells terminals apart.
+  setup_tombstone
+  FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
+  STATE="$(make_deciding_reviewer_state \
+    "$FAKE_HOME" "old-scope:fixture-pass" "old-scope" "fixture-terminal")"
+  assert_pi_reviewer_fail_closed "$FAKE_HOME" "new-scope" "fixture-terminal"
+  rm -rf "$FAKE_HOME"
+  teardown_tombstone
+}
+
+@test "pi-review: the same HC_SCOPE under a different terminal id is rejected" {
+  setup_tombstone
+  FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
+  STATE="$(make_deciding_reviewer_state \
+    "$FAKE_HOME" "fixture-scope:fixture-pass" "fixture-scope" "t3")"
+  assert_pi_reviewer_fail_closed "$FAKE_HOME" "fixture-scope" "t4"
+  rm -rf "$FAKE_HOME"
+  teardown_tombstone
+}
+
+@test "pi-review: an artifact in the old herdr workspace/pane format is rejected" {
+  setup_tombstone
+  FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
+  STATE="$(make_deciding_reviewer_state "$FAKE_HOME")"
+  python3 - "$STATE" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+artifact = json.load(open(path))
+scope = artifact["resolution_scope"]
+scope["herdr_workspace_id"] = scope.pop("hc_scope")
+scope["herdr_pane_id"] = scope.pop("hc_terminal_id")
+with open(path, "w") as sink:
+    json.dump(artifact, sink)
+os.chmod(path, 0o600)
+PY
+  assert_pi_reviewer_fail_closed "$FAKE_HOME" "fixture-scope" "fixture-terminal"
   rm -rf "$FAKE_HOME"
   teardown_tombstone
 }
@@ -458,10 +498,10 @@ PY
 }
 
 # Lean C04: SessionStart neither runs the resolver nor adopts a cached roster.
-# Even a deciding artifact the real resolver wrote earlier in this pane carries
+# Even a deciding artifact the real resolver wrote earlier in this terminal carries
 # no origin attestation, so the hook removes it and reports the roles undecided;
 # no resolver copy, release or project, runs.
-@test "herdr session hook removes this pane's cached ~/.trellis/state/roles-resolved.json without resolving or adopting" {
+@test "session hook removes this terminal's cached ~/.trellis/state/roles-resolved.json without resolving or adopting" {
   FAKE_HOME="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
   STATE="$(make_deciding_reviewer_state "$FAKE_HOME")"
   RELEASE_RESOLVER="$FAKE_HOME/.trellis/releases/1.2.3/payload/core-rules/skills/herdr-foreman/scripts/resolve-roles.py"
@@ -477,7 +517,7 @@ PY
 
   run env -u CODE_REVIEWER_CMD \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
-    HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
     CLAUDE_PROJECT_DIR="$POISON_PROJECT" PATH="$CLI_DIR:$PATH" \
     bash "$SESSION_HOOK"
 
@@ -485,14 +525,14 @@ PY
   [ ! -s "$RESOLVER_MARKER" ] || { echo "a resolver ran at SessionStart: $(cat "$RESOLVER_MARKER")"; false; }
   [[ "$output" == *"DEGRADED: SessionStart does not adopt a cached deciding roster;"* ]] || { echo "roles not reported undecided: $output"; false; }
   [[ "$output" != *"Cached deciding roster ("* ]] || { echo "cached roster adopted: $output"; false; }
-  [[ "$output" == *"pi foreman pane"* ]] || { echo "missing pi wording: $output"; false; }
-  [[ "$output" == *"Existing pi panes"* ]] || { echo "missing pi panes: $output"; false; }
-  [ ! -e "$ROLE_STATE" ] || { echo "this pane's cached roster was kept: $output"; false; }
+  [[ "$output" == *"pi foreman runs as your hc sub-agent"* ]] || { echo "missing pi wording: $output"; false; }
+  [[ "$output" == *"Live pi agents"* ]] || { echo "missing pi agents: $output"; false; }
+  [ ! -e "$ROLE_STATE" ] || { echo "this terminal's cached roster was kept: $output"; false; }
   rm -rf "$FAKE_HOME" "$POISON_PROJECT" "$CLI_DIR"
   rm -f "$RESOLVER_MARKER"
 }
 
-@test "code-review-subagent inside Herdr routes to pi, never claude" {
+@test "code-review-subagent inside hc routes to pi, never claude" {
   setup_project_dir
   setup_tombstone
   (
@@ -510,14 +550,14 @@ PY
   export HOME="$FAKE_HOME"
   export TRELLIS_HOME="$FAKE_HOME/.trellis"
   unset CODE_REVIEWER_CMD
-  export HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane
+  export HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal
   MARKER="$(mktemp "$BATS_TMPDIR/hookran.XXXXXX")"
   STUB_DIR="$(make_pi_stub "$MARKER")"
   PATH_BACKUP="$PATH"
   CLAUDE_DIR="$(make_tombstone_claude)"
   export PATH="$STUB_DIR:$CLAUDE_DIR:$PATH"
   run_with_stderr "$HOOK" '{"stop_hook_active":false}'
-  unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID
+  unset HC_SCOPE HC_TERMINAL_ID
   export PATH="$PATH_BACKUP"
   export HOME="$HOME_BACKUP"
   if [ -n "$TRELLIS_HOME_BACKUP" ]; then
@@ -542,7 +582,7 @@ PY
   STATE="$FAKE_HOME/.trellis/state/roles-resolved.json"
   mkdir -p "$(dirname "$STATE")"
   python3 "$HOOKS_DIR/../../scripts/tests/fixtures/herdr-task-routing/sc7_artifacts.py" \
-    "$POLICY" "$SC7_DIR" fixture-workspace fixture-pane fixture-nonce
+    "$POLICY" "$SC7_DIR" fixture-scope fixture-terminal fixture-nonce
 
   # The same crafted set runs through the resolver and both SessionStart hook
   # copies; here it goes through code-reviewer.sh's public shell function.
@@ -555,8 +595,8 @@ import sys
 
 lib_path, sc7_dir, state_path, home = sys.argv[1:]
 env = dict(os.environ, HOME=home, TRELLIS_HOME=home + "/.trellis",
-           HERDR_ENV="1", HERDR_WORKSPACE_ID="fixture-workspace",
-           HERDR_PANE_ID="fixture-pane")
+           HC_SCOPE="fixture-scope",
+           HC_TERMINAL_ID="fixture-terminal")
 manifest = json.load(open(os.path.join(sc7_dir, "manifest.json")))
 assert len(manifest) == 18, manifest
 for case in manifest:
@@ -577,4 +617,109 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"code-reviewer enforces SC7"* ]]
   rm -rf "$FAKE_HOME"
+}
+
+# --- Spec 073: the hc scope matrix through BOTH deployed review hooks --------
+# A valid hc-scoped decision routes to pi and completes the review; a decision
+# from another hc terminal (reused terminal id, or the same scope under another
+# id) or in the old herdr workspace/pane format runs neither pi nor Claude and
+# mints no completed-review marker. The old HERDR_* variables change nothing.
+
+deploy_codex_review_hook() {
+  local hookdir
+  hookdir="$(mktemp -d "$BATS_TMPDIR/codexdeploy.XXXXXX")/.codex/hooks"
+  mkdir -p "$hookdir/lib"
+  cp "$CODEX_HOOKS_DIR/code-review-subagent.sh" "$hookdir/code-review-subagent.sh"
+  cp "$HOOKS_DIR/lib/code-reviewer.sh" "$hookdir/lib/code-reviewer.sh"
+  cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/pm.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$hookdir/lib/"
+  chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"
+  printf '%s' "$hookdir/code-review-subagent.sh"
+}
+
+# hook_case HARNESS SCOPE TERMINAL ARTIFACT_SCOPE ARTIFACT_TERMINAL [old-format] [legacy-env]
+# Sets RAN, CLAUDE_RAN and MARKERS for the caller.
+hook_case() {
+  local harness="$1" scope="$2" terminal="$3" a_scope="$4" a_terminal="$5" old="${6:-}" legacy="${7:-}"
+  local hook fake_home marker stub_dir claude_dir path_backup
+  setup_project_dir
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf 'def a():\n    return 1\n' >a.py
+    printf 'def b():\n    return 2\n' >b.py
+    printf 'def c():\n    return 3\n' >c.py
+    git add -A
+  )
+  fake_home="$(mktemp -d "$BATS_TMPDIR/fakehome.XXXXXX")"
+  STATE="$(make_deciding_reviewer_state "$fake_home" "$a_scope:fixture-pass" "$a_scope" "$a_terminal")"
+  if [ "$old" = old-format ]; then
+    python3 - "$STATE" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+artifact = json.load(open(path))
+scope = artifact["resolution_scope"]
+scope["herdr_workspace_id"] = scope.pop("hc_scope")
+scope["herdr_pane_id"] = scope.pop("hc_terminal_id")
+with open(path, "w") as sink:
+    json.dump(artifact, sink)
+os.chmod(path, 0o600)
+PY
+  fi
+  marker="$(mktemp "$BATS_TMPDIR/hookran.XXXXXX")"
+  stub_dir="$(make_pi_stub "$marker")"
+  claude_dir="$(make_tombstone_claude)"
+  path_backup="$PATH"
+  if [ "$harness" = codex ]; then
+    hook="$(deploy_codex_review_hook)"
+    run env -u CODE_REVIEWER_CMD -u CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR="$PROJECT_DIR" \
+      HOME="$fake_home" TRELLIS_HOME="$fake_home/.trellis" \
+      HC_SCOPE="$scope" HC_TERMINAL_ID="$terminal" ${legacy:+HERDR_ENV=1 HERDR_WORKSPACE_ID=w HERDR_PANE_ID=p} \
+      PATH="$stub_dir:$claude_dir:$path_backup" bash "$hook" <<<'{}'
+    MARKERS="$(find "$PROJECT_DIR" -maxdepth 2 -type f -name '.review-done-*' | wc -l | tr -d ' ')"
+  else
+    run env -u CODE_REVIEWER_CMD CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+      HOME="$fake_home" TRELLIS_HOME="$fake_home/.trellis" \
+      HC_SCOPE="$scope" HC_TERMINAL_ID="$terminal" ${legacy:+HERDR_ENV=1 HERDR_WORKSPACE_ID=w HERDR_PANE_ID=p} \
+      PATH="$stub_dir:$claude_dir:$path_backup" bash "$HOOK" <<<'{"stop_hook_active":false}'
+    MARKERS="$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  RAN="$(cat "$marker" 2>/dev/null || true)"
+  CLAUDE_RAN="$(cat "$TOMBSTONE" 2>/dev/null || true)"
+  rm -rf "$fake_home" "$stub_dir" "$claude_dir" "$PROJECT_DIR"
+  rm -f "$marker"
+}
+
+@test "deployed hooks: a valid hc decision routes to pi and completes the review" {
+  local harness legacy
+  for harness in claude codex; do
+    for legacy in "" legacy; do
+      setup_tombstone
+      hook_case "$harness" fixture-scope t3 fixture-scope t3 "" "$legacy"
+      [ "$status" -eq 0 ] || { echo "$harness/$legacy: $output"; false; }
+      [[ "$RAN" == *RAN_PI* ]] || { echo "$harness/$legacy: pi did not run"; false; }
+      [ -z "$CLAUDE_RAN" ] || { echo "$harness/$legacy: claude ran"; false; }
+      [ "$MARKERS" -eq 1 ] || { echo "$harness/$legacy: markers=$MARKERS"; false; }
+      teardown_tombstone
+    done
+  done
+}
+
+@test "deployed hooks: foreign or old-format hc decisions run no model and mint no marker" {
+  local harness legacy case
+  for harness in claude codex; do
+    for legacy in "" legacy; do
+      for case in reused-id other-id old-format; do
+        setup_tombstone
+        case "$case" in
+          reused-id) hook_case "$harness" new-scope t3 old-scope t3 "" "$legacy" ;;
+          other-id) hook_case "$harness" fixture-scope t4 fixture-scope t3 "" "$legacy" ;;
+          old-format) hook_case "$harness" fixture-scope t3 fixture-scope t3 old-format "$legacy" ;;
+        esac
+        [ "$status" -eq 0 ] || { echo "$harness/$legacy/$case: $output"; false; }
+        [[ "$RAN" != *RAN_PI* ]] || { echo "$harness/$legacy/$case: pi ran"; false; }
+        [ -z "$CLAUDE_RAN" ] || { echo "$harness/$legacy/$case: claude ran"; false; }
+        [ "$MARKERS" -eq 0 ] || { echo "$harness/$legacy/$case: markers=$MARKERS"; false; }
+        teardown_tombstone
+      done
+    done
+  done
 }

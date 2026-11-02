@@ -85,6 +85,10 @@ EOF
   echo x > "$PROJECT_DIR/scratch.txt"
 }
 
+# Stop reuses a pass on an unchanged tree (spec 072 U8), which records no
+# execution. Tests about repeated executions change the tree before each call.
+change_tree() { echo "$1" > "$PROJECT_DIR/scratch.txt"; }
+
 run_stop() {
   local hook="$1"; shift
   local err="$BATS_TEST_TMPDIR/stop.stderr"
@@ -130,7 +134,7 @@ receipts() {
 one_receipt() { receipts "$@" | head -1; }
 receipt_count() { receipts "$@" | awk 'END{print NR}'; }
 
-file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+file_mode() { python3 -I -c 'import os, stat, sys; print(format(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode), "o"))' "$1"; }
 
 # --- producer: argv form ----------------------------------------------------
 
@@ -191,8 +195,10 @@ file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 
   run_stop "$hooks/stop-verify.sh"
   [ "$status" -eq 0 ]
+  change_tree 2
   run_stop "$hooks/stop-verify.sh"
   [ "$status" -eq 0 ]
+  change_tree 3
   run_stop "$hooks/stop-verify.sh"
   [ "$status" -eq 0 ]
 
@@ -338,7 +344,7 @@ file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
   fake_out ""
 
   local i
-  for i in 1 2 3 4 5; do run_stop "$hooks/stop-verify.sh"; [ "$status" -eq 0 ]; done
+  for i in 1 2 3 4 5; do change_tree "$i"; run_stop "$hooks/stop-verify.sh"; [ "$status" -eq 0 ]; done
   [ "$(receipt_count)" -eq 5 ]
 
   run_session "$hooks/session-context.sh"
@@ -666,8 +672,10 @@ reject_both() {
   # Pin only the producer clock in the private deployed library, not its writer.
   printf '\n_vr_now_stamp() { printf 20260906T010203Z; }\n' >> "$CLAUDE_HOOKS/lib/verification-receipt.sh"
   rm "$RECEIPT"
+  change_tree 2
   run_stop "$CLAUDE_HOOKS/stop-verify.sh"
   [ "$status" -eq 0 ]
+  change_tree 3
   run_stop "$CLAUDE_HOOKS/stop-verify.sh"
   [ "$status" -eq 0 ]
   [ "$(call_count)" -eq 3 ]
@@ -694,6 +702,7 @@ reject_both() {
 
   local i
   for i in $(seq 1 22); do
+    change_tree "$i"
     run_stop "$hooks/stop-verify.sh"
     [ "$status" -eq 0 ]
   done
@@ -708,6 +717,7 @@ reject_both() {
   printf 'keep me\n' > "$root/unrelated.txt"
   printf '{"schema_version":1}\n' > "$root/not-a-receipt.json"
   ln -s /dev/null "$root/dangling.json"
+  change_tree 23
   run_stop "$hooks/stop-verify.sh"
   [ "$status" -eq 0 ]
 

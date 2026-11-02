@@ -143,7 +143,7 @@ _pgcfg_validate_policy_fallback() {
       else false end;
     def janitor_scope:
       . as $scope
-      | ["caches", "worktrees", "stores", "docker", "releases", "pi",
+      | ["caches", "worktrees", "stores", "docker", "releases", "release-tmp", "pi",
          "orphans", "logs", "tmp", "transcripts"]
       | any(.[]; . == $scope);
     def home_or_absolute_path:

@@ -42,7 +42,7 @@ capability/effort restrictions; a cheaper first pass does not waive independence
 
 Orthogonal to shape: a unit whose execution needs live web search or computer
 use, when it resolves to a GPT/Codex-family agent, runs on the Codex CLI harness
-through Herdr (`herdr agent start --kind codex -- --search`), rather than the
+through hc (`hc run --bg --name <name> --cwd <dir> codex --no-daemon --search "<task>"`), rather than the
 text-only pi workflow (operator ruling 2026-09-02). Codex CLI is the only
 non-Claude harness with native `web_search` and working computer use; pi GPT
 lanes are text-only workflow/subagent workers.
@@ -192,33 +192,26 @@ workflow agents auto-terminate, named teammates do not.
   orchestrator slot but does not prove the operating-system process exited.
 - Declaring done with teammates still live leaks panes and memory — see
   `core-rules/CLAUDE.md` § Definition of done.
-- The same rule binds **pi panes**, which are not `TaskStop` teammates: close each
-  with `herdr pane close <pane_id>` at the moment its own output is accepted, in
-  the same turn, rather than batching teardown at the end of the workstream. On a
-  review panel, close the reviewers before starting the judge — the judge reads
-  their report files, not their sessions. See
-  [`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).
-- Treat a lingering pane as a spend leak, not only a housekeeping one: it holds a
+- The same rule binds **hc sub-agents** (pi foremen and workers), which are not
+  `TaskStop` teammates: end each with `hc kill <t>` then `hc rm <t>` at the moment
+  its own output is accepted, in the same turn, rather than batching teardown at
+  the end of the workstream. On a review panel, end the reviewers before starting
+  the judge — the judge reads their report files, not their sessions. See
+  [`core-rules/references/herdr-foreman.md` § Visibility and teardown](herdr-foreman.md#visibility-and-teardown).
+- Treat a lingering agent as a spend leak, not only a housekeeping one: it holds a
   live session whose whole context is re-sent on every wake. Past **272K input
   tokens OpenAI bills 2x input and 1.5x output for the entire request**, not just
   the overage. Keep `compaction.methodOrder` remote-first (`remote` is
   provider-native server compaction, the mechanism that holds a pi session under
-  the line) and close panes at acceptance so there is no context to re-send.
+  the line) and end agents at acceptance so there is no context to re-send.
 
-## Panel layout in a terminal multiplexer
+## Seeing delegated agents
 
-Where agents occupy panes the operator can see, layout is part of the contract:
-an unreadable panel is an unreviewable one, and review is the bottleneck these
-fan-outs exist to feed.
-
-The rules themselves — full-height Apex on the left 40%, up to four foremen
-filling the right 60% as a 2x2 on demand, overflow only after all four slots fill,
-the HARD owner rule that all delegated agent work uses visible Herdr panes (only
-harness-native subagents and Dynamic Workflow agents are exempt), preserved focus,
-closing completed owned panes (never unrelated operator panes), and a finished
-tab being a held resource like a pane — are stated once, in
-[`core-rules/references/herdr-foreman.md` § Panel layout and teardown](herdr-foreman.md#panel-layout-and-teardown).
-Harness-specific commands belong in the harness's own implementation.
+Delegated agents run as `hc` sub-agents of the apex: the Herdr app lists them under
+the apex with live status, and the operator opens one in a pane only when they
+want to watch. Trellis places no panes and keeps no grid; a stuck or questioning
+agent is the apex's to handle. Stated once, in
+[`core-rules/references/herdr-foreman.md` § Visibility and teardown](herdr-foreman.md#visibility-and-teardown).
 
 ## Width needs an oracle; building the oracle is serial
 

@@ -26,7 +26,7 @@ load doctor-fix-common
   [[ "$output" == *"core.hooksPath repaired in"*": .husky/_ -> "* ]] || { echo "$output"; false; }
   assert_adopted
   for name in $ADOPT_PASSTHROUGH; do
-    [ "$(stat -f %Lp "$HF_MANAGED/$name")" = 700 ]
+    [ "$(fixture_mode "$HF_MANAGED/$name")" = 700 ]
     cmp -s <(recorded_shim_body "$name") "$HF_MANAGED/$name" || { echo "shim $name differs from the recorded generator"; false; }
   done
   # No shim for a Trellis-owned name: those two stay the managed dispatchers.
@@ -194,7 +194,7 @@ load doctor-fix-common
   hooks_fix_attach null
   mkdir -p "$stub"
   printf '#!/bin/sh\nexit 127\n' > "$stub/shasum"
-  printf '#!/bin/sh\nexec /usr/bin/shasum -a 256 "$@"\n' > "$stub/sha256sum"
+  printf '#!/bin/sh\nexec "%s" -a 256 "$@"\n' "$(command -v shasum)" > "$stub/sha256sum"
   chmod +x "$stub/shasum" "$stub/sha256sum"
   PATH="$stub:$PATH" run worktrees_ok
   [ "$status" -eq 0 ] || { echo "$output"; false; }

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "post_action",
+  "native_event": "tool_result",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "write",
+    "family": "file_mutation",
+    "target_coverage": "complete",
+    "targets": [
+      {
+        "operation": "create",
+        "path": "src/new.ts"
+      }
+    ],
+    "input": {
+      "path": "src/new.ts",
+      "content": "export const x = 1;\n"
+    }
+  },
+  "result": {
+    "status": "succeeded",
+    "is_error": false,
+    "output": [
+      {
+        "type": "text",
+        "text": "Successfully wrote 20 bytes to src/new.ts"
+      }
+    ]
+  },
+  "in_process_read_tracking": true
+}

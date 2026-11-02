@@ -29,7 +29,10 @@
 #
 # State contract: see reread-guard.sh header. track-read OWNS reads.tsv.
 #
-# Dependencies: jq (required), shasum, awk (BSD), date.
+# Failure markers: core-rules/hooks/rules/reread.json, compiled into
+# lib/guard-rules.sh by scripts/gen-guard-rules.py.
+#
+# Dependencies: jq (required — one call), sha256sum or shasum, awk (BSD), git.
 
 set -u
 
@@ -42,8 +45,29 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "track-read"
 
+__gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
+[ -f "$__gr_lib" ] || { echo "track-read: missing sibling lib at $__gr_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/guard-rules.sh disable=SC1090
+. "$__gr_lib"
+
+# One jq run for every field; each reads as its own `$(jq -r ...)` call did.
+# The response fields are taken only for the response type that reads them, so
+# a Read's file content never crosses the pipe.
+_gr_jq_fields "$INPUT" \
+  '.tool_input.file_path // empty' \
+  '.tool_name // empty' \
+  '.tool_response | type' \
+  'if (.tool_response | type) == "object" then
+     ((.tool_response.error // empty) != "")
+     or ((.tool_response.is_error // false) == true)
+     or ((.tool_response.tool_use_error // empty) != "")
+   else empty end' \
+  'if (.tool_response | type) == "string" then .tool_response else empty end' \
+  '.transcript_path // empty' \
+  '.session_id // empty'
+
 # --- target file ---
-T=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
+T=${GR_FV[0]}
 [ -n "$T" ] || exit 0
 
 # Codex may pass a relative file_path; resolve against the project dir. Claude
@@ -79,7 +103,7 @@ esac
 T=$(_se_normpath "$T")
 [ -n "$T" ] || exit 0
 
-TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
+TOOL_NAME=${GR_FV[1]}
 
 # --- success detection (SHAPE-based for the edit family) ------------------
 # DL-P5-08: a successful Edit/Write/MultiEdit response is an OBJECT; a genuine
@@ -88,22 +112,20 @@ TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')
 # 'ENOENT' is NOT misread as a failed edit.
 case "$TOOL_NAME" in
   Edit|MultiEdit|Write)
-    RTYPE=$(printf '%s' "$INPUT" | jq -r '.tool_response | type' 2>/dev/null) || RTYPE=""
+    RTYPE=${GR_FV[2]}; [ "${GR_FE[2]}" = 0 ] || RTYPE=""
     case "$RTYPE" in
       object)
         # Successful edit → RECORD, UNLESS an explicit error key is present.
-        if printf '%s' "$INPUT" | jq -e '
-              ((.tool_response.error // empty) != "")
-              or ((.tool_response.is_error // false) == true)
-              or ((.tool_response.tool_use_error // empty) != "")
-            ' >/dev/null 2>&1; then
+        # Read as `jq -e` read it: the last value printed is true. With no
+        # .error key the first operand prints nothing, so nothing is printed.
+        if [ "${GR_FE[3]}" = 0 ] && [ "${GR_FV[3]##*$'\n'}" = true ]; then
           exit 0   # explicit error key → a failed edit → do NOT record
         fi
         ;;
       string)
-        # Genuine failure arrives as an error string → keep the marker grep.
-        RESP=$(printf '%s' "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null) || RESP=""
-        if printf '%s' "$RESP" | grep -qiE 'does not match|String to replace|no changes|Error:|tool_use_error|ENOENT|not found|has not been read'; then
+        # Genuine failure arrives as an error string → keep the marker test.
+        RESP=${GR_FV[4]}; [ "${GR_FE[4]}" = 0 ] || RESP=""
+        if _gr_edit_failed "$RESP"; then
           exit 0   # clear edit-failure marker on the error string → do NOT record
         fi
         ;;
@@ -119,8 +141,9 @@ case "$TOOL_NAME" in
 esac
 
 # --- derive the shared state key (DL-P5-09: one helper, zero inline copies) ---
-TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || exit 0
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || exit 0
+[ "${GR_FE[5]}" = 0 ] && [ "${GR_FE[6]}" = 0 ] || exit 0
+TP=${GR_FV[5]}
+SID=${GR_FV[6]}
 KEY=$(_se_state_key "$TP" "$SID") || exit 0
 [ -n "$KEY" ] || exit 0   # key derivation failed → fail-open (no record)
 
@@ -128,8 +151,9 @@ KEY=$(_se_state_key "$TP" "$SID") || exit 0
 ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || exit 0
 [ -n "$ROOT" ] || exit 0
 STATE_DIR="$ROOT/.claude/.reread-state"
-mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+[ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
-NOW=$(date +%s 2>/dev/null) || exit 0
-printf '%s\t%s\n' "$NOW" "$T" >> "$STATE_DIR/$KEY.reads.tsv" 2>/dev/null || exit 0
+_gr_now
+[ -n "$GR_NOW" ] || exit 0
+printf '%s\t%s\n' "$GR_NOW" "$T" >> "$STATE_DIR/$KEY.reads.tsv" 2>/dev/null || exit 0
 exit 0

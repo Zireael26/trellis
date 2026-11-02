@@ -28,10 +28,11 @@ for name in corpus.input_hashes(source):
         target.symlink_to(original.readlink())
     else:
         shutil.copy2(original, target)
-guard = negative / 'core-rules/hooks/reread-guard.sh'
+# The warn budget lives in the include compiled from core-rules/hooks/rules/reread.json.
+guard = negative / 'core-rules/hooks/lib/guard-rules.sh'
 text = guard.read_text()
-assert text.count('*)   BUDGET=2 ;;') == 1
-guard.write_text(text.replace('*)   BUDGET=2 ;;', '*)   BUDGET=99 ;;'))
+assert text.count('    *) GR_BUDGET=2 ;;') == 1
+guard.write_text(text.replace('    *) GR_BUDGET=2 ;;', '    *) GR_BUDGET=99 ;;'))
 (evidence / 'business-mutation.txt').write_text('Claude actual guard: L3 BUDGET=2 -> BUDGET=99; third attempt must no longer deny.\n')
 PY
   # Negative actual-adapter behavior MUST be observed before the first green run.
@@ -70,7 +71,8 @@ for x in r['cases']:
     assert x['assertion'] == 'pass' and x['reason'] and x['observations']
     assert x['native_outcome'] == 'unknown' and x['native_loaded'] is None and x['native_exercised'] is None
 assert r['cases'][2]['evidence_class'] == 'registration'
-assert r['cases'][10]['observations']['decisions'][0]['capability_status'] == 'enforced'
+pre = r['cases'][10]['observations']
+assert pre['response']['block'] is True and pre['allowed'] is None and pre['envelopes'] == []
 PY
 }
 
@@ -83,7 +85,7 @@ assert bad['complete'] and not bad['passed'] and len(bad['cases']) == 16
 assert bad['cases'][0]['assertion'] == 'fail'
 assert 'warn 3/99' in bad['cases'][0]['observations']['responses'][2]['stderr']
 changed = [k for k in good['source_inputs'] if good['source_inputs'][k] != bad['source_inputs'][k]]
-assert changed == ['core-rules/hooks/reread-guard.sh']
+assert changed == ['core-rules/hooks/lib/guard-rules.sh']
 PY
 }
 

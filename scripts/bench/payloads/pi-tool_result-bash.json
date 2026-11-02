@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "post_action",
+  "native_event": "tool_result",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "bash",
+    "family": "shell",
+    "target_coverage": "none",
+    "targets": [],
+    "input": {
+      "command": "git status --short"
+    }
+  },
+  "result": {
+    "status": "succeeded",
+    "is_error": false,
+    "output": [
+      {
+        "type": "text",
+        "text": ""
+      }
+    ]
+  },
+  "in_process_read_tracking": true
+}

@@ -28,11 +28,16 @@ make_release() {
   for path in attach-project.sh registry.sh release.sh trellis trellis-launcher.sh; do
     cp "$REPO_ROOT/scripts/$path" "$source/scripts/$path"
   done
-  # Match the attachment planner's real payload dependency closure.
+  # Match the attachment planner's real payload dependency closure, less
+  # attach-postjob.sh: the launcher runs attach under env -i, so
+  # TRELLIS_ATTACH_POSTJOB=off cannot reach it, and the detached job it would
+  # spawn holds the checkout lock while a later rollout in the same case runs.
   for path in \
     attachment.sh \
     local-registry.sh \
+    release-stamp.sh \
     release-store.sh \
+    release_stamp.py \
     semver.sh \
     skill-roots.sh \
     surface-plan.sh \

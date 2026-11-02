@@ -109,21 +109,19 @@ EOF
         "$PAYLOAD/core-rules/hooks/lib" \
         "$PAYLOAD/core-rules/codex/hooks/lib"
       cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
-      cp "$REPO_ROOT/core-rules/hooks/session-context.sh" \
-        "$PAYLOAD/core-rules/hooks/session-context.sh"
+      for hook in session-start session-context inject-primer-index; do
+        cp "$REPO_ROOT/core-rules/hooks/$hook.sh" "$PAYLOAD/core-rules/hooks/$hook.sh"
+        cp "$REPO_ROOT/core-rules/codex/hooks/$hook.sh" "$PAYLOAD/core-rules/codex/hooks/$hook.sh"
+        chmod 755 "$PAYLOAD/core-rules/hooks/$hook.sh" "$PAYLOAD/core-rules/codex/hooks/$hook.sh"
+      done
       cp "$REPO_ROOT/core-rules/hooks/lib/deps.sh" \
         "$PAYLOAD/core-rules/hooks/lib/deps.sh"
       cp "$REPO_ROOT/core-rules/hooks/lib/autonomy.sh" \
         "$PAYLOAD/core-rules/hooks/lib/autonomy.sh"
-      cp "$REPO_ROOT/core-rules/codex/hooks/session-context.sh" \
-        "$PAYLOAD/core-rules/codex/hooks/session-context.sh"
       cp "$REPO_ROOT/core-rules/codex/hooks/lib/deps.sh" \
         "$PAYLOAD/core-rules/codex/hooks/lib/deps.sh"
       cp "$REPO_ROOT/core-rules/codex/hooks/lib/autonomy.sh" \
         "$PAYLOAD/core-rules/codex/hooks/lib/autonomy.sh"
-      chmod 755 \
-        "$PAYLOAD/core-rules/hooks/session-context.sh" \
-        "$PAYLOAD/core-rules/codex/hooks/session-context.sh"
       printf '{"autonomy_default":4}\n' > "$PAYLOAD/trellis.config.json"
       ;;
     command-bundle)
@@ -305,18 +303,21 @@ run_launcher() {
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" "$@"
 }
 
-# The launcher removes its sealed execution snapshot on the way out. `find`
-# prints nothing at all when its own start point does not exist — it writes to
-# stderr and returns non-zero — so a bare `[ -z "$(find …)" ]` also passes when
-# the release store was never created, which is not the claim. Prove the store
-# is there first, then fold stderr into the captured text so a find failure is
-# non-empty output rather than a silent pass.
+# The persistent execution snapshot (releases/.exec/<version>-<digest>) stays;
+# nothing else a run creates in the store may survive it: no snapshot work
+# directory or owner sidecar, no verify scratch, no per-run snapshot of the kind
+# launchers before 1.4.0 made. `find` prints nothing at all when its own start
+# point does not exist — it writes to stderr and returns non-zero — so a bare
+# `[ -z "$(find …)" ]` also passes when the release store was never created,
+# which is not the claim. Prove the store is there first, then fold stderr into
+# the captured text so a find failure is non-empty output rather than a silent
+# pass.
 assert_no_execution_snapshot() {
   [ -d "$TRELLIS_HOME/releases" ] ||
     { echo "release store is absent, so the emptiness claim is vacuous: $TRELLIS_HOME/releases"; false; }
   local leftover
-  leftover="$(find "$TRELLIS_HOME/releases" -maxdepth 1 -name '.tmp.*.exec.*' -print 2>&1)"
-  [ -z "$leftover" ] || { echo "execution snapshot survived: $leftover"; false; }
+  leftover="$(find "$TRELLIS_HOME/releases" -maxdepth 2 -name '.tmp.*' -print 2>&1)"
+  [ -z "$leftover" ] || { echo "execution snapshot work survived: $leftover"; false; }
 }
 
 # Same shape as assert_no_execution_snapshot: prove the root exists first, so an
@@ -368,13 +369,13 @@ EOF
 }
 
 run_session_context() {
-  local harness="$1" project_root="$2"
+  local harness="$1" project_root="$2" route="${3:-session-context}"
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
     CLAUDE_PROJECT_DIR="$SANDBOX/incorrect claude project" \
     CODEX_PROJECT_DIR="$SANDBOX/incorrect codex project" \
     PROJECT_RUNTIME_MARKER="$PROJECT_RUNTIME_MARKER" \
-    bash -c 'printf "%s\n" "{\"source\":\"startup\"}" | "$1" hook session-context "$2" "$3"' \
-    _ "$LAUNCHER" "$harness" "$project_root"
+    bash -c 'printf "%s\n" "{\"source\":\"startup\"}" | "$1" hook "$4" "$2" "$3"' \
+    _ "$LAUNCHER" "$harness" "$project_root" "$route"
 }
 
 # The Codex SessionStart command exactly as it is written into a project's
@@ -383,8 +384,12 @@ run_session_context() {
 # two copies of a string agree, which is all the string assertions elsewhere in
 # this file can prove.
 render_codex_session_start_command() {
-  jq -r '.hooks.SessionStart[0].hooks[].command | select(contains("hook session-context codex "))' \
-    "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" |
+  render_session_start_command codex-hooks.local.json
+}
+
+render_session_start_command() {
+  jq -r '.hooks.SessionStart[0].hooks[].command | select(contains(" hook session-start "))' \
+    "$REPO_ROOT/core-rules/templates/$1" |
     sed -e "s#__TRELLIS_USER_HOME__#$HOME#g" \
       -e "s#__TRELLIS_HOME__#$TRELLIS_HOME#g" \
       -e "s#__TRELLIS_LAUNCHER__#$LAUNCHER#g"
@@ -399,7 +404,7 @@ run_rendered_codex_session_start() {
   run env -i "HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" \
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "${@}" \
     /bin/bash --noprofile --norc -c \
-    "cd \"\$1\" || exit 1; printf '%s\n' '{\"source\":\"startup\"}' | $command" \
+    "cd \"\$1\" || exit 1; printf '%s\n' '{\"source\":\"startup\"}' | { $command; }" \
     _ "$cwd"
 }
 
@@ -535,9 +540,9 @@ launcher_verified_ssh_auth_sock"
   run_launcher registry
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   [ "$(cat "$ATTACH_PATH_LOG")" = __UNSET__ ]
-  # The dispatcher intentionally exits 3 after the launcher has created and
-  # handed off its sealed snapshot. Cleanup is required on this error path too,
-  # not only after a successful payload exit.
+  # The dispatcher intentionally exits 3 after the launcher has handed off its
+  # sealed snapshot. No snapshot work may survive this error path either, not
+  # only a successful payload exit.
   assert_no_execution_snapshot
 }
 
@@ -655,22 +660,57 @@ EOF
   [ "$output" = "$(printf '%s\n' 'argc=2 first=<with space> second=<>' 'exit-status=42')" ]
 }
 
-@test "session-context route runs verified data hooks and never poisoned project runtime" {
-  local harness
+@test "session-start and session-context routes run verified data hooks and never poisoned project runtime" {
+  local harness route
   make_release 1.2.3 session-context
   make_poisoned_project_runtime
 
-  for harness in claude codex; do
-    rm -f "$PROJECT_RUNTIME_MARKER"
-    run_session_context "$harness" "$PROJECT"
+  for route in session-start session-context; do
+    for harness in claude codex; do
+      rm -f "$PROJECT_RUNTIME_MARKER"
+      run_session_context "$harness" "$PROJECT" "$route"
 
-    [ "$status" -eq 0 ] || { echo "$output"; false; }
-    [[ "$output" == *"verified payload project context"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"Level: L4"* ]] || { echo "$output"; false; }
-    [ ! -e "$PROJECT_RUNTIME_MARKER" ]
+      [ "$status" -eq 0 ] || { echo "$route $harness: $output"; false; }
+      [[ "$output" == *"verified payload project context"* ]] || { echo "$route $harness: $output"; false; }
+      [[ "$output" == *"Level: L4"* ]] || { echo "$route $harness: $output"; false; }
+      [ ! -e "$PROJECT_RUNTIME_MARKER" ]
+    done
   done
 }
 
+# Review HIGH-2: the project's runtime anchor is data to diagnose. A dispatcher
+# planted in a replaced runtime directory, or behind a retargeted runtime
+# symlink, never runs; the verified payload's dispatcher does, under the
+# attach-time HOME and TRELLIS_HOME whatever the caller's environment holds.
+@test "the rendered SessionStart command never executes a replaced or retargeted project runtime" {
+  local name harness_dir command layout hook
+  make_release 1.2.3 session-context
+  make_poisoned_project_runtime
+  mkdir -p "$SANDBOX/poison tree/core-rules/hooks" "$SANDBOX/poison tree/core-rules/codex/hooks"
+  for hook in core-rules/hooks/session-start.sh core-rules/codex/hooks/session-start.sh; do
+    for layout in "$PROJECT/.trellis/runtime" "$SANDBOX/poison tree"; do
+      printf '#!/usr/bin/env bash\n: > %q\nexit 97\n' "$PROJECT_RUNTIME_MARKER" > "$layout/$hook"
+      chmod 755 "$layout/$hook"
+    done
+  done
+  for layout in replaced retargeted; do
+    if [ "$layout" = retargeted ]; then
+      rm -rf "$PROJECT/.trellis/runtime"
+      ln -s "$SANDBOX/poison tree" "$PROJECT/.trellis/runtime"
+    fi
+    for name in claude-settings.local.json codex-hooks.local.json; do
+      rm -f "$PROJECT_RUNTIME_MARKER"
+      command="$(render_session_start_command "$name")"
+      run env -i HOME="$SANDBOX/hostile home" TRELLIS_HOME="$SANDBOX/hostile trellis home" \
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin BASH_ENV="$SANDBOX/hostile-bash-env" \
+        CLAUDE_PROJECT_DIR="$PROJECT" CODEX_PROJECT_DIR="$PROJECT" \
+        /bin/bash --noprofile --norc -c "printf '%s\n' '{\"source\":\"startup\"}' | { $command; }"
+      [ "$status" -eq 0 ] || { echo "$layout $name: $output"; false; }
+      [[ "$output" == *"verified payload project context"* ]] || { echo "$layout $name: $output"; false; }
+      [ ! -e "$PROJECT_RUNTIME_MARKER" ] || { echo "$layout $name executed the project runtime"; false; }
+    done
+  done
+}
 
 # Every other assertion about the fallback chain is a string match on the
 # template or the rendered JSON, so all of them would still pass if the chain
@@ -756,14 +796,16 @@ EOF
 
   run_launcher hook inject-primer-index claude "$SANDBOX/projects/valid"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  # The executed payload is the sealed private snapshot of the configured
-  # release, never the installed release directory itself.
+  # The executed payload is a sealed execution snapshot of the configured
+  # release, never the installed release directory itself. This fixture does
+  # not declare the exec-snapshot capability, so like a release before 1.4.0
+  # it runs from a per-run snapshot, removed again on the way out.
   [[ "$output" == *"trusted-primer:$SANDBOX/projects/valid:$TRELLIS_HOME/releases/.tmp.1.2.3.exec."*"/payload "* ]] ||
     { echo "$output"; false; }
   [[ "$output" != *"trusted-primer:$SANDBOX/projects/valid:$PAYLOAD "* ]] ||
     { echo "$output"; false; }
-  # The snapshot is removed again on the way out.
   assert_no_execution_snapshot
+  [ ! -e "$TRELLIS_HOME/releases/.exec" ]
 }
 
 # Projects rendered by 1.3.11 and earlier still register skill-size-preflight.
@@ -800,31 +842,22 @@ EOF
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *'git-dir=unset git-work-tree=unset fsmonitor=false hooks=/dev/null no-system=1 global=/dev/null'* ]] || { echo "$output"; false; }
 }
-@test "SessionStart templates route every start hook through the clean stable launcher" {
+@test "SessionStart templates route the one session-start dispatcher through the clean stable launcher" {
   local expected
-  for name in session-context post-compact-context inject-primer-index; do
-    run jq -r --arg name "$name" '.hooks.SessionStart[0].hooks[].command | select(contains("hook " + $name + " claude "))' \
-      "$REPO_ROOT/core-rules/templates/claude-settings.local.json"
-    [ "$status" -eq 0 ] || { echo "$output"; false; }
-    expected="/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook $name claude \"\$CLAUDE_PROJECT_DIR\""
-    [ "$output" = "$expected" ]
-  done
+  run jq -r '[.hooks.SessionStart[].hooks[].command] | if length == 1 then .[0] else error("not one command") end' \
+    "$REPO_ROOT/core-rules/templates/claude-settings.local.json"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  expected='/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start claude "$CLAUDE_PROJECT_DIR"'
+  [ "$output" = "$expected" ] || { echo "actual:   $output"; echo "expected: $expected"; false; }
 
-  # The Claude and Codex project-dir arguments differ on purpose, so this loop
-  # cannot reuse the bare-variable form asserted above. Claude Code always sets
-  # CLAUDE_PROJECT_DIR, but Codex does not reliably set CODEX_PROJECT_DIR, so
-  # every Codex surface in this repo — core-rules/codex/hooks.json and each
-  # script under core-rules/codex/hooks/ — resolves it through the documented
-  # ${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}} chain. The template follows
-  # that convention; this expectation had mirrored the Claude form since the
-  # template and the assertion landed together in 0d37cf1, so it never matched.
-  for name in session-context post-compact-context inject-primer-index; do
-    run jq -r --arg name "$name" '.hooks.SessionStart[0].hooks[].command | select(contains("hook " + $name + " codex "))' \
-      "$REPO_ROOT/core-rules/templates/codex-hooks.local.json"
-    [ "$status" -eq 0 ] || { echo "$output"; false; }
-    expected="/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook $name codex \"\${CODEX_PROJECT_DIR:-\${CLAUDE_PROJECT_DIR:-\$PWD}}\""
-    [ "$output" = "$expected" ] || { echo "actual:   $output"; echo "expected: $expected"; false; }
-  done
+  # Claude Code always sets CLAUDE_PROJECT_DIR, but Codex does not reliably set
+  # CODEX_PROJECT_DIR, so every Codex surface resolves the project through the
+  # documented ${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}} chain.
+  run jq -r '[.hooks.SessionStart[].hooks[].command] | if length == 1 then .[0] else error("not one command") end' \
+    "$REPO_ROOT/core-rules/templates/codex-hooks.local.json"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  expected='/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start codex "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"'
+  [ "$output" = "$expected" ] || { echo "actual:   $output"; echo "expected: $expected"; false; }
 }
 
 @test "clean home allows only fixed launcher initial active release install" {
@@ -1543,6 +1576,21 @@ print("\n".join(re.findall(r"\"([^\"]+)\"", block)))
 # byte-identical and carry no excluded entry; the released 1.3.6 configure then
 # selects the release and the 1.3.6 launcher dispatches into it. The inversion
 # runs the same launcher on an unfiltered release-commit tag.
+# stale_directory_cursor <dir> — "stale" when a directory descriptor listed
+# while empty still lists nothing after an entry is added (Linux Btrfs), else
+# "fresh".
+stale_directory_cursor() {
+  python3 -I - "$1" <<'PY'
+import os, sys, tempfile
+d = tempfile.mkdtemp(dir=sys.argv[1])
+fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+os.listdir(fd)
+open(os.path.join(d, "entry"), "w").close()
+print("stale" if not os.listdir(fd) else "fresh")
+os.close(fd)
+PY
+}
+
 @test "A3.4 the v1.3.6 launcher and store install one packaged tag identically and configure selects it" {
   local v136="$SANDBOX/v1.3.6" src="$SANDBOX/packaged-source" remote="$SANDBOX/packaged-remote.git"
   local launcher store_home="$SANDBOX/v136-store-home" record
@@ -1581,6 +1629,18 @@ print("\n".join(re.findall(r"\"([^\"]+)\"", block)))
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(jq -r .active_cli_release "$TRELLIS_HOME/config.json")" = 7.7.7 ]
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$launcher" probe filtered
+  # v1.3.6 seals its execution snapshot by listing it through a descriptor
+  # opened while it was empty. Btrfs keeps that descriptor's end-of-directory
+  # cursor, so v1.3.6 sees nothing to seal and refuses its own still-writable
+  # snapshot record (fixed since by fresh_names). Where the store's filesystem
+  # does that, pin the old refusal and run the configured release through the
+  # current launcher instead.
+  if [ "$(stale_directory_cursor "$SANDBOX")" = stale ]; then
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"configured release record is missing, writable, or invalid: $TRELLIS_HOME/releases/.tmp.7.7.7.exec."* ]] ||
+      { echo "$output"; false; }
+    run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" probe filtered
+  fi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = 'fixture dispatcher: probe filtered' ] || { echo "$output"; false; }
 

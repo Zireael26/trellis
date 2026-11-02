@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
-# SessionStart: when running inside Herdr, inject the visible-pane rule and the
-# foreman context so Claude auto-adopts the herdr-foreman skill for multi-unit work.
+# SessionStart: when running inside a Herdr (herdr-core `hc`) terminal, inject
+# the foreman context so the apex adopts the herdr-foreman skill for multi-unit
+# work.
 #
 # Lean C04: SessionStart never resolves roles live (the resolver's usage and
 # credential probes cost up to two 20-second passes) and never adopts a cached
 # roster. It reports the roles as undecided and prints the on-demand resolver
 # command.
-[ "${HERDR_ENV:-}" = 1 ] || exit 0
-echo "HARD RULE (owner): all delegated agent work (workers, reviewers, consults, foremen, research, one-shot pi -p/codex exec) MUST use visible Herdr panes; only harness-native subagents and Dynamic Workflow agents are exempt. One-shot: core-rules/references/herdr-foreman.md § pi launch forms (1.1.0 and above)."
-if [ -z "${HERDR_WORKSPACE_ID:-}" ] || [ -z "${HERDR_PANE_ID:-}" ]; then
-  echo "DEGRADED: inside Herdr but the current workspace or pane identity is unavailable; deciding roles were not resolved. Do not substitute silently."
-  exit 0
-fi
+# The Herdr app sets HC_SCOPE (unique per terminal) and HC_TERMINAL_ID for
+# every terminal it runs; outside one this hook prints nothing.
+[ -n "${HC_SCOPE:-}" ] && [ -n "${HC_TERMINAL_ID:-}" ] || exit 0
 command -v pi >/dev/null 2>&1 || { echo "DEGRADED: inside Herdr but pi is not on PATH; foreman and resolver roles are unavailable. Do not substitute silently."; exit 0; }
 
-# Caps the one external call left at SessionStart (`herdr agent list`) and
+# A real CPython, never a pyenv-style shim (~0.4 s for each of the calls
+# below). Only the payload's own resolver is trusted; a mapped copy keeps PATH.
+case "${BASH_SOURCE[0]}" in
+  */core-rules/hooks/*)
+    # shellcheck source=../../scripts/lib/trellis-python.sh disable=SC1091
+    . "${BASH_SOURCE[0]%/*}/../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+  */core-rules/codex/hooks/*)
+    # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+    . "${BASH_SOURCE[0]%/*}/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+esac
+command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=python3
+
+# Caps the one external call left at SessionStart (`hc ls`) and
 # kills its whole process group on expiry.
 run_with_timeout() {
   local secs="$1"
@@ -38,7 +48,7 @@ run_with_timeout() {
   else
     # Python is already a resolver dependency. Keep the cap on hosts without
     # Perl (GNU `timeout` is not available on the macOS hosts this runs on).
-    python3 - "$secs" "$@" <<'PY'
+    "$TRELLIS_PYTHON" - "$secs" "$@" <<'PY'
 import os
 import signal
 import subprocess
@@ -91,18 +101,19 @@ fi
 ROLE_STATE="$STATE_PARENT/roles-resolved.json"
 # SessionStart never adopts a cached deciding roster: roles-resolved.json has
 # no resolver-origin attestation, so a same-account writer could plant a fresh,
-# internally consistent one. Remove this pane's copy, as the resolving hook did
-# before each pass, and leave a roster scoped to another Herdr pane for that
-# pane. Status: 0 = none, 2 = removed, 3 = another pane's, else not removed.
+# internally consistent one. Remove this terminal's copy, as the resolving hook
+# did before each pass, and leave a roster scoped to another hc terminal for
+# that terminal. Status: 0 = none, 2 = removed, 3 = another terminal's, else
+# not removed.
 ROSTER_STATUS=0
 if [ -e "$ROLE_STATE" ] || [ -L "$ROLE_STATE" ]; then
-  python3 - "$ROLE_STATE" "$HERDR_WORKSPACE_ID" "$HERDR_PANE_ID" <<'PY'
+  "$TRELLIS_PYTHON" - "$ROLE_STATE" "$HC_SCOPE" "$HC_TERMINAL_ID" <<'PY'
 import json
 import os
 import stat
 import sys
 
-path, workspace, pane = sys.argv[1:]
+path, hc_scope, hc_terminal = sys.argv[1:]
 try:
     seen = os.lstat(path)
 except FileNotFoundError:
@@ -120,8 +131,8 @@ if stat.S_ISREG(seen.st_mode):
     except (OSError, UnicodeDecodeError, ValueError):
         scope = None
 if isinstance(scope, dict):
-    owner = (scope.get("herdr_workspace_id"), scope.get("herdr_pane_id"))
-    if all(isinstance(value, str) and value for value in owner) and owner != (workspace, pane):
+    owner = (scope.get("hc_scope"), scope.get("hc_terminal_id"))
+    if all(isinstance(value, str) and value for value in owner) and owner != (hc_scope, hc_terminal):
         raise SystemExit(3)
 # Unlink only the entry inspected above; unlink never follows a symlink.
 try:
@@ -147,7 +158,7 @@ if [ -z "$TRELLIS_ROOT" ] && [ -n "${HOME:-}" ]; then
 fi
 ACTIVE_RELEASE=""
 if [ -n "$TRELLIS_ROOT" ] && [ -f "$TRELLIS_ROOT/config.json" ]; then
-  ACTIVE_RELEASE="$(python3 - "$TRELLIS_ROOT/config.json" <<'PY'
+  ACTIVE_RELEASE="$("$TRELLIS_PYTHON" - "$TRELLIS_ROOT/config.json" <<'PY'
 import json
 import sys
 
@@ -175,7 +186,7 @@ if [ -n "$ACTIVE_RELEASE" ]; then
 fi
 R="$RELEASE_PAYLOAD/core-rules/skills/herdr-foreman/scripts/resolve-roles.py"
 POLICY="$RELEASE_PAYLOAD/core-rules/skills/herdr-foreman/roles.json"
-if ! python3 - "$RELEASE_PAYLOAD" "$R" "$POLICY" <<'PY'
+if ! "$TRELLIS_PYTHON" - "$RELEASE_PAYLOAD" "$R" "$POLICY" <<'PY'
 import os
 import sys
 
@@ -195,26 +206,24 @@ then
   exit 0
 fi
 
-FOREMEN_RAW="$(run_with_timeout 2 herdr agent list 2>/dev/null)"
-if [ "$?" -eq 0 ]; then
-  FOREMEN="$(printf '%s\n' "$FOREMEN_RAW" | python3 -c '
+FOREMEN="unknown"
+if command -v hc >/dev/null 2>&1 && FOREMEN_RAW="$(run_with_timeout 2 hc ls --json 2>/dev/null)"; then
+  FOREMEN="$(printf '%s\n' "$FOREMEN_RAW" | "$TRELLIS_PYTHON" -c '
 import json,sys
 try:
-    a=[x for x in json.load(sys.stdin)["result"]["agents"] if x["agent"]=="pi"]
-    print(", ".join("%s(%s,%s)" % (x["pane_id"], x["agent_status"], x["cwd"].rsplit("/",1)[-1]) for x in a) or "none")
+    a=[x for x in json.load(sys.stdin)["terminals"] if x.get("agent")=="pi"]
+    print(", ".join("%s(%s,%s)" % (x["address"] + (" " + x["name"] if x.get("name") else ""), x.get("status") or "unknown", (x.get("cwd") or "?").rsplit("/",1)[-1]) for x in a) or "none")
 except Exception:
     print("unknown")')"
-else
-  FOREMEN="unknown"
 fi
 echo "## herdr-foreman (auto)"
-echo "Inside Herdr (pane ${HERDR_PANE_ID:-?}, workspace ${HERDR_WORKSPACE_ID:-?}). For any multi-unit task, follow skill \`herdr-foreman\`: Claude = apex (briefs, git, receipts), pi foreman pane = workflow/subagent driver, workers chosen by quota. Existing pi panes: ${FOREMEN}"
+echo "Inside Herdr (hc terminal ${HC_TERMINAL_ID}). For any multi-unit task, follow skill \`herdr-foreman\`: you are the apex (briefs, git, receipts); a pi foreman runs as your hc sub-agent and drives workers chosen by quota. Live pi agents: ${FOREMEN}"
 
-ON_DEMAND="SessionStart does not probe live quota or credentials; select an implementer, then run python3 $R --implementer <agent> in this pane to resolve on demand."
+ON_DEMAND="SessionStart does not probe live quota or credentials; select an implementer, then run python3 $R --implementer <agent> in this terminal to resolve on demand."
 case "$ROSTER_STATUS" in
   0) ;;
-  2) echo "Removed this pane's cached deciding roster at $ROLE_STATE; SessionStart never adopts a cached roster." ;;
-  3) echo "The cached deciding roster at $ROLE_STATE belongs to another Herdr workspace or pane; it was left in place for that pane." ;;
-  *) echo "DEGRADED: could not safely remove this pane's cached deciding roster at $ROLE_STATE; remove it before relying on any roster. Do not substitute silently." ;;
+  2) echo "Removed this terminal's cached deciding roster at $ROLE_STATE; SessionStart never adopts a cached roster." ;;
+  3) echo "The cached deciding roster at $ROLE_STATE belongs to another hc terminal; it was left in place for that terminal." ;;
+  *) echo "DEGRADED: could not safely remove this terminal's cached deciding roster at $ROLE_STATE; remove it before relying on any roster. Do not substitute silently." ;;
 esac
 echo "DEGRADED: SessionStart does not adopt a cached deciding roster; implementer, reviewer, security_reviewer, merge_reviewer, and refuter are undecided. $ON_DEMAND Do not substitute silently."

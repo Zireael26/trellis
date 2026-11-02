@@ -237,3 +237,30 @@ SH
   [[ "$output" == *"reason=diff-base resolver unavailable"* ]] || { echo "$output"; false; }
   [ ! -e "$CALLS" ]
 }
+
+@test "a cyclic link to the hook ends the walk at 40 hops and keeps the PATH lookup" {
+  write_config true
+  local hooks="$BATS_TEST_TMPDIR/hooks" bin="$BATS_TEST_TMPDIR/swap-bin" jq
+  jq="$(command -v jq)"
+  mkdir -p "$hooks" "$bin" "$BATS_TEST_TMPDIR/home" "$BATS_TEST_TMPDIR/tmp"
+  ln -s "$HOOK" "$hooks/aeo-gate-warn.sh"
+  # bash refuses to open a cyclic link, so the first jq call turns the link the
+  # hook runs through into a two-link cycle once bash has the file open.
+  cat >"$bin/jq" <<EOF
+#!/bin/sh
+if [ ! -L "$hooks/next" ]; then
+  ln -s aeo-gate-warn.sh "$hooks/next"
+  rm -f "$hooks/aeo-gate-warn.sh"
+  ln -s next "$hooks/aeo-gate-warn.sh"
+fi
+exec "$jq" "\$@"
+EOF
+  chmod +x "$bin/jq"
+  # Without a hop cap the walk never ends; the alarm turns that into a failure.
+  run env PATH="$bin:$PATH" HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home" \
+    TMPDIR="$BATS_TEST_TMPDIR/tmp" perl -e 'alarm shift; exec @ARGV or exit 127' 10 \
+    bash -c 'cd "$1" && bash "$2"' _ "$REPO" "$hooks/aeo-gate-warn.sh"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+  [[ "$output" == *"status=PASS"* ]] || { echo "$output"; false; }
+  [ "$(readlink "$hooks/aeo-gate-warn.sh")" = next ]
+}

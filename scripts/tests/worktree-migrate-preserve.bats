@@ -55,7 +55,9 @@ wip_wt() {
     | .pushed_ref == "origin/preserve/feat-wip" and .sha == $s' "$j"
   archive="$(jq -sr --arg p "$wt" 'map(select(.old == $p and .step == "archived")) | .[0].archive' "$j")"
   cmp "$archive/.env.local" "$target/.env.local"
-  [ "$(stat -f %Lp "${j%.jsonl}.archive" 2>/dev/null || stat -c %a "${j%.jsonl}.archive")" = 700 ]
+  local mode
+  mode="$(stat -f %Lp "${j%.jsonl}.archive" 2>/dev/null)" || mode="$(stat -c %a "${j%.jsonl}.archive")"
+  [ "$mode" = 700 ]
   ! git -C "$target" show HEAD --name-only | grep -q '.env.local'
 }
 
@@ -184,7 +186,9 @@ wip_wt() {
   archive="$(jq -sr 'map(select(.step == "secrets-withheld")) | .[0].archive' "$j")"
   cmp "$archive/.env.local" "$target/.env.local"
   jq -se 'map(select(.step == "secrets-withheld")) | .[0].files == [".env.local"]' "$j"
-  [ "$(stat -f %Lp "$archive" 2>/dev/null || stat -c %a "$archive")" = 700 ]
+  local mode
+  mode="$(stat -f %Lp "$archive" 2>/dev/null)" || mode="$(stat -c %a "$archive")"
+  [ "$mode" = 700 ]
 }
 
 @test "P2: subdir env, credential JSON, SSH keys and JSON secret fields are withheld" {
@@ -224,5 +228,7 @@ wip_wt() {
   for f in config/.env app/.env.local config/credentials.json config/service-account.json config/service_account.json config/id_rsa config/id_ed25519 config/id_ecdsa config/id_dsa config/key.ppk config/client.json config/pk.json config/acct.json; do
     cmp "$archive/$f" "$target/$f" || { echo "archive mismatch $f"; return 1; }
   done
-  [ "$(stat -f %Lp "$archive" 2>/dev/null || stat -c %a "$archive")" = 700 ]
+  local mode
+  mode="$(stat -f %Lp "$archive" 2>/dev/null)" || mode="$(stat -c %a "$archive")"
+  [ "$mode" = 700 ]
 }

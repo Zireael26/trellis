@@ -248,7 +248,7 @@ surface_plan_require_source() {
 
 surface_plan_require_source_parent() {
   local payload="$1" relative="$2" parent
-  parent="$(dirname "$relative")"
+  parent="$(dirname -- "$relative")"
   [ "$parent" = "." ] && return 0
   surface_plan_require_source "$payload" "$parent" directory
 }
@@ -330,7 +330,7 @@ surface_plan_path_has_excluded_component() {
 surface_plan_runtime_target() {
   local destination="$1" source="$2" parent remaining component up=""
 
-  parent="$(dirname "$destination")"
+  parent="$(dirname -- "$destination")"
   if [ "$parent" = "." ]; then
     printf '.trellis/runtime/%s\n' "$source"
     return 0
@@ -361,7 +361,7 @@ surface_plan_runtime_target() {
 surface_plan_project_target() {
   local destination="$1" source="$2" parent remaining component up=""
 
-  parent="$(dirname "$destination")"
+  parent="$(dirname -- "$destination")"
   if [ "$parent" = "." ]; then
     printf '%s\n' "$source"
     return 0
@@ -464,7 +464,7 @@ surface_plan_validate_user_destination_aliases() {
 }
 
 surface_plan_add_link_record() {
-  local harness="$1" source="$2" destination="$3" executable="$4" payload="${5:-}" target record
+  local harness="$1" source="$2" destination="$3" executable="$4" payload="${5:-}" target
 
   surface_plan_register_destination "$destination" || return "$?"
   if [ "$harness" = "user" ]; then
@@ -476,61 +476,29 @@ surface_plan_add_link_record() {
   else
     target="$(surface_plan_runtime_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
   fi
-  record="$(jq -cn \
-    --arg harness "$harness" \
-    --arg source "$source" \
-    --arg destination "$destination" \
-    --arg target "$target" \
-    --argjson executable "$executable" \
-    '{harness: $harness, kind: "symlink", source: $source, source_scope: "payload", destination: $destination, target: $target, executable: $executable}')" || {
-      surface_plan_err "could not encode symlink plan record"
-      return "$TRELLIS_EX_STATE"
-    }
-  _SURFACE_PLAN_RECORDS+=("$record")
+  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" payload "$destination" "$target" "$executable" "" "" "" "" "" "")
   return 0
 }
 
 surface_plan_add_project_link_record() {
   local harness="$1" source="$2" fallback_source="$3" destination="$4"
-  local target fallback_target record
+  local target fallback_target
 
   surface_plan_register_destination "$destination" || return "$?"
   target="$(surface_plan_project_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
   fallback_target="$(surface_plan_runtime_target "$destination" "$fallback_source")" || return "$TRELLIS_EX_STATE"
-  record="$(jq -cn \
-    --arg harness "$harness" \
-    --arg source "$source" \
-    --arg target "$target" \
-    --arg fallback_source "$fallback_source" \
-    --arg destination "$destination" \
-    --arg fallback_target "$fallback_target" \
-    '{harness: $harness, kind: "symlink", source: $source, source_scope: "project", destination: $destination, target: $target, fallback_source: $fallback_source, fallback_source_scope: "payload", fallback_target: $fallback_target, target_policy: "project-if-present-else-payload", executable: false}')" || {
-      surface_plan_err "could not encode project symlink plan record"
-      return "$TRELLIS_EX_STATE"
-    }
-  _SURFACE_PLAN_RECORDS+=("$record")
+  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" project "$destination" "$target" false "$fallback_source" "$fallback_target" "" "" "" "")
   return 0
 }
 
 surface_plan_add_render_record() {
-  local collection="$1" harness="$2" template="$3" destination="$4" merge="$5" mode="$6" required="$7" render_if_absent="$8" record
+  local collection="$1" harness="$2" template="$3" destination="$4" merge="$5" mode="$6" required="$7" render_if_absent="$8"
+  local -a fields=(render "$harness" "$template" "" "$destination" "" "" "" "" "$merge" "$mode" "$required" "$render_if_absent")
 
   surface_plan_register_destination "$destination" || return "$?"
-  record="$(jq -cn \
-    --arg harness "$harness" \
-    --arg template "$template" \
-    --arg destination "$destination" \
-    --arg merge "$merge" \
-    --arg mode "$mode" \
-    --argjson required "$required" \
-    --argjson render_if_absent "$render_if_absent" \
-    '{harness: $harness, kind: "render", source: $template, template: $template, destination: $destination, merge: $merge, mode: $mode, required: $required, render_if_absent: $render_if_absent}')" || {
-      surface_plan_err "could not encode render plan record"
-      return "$TRELLIS_EX_STATE"
-    }
   case "$collection" in
-    artifact) _SURFACE_PLAN_RECORDS+=("$record") ;;
-    optional-missing) _SURFACE_PLAN_OPTIONAL_MISSING+=("$record") ;;
+    artifact) _SURFACE_PLAN_RECORDS+=("${fields[@]}") ;;
+    optional-missing) _SURFACE_PLAN_OPTIONAL_MISSING+=("${fields[@]}") ;;
     *)
       surface_plan_err "internal error: unknown render record collection $collection"
       return "$TRELLIS_EX_STATE"
@@ -540,11 +508,7 @@ surface_plan_add_render_record() {
 }
 
 surface_plan_emit_direct_link() {
-  local payload="$1" harness="$2" entry="$3" source destination executable
-
-  source="$(printf '%s' "$entry" | jq -r '.source')" || return "$TRELLIS_EX_STATE"
-  destination="$(printf '%s' "$entry" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
-  executable="$(printf '%s' "$entry" | jq -r '.executable // false')" || return "$TRELLIS_EX_STATE"
+  local payload="$1" harness="$2" source="$3" destination="$4" executable="$5"
   if [ "$harness" = "user" ]; then
     destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
     if [ -d "$payload/$source" ] && [ ! -L "$payload/$source" ]; then
@@ -560,39 +524,23 @@ surface_plan_emit_direct_link() {
 }
 
 surface_plan_emit_project_link() {
-  local payload="$1" harness="$2" entry="$3" source fallback_source destination
-
-  source="$(printf '%s' "$entry" | jq -r '.project_target')" || return "$TRELLIS_EX_STATE"
-  fallback_source="$(printf '%s' "$entry" | jq -r '.fallback_source')" || return "$TRELLIS_EX_STATE"
-  destination="$(printf '%s' "$entry" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  local payload="$1" harness="$2" source="$3" destination="$4" fallback_source="$5"
   surface_plan_require_source "$payload" "$fallback_source" file || return "$?"
   surface_plan_add_project_link_record "$harness" "$source" "$fallback_source" "$destination"
 }
 
 surface_plan_emit_children_link() {
-  local payload="$1" harness="$2" entry="$3"
-  local source destination_dir entry_type suffix required_file recursive temporary candidate child_relative
-  local source_relative destination executable exclusions_file unsorted_file sorted_file
+  local payload="$1" harness="$2" source="$3" destination_dir="$4" executable="$5"
+  local entry_type="$6" suffix="$7" required_file="$8" recursive="$9" exclusions="${10}"
+  local temporary candidate child_relative source_relative destination unsorted_file sorted_file
   local -a excluded_dirs=()
   local -a candidates=()
   local sorted_candidate
 
-  source="$(printf '%s' "$entry" | jq -r '.source_children')" || return "$TRELLIS_EX_STATE"
-  destination_dir="$(printf '%s' "$entry" | jq -r '.destination_dir')" || return "$TRELLIS_EX_STATE"
-  entry_type="$(printf '%s' "$entry" | jq -r '.entry_type')" || return "$TRELLIS_EX_STATE"
-  suffix="$(printf '%s' "$entry" | jq -r '.suffix // ""')" || return "$TRELLIS_EX_STATE"
-  required_file="$(printf '%s' "$entry" | jq -r '.required_file // ""')" || return "$TRELLIS_EX_STATE"
-  recursive="$(printf '%s' "$entry" | jq -r '.recursive // false')" || return "$TRELLIS_EX_STATE"
-  executable="$(printf '%s' "$entry" | jq -r '.executable // false')" || return "$TRELLIS_EX_STATE"
-  surface_plan_make_tempfile || return "$?"
-  exclusions_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! jq -r '.exclude_dirs // [] | .[]' <<< "$entry" > "$exclusions_file"; then
-    surface_plan_err "could not enumerate source exclusions: $source"
-    return "$TRELLIS_EX_STATE"
+  # Exclusions are validated single components, so slash is an exact separator.
+  if [ -n "$exclusions" ]; then
+    IFS=/ read -r -a excluded_dirs <<< "$exclusions"
   fi
-  while IFS= read -r source_relative; do
-    [ -n "$source_relative" ] && excluded_dirs+=("$source_relative")
-  done < "$exclusions_file"
 
   surface_plan_require_source "$payload" "$source" directory || return "$?"
   surface_plan_assert_tree_safe "$payload" "$payload/$source" || return "$?"
@@ -683,18 +631,11 @@ surface_plan_emit_children_link() {
 # `explicit-json` already coexists with destination keys by merging, so a
 # skip-if-exists rule there would only mean "never merge".
 surface_plan_emit_render() {
-  local payload="$1" harness="$2" entry="$3"
-  local template destination merge mode required render_if_absent source_path
-
-  template="$(printf '%s' "$entry" | jq -r '.template')" || return "$TRELLIS_EX_STATE"
-  destination="$(printf '%s' "$entry" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  local payload="$1" harness="$2" template="$3" destination="$4" merge="$5" mode="$6" required="$7" render_if_absent="$8"
+  local source_path
   if [ "$harness" = "user" ]; then
     destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
   fi
-  merge="$(printf '%s' "$entry" | jq -r '.merge')" || return "$TRELLIS_EX_STATE"
-  mode="$(printf '%s' "$entry" | jq -r '.mode')" || return "$TRELLIS_EX_STATE"
-  required="$(printf '%s' "$entry" | jq -r '.required')" || return "$TRELLIS_EX_STATE"
-  render_if_absent="$(printf '%s' "$entry" | jq -r '.render_if_absent // false')" || return "$TRELLIS_EX_STATE"
   source_path="$payload/$template"
   surface_plan_require_source_parent "$payload" "$template" || return "$?"
 
@@ -711,21 +652,10 @@ surface_plan_emit_render() {
   surface_plan_add_render_record optional-missing "$harness" "$template" "$destination" "$merge" "$mode" "$required" "$render_if_absent"
 }
 
-surface_plan_emit_link_entry() {
-  local payload="$1" harness="$2" entry="$3" direct project
-  direct="$(printf '%s' "$entry" | jq -r 'has("source")')" || return "$TRELLIS_EX_STATE"
-  project="$(printf '%s' "$entry" | jq -r 'has("project_target")')" || return "$TRELLIS_EX_STATE"
-  if [ "$direct" = "true" ]; then
-    surface_plan_emit_direct_link "$payload" "$harness" "$entry"
-  elif [ "$project" = "true" ]; then
-    surface_plan_emit_project_link "$payload" "$harness" "$entry"
-  else
-    surface_plan_emit_children_link "$payload" "$harness" "$entry"
-  fi
-}
-
 surface_plan_emit_harness() {
-  local payload="$1" manifest="$2" harness="$3" entry links_file render_file
+  local payload="$1" manifest="$2" harness="$3" links_file render_file
+  local kind source destination executable fallback entry_type suffix required_file recursive exclusions
+  local template merge mode required render_if_absent
 
   if [ "$harness" = "user" ]; then
     surface_plan_prepare_user_home || return "$?"
@@ -733,24 +663,42 @@ surface_plan_emit_harness() {
 
   surface_plan_make_tempfile || return "$?"
   links_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! jq -c --arg harness "$harness" '.harnesses[$harness].links[]' "$manifest" > "$links_file"; then
+  if ! jq -j --arg harness "$harness" '
+    .harnesses[$harness].links[]
+    | (if has("source") then "direct" elif has("project_target") then "project" else "children" end), "\u0000",
+      (.source // .project_target // .source_children), "\u0000", (.destination // .destination_dir), "\u0000",
+      (.executable // false), "\u0000", (.fallback_source // ""), "\u0000", (.entry_type // ""), "\u0000",
+      (.suffix // ""), "\u0000", (.required_file // ""), "\u0000", (.recursive // false), "\u0000",
+      ((.exclude_dirs // []) | join("/")), "\u0000"' "$manifest" > "$links_file"; then
     surface_plan_err "could not enumerate links for harness: $harness"
     return "$TRELLIS_EX_STATE"
   fi
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    surface_plan_emit_link_entry "$payload" "$harness" "$entry" || return "$?"
+  while IFS= read -r -d '' kind && IFS= read -r -d '' source &&
+        IFS= read -r -d '' destination && IFS= read -r -d '' executable &&
+        IFS= read -r -d '' fallback && IFS= read -r -d '' entry_type &&
+        IFS= read -r -d '' suffix && IFS= read -r -d '' required_file &&
+        IFS= read -r -d '' recursive && IFS= read -r -d '' exclusions; do
+    case "$kind" in
+      direct) surface_plan_emit_direct_link "$payload" "$harness" "$source" "$destination" "$executable" ;;
+      project) surface_plan_emit_project_link "$payload" "$harness" "$source" "$destination" "$fallback" ;;
+      children) surface_plan_emit_children_link "$payload" "$harness" "$source" "$destination" "$executable" \
+        "$entry_type" "$suffix" "$required_file" "$recursive" "$exclusions" ;;
+    esac || return "$?"
   done < "$links_file"
 
   surface_plan_make_tempfile || return "$?"
   render_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! jq -c --arg harness "$harness" '.harnesses[$harness].render[]' "$manifest" > "$render_file"; then
+  if ! jq -j --arg harness "$harness" '
+    .harnesses[$harness].render[]
+    | .template, "\u0000", .destination, "\u0000", .merge, "\u0000", .mode, "\u0000",
+      .required, "\u0000", (.render_if_absent // false), "\u0000"' "$manifest" > "$render_file"; then
     surface_plan_err "could not enumerate renders for harness: $harness"
     return "$TRELLIS_EX_STATE"
   fi
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    surface_plan_emit_render "$payload" "$harness" "$entry" || return "$?"
+  while IFS= read -r -d '' template && IFS= read -r -d '' destination &&
+        IFS= read -r -d '' merge && IFS= read -r -d '' mode &&
+        IFS= read -r -d '' required && IFS= read -r -d '' render_if_absent; do
+    surface_plan_emit_render "$payload" "$harness" "$template" "$destination" "$merge" "$mode" "$required" "$render_if_absent" || return "$?"
   done < "$render_file"
   return 0
 }
@@ -1051,7 +999,20 @@ surface_plan_json_array() {
     printf '[]\n'
     return 0
   fi
-  printf '%s\n' "$@" | jq -cs '.'
+  # Each record holds kind, harness, source, scope, destination, target,
+  # executable, fallback source/target, merge, mode, required, render-if-absent.
+  printf '%s\0' "$@" | jq -Rsc '
+    split("\u0000")[:-1]
+    | [range(0; length; 13) as $i | .[$i:$i+13]
+       | {kind: .[0], harness: .[1], source: .[2], destination: .[4]}
+         + (if .[0] == "symlink" then
+              {source_scope: .[3], target: .[5], executable: (.[6] | fromjson)}
+              + (if .[3] == "project" then
+                   {fallback_source: .[7], fallback_source_scope: "payload", fallback_target: .[8],
+                    target_policy: "project-if-present-else-payload"}
+                 else {} end)
+            else {template: .[2], merge: .[9], mode: .[10], required: (.[11] | fromjson), render_if_absent: (.[12] | fromjson)}
+            end)]'
 }
 
 surface_plan_write_json() {

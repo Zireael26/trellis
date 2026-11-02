@@ -66,7 +66,7 @@ function fixture(t, { lib = true, primitive = true } = {}) {
   };
   const handlers = new Map(), messages = [], notifications = [];
   const pi = {
-    on: (name, handler) => handlers.set(name, handler),
+    on: (name, handler) => handlers.set(name, name === 'before_agent_start' ? (event, ctx) => handler({ messageType: 'user', ...event }, ctx) : handler),
     getAllTools: () => [],
     sendMessage: (...args) => messages.push(args),
     exec: async (_script, args) => {

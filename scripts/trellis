@@ -45,19 +45,21 @@ Existing commands:
   worktree      Create/repair a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
   heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
+  bench         Measure Trellis hook, lifecycle and gate latency in a sandbox (--suite hooks|lifecycle|gate, --n N)
 EOF
 }
 
 # Internal SessionStart routes. The stable launcher verifies the active immutable
 # payload before it executes this dispatcher. Project runtime anchors are data to
-# diagnose, never executable hook sources.
+# diagnose, never executable hook sources. Rendered settings use session-start;
+# the three single-hook routes remain for settings rendered by 1.3.21 and earlier.
 session_hook_path() {
   local payload_root="$1" hook_name="$2" harness="$3"
   case "$harness:$hook_name" in
-    claude:session-context|claude:post-compact-context|claude:inject-primer-index)
+    claude:session-start|claude:session-context|claude:post-compact-context|claude:inject-primer-index)
       printf '%s/core-rules/hooks/%s.sh\n' "$payload_root" "$hook_name"
       ;;
-    codex:session-context|codex:post-compact-context|codex:inject-primer-index)
+    codex:session-start|codex:session-context|codex:post-compact-context|codex:inject-primer-index)
       printf '%s/core-rules/codex/hooks/%s.sh\n' "$payload_root" "$hook_name"
       ;;
     *) return 1 ;;
@@ -230,6 +232,15 @@ case "$cmd" in
                 exit 2
                 ;;
   heavy)        shift; exec "$SCRIPT_DIR/heavy.sh" "$@" ;;
+  bench)
+                shift
+                # The bench runs from this verified payload under the control
+                # PATH; the hooks it times get the caller's PATH, which the
+                # launcher forwards as data for this route.
+                exec /usr/bin/env -u TRELLIS_ATTACH_CALLER_PATH TRELLIS_BENCH_VIA_ROUTE=1 \
+                  "TRELLIS_BENCH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
+                  python3 -I "$SCRIPT_DIR/bench/trellis-latency.py" "$@"
+                ;;
   pi-spill-watchdog) shift; exec "$SCRIPT_DIR/pi-spill-watchdog.sh" "$@" ;;
   help|-h|--help) usage ;;
   *)            usage >&2; exit 2 ;;

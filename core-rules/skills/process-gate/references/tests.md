@@ -18,6 +18,17 @@ PROCESS_GATE_TEST_CMD="pnpm test"
 
 The file is read from the base of the gated range and parsed as data (see SKILL.md, "Gate config is read from the range base, as data"): changing a command in a PR takes effect only after it merges.
 
+When the full test battery already runs the exact typecheck and lint commands,
+base-side config may declare `PROCESS_GATE_TEST_COVERS_STATIC` as a three-item
+array: the covering test command, typecheck command, and lint command. Only an
+exact match of all three effective commands deduplicates the standalone checks;
+the row reports `typecheck and lint: included in full test battery`. Docs-only
+ranges always retain them, even if the policy names that same battery command.
+Other narrowed test commands and changed static commands retain them too. An
+inherited declaration is ignored: this is a reviewed config assertion about the
+battery's contents, not an environment bypass. Trellis's own declaration matches
+`run-tests.sh`'s `shellcheck_tree` and `aeo_static_and_python` stages.
+
 Web stacks default to `pnpm` if `pnpm-lock.yaml` is present, `bun` if `bun.lockb`, `npm` if `package-lock.json`. The gate auto-detects but local.config.sh wins.
 
 Python projects auto-detect in this order: `uv.lock` → `uv run`, `pdm.lock` → `pdm run`, otherwise `pyproject.toml` alone → `python -m` (from the project's active venv). Default commands once a runner is selected:
@@ -73,17 +84,148 @@ Web projects often add accessibility tests (axe-core, pa11y) and visual regressi
 
 ## When tests should run
 
-The gate runs tests on the *full project*, not just the diff (the one exception is an opted-in docs-only range, below). Reasoning: a change in module A can break tests in module B that the diff doesn't touch. Covered by the canonical `stop-verify` hook in-session and the `pre-push` hook at git boundary; the gate is a third confirmation at PR time.
+The gate runs tests on the *full project*, not just the diff (exceptions are a project-owned push dispatcher using the interface below, and an opted-in docs-only range). Reasoning: a change in module A can break tests in module B that the diff doesn't touch. Covered by the canonical `stop-verify` hook in-session and the `pre-push` hook at git boundary; the gate is a third confirmation at PR time.
 
 For very large monorepos where full-project test runs exceed the 5-min budget:
 
 ```bash
-# Use Turbo's affected-only mode or equivalent.
-PROCESS_GATE_TEST_CMD="turbo run test --filter=...[origin/main]"
+# A project-owned dispatcher consumes the gate's push scope below.
+PROCESS_GATE_TEST_CMD="python3 .claude/skills/process-gate-local/tests.py"
 PROCESS_GATE_TEST_TIMEOUT=600
 ```
 
 The trade-off (faster gate but theoretically incomplete coverage) must be acknowledged in the project's `CLAUDE.md`.
+
+## Exact-input local battery verdicts
+
+The canonical `python3 [-I] scripts/run-tests-local.py` command always runs
+uncached. Only `check-tests.sh` can replace that command with a runner-written
+passing verdict; typecheck, lint, coverage and every other gate row still run
+(or static checks are covered by the exact base-declared full-battery tuple).
+`--verdict-status [--head=COMMIT]` is a read-only probe: a miss exits 1.
+
+Verdicts live in `${TRELLIS_GATE_STATE_DIR:-$HOME/.local/state/trellis-gate}/verdicts/`
+(mode 0700, records 0600). The default is pinned regardless of `XDG_STATE_HOME`,
+so cron and interactive agents share the queue and disable marker. An explicit
+state override must be absolute, outside every checkout, and shared by all
+callers; invalid roots refuse before creating state. Queue metadata uses
+`queue.lock`; admitted runners retain the legacy `lock` flock until close, so
+pre-072 runners cannot overlap them. Inputs over-include the clean tree, test inventory and
+suite blobs, runner/fence/helper blobs, tool paths/binaries/versions, platform,
+Git refs/config and a digest of the effective environment. Only queue/output and
+heavy-slot transport variables are excluded. The heavy exclusions are exactly
+`FD`, `TOKEN`, `SLOT`, `POOL` and `DIR_ID` under `TRELLIS_HEAVY_`; other heavy
+configuration is bound, and `TRELLIS_HEAVY_TEST*` refuses reuse. Checkout HEAD
+must be the gated head. Ignored files matching any non-recursive suite-discovery
+glob also refuse reuse, including files under ignored parent directories.
+A failed version probe refuses reuse. `mktemp`, `lsof`, `ps` and the npm/npx
+entrypoints bind resolved executable bytes without invoking a version command;
+normal npm/npx installations additionally bind the resolved package metadata,
+so an npm-only upgrade changes the key even if its entrypoint is unchanged.
+Other discovered tools require a successful version probe. Dirty, narrowed, test-seam, partial, failed, timed-out, interrupted or
+containment-ambiguous runs never qualify. An explicit rerun invalidates an older
+pass for the same inputs before starting. Changing inputs during a run also
+prevents a write. The retained aggregate and its digest must still validate.
+Wrong modes, symlinked records, missing evidence and verdicts older than seven
+days are misses, never passes. The weekly uncached backstop compares tree-matched
+candidates even when scheduler environment/toolchain inputs differ, records the
+differing field names, and raises P1 on a failing unchanged tree.
+A `reuse-disabled.json` marker in the state directory disables reads and writes
+until an operator reviews the divergence and removes it.
+
+Residual inputs: unrelated ignored dependency/cache contents, Python installed
+package contents, npm/npx imported contents beyond entrypoints/package metadata
+(and package metadata hidden by nonstandard wrappers),
+and external Git exclude/config file bytes are not individually hashed. Fresh
+Git discovery still checks ignored suites on every lookup. The seven-day cap
+and conservative weekly tree-divergence backstop limit, but do not eliminate,
+those residuals; retain uncached release qualification.
+
+Passing timing evidence is retained separately under `passing-runs/<id>/` with
+head, tree and aggregate digest. `python3 -I scripts/refresh-stage-weights.py`
+updates the reviewed weights from the last five passing runs plus the pinned
+baseline; unmeasured stages explicitly keep their estimates. Failed shard
+outputs older than seven days are pruned on admission and `--runs-reap`.
+
+## Verified release-tag reuse (1.4.0)
+
+A single tag-only push may reuse a full release-tree verdict only after
+`release-payload-commit.sh --verify-tag` passes. Both pre-push carriers pass the
+observed tag ref and object ID as arguments; Tests independently verifies them
+again. Mixed/multiple tags, failed verification and unclassified tag pushes run
+full tests, not the ordinary docs-only or exact-HEAD shortcuts.
+
+The checkout must be clean and byte-identical to the approved release-commit
+tree (the payload's sole parent). T30 must validate exactly one retained passing
+verdict with the same tree, runner/fence, inventory, toolchain, environment,
+platform and Git configuration. The only permitted ref difference is addition
+of this verified tag; other ref changes or an occupied/disabled/stale/tampered
+verdict miss. No new reusable full verdict is written by the tag-reading rerun.
+
+T32's `scripts/tests/release-metadata-audit.json` is read from the approved
+release tree. It must be complete, source-digest matched and internally
+consistent. Every observed `tag_reads: true` suite runs under the normal Tests
+command timeout, and a failure blocks. Static checks, coverage and other gate
+rows retain their normal behavior. The verdict prints the reused run ID/tree
+and explicitly notes the tag-reading rerun. Its scope is `full` (reused full
+release-tree evidence plus the tag checks), never a selector narrowing. A
+missing, unreadable, incomplete,
+stale or ambiguous trace leaves the full command unchanged. The checked-in
+targeted trace remains incomplete until the release owner certifies full
+coverage; installing this code alone never promotes that evidence.
+
+## Push scope and command receipts
+
+Only push Tests receives gate-owned `PG_TESTS_BASE` and `PG_TESTS_HEAD`, full commit SHAs for the exact resolved range (not hard-coded trunk or necessarily checkout HEAD); `A...B` uses merge-base(A, B).
+`run-all.sh` snapshots them before rows; `check-tests.sh` resolves argv. Both unset inherited interface values. Only Tests receives them, even through the heavy clean-env boundary; Claude and Codex share the scripts.
+
+Merge, release, unknown and missing modes provide no interface and run the existing command unchanged. Standalone `check-tests.sh --mode=push` also needs explicit `--range` or `--base`.
+**Absent/unresolved scope or any unclassifiable path must select the full suite.** A project dispatcher owns its conservative classification and coverage map; the gate does not certify those choices.
+
+In scoped push mode, `PG_TESTS_RECEIPT_FILE` names a private temporary file; the command may write exactly one newline-terminated line (at most 128 bytes):
+
+```text
+PG_TESTS_RECEIPT full
+PG_TESTS_RECEIPT narrowed 7
+PG_TESTS_RECEIPT no-tests docs-only
+```
+
+`narrowed N` requires a positive selected-test count; `no-tests docs-only` reports zero. The row and final verdict show `full`, `narrowed: N selected`, or `no-tests: docs-only`.
+An executed command without a receipt defaults to `full`, not an independently measured count. Undeclared Tests are `not run`; a missing checker `Tests:` line is `unknown`. Stdout is not a receipt channel.
+Malformed/multiple receipts fail the row; a valid receipt never overrides command failure or timeout. The gate removes the file after reading it. Existing base-policy docs-only behavior below is unchanged.
+
+## Base-side test-file selector (opt-in)
+
+`PROCESS_GATE_TEST_MAP="scripts/lib/push-test-map.py"` opts into a base-owned
+Python selector for explicit branch-only pushes (`PG_PUSH_TEST_SCOPE=branch`,
+set by pre-push; tags and mixed pushes force `full`). The gate executes the
+regular BASE blob with isolated Python, appends its selected `--test-file=`
+arguments to the existing Tests command, and falls back to that unmodified
+command when the map cannot decide, HEAD differs from the pushed range head,
+or the tracked tree/index is dirty. Merge/manual gates never use the selector
+and keep their previous passive-docs exemption (also for break-glass main pushes
+without tags). The gate consumes and unsets `PG_PUSH_TEST_SCOPE` before check
+commands run; both runners also scrub it from descendants.
+The base is the pushed range's base. For a branch's later pushes that is its own
+previous push, so a branch can select with a map it changed itself, the same
+trust the base-side `PROCESS_GATE_TEST_CMD` already carries. Narrowing is a
+push-time speedup only: merge acceptance never uses the selector.
+A successful selected command must write `PG_TESTS_RECEIPT narrowed M` for exactly M
+selected files; missing, full or mismatched receipts fail as `unknown`, never
+claiming a full-battery pass. A failing selected run reports its actual failure
+with scope `unknown`, without demanding a success receipt. Trellis's contained
+runner deduplicates selected files, keeps static/core stages and recipe lint,
+and alone writes the receipt
+after successful execution and verified containment cleanup. Planner and shard
+children do not receive the gate receipt interface.
+
+The Trellis mapper over-includes transitive `source`/Bats `load` dependencies,
+`shellcheck source=` hints, and literal helper/fixture references from both
+endpoint trees. A removed dependency edge therefore still selects its old
+consumer. Changes to `scripts/lib/` always require the full battery; unknown
+paths, missing required suites, and dependencies reaching core hook/skill
+suites also fall back to full. Selections travel only as command arguments,
+never as an environment-carried file list.
 
 ## Docs-only ranges (opt-in)
 
@@ -128,12 +270,57 @@ With no policy at the base, or a range the shared diff-base resolver (`core-rule
 - Typecheck and lint still run.
 - The battery is replaced by the policy's `tests` command, or skipped if the policy has none. That command takes no heavy slot.
 - Coverage and the mutation spot-check are skipped.
-- The row prints `Tests: narrowed (docs-only: N files)`, where N is the number of changed paths in the net diff, and `run-all.sh` repeats that line under the verdict. A narrowed pass is never a full-battery pass.
+- A scoped push with no policy tests command prints `Tests: no-tests: docs-only`. A policy command's canonical scope receipt is retained when present; other docs-only runs keep `Tests: narrowed (docs-only: N files)`, where N counts net changed paths. `run-all.sh` repeats the scope under the verdict. A narrowed pass is never a full-battery pass.
 - The other rows are unaffected. Secrets, Bypass markers, Docs discipline and Security run in full on every range.
 
 The narrowing presumes that the protected base passed its own full gate. It does not reuse or verify a prior test receipt.
 
 **Trellis's own policy** is `.claude/skills/process-gate-local/docs-only-tests.policy`. It allows `docs/`, spec and top-level Markdown, and it denies the runbooks, the process doctrine, steering, prompt and setup text. Its `tests` line runs only the checks that read repository Markdown: `scripts/tests/gpt6-roster-sweep.bats`, the A3.8 repository scan in `scripts/tests/release-tag-consumers.bats`, the tracked-source scan in `scripts/tests/check-process-liveness.bats`, and `scripts/conformance-check.sh`.
+
+## Release-metadata class (base-side opt-in)
+
+A docs-only policy can additionally declare:
+
+```
+class release-metadata scripts/tests/release-metadata-audit.json
+```
+
+This class allows only regular passive `VERSION` / `core-rules/VERSION` (one
+semver line), `CHANGELOG.md`, and `docs/adr/*.md` changes, checking every commit,
+including subsequently reverted changes. Bash refuses ranges containing merges
+and enforces the exact path floor before invoking Python; other paths fall back
+to the ordinary docs/full class, even if the frozen helper is permissive.
+The helper and its local imports are extracted from the base into a private,
+short-lived directory, never executed from the candidate. Base policy denies
+still apply. A clean candidate, an intact full-green base verdict, unchanged tools/environment,
+runner/inventory/suites/config, and unchanged refs except the current branch's
+base-to-candidate advance are mandatory. Only the audited suites replace the
+battery; local static checks still run. The verdict carries
+`Tests: narrowed (release-metadata: N files)`. No narrowed run writes a full verdict.
+
+The audit is read from the base, must be regular, `complete: true`, and bind all
+non-metadata source blobs through `source_digest`. Incomplete, stale, missing,
+malformed or unqualified evidence runs the full battery. Ordinary docs keep
+using their existing class. The shipped audit is **targeted, not complete**;
+the directive is deliberately not enabled in Trellis's policy until the release
+owner finishes the full-battery trace. Do not promote the targeted sample.
+
+Capture real read opens with Linux `strace -f -yy -s 4096 -e trace=%file`, one
+log per targeted suite under `trellis heavy --light --lane <lane>` and sandbox
+HOME/TRELLIS_HOME/TMPDIR. macOS native file-open tracing needs operator-granted
+DTrace/root privileges; a sandboxed local Linux VM is an alternative. Summarize
+with `python3 -I scripts/trace-release-metadata.py --trace <suite>=<log> ...`.
+Targeted summaries record hashes of the retained raw traces and always emit
+`complete: false`. For the full CI Bats inventory, use
+`bash scripts/trace-full-battery.sh <new-evidence-directory> --workers N` on Linux.
+Collection still writes `complete: false`; the separate
+`python3 -I scripts/trace-release-metadata.py --promote-run <directory>` step
+requires every inventory log, zero exits, successful parsing and matching HEAD
+source digests before writing `complete: true`. See
+[`docs/FULL-BATTERY-TRACE.md`](../../../../docs/FULL-BATTERY-TRACE.md) for the
+sandbox, evidence and promotion workflow. File probes and Git object-store reads
+are included conservatively. Full tracing and owner review, not this sample,
+determine the final suite set and the ≤10-minute metadata timing receipt.
 
 ## Machine-wide heavy slots
 

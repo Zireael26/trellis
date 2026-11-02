@@ -27,6 +27,8 @@
 #                  use the documented 30-second default weight.
 #                  The workflow fans these out across a matrix; locally the
 #                  default 1/1 runs everything.
+#   --test-file=P  select an existing scripts/tests/*.bats file (repeatable),
+#                  retaining static/core stages, recipe lint and normal LPT/fencing.
 #   --list         print only the stage names this invocation would run, and exit 0.
 #                  Concatenating the four shards' lists must reproduce the 1/1
 #                  list as a set — suite-coverage.bats asserts that.
@@ -88,6 +90,7 @@ if [ "$CAPTURE_PROVENANCE" -eq 1 ]; then
 fi
 # Runner-owned binding: fenced capture uses the private shell variable, not env.
 unset TRELLIS_TEST_PROVENANCE_RECEIPT
+unset PG_TESTS_BASE PG_TESTS_HEAD PG_TESTS_RECEIPT_FILE PG_PUSH_TEST_SCOPE
 
 # shellcheck source=scripts/lib/test-suites.sh
 . "$ROOT/scripts/lib/test-suites.sh"
@@ -100,11 +103,13 @@ PLAN=0
 SCOPE=local
 SHARD_INDEX=1
 SHARD_TOTAL=1
+SELECTED_TESTS=()
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
     --list) LIST=1 ;;
     --plan) PLAN=1 ;;
+    --test-file=*) SELECTED_TESTS+=( "${arg#--test-file=}" ) ;;
     --scope=*) SCOPE="${arg#--scope=}" ;;
     --shard=*)
       SHARD_INDEX="${arg#--shard=}"
@@ -127,6 +132,18 @@ if [ "$SHARD_TOTAL" -lt 1 ] || [ "$SHARD_INDEX" -lt 1 ] || [ "$SHARD_INDEX" -gt 
   exit 64
 fi
 
+for test_file in ${SELECTED_TESTS[@]+"${SELECTED_TESTS[@]}"}; do
+  if [[ ! "$test_file" =~ ^scripts/tests/[A-Za-z0-9_-]+\.bats$ ]] ||
+     [ ! -f "$test_file" ] || [ -L "$test_file" ] || [ "$QUICK" -eq 1 ]; then
+    printf 'run-tests: invalid selected test: %s\n' "$test_file" >&2; exit 64
+  fi
+  suite="${test_file##*/}"
+  excluded="$(test_suites_exclusion_scope "${suite%.bats}")"
+  if [ "$excluded" = all ] || { [ "$SCOPE" = ci ] && [ "$excluded" = ci ]; }; then
+    printf 'run-tests: selected test excluded in %s: %s\n' "$SCOPE" "$test_file" >&2; exit 64
+  fi
+done
+
 # Git invokes hooks with repository-routing variables exported for the hook's
 # checkout. They are poison for a fixture suite: `git -C "$fixture"` does NOT
 # override an inherited GIT_DIR, so fixture init/config/worktree commands can
@@ -143,7 +160,7 @@ install_test_git_fence() {
 
   # Recognize generated launchers only to reject them as delegates. Their body
   # is never parsed as authority: Git and mktemp pins retain the existing
-  # inherited-delegate behavior; Python is resolved only through caller PATH.
+  # inherited-delegate behavior; Python uses the shared interpreter resolver.
   is_generated_test_fence_launcher() {
     local candidate="$1" line count=0
     [ -f "$candidate" ] && [ -r "$candidate" ] || return 1
@@ -174,8 +191,16 @@ install_test_git_fence() {
     return 1
   fi
 
-  # An inbound Python pin must never execute during installer admission.
-  real_python="$(command -v python3 2>/dev/null || printf '')"
+  # Resolve once for the shard, including bare python3 calls from its suites.
+  # The fence's separate TRELLIS_TEST_REAL_PYTHON pin is never an input.
+  # shellcheck source=scripts/lib/trellis-python.sh
+  . "$ROOT/scripts/lib/trellis-python.sh"
+  # Admission must not read or update the caller's live interpreter cache.
+  TRELLIS_HOME=/dev/null trellis_python || {
+    printf 'run-tests: could not resolve the Python executable\n' >&2
+    return 1
+  }
+  real_python="$TRELLIS_PYTHON"
   case "$real_python" in /*) ;; *) real_python="" ;; esac
   if [ -z "$real_python" ] || [ ! -x "$real_python" ]; then
     printf 'run-tests: could not resolve the Python executable\n' >&2
@@ -184,17 +209,17 @@ install_test_git_fence() {
 
   # Canonical paths make aliases of either checked-in helper ineligible as a
   # delegate and freeze symlink targets before launchers are written.
-  real_python="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python")" || return 1
-  real_git="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_git")" || return 1
-  real_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_mktemp")" || return 1
-  static_git="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_git")" || return 1
-  static_mktemp="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_mktemp")" || return 1
+  real_python="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python")" || return 1
+  real_git="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_git")" || return 1
+  real_mktemp="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_mktemp")" || return 1
+  static_git="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_git")" || return 1
+  static_mktemp="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$static_mktemp")" || return 1
   # A pyenv-style python3 is a bash script: ~0.2 s per exec (every fenced Git
   # call pays it several times over) and dead on a PATH without bash, which
   # stripped-PATH hook tests construct. Pin the true binary behind the shim.
-  real_python_exe="$("$real_python" -c 'import sys; print(sys.executable)' 2>/dev/null)" || real_python_exe=""
+  real_python_exe="$("$real_python" -I -c 'import sys; print(sys.executable)' 2>/dev/null)" || real_python_exe=""
   if [ -n "$real_python_exe" ]; then
-    real_python_exe="$("$real_python" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python_exe" 2>/dev/null)" || real_python_exe=""
+    real_python_exe="$("$real_python" -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$real_python_exe" 2>/dev/null)" || real_python_exe=""
   fi
   if [ -n "$real_python_exe" ] && [ -f "$real_python_exe" ] && [ -x "$real_python_exe" ]; then
     real_python="$real_python_exe"
@@ -203,6 +228,9 @@ install_test_git_fence() {
     printf 'run-tests: could not resolve the Python executable\n' >&2
     return 1
   fi
+  # A shim-only host still resolves through the shared fallback, but pays the
+  # shim only during admission. Keep intentional non-shim override wrappers.
+  case "$TRELLIS_PYTHON" in */shims/python3) TRELLIS_PYTHON="$real_python" ;; esac
   if [ ! -x "$real_git" ] || [ "$real_git" = "$static_git" ] ||
      is_generated_test_fence_launcher "$real_git"; then
     printf 'run-tests: could not resolve the real Git executable\n' >&2
@@ -262,6 +290,9 @@ EOF
     printf 'export TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP TRELLIS_TEST_REAL_PYTHON\n'
     printf 'exec /bin/bash %q "$@"\n' "$static_mktemp"
   } > "$launcher_dir/mktemp"
+  # A private PATH entry, not a shell function: suites that replace PATH to
+  # exercise missing/shimmed Python still see exactly their chosen toolchain.
+  ln -s "$TRELLIS_PYTHON" "$launcher_dir/python3" || return 1
   chmod 700 "$launcher_dir/git" "$launcher_dir/mktemp"
   if [ ! -f "$launcher_dir/git" ] || [ -L "$launcher_dir/git" ] || [ ! -x "$launcher_dir/git" ] ||
      [ ! -f "$launcher_dir/mktemp" ] || [ -L "$launcher_dir/mktemp" ] || [ ! -x "$launcher_dir/mktemp" ]; then
@@ -296,6 +327,9 @@ EOF
     local cleanup_name="${TRELLIS_TEST_GIT_FENCE_ROOT##*/}"
     case "$cleanup_name" in
       trellis-test-git.*)
+        if [ -d "$TRELLIS_TEST_GIT_FENCE_ROOT/historical-releases" ]; then
+          find "$TRELLIS_TEST_GIT_FENCE_ROOT/historical-releases" -type d -exec chmod u+w {} +
+        fi
         (CDPATH='' cd "$TRELLIS_TEST_GIT_FENCE_PARENT" && rm -rf -- "$cleanup_name")
         ;;
     esac
@@ -561,28 +595,42 @@ stage "POSIX bootstrap prologues" bats scripts/tests/posix-bootstrap-prologue.ba
 stage "AEO contract, static, and entrypoint" aeo_static_and_python
 stage "conformance-check" bash scripts/conformance-check.sh
 
-if [ "$QUICK" -eq 0 ]; then
-  # HERDR_* must not reach the hook suites: code-reviewer.sh takes the rung-2a
-  # (`pi`) branch when HERDR_ENV=1, so every rung-2b assertion fails against the
-  # operator's live roles-resolved.json when the gate is launched from a Herdr
-  # pane (run-tests-local.py spawns shards with os.environ.copy()). Scrubbed
+if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+  # HC_* must not reach the hook suites: code-reviewer.sh takes the rung-2a
+  # (`pi`) branch inside an hc terminal, so every rung-2b assertion fails against
+  # the operator's live roles-resolved.json when the gate is launched from the
+  # Herdr app (run-tests-local.py spawns shards with os.environ.copy()). Scrubbed
   # here so it holds for every suite in the stage, including the files that do
-  # not `load helpers`. Suites that need Herdr set it per-invocation.
-  stage "hooks (claude + codex)" env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID \
-    -u HERDR_TAB_ID -u HERDR_SOCKET_PATH -u HERDR_BIN_PATH \
-    bats core-rules/hooks/tests/ core-rules/codex/hooks/tests/
-  stage "skill gates" bats core-rules/skills/*/tests/
-  stage "recipe routing lint" bash scripts/lint-recipe-routing.sh
-  stage "Herdr panel layout" python3 core-rules/skills/herdr-foreman/tests/test_panel_layout.py
+  # not `load helpers`. Suites that need hc set it per-invocation.
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    stage "bats $suite" env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET \
+      bats "$suite"
+  done < <(test_suites_core hooks)
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    stage "bats $suite" bats "$suite"
+  done < <(test_suites_core skills)
 
+fi
+
+if [ "$QUICK" -eq 0 ]; then
+  stage "recipe routing lint" bash scripts/lint-recipe-routing.sh
   # One stage per suite: a failure names the suite that caused it, and the exit
   # code stays an honest count of failing suites.
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
     # posix-bootstrap-prologue already ran above as part of the quick slice.
     [ "$suite" = "posix-bootstrap-prologue" ] && continue
+    if [ "${#SELECTED_TESTS[@]}" -gt 0 ]; then
+      selected=0
+      for test_file in "${SELECTED_TESTS[@]}"; do
+        [ "$test_file" != "scripts/tests/$suite.bats" ] || selected=1
+      done
+      [ "$selected" -eq 1 ] || continue
+    fi
     case "$suite" in
-      rollout-hooks-part*|sync-hooks-settings-part*|doctor-part*|t6-phase-a-integration|detach-project-part*|pi-attachment|release-store|setup-runbooks|attach-project|disk-janitor-apply)
+      rollout-hooks-part*|sync-hooks-settings-part*|doctor-part*|t6-phase-a-integration|detach-project-part*|pi-attachment|release-store-part*|setup-runbooks|attach-project|disk-janitor-apply)
         # These suites allocate all mutable fixtures per test. Keep the outer
         # four-shard bound; Bats uses two internal semaphore slots per file.
         # Disabling cross-file parallelism avoids a GNU parallel dependency.
@@ -599,6 +647,27 @@ build_stage_plan || exit 1
 if [ "$PLAN" -eq 1 ]; then
   print_stage_plan
   exit 0
+fi
+
+# Only the historical group-plan part consumes this fixture. Do not build it
+# for quick, inventory-only, or unrelated shards. Never trust an inbound cache.
+unset TRELLIS_TEST_HISTORICAL_RELEASES
+if [ "$LIST" -eq 0 ]; then
+  for ((STAGE_INDEX = 1; STAGE_INDEX <= STAGE_ORDINAL; STAGE_INDEX++)); do
+    if [ "${STAGE_ASSIGNMENTS[$STAGE_INDEX]}" -eq "$SHARD_INDEX" ] &&
+      [ "${STAGE_NAMES[$STAGE_INDEX]}" = 'bats scripts/tests/release-store-part1.bats' ]; then
+      REPO_ROOT="$ROOT"
+      RELEASE_STORE_LIB="$ROOT/scripts/lib/release-store.sh"
+      # shellcheck source=scripts/tests/helpers/payload-fixture.bash
+      . "$ROOT/scripts/tests/helpers/payload-fixture.bash"
+      # shellcheck source=scripts/tests/helpers/group-plan.bash
+      . "$ROOT/scripts/tests/helpers/group-plan.bash"
+      # shellcheck source=scripts/tests/helpers/historical-releases.bash
+      . "$ROOT/scripts/tests/helpers/historical-releases.bash"
+      historical_releases_prepare "$TRELLIS_TEST_GIT_FENCE_ROOT" || exit 1
+      break
+    fi
+  done
 fi
 
 for ((STAGE_INDEX = 1; STAGE_INDEX <= STAGE_ORDINAL; STAGE_INDEX++)); do

@@ -290,6 +290,30 @@ run_guard_with_home() {
   [ -z "$stderr" ]
 }
 
+# Bash 3.2 and 4 have no EPOCHSECONDS clock: an inherited EPOCHSECONDS is an
+# ordinary variable. A Read stamped with a future value would stay known in
+# every later turn, so the guards must take the clock from date there.
+@test "clock: an inherited EPOCHSECONDS under /bin/bash does not keep a Read known in a later turn" {
+  local fake="$PROJECT_DIR/fake-bin" now
+  mkdir -p "$fake"
+  printf '#!/bin/sh\nexec env EPOCHSECONDS=4102444800 /bin/bash "$@"\n' > "$fake/bash"
+  chmod +x "$fake/bash"
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/clock.txt"; printf 'hello\n' > "$f"
+  PATH="$fake:$PATH" run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" --arg body "$(cat "$f")" \
+    '{transcript_path: $tp, tool_name: "Read", tool_input: {file_path: $t}, tool_response: $body}')"
+  [ "$status" -eq 0 ]
+  now=$(date +%s)
+  run awk -F '\t' -v now="$now" '$1 > now + 60 {bad = 1} END {exit bad || NR == 0}' "$STATE_DIR/$KEY.reads.tsv"
+  [ "$status" -eq 0 ] || { cat "$STATE_DIR/$KEY.reads.tsv"; false; }
+  # A later turn with the warn budget spent: the stale edit is blocked.
+  set_turn_epoch $((now + 100))
+  printf '%s\t%s\n' $((now + 100)) "$f" $((now + 100)) "$f" > "$STATE_DIR/$KEY.warns.tsv"
+  PATH="$fake:$PATH" run_guard "$f"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *deny* ]] || { echo "$output"; false; }
+}
+
 @test "integration: a Read whose CONTENT contains 'Error:'/'not found' is still recorded → guard silent" {
   set_turn_epoch 1000
   f="$PROJECT_DIR/source-with-markers.txt"

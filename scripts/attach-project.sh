@@ -1225,46 +1225,56 @@ attach_project_claude_present() {
 # template-identical file — is left in the plan so the destination preflight
 # refuses it BY NAME.
 attach_deferred_leaves() {
-  local root="$1" payload="$2" surfaces="$3" record kind path target reason deferred='[]'
+  local root="$1" payload="$2" surfaces="$3" kind path scope source fallback target reason
+  local -a deferred=()
   local has_project_claude=false
   attach_project_claude_present "$root" && has_project_claude=true
-  while IFS= read -r record; do
-    [ -n "$record" ] || continue
-    kind="$(printf '%s\n' "$record" | jq -r '.kind')" || return "$TRELLIS_EX_STATE"
-    path="$(printf '%s\n' "$record" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
+  while IFS= read -r -d '' kind && IFS= read -r -d '' path &&
+        IFS= read -r -d '' scope && IFS= read -r -d '' source &&
+        IFS= read -r -d '' fallback && IFS= read -r -d '' target; do
     case "$kind" in
       render)
         [ -e "$root/$path" ] || [ -L "$root/$path" ] || continue
-        deferred="$(trellis_jq -cn --argjson current "$deferred" --arg path "$path" \
-          '$current + [{path:$path,kind:"file",target:null,reason:"project-authored-render"}]')" || return "$TRELLIS_EX_STATE"
+        deferred+=("$path" file "" project-authored-render)
         ;;
       symlink)
         [ -e "$root/$path" ] || [ -L "$root/$path" ] || continue
         if [ -L "$root/$path" ]; then
           reason="pre-existing-symlink"
-        elif _attachment_symlink_destination_authored "$record" "$root" "$payload" "$path"; then
-          reason="project-authored-file"
         else
-          continue
+          if [ "$scope" = project ]; then
+            _attachment_project_authored_file "$root/$path" "$root/$source" "$payload/$fallback" || continue
+          else
+            _attachment_project_authored_file "$root/$path" "$payload/$source" || continue
+          fi
+          reason="project-authored-file"
         fi
         # Recorded even for the authored-file shape: it pins WHICH link the
         # project displaced, so diagnosis can hold the entry against the same
         # manifest leaf instead of matching on path alone.
-        target="$(printf '%s\n' "$record" | jq -r --argjson has_project_claude "$has_project_claude" '
-          if .source_scope == "project"
-          then (if $has_project_claude then .target else .fallback_target end)
-          else .target end')" || return "$TRELLIS_EX_STATE"
         if [ "$reason" = "pre-existing-symlink" ]; then
           _attachment_symlink_matches "$root/$path" "$target" || continue
         fi
-        deferred="$(trellis_jq -cn --argjson current "$deferred" --arg path "$path" --arg target "$target" --arg reason "$reason" \
-          '$current + [{path:$path,kind:"symlink",target:$target,reason:$reason}]')" || return "$TRELLIS_EX_STATE"
+        deferred+=("$path" symlink "$target" "$reason")
         ;;
     esac
-  done < <(printf '%s\n' "$surfaces" | jq -c '
+  done < <(printf '%s\n' "$surfaces" | jq -j --argjson has_project_claude "$has_project_claude" '
     .artifacts[]
-    | select((.kind == "render" and (.render_if_absent // false)) or .kind == "symlink")')
-  printf '%s\n' "$deferred" | jq -cS 'sort_by(.path)'
+    | select((.kind == "render" and (.render_if_absent // false)) or .kind == "symlink")
+    | .kind, "\u0000", .destination, "\u0000", .source_scope, "\u0000", .source, "\u0000",
+      .fallback_source, "\u0000",
+      (if .source_scope == "project"
+       then (if $has_project_claude then .target else .fallback_target end)
+       else .target end), "\u0000"')
+  if [ "${#deferred[@]}" -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\0' "${deferred[@]}" | jq -RscS '
+    split("\u0000")[:-1]
+    | [range(0; length; 4) as $i | .[$i:$i+4]
+       | {path: .[0], kind: .[1], target: (if .[1] == "file" then null else .[2] end), reason: .[3]}]
+    | sort_by(.path)'
 }
 
 # Owned leaves are not deferrals, including during same-version adoption.
@@ -3549,6 +3559,8 @@ attach_hooks_install() {
     attach_relink_set_hooks_path_pinned "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino" "$managed" || return "$?"
   fi
   _attachment_verify_managed_hooks "$home" "$owner" || return "$?"
+  _attachment_hooks_digest_memo_write "$home" "$payload" "$manifest" "$source" ||
+    _attachment_diag "could not record the managed hook digests; the post-checkout fast path will take the full reconcile"
   attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino" >/dev/null
 }
 

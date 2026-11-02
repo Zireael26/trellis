@@ -48,7 +48,10 @@ teardown() {
   TWS_BLOCKED_LIST="$SANDBOX/blocked.sha256" run "$INSTALLER" --home "$H" install "$SANDBOX/good.ts"
   [ "$status" -eq 0 ]
   cmp "$SANDBOX/good.ts" "$EXT/trellis-web-search.ts"
-  [ "$(stat -f '%Lp' "$EXT/trellis-web-search.ts")" = "644" ]
+  # Discard stdout from a failed BSD attempt before trying GNU stat.
+  mode="$(stat -f '%Lp' "$EXT/trellis-web-search.ts" 2>/dev/null)" ||
+    mode="$(stat -c '%a' "$EXT/trellis-web-search.ts")"
+  [ "$mode" = "644" ]
   backups=("$H"/.pi/agent/backups/extensions/trellis-web-search.ts.*)
   [ "${#backups[@]}" -eq 1 ]
   [ "$(shasum -a 256 "${backups[0]}" | awk '{print $1}')" = "$old_sha" ]
@@ -93,11 +96,13 @@ teardown() {
 # test-controlled side effect, which lets a test land an action exactly
 # between two steps of the installer.
 make_shims() {
+  # Resolve before the shims are prepended to PATH.
+  export REAL_SHASUM="$(command -v shasum)"
   SHIMS="$SANDBOX/shims"
   mkdir -p "$SHIMS"
   cat >"$SHIMS/shasum" <<'EOF'
 #!/bin/bash
-/usr/bin/shasum "$@"
+"$REAL_SHASUM" "$@"
 rc=$?
 # Swap the source the first time anything is hashed: after the vetting hash.
 if [ -n "${SWAP_SRC:-}" ] && [ ! -e "$SWAP_SRC.swapped" ]; then

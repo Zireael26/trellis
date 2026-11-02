@@ -1,0 +1,19 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git status --short",
+    "description": "Show working tree status"
+  },
+  "tool_response": {
+    "stdout": "",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  },
+  "tool_use_id": "toolu_bench_0001"
+}

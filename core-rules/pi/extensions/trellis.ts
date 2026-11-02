@@ -7,6 +7,7 @@ import type {
   ExtensionContext,
   ToolCallEvent,
   ToolResultEvent,
+  UserBashEvent,
 } from "@earendil-works/pi-coding-agent";
 
 type Target = { operation: "read" | "create" | "update" | "delete" | "rename"; path: string; destination?: string };
@@ -30,6 +31,188 @@ type NormalizedAction = {
 };
 type Decision = { schema_version: 1; capability_status: "enforced" | "advisory" | "unsupported" | "disabled" | "unknown"; decision: "allow" | "deny" | "warn"; reason?: string; context?: string };
 type ReadState = { known: Set<string>; warns: Map<string, number> };
+type RuleEngine = "claude" | "codex";
+type GuardExemption = {
+  engines: RuleEngine[]; allowed_commands: string[]; command_prefixes: string[];
+  refuse_if_line_matches: string[]; refuse_short_flags: string[]; boundaries: string;
+  identifier: string; identifier_boundary: string; replacement: string; why?: string;
+};
+type GuardRule = {
+  id: string; effect: "warn" | "deny"; reason?: string; message?: string;
+  message_by_engine?: Partial<Record<RuleEngine, string>>;
+  ignore_case?: boolean; match: string[]; unless?: string[]; exempt?: GuardExemption;
+};
+type GuardRules = ReturnType<typeof loadGuardRules>;
+
+const asciiLower = (text: string) => text.replace(/[A-Z]/g, letter => letter.toLowerCase());
+
+// Match LF-delimited lines without JS's Unicode case folding or multiline mode.
+// C-locale character classes and all policy patterns stay in the shared JSON.
+function rulePattern(pattern: string, ignoreCase = false): RegExp {
+  return new RegExp(ignoreCase ? asciiLower(pattern) : pattern);
+}
+
+// Mirror the generator's closed key sets: a new policy field needs an explicit
+// implementation, never a successful load that silently drops its semantics.
+function checkKeys(value: unknown, required: string[], optional: string[] = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || required.some(key => !Object.hasOwn(value, key))
+      || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) throw new Error("invalid Trellis guard rule keys");
+}
+
+function compileExemption(exempt: GuardExemption, ignoreCase: boolean) {
+  checkKeys(exempt, ["engines", "allowed_commands", "command_prefixes", "refuse_if_line_matches", "refuse_short_flags", "boundaries", "identifier", "identifier_boundary", "replacement"], ["why"]);
+  const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0);
+  if (!strings(exempt.engines) || !exempt.engines.length || exempt.engines.some(engine => !["claude", "codex"].includes(engine))
+      || !strings(exempt.allowed_commands) || !exempt.allowed_commands.length || exempt.allowed_commands.some(command => !/^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$/.test(command))
+      || !strings(exempt.command_prefixes) || exempt.command_prefixes.some(prefix => !/^[A-Za-z0-9_.-]+$/.test(prefix))
+      || !strings(exempt.refuse_if_line_matches) || !strings(exempt.refuse_short_flags) || exempt.refuse_short_flags.some(flag => !/^-[A-Za-z0-9]$/.test(flag))
+      || typeof exempt.boundaries !== "string" || !/^[!-~]+$/.test(exempt.boundaries) || new Set(exempt.boundaries).size !== exempt.boundaries.length
+      || typeof exempt.identifier !== "string" || !exempt.identifier || typeof exempt.identifier_boundary !== "string" || !/^\[.*\]$/.test(exempt.identifier_boundary)
+      || typeof exempt.replacement !== "string" || !/^[!-~]+$/.test(exempt.replacement) || exempt.replacement.includes("/")) throw new Error("invalid Trellis guard exemption");
+  const fold = (text: string) => ignoreCase ? asciiLower(text) : text;
+  return {
+    ...exempt, boundaries: fold(exempt.boundaries), replacement: fold(exempt.replacement),
+    allowedWords: exempt.allowed_commands.map(command => fold(command).split(" ")),
+    prefixes: exempt.command_prefixes.map(fold), shortFlags: exempt.refuse_short_flags.map(fold),
+    refusals: exempt.refuse_if_line_matches.map(pattern => rulePattern(pattern, ignoreCase)),
+    identifierPattern: rulePattern(`(${exempt.identifier_boundary})(${exempt.identifier})`, ignoreCase),
+  };
+}
+
+export function loadGuardRules(directory = fileURLToPath(new URL("../../hooks/rules/", import.meta.url))) {
+  const destructive = JSON.parse(readFileSync(resolve(directory, "destructive.json"), "utf8"));
+  const reread = JSON.parse(readFileSync(resolve(directory, "reread.json"), "utf8"));
+  checkKeys(destructive, ["schema_version", "guard", "description", "semantics", "rules"]);
+  checkKeys(reread, ["schema_version", "guard", "description", "warn_budget", "messages", "edit_failure_markers"]);
+  checkKeys(reread.warn_budget, ["default", "by_level"]);
+  checkKeys(reread.warn_budget.by_level, [], ["1", "2", "3", "4", "5"]);
+  checkKeys(reread.messages, ["warn", "block"]);
+  checkKeys(reread.edit_failure_markers, ["ignore_case", "pattern"], ["why"]);
+  if (destructive.schema_version !== 1 || destructive.guard !== "block-destructive" || !Array.isArray(destructive.rules) || destructive.rules.length === 0
+      || reread.schema_version !== 1 || reread.guard !== "reread-guard"
+      || !Number.isInteger(reread.warn_budget?.default) || reread.warn_budget.default < 1
+      || !reread.warn_budget.by_level || Object.values(reread.warn_budget.by_level).some(value => !Number.isInteger(value) || Number(value) < 1)
+      || typeof reread.messages?.warn !== "string" || typeof reread.messages?.block !== "string"
+      || typeof reread.edit_failure_markers?.pattern !== "string") throw new Error("invalid Trellis guard rules");
+  const seen = new Set<string>();
+  const rules = (destructive.rules as GuardRule[]).map(rule => {
+    checkKeys(rule, ["id", "effect", "match"], ["reason", "message", "message_by_engine", "ignore_case", "unless", "exempt"]);
+    if (typeof rule.id !== "string" || !/^[a-z0-9-]+$/.test(rule.id) || seen.has(rule.id) || !["warn", "deny"].includes(rule.effect)
+        || (rule.ignore_case !== undefined && typeof rule.ignore_case !== "boolean") || !Array.isArray(rule.match) || !rule.match.length
+        || !rule.match.every(pattern => typeof pattern === "string" && pattern.length > 0)
+        || (rule.unless !== undefined && (!Array.isArray(rule.unless) || !rule.unless.every(pattern => typeof pattern === "string" && pattern.length > 0)))
+        || typeof (rule.effect === "deny" ? rule.reason : rule.message) !== "string") throw new Error("invalid destructive rule");
+    seen.add(rule.id);
+    if (rule.message_by_engine !== undefined) checkKeys(rule.message_by_engine, [], ["claude", "codex"]);
+    return {
+      ...rule,
+      matches: rule.match.map(pattern => rulePattern(pattern, rule.ignore_case)),
+      exceptions: (rule.unless ?? []).map(pattern => rulePattern(pattern, rule.ignore_case)),
+      exemption: rule.exempt !== undefined ? compileExemption(rule.exempt, rule.ignore_case ?? false) : undefined,
+    };
+  });
+  return { rules, reread, editFailure: rulePattern(reread.edit_failure_markers.pattern, reread.edit_failure_markers.ignore_case) };
+}
+
+// POSIX chooses the longest span at the first matching position; JS chooses
+// the first alternative. End-bound probes force JS to consider longer paths,
+// without slicing the input (which would change the meaning of ^ and $).
+function identifierMatch(pattern: RegExp, text: string): RegExpExecArray | null {
+  let best = pattern.exec(text);
+  if (!best) return null;
+  let low = best.index + best[0].length, high = text.length;
+  while (low < high) {
+    const end = Math.ceil((low + high) / 2);
+    const probe = new RegExp(`(?:${pattern.source})(?=[\\s\\S]{0,${text.length - end}}$)`, "y");
+    probe.lastIndex = best.index;
+    const longer = probe.exec(text);
+    if (longer) { best = longer; low = longer.index + longer[0].length; }
+    else high = end - 1;
+  }
+  return best;
+}
+
+// Same simple-command walk as _gr_exempt: one refused command anywhere cancels
+// the whole exemption. Command names, prefixes, refusals and rewrites are data.
+function exemptLines(lines: string[], exempt: ReturnType<typeof compileExemption>): string[] {
+  if (exempt.refusals.some(pattern => lines.some(line => pattern.test(line)))) return lines;
+  const commands = lines.map(line => {
+    const segments: { text: string; separator: string }[] = [];
+    let start = 0;
+    for (let index = 0; index < line.length; index++) if (exempt.boundaries.includes(line[index])) {
+      segments.push({ text: line.slice(start, index), separator: line[index] }); start = index + 1;
+    }
+    segments.push({ text: line.slice(start), separator: "" });
+    return segments;
+  });
+  for (const segments of commands) for (const { text } of segments) {
+    const words = text.split(/[ \t\v\f\r]+/).filter(Boolean);
+    if (!words.length) continue;
+    const offset = exempt.prefixes.includes(words[0]) ? 1 : 0;
+    if (!exempt.allowedWords.some(allowed => allowed.every((word, index) => words[offset + index] === word))) return lines;
+    let previous = "";
+    for (const word of words.slice(offset + 1)) {
+      if (exempt.shortFlags.some(flag => word.startsWith(flag))
+          || (word.startsWith("-") && word.includes("=") && exempt.identifierPattern.test(` ${word.slice(word.indexOf("=") + 1)}`))
+          || (previous.startsWith("--") && previous.length > 2 && !previous.includes("=") && exempt.identifierPattern.test(` ${word}`))) return lines;
+      previous = word;
+    }
+  }
+  return commands.map(segments => segments.map(({ text, separator }) => {
+    let remaining = ` ${text}`, rewritten = "";
+    for (let match; (match = identifierMatch(exempt.identifierPattern, remaining));) {
+      rewritten += remaining.slice(0, match.index) + match[1] + exempt.replacement;
+      remaining = remaining.slice(match.index + match[0].length);
+    }
+    return (rewritten + remaining).slice(1) + separator;
+  }).join(""));
+}
+
+export function destructiveMatches(policy: GuardRules, command: string, engine: RuleEngine = "codex") {
+  const events: { id: string; effect: "warn" | "deny"; reason: string }[] = [];
+  for (const rule of policy.rules) {
+    let lines = command.split("\n");
+    if (rule.ignore_case) lines = lines.map(asciiLower);
+    if (rule.exemption?.engines.includes(engine)) lines = exemptLines(lines, rule.exemption);
+    if (!rule.matches.every(pattern => lines.some(line => pattern.test(line)))
+        || rule.exceptions.some(pattern => lines.some(line => pattern.test(line)))) continue;
+    events.push({ id: rule.id, effect: rule.effect, reason: (rule.effect === "deny" ? rule.reason : rule.message_by_engine?.[engine] ?? rule.message)! });
+    if (rule.effect === "deny") break;
+  }
+  return events;
+}
+
+export function rereadDecision(policy: GuardRules, path: string, state: ReadState, budget: number, override = false): Decision {
+  if (override) return { schema_version: 1, capability_status: "enforced", decision: "allow", reason: `reread-guard: TRELLIS_REREAD_OVERRIDE=1 logged-escape for ${path}` };
+  if (!existsSync(path) || state.known.has(path)) return { schema_version: 1, capability_status: "enforced", decision: "allow" };
+  const count = state.warns.get(path) ?? 0;
+  const blocked = count >= budget;
+  if (!blocked) state.warns.set(path, count + 1);
+  const template: string = policy.reread.messages[blocked ? "block" : "warn"];
+  const values: Record<string, string> = { path, count: String(count + 1), budget: String(budget) };
+  return { schema_version: 1, capability_status: "enforced", decision: blocked ? "deny" : "warn",
+    reason: template.replace(/\{(path|count|budget)\}/g, (_, key) => values[key]) };
+}
+
+export function responseFailed(policy: GuardRules, response: unknown, toolName: string): boolean {
+  if (response && typeof response === "object") {
+    const data = response as Record<string, unknown>;
+    return data.is_error === true || data.isError === true
+      || [data.error, data.tool_use_error].some(value => value != null && value !== false && value !== "");
+  }
+  if (typeof response !== "string" || response.startsWith("Success. Updated the following files:")) return false;
+  if (response.startsWith("Error") || response.startsWith("No files were modified.")) return true;
+  return toolName !== "Read" && response.split("\n").some(line => policy.editFailure.test(policy.reread.edit_failure_markers.ignore_case ? asciiLower(line) : line));
+}
+
+export function recordReadTargets(state: ReadState, targets: Target[], cwd: string, failed: boolean) {
+  if (failed) return;
+  for (const target of targets) {
+    const path = target.operation === "rename" ? target.destination : target.operation === "delete" ? undefined : target.path;
+    if (path && !/[\0\t\r\n]/.test(path)) state.known.add(resolve(cwd, path));
+  }
+}
 
 function deny(reason: string): Decision {
   return { schema_version: 1, capability_status: "unknown", decision: "deny", reason };
@@ -59,7 +242,7 @@ function autonomyRoot(root: string): string {
 
 // Port of the shared autonomy resolver, using only project data and runtime presets.
 // Malformed/unreadable state refuses instead of restoring a permissive default.
-function rereadBudget(root: string): number {
+export function rereadBudget(root: string, rules: GuardRules): number {
   const json = (path: string): Record<string, unknown> | undefined => {
     if (!lstatSync(path, { throwIfNoEntry: false })) return undefined;
     const value: unknown = JSON.parse(readFileSync(path, "utf8"), (key: string, value: unknown, context?: { source?: string }) => {
@@ -100,7 +283,7 @@ function rereadBudget(root: string): number {
     const override = readFileSync(sessionPath, "utf8").split(/\r?\n/)[0].replace(/[ \t\r\n\f\v]/g, "");
     if (valid(override)) level = Number(override);
   }
-  return Math.min(level, ceiling) >= 4 ? 1 : 2;
+  return rules.reread.warn_budget.by_level[String(Math.min(level, ceiling))] ?? rules.reread.warn_budget.default;
 }
 
 function skillManifestReason(path: string): string | undefined {
@@ -148,17 +331,24 @@ function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
   } catch { return false; }
 }
 
-function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cwd: string, root: string, state: ReadState): Decision | undefined {
+function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cwd: string, root: string, state: ReadState, rules: GuardRules): Decision {
   if (action.tool_name === "powershell") return deny("Trellis PowerShell destructive protection is unavailable; refusing pre-action execution");
+  if (action.tool_name === "bash") {
+    if (typeof action.input.command !== "string") return deny("Trellis shell command is unavailable; refusing pre-action execution");
+    const matches = destructiveMatches(rules, action.input.command);
+    return { schema_version: 1, capability_status: "enforced",
+      decision: matches.some(match => match.effect === "deny") ? "deny" : matches.length ? "warn" : "allow",
+      ...(matches.length ? { reason: matches.map(match => match.reason).join("\n") } : {}) };
+  }
   if (action.family === "mcp" || action.family === "local_tool" || action.family === "unknown") {
     // Child guard loading is a launcher/roster contract, not parent argument parsing.
-    if (action.tool_name === "Agent" || action.tool_name === "SubagentWorkflow") return undefined;
-    if (action.family === "local_tool" && isSubagentControl(pi, action.tool_name)) return undefined;
+    if (action.tool_name === "Agent" || action.tool_name === "SubagentWorkflow") return unhandledDecision("pre_action", action.family);
+    if (action.family === "local_tool" && isSubagentControl(pi, action.tool_name)) return unhandledDecision("pre_action", action.family);
     const builtin = ["grep", "find", "ls"].includes(action.tool_name)
       && pi.getAllTools().some(tool => tool.name === action.tool_name && tool.sourceInfo.source === "builtin");
     if (!builtin) return deny(`Trellis refuses unmediated ${action.family} tool '${action.tool_name}': shell/mutation protection is unavailable`);
   }
-  if (action.family !== "file_read" && action.family !== "file_mutation") return undefined;
+  if (action.family !== "file_read" && action.family !== "file_mutation") return unhandledDecision("pre_action", action.family);
   const target = action.targets[0];
   if (action.family === "file_read") {
     const reason = target ? nativeSkillReason(pi, resolve(cwd, target.path)) : undefined;
@@ -171,10 +361,8 @@ function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cw
     if (!lstatSync(path, { throwIfNoEntry: false })) return { schema_version: 1, capability_status: "enforced", decision: "allow" };
     if (!statSync(path).isFile()) return deny("reread-guard: mutation target is not a regular file");
     if (state.known.has(path)) return { schema_version: 1, capability_status: "enforced", decision: "allow" };
-    const budget = rereadBudget(root), count = state.warns.get(path) ?? 0;
-    if (count >= budget) return { schema_version: 1, capability_status: "enforced", decision: "deny", reason: `reread-guard: BLOCKED edit of ${path} — it was not Read this turn and the re-read warn budget is exhausted. Read it first.` };
-    state.warns.set(path, count + 1);
-    return { schema_version: 1, capability_status: "enforced", decision: "warn", reason: `reread-guard: about to edit ${path} not Read this turn (warn ${count + 1}/${budget}). Read it first. Repeated FAILED stale edits will BLOCK.` };
+    // Native Pi deliberately does not honor an ambient shell override.
+    return rereadDecision(rules, path, state, rereadBudget(root, rules));
   } catch {
     return deny("reread-guard: target or autonomy state is unreadable; refusing mutation");
   }
@@ -262,12 +450,19 @@ function actionFor(pi: ExtensionAPI, cwd: string, id: string, name: string, inpu
   return { id, tool_name: name, family, target_coverage, targets, input: structuredClone(input) } as NormalizedAction["action"];
 }
 
-function session(ctx: ExtensionContext) {
-  return {
-    cwd: ctx.cwd,
-    session_id: ctx.sessionManager.getSessionId(),
-    ...(ctx.sessionManager.getSessionFile() ? { session_file: ctx.sessionManager.getSessionFile() } : {}),
-  };
+type HandlerContext = {
+  cwd: string; signal: ExtensionContext["signal"]; session_id: string; session_file?: string;
+  notify: ExtensionContext["ui"]["notify"];
+};
+
+function snapshot(ctx: ExtensionContext): HandlerContext {
+  const cwd = ctx.cwd, signal = ctx.signal, ui = ctx.ui;
+  const session_id = ctx.sessionManager.getSessionId(), session_file = ctx.sessionManager.getSessionFile();
+  return { cwd, signal, session_id, ...(session_file ? { session_file } : {}), notify: ui.notify.bind(ui) };
+}
+
+function session(ctx: HandlerContext) {
+  return { cwd: ctx.cwd, session_id: ctx.session_id, ...(ctx.session_file ? { session_file: ctx.session_file } : {}) };
 }
 
 const MAX_DISPATCH_EVENT_BYTES = 64 * 1024 * 1024;
@@ -276,7 +471,7 @@ function missingPath(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
 }
 
-async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<string, unknown>, ctx: ExtensionContext, cwd = ctx.cwd): Promise<Decision> {
+async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<string, unknown>, ctx: HandlerContext, cwd = ctx.cwd): Promise<Decision> {
   const root = attachedRoot(cwd);
   if (!root) return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: runtimeUnavailable };
   const script = resolve(root, ".trellis/runtime/core-rules/pi/hooks/dispatch.sh");
@@ -356,20 +551,32 @@ function isDecision(value: unknown): value is Decision {
 }
 
 // Native result details are structured response data, not edited source text.
-function resultFailed(event: ToolResultEvent, family: NormalizedAction["action"]["family"]): boolean {
+function resultFailed(event: ToolResultEvent, family: NormalizedAction["action"]["family"], rules: GuardRules): boolean {
   if (event.isError) return true;
   if (family !== "file_mutation" && family !== "file_read") return false;
   const details: unknown = event.details;
   if (details && typeof details === "object") {
-    if (("is_error" in details && details.is_error === true) || ("isError" in details && details.isError === true)) return true;
-    if (("error" in details && details.error != null && details.error !== "") || ("tool_use_error" in details && details.tool_use_error != null && details.tool_use_error !== "")) return true;
-    return false; // Code echoed inside an object may legitimately say Error/ENOENT.
+    return responseFailed(rules, details, event.toolName); // Echoed source text is not failure evidence.
   }
   if (family === "file_mutation") {
     const text = event.content.filter(block => block.type === "text").map(block => block.text).join("\n");
-    return /does not match|String to replace|no changes|Error:|tool_use_error|ENOENT|not found|has not been read|^Error|^No files were modified\./i.test(text);
+    const head = asciiLower(text);
+    return head.startsWith("error") || head.startsWith("no files were modified.") || responseFailed(rules, text, event.toolName);
   }
   return false; // Successful reads contain arbitrary file text, never failure evidence.
+}
+
+function unhandledDecision(phase: string, family: string): Decision {
+  return { schema_version: 1, capability_status: "unsupported", decision: "allow", reason: `${phase}/${family}: unsupported — no ${phase === "pre_action" ? "pre" : "post"}-action handler` };
+}
+
+// A conservative no-op filter, not a shell parser. The release-owned
+// core-rules/codex/hooks/pr-gate-shiftleft.sh owns detection; keep this superset
+// aligned when its scanner learns spellings. Prose can trigger a harmless fork.
+function mayCreatePr(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const text = command.replace(/\\\n/g, "").replace(/['"\\]/g, "");
+  return text.includes("gh") && text.includes("pr") && text.includes("create");
 }
 
 function isCapabilityOnly(decision: Decision): boolean {
@@ -378,29 +585,42 @@ function isCapabilityOnly(decision: Decision): boolean {
     && !decision.context;
 }
 
-function show(ctx: ExtensionContext, decision: Decision) {
+function show(ctx: HandlerContext, decision: Decision) {
   if (decision.reason && decision.decision !== "allow") {
-    ctx.ui.notify(decision.reason, decision.decision === "deny" ? "error" : "warning");
+    ctx.notify(decision.reason, decision.decision === "deny" ? "error" : "warning");
   }
 }
 
 export default function trellisPiExtension(pi: ExtensionAPI) {
-  const pending = new Map<string, { action: NormalizedAction["action"]; context: string; capabilityOnly: boolean; state: ReadState; generation: number }>();
+  // Keep initialization failures in the execution gate, not the factory. Pi
+  // >=1.4 blocks thrown handlers; explicit block returns also protect older hosts.
+  let rules: GuardRules;
+  let ruleError: unknown;
+  try { rules = loadGuardRules(); } catch (error) { ruleError = error; }
+  function guardRules(): GuardRules {
+    if (ruleError) throw new Error("Trellis guard rules are unavailable; refusing execution", { cause: ruleError });
+    return rules;
+  }
+  const pending = new Map<string, { action: NormalizedAction["action"]; input: object; cwd: string; context: string; capabilityOnly: boolean; state: ReadState }>();
+  const callGenerations = new WeakMap<object, number>();
   const readStates = new Map<string, ReadState>();
   let generation = 0;
   let userBashSequence = 0;
 
-  function readState(ctx: ExtensionContext): ReadState {
-    const key = JSON.stringify([attachedRoot(ctx.cwd), ctx.sessionManager.getSessionId()]);
+  function readState(ctx: HandlerContext): ReadState {
+    const key = JSON.stringify([attachedRoot(ctx.cwd), ctx.session_id]);
     let state = readStates.get(key);
     if (!state) { state = { known: new Set(), warns: new Map() }; readStates.set(key, state); }
     return state;
   }
 
   function resetReads() {
+    pending.clear();
     readStates.clear();
     generation++;
   }
+
+  const pendingKey = (epoch: number, ctx: HandlerContext, id: string) => JSON.stringify([epoch, ctx.session_id, ctx.cwd, id]);
   let pendingContext: string | undefined;
   const deliveredReasons = new Set<string>();
 
@@ -427,7 +647,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     return root ? { skillPaths: [resolve(root, ".agents/skills")], promptPaths: [resolve(root, ".agents/commands")] } : undefined;
   });
 
-  pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
+  async function toolCall(event: ToolCallEvent, context: ExtensionContext) {
+    const ctx = snapshot(context), epoch = generation, policy = guardRules();
     const action = actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
     const root = attachedRoot(ctx.cwd);
     if ((action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName)) && (!root || !readPolicy(root))) {
@@ -441,26 +662,46 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     } catch { return { block: true, reason: "Trellis Pi dispatcher is missing or invalid in the attached immutable runtime" }; }
     const state = readState(ctx);
     const envelope: NormalizedAction = { schema_version: 1, harness: "pi", phase: "pre_action", native_event: "tool_call", ...session(ctx), action, result: null };
-    const decision = localPreAction(pi, action, ctx.cwd, root, state) ?? await dispatch(pi, envelope, ctx);
+    let decision = localPreAction(pi, action, ctx.cwd, root, state, policy);
+    if (decision.decision !== "deny" && action.tool_name === "bash" && mayCreatePr(action.input.command)) {
+      const advisory = await dispatch(pi, envelope, ctx);
+      decision = { ...advisory, reason: [decision.reason, advisory.reason].filter(Boolean).join("\n") };
+    }
     show(ctx, decision);
     if (decision.decision === "deny") return { block: true, reason: decision.reason ?? "Blocked by Trellis" };
-    const context = advisoryContext(decision);
-    pending.set(event.toolCallId, { action, state, generation, capabilityOnly: isCapabilityOnly(decision), context: context ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${context}` : "" });
+    if (epoch !== generation) return { block: true, reason: "Trellis turn changed during pre-action; retry the tool" };
+    const advisory = advisoryContext(decision);
+    callGenerations.set(event.input, epoch);
+    pending.set(pendingKey(epoch, ctx, event.toolCallId), { action, input: event.input, cwd: ctx.cwd, state, capabilityOnly: isCapabilityOnly(decision), context: advisory ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${advisory}` : "" });
+  }
+
+  pi.on("tool_call", async (event, ctx) => {
+    try { return await toolCall(event, ctx); }
+    catch (error) { return { block: true, reason: `Trellis policy failed; refusing execution: ${error instanceof Error ? error.message : String(error)}` }; }
   });
 
-  pi.on("tool_result", async (event: ToolResultEvent, ctx) => {
-    const pre = pending.get(event.toolCallId);
+  pi.on("tool_result", async (event: ToolResultEvent, nativeContext) => {
+    const ctx = snapshot(nativeContext), epoch = callGenerations.get(event.input) ?? generation;
+    if (epoch !== generation) return;
+    const key = pendingKey(epoch, ctx, event.toolCallId), candidate = pending.get(key);
+    // Pi carries the same parsed args object through pre/post; a late nested
+    // result with a reused id must not consume a newer call's state.
+    const pre = candidate?.input === event.input ? candidate : undefined;
+    if (pre) pending.delete(key);
     const action = pre?.action ?? actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
-    pending.delete(event.toolCallId);
-    const failed = resultFailed(event, action.family);
+    const failed = resultFailed(event, action.family, guardRules());
     const envelope: NormalizedAction = {
       schema_version: 1, harness: "pi", phase: "post_action", native_event: "tool_result", ...session(ctx), action,
       result: { status: failed ? "failed" : "succeeded", is_error: failed, output: event.content },
     };
-    if (pre && pre.generation === generation && !failed && (action.family === "file_read" || action.family === "file_mutation")) {
-      for (const target of action.targets) if (!/[\0\t\r\n]/.test(target.path)) pre.state.known.add(resolve(ctx.cwd, target.path));
+    if (pre && (action.family === "file_read" || action.family === "file_mutation")) {
+      recordReadTargets(pre.state, action.targets, pre.cwd, failed);
     }
-    const decision = await dispatch(pi, { ...envelope, in_process_read_tracking: true }, ctx);
+    const handled = action.family === "file_read" || action.family === "shell" || (action.family === "file_mutation" && !failed);
+    const decision = handled ? await dispatch(pi, { ...envelope, in_process_read_tracking: true }, ctx)
+      : action.family === "file_mutation" ? { schema_version: 1 as const, capability_status: "unsupported" as const, decision: "allow" as const, reason: "post_action/file_mutation: unsupported — checks skipped due to failed result" }
+      : unhandledDecision("post_action", action.family);
+    if (epoch !== generation) return;
     show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
     const postContext = advisoryContext(decision);
     const postAdvisory = postContext ? `[Trellis post-action advisory; capability: ${decision.capability_status}]\n${postContext}` : "";
@@ -476,14 +717,19 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     if (context) return { content: [...event.content, { type: "text" as const, text: context }] };
   });
 
-  pi.on("user_bash", async (event, ctx) => {
+  async function userBash(event: UserBashEvent, context: ExtensionContext) {
+    const ctx = snapshot(context), policy = guardRules();
     const root = attachedRoot(event.cwd);
     if (!root || !readPolicy(root)) {
       return { result: { output: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md", exitCode: 1, cancelled: false, truncated: false } };
     }
     const action = actionFor(pi, event.cwd, `user-bash:${++userBashSequence}`, "bash", { command: event.command });
     const envelope: NormalizedAction = { schema_version: 1, harness: "pi", phase: "pre_action", native_event: "user_bash", ...session(ctx), cwd: event.cwd, action, result: null };
-    const decision = await dispatch(pi, envelope, ctx, event.cwd);
+    let decision = localPreAction(pi, action, event.cwd, root, readState({ ...ctx, cwd: event.cwd }), policy);
+    if (decision.decision !== "deny" && mayCreatePr(event.command)) {
+      const advisory = await dispatch(pi, envelope, ctx, event.cwd);
+      decision = { ...advisory, reason: [decision.reason, advisory.reason].filter(Boolean).join("\n") };
+    }
     show(ctx, decision);
     if (decision.decision === "deny") {
       return { result: { output: decision.reason ?? "Blocked by Trellis", exitCode: 1, cancelled: false, truncated: false } };
@@ -492,9 +738,14 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
       const context = advisoryContext(decision);
       if (context) pi.sendMessage({ customType: "trellis-context", content: `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${context}`, display: false }, { deliverAs: "nextTurn" });
     }
+  }
+
+  pi.on("user_bash", async (event, ctx) => {
+    try { return await userBash(event, ctx); }
+    catch (error) { return { result: { output: `Trellis policy failed; refusing execution: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1, cancelled: false, truncated: false } }; }
   });
 
-  const lifecycle = (native_event: string, ctx: ExtensionContext, extra: Record<string, unknown> = {}) =>
+  const lifecycle = (native_event: string, ctx: HandlerContext, extra: Record<string, unknown> = {}) =>
     dispatch(pi, { schema_version: 1, harness: "pi", phase: "lifecycle", native_event, ...session(ctx), ...extra }, ctx);
 
   // Pi emits input BEFORE /skill:name expansion, including queued RPC input.
@@ -519,8 +770,10 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    if (event.messageType !== "user") return;
+    const cwd = ctx.cwd;
     resetReads();
-    const root = attachedRoot(ctx.cwd);
+    const root = attachedRoot(cwd);
     const policy = root ? readPolicy(root) : undefined;
     const policyBlock = policy ? `<trellis_parent_policy>\n${policy}\n</trellis_parent_policy>` : undefined;
     const systemPrompt = policyBlock && !event.systemPrompt.includes(policyBlock)
@@ -537,31 +790,36 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     };
   });
 
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (event, context) => {
+    const ctx = snapshot(context);
     resetSession();
     const decision = await lifecycle("session_start", ctx, { reason: event.reason });
     pendingContext = [pendingContext, advisoryContext(decision)].filter(Boolean).join("\n\n");
     show(ctx, decision);
   });
-  pi.on("session_before_compact", async (event, ctx) => {
+  pi.on("session_before_compact", async (event, nativeContext) => {
+    const ctx = snapshot(nativeContext);
     const decision = await lifecycle("session_before_compact", ctx, { reason: event.reason, will_retry: event.willRetry });
     show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
     const context = advisoryContext(decision);
     if (context) pi.sendMessage({ customType: "trellis-context", content: context, display: false }, { deliverAs: "nextTurn" });
   });
-  pi.on("session_compact", async (event, ctx) => {
+  pi.on("session_compact", async (event, context) => {
+    const ctx = snapshot(context);
     const decision = await lifecycle("session_compact", ctx, { reason: event.reason, will_retry: event.willRetry });
     pendingContext = [pendingContext, advisoryContext(decision)].filter(Boolean).join("\n\n");
     show(ctx, decision);
   });
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (_event, nativeContext) => {
+    const ctx = snapshot(nativeContext);
     resetReads();
     const decision = await lifecycle("agent_settled", ctx);
     show(ctx, decision);
     const context = advisoryContext(decision);
     if (context) pi.sendMessage({ customType: "trellis-context", content: context, display: false }, { deliverAs: "nextTurn" });
   });
-  pi.on("session_shutdown", async (event, ctx) => {
+  pi.on("session_shutdown", async (event, context) => {
+    const ctx = snapshot(context);
     resetSession();
     const decision = await lifecycle("session_shutdown", ctx, { reason: event.reason });
     show(ctx, decision);

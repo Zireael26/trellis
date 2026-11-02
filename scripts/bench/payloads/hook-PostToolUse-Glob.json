@@ -1,0 +1,21 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Glob",
+  "tool_input": {
+    "pattern": "**/*.ts",
+    "path": "@PROJECT@"
+  },
+  "tool_response": {
+    "filenames": [
+      "@PROJECT@/src/a.ts"
+    ],
+    "durationMs": 3,
+    "numFiles": 1,
+    "truncated": false
+  },
+  "tool_use_id": "toolu_bench_0001"
+}

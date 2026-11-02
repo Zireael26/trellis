@@ -40,6 +40,30 @@ teardown() {
 # A.5 engine
 # ---------------------------------------------------------------------------
 
+@test "journal IDs and owner fixtures hash correctly without shasum on PATH" {
+  command -v sha256sum >/dev/null 2>&1 || skip "requires sha256sum"
+  local bin="$SANDBOX/no-shasum"
+  mkdir -p "$bin"
+  for tool in sha256sum cut mkdir jq date; do
+    ln -s "$(command -v "$tool")" "$bin/$tool"
+  done
+  run env PATH="$bin" /bin/bash -c '
+    set -euo pipefail
+    . "$1"
+    . "$2"
+    ! command -v shasum >/dev/null 2>&1
+    [ "$(wm_id "")" = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]
+    [ "$(wm_id abc)" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ]
+    wm_journal "$3/journal" move abc xyz done
+    wm_journal "$3/journal" move def uvw failed "fixture failure"
+    jq -se "map(.id) | unique | length == 2" "$3/journal"
+    [ "$(wm_report_entry "$3/journal" abc)" = "done   move abc -> xyz" ]
+    wm_owner abc 1.2.3
+    jq -e '\''.worktree_root == "abc"'\'' "$TRELLIS_HOME/state/attachments/fixture-checkout/ba7816bf8f01cfea.json"
+  ' _ "$APPLY_LIB" "$BATS_TEST_DIRNAME/helpers/worktree-migrate.bash" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "apply without --yes on a non-terminal stdin changes nothing" {
   alpha
   wm_wt "$HOME/projects/alpha" gone "$HOME/projects/alpha-wt/gone"
@@ -58,8 +82,11 @@ teardown() {
   migrate --apply --yes
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   ! git -C "$HOME/projects/alpha" worktree list --porcelain | grep -q 'alpha-wt/gone'
-  [ "$(stat -f %Lp "$TRELLIS_HOME/state/worktree-migrate" 2>/dev/null || stat -c %a "$TRELLIS_HOME/state/worktree-migrate")" = 700 ]
-  [ "$(stat -f %Lp "$(journal)" 2>/dev/null || stat -c %a "$(journal)")" = 600 ]
+  local mode
+  mode="$(stat -f %Lp "$TRELLIS_HOME/state/worktree-migrate" 2>/dev/null)" || mode="$(stat -c %a "$TRELLIS_HOME/state/worktree-migrate")"
+  [ "$mode" = 700 ]
+  mode="$(stat -f %Lp "$(journal)" 2>/dev/null)" || mode="$(stat -c %a "$(journal)")"
+  [ "$mode" = 600 ]
   jq -se --arg p "$HOME/projects/alpha-wt/gone" 'map(select(.old == $p)) | last | .action == "prune" and .step == "done"' "$(journal)"
   [[ "$output" == *"done   prune $HOME/projects/alpha-wt/gone"* ]] || { echo "$output"; return 1; }
 }
@@ -229,11 +256,27 @@ a4_sums() {
   local base
   for base in "$@"; do
     if [ -f "$base/.env.local" ]; then
-      shasum -a 256 "$base/.env.local" "$base/data/app.sqlite" "$base/src/new_module.py" | cut -d ' ' -f 1
+      wm_fixture_sha256 "$base/.env.local" "$base/data/app.sqlite" "$base/src/new_module.py" | cut -d ' ' -f 1
       return 0
     fi
   done
   return 1
+}
+
+@test "A4 checksums remain nonempty and detect changes without shasum on PATH" {
+  command -v sha256sum >/dev/null 2>&1 || skip "requires sha256sum"
+  local bin="$SANDBOX/no-shasum" wt="$SANDBOX/a4" before after hash
+  mkdir -p "$bin" "$wt/data" "$wt/src"
+  for tool in sha256sum cut; do ln -s "$(command -v "$tool")" "$bin/$tool"; done
+  printf abc > "$wt/.env.local"
+  printf abc > "$wt/data/app.sqlite"
+  printf abc > "$wt/src/new_module.py"
+  hash=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+  before="$(PATH="$bin" a4_sums "$wt")"
+  [ "$before" = "$(printf '%s\n%s\n%s\n' "$hash" "$hash" "$hash")" ]
+  printf changed > "$wt/data/app.sqlite"
+  after="$(PATH="$bin" a4_sums "$wt")"
+  [ -n "$after" ] && [ "$before" != "$after" ]
 }
 
 @test "A4: .env.local, a SQLite file and untracked source survive apply byte-identical" {

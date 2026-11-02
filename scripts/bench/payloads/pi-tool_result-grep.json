@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "post_action",
+  "native_event": "tool_result",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "grep",
+    "family": "local_tool",
+    "target_coverage": "none",
+    "targets": [],
+    "input": {
+      "pattern": "add",
+      "path": "."
+    }
+  },
+  "result": {
+    "status": "succeeded",
+    "is_error": false,
+    "output": [
+      {
+        "type": "text",
+        "text": "src/a.ts"
+      }
+    ]
+  },
+  "in_process_read_tracking": true
+}

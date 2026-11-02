@@ -47,6 +47,8 @@ set -uo pipefail
 # has already run before this line, so direct callers launch it clean:
 # bash -p run-all.sh (the pre-push carriers do).
 unset BASH_ENV ENV
+# Tests scope/receipt inputs are gate-owned, never caller-supplied.
+unset PG_TESTS_BASE PG_TESTS_HEAD PG_TESTS_RECEIPT_FILE
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
@@ -83,9 +85,12 @@ pg_usage() {
   printf '                     absent; any other value is refused, not remapped)\n'
   printf '  --target=main      the push targets main/master (set by pre-push): a\n'
   printf '                     gate-config change is BLOCKED, approved or not\n'
+  printf '  --tag-push         full Tests unless a verified release tag can reuse\n'
+  printf '  --release-tag=REF:OID  pushed tag identity; reverified by Tests\n'
   printf '  -h, --help         print this and exit without running any gate\n'
 }
 _pg_range=""; _pg_base=""
+_pg_tag_args=()
 for arg in "$@"; do
   case "$arg" in
     -h|--help)
@@ -106,6 +111,7 @@ for arg in "$@"; do
           ;;
       esac
       ;;
+    --tag-push|--release-tag=*) _pg_tag_args+=("$arg") ;;
     --target=main) ;;
     --target=*)
       printf 'run-all.sh: unknown --target value: %s (supported: main)\n' "${arg#--target=}" >&2
@@ -174,6 +180,14 @@ if [ -z "$_pg_range" ] && [ "$_pg_db_rc" -ne 0 ]; then
   exit 1
 fi
 PROJECT_DIR="$(pg_project_dir)"
+# Snapshot the Tests endpoints before any row can move a ref. Three-dot uses
+# its merge-base, and an explicit head need not be the checkout HEAD.
+_pg_tests_range="$RANGE"
+if [ "$PG_MODE" = push ]; then
+  _pg_tests_base="$(pg_range_base "$PROJECT_DIR" "$RANGE")" &&
+    _pg_tests_head="$(pg_range_head "$PROJECT_DIR" "$RANGE")" &&
+    _pg_tests_range="$_pg_tests_base..$_pg_tests_head"
+fi
 
 # A refusal that still renders a verdict: callers treat a passing rc without an
 # Overall line as a failure, so every early BLOCKED carries one.
@@ -282,9 +296,10 @@ pg_is_pr_shape_idx() {
 
 run_gate() {
   local idx="$1" script="$2"
-  local out rc status
+  local out rc status gate_range="$RANGE"
   shift 2
-  out="$(env -u BASH_ENV -u ENV bash -p "$script" --range="$RANGE" "$@" 2>&1)"; rc=$?
+  [ "$idx" != 3 ] || gate_range="$_pg_tests_range"
+  out="$(env -u BASH_ENV -u ENV bash -p "$script" --range="$gate_range" "$@" 2>&1)"; rc=$?
   case "$rc" in
     0) status="pass" ;;
     2) status="warn" ;;
@@ -815,7 +830,6 @@ fi
 run_gate 0 "$SKILL_DIR/scripts/check-pr.sh"
 run_gate 1 "$SKILL_DIR/scripts/check-secrets.sh"
 run_gate 2 "$SKILL_DIR/scripts/check-bypass.sh"
-run_gate 3 "$SKILL_DIR/scripts/check-tests.sh"
 run_gate 4 "$SKILL_DIR/scripts/check-docs.sh"
 
 # Stack profile (idx 5). Validators run as their base copies (materialised
@@ -910,6 +924,24 @@ else
   fi
 fi
 
+# All cheap rows run before Tests. At push only, an always-hard failure has
+# already refused the push: do not start the battery or imply it passed.
+# Merge still runs every row, and PR-shape warnings never skip Tests.
+tests_blocked=false
+if [ "$PG_MODE" = push ]; then
+  for i in 1 2 5 6 8; do
+    if [ "${RESULTS[$i]}" = fail ]; then
+      tests_blocked=true
+      break
+    fi
+  done
+fi
+if [ "$tests_blocked" = true ]; then
+  set_result 3 "n/a" "Tests: not run (mode=push: always-hard cheap row failed; battery skipped)"
+else
+  run_gate 3 "$SKILL_DIR/scripts/check-tests.sh" --mode="$PG_MODE" ${_pg_tag_args[@]+"${_pg_tag_args[@]}"}
+fi
+
 # --- Render verdict --------------------------------------------------------
 glyph() {
   case "$1" in
@@ -931,17 +963,24 @@ done
 
 printf "## process-gate verdict (mode=%s)\n\n" "$PG_MODE"
 printf "%s\n\n" "$DIFF_BASE_RECEIPT"
+# Only the checker's own two-space finding counts, never captured command
+# output (four spaces). The checker's final receipt wins over earlier findings.
+tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|not run|unknown|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
+tests_scope="${tests_scope:-unknown}"
 for i in 0 1 2 3 4 5 6 7 8; do
-  printf "%-18s %s\n" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"
+  printf "%-18s %s" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"
+  [ "$i" != 3 ] || printf ' — %s' "$tests_scope"
+  printf '\n'
 done
-printf "\nOverall: %s\n\n" "$overall"
-
-# C08: a narrowed Tests row is not a full-battery pass. Carry check-tests.sh's
-# own receipt line (two-space finding indent; command output is indented four)
-# into the verdict so the narrowing is visible at every overall level.
-tests_receipt="$(printf '%s\n' "${FINDINGS[3]}" | sed -n 's/^  \(Tests: narrowed (docs-only: [0-9][0-9]* files)\)$/\1/p' | head -n 1)"
-if [ -n "$tests_receipt" ]; then
-  printf "%s\n\n" "$tests_receipt"
+printf "\nOverall: %s\n\nTests: %s\n\n" "$overall" "$tests_scope"
+# Cache identity and the tag rerun supplement the canonical scope; neither is
+# parsed as a second Tests scope or allowed to override its result.
+tests_receipt="$(printf '%s\n' "${FINDINGS[3]}" | sed -En 's/^  (tests: reused verdict [0-9a-f]+ \(tree [0-9a-f]+, ran [^)]*\))$/\1/p' | head -n 1)"
+[ -z "$tests_receipt" ] || printf '%s\n\n' "$tests_receipt"
+tag_receipt="$(printf '%s\n' "${FINDINGS[3]}" | sed -n 's/^  \(tests: tag-reading suites executed\)$/\1/p')"
+[ -z "$tag_receipt" ] || printf '%s\n\n' "$tag_receipt"
+if [ "$tests_blocked" = true ]; then
+  printf "%s\n\n" "${FINDINGS[3]}"
 fi
 
 if [ "$overall" != "MERGEABLE" ]; then

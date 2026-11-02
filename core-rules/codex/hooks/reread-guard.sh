@@ -48,7 +48,11 @@
 #   Targets are lexically normalized via _se_normpath before compare so the
 #   store side (track-read) and the compare side here agree (DL-P5-10).
 #
-# Dependencies: jq (required), shasum, awk (BSD).
+# Knobs (warn budget, messages): core-rules/hooks/rules/reread.json, compiled into
+# lib/guard-rules.sh by scripts/gen-guard-rules.py.
+#
+# Dependencies: jq (required — one call; the autonomy resolver on the warn path
+# makes its own), sha256sum or shasum, awk (BSD), git.
 
 set -u
 
@@ -68,6 +72,11 @@ __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
+__gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
+[ -f "$__gr_lib" ] || { echo "reread-guard: missing sibling lib at $__gr_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/guard-rules.sh disable=SC1090
+. "$__gr_lib"
+
 # Sibling first; the in-place fallback applies only inside the declared
 # runtime's Codex tree (spec 055 R1.1), never a project-controlled hooks/lib/.
 __h_dir=$(unset CDPATH; cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -80,13 +89,13 @@ fi
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"
 
-NORMALIZED=$(_ta_normalize_action codex pre_action "$INPUT") || exit 0
-[ "$(printf '%s' "$NORMALIZED" | jq -r '.action.family')" = "file_mutation" ] || exit 0
-ACTION_CWD=$(printf '%s' "$NORMALIZED" | jq -r '.cwd // empty')
+# One jq run normalizes the event and yields every field this guard reads.
+_ta_guard_fields pre_action "$INPUT" "$GR_EDIT_FAILURE_RE" "$GR_EDIT_FAILURE_FLAGS" || exit 0
+[ "$TA_FAMILY" = "file_mutation" ] || exit 0
+ACTION_CWD=$TA_CWD
 [ -d "$ACTION_CWD" ] || ACTION_CWD="$(_se_project_dir)"
-if [ "$(printf '%s' "$NORMALIZED" | jq -r '.action.target_coverage')" != "complete" ]; then
-  DIAGNOSTIC=$(printf '%s' "$NORMALIZED" | jq -r '.action.diagnostics[0] // "mutation targets are unavailable"')
-  echo "reread-guard: incomplete native mutation envelope — $DIAGNOSTIC; checking declared targets only" >&2
+if [ "$TA_COVERAGE" != "complete" ]; then
+  echo "reread-guard: incomplete native mutation envelope — $TA_DIAGNOSTIC; checking declared targets only" >&2
 fi
 
 guard_target() {
@@ -132,13 +141,12 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
   # to log falls back to stderr; either way we PERMIT (logged escape). The
   # breadcrumb uses the already-normalized $T (FIX-4).
   ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || ROOT=""
-  TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null) || TP=""
-  SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SID=""
-  KEY=$(_se_state_key "$TP" "$SID") || KEY=""
+  KEY=$(_se_state_key "$TA_TP" "$TA_SID") || KEY=""
   if [ -n "$ROOT" ] && [ -n "$KEY" ]; then
     STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
-    if mkdir -p "$STATE_DIR" 2>/dev/null; then
-      now=$(date +%s 2>/dev/null) || now=0
+    if [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null; then
+      _gr_now
+      now=${GR_NOW:-0}
       printf '%s\t%s\n' "$now" "OVERRIDE:$T" >> "$STATE_DIR/$KEY.warns.tsv" 2>/dev/null \
         || echo "reread-guard: TRELLIS_REREAD_OVERRIDE=1 logged-escape for $T (warns.tsv unwritable)" >&2
     else
@@ -151,9 +159,7 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
 fi
 
 # --- derive the shared state key (DL-P5-09: one helper, zero inline copies) ---
-TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || return 0
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || return 0
-KEY=$(_se_state_key "$TP" "$SID") || return 0
+KEY=$(_se_state_key "$TA_TP" "$TA_SID") || return 0
 [ -n "$KEY" ] || return 0   # key derivation failed → permit (fail-open)
 
 # --- resolve state; any failure → PERMIT (fail-open) ---
@@ -169,7 +175,9 @@ STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
 TURN_EPOCH=0
 EPOCH_FILE="$STATE_DIR/$KEY.epoch"
 if [ -f "$EPOCH_FILE" ]; then
-  _e=$(head -1 "$EPOCH_FILE" 2>/dev/null | tr -d '[:space:]')
+  _e=""
+  IFS= read -r _e 2>/dev/null < "$EPOCH_FILE"
+  _e=${_e//[[:space:]]/}
   case "$_e" in
     ''|*[!0-9]*) TURN_EPOCH=0 ;;
     *) TURN_EPOCH="$_e" ;;
@@ -194,11 +202,9 @@ fi
 # and built-in precedence. Reread state handling remains local and fail-open.
 _se_resolve_autonomy "$ROOT"
 
-# warn-budget(level): L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
-case "$AUTONOMY_LEVEL" in
-  4|5) BUDGET=1 ;;
-  *)   BUDGET=2 ;;
-esac
+# warn-budget(level) from rules/reread.json: L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
+_gr_reread_budget "$AUTONOMY_LEVEL"
+BUDGET=$GR_BUDGET
 
 # count warns already issued for T THIS turn = warns.tsv rows with
 # col1 == turn_epoch AND col2 == T.
@@ -216,24 +222,27 @@ if [ "$WARN_COUNT" -lt "$BUDGET" ]; then
   # WARN: record the warn, advise on STDERR, PERMIT (no decision JSON).
   # Failing to record a warn → fail-open: still PERMIT (we never escalate to a
   # block on a state error).
-  if mkdir -p "$STATE_DIR" 2>/dev/null; then
+  if [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null; then
     printf '%s\t%s\n' "$TURN_EPOCH" "$T" >> "$WARNS_FILE" 2>/dev/null || true
   fi
-  N=$((WARN_COUNT + 1))
-  echo "reread-guard: about to edit $T not Read this turn (warn $N/$BUDGET). Read it first, or export TRELLIS_REREAD_OVERRIDE=1. Repeated FAILED stale edits will BLOCK." >&2
+  _gr_reread_warn_msg "$T" "$((WARN_COUNT + 1))" "$BUDGET"
+  printf '%s\n' "$GR_MSG" >&2
   return 0
 fi
 
 # BLOCK: budget exhausted. Codex requires a stderr blocking reason on exit 2.
-REASON="reread-guard: BLOCKED edit of $T — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override."
-jq -nc --arg reason "$REASON" '{decision: "block", reason: $reason}'
-printf '%s\n' "$REASON" >&2
+_gr_reread_block_msg "$T"
+_gr_json_str "$GR_MSG"
+printf '{"decision":"block","reason":%s}\n' "$GR_JSON"
+printf '%s\n' "$GR_MSG" >&2
 exit 2
 }
 
-while IFS=$'\t' read -r OPERATION SOURCE_PATH _DESTINATION; do
-  case "$OPERATION" in
-    create|update|delete|rename) guard_target "$SOURCE_PATH" ;;
+__i=0
+while [ "$__i" -lt "${#TA_OPS[@]}" ]; do
+  case "${TA_OPS[__i]}" in
+    create|update|delete|rename) guard_target "${TA_PATHS[__i]}" ;;
   esac
-done < <(_ta_targets_tsv "$NORMALIZED")
+  __i=$((__i + 1))
+done
 exit 0

@@ -3,7 +3,7 @@
 This recipe supports pi **1.1.0 and above**, and installs 1.1.0, the version the reference
 setup runs. Earlier pi versions are not supported: `trellis doctor` warns below 1.1.0. It
 installs no computer-use tools: pi has none in this setup. Route a unit that needs a browser page or
-a native desktop app to Codex CLI in a Herdr pane or to Claude Code, as
+a native desktop app to Codex CLI as an hc sub-agent or to Claude Code, as
 [Computer use with Pi](docs/PI-COMPUTER-USE.md) describes; that page also covers removing an
 earlier install.
 
@@ -67,7 +67,7 @@ bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi
 | 7 | Write `pi-statusline.json` | exact 19-segment OMP-parity ordered list prints |
 | 8 | Configure account 2 and durable pi temp root | account-2 env loads; `os.tmpdir()` resolves under `~/.trellis` |
 | 9 | Author and materialize your agent roster | every agent you wrote resolves from `.agents/agents/`; boundaries pass |
-| 10 | Implement the Herdr placement policy | 2x2 fill before overflow; `--tab` is preference plus overflow label |
+| 10 | Launch agents as hc sub-agents | one `hc run --bg`, briefed at launch; no pane placement |
 | 11 | Understand remote compaction | six reason codes understood; not installed by step 2 |
 | 12 | Fire pi and enumerate active tools | the 9-name tool list prints, including `trellis_web_search` |
 
@@ -106,7 +106,7 @@ This guide is macOS-only by construction: step 3 stores keys in the macOS Keycha
 
 **The supported floor is pi 1.1.0; any later version is supported.** The install pins 1.1.0 exactly, the version the reference setup runs, so a fresh install is reproducible: do not use `latest` or omit `@1.1.0`. A machine that already runs a later pi keeps it; the Verify below accepts it, and step 12 is the check to re-run after any pi upgrade. `trellis doctor` warns when pi is below 1.1.0, or missing while a registered checkout selects the pi harness.
 
-The setup relies on two pi behaviours it has verified only on 1.1.0. Pi 1.x ships a built-in MCP client, which step 2's `settings.json` switches off with `"extensions": ["-builtin:mcp"]`. And with `pi-subagents` 0.19.0, a project `<cwd>/.pi/subagents.json` merges over the global one (verified on pi 1.1.0, step 12), which is how step 6 keeps workflows off everywhere except a foreman's worktree. Instructions that existed only for pi 0.99 and 1.0 (the MCP adapter's built-in allowlist and `autoEnableCodemode` keys) are gone with the adapter. The pi 1.0 launch forms Herdr uses (fullscreen TUI, `-p … --no-tools < /dev/null` for one-shot reviewers) are unchanged on 1.1.0.
+The setup relies on two pi behaviours it has verified only on 1.1.0. Pi 1.x ships a built-in MCP client, which step 2's `settings.json` switches off with `"extensions": ["-builtin:mcp"]`. And with `pi-subagents` 0.19.0, a project `<cwd>/.pi/subagents.json` merges over the global one (verified on pi 1.1.0, step 12), which is how step 6 keeps workflows off everywhere except a foreman's worktree. Instructions that existed only for pi 0.99 and 1.0 (the MCP adapter's built-in allowlist and `autoEnableCodemode` keys) are gone with the adapter. The pi launch forms Herdr uses (fullscreen TUI; one-shot reviewers as interactive `--no-tools` sessions briefed at launch) are unchanged on 1.1.0.
 
 Where a step's evidence came from an earlier version, it says so. The compaction patch bundle in step 11 is **legacy**: it pins pi 0.85.0 / 0.85.1 bundle identities (`chunk-WZB2R5YO.js` / `chunk-JVUZSMYM.js`), refuses every other version, and does not apply to this setup.
 
@@ -156,8 +156,8 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
 {
   "lastChangelogVersion": "1.1.0",
   "theme": "dark",
-  "defaultProvider": "opencode-go-2",
-  "defaultModel": "muse-spark-1.3-contributor",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-6.1-sol",
   "packages": [
     "npm:@tintinweb/pi-subagents",
     "npm:@narumitw/pi-codex-compact@0.54.0",
@@ -292,8 +292,8 @@ raw = (agent / "settings.json").read_bytes()
 assert raw == (json.dumps(json.loads(raw), indent=2) + "\n").encode(), "settings.json: not the step-2 rendering"
 settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
 assert settings["modelThinkingLevels"]["openai-codex/gpt-6-luna"] == "max", settings
-assert settings["defaultProvider"] == "opencode-go-2", settings
-assert settings["defaultModel"] == "muse-spark-1.3-contributor", settings
+assert settings["defaultProvider"] == "openai-codex", settings
+assert settings["defaultModel"] == "gpt-6.1-sol", settings
 assert settings["extensions"] == ["-builtin:mcp"], settings
 print(f"settings.json keys={len(settings)} thinking_levels={len(settings['modelThinkingLevels'])}")
 PY
@@ -738,24 +738,15 @@ PY
 
 Expected: equal non-zero source/materialized counts ending in `boundaries=pass`.
 
-## 10. Implement the Herdr placement policy
+## 10. Launch agents as hc sub-agents
 
-This is a rule about where a launcher puts a new pane, not a pi setting. Trellis's own launcher is not published here; implement the policy in yours.
+This is a rule about how a launcher starts an agent, not a pi setting. Inside the Herdr app (herdr-core `hc`, `HC_SCOPE` set), start each agent with one call and put its brief in the launch argv:
 
-A tab fills as a 2x2 grid before overflowing into a new tab: pane 1 splits right, pane 2 splits down from the left pane, and pane 3 splits down from the right pane. A fourth pane completes the grid; only the fifth needs another tab.
+```sh
+hc run --bg --name <name> --cwd <worktree> pi --model <route> @<brief.md> "Execute the brief above. Report with hc send $HC_TERMINAL_ID when done or stuck."
+```
 
-| New pane | Split target | Direction |
-|---:|---|---|
-| 2 | pane 1 | right |
-| 3 | pane 1 | down |
-| 4 | pane 2 | down |
-| 5 | — | new tab, carrying the requested label |
-
-`--tab <label>` means **preference plus overflow label**, not "always create a tab." Placement order is:
-
-1. an existing tab with that label in the same workspace, if it has fewer than four panes;
-2. otherwise the caller's tab, if it has fewer than four panes;
-3. otherwise a new overflow tab, carrying the requested label.
+The agent is the caller's sub-agent: the app lists it under the caller with live status and ends it with the caller. No pane is placed; the operator opens one from the app when they want to watch. The caller waits with `hc wait --children`, never a sleep loop, and ends the agent with `hc kill` then `hc rm` once its work is accepted. On another machine add `--on <machine>`.
 
 **Verify**
 
@@ -915,7 +906,7 @@ Each line below names the measured failure, not a preference.
 
 ### Interactive pi pins a durable `TMPDIR`
 
-**Customization:** the `pi()` function sets `TMPDIR=$HOME/projects/worktrees/_pi` and passes a private `$TMPDIR/pi` as `TRELLIS_PI_TMPDIR`, which `settings.json`'s `shellCommandPrefix` makes the `TMPDIR` of each command pi runs; foreman scopes the same values to Herdr pi launches. The root was `~/.pi-worktrees` in 1.3.12 and `~/.trellis/pi-worktrees` before it.
+**Customization:** the `pi()` function sets `TMPDIR=$HOME/projects/worktrees/_pi` and passes a private `$TMPDIR/pi` as `TRELLIS_PI_TMPDIR`, which `settings.json`'s `shellCommandPrefix` makes the `TMPDIR` of each command pi runs; foreman scopes the same values to the pi agents it starts through hc. The root was `~/.pi-worktrees` in 1.3.12 and `~/.trellis/pi-worktrees` before it.
 
 **What breaks without it:** pi-subagents creates worktrees under `os.tmpdir()`. On macOS that is the volatile `/var/folders` root, so reboot or OS cleanup can erase a worktree containing unmerged agent changes. pi's bash spill logs share that root, so a root inside `~/.trellis` lets a recursive grep there read its own output without end; and with no split, every build cache the commands write becomes durable and unreaped.
 
@@ -1013,13 +1004,13 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 **Demonstration:** step 9 checks the copy hook and compares every `.agents/agents` file byte-for-byte with its release source.
 
-### Herdr fills a 2x2 grid before overflow
+### Agents start as hc sub-agents
 
-**Customization:** reuse a labelled tab with room, otherwise fill the caller's tab to four panes, and only then create an overflow tab; `--tab <label>` is a preference and overflow label.
+**Customization:** one `hc run --bg` per agent with the brief as pi's initial message; no pane or tab placement.
 
-**What breaks without it:** every dispatch can force tab sprawl, split geometry stops being deterministic, and callers using `--tab` can mistake a label request for guaranteed new-tab isolation.
+**What breaks without it:** a prompt sent after launch can be dropped while pi boots, hand-placed panes sprawl, and an agent with no hc parent is neither listed under its apex nor reported when it gets stuck.
 
-**Demonstration:** step 10 states all three split transitions, labelled-tab preference, and labelled overflow movement as the rule your launcher must satisfy.
+**Demonstration:** step 10 states the launch form, the wait and the teardown.
 
 ### Codex uses remote compaction after it lands
 

@@ -207,3 +207,96 @@ SH
   [ "$status" -eq 0 ]
   [ ! -d "$PROJECT_DIR/.codex/.reread-state" ]
 }
+
+@test "Codex hooks source the one shared normalizer and never carry a copy" {
+  local hook n=0
+  # A function of the normalizer defined anywhere else is a copy that can drift.
+  run grep -rlE '^_ta_[a-z_]+\(\)' "$REPO_ROOT/core-rules" "$REPO_ROOT/scripts"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$NORMALIZER" ] || { echo "$output"; false; }
+  for hook in "$HOOKS_DIR"/*.sh; do
+    grep -qE '_ta_(normalize_action|guard_fields)' "$hook" || continue
+    grep -qF '__ta_lib="$__h_dir/lib/action-normalize.sh"' "$hook" || { echo "$hook"; return 1; }
+    grep -qxF '. "$__ta_lib"' "$hook" || { echo "$hook"; return 1; }
+    n=$((n + 1))
+  done
+  [ "$n" -ge 5 ]
+}
+
+# The single-jq normalizer must print what the shell-and-jq normalizer printed.
+# action-normalize-golden.json holds that normalizer's status and stdout for
+# each entry, captured at a2a8746e4 before the rewrite.
+GOLDEN="$BATS_TEST_DIRNAME/action-normalize-golden.json"
+
+golden_entries() {
+  jq -j '.[] | .name, "\u0000", .phase, "\u0000", .input, "\u0000", (.status | tostring), "\u0000", .output, "\u0000"' "$GOLDEN"
+}
+
+@test "normalizer output matches the golden corpus byte for byte" {
+  local name phase input want_status want got rc checked=0 fails=0
+  while IFS= read -r -d '' name && IFS= read -r -d '' phase && IFS= read -r -d '' input &&
+    IFS= read -r -d '' want_status && IFS= read -r -d '' want; do
+    got="$(normalize "$phase" "$input" 2>/dev/null)" && rc=0 || rc=$?
+    checked=$((checked + 1))
+    if [ "$rc" != "$want_status" ] || [ "$got" != "$want" ]; then
+      printf '%s: status %s want %s\n  got  %s\n  want %s\n' "$name" "$rc" "$want_status" "$got" "$want"
+      fails=$((fails + 1))
+    fi
+  done < <(golden_entries)
+  echo "checked $checked"
+  [ "$checked" -gt 150 ]
+  [ "$fails" -eq 0 ]
+}
+
+# The guards read their fields from _ta_guard_fields in the normalizer's own jq
+# run; each must equal what the guards read from the envelope before.
+@test "guard fields agree with the envelope for every golden entry" {
+  local name phase input want_status want fields expected checked=0 fails=0
+  while IFS= read -r -d '' name && IFS= read -r -d '' phase && IFS= read -r -d '' input &&
+    IFS= read -r -d '' want_status && IFS= read -r -d '' want; do
+    fields="$(bash -c '
+      . "$1"
+      _ta_guard_fields "$2" "$3" "$_TA_EDIT_FAILURE_RE" i || { echo FAIL; exit 0; }
+      printf "%s|" "$TA_FAMILY" "$TA_COVERAGE" "$TA_DIAGNOSTIC" "$TA_CWD" "$TA_STATUS" "$TA_TP" "$TA_SID"
+      for i in "${!TA_OPS[@]}"; do printf "%s\t%s\t%s\n" "${TA_OPS[i]}" "${TA_PATHS[i]}" "${TA_DESTS[i]}"; done' _ \
+      "$NORMALIZER" "$phase" "$input")"
+    if [ "$want_status" != 0 ]; then
+      expected=FAIL
+    else
+      expected="$(printf '%s|' \
+        "$(printf '%s' "$want" | jq -r '.action.family')" \
+        "$(printf '%s' "$want" | jq -r '.action.target_coverage')" \
+        "$(printf '%s' "$want" | jq -r '.action.diagnostics[0] // "mutation targets are unavailable"')" \
+        "$(printf '%s' "$want" | jq -r '.cwd // empty')" \
+        "$(printf '%s' "$want" | jq -r '.result.status')" \
+        "$(printf '%s' "$input" | jq -r '.transcript_path // empty')" \
+        "$(printf '%s' "$input" | jq -r '.session_id // empty')"
+        bash -c '. "$1"; _ta_targets_tsv "$2"' _ "$NORMALIZER" "$want")"
+    fi
+    checked=$((checked + 1))
+    [ "$fields" = "$expected" ] || { printf '%s:\n  got  %s\n  want %s\n' "$name" "$fields" "$expected"; fails=$((fails + 1)); }
+  done < <(golden_entries)
+  echo "checked $checked"
+  [ "$checked" -gt 150 ]
+  [ "$fails" -eq 0 ]
+}
+
+# ta_r(f) reads a field as `$(jq -r f)` did; the guard include carries the same
+# reading as gr_field (guard-rules.bats).
+@test "ta_r reads every field as jq -r and command substitution did" {
+  local input filter want got
+  for input in '{"p":"/a b\n\n","s":{"k":[1,{"y":"z"},[],{}],"n":-1.50,"t":true,"u":null}}' \
+    '{"p":"a\u0000b","s":42}' '{"p":false,"s":[]}' '{"p":"","s":"x\ty"}'; do
+    for filter in '.p // empty' '.s // empty' '.s' '.missing // ""'; do
+      want="$(printf '%s' "$input" | jq -r "$filter" 2>/dev/null)"
+      got="$(printf '%s' "$input" | bash -c '. "$1"; jq -j "$_TA_JQ ta_r($2)"' _ "$NORMALIZER" "$filter")"
+      [ "$got" = "$want" ] || { echo "$input $filter: $(printf '%q' "$got") want $(printf '%q' "$want")"; return 1; }
+    done
+  done
+}
+
+@test "the normalizer and the guard rules share one edit-failure marker set" {
+  run bash -c '. "$1"; . "$2"; [ "$_TA_EDIT_FAILURE_RE" = "$GR_EDIT_FAILURE_RE" ] && [ "$GR_EDIT_FAILURE_FLAGS" = i ]' _ \
+    "$NORMALIZER" "$REPO_ROOT/core-rules/hooks/lib/guard-rules.sh"
+  [ "$status" -eq 0 ]
+}

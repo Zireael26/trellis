@@ -2,9 +2,9 @@
 # A review that no cross-family LLM completed must never mint the idempotency
 # marker (trellis-lean H2, coordinator ruling 2026-10-08 #1).
 #
-# Before the fix, the ladder's Herdr branch fell through to the deterministic
+# Before the fix, the ladder's hc branch fell through to the deterministic
 # rung WITHOUT marking the result degraded when `pi` was absent or failed, and
-# the same happened off Herdr when `claude` was absent. The deterministic
+# the same happened outside hc when `claude` was absent. The deterministic
 # envelope carries no `status`; code-review-subagent.sh defaulted a missing
 # status to "completed" and wrote .claude/.review-done-<hash>, so that exact
 # diff was never sent to a cross-family reviewer while the marker existed.
@@ -73,12 +73,12 @@ setup() {
 teardown() {
   export PATH="$PATH_BACKUP"
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
-  unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR CODE_REVIEWER_CMD HERDR_ENV
+  unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR CODE_REVIEWER_CMD HC_SCOPE HC_TERMINAL_ID
   return 0
 }
 
-@test "unmet: inside Herdr with no pi, no marker and the review is reported unmet" {
-  export HERDR_ENV=1 PATH="$BIN"
+@test "unmet: inside hc with no pi, no marker and the review is reported unmet" {
+  export HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal PATH="$BIN"
   run_with_stderr "$HOOK" '{}'
   export PATH="$PATH_BACKUP"
   [ "$status" -eq 0 ]
@@ -86,16 +86,16 @@ teardown() {
   [[ "$stderr" == *"review unmet"* ]] || { echo "stderr: $stderr"; return 1; }
 }
 
-@test "unmet: inside Herdr with a failing pi, no marker" {
+@test "unmet: inside hc with a failing pi, no marker" {
   PI_DIR="$(make_failing_cli_dir pi)"
-  export HERDR_ENV=1 PATH="$PI_DIR:$BIN"
+  export HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal PATH="$PI_DIR:$BIN"
   run_with_stderr "$HOOK" '{}'
   export PATH="$PATH_BACKUP"
   [ "$status" -eq 0 ]
   [ "$(marker_count)" -eq 0 ] || { echo "marker written; stderr: $stderr"; return 1; }
 }
 
-@test "unmet: off Herdr with no claude, no marker" {
+@test "unmet: outside hc with no claude, no marker" {
   export PATH="$BIN"
   run_with_stderr "$HOOK" '{}'
   export PATH="$PATH_BACKUP"
@@ -103,7 +103,7 @@ teardown() {
   [ "$(marker_count)" -eq 0 ] || { echo "marker written; stderr: $stderr"; return 1; }
 }
 
-@test "control: off Herdr with a failing claude stays degraded with no marker" {
+@test "control: outside hc with a failing claude stays degraded with no marker" {
   CL_DIR="$(make_failing_cli_dir claude)"
   export PATH="$CL_DIR:$BIN"
   run_with_stderr "$HOOK" '{}'
@@ -156,10 +156,10 @@ codex_marker_count() {
   find "$PROJECT_DIR" -maxdepth 2 -type f -name '.review-done-*' | wc -l | tr -d ' '
 }
 
-@test "unmet (Codex): inside Herdr with no pi, no marker" {
+@test "unmet (Codex): inside hc with no pi, no marker" {
   CODEX_HOOK="$(deploy_codex_hook)"
   unset CLAUDE_PROJECT_DIR
-  export CODEX_PROJECT_DIR="$PROJECT_DIR" HERDR_ENV=1 PATH="$BIN"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR" HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal PATH="$BIN"
   run_with_stderr "$CODEX_HOOK" '{}'
   export PATH="$PATH_BACKUP"
   [ "$status" -eq 0 ]

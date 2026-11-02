@@ -500,6 +500,16 @@ itself: `trellis release install <active_cli_release> [--remote URL]`. It
 accepts no other version and no other flag, so bootstrapping never needs a
 mutable source dispatcher.
 
+**The bench route measures, read-only.** `trellis bench [--suite hooks|lifecycle|gate]
+[--n N] [--out DIR]` copies the active installed release into a private sandbox (fresh
+HOME, TRELLIS_HOME and TMPDIR), attaches a fixture project there, and times every
+registered Claude and Codex hook per tool, the pi `trellis.ts` handlers through a headless
+host, the launcher, SessionStart and git checkout routes, and, given `--gate-tsv` and
+`--gate-wall`, a battery's stage timings. The caller's store is only read; the launcher
+forwards the caller PATH so hooks run under the toolchain agents use. Receipts replace
+home, temp and user strings with tokens and record PATH as counts, so they can be
+published; p99 appears only at n ≥ 200. Run it under `trellis heavy` when the numbers matter.
+
 **The heavy route carries the caller's environment.** `trellis heavy [--lane NAME]
 [--timeout SECONDS] -- <cmd...>` is the one route whose child is an arbitrary workload
 rather than Trellis code, so the launcher relays the caller's environment to it as an
@@ -534,6 +544,34 @@ Trellis's local attachment does not make otherwise-untracked policy files part
 of a project commit. Before committing a migration, review the project diff and
 stage only deliberate tracked changes such as `.trellis.json` and removal of
 legacy Trellis-generated tracked behavior.
+
+Trellis's own branch-push Tests gate is diff-aware. The base-side
+`PROCESS_GATE_TEST_MAP` opts into `scripts/lib/push-test-map.py`: audited leaf
+entrypoints map to covering Bats files, and existing top-level Bats edits run
+themselves; CHANGELOG may accompany a mapped change. Every selection includes
+POSIX bootstrap, inventory and mapper contracts, whole-repository scanners,
+and the static/core and recipe-routing stages. The same contained local runner
+and deterministic LPT planner execute the selection; typecheck and lint stay
+unchanged. The runner writes `PG_TESTS_RECEIPT narrowed M` to the gate-owned
+`PG_TESTS_RECEIPT_FILE`, where M counts unique selected test files. The verdict
+and accept-branch retain the existing scope `Tests: narrowed: M selected`.
+
+The base-side mapper examines every commit, including reverted changes and both
+rename paths. Unknown paths, shared libraries/hooks/launcher, missing tests,
+merges, empty/invalid ranges or an unavailable selector retain the full suite
+and report `full`. Release-tag pushes, including mixed branch+tag pushes,
+always run full tests and never use the docs-only exemption. Merge/manual gates
+never use the selector and retain their existing passive-docs exemption, including
+break-glass main pushes without tags. Pre-push scope is consumed by the gate and
+removed before any check command runs; it is not a test-child interface.
+Passive docs-only branch ranges use the separate base-side docs policy; a scoped
+push that skips tests reports `no-tests: docs-only`.
+
+Existing-branch selection uses `remote_tip..local`, relying on the remote tip
+having passed its gate; the full merge-mode gate remains load-bearing. Tests
+execute the working tree: the selector requires HEAD to equal the pushed range
+head and a clean tracked tree (including the index); otherwise it runs full.
+A full fallback does not switch trees: check out the intended tip before testing.
 
 ### 7.2 Private source and public publication are different roles
 
@@ -1163,6 +1201,7 @@ clone/common-dir owner; common Git state persists until its final owner detaches
 | Configure a machine or create fleets | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
 | Install and verify a release | Follow [docs/UPGRADING.md](docs/UPGRADING.md). |
 | Install, verify, and adopt in one step | `trellis upgrade VERSION [--remote URL]` with exactly one selector; launcher-only, forward-only (§14.6). |
+| Measure the latency Trellis adds (hooks, lifecycle, gate) | `trellis bench [--suite hooks\|lifecycle\|gate] [--n N] [--out DIR]` in a sandbox; writes a redacted `bench-<date>-<label>.{json,md}` receipt (§6.5). |
 | Run a heavy test battery without starving other lanes | `trellis heavy --lane NAME -- <cmd...>` (add `--light` for a single-file run under 2 minutes); `trellis heavy --status` shows who holds the slots (§6.5). |
 | Import or rebuild local inventory | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
 | Attach, move, recover, or detach a checkout | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |

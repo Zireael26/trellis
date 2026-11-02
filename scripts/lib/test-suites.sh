@@ -58,6 +58,9 @@
 
 # shellcheck disable=SC2034  # consumed by sourcing runners and the guard suite
 TEST_SUITE_EXCLUSIONS=(
+  # Like the installer suite, agent ownership checks call native plutil even
+  # when launchctl is mocked. Linux cannot exercise this launchd boundary.
+  "disk-janitor-agents|ci|macOS launchd agent ownership: native plutil mutations and plist validation"
   # Verified on ubuntu:24.04 at this tip: 9 cases fail because the installer
   # validates the plist template with macOS `plutil` and probes BSD ACLs on the
   # destination. launchd itself is mocked, but those two boundaries are not, and
@@ -85,6 +88,23 @@ test_suites_all() {
     [ -e "$suite" ] || continue
     suite="${suite##*/}"
     printf '%s\n' "${suite%.bats}"
+  done | LC_ALL=C sort
+}
+
+# Core Bats groups, as repository-relative files rather than directory stages.
+# Bats' directory invocation is non-recursive; keep the same glob depth here.
+test_suites_core() {
+  local group="$1" root suite
+  local files=()
+  root="$(test_suites_root)/.."
+  case "$group" in
+    hooks) files=( "$root"/core-rules/hooks/tests/*.bats "$root"/core-rules/codex/hooks/tests/*.bats ) ;;
+    skills) files=( "$root"/core-rules/skills/*/tests/*.bats ) ;;
+    *) printf 'test-suites: unknown core group: %s\n' "$group" >&2; return 64 ;;
+  esac
+  for suite in ${files[@]+"${files[@]}"}; do
+    [ -f "$suite" ] || continue
+    printf '%s\n' "${suite#"$root/"}"
   done | LC_ALL=C sort
 }
 

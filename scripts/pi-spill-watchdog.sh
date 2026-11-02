@@ -85,7 +85,9 @@ for root in "${ROOTS[@]}"; do
     [ -f "$file" ] || continue
     [ ! -L "$file" ] || continue
 
-    size="$(stat -f '%z' "$file" 2>/dev/null || stat -c '%s' "$file" 2>/dev/null || echo 0)"
+    # GNU stat -f can print filesystem data before failing: discard that stdout.
+    size="$(stat -f '%z' "$file" 2>/dev/null)" ||
+      size="$(stat -c '%s' "$file" 2>/dev/null)" || size=0
     case "$size" in
       ''|*[!0-9]*) size=0 ;;
     esac

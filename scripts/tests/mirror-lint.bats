@@ -782,3 +782,41 @@ SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
   [ "$status" -eq 1 ]
   [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
 }
+
+# --- Spec 072 T32: the generated release-metadata audit ---------------------
+# One file, one exact ADR path. The positive proves the allowance exists; the
+# negatives prove it is neither path-wide nor a bare-word allowance.
+
+AUDIT=scripts/tests/release-metadata-audit.json
+HARNESS_ADR=docs/adr/2026-05-20-antigravity-third-harness.md
+
+@test "072: the tracked release-metadata audit publishes at its own path" {
+  mkdir -p "$MIRROR/scripts/tests"
+  cp "$REPO_ROOT/$AUDIT" "$MIRROR/$AUDIT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "072: the harness ADR path fails in any other file" {
+  mkdir -p "$MIRROR/scripts/tests"
+  printf '{"metadata": ["%s"]}\n' "$HARNESS_ADR" > "$MIRROR/scripts/tests/other-audit.json"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"scripts/tests/other-audit.json: stale 'antigravity'"* ]]
+}
+
+@test "072: another antigravity reference fails inside the audit" {
+  mkdir -p "$MIRROR/scripts/tests"
+  printf '{"metadata": ["%s", "docs/adr/2026-06-01-antigravity-revival.md"]}\n' \
+    "$HARNESS_ADR" > "$MIRROR/$AUDIT"
+
+  run lint_mirror "$MIRROR"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"$AUDIT: stale 'antigravity'"* ]]
+}

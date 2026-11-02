@@ -335,6 +335,14 @@ ANTIGRAVITY_ ANTIGRAVITY Antigravity $mirror_allowed_tokens"
             mirror_allowed_tokens="antigravityError searchAntigravity \
 Antigravity ANTIGRAVITY $mirror_allowed_tokens"
             ;;
+          # Spec 072 T32: the generated release-metadata audit lists every ADR
+          # a traced suite reads, by path. docs/adr/* is release metadata by
+          # design (trace-release-metadata.py META), and the ADR itself is
+          # exempt above, so its exact path is allowed in this one file only.
+          scripts/tests/release-metadata-audit.json)
+            mirror_allowed_tokens="docs/adr/2026-05-20-antigravity-third-harness.md \
+$mirror_allowed_tokens"
+            ;;
         esac
         if awk -v allowed_tokens="$mirror_allowed_tokens" '
           {

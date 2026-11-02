@@ -112,7 +112,7 @@ test('dangling symlink and unreadable autonomy state deny, not create exemption'
 });
 
 for (const native of ['tool_call', 'user_bash']) {
-  test(`real destructive guard blocks ${native} before execution and missing guard denies`, async t => {
+  test(`JSON destructive guard blocks ${native} before execution without a shell guard`, async t => {
     const f = await deliveredFixture(t);
     const fire = command => native === 'tool_call' ? blocked(f, 'bash', { command }) : f.fire('user_bash', { command, cwd: f.cwd, excludeFromContext: true });
     const denial = await fire('rm -rf /fixture-never-executed');
@@ -120,8 +120,10 @@ for (const native of ['tool_call', 'user_bash']) {
     assert.match(native === 'tool_call' ? denial.reason : denial.result.output, /Blocked destructive rm/);
     assert.equal(await fire('printf harmless'), undefined);
     rmSync(resolve(f.runtime, 'core-rules/codex/hooks/block-destructive.sh'));
-    const missing = await fire('printf harmless');
-    assert.equal(native === 'tool_call' ? missing.block : missing.result.exitCode, native === 'tool_call' ? true : 1);
+    assert.equal(await fire('printf harmless'), undefined);
+    const cached = await fire('rm -rf /fixture-never-executed');
+    assert.equal(native === 'tool_call' ? cached.block : cached.result.exitCode, native === 'tool_call' ? true : 1);
+    assert.equal(f.calls.length, 0);
   });
 }
 
@@ -229,7 +231,8 @@ for (const toolName of ['get_subagent_result', 'steer_subagent']) {
       const f = await deliveredFixture(t), sourceInfo = { ...subagentControlSource(f), source };
       f.pi.getAllTools = () => [{ name: toolName, sourceInfo }];
       assert.equal(await blocked(f, toolName, { agent_id: 'fixture', message: 'guidance' }), undefined);
-      assert.equal(f.calls.length, 1, 'allowed controls still use the dispatcher');
+      await f.result(f.call(toolName, { agent_id: 'fixture' }));
+      assert.equal(f.calls.length, 0, 'unhandled control pre/post never dispatch');
     });
   }
   for (const invalid of ['foreign-source', 'prefix-collision', 'alias-spec', 'npm-alias', 'top-level', 'wrong-package', 'missing-path', 'symlink-escape', 'nested-package']) {
@@ -297,7 +300,7 @@ test('subagent policy gate preserves result retrieval without parent policy', as
   f.pi.getAllTools = () => [{ name: 'get_subagent_result', sourceInfo }];
   rmSync(resolve(f.cwd, '.agents/rules/trellis.md'));
   assert.equal(await blocked(f, 'get_subagent_result', {}), undefined);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 0);
 });
 
 for (const input of [
@@ -460,7 +463,7 @@ test('M7 shell writes remain explicitly outside structured reread scope', async 
   const f = await deliveredFixture(t);
   // This is only a guard query; the shell command is NEVER executed.
   assert.equal(await blocked(f, 'bash', { command: 'printf x > file' }), undefined);
-  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls.length, 0);
 });
 
 test('safe slash skill and duplicate physical aliases allow; runtime rechecks changed manifest', async t => {

@@ -1,0 +1,117 @@
+=== pass (rc=0) ===
+## process-gate verdict (mode=merge)
+
+diff-base: <base> - via explicit (explicit) range=main..HEAD head=main
+
+PR hygiene:        ✅ pass
+Secrets:           ✅ pass
+Bypass markers:    ✅ pass
+Tests & coverage:  ✅ pass — unknown
+Docs discipline:   ✅ pass
+Stack profile:     ✅ pass
+Security (diff):   ✅ pass
+Analyze:           ✅ pass
+Anti-slop:         ➖ n/a
+
+Overall: MERGEABLE
+
+Tests: unknown
+
+=== warn (rc=2) ===
+## process-gate verdict (mode=push)
+
+diff-base: <base> - via explicit (explicit) range=main..HEAD head=main
+
+PR hygiene:        ⚠️  warn
+Secrets:           ⚠️  warn
+Bypass markers:    ✅ pass
+Tests & coverage:  ✅ pass — unknown
+Docs discipline:   ⚠️  warn
+Stack profile:     ⚠️  warn
+Security (diff):   ✅ pass
+Analyze:           ⚠️  warn
+Anti-slop:         ⚠️  warn
+
+Overall: NEEDS CHANGES
+
+Tests: unknown
+
+## Findings
+
+### PR hygiene
+fixture row 0
+  [process-gate] mode=push: PR-shape FAIL downgraded to WARN (would BLOCK at merge)
+
+### Secrets
+fixture row 1
+
+### Docs discipline
+fixture row 4
+  [process-gate] mode=push: PR-shape FAIL downgraded to WARN (would BLOCK at merge)
+
+### Stack profile
+fixture row 5
+
+
+### Analyze
+fixture row 7
+  [process-gate] mode=push: PR-shape FAIL downgraded to WARN (would BLOCK at merge)
+
+### Anti-slop
+warn fixture row 8
+
+=== fail (rc=1) ===
+## process-gate verdict (mode=merge)
+
+diff-base: <base> - via explicit (explicit) range=main..HEAD head=main
+
+PR hygiene:        ❌ fail
+Secrets:           ❌ fail
+Bypass markers:    ❌ fail
+Tests & coverage:  ❌ fail — unknown
+Docs discipline:   ❌ fail
+Stack profile:     ❌ fail
+Security (diff):   ❌ fail
+Analyze:           ❌ fail
+Anti-slop:         ❌ fail
+
+Overall: BLOCKED
+
+Tests: unknown
+
+## Findings
+
+### PR hygiene
+fixture row 0
+
+### Secrets
+fixture row 1
+
+### Bypass markers
+fixture row 2
+
+### Tests & coverage
+fixture row 3
+
+### Docs discipline
+fixture row 4
+
+### Stack profile
+fixture row 5
+
+
+### Security (diff)
+fixture row 6
+
+### Analyze
+fixture row 7
+
+### Anti-slop
+fail fixture row 8
+
+=== blocked (rc=1) ===
+## process-gate verdict (mode=merge)
+
+process-gate cannot resolve the base of range missing..HEAD; local config not loaded
+
+Overall: BLOCKED

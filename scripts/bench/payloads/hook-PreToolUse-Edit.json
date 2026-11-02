@@ -1,0 +1,15 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "@PROJECT@/src/a.ts",
+    "old_string": "return a + b;",
+    "new_string": "return a + b; // checked",
+    "replace_all": false
+  },
+  "tool_use_id": "toolu_bench_0001"
+}

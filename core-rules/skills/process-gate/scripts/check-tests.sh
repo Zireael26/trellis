@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Gate 4: Tests & coverage — runs project-declared typecheck/lint/test commands.
-# Usage: check-tests.sh [--range=<gitspec>]
+# Usage: check-tests.sh [--range=<gitspec> | --base=<ref>] [--mode=push|merge]
 
 set -euo pipefail
+# Only this gate may populate the Tests command's interface.
+unset PG_TESTS_BASE PG_TESTS_HEAD PG_TESTS_RECEIPT_FILE
+unset PROCESS_GATE_TEST_MAP # Only tracked base-side config may opt into selection.
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/common.sh
@@ -12,6 +15,9 @@ SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # base-side config to load, so fall back to defaults with a notice instead of
 # failing closed. Every other config failure still exits: a range must not
 # loosen the gate that judges it.
+# Only the range-base config may declare that a battery covers static checks.
+# An inherited declaration must not suppress a project's standalone checks.
+PROCESS_GATE_TEST_COVERS_STATIC=()
 if ! pg_load_config "$@"; then
   case "${PG_CONFIG_ERROR:-}" in
     *"cannot resolve the base of range "*)
@@ -20,9 +26,41 @@ if ! pg_load_config "$@"; then
     *) exit 1 ;;
   esac
 fi
+# Push scope controls this gate only, never any command or nested fixture gate.
+pg_push_scope="${PG_PUSH_TEST_SCOPE:-}"
+unset PG_PUSH_TEST_SCOPE
 RANGE="$(pg_parse_range "$@")"
+tag_push=0
+release_tag=""
+release_tag_count=0
+for arg in "$@"; do
+  case "$arg" in
+    --tag-push) tag_push=1 ;;
+    --release-tag=*) tag_push=1; release_tag="${arg#--release-tag=}"; release_tag_count=$((release_tag_count + 1)) ;;
+  esac
+done
+[ "$release_tag_count" -eq 1 ] || release_tag=""
+[ "$tag_push" -eq 0 ] || pg_push_scope=full
 PROJECT_DIR="$(pg_project_dir)"
 cd "$PROJECT_DIR"
+
+# Only explicit push scope is eligible. run-all supplies its immutable snapshot;
+# direct callers also resolve their argv, never inherited interface variables.
+_pg_tests_base=""; _pg_tests_head=""; pg_tests_receipt_file=""
+tests_scope='not run'
+if [ "$(pg_parse_mode "$@")" = push ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --range=*|--base=*)
+        if ! _pg_tests_base="$(pg_range_base "$PROJECT_DIR" "$RANGE")" ||
+          ! _pg_tests_head="$(pg_range_head "$PROJECT_DIR" "$RANGE")"; then
+          _pg_tests_base=""; _pg_tests_head=""
+        fi
+        break ;;
+    esac
+  done
+fi
+trap '[ -z "$pg_tests_receipt_file" ] || rm -f "$pg_tests_receipt_file"' EXIT
 
 # Git exports repository-local routing variables to hooks. The configured test
 # command is a fixture suite, not an extension of the hook's Git process: if it
@@ -198,6 +236,8 @@ PG_DOCS_POLICY_PATHS=(
 docs_only_files=""
 docs_only_cmd=""
 docs_only_reason=""
+release_metadata_manifest=""
+release_metadata_class=""
 DOCS_ALLOW=()
 DOCS_DENY=()
 
@@ -312,6 +352,13 @@ pg_docs_read_policy() {
         fi
         if [ "$kw" = allow ]; then DOCS_ALLOW+=("$rest"); else DOCS_DENY+=("$rest"); fi
         ;;
+      class)
+        if [[ "$rest" =~ ^release-metadata[[:space:]]+([A-Za-z0-9_./-]+\.json)$ ]] && [ -z "$release_metadata_manifest" ]; then
+          release_metadata_manifest="${BASH_REMATCH[1]}"
+        else
+          docs_only_reason="policy $found: line $n: invalid or duplicate class"; return 1
+        fi
+        ;;
       tests)
         if [ -z "$rest" ] || [ -n "$docs_only_cmd" ]; then
           docs_only_reason="policy $found: line $n: one non-empty tests command allowed"; return 1
@@ -341,6 +388,45 @@ pg_docs_only_eval() {
     3) return 1 ;;
     *) docs_only_note "$docs_only_reason"; return 1 ;;
   esac
+  if [ -n "$release_metadata_manifest" ]; then
+    local metadata_result metadata_path metadata_re metadata_only=1 metadata_rc=0
+    local metadata_allowed='^(VERSION|core-rules/VERSION|CHANGELOG\.md|docs/adr/[A-Za-z0-9][A-Za-z0-9._-]*\.md)$'
+    [ -z "$(git rev-list --min-parents=2 "$base..$head" 2>/dev/null || echo unreadable)" ] || metadata_only=0
+    for c in $(git rev-list "$base..$head" 2>/dev/null); do
+      while IFS= read -r -d '' metadata_path; do
+        [[ "$metadata_path" =~ $metadata_allowed ]] || metadata_only=0
+        for metadata_re in ${DOCS_DENY[@]+"${DOCS_DENY[@]}"}; do
+          if [[ "$metadata_path" =~ $metadata_re ]]; then
+            docs_only_note "$metadata_path: denied by the base policy"; return 1
+          fi
+        done
+      done < <(git diff-tree -r -z --name-only --no-renames --no-commit-id "$c")
+    done
+    if [ "$metadata_only" -eq 1 ]; then
+      # Freeze the helper and all local imports at the policy's trusted base.
+      metadata_result="$(
+        metadata_work="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/trellis-metadata.XXXXXX")" || exit 1
+        metadata_work="$(cd "$metadata_work" && pwd -P)" || exit 1
+        trap 'rm -rf "$metadata_work"' EXIT
+        for metadata_module in release_metadata.py gate_verdict.py gate_receipts.py receipt_provenance.py; do
+          metadata_source="scripts/lib/$metadata_module"
+          [ "$(git ls-tree "$base" -- "$metadata_source" | awk '{print $1}')" = 100644 ] || exit 1
+          (umask 077; git show "$base:$metadata_source" > "$metadata_work/$metadata_module") || exit 1
+        done
+        python3 -I "$metadata_work/release_metadata.py" "$base" "$head" "$release_metadata_manifest"
+      )" || metadata_rc=$?
+      case "$metadata_rc" in
+        0)
+          docs_only_files="${metadata_result%%$'\t'*}"
+          docs_only_cmd="${metadata_result#*$'\t'}"
+          release_metadata_class=1
+          return 0
+          ;;
+        2) ;; # No release metadata changed; apply the ordinary docs class.
+        *) docs_only_note "release-metadata requires a complete audit and full green base verdict"; return 1 ;;
+      esac
+    fi
+  fi
   # db_anc is the resolver's reviewed ancestry probe (release-tag-consumers.bats).
   if ! db_anc "$base" "$head"; then
     docs_only_note "range start is not an ancestor of its end"; return 1
@@ -372,9 +458,58 @@ docs_only_note() {
 }
 
 if [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
-  pg_docs_only_eval || true
+  if [ "$tag_push" -eq 0 ] && [ "$pg_push_scope" != full ]; then pg_docs_only_eval || true; fi
   if [ -n "$docs_only_files" ]; then
     PROCESS_GATE_TEST_CMD="$docs_only_cmd"
+    if [ -n "$_pg_tests_base" ] && [ -z "$docs_only_cmd" ]; then
+      tests_scope='no-tests: docs-only'
+    fi
+  fi
+fi
+
+# Optional selector is trusted BASE code, used only for explicit branch pushes.
+# Its diagnostic header is not a receipt: the command reports through the
+# gate-range interface. An absent or undecidable map leaves the command full.
+diff_tests_count=0
+if [ -z "$docs_only_files" ] && [ -n "$_pg_tests_base" ] &&
+   [ "$pg_push_scope" = branch ] && [ -n "${PROCESS_GATE_TEST_MAP:-}" ]; then
+  if [ "$(git rev-parse HEAD)" != "$_pg_tests_head" ]; then
+    printf 'process-gate: full tests — HEAD differs from pushed range head\n' >&2
+  elif ! git diff --quiet -- || ! git diff --cached --quiet HEAD --; then
+    printf 'process-gate: full tests — tracked tree is dirty or unreadable\n' >&2
+  elif pg_base_path "$PROJECT_DIR" "$PG_CONFIG_BASE" "$PROCESS_GATE_TEST_MAP" &&
+     selection="$(git show "$PG_CONFIG_BASE:$PROCESS_GATE_TEST_MAP" | python3 -I - "$RANGE")"; then
+    while IFS= read -r test_file; do
+      printf -v test_arg '%q' "--test-file=$test_file"
+      PROCESS_GATE_TEST_CMD+=" $test_arg"
+      diff_tests_count=$((diff_tests_count + 1))
+    done <<< "${selection#*$'\n'}"
+  else
+    printf 'process-gate: full tests — selector unavailable or range not mapped\n' >&2
+  fi
+fi
+
+# Only the canonical full local runner can supply an exact-input verdict. A
+# project command, narrowed range, dirty checkout, or different gated HEAD misses.
+PG_REUSED_VERDICT=""
+PG_TAG_VERDICT=""
+if [ "$tag_push" -eq 1 ] && [ -n "$release_tag" ] && [ "$(pg_parse_mode "$@")" = push ] &&
+  { [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 scripts/run-tests-local.py' ] ||
+    [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 -I scripts/run-tests-local.py' ]; }; then
+  if tag_result="$(python3 -I "$SKILL_DIR/../../../scripts/lib/tag_push_reuse.py" "$release_tag" "$RANGE")"; then
+    PG_TAG_VERDICT="${tag_result%%$'\n'*}"
+    PROCESS_GATE_TEST_CMD="${tag_result#*$'\n'}"
+  fi
+fi
+if [ "$tag_push" -eq 0 ] && [ "$pg_push_scope" != full ] && [ "$diff_tests_count" -eq 0 ] &&
+  [ -z "$docs_only_files" ] && [ -f scripts/lib/gate_verdict.py ] &&
+  { [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 scripts/run-tests-local.py' ] ||
+    [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 -I scripts/run-tests-local.py' ]; }; then
+  # shellcheck source=lib/diff-base.sh
+  . "$SKILL_DIR/scripts/lib/diff-base.sh"
+  if db_resolve --range="$RANGE" >/dev/null 2>&1 && [ -n "$DB_HEAD_SHA" ]; then
+    PG_REUSED_VERDICT="$(python3 -I scripts/run-tests-local.py --verdict-status "--head=$DB_HEAD_SHA" 2>/dev/null)" || PG_REUSED_VERDICT=""
+    [ -z "$PG_REUSED_VERDICT" ] || tests_scope=full
   fi
 fi
 
@@ -465,7 +600,8 @@ pg_heavy_preflight() {
   printf 'process-gate: notice (heavy-gate-unavailable: %s)\n' "$reason" >&2
 }
 # A narrowed range's tests command is light: it never waits for a heavy slot.
-if [ -n "${PROCESS_GATE_TEST_CMD:-}" ] && [ -z "$docs_only_files" ]; then
+if [ -n "${PROCESS_GATE_TEST_CMD:-}" ] && [ -z "$docs_only_files" ] &&
+  [ -z "$PG_REUSED_VERDICT" ] && [ -z "$PG_TAG_VERDICT" ]; then
   pg_heavy_preflight
 fi
 
@@ -528,11 +664,34 @@ pg_private_directory() {
   [ "$owner" = "$(id -u)" ] && [ "$mode" = 700 ]
 }
 
+pg_gate_state_root() (
+  local path="${TRELLIS_GATE_STATE_DIR-${HOME:-}/.local/state/trellis-gate}" ancestor suffix="" part
+  [ -n "${TRELLIS_GATE_STATE_DIR+x}" ] || [ -n "${HOME:-}" ] || return 1
+  case "$path" in /*) ;; *) return 1 ;; esac
+  ancestor="$path"
+  while [ ! -d "$ancestor" ]; do
+    [ ! -e "$ancestor" ] && [ ! -L "$ancestor" ] || return 1
+    part="${ancestor##*/}"
+    case "$part" in .|..) return 1 ;; esac
+    suffix="/$part$suffix"
+    ancestor="${ancestor%/*}"
+    [ -n "$ancestor" ] || ancestor=/
+  done
+  ancestor="$(cd "$ancestor" && pwd -P)$suffix" || return 1
+  while :; do
+    [ ! -e "$ancestor/.git" ] && [ ! -L "$ancestor/.git" ] || return 1
+    [ "$ancestor" != / ] || break
+    ancestor="${ancestor%/*}"
+    [ -n "$ancestor" ] || ancestor=/
+  done
+  printf '%s\n' "$path"
+)
+
 pg_add_failure_output() {
   local label="$1" output="$2" state_root failure_root failure_dir failure_file line
-  state_root="${TRELLIS_GATE_STATE_DIR:-${HOME:-}/.local/state/trellis-gate}"
+  state_root="$(pg_gate_state_root)" || state_root=""
   failure_root="$state_root/failed-shards"
-  if [ -L "$state_root" ] || [ -L "$failure_root" ] ||
+  if [ -z "$state_root" ] || [ -L "$state_root" ] || [ -L "$failure_root" ] ||
     ! (umask 077; mkdir -p "$failure_root" 2>/dev/null) ||
     ! pg_private_directory "$state_root" || ! pg_private_directory "$failure_root"; then
     findings+=("$label: full output could not be saved in an owner-private failed-shards directory")
@@ -582,17 +741,26 @@ run_check() {
     return 0
   fi
 
-  local out rc
+  local out rc receipt
+  local -a command_env=()
+  if [ "$label" = tests ] && [ -z "$PG_TAG_VERDICT" ] && [ -n "$_pg_tests_base" ] && [ -n "$_pg_tests_head" ]; then
+    pg_tests_receipt_file="$(umask 077; mktemp "${TMPDIR:-/tmp}/pg-tests-receipt.XXXXXXXX")"
+    # Set these AFTER the heavy launcher's clean-env boundary, on the command
+    # itself. Typecheck, lint, coverage and mutation never get this interface.
+    command_env=(env "PG_TESTS_BASE=$_pg_tests_base" "PG_TESTS_HEAD=$_pg_tests_head"
+      "PG_TESTS_RECEIPT_FILE=$pg_tests_receipt_file")
+  fi
+  [ "$label" != tests ] || tests_scope=full
   set +e
   if [ "$label" = tests ] && [ -n "$PG_HEAVY_LAUNCHER" ]; then
-    out="$("$PG_HEAVY_LAUNCHER" heavy --lane process-gate --timeout "$limit" -- bash -c "$cmd" 2>&1)"; rc=$?
+    out="$("$PG_HEAVY_LAUNCHER" heavy --lane process-gate --timeout "$limit" -- ${command_env[@]+"${command_env[@]}"} bash -c "$cmd" 2>&1)"; rc=$?
   elif [ -n "$PG_TIMEOUT_RUNNER" ]; then
-    out="$(run_with_timeout "$limit" bash -c "$cmd" 2>&1)"; rc=$?
+    out="$(run_with_timeout "$limit" ${command_env[@]+"${command_env[@]}"} bash -c "$cmd" 2>&1)"; rc=$?
   else
     # No bounded runner reachable on this PATH. Still RUN the check -- refusing
     # would turn the gate into a silent skip, which is a worse hole than an
     # unbounded run -- but say so once, so an unbounded wait is never invisible.
-    out="$(bash -c "$cmd" 2>&1)"; rc=$?
+    out="$(${command_env[@]+"${command_env[@]}"} bash -c "$cmd" 2>&1)"; rc=$?
     if [ "$pg_unbounded_warned" = no ]; then
       pg_unbounded_warned=yes
       findings+=("checks ran UNBOUNDED: no timeout, gtimeout or perl on PATH — a hung command will not be killed")
@@ -602,6 +770,38 @@ run_check() {
     fi
   fi
   set -e
+
+  if [ "$label" = tests ] && [ -s "$pg_tests_receipt_file" ]; then
+    receipt=""
+    if [ "$(wc -c < "$pg_tests_receipt_file")" -le 128 ] &&
+      [ "$(wc -l < "$pg_tests_receipt_file")" -eq 1 ]; then
+      receipt="$(< "$pg_tests_receipt_file")"
+    fi
+    if [ "$receipt" = 'PG_TESTS_RECEIPT full' ]; then
+      tests_scope=full
+    elif [[ "$receipt" =~ ^PG_TESTS_RECEIPT\ narrowed\ ([1-9][0-9]*)$ ]]; then
+      tests_scope="narrowed: ${BASH_REMATCH[1]} selected"
+    elif [ "$receipt" = 'PG_TESTS_RECEIPT no-tests docs-only' ]; then
+      tests_scope='no-tests: docs-only'
+    else
+      findings+=("invalid Tests receipt: expected one PG_TESTS_RECEIPT line")
+      worst=fail
+    fi
+  fi
+  if [ "$label" = tests ] && [ "$diff_tests_count" -gt 0 ]; then
+    if [ "$rc" -ne 0 ]; then
+      # Failed selected runs need no success receipt; report their real failure.
+      tests_scope=unknown
+    elif [ "$tests_scope" != "narrowed: $diff_tests_count selected" ]; then
+      findings+=("invalid Tests receipt: selected command must report narrowed $diff_tests_count")
+      tests_scope=unknown
+      worst=fail
+    fi
+  fi
+  if [ -n "$pg_tests_receipt_file" ]; then
+    rm -f "$pg_tests_receipt_file"
+    pg_tests_receipt_file=""
+  fi
 
   # A cooperating test runner can distinguish database-lock starvation from a
   # failing assertion with this exact marker. Keep the gate blocking, but name
@@ -642,10 +842,21 @@ run_check() {
   fi
 }
 
-run_check "typecheck" "${PROCESS_GATE_TYPECHECK_CMD:-}"
-run_check "lint"      "${PROCESS_GATE_LINT_CMD:-}"
+# Deduplicate only an exact base-declared tuple after test selection. A docs
+# policy can even name the same command, but a narrowed run keeps local checks.
+static_checks_in_battery=""
+if [ -z "$docs_only_files" ] && [ "${#PROCESS_GATE_TEST_COVERS_STATIC[@]}" -eq 3 ] &&
+  [ -n "${PROCESS_GATE_TEST_CMD:-}" ] &&
+  [ "$PROCESS_GATE_TEST_CMD" = "${PROCESS_GATE_TEST_COVERS_STATIC[0]}" ] &&
+  [ "${PROCESS_GATE_TYPECHECK_CMD:-}" = "${PROCESS_GATE_TEST_COVERS_STATIC[1]}" ] &&
+  [ "${PROCESS_GATE_LINT_CMD:-}" = "${PROCESS_GATE_TEST_COVERS_STATIC[2]}" ]; then
+  static_checks_in_battery="typecheck and lint: included in full test battery"
+else
+  run_check "typecheck" "${PROCESS_GATE_TYPECHECK_CMD:-}"
+  run_check "lint"      "${PROCESS_GATE_LINT_CMD:-}"
+fi
 # Narrowed with no policy tests command: the battery is skipped, not undeclared.
-if [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
+if [ -z "$PG_REUSED_VERDICT" ] && { [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; }; then
   run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
 fi
 
@@ -1068,7 +1279,19 @@ case "$worst" in
     for f in ${findings[@]+"${findings[@]}"}; do pg_finding "$f"; done
     ;;
 esac
+[ -z "$PG_REUSED_VERDICT" ] || pg_finding "tests: $PG_REUSED_VERDICT"
+if [ -n "$PG_TAG_VERDICT" ]; then
+  pg_finding "tests: $PG_TAG_VERDICT"
+  pg_finding "tests: tag-reading suites executed"
+fi
+[ -z "$static_checks_in_battery" ] || pg_finding "$static_checks_in_battery"
 # run-all.sh carries this exact line into the verdict; keep its shape.
-[ -z "$docs_only_files" ] || pg_finding "Tests: narrowed (docs-only: $docs_only_files files)"
+if [ -n "$release_metadata_class" ]; then
+  pg_finding "Tests: narrowed (release-metadata: $docs_only_files files)"
+elif [ -n "$docs_only_files" ] && { [ "$tests_scope" = full ] || [ "$tests_scope" = 'not run' ]; }; then
+  pg_finding "Tests: narrowed (docs-only: $docs_only_files files)"
+else
+  pg_finding "Tests: $tests_scope"
+fi
 
 pg_exit_code "$worst"

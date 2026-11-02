@@ -277,7 +277,7 @@ x_bound_marker_push() {
   [ ! -e "$SPEC_GATE_CAPTURE" ] || return 1
   [[ "$output" == *"spec-gate: skipped (tag-only push)"* ]] || return 1
   [[ "$output" == *"diff-base: ${M0:0:12} - via explicit (explicit) range=$M0..$BTIP head=refs/tags/v1"* ]] || return 1
-  [ "$(< "$PROCESS_GATE_CAPTURE")" = "--mode=push --range=$M0..$BTIP" ] || return 1
+  [ "$(< "$PROCESS_GATE_CAPTURE")" = "--mode=push --tag-push --range=$M0..$BTIP" ] || return 1
 }
 
 @test "R31 branch+tag gives spec-gate the branch and still gates a tag range outside it" {
@@ -289,7 +289,7 @@ refs/heads/feature/b $BTIP refs/heads/feature/b $ZERO" || return 1
   [ "$status" -eq 0 ] || return 1
   [ "$(< "$SPEC_GATE_CAPTURE")" = "--gate --ref refs/heads/feature/b --head $BTIP --range $ATIP..$BTIP" ] || return 1
   # a1 and a2 are outside the stacked branch range, so the tag range runs last.
-  [ "$(< "$PROCESS_GATE_CAPTURE")" = "--mode=push --range=$M0..$BTIP" ] || return 1
+  [ "$(< "$PROCESS_GATE_CAPTURE")" = "--mode=push --tag-push --range=$M0..$BTIP" ] || return 1
 }
 
 @test "F1 a pushed tree naming another template.branch cannot unprotect main" {

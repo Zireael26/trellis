@@ -202,12 +202,14 @@ run_detach() {
   printf '%s\n' "$output" | grep -Fq 'canonicalizing PATH entry'
   printf '%s\n' "$output" | grep -Fq '/usr/bin/'
 
-  # REGRESSION: the stock macOS PATH ships /System/Cryptexes/App/usr/bin as
-  # line 2 of /etc/paths, and /System/Cryptexes/App is a symlink. Refusing it
-  # refuses every normal interactive PATH on macOS 13+ and breaks attach.
-  run bash -c "source '$ATTACH_LIB'; _attachment_toolchain_path_resolve '/opt/homebrew/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin' 2>/dev/null"
+  # REGRESSION: macOS ships /System/Cryptexes/App/usr/bin on PATH with App
+  # symlinked. Model that ancestor symlink locally, including on Linux.
+  mkdir -p "$SANDBOX/System/Cryptexes" "$SANDBOX/preboot/App/usr/bin"
+  ln -s "$SANDBOX/preboot/App" "$SANDBOX/System/Cryptexes/App"
+  run bash -c "source '$ATTACH_LIB'; _attachment_toolchain_path_resolve '$SANDBOX/System/Cryptexes/App/usr/bin:/usr/bin:/bin' 2>/dev/null"
   [ "$status" -eq 0 ]
-  printf '%s\n' "$output" | grep -Fq 'Cryptexes'
+  printf '%s\n' "$output" | grep -Fq -- "$SANDBOX/preboot/App/usr/bin"
+  [[ "$output" != *"$SANDBOX/System/Cryptexes/App/usr/bin"* ]]
 
   # A real non-directory is still a hard refusal, named.
   : > "$SANDBOX/notadir"

@@ -60,6 +60,11 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS"
   DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
+  # A fixture attach must not spawn the detached post-attach job: it races the
+  # core.hooksPath and exclude edits these tests make right after attaching,
+  # records its own FAILED verdict (exit 4), and outlives teardown.
+  # run-tests.sh sets this too; a direct bats run must not depend on it.
+  export TRELLIS_ATTACH_POSTJOB=off
   unset PORTABLE_STRICT_PRESET_CONTENT
 }
 

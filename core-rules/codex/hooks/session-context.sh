@@ -45,6 +45,16 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "session-context"
 
+# A real CPython for the Python helpers below (and the task-context library,
+# which reuses the export), never a pyenv-style shim: ~0.4 s a call. Only the
+# payload's own resolver is trusted; a mapped copy keeps the PATH lookup.
+case "${BASH_SOURCE[0]}" in
+  */core-rules/codex/hooks/*)
+    # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+    . "${BASH_SOURCE[0]%/*}/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+esac
+command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=python3
+
 # Byte-bounded prefix that never leaves a split UTF-8 sequence at the cut. The
 # assembled context is valid UTF-8, so a cut can only strand one lead byte plus
 # the continuation bytes already copied; exactly those are dropped.
@@ -249,8 +259,8 @@ _se_lane_availability_line() {
   [ -n "$home" ] || { printf 'Lane availability: unavailable (no TRELLIS_HOME/HOME)\n'; return 0; }
   state="$home/state/lane-availability.json"
   if [ ! -f "$state" ] || [ -L "$state" ]; then printf 'Lane availability: unavailable (no snapshot at %s)\n' "$state"; return 0; fi
-  if ! command -v python3 >/dev/null 2>&1; then printf 'Lane availability: unavailable (python3 missing)\n'; return 0; fi
-  line="$(python3 - "$state" <<'PY' 2>/dev/null
+  if ! command -v "$TRELLIS_PYTHON" >/dev/null 2>&1; then printf 'Lane availability: unavailable (python3 missing)\n'; return 0; fi
+  line="$("$TRELLIS_PYTHON" - "$state" <<'PY' 2>/dev/null
 import json, sys
 from datetime import datetime, timezone
 path = sys.argv[1]
@@ -319,10 +329,11 @@ CTX_TAIL="${CTX_TAIL}$(_se_verification_receipts_block 2>/dev/null)
 "
 
 # --- Worktree attachment diagnosis ---
-# This is deliberately self-contained and data-only. SessionStart must never
-# source an attached project's runtime: the runtime anchor is an assertion to
-# inspect, not a path to execute. The Codex hook carries the same local checks
-# because the installed hook cannot safely depend on a project-owned library.
+# This is deliberately self-contained and data-only. The runtime anchor is an
+# assertion to inspect: nothing here resolves code through it. (The hook itself
+# may be running from that anchor, as every other hook does; the release check
+# below sources only from the tree that is already executing.) The Codex hook
+# carries the same local checks.
 _se_wt_safe_abs() {
   local path="${1:-}"
   case "$path" in
@@ -716,206 +727,27 @@ _se_wt_verify_owner_renders() {
   done < <(jq -c '.renders[]?' "$owner")
 }
 
-_se_wt_release_record_valid() {
-  local release_json="$1"
-  jq -e '
-    def semver:
-      "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+([0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*))?$";
-    def keyset($keys): (keys_unsorted | sort) == ($keys | sort);
-    def safe_relative_path:
-      type == "string"
-      and length > 0
-      and (startswith("/") | not)
-      and (endswith("/") | not)
-      and (contains("//") | not)
-      and (contains("\u0000") | not)
-      and (contains("\t") | not)
-      and (contains("\n") | not)
-      and (contains("\r") | not)
-      and (test("(^|/)\\.(/|$)") | not)
-      and (test("(^|/)\\.\\.(/|$)") | not);
-    type == "object"
-    and (
-      keyset(["schema_version", "version", "tag", "commit", "remote", "tree"])
-      or keyset(["$schema", "schema_version", "version", "tag", "commit", "remote", "tree"])
-    )
-    and ((has("$schema") | not) or (."$schema" | type == "string" and length > 0))
-    and .schema_version == 1
-    and (.version | type == "string" and test(semver))
-    and (.tag == ("v" + .version))
-    and (.commit | type == "string" and test("^[a-f0-9]{40}$"))
-    and (.remote | type == "string" and length > 0)
-    and (.tree | type == "array" and length > 0)
-    and ([.tree[].path] | length == (unique | length))
-    and all(.tree[];
-      type == "object"
-      and keyset(["path", "mode", "oid"])
-      and (.path | safe_relative_path)
-      and (.mode == "100644" or .mode == "100755" or .mode == "120000")
-      and (.oid | type == "string" and test("^[a-f0-9]{40}$"))
-    )
-  ' "$release_json" >/dev/null 2>&1
-}
-
-_se_wt_readonly() {
-  local mode bits
-  mode="$(_se_wt_mode "$1")" || return 1
-  bits="${mode#${mode%???}}"
-  case "$bits" in
-    *[2367]*) return 1 ;;
-  esac
-  return 0
-}
-
-_se_wt_release_mode() {
-  local mode bits
-  if [ -L "$1" ]; then
-    printf '120000\n'
-    return 0
-  fi
-  [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  mode="$(_se_wt_mode "$1")" || return 1
-  bits="${mode#${mode%???}}"
-  case "$bits" in
-    *[1357]*) printf '100755\n' ;;
-    *) printf '100644\n' ;;
-  esac
-}
-
-_se_wt_release_target_safe() {
-  local link_path="$1" target="$2" parent="" rest component resolved=""
-  _se_wt_safe_rel "$link_path" || return 1
-  [ -n "$target" ] || return 1
-  case "$target" in
-    /*|*'//'|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
-  esac
-  case "$link_path" in
-    */*) parent="${link_path%/*}" ;;
-  esac
-  if [ -n "$parent" ]; then
-    rest="$parent/$target"
-  else
-    rest="$target"
-  fi
-  while [ -n "$rest" ]; do
-    case "$rest" in
-      */*) component="${rest%%/*}"; rest="${rest#*/}" ;;
-      *) component="$rest"; rest="" ;;
-    esac
-    case "$component" in
-      ""|.) ;;
-      ..)
-        [ -n "$resolved" ] || return 1
-        case "$resolved" in
-          */*) resolved="${resolved%/*}" ;;
-          *) resolved="" ;;
-        esac
-        ;;
-      *)
-        if [ -n "$resolved" ]; then
-          resolved="$resolved/$component"
-        else
-          resolved="$component"
-        fi
-        ;;
-    esac
-  done
-}
-
-_se_wt_blob_oid() {
-  local path="$1" target
-  if [ -L "$path" ]; then
-    target="$(readlink "$path")" || return 1
-    printf '%s' "$target" | git hash-object --stdin
-    return $?
-  fi
-  git hash-object --no-filters "$path"
-}
-
-_se_wt_release_verify() (
-  set +e
-  local home="$1" release="$2" releases release_dir release_json payload tmp
-  local version mode oid path parent full actual_mode actual_oid target rel entry base
-  releases="$home/releases"
-  _se_wt_canonical_dir "$releases" || return 1
-  release_dir="$releases/$release"
-  _se_wt_canonical_dir "$release_dir" || return 1
-  [ "$release_dir" = "$releases/$release" ] || return 1
-  _se_wt_readonly "$release_dir" || return 1
-  release_json="$release_dir/release.json"
-  _se_wt_real_parent "$release_json" || return 1
-  [ -f "$release_json" ] && [ ! -L "$release_json" ] || return 1
-  _se_wt_readonly "$release_json" || return 1
-  _se_wt_release_record_valid "$release_json" || return 1
-  version="$(jq -r '.version' "$release_json")" || return 1
-  [ "$version" = "$release" ] || return 1
-  payload="$release_dir/payload"
-  _se_wt_canonical_dir "$payload" || return 1
-  [ "$payload" = "$release_dir/payload" ] || return 1
-  _se_wt_readonly "$payload" || return 1
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/trellis-session-release.XXXXXX")" || return 1
-  trap 'rm -rf "$tmp"' EXIT
-  find "$release_dir" -mindepth 1 -maxdepth 1 -print0 > "$tmp/top.raw" 2>/dev/null || return 1
-  while IFS= read -r -d '' entry; do
-    base="$(basename "$entry")"
-    case "$base" in
-      release.json|payload) ;;
-      *) return 1 ;;
-    esac
-  done < "$tmp/top.raw"
-  jq -r '.tree[] | [.mode, .oid, .path] | @tsv' "$release_json" > "$tmp/manifest.tsv" || return 1
-  : > "$tmp/manifest.paths"
-  : > "$tmp/manifest.dirs"
-  while IFS=$'\t' read -r mode oid path; do
-    _se_wt_safe_rel "$path" || return 1
-    case "$path" in
-      */*) parent="$payload/${path%/*}" ;;
-      *) parent="$payload" ;;
-    esac
-    _se_wt_canonical_dir "$parent" || return 1
-    full="$payload/$path"
-    [ -e "$full" ] || [ -L "$full" ] || return 1
-    actual_mode="$(_se_wt_release_mode "$full")" || return 1
-    [ "$actual_mode" = "$mode" ] || return 1
-    if [ "$actual_mode" = 120000 ]; then
-      target="$(readlink "$full")" || return 1
-      _se_wt_release_target_safe "$path" "$target" || return 1
-    fi
-    actual_oid="$(_se_wt_blob_oid "$full")" || return 1
-    [ "$actual_oid" = "$oid" ] || return 1
-    # A symlink's own mode is meaningless (macOS reports the link's 0700, Linux
-    # 0777); the read-only parent directory checked below is what pins it.
-    [ "$actual_mode" = 120000 ] || _se_wt_readonly "$full" || return 1
-    printf '%s\n' "$path" >> "$tmp/manifest.paths"
-    rel="$path"
-    while [ "${rel%/*}" != "$rel" ]; do
-      rel="${rel%/*}"
-      printf '%s\n' "$rel" >> "$tmp/manifest.dirs"
-    done
-  done < "$tmp/manifest.tsv"
-  find "$payload" -mindepth 1 -print0 > "$tmp/files.raw" 2>/dev/null || return 1
-  : > "$tmp/actual.paths"
-  : > "$tmp/actual.dirs"
-  while IFS= read -r -d '' entry; do
-    rel="${entry#"$payload"/}"
-    [ "$rel" != "$entry" ] || return 1
-    _se_wt_safe_rel "$rel" || return 1
-    if [ -L "$entry" ] || [ -f "$entry" ]; then
-      printf '%s\n' "$rel" >> "$tmp/actual.paths"
-    elif [ -d "$entry" ] && [ ! -L "$entry" ]; then
-      _se_wt_readonly "$entry" || return 1
-      printf '%s\n' "$rel" >> "$tmp/actual.dirs"
-    else
-      return 1
-    fi
-  done < "$tmp/files.raw"
-  LC_ALL=C sort "$tmp/manifest.paths" > "$tmp/manifest.paths.sorted" || return 1
-  LC_ALL=C sort "$tmp/actual.paths" > "$tmp/actual.paths.sorted" || return 1
-  LC_ALL=C sort -u "$tmp/manifest.dirs" > "$tmp/manifest.dirs.sorted" || return 1
-  LC_ALL=C sort "$tmp/actual.dirs" > "$tmp/actual.dirs.sorted" || return 1
-  diff -u "$tmp/manifest.paths.sorted" "$tmp/actual.paths.sorted" >/dev/null 2>&1 || return 1
-  diff -u "$tmp/manifest.dirs.sorted" "$tmp/actual.dirs.sorted" >/dev/null 2>&1 || return 1
-  printf '%s\n' "$payload"
+# Release integrity for the attached release (spec 072 U4): the release
+# stamp, which proves the release unchanged since a full verify, else the full
+# verify, which stamps the release for the next caller. A post-attach ok
+# verdict is not evidence here: it says the release verified when the job ran,
+# not that it is unchanged now. Exit 0 when the stamp or the verify confirms
+# the release, 1 when the verify refuses it, 2 when neither could run. The
+# release libraries come from this hook's own physical tree, the one already
+# executing, never from the attachment under diagnosis.
+_se_wt_release_confirm() (
+  local home="$1" release="$2" release_dir scripts
+  release_dir="$home/releases/$release"
+  _se_wt_canonical_dir "$release_dir/payload" || return 1
+  scripts="$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../scripts/lib" 2>/dev/null && pwd -P)" || return 2
+  [ -f "$scripts/release-stamp.sh" ] && [ -f "$scripts/release-store.sh" ] || return 2
+  # shellcheck source=/dev/null
+  . "$scripts/release-stamp.sh" || return 2
+  release_stamp_check "$home" "$release_dir" && return 0
+  # shellcheck source=/dev/null
+  . "$scripts/release-store.sh" || return 2
+  TRELLIS_HOME="$home" release_store_locate "$release" >/dev/null 2>&1 || return 1
+  release_stamp_write "$home" "$release_dir" || :
 )
 
 _se_wt_diagnose() (
@@ -995,17 +827,27 @@ _se_wt_diagnose() (
   _se_wt_render_context_valid "$owner" "$home" || { printf 'WARN\n'; exit 0; }
   _se_wt_verify_owner_artifacts "$owner" "$active_root" || { printf 'WARN\n'; exit 0; }
   _se_wt_verify_owner_renders "$owner" "$active_root" || { printf 'WARN\n'; exit 0; }
-  payload="$(_se_wt_release_verify "$home" "$release")" || { printf 'WARN\n'; exit 0; }
+  payload="$home/releases/$release/payload"
   jq -e --arg payload "$payload" '
     ([.artifacts[]
       | select(.path == ".trellis/runtime" and .kind == "symlink" and .target == $payload)] | length) == 1
   ' "$owner" >/dev/null 2>&1 || { printf 'WARN\n'; exit 0; }
   _se_wt_readlink_exact "$active_root/.trellis/runtime" "$payload" || { printf 'WARN\n'; exit 0; }
+  _se_wt_release_confirm "$home" "$release"
+  case $? in
+    0) ;;
+    2) printf 'UNCONFIRMED\n' ;;
+    *) printf 'WARN\n' ;;
+  esac
 )
 
 _se_worktree_warn="$(_se_wt_diagnose 2>/dev/null || printf 'WARN\n')"
-if [ "${_se_worktree_warn:-}" = "WARN" ]; then
-  _se_wt_msg="Trellis attachment is missing in this opted-in worktree. Harness discovery already ran, so no repair was attempted. Report this finding to the operator; do not run attachment repair commands from this session."
+_se_wt_msg=""
+case "${_se_worktree_warn:-}" in
+  WARN) _se_wt_msg="Trellis attachment is missing in this opted-in worktree. Harness discovery already ran, so no repair was attempted. Report this finding to the operator; do not run attachment repair commands from this session." ;;
+  UNCONFIRMED) _se_wt_msg="Trellis could not confirm the release integrity of this opted-in worktree: no current release stamp, and the full release verify is unavailable here. Report this finding to the operator; do not run attachment repair commands from this session." ;;
+esac
+if [ -n "$_se_wt_msg" ]; then
   CTX="${_se_wt_msg}
 
 ${CTX}"

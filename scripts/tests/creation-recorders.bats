@@ -40,6 +40,7 @@ install_recorder() {
     _attachment_hooks_dispatcher_common_body() {
       printf '%s\n' '#!/usr/bin/env bash' 'set -u' \
         'project_root="$PWD"; managed_dir="$PWD"' \
+        'trellis_enter_command_scratch() { :; }' \
         'trellis_read_sidecar() { printf "stub\n"; }' \
         'trellis_prior_hook() { return 0; }' \
         'trellis_managed_payload_file() { printf "/dev/null\n"; }' \

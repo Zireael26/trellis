@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 ZERO=0000000000000000000000000000000000000000
 
 setup() {
+  unset PG_PUSH_TEST_SCOPE
   REPO="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/repo"
   CAPTURE="$BATS_TEST_TMPDIR/runner.log"
   mkdir -p "$REPO"
@@ -22,6 +23,7 @@ setup() {
 # scenarios still assert exact single-line equality below. The hook refuses a
 # passing rc without exactly one Overall line in one verdict block.
 printf '%s\n' "$*" >> "$PROCESS_GATE_CAPTURE"
+printf '%s\n' "${PG_PUSH_TEST_SCOPE:-unset}" >> "$PROCESS_GATE_CAPTURE.scope"
 printf '## process-gate verdict (mode=push)\n\nOverall: MERGEABLE\n'
 exit 0
 SH
@@ -41,7 +43,7 @@ run_hook() {
   local hook="$1" lines="$2"
   shift 2
   printf '%s\n' "$lines" > "$BATS_TEST_TMPDIR/refs"
-  rm -f "$CAPTURE"
+  rm -f "$CAPTURE" "$CAPTURE.scope"
   run env PROCESS_GATE_CAPTURE="$CAPTURE" "$@" sh -c \
     'cd "$1" && sh "$2" origin https://example.invalid/repo.git < "$3"' \
     _ "$REPO" "$hook" "$BATS_TEST_TMPDIR/refs"
@@ -49,8 +51,12 @@ run_hook() {
 
 assert_args() {
   [ -f "$CAPTURE" ] || { printf 'runner never ran\n%s\n' "$output"; false; }
-  [ "$(cat "$CAPTURE")" = "$1" ] || {
-    printf 'expected: %s\nactual:   %s\n' "$1" "$(cat "$CAPTURE")"
+  local expected="$1"
+  if grep -q ' refs/tags/' "$BATS_TEST_TMPDIR/refs"; then
+    expected="${expected//--mode=push/--mode=push --tag-push}"
+  fi
+  [ "$(cat "$CAPTURE")" = "$expected" ] || {
+    printf 'expected: %s\nactual:   %s\n' "$expected" "$(cat "$CAPTURE")"
     false
   }
 }
@@ -68,9 +74,10 @@ for_each_hook() {
   old="$(snap old)"
   new="$(snap new)"
   check() {
-    run_hook "$1" "refs/heads/feature $new refs/heads/feature $old"
+    run_hook "$1" "refs/heads/feature $new refs/heads/feature $old" PG_PUSH_TEST_SCOPE=full
     [ "$status" -eq 0 ]
     assert_args "--mode=push --range=$old..$new"
+    [ "$(tail -n 1 "$CAPTURE.scope")" = branch ]
   }
   for_each_hook check
 }
@@ -191,9 +198,10 @@ refs/tags/v9.9.9 $new refs/tags/v9.9.9 $ZERO"
     [[ "$output" == *"Direct push to refs/heads/main blocked by Trellis policy"* ]]
     [ ! -f "$CAPTURE" ]
 
-    run_hook "$1" "refs/heads/main $new refs/heads/main $old" TRELLIS_ALLOW_MAIN_PUSH=1
+    run_hook "$1" "refs/heads/main $new refs/heads/main $old" TRELLIS_ALLOW_MAIN_PUSH=1 PG_PUSH_TEST_SCOPE=full
     [ "$status" -eq 0 ]
     assert_args "--mode=merge --range=$old..$new --target=main"
+    [ "$(tail -n 1 "$CAPTURE.scope")" = unset ]
   }
   for_each_hook check
 }
@@ -268,9 +276,10 @@ refs/heads/feature $new refs/heads/feature $old"
   git -C "$REPO" tag v1.2.3 "$tip"
   check() {
     run_hook "$1" "refs/tags/v1.2.3 $tip refs/tags/v1.2.3 $ZERO
-refs/heads/feature $tip refs/heads/feature $base"
+refs/heads/feature $tip refs/heads/feature $base" PG_PUSH_TEST_SCOPE=branch
     [ "$status" -eq 0 ] || return 1
     assert_args "--mode=push --range=$base..$tip" || return 1
+    [ "$(cat "$CAPTURE.scope")" = full ]
   }
   for_each_hook check || return 1
 }
@@ -283,9 +292,10 @@ refs/heads/feature $tip refs/heads/feature $base"
   git -C "$REPO" update-ref refs/remotes/origin/main "$tagsha"
   tagobject="$(git -C "$REPO" rev-parse v9.9.9)"
   check() {
-    run_hook "$1" "refs/tags/v9.9.9 $tagobject refs/tags/v9.9.9 $ZERO"
+    run_hook "$1" "refs/tags/v9.9.9 $tagobject refs/tags/v9.9.9 $ZERO" PG_PUSH_TEST_SCOPE=branch
     [ "$status" -eq 0 ] || return 1
     assert_args "--mode=push --range=$tagsha..$tagobject" || return 1
+    [ "$(cat "$CAPTURE.scope")" = full ]
   }
   for_each_hook check || return 1
 }
@@ -304,8 +314,8 @@ refs/tags/v2.0.0 $t2 refs/tags/v2.0.0 $ZERO"
     # The stub appends every invocation in push order: both tag ranges must
     # have been gated. Gating only the final tag (one line), a single union
     # range, or a bare push all fail this equality.
-    [ "$(cat "$CAPTURE")" = "--mode=push --range=$base..$t1
---mode=push --range=$base..$t2" ] || {
+    [ "$(cat "$CAPTURE")" = "--mode=push --tag-push --range=$base..$t1
+--mode=push --tag-push --range=$base..$t2" ] || {
       printf 'expected two gated ranges, got:\n%s\n' "$(cat "$CAPTURE")"
       return 1
     }

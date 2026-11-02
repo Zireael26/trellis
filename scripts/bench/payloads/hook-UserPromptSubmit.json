@@ -1,0 +1,8 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "fix the add function"
+}

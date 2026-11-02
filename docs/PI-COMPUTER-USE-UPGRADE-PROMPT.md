@@ -23,6 +23,6 @@ extension, patch, skill, MCP server and setting.
    offered. A session that was already running keeps its old tools until restart.
 
 Finish with the backup paths, the exact changes made, and the new tool list.
-For computer-use work from now on, use Codex CLI in a Herdr pane
-(`herdr agent start <name> --kind codex --pane <id> -- --search`) or Claude Code.
+For computer-use work from now on, use Codex CLI as an hc sub-agent
+(`hc run --bg --name <name> --cwd <dir> codex --no-daemon --search "<task>"`) or Claude Code.
 ```

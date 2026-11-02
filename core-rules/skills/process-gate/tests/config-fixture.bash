@@ -10,6 +10,7 @@
 # truncation) are what decide. Secret-shaped values are assembled at runtime.
 
 config_fixture_setup() {
+  unset PG_PUSH_TEST_SCOPE
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd -P)"
   STUB="$(mktemp -d "$BATS_TEST_TMPDIR/process-gate.XXXXXX")"

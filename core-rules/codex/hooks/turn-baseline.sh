@@ -8,6 +8,10 @@
 # baseline before the agent acts. stop-verify consumes the baseline at Stop; a
 # turn whose tree still matches every recorded line owes no DoD receipt.
 #
+# Incremental: fp-cache beside the baseline keeps each dirty file's blob id
+# under its stat identity, so only files that changed since the last
+# fingerprint are re-read (lib/deps.sh __se_fp_perl). The hash is unchanged.
+#
 # APPEND, never overwrite: a prompt submitted mid-turn adds a line instead of
 # replacing the turn-entry state, so it cannot launder an earlier edit.
 #
@@ -71,7 +75,7 @@ FILE="$STATE_DIR/$HARNESS.$KEY"
 ( umask 077 && mkdir -p "$STATE_DIR" ) 2>/dev/null || exit 0
 # The nonce goes to the hook-only log first; a baseline line whose nonce is not
 # in the log reads as unknown at Stop.
-if NONCE=$(_se_turn_nonce) && FP=$(_se_tree_fingerprint "$PROJECT_DIR") \
+if NONCE=$(_se_turn_nonce) && FP=$(_se_tree_fingerprint "$PROJECT_DIR" "$STATE_DIR/fp-cache") \
    && ( umask 077 && printf '%s %s\n' "$HARNESS.$KEY" "$NONCE" >> "$STATE_DIR/nonces.log" ) 2>/dev/null; then
   ( umask 077 && printf 'trellis-turn-baseline v2 %s %s\n' "$NONCE" "$FP" >> "$FILE" ) 2>/dev/null || rm -f "$FILE" 2>/dev/null
 else

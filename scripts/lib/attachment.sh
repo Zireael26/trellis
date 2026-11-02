@@ -7,6 +7,8 @@ if [ "${TRELLIS_LIBS_PRELOADED:-}" != 1 ]; then
   # Full detach commits clear their exact registry identity before owner unlink.
   # shellcheck source=scripts/lib/local-registry.sh
   source "$_ATTACHMENT_DIR/local-registry.sh"
+  # shellcheck source=scripts/lib/semver.sh
+  source "$_ATTACHMENT_DIR/semver.sh"
 fi
 
 # The BSD and GNU stat forms MUST be captured separately. GNU `stat -f` is
@@ -583,23 +585,242 @@ attachment_contextual_template_expected() {
     core-rules/templates/claude-settings.local.json)
       cat <<'JSON'
 [
-  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context claude \"$CLAUDE_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",1,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context claude \"$CLAUDE_PROJECT_DIR\""},
-  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index claude \"$CLAUDE_PROJECT_DIR\""}
+  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start claude \"$CLAUDE_PROJECT_DIR\""}
 ]
 JSON
       ;;
     core-rules/templates/codex-hooks.local.json)
       cat <<'JSON'
 [
-  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-context codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""},
-  {"path":["hooks","SessionStart",0,"hooks",1,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook post-compact-context codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""},
-  {"path":["hooks","SessionStart",0,"hooks",2,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook inject-primer-index codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""}
+  {"path":["hooks","SessionStart",0,"hooks",0,"command"],"command":"/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""}
 ]
 JSON
       ;;
     *) printf '[]\n' ;;
   esac
+}
+
+# The installed Claude Code version: X.Y.Z, nothing when `claude --version`
+# gives none, status 1 when no claude is found. The launcher runs attach and
+# doctor under the control PATH and forwards the caller's PATH as
+# TRELLIS_ATTACH_CALLER_PATH, so that is searched first.
+attachment_claude_code_version() {
+  local dir claude="" saved_ifs="$IFS"
+  IFS=:
+  for dir in ${TRELLIS_ATTACH_CALLER_PATH:-} ${PATH:-}; do
+    case "$dir" in /*) ;; *) continue ;; esac
+    if [ -f "$dir/claude" ] && [ -x "$dir/claude" ]; then
+      claude="$dir/claude"
+      break
+    fi
+  done
+  IFS="$saved_ifs"
+  [ -n "$claude" ] || return 1
+  # perl comes from the control PATH; the CLI gets the caller's, so a
+  # `#!/usr/bin/env node` claude finds the runtime installed beside it.
+  perl -e '$ENV{PATH} = shift; alarm shift; exec @ARGV' \
+    "${TRELLIS_ATTACH_CALLER_PATH:-$PATH}" 10 "$claude" --version </dev/null 2>/dev/null |
+    head -n 1 | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
+# Claude Code 2.1.295 added the hook `onFailure` key; exec-form hooks
+# (`command` + `args`) are older, but one floor keeps this simple. At or above
+# it the Claude settings render is the template: exec form, onFailure on the
+# guards. Below it, or when the version cannot be read, every hook outside
+# SessionStart is the pre-exec shell-form wiring below, byte for byte, and the
+# guard supervisor alone fails closed.
+ATTACHMENT_CLAUDE_ON_FAILURE_VERSION=2.1.295
+attachment_claude_on_failure_supported() {
+  local version
+  version="$(attachment_claude_code_version)" || return 1
+  [ -n "$version" ] || return 1
+  [ "$(semver_compare "$version" "$ATTACHMENT_CLAUDE_ON_FAILURE_VERSION")" != -1 ]
+}
+
+# The shell-form `.hooks` of claude-settings.local.json before exec form,
+# SessionStart excluded (that stays the template's contextual entries).
+attachment_claude_legacy_hooks() {
+  cat <<'JSON'
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" /bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl\" claude block-destructive \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/block-destructive.sh\"",
+          "timeout": 30,
+          "statusMessage": "Checking command safety..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/pr-gate-shiftleft.sh\"",
+          "timeout": 120,
+          "statusMessage": "Running PR process-gate pre-flight..."
+        }
+      ]
+    },
+    {
+      "matcher": "Skill",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" /bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl\" claude skill-preload-guard \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/skill-preload-guard.sh\"",
+          "timeout": 30,
+          "statusMessage": "Checking Skill pre-load size..."
+        }
+      ]
+    },
+    {
+      "matcher": "Edit|MultiEdit|Write",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" /bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0' guard-supervise \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl\" claude reread-guard \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/reread-guard.sh\"",
+          "timeout": 30,
+          "statusMessage": "Re-read guard..."
+        }
+      ]
+    }
+  ],
+  "UserPromptExpansion": [
+    {
+      "matcher": ".*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/skill-slash-guard.sh\"",
+          "timeout": 5,
+          "statusMessage": "Checking slash-command Skill size..."
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/turn-baseline.sh\"",
+          "timeout": 10,
+          "statusMessage": "Recording turn baseline..."
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/post-edit-verify.sh\"",
+          "timeout": 120,
+          "statusMessage": "Verifying edit..."
+        }
+      ]
+    },
+    {
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/slop-tripwire.sh\"",
+          "timeout": 5,
+          "statusMessage": "Checking evidence doctrine..."
+        }
+      ]
+    },
+    {
+      "matcher": "Read|Write|Edit|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/track-read.sh\"",
+          "timeout": 5,
+          "statusMessage": "Recording reads..."
+        }
+      ]
+    },
+    {
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/wiki-skill-suggest.sh\"",
+          "timeout": 5,
+          "statusMessage": "Suggesting wiki maintenance..."
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "h=\"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/hookspath-guard.sh\"; [ -f \"$h\" ] || exit 0; TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$h\"",
+          "timeout": 10,
+          "statusMessage": "Checking git hooks path..."
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/save-context-log.sh\"",
+          "timeout": 10,
+          "statusMessage": "Saving session context..."
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/spec-gate.sh\"",
+          "timeout": 15,
+          "statusMessage": "Checking spec-gate..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/decision-receipt.sh\"",
+          "timeout": 15,
+          "statusMessage": "Checking decision receipts..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/stop-verify.sh\"",
+          "timeout": 300,
+          "statusMessage": "Running final verification..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/code-review-subagent.sh\"",
+          "timeout": 120,
+          "statusMessage": "Code review on diff..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/ui-verify.sh\"",
+          "timeout": 120,
+          "statusMessage": "UI verification..."
+        },
+        {
+          "type": "command",
+          "command": "TRELLIS_ROOT=\"$CLAUDE_PROJECT_DIR/.trellis/runtime\" \"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/stamp-turn.sh\"",
+          "timeout": 5,
+          "statusMessage": "Stamping turn..."
+        }
+      ]
+    }
+  ]
+}
+JSON
 }
 
 attachment_contextual_render_required() {
@@ -618,8 +839,12 @@ attachment_contextual_render_required() {
 
 attachment_contextual_template_render() {
   local source=$1 template=$2 context=$3 expected user_home trellis_home launcher
-  local user_home_shell trellis_home_shell launcher_shell
+  local user_home_shell trellis_home_shell launcher_shell legacy_hooks=null
   expected="$(attachment_contextual_template_expected "$template")" || return "$TRELLIS_EX_STATE"
+  if [ "$template" = core-rules/templates/claude-settings.local.json ] &&
+     ! attachment_claude_on_failure_supported; then
+    legacy_hooks="$(attachment_claude_legacy_hooks)"
+  fi
   if [ "$(printf '%s\n' "$expected" | jq 'length')" -eq 0 ]; then
     jq -e \
       --arg user_home_marker '__TRELLIS_USER_HOME__' \
@@ -684,6 +909,7 @@ attachment_contextual_template_render() {
     --arg user_home_shell "$user_home_shell" \
     --arg trellis_home_shell "$trellis_home_shell" \
     --arg launcher_shell "$launcher_shell" \
+    --argjson legacy_hooks "$legacy_hooks" \
     --argjson expected "$expected" '
       def contextual_command:
         split("__TRELLIS_USER_HOME__") | join($user_home_shell)
@@ -691,6 +917,7 @@ attachment_contextual_template_render() {
         | split("__TRELLIS_LAUNCHER__") | join($launcher_shell);
       reduce $expected[] as $entry (.;
         setpath($entry.path; ($entry.command | contextual_command)))
+      | if $legacy_hooks == null then . else .hooks = $legacy_hooks + {SessionStart: .hooks.SessionStart} end
     ' "$source"
 }
 
@@ -790,6 +1017,83 @@ _attachment_hooks_is_passthrough_name() {
     applypatch-msg|commit-msg|fsmonitor-watchman|p4-changelist|p4-post-changelist|p4-pre-submit|p4-prepare-changelist|post-applypatch|post-commit|post-index-change|post-merge|post-receive|post-rewrite|post-update|pre-applypatch|pre-auto-gc|pre-commit|pre-merge-commit|pre-rebase|pre-receive|prepare-commit-msg|proc-receive|push-to-checkout|reference-transaction|sendemail-validate|update) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# The names _attachment_hooks_is_passthrough_name accepts, one per line. The
+# hook digest memo records a shim digest for each; a test keeps the two equal.
+_attachment_hooks_passthrough_names() {
+  printf '%s\n' applypatch-msg commit-msg fsmonitor-watchman p4-changelist p4-post-changelist \
+    p4-pre-submit p4-prepare-changelist post-applypatch post-commit post-index-change post-merge \
+    post-receive post-rewrite post-update pre-applypatch pre-auto-gc pre-commit pre-merge-commit \
+    pre-rebase pre-receive prepare-commit-msg proc-receive push-to-checkout reference-transaction \
+    sendemail-validate update
+}
+
+# Hook digest memo (spec 072 T8): the sha256 of every managed hook file this
+# release generates for one pre-push source, both dispatchers and the shim of
+# each pass-through name, so the post-checkout fast path compares installed
+# bytes instead of regenerating them. Content-addressed as
+# state/hook-digests/<release manifest sha256>-<sha256 of the source>.json
+# (0600 in 0700), so a changed input is another memo, never a stale one. Only
+# a verified attach writes it, and from the generator, not the installed
+# files. The owner record vouches for what it binds: the fast path takes a
+# memo only for the owner's release payload and pre-push source and for the
+# manifest the stamped release.json has. A missing or mismatched memo is a
+# fast-path miss.
+_attachment_hooks_digest_memo_py() {
+  LC_ALL=C python3 -I -c '
+import hashlib, json, os, stat, sys
+home, payload, manifest, source, folder = sys.argv[1:6]
+directory = home + "/state/hook-digests"
+name = manifest + "-" + hashlib.sha256(source.encode()).hexdigest() + ".json"
+def digest(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+def private(path, kind, mode):
+    info = os.lstat(path)
+    if not kind(info.st_mode) or stat.S_IMODE(info.st_mode) != mode or info.st_uid != os.geteuid():
+        sys.exit(1)
+private(directory, stat.S_ISDIR, 0o700)
+memo = {"schema_version": 1, "manifest_sha256": manifest, "payload": payload, "pre_push_source": source,
+        "post_checkout": digest(folder + "/post-checkout"), "pre_push": digest(folder + "/pre-push"),
+        "shims": dict((entry, digest(folder + "/shims/" + entry)) for entry in os.listdir(folder + "/shims"))}
+data = (json.dumps(memo, sort_keys=True) + "\n").encode()
+temporary = "%s/.%s.%s.tmp" % (directory, name, os.urandom(8).hex())
+out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+try:
+    os.fchmod(out, 0o600)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(out, view):]
+    os.close(out)
+    os.replace(temporary, directory + "/" + name)
+except BaseException:
+    os.unlink(temporary)
+    raise
+' "$@" 2>/dev/null
+}
+
+# Records the memo for <payload> <manifest> <source>, rebuilt from the
+# generator every time. Callers run it only after verifying the installed hook
+# set; <manifest> is the release manifest sha256 the dispatchers embed.
+_attachment_hooks_digest_memo_write() {
+  local home=$1 payload=$2 manifest=$3 source=$4 work name body rc=0
+  _attachment_ensure_private_dir "$home/state/hook-digests" || return 1
+  work="$(mktemp -d "${TMPDIR:-/tmp}/trellis-hook-digests.XXXXXX")" || return 1
+  mkdir "$work/shims" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    body="$(_attachment_hooks_post_checkout_dispatcher_body "$payload" "$manifest")" && [ -n "$body" ] &&
+      printf '%s\n' "$body" > "$work/post-checkout" &&
+      body="$(_attachment_hooks_pre_push_dispatcher_body "$payload" "$source" "$manifest")" && [ -n "$body" ] &&
+      printf '%s\n' "$body" > "$work/pre-push" || rc=1
+  fi
+  for name in $(_attachment_hooks_passthrough_names); do
+    [ "$rc" -eq 0 ] || break
+    body="$(_attachment_hooks_passthrough_shim_body "$name")" && printf '%s\n' "$body" > "$work/shims/$name" || rc=1
+  done
+  [ "$rc" -ne 0 ] || _attachment_hooks_digest_memo_py "$home" "$payload" "$manifest" "$source" "$work" || rc=1
+  rm -rf "$work"
+  return "$rc"
 }
 
 # Deterministic pass-through shim for one previous project hook. Mirrors the
@@ -1096,11 +1400,36 @@ _attachment_command_scratch_emitters() {
   printf '%s\n%s\n' "$create" "$remove"
 }
 
+# The release stamp program (release_stamp.py beside this library), emitted as
+# a function that prints it. The dispatcher checks a payload before trusting
+# any file in it, so it carries the program rather than running the payload's
+# copy. Refuses a program with a single quote, which would end the wrapper.
+_attachment_release_stamp_emitter() {
+  local library="" program="" text=""
+  library="$(_attachment_library_source)" || return 1
+  program="${library%/*}/release_stamp.py"
+  [ -f "$program" ] && [ ! -L "$program" ] || return 1
+  text="$(cat "$program")" || return 1
+  [ -n "$text" ] || return 1
+  case "$text" in *"'"*) return 1 ;; esac
+  text="trellis_release_stamp_program() {
+  printf '%s' '$text
+'
+}"
+  printf '%s\n' "$text" | /bin/bash --noprofile --norc -n || return 1
+  printf '%s\n' "$text"
+}
+
+# A fourth argument "post-checkout" leaves out what only pre-push uses (the
+# gate environment list) and wraps the private scratch allocation in
+# trellis_enter_command_scratch, so a file checkout can run the prior hook and
+# exit before it; the post-checkout body calls it for everything else.
 _attachment_hooks_dispatcher_common_body() {
-  local payload=${1:-} source=${2:-} manifest_sha256=${3:-} emitters="" library="" predicate=""
+  local payload=${1:-} source=${2:-} manifest_sha256=${3:-} kind=${4:-} emitters="" library="" predicate="" stamp=""
   emitters="$(_attachment_command_scratch_emitters)" || return 1
   library="$(_attachment_library_source)" || return 1
   predicate="$(_attachment_extract_shell_function "$library" trellis_toolchain_control_only)" || return 1
+  stamp="$(_attachment_release_stamp_emitter)" || return 1
   cat <<'EOF'
 #!/bin/bash -p
 caller_path=${PATH-}
@@ -1236,11 +1565,17 @@ if [ "$caller_docker_host_set" != x ] && [ "${DOCKER_CONTEXT+x}" = x ]; then
       "$(printf '%s' "$DOCKER_CONTEXT" | LC_ALL=C /usr/bin/tr '[:cntrl:]' '?')" >&2
   fi
 fi
+EOF
+  if [ "$kind" != post-checkout ]; then
+    cat <<'EOF'
 trellis_env_project_root="$(CDPATH='' cd . && pwd -P)" || exit 1
 if ! trellis_collect_gate_env "$trellis_env_project_root"; then
   caller_gate_env=()
   printf 'trellis gate: refused (env-passthrough): invalid protected gate environment list\n' >&2
 fi
+EOF
+  fi
+  cat <<'EOF'
 exec /usr/bin/env -i \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   HOME=/dev/null \
@@ -1367,6 +1702,9 @@ trellis_cleanup_command_scratch() {
   return 0
 }
 
+EOF
+  [ "$kind" != post-checkout ] || printf 'trellis_enter_command_scratch() {\n'
+  cat <<'EOF'
 trellis_derive_command_scratch "$managed_home" || {
   printf 'trellis managed hook: could not create a private command scratch directory under %s\n' \
     "$managed_home" >&2
@@ -1381,6 +1719,9 @@ TMP="$TMPDIR"
 TEMP="$TMPDIR"
 export TMPDIR TMP TEMP
 readonly TMPDIR TMP TEMP
+EOF
+  [ "$kind" != post-checkout ] || printf '}\n'
+  cat <<'EOF'
 # trellis-command-scratch-end
 # trellis-gate-xdg-begin
 # Writable XDG dirs for node toolchains (corepack/pnpm) under managed state,
@@ -1403,6 +1744,7 @@ EOF
   printf 'expected_payload=%q\n' "$payload"
   printf 'expected_pre_push_source=%q\n' "$source"
   printf 'expected_release_manifest_sha256=%q\n' "$manifest_sha256"
+  printf '%s\n' "$stamp"
   cat <<'EOF'
 
 trellis_read_sidecar() {
@@ -1736,12 +2078,39 @@ trellis_verify_release_anchor() {
   done
 }
 
-trellis_verify_release() (
+# Spec 072 D-A: the release stamp (release_stamp.py, carried above) is a stat
+# manifest with ctime of a release a full verify passed, under
+# state/release-stamps. "check" passes only when every entry is unchanged since;
+# any change, or an absent, unreadable or foreign stamp, falls back to the full
+# verify, and "write" follows only that verify's success. Every call sweeps
+# afresh, so no verdict crosses the pre-push prior-hook boundary. A hit is exit
+# 0 with the program's "hit" line, so a python3 that exits 0 without running
+# the program is a miss.
+trellis_release_stamp() {
+  local python_bin="" program=""
+  python_bin="$(command -v python3)" || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  program="$(trellis_release_stamp_program)" || return 1
+  LC_ALL=C "$python_bin" -I -c "$program" "$@" 2>/dev/null
+}
+
+trellis_verify_release() {
+  local payload="${1:-}" token=""
+  trellis_verify_release_anchor "$payload" || return 1
+  if token="$(trellis_release_stamp check "$managed_home" "${payload%/payload}")" && [ "$token" = hit ]; then
+    return 0
+  fi
+  trellis_verify_release_tree "$payload" || return 1
+  # Best effort: an unwritten stamp only means the next call verifies in full.
+  trellis_release_stamp write "$managed_home" "${payload%/payload}" "$token" >/dev/null || :
+}
+
+# The full per-file verify, after the anchor.
+trellis_verify_release_tree() (
   local payload="${1:-}" release_dir="" release_json="" version=""
   local tmpdir="" manifest_paths="" manifest_dirs="" actual_paths="" actual_dirs=""
   local mode="" oid="" path="" full="" parent="" actual_mode="" actual_oid="" target="" rel=""
 
-  trellis_verify_release_anchor "$payload" || return 1
   release_dir="${payload%/payload}"
   version="${release_dir##*/}"
   release_json="$release_dir/release.json"
@@ -1819,12 +2188,17 @@ trellis_verify_release() (
 # names another release, since seed-inheritance-symlinks.sh still sources this
 # payload's attach-project.sh. That attach can take the donor fast path
 # (attach-fastpath.py, which loads release-executed.py) and starts
-# attach-postjob.sh, which sources health-checks.sh and disk-janitor-agents.sh,
-# so those are listed too. A listed file the release lacks refuses. The rest of
-# the payload stays covered by that reconcile verify, by pre-push (its carriers
-# keep trellis_verify_release) and by doctor.
+# attach-postjob.sh, which sources health-checks.sh, disk-janitor-agents.sh and
+# release-stamp.sh (which runs release_stamp.py), so those are listed too. A
+# listed file the release lacks refuses. The rest of the payload stays covered
+# by that reconcile verify, by pre-push (its carriers keep
+# trellis_verify_release) and by doctor. A release stamp left by a full verify
+# and unchanged since covers every listed file, so it skips the content check
+# below; the no-link and ACL checks still run. A second argument "stamped"
+# refuses instead of falling back to the content check, for a caller that needs
+# the whole release proved unchanged.
 trellis_verify_release_executed() {
-  local payload="${1:-}" release_dir="" python_bin="" program="" permissions="" path=""
+  local payload="${1:-}" mode="${2:-}" release_dir="" python_bin="" program="" permissions="" path="" stamp=""
   local -a paths=(
     scripts/seed-inheritance-symlinks.sh
     scripts/lib/trellis-home.sh
@@ -1848,22 +2222,36 @@ trellis_verify_release_executed() {
     scripts/lib/disk-janitor-lib.sh
     scripts/lib/disk-janitor-dehydrate.sh
     scripts/lib/disk-janitor-host.sh
+    scripts/lib/release_tmp.py
+    scripts/lib/release-stamp.sh
+    scripts/lib/release_stamp.py
   )
   local -a listed=("$payload/scripts" "$payload/scripts/lib")
 
   trellis_verify_release_anchor "$payload" || return 1
   release_dir="${payload%/payload}"
+  # A full verify accepts links in a release, so a stamp does not prove the
+  # rule python enforces here: real directories and regular files, no links.
+  for path in "${listed[@]}"; do
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  done
   for path in "${paths[@]}"; do
+    [ -f "$payload/$path" ] && [ ! -L "$payload/$path" ] || return 1
     listed+=("$payload/$path")
   done
   # One ls refuses any ACL; python checks the rest. On macOS the "@" an xattr
   # puts after the mode hides the "+" of an ACL, so list the ACL entries
   # themselves with -e (one " 0: user:... allow write" line each). Where ls has
-  # no -e (GNU), the mode column's "+" is reliable.
+  # no -e (GNU), the mode column's "+" is reliable. This runs on every call:
+  # the full verify behind a stamp reads ACLs only through that hidden "+".
   permissions="$(LC_ALL=C /bin/ls -lde -- "${listed[@]}" 2>/dev/null)" ||
     permissions="$(LC_ALL=C /bin/ls -ld -- "${listed[@]}" 2>/dev/null)" || return 1
   printf '%s\n' "$permissions" |
     /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }' || return 1
+  if stamp="$(trellis_release_stamp check "$managed_home" "$release_dir")" && [ "$stamp" = hit ]; then
+    return 0
+  fi
+  [ "$mode" != stamped ] || return 1
   python_bin="$(command -v python3)" || return 1
   case "$python_bin" in /*) ;; *) return 1 ;; esac
   program="$(trellis_verify_executed_program)" || return 1
@@ -2234,7 +2622,7 @@ esac
 
 _attachment_hooks_post_checkout_dispatcher_body_in_process() {
   # A failed common body must not be hidden by the successful cat that follows.
-  _attachment_hooks_dispatcher_common_body "${1:-}" "" "${2:-}" || return "$?"
+  _attachment_hooks_dispatcher_common_body "${1:-}" "" "${2:-}" post-checkout || return "$?"
   cat <<'EOF'
 # trellis-diff-base-creation-recorder-v1 (spec 067 T10; delivery marker)
 trellis_record_creation_base() {
@@ -2288,8 +2676,224 @@ trellis_record_creation_base() {
   git -C "$project_root" config --local "branch.$branch.trellisSource" post-checkout || return 1
   git -C "$project_root" config --local "branch.$branch.trellisParent" "$parent" || return 1
 }
-if ! trellis_record_creation_base "$@"; then
-  printf 'trellis post-checkout: warning: could not record branch creation base; use diff-base.sh set <parent>.\n' >&2
+# Spec 072 U5: a branch checkout needs no reconcile when this worktree is
+# already attached to the verified release and nothing the reconcile checks
+# has moved. Each check is O(1) in the release:
+# - no pending adoption;
+# - the two commits differ in neither .trellis.json nor an owned path, a path
+#   below one or an ancestor of one (Git replaces ignored files), compared
+#   case-folded, and any name Git quotes (non-ASCII, so any Unicode
+#   normalization variant, or a control character) counts as a change;
+#   .trellis.json has no staged, unstaged or untracked change either;
+# - the recorded payload is the one this dispatcher carries: anchor, ACLs of the
+#   files it executes, and its release stamp unchanged since a full verify;
+# - the committed owner record names the runtime link to that payload and the
+#   project id .trellis.json declares, and every owned artifact on disk matches
+#   it: each link its target, each file its mode and digest (a render: its
+#   owned keys, equal as jq compares JSON), each recorded parent and every
+#   ancestor a real directory;
+# - each sidecar is the owner record's value and the release manifest is the
+#   stamped release.json's, and the managed hook set is what this release
+#   generates, as the hook digest memo a verified attach recorded it: both
+#   dispatchers and the shims the predecessor calls for byte for byte, no
+#   other file, the modes, and core.hooksPath naming it.
+# A new worktree (old HEAD all zeros) has no owner yet. Any miss takes the full
+# reconcile.
+trellis_worktree_current() {
+  local old="${1:-}" new="${2:-}" payload="" common="" checkout="" worktree="" owner=""
+  local owned="" changed="" manifest=""
+  case "$old:$new" in *[!0-9a-f:]*|:*|*:) return 1 ;; esac
+  case "$old" in *[!0]*) ;; *) return 1 ;; esac
+  payload="$(trellis_read_sidecar "$managed_dir/release-payload")" || return 1
+  common="$(/usr/bin/git -C "$project_root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common" in /*) ;; *) common="$project_root/$common" ;; esac
+  common="$(CDPATH= cd "$common" && pwd -P)" || return 1
+  checkout="$(trellis_hash_text "$common")" || return 1
+  worktree="$(trellis_hash_text "$project_root")" || return 1
+  [ ! -e "$managed_home/state/release-adoptions/$checkout" ] &&
+    [ ! -L "$managed_home/state/release-adoptions/$checkout" ] || return 1
+  owner="$managed_home/state/attachments/$checkout/$worktree.json"
+  [ -f "$owner" ] && [ ! -L "$owner" ] && [ "$(trellis_mode "$owner")" = 600 ] || return 1
+  changed="$(/usr/bin/git -C "$project_root" diff --name-only --no-renames "$old" "$new" -- 2>/dev/null)" ||
+    return 1
+  manifest="$(/usr/bin/git -C "$project_root" status --porcelain --untracked-files=all -- .trellis.json 2>/dev/null)" ||
+    return 1
+  [ -z "$manifest" ] || return 1
+  trellis_verify_release_executed "$payload" stamped || return 1
+  owned="$(LC_ALL=C python3 -I -c '
+import decimal, hashlib, json, os, stat, subprocess, sys
+root, payload, managed, record, managed_home, manifest = sys.argv[1:7]
+def constant(name):
+    raise ValueError(name)
+def load(data):
+    return json.loads(data, parse_float=decimal.Decimal, parse_constant=constant)
+# JSON equality as jq judges it, or stricter: a Boolean is never a number, and
+# numbers compare exactly.
+def same(left, right):
+    if isinstance(left, bool) or isinstance(right, bool) or left is None or right is None:
+        return left is right
+    if isinstance(left, (int, decimal.Decimal)) and isinstance(right, (int, decimal.Decimal)):
+        return left == right
+    if isinstance(left, str) and isinstance(right, str):
+        return left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(same(a, b) for a, b in zip(left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(same(left[key], right[key]) for key in left)
+    return False
+with open(record, "rb") as handle:
+    owner = load(handle.read())
+with open(root + "/.trellis.json", "rb") as handle:
+    declared = json.load(handle)
+hooks = owner["git_hooks"]
+runtime = [item for item in owner["artifacts"] if item["path"] == ".trellis/runtime"]
+if (owner["status"] != "committed" or owner["project_root"] != root
+        or owner["worktree_root"] != root or declared["project_id"] != owner["project_id"]
+        or len(runtime) != 1 or runtime[0]["kind"] != "symlink" or runtime[0]["target"] != payload):
+    sys.exit(1)
+# The hook state the owner record names, as _attachment_hooks_state_owned_matches
+# compares it: the managed path, every sidecar, and the release manifest the
+# dispatchers were generated from.
+def sidecar(name, allow_empty=False):
+    path = managed + "/" + name
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        sys.exit(1)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    line = data[:-1] if data.endswith(b"\n") else data
+    if not data or b"\n" in line or any(byte < 32 or byte == 127 for byte in line) or not (line or allow_empty):
+        sys.exit(1)
+    return line.decode("utf-8")
+release = managed_home + "/releases/" + owner["release"]
+previous = sidecar("previous-hooks-path", True)
+if (hooks["enabled"] is not True or hooks["managed_hooks_path"] != managed
+        or managed != managed_home + "/state/git-hooks/" + owner["checkout_id"]
+        or previous != (hooks["previous_hooks_path"] or "") or previous == managed
+        or sidecar("release-payload") != release + "/payload" or release + "/payload" != payload
+        or sidecar("pre-push-source") != hooks["pre_push_source"]):
+    sys.exit(1)
+release += "/release.json"
+if os.path.realpath(release) != release or not stat.S_ISREG(os.lstat(release).st_mode):
+    sys.exit(1)
+with open(release, "rb") as handle:
+    if hashlib.sha256(handle.read()).hexdigest() != manifest:
+        sys.exit(1)
+# The managed hook set against the hook digest memo for this manifest and
+# source: both dispatchers and every shim byte for byte, the modes, exactly the
+# shims the predecessor calls for, and core.hooksPath naming the managed dir.
+def private(path, kind, mode):
+    info = os.lstat(path)
+    if not kind(info.st_mode) or stat.S_IMODE(info.st_mode) != mode or info.st_uid != os.geteuid():
+        sys.exit(1)
+def digest(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+source = hooks["pre_push_source"]
+memo = managed_home + "/state/hook-digests/" + manifest + "-" + hashlib.sha256(source.encode()).hexdigest() + ".json"
+# Fail closed: a real 0700 directory and a regular 0600 file of this uid,
+# opened without following a link, at most 64 KiB, with exactly these keys.
+private(memo.rsplit("/", 1)[0], stat.S_ISDIR, 0o700)
+handle = os.open(memo, os.O_RDONLY | os.O_NOFOLLOW)
+info = os.fstat(handle)
+if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
+    sys.exit(1)
+data = os.read(handle, 65537)
+os.close(handle)
+memo = json.loads(data.decode("utf-8"), parse_constant=constant)
+def is_sha(value):
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+if (len(data) > 65536 or not isinstance(memo, dict) or sorted(memo) != ["manifest_sha256", "payload",
+        "post_checkout", "pre_push", "pre_push_source", "schema_version", "shims"]
+        or type(memo["schema_version"]) is not int or memo["schema_version"] != 1 or memo["manifest_sha256"] != manifest or memo["payload"] != payload
+        or memo["pre_push_source"] != source or not is_sha(memo["post_checkout"]) or not is_sha(memo["pre_push"])
+        or not isinstance(memo["shims"], dict) or not all(is_sha(value) for value in memo["shims"].values())
+        or source not in ("core-rules/githooks/pre-push", "core-rules/husky/pre-push")
+        or os.path.realpath(managed) != managed):
+    sys.exit(1)
+shims = memo["shims"]
+private(managed, stat.S_ISDIR, 0o700)
+private(managed.rsplit("/", 1)[0], stat.S_ISDIR, 0o700)
+wanted = {"post-checkout": memo["post_checkout"], "pre-push": memo["pre_push"]}
+if previous:
+    folder = previous if previous.startswith("/") else root + "/" + previous
+    if os.path.isdir(folder):
+        for name in os.listdir(folder):
+            entry = folder + "/" + name
+            if name in shims and (os.path.isfile(entry) or os.path.islink(entry)) and os.access(entry, os.X_OK):
+                wanted[name] = shims[name]
+sidecars = ("previous-hooks-path", "release-payload", "pre-push-source")
+if set(os.listdir(managed)) != set(wanted) | set(sidecars):
+    sys.exit(1)
+for name in sidecars:
+    private(managed + "/" + name, stat.S_ISREG, 0o600)
+for name in wanted:
+    private(managed + "/" + name, stat.S_ISREG, 0o700)
+    if digest(managed + "/" + name) != wanted[name]:
+        sys.exit(1)
+def hooks_path(*scope):
+    found = subprocess.run(("/usr/bin/git", "-C", root, "config") + scope + ("core.hooksPath",),
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return found.returncode == 0 and found.stdout == (managed + "\n").encode()
+if not (hooks_path("--local", "--get-all") and hooks_path("--get")):
+    sys.exit(1)
+renders = dict((item["path"], item) for item in owner.get("renders") or [])
+for item in owner["artifacts"]:
+    path = root
+    for part in item["path"].split("/")[:-1]:
+        path += "/" + part
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            sys.exit(1)
+    path = root + "/" + item["path"]
+    info = os.lstat(path)
+    if item["kind"] == "symlink":
+        exact = stat.S_ISLNK(info.st_mode) and os.readlink(path) == item["target"]
+    elif item["kind"] == "parent":
+        exact = stat.S_ISDIR(info.st_mode)
+    elif item["kind"] == "file":
+        exact = stat.S_ISREG(info.st_mode) and "%04o" % stat.S_IMODE(info.st_mode) == item["mode"]
+        if exact:
+            with open(path, "rb") as handle:
+                data = handle.read()
+            render = renders.get(item["path"])
+            if render is None:
+                exact = hashlib.sha256(data).hexdigest() == item["sha256"]
+            else:
+                current = load(data.decode("utf-8"))
+                exact = isinstance(current, dict) and "%04o" % stat.S_IMODE(info.st_mode) == render["after_mode"]
+                for key in render["owned_keys"]:
+                    value = current
+                    for part in key["path"]:
+                        if not exact or not isinstance(value, dict) or part not in value:
+                            exact = False
+                            break
+                        value = value[part]
+                    exact = exact and same(value, key["value"])
+    else:
+        exact = False
+    if not exact:
+        sys.exit(1)
+    print(item["path"])
+' "$project_root" "$payload" "$managed_dir" "$owner" "$managed_home" \
+    "$expected_release_manifest_sha256" 2>/dev/null)" || return 1
+  if [ -n "$changed" ]; then
+    printf '%s\n' "$owned" "" "$changed" | /usr/bin/awk '
+      !sep && $0 == "" { sep = 1; next }
+      { $0 = tolower($0) }
+      !sep { owned[$0] = 1; up = $0; while (sub(/\/[^\/]*$/, "", up)) above[up] = 1; next }
+      $0 == ".trellis.json" || substr($0, 1, 1) == "\"" || ($0 in owned) || ($0 in above) { exit 1 }
+      { up = $0; while (sub(/\/[^\/]*$/, "", up)) if (up in owned) exit 1 }
+    ' || return 1
+  fi
+}
+# Git passes 0 as the third argument for a file checkout (`git checkout --
+# <path>`, `git restore`). It changes no branch and adds no worktree, so only
+# the prior hook runs, before the private scratch exists: nothing on that path
+# allocates a temporary. A branch switch, a rebase and a new worktree pass 1.
+if [ "${3:-}" != 0 ]; then
+  trellis_enter_command_scratch
+  if ! trellis_record_creation_base "$@"; then
+    printf 'trellis post-checkout: warning: could not record branch creation base; use diff-base.sh set <parent>.\n' >&2
+  fi
 fi
 previous="$(trellis_read_sidecar "$managed_dir/previous-hooks-path" true)" || exit 1
 prior_status=0
@@ -2298,10 +2902,7 @@ if [ -n "$prior_hook" ] && { [ -f "$prior_hook" ] || [ -L "$prior_hook" ]; } && 
   trellis_run_prior_hook "$prior_hook" "$@"
   prior_status=$?
 fi
-# Git passes 0 as the third argument for a file checkout (`git checkout --
-# <path>`, `git restore`). It changes no branch and adds no worktree, so only
-# the prior hook runs. A branch switch, a rebase and a new worktree pass 1.
-if [ "${3:-}" = 0 ]; then
+if [ "${3:-}" = 0 ] || trellis_worktree_current "$@"; then
   exit "$prior_status"
 fi
 reconcile_status=0
@@ -2674,7 +3275,7 @@ _attachment_validate_collisions() {
 _attachment_parent_safe() {
   local root=$1 relative=$2 parent current part
   local -a parts
-  parent=$(dirname "$relative") || return 1
+  parent=$(dirname -- "$relative") || return 1
   [ "$parent" != . ] || return 0
   current=$root
   IFS=/ read -r -a parts <<< "$parent"
@@ -2687,14 +3288,11 @@ _attachment_parent_safe() {
 }
 
 _attachment_validate_planned_parents() {
-  local plan=$1 root artifact path parent current part relative index kind destination
-  local -a parts
+  local plan=$1 root path parent current part relative kind destination planned found
+  local -a parts planned_parents=()
   root=$(printf '%s\n' "$plan" | jq -r '.worktree_root') || return 2
-  index=0
-  while IFS= read -r artifact; do
-    path=$(printf '%s\n' "$artifact" | jq -r '.path') || return 2
-    kind=$(printf '%s\n' "$artifact" | jq -r '.kind') || return 2
-    parent=$(dirname "$path") || return 2
+  while IFS= read -r -d '' path && IFS= read -r -d '' kind; do
+    parent=$(dirname -- "$path") || return 2
     if [ "$parent" != . ]; then
       current=$root
       relative=
@@ -2706,8 +3304,11 @@ _attachment_validate_planned_parents() {
         if [ -e "$current" ] || [ -L "$current" ]; then
           [ -d "$current" ] && [ ! -L "$current" ] || return 3
         else
-          printf '%s\n' "$plan" | jq -e --arg path "$relative" --argjson index "$index" \
-            'any(.artifacts[0:$index][]; .kind == "parent" and .path == $path)' >/dev/null 2>&1 || return 2
+          found=false
+          for planned in "${planned_parents[@]+"${planned_parents[@]}"}"; do
+            [ "$planned" != "$relative" ] || { found=true; break; }
+          done
+          [ "$found" = true ] || return 2
         fi
       done
     fi
@@ -2715,8 +3316,8 @@ _attachment_validate_planned_parents() {
     if [ "$kind" = parent ] && { [ -e "$destination" ] || [ -L "$destination" ]; }; then
       [ -d "$destination" ] && [ ! -L "$destination" ] || return 3
     fi
-    index=$((index + 1))
-  done < <(printf '%s\n' "$plan" | jq -c '.artifacts[]')
+    [ "$kind" != parent ] || planned_parents+=("$path")
+  done < <(printf '%s\n' "$plan" | jq -j '.artifacts[] | .path, "\u0000", .kind, "\u0000"')
   return 0
 }
 
@@ -2750,20 +3351,19 @@ _attachment_validate_roots() {
 }
 
 _attachment_validate_sources() {
-  local plan=$1 error_code=$2 artifact source expected actual
-  while IFS= read -r artifact; do
-    if [ "$(printf '%s\n' "$artifact" | jq -r '.kind')" = file ]; then
-      if printf '%s\n' "$artifact" | jq -e 'has("source")' >/dev/null 2>&1; then
-        source=$(printf '%s\n' "$artifact" | jq -r '.source') || return "$error_code"
-        expected=$(printf '%s\n' "$artifact" | jq -r '.sha256') || return "$error_code"
-        _attachment_canonical_file "$source" || return "$error_code"
-        actual=$(_attachment_hash "$source") || return "$error_code"
-        [ "$actual" = "$expected" ] || return "$error_code"
-      else
-        printf '%s\n' "$artifact" | jq -e '.content_base64 | type == "string"' >/dev/null 2>&1 || return "$error_code"
-      fi
+  local plan=$1 error_code=$2 has_source source expected content_type actual
+  while IFS= read -r -d '' has_source && IFS= read -r -d '' source &&
+        IFS= read -r -d '' expected && IFS= read -r -d '' content_type; do
+    if [ "$has_source" = true ]; then
+      _attachment_canonical_file "$source" || return "$error_code"
+      actual=$(_attachment_hash "$source") || return "$error_code"
+      [ "$actual" = "$expected" ] || return "$error_code"
+    else
+      [ "$content_type" = string ] || return "$error_code"
     fi
-  done < <(printf '%s\n' "$plan" | jq -c '.artifacts[]')
+  done < <(printf '%s\n' "$plan" | jq -j '
+    .artifacts[] | select(.kind == "file")
+    | has("source"), "\u0000", .source, "\u0000", .sha256, "\u0000", (.content_base64 | type), "\u0000"')
   return 0
 }
 
@@ -2772,20 +3372,21 @@ _attachment_destination() {
 }
 
 _attachment_validate_destinations_absent() {
-  local plan=$1 root artifact destination before_hash before_mode actual
+  local plan=$1 root path has_replace destination before_hash before_mode actual
   root=$(printf '%s\n' "$plan" | jq -r '.worktree_root') || return 2
-  while IFS= read -r artifact; do
-    destination=$(_attachment_destination "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')")
-    if printf '%s\n' "$artifact" | jq -e 'has("replace")' >/dev/null 2>&1; then
+  while IFS= read -r -d '' path && IFS= read -r -d '' has_replace &&
+        IFS= read -r -d '' before_hash && IFS= read -r -d '' before_mode; do
+    destination="$root/$path"
+    if [ "$has_replace" = true ]; then
       [ -f "$destination" ] && [ ! -L "$destination" ] || return 3
-      before_hash=$(printf '%s\n' "$artifact" | jq -r '.replace.before_sha256') || return 2
-      before_mode=$(printf '%s\n' "$artifact" | jq -r '.replace.before_mode') || return 2
       actual=$(_attachment_hash "$destination") || return 3
       [ "$actual" = "$before_hash" ] && _attachment_mode_matches "$destination" "$before_mode" || return 3
     else
       [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 3
     fi
-  done < <(printf '%s\n' "$plan" | jq -c '.artifacts[]')
+  done < <(printf '%s\n' "$plan" | jq -j '
+    .artifacts[] | .path, "\u0000", has("replace"), "\u0000",
+    .replace.before_sha256, "\u0000", .replace.before_mode, "\u0000"')
 }
 
 _attachment_ownership_path() {
@@ -3000,23 +3601,31 @@ _attachment_same_journal_plan() {
 }
 
 _attachment_path_exact() {
-  local path=$1 artifact=$2 kind expected actual target first mode
-  kind=$(printf '%s\n' "$artifact" | jq -r '.kind') || return 1
+  local path=$1 artifact=$2 kind expected has_mode mode target
+  while IFS= read -r -d '' kind && IFS= read -r -d '' expected &&
+        IFS= read -r -d '' has_mode && IFS= read -r -d '' mode && IFS= read -r -d '' target; do
+    _attachment_path_exact_fields "$path" "$kind" "$expected" "$has_mode" "$mode" "$target"
+    return $?
+  done < <(printf '%s\n' "$artifact" | jq -j '
+    .kind, "\u0000", .sha256, "\u0000", has("mode"), "\u0000", .mode, "\u0000", .target, "\u0000"')
+  return 1
+}
+
+# Decoded fields let owner verification keep one jq process for the whole loop.
+_attachment_path_exact_fields() {
+  local path=$1 kind=$2 expected=$3 has_mode=$4 mode=$5 target=$6 actual first
   [ -e "$path" ] || [ -L "$path" ] || return 1
   case "$kind" in
     file)
       [ -f "$path" ] && [ ! -L "$path" ] || return 1
-      expected=$(printf '%s\n' "$artifact" | jq -r '.sha256') || return 1
       actual=$(_attachment_hash "$path") || return 1
       [ "$actual" = "$expected" ] || return 1
-      if printf '%s\n' "$artifact" | jq -e 'has("mode")' >/dev/null 2>&1; then
-        mode=$(printf '%s\n' "$artifact" | jq -r '.mode') || return 1
+      if [ "$has_mode" = true ]; then
         _attachment_mode_matches "$path" "$mode" || return 1
       fi
       ;;
     symlink)
       [ -L "$path" ] || return 1
-      target=$(printf '%s\n' "$artifact" | jq -r '.target') || return 1
       _attachment_symlink_matches "$path" "$target"
       ;;
     directory)
@@ -3032,7 +3641,18 @@ _attachment_path_exact() {
 }
 
 _attachment_path_exact_pinned() {
-  local path=$1 artifact=$2 parent base actual_parent
+  local path=$1 artifact=$2 kind expected has_mode mode target
+  while IFS= read -r -d '' kind && IFS= read -r -d '' expected &&
+        IFS= read -r -d '' has_mode && IFS= read -r -d '' mode && IFS= read -r -d '' target; do
+    _attachment_path_exact_pinned_fields "$path" "$kind" "$expected" "$has_mode" "$mode" "$target"
+    return $?
+  done < <(printf '%s\n' "$artifact" | jq -j '
+    .kind, "\u0000", .sha256, "\u0000", has("mode"), "\u0000", .mode, "\u0000", .target, "\u0000"')
+  return 1
+}
+
+_attachment_path_exact_pinned_fields() {
+  local path=$1 kind=$2 expected=$3 has_mode=$4 mode=$5 target=$6 parent base actual_parent
   case "$path" in
     /*) parent=$(dirname "$path") || return 1 ;;
     *) parent=$(CDPATH='' cd "$(dirname "$path")" && pwd -P) || return 1 ;;
@@ -3043,7 +3663,7 @@ _attachment_path_exact_pinned() {
     CDPATH='' cd "$parent" || return 1
     actual_parent=$(pwd -P) || return 1
     [ "$actual_parent" = "$parent" ] || return 1
-    _attachment_path_exact "./$base" "$artifact"
+    _attachment_path_exact_fields "./$base" "$kind" "$expected" "$has_mode" "$mode" "$target"
   )
 }
 
@@ -3053,6 +3673,15 @@ _attachment_artifact_exact() {
   _attachment_parent_safe "$root" "$relative" || return 1
   destination=$(_attachment_destination "$root" "$relative")
   _attachment_path_exact_pinned "$destination" "$artifact"
+}
+
+# Keep the artifact-level parent recheck before pinning, including when the
+# caller already preflighted the parent and decoded all fields in one batch.
+_attachment_artifact_exact_fields() {
+  local root=$1 relative=$2
+  shift 2
+  _attachment_parent_safe "$root" "$relative" || return 1
+  _attachment_path_exact_pinned_fields "$root/$relative" "$@"
 }
 
 _attachment_artifact_absent_or_exact() {
@@ -3568,7 +4197,7 @@ _attachment_render_owned_keys_exact() (
 )
 
 _attachment_verify_owner_artifacts() {
-  local owner=$1 expected_trellis_home="${2:-}" record root artifact render
+  local owner=$1 expected_trellis_home="${2:-}" record root relative kind expected has_mode mode target render
   record=$(jq -c . "$owner") || return 3
   _attachment_contextual_render_context_record_valid "$record" "$expected_trellis_home" || return 3
   # Before _attachment_validate_roots: that is the check that actually refuses a
@@ -3581,18 +4210,21 @@ _attachment_verify_owner_artifacts() {
   _attachment_validate_roots "$record" || return 3
   _attachment_validate_ids "$record" || return 3
   _attachment_render_pairings_valid "$record" || return 3
-  while IFS= read -r artifact; do
-    if ! _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" ||
-       ! _attachment_artifact_exact "$root" "$artifact"; then
-      _attachment_diag "owned artifact does not match its record: $(printf '%s\n' "$artifact" | jq -r '"\(.path) (recorded \(.kind))"') under $root"
+  while IFS= read -r -d '' relative && IFS= read -r -d '' kind &&
+        IFS= read -r -d '' expected && IFS= read -r -d '' has_mode &&
+        IFS= read -r -d '' mode && IFS= read -r -d '' target; do
+    if ! _attachment_parent_safe "$root" "$relative" ||
+       ! _attachment_artifact_exact_fields "$root" "$relative" "$kind" "$expected" "$has_mode" "$mode" "$target"; then
+      _attachment_diag "owned artifact does not match its record: $relative (recorded $kind) under $root"
       return 3
     fi
-  done < <(printf '%s\n' "$record" | jq -c '
+  done < <(printf '%s\n' "$record" | jq -j '
     . as $owner
     | (($owner.renders // []) | map(.path)) as $render_paths
     | $owner.artifacts[] as $artifact
     | select(($render_paths | index($artifact.path)) == null)
-    | $artifact
+    | $artifact | .path, "\u0000", .kind, "\u0000", .sha256, "\u0000",
+      has("mode"), "\u0000", .mode, "\u0000", .target, "\u0000"
   ')
   while IFS= read -r render; do
     _attachment_render_owned_keys_exact "$root" "$render" || {
@@ -3603,7 +4235,7 @@ _attachment_verify_owner_artifacts() {
 }
 
 _attachment_verify_detach_owner_artifacts() {
-  local owner=$1 record root artifact relative code
+  local owner=$1 record root relative kind expected has_mode mode target code
   record=$(jq -c . "$owner") && _attachment_validate_roots "$record" && _attachment_validate_ids "$record" &&
     root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || {
     _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
@@ -3611,21 +4243,24 @@ _attachment_verify_detach_owner_artifacts() {
   }
   # Sorted by path (jq's codepoint order is LC_ALL=C byte order for UTF-8), so
   # the drifted artifact reported first is deterministic.
-  while IFS= read -r artifact; do
-    relative=$(printf '%s\n' "$artifact" | jq -r '.path')
-    if ! _attachment_parent_safe "$root" "$relative" || ! _attachment_artifact_exact "$root" "$artifact"; then
+  while IFS= read -r -d '' relative && IFS= read -r -d '' kind &&
+        IFS= read -r -d '' expected && IFS= read -r -d '' has_mode &&
+        IFS= read -r -d '' mode && IFS= read -r -d '' target; do
+    if ! _attachment_parent_safe "$root" "$relative" ||
+       ! _attachment_artifact_exact_fields "$root" "$relative" "$kind" "$expected" "$has_mode" "$mode" "$target"; then
       code=owned-file-drift
-      [ "$(printf '%s\n' "$artifact" | jq -r '.kind')" != symlink ] || code=owned-symlink-drift
+      [ "$kind" != symlink ] || code=owned-symlink-drift
       _attachment_refuse "${ATTACHMENT_ACTION:-}" "$code" "$root/$relative"
       return 3
     fi
-  done < <(printf '%s\n' "$record" | jq -c '
+  done < <(printf '%s\n' "$record" | jq -j '
     . as $owner
     | (($owner.renders // []) | map(.path)) as $render_paths
     | [$owner.artifacts[] as $artifact
        | select(($render_paths | index($artifact.path)) == null)
        | $artifact]
-    | sort_by(.path)[]
+    | sort_by(.path)[] | .path, "\u0000", .kind, "\u0000", .sha256, "\u0000",
+      has("mode"), "\u0000", .mode, "\u0000", .target, "\u0000"
   ')
 }
 

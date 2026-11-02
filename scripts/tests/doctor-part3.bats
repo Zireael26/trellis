@@ -60,6 +60,11 @@ setup() {
   mkdir -p "$CANON" "$PROJECTS"
   DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
+  # A fixture attach must not spawn the detached post-attach job: it races the
+  # core.hooksPath and exclude edits these tests make right after attaching,
+  # records its own FAILED verdict (exit 4), and outlives teardown.
+  # run-tests.sh sets this too; a direct bats run must not depend on it.
+  export TRELLIS_ATTACH_POSTJOB=off
   unset PORTABLE_STRICT_PRESET_CONTENT
 }
 
@@ -714,6 +719,40 @@ make_no_playwright_path() {
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   [[ "$output" == *"native surfaces: committed render bytes, ownership, or live owned keys are invalid"* ]] ||
     { echo "$output"; false; }
+}
+
+# attach_and_doctor_with_claude <version>: attach and doctor both see only a
+# stub claude reporting <version> ahead of the ambient PATH.
+attach_and_doctor_with_claude() {
+  mkdir -p "$SANDBOX/claude-stub"
+  printf '#!/bin/sh\necho "%s (Claude Code)"\n' "$1" > "$SANDBOX/claude-stub/claude"
+  chmod 755 "$SANDBOX/claude-stub/claude"
+  export TRELLIS_ATTACH_CALLER_PATH="$SANDBOX/claude-stub:$PATH"
+  build_portable_doctor_home
+  prepare_portable_attachment
+  run_portable_doctor --project portable-fixture
+  unset TRELLIS_ATTACH_CALLER_PATH
+}
+
+@test "portable doctor accepts the shell-form Claude render on a client below 2.1.295" {
+  attach_and_doctor_with_claude 2.1.294
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"native surfaces: claude, codex match the selected immutable harness manifest"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *"guard registration not stall-safe"* ]] || { echo "$output"; false; }
+  jq -e '([.. | objects | select(has("args") or has("onFailure"))] | length) == 0
+    and ([.hooks.PreToolUse[].hooks[] | select(.command | contains("guard-supervise"))] | length) == 3' \
+    "$PORTABLE_PROJECT/.claude/settings.local.json" >/dev/null
+}
+
+@test "portable doctor accepts the exec-form Claude render on a client at 2.1.295 or later" {
+  attach_and_doctor_with_claude 2.1.300
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"native surfaces: claude, codex match the selected immutable harness manifest"* ]] ||
+    { echo "$output"; false; }
+  [[ "$output" != *"guard registration not stall-safe"* ]] || { echo "$output"; false; }
+  jq -e '[.hooks.PreToolUse[].hooks[] | select(.onFailure == "block") | .command] == ["/usr/bin/env","/usr/bin/env","/usr/bin/env"]' \
+    "$PORTABLE_PROJECT/.claude/settings.local.json" >/dev/null
 }
 
 @test "portable doctor treats the recorded previous hooksPath as drift while hooks are enabled" {

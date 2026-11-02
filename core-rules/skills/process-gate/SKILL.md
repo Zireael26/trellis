@@ -218,7 +218,7 @@ When invoked, the skill:
 
 1. Reads each of the nine gate references so its advice reflects current rules (not stale training data).
 2. Reads `local.config.sh` (if present) as data from the range base — see above.
-3. Inspects the working tree (or the diff range provided) and runs each validator in order.
+3. Inspects the working tree (or the diff range provided) and runs the cheap rows before Tests & coverage, preserving the verdict's category order. In push mode, an always-hard cheap failure skips Tests: that row renders `➖ n/a` with an explicit `Tests: not run` notice and the overall verdict remains `BLOCKED`. Merge mode always runs every row; warnings and push-downgraded PR-shape failures never skip Tests.
 4. Emits a verdict section in this exact shape:
 
 ```
@@ -227,7 +227,7 @@ When invoked, the skill:
 PR hygiene:        ✅ pass | ⚠️ warn | ❌ fail
 Secrets:           ✅ pass | ⚠️ warn | ❌ fail
 Bypass markers:    ✅ pass | ⚠️ warn | ❌ fail
-Tests & coverage:  ✅ pass | ⚠️ warn | ❌ fail
+Tests & coverage:  ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a (push already BLOCKED)
 Docs discipline:   ✅ pass | ⚠️ warn | ❌ fail
 Stack profile:     ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a
 Security (diff):   ✅ pass | ⚠️ warn | ❌ fail | ➖ n/a

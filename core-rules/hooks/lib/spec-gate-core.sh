@@ -579,6 +579,55 @@ EOF
   sg_result block "$diff gated lines over floor $floor with no in-range spec triad and no valid surgical declaration"
 }
 
+# --- Stop-hook pass cache (spec 072 U8) ---------------------------------------
+# The Stop early warning re-derives the same verdict on every Stop. A pass is
+# cached under a key over everything sg_verdict reads in Stop mode: the
+# worktree and canonical root, HEAD, the branch, every ref, the common-dir
+# config and reflogs (diff-base reads them), policy and preset files, the
+# surgical marker, autonomy session, decisions-log, spec waiver, every
+# specs/*/*.md file, the resolver and these scripts, and TRELLIS_ROOT and the
+# SG_REQUEST_* inputs. Only passes are cached, and never a surgical-marker pass
+# (its validation appends to the audit log), so a hit can only be a pass the
+# full path also gives. The pre-push --gate never reads the cache. Requires
+# the deps.sh helpers; without them there is no cache.
+
+# sg_stop_cache_file <dir> <harness> — print the per-worktree pass cache path.
+sg_stop_cache_file() {
+  local sdir
+  sdir=$(_se_turn_state_dir "$1") || return 1
+  printf '%s/spec-gate/%s.%s' "${sdir%/turn-baseline/*}" "${sdir##*/}" "$2"
+}
+
+# sg_stop_cache_key <dir> — print the sha256 key; fails when any input cannot
+# be read.
+sg_stop_cache_key() {
+  local dir root common branch head refs stats resolver f sum list=()
+  dir=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
+  root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || branch=""
+  head=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=unborn
+  refs=$(git -C "$dir" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null) || return 1
+  resolver=$(sg_find_resolver "$dir" "$root") || resolver=""
+  for f in "$common/config" "$common/logs/HEAD" "$common/logs/refs/heads/$branch" \
+      "$root/.trellis.json" "$root/.trellis.config.json" "$root/.claude/session-surgical" \
+      "$root/.claude/session-autonomy" "$root/.claude/spec-waiver" "$root/decisions-log.md" \
+      "${TRELLIS_ROOT:-/nonexistent}/trellis.config.json" \
+      "${TRELLIS_ROOT:-/nonexistent}"/core-rules/presets/*.md "$dir"/specs/*/*.md \
+      "$resolver" "$_sg_lib_dir/spec-gate-core.sh" "$_sg_lib_dir/deps.sh" \
+      "$_sg_lib_dir/autonomy.sh" "$0"; do
+    list[${#list[@]}]="s:$f"
+  done
+  stats=$(_se_stat_lines "${list[@]}") || return 1
+  sum=$(printf '%s\n' 'trellis-spec-gate-key v1' "dir $dir" "root $root" "branch $branch" "head $head" \
+    "env ${TRELLIS_ROOT:-}|${SG_REQUEST_RANGE:-}|${SG_REQUEST_REF:-}|${SG_REQUEST_HEAD:-}" \
+    "$refs" "$stats" | shasum -a 256) || return 1
+  sum=${sum%% *}
+  [ "${#sum}" -eq 64 ] || return 1
+  printf '%s' "$sum"
+}
+
 # Human-facing remedy message (shared by all callers).
 sg_remedy_message() {
   cat <<'MSG'

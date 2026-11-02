@@ -29,7 +29,7 @@ frontmatter_value() {
 }
 
 @test "RW roster agents leave isolation unspecified" {
-  for name in cheap-rw cheap-1-rw cheap-2-rw general-purpose haiku haiku-xhigh luna muse-meta-rw sol-rw; do
+  for name in general-purpose haiku haiku-xhigh luna sol-rw; do
     run frontmatter_value "$AGENTS/$name.md" isolation
     [ "$status" -eq 1 ] || {
       printf '%s.md unexpectedly declares isolation: %s\n' "$name" "$output" >&2
@@ -39,7 +39,7 @@ frontmatter_value() {
 }
 
 @test "RW descriptions do not promise forced worktree isolation" {
-  for name in cheap-rw cheap-1-rw cheap-2-rw general-purpose haiku haiku-xhigh luna muse-meta-rw sol-rw; do
+  for name in general-purpose haiku haiku-xhigh luna sol-rw; do
     run frontmatter_value "$AGENTS/$name.md" description
     [ "$status" -eq 0 ]
     [[ "$output" != *'Worktree-isolated'* ]]
@@ -52,7 +52,7 @@ import pathlib
 import re
 import sys
 text = pathlib.Path(sys.argv[1]).read_text()
-requests = [line for line in text.splitlines() if re.match(r'\s*(prompt=|export HERDR_PROBE_PROMPT=)', line) and 'Call Agent exactly once' in line]
+requests = [line for line in text.splitlines() if re.match(r'\s*(prompt=|export PI_PROBE_PROMPT=)', line) and 'Call Agent exactly once' in line]
 assert len(requests) == 3, requests
 assert all('isolation worktree' in line for line in requests), requests
 assert 'assert args["isolation"] == "worktree"' in text
@@ -62,7 +62,7 @@ PY
 }
 
 @test "read-only roster agents retain explicit isolation off" {
-  for name in Explore Plan astra-ro cheap-1-ro cheap-2-ro cheap-ro gemini-ro haiku-ro muse-meta-ro security-reviewer sol-ro; do
+  for name in Explore Plan astra-ro gemini-ro haiku-ro security-reviewer sol-ro; do
     run frontmatter_value "$AGENTS/$name.md" isolation
     [ "$status" -eq 0 ] || { printf '%s.md is missing isolation metadata\n' "$name" >&2; false; }
     [ "$output" = off ] || { printf '%s.md isolation is %s, expected off\n' "$name" "$output" >&2; false; }

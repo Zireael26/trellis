@@ -135,6 +135,31 @@ rewrite_manifest() {
   ' >/dev/null
 }
 
+@test "NUL manifest records preserve quoted spaced backslash and leading-dash link and render paths" {
+  local leaf='-leaf '\''single'\'' "double" \slash.md' source="core-rules/quoted source"
+  mkdir -p "$PAYLOAD/$source/children"
+  printf 'direct\n' > "$PAYLOAD/$source/$leaf"
+  printf 'child\n' > "$PAYLOAD/$source/children/$leaf"
+  jq -n --arg source "$source" --arg leaf "$leaf" '{schema_version:1,harnesses:{
+    claude:{links:[
+      {source:($source + "/" + $leaf),destination:$leaf},
+      {project_target:$leaf,fallback_source:($source + "/" + $leaf),destination:("project/" + $leaf)},
+      {source_children:($source + "/children"),destination_dir:"children",entry_type:"file",suffix:".md"}
+    ],render:[{template:($source + "/" + $leaf),destination:("render/" + $leaf),merge:"replace",mode:"0600",required:true}]},
+    codex:{links:[],render:[]}}}' > "$MANIFEST"
+  run_plan --harness claude
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | jq -e --arg source "$source" --arg leaf "$leaf" '
+    (.artifacts | length) == 4
+    and any(.artifacts[]; .destination == $leaf and .source == ($source + "/" + $leaf)
+      and .target == (".trellis/runtime/" + $source + "/" + $leaf) and .executable == false)
+    and any(.artifacts[]; .destination == ("project/" + $leaf) and .source_scope == "project"
+      and .target == ("../" + $leaf) and .fallback_source == ($source + "/" + $leaf))
+    and any(.artifacts[]; .destination == ("children/" + $leaf) and .source == ($source + "/children/" + $leaf))
+    and any(.artifacts[]; .destination == ("render/" + $leaf) and .template == ($source + "/" + $leaf)
+      and .required == true and .render_if_absent == false and .mode == "0600")' >/dev/null
+}
+
 @test "harness subsets are canonicalized and planning leaves project-native siblings untouched" {
   project_before="$(cat "$PROJECT/.claude/skills/project-only.md")"
 
@@ -160,7 +185,7 @@ rewrite_manifest() {
   [[ "$output" == *"required source is missing from immutable payload: core-rules/skills/missing-contract/SKILL.md"* ]] || { echo "$output"; false; }
 }
 
-@test "optional T12 templates remain optional and declare only contextual trusted SessionStart routes when present" {
+@test "optional T12 templates remain optional and declare only the contextual SessionStart dispatcher route when present" {
   run_plan
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | jq -e '
@@ -172,27 +197,27 @@ rewrite_manifest() {
   jq -e '
     def marker_count($marker): split($marker) | length - 1;
     (.hooks.SessionStart[0].hooks | map(.command)) as $commands
-    | ($commands | length) == 3
+    | ($commands | length) == 1
     and all($commands[];
-      startswith("/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook ")
-      and contains(" claude \"$CLAUDE_PROJECT_DIR\"")
+      . == "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start claude \"$CLAUDE_PROJECT_DIR\""
+      and (contains(".trellis/runtime") | not)
       and marker_count("__TRELLIS_USER_HOME__") == 1
       and marker_count("__TRELLIS_HOME__") == 1
       and marker_count("__TRELLIS_LAUNCHER__") == 1
-      and (contains(".trellis/runtime") or contains("$HOME") or contains("$TRELLIS_HOME") or contains("$PATH") or contains("BASH_ENV") or contains(" ENV=") | not))
+      and (contains("$HOME") or contains("$TRELLIS_HOME") or contains("$PATH") or contains("BASH_ENV") or contains(" ENV=") | not))
   ' "$PAYLOAD/core-rules/templates/claude-settings.local.json" >/dev/null
 
   jq -e '
     def marker_count($marker): split($marker) | length - 1;
     (.hooks.SessionStart[0].hooks | map(.command)) as $commands
-    | ($commands | length) == 3
+    | ($commands | length) == 1
     and all($commands[];
-      startswith("/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook ")
-      and contains(" codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\"")
+      . == "/usr/bin/env -i HOME=__TRELLIS_USER_HOME__ TRELLIS_HOME=__TRELLIS_HOME__ PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc __TRELLIS_LAUNCHER__ hook session-start codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\""
+      and (contains(".trellis/runtime") | not)
       and marker_count("__TRELLIS_USER_HOME__") == 1
       and marker_count("__TRELLIS_HOME__") == 1
       and marker_count("__TRELLIS_LAUNCHER__") == 1
-      and (contains(".trellis/runtime") or contains("$HOME") or contains("$TRELLIS_HOME") or contains("$PATH") or contains("BASH_ENV") or contains(" ENV=") | not))
+      and (contains("$HOME") or contains("$TRELLIS_HOME") or contains("$PATH") or contains("BASH_ENV") or contains(" ENV=") | not))
   ' "$PAYLOAD/core-rules/templates/codex-hooks.local.json" >/dev/null
   rm "$PAYLOAD/core-rules/templates/claude-settings.local.json"
   rm "$PAYLOAD/core-rules/templates/codex-hooks.local.json"
@@ -465,10 +490,10 @@ rewrite_manifest() {
 }
 
 @test "child exclusion and sorting failures cannot silently drop planned leaves" {
-  run bash -c '. "$1"; jq() { if [ "$1" = "-r" ] && [ "$2" = ".exclude_dirs // [] | .[]" ]; then return 1; fi; command jq "$@"; }; surface_plan_emit "$2" claude' _ \
+  run bash -c '. "$1"; jq() { if [ "$1" = "-j" ]; then case "$*" in *".exclude_dirs // []"*) return 1 ;; esac; fi; command jq "$@"; }; surface_plan_emit "$2" claude' _ \
     "$PLANNER" "$PAYLOAD"
   [ "$status" -eq 4 ]
-  [[ "$output" == *"could not enumerate source exclusions"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"could not enumerate links for harness: claude"* ]] || { echo "$output"; false; }
 
   run bash -c '. "$1"; sort() { return 1; }; surface_plan_emit "$2" claude' _ \
     "$PLANNER" "$PAYLOAD"

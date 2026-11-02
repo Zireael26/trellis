@@ -1,0 +1,9 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Done."
+}

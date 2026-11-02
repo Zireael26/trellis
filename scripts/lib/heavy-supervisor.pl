@@ -8,7 +8,8 @@
 #
 # A slot is a flock(2) lock on $TRELLIS_HOME/locks/heavy/slot-<i>.lock (the
 # heavy pool) or light-<i>.lock (the light pool, Amendment A1). The pools never
-# borrow from each other; everything else below applies to each alike. The
+# borrow from each other. Heavy slot 0 is reserved for lane process-gate;
+# ordinary lanes use 1..heavy_slots, unchanged when no gate runs. The
 # kernel releases it when the last copy of the open file description closes,
 # so there is no reclaim protocol: a dead holder frees its slot by dying.
 #
@@ -194,7 +195,7 @@ sub held_summary {
   my @held;
   my $max = max_slot_on_disk($p);
   $max = $n if $n > $max;
-  for my $i (1 .. $max) {
+  for my $i (($p eq 'heavy' ? (0) : ()), 1 .. $max) {
     next unless slot_is_held($p, $i);
     my $info = read_info($p, $i);
     push @held, "$i=" . ($info ? "$info->[1]/$info->[0]" : 'unknown');
@@ -249,7 +250,7 @@ if ($mode eq 'status') {
     my $label = $POOL{$p}{prefix};
     my $max = max_slot_on_disk($p);
     $max = $n->{$p} if $n->{$p} > $max;
-    for my $i (1 .. $max) {
+    for my $i (($p eq 'heavy' ? (0) : ()), 1 .. $max) {
       my $retired = $i > $n->{$p} ? ' (retired)' : '';
       if (!slot_is_held($p, $i)) {
         print "$label $i: free$retired\n";
@@ -270,6 +271,7 @@ $mode eq 'run' or fail($EX_USAGE, "unknown supervisor mode: $mode");
 my $pool = shift @ARGV // '';
 $POOL{$pool} or fail($EX_USAGE, "unknown pool: $pool");
 my $lane = shift @ARGV;
+my $gate = $pool eq 'heavy' && $lane eq 'process-gate';
 my $timeout = shift @ARGV;
 my @command = @ARGV;
 @command or fail($EX_USAGE, 'a command is required after --');
@@ -303,7 +305,7 @@ sub verified_nested_fd {
   my ($fd, $slot, $id, $mpool) = @caller{qw(TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID TRELLIS_HEAVY_POOL)};
   return undef unless defined $mpool && $POOL{$mpool};
   return undef unless defined $fd && $fd =~ /^[0-9]+$/;
-  return undef unless defined $slot && $slot =~ /^[1-9][0-9]*$/;
+  return undef unless defined $slot && ($slot =~ /^[1-9][0-9]*$/ || ($mpool eq 'heavy' && $slot eq '0'));
   return undef unless defined $id && $id =~ /^[0-9]+:[0-9]+$/;
   return undef unless (dir_id() // '') eq $id;
   my @file = lstat(slot_path($mpool, $slot));
@@ -336,13 +338,15 @@ sub verified_nested_fd {
     flock($dup, LOCK_UN);
     return undef;
   }
-  return 1;
+  return $mpool eq 'heavy' && $slot eq '0' ? 'gate' : 'lane';
 }
 
 my $problem = prepare_dir();
 fail($EX_CONFIG, $problem) if $problem;
 
 my $nested = verified_nested_fd();
+fail($EX_USAGE, 'run process-gate outside the enclosing ordinary heavy/light wrapper')
+  if $gate && ($nested // '') eq 'lane';
 my ($lock, %child_env);
 %child_env = %caller;
 
@@ -355,7 +359,7 @@ if (!$nested) {
     my ($n, $why) = read_slots();
     fail($EX_CONFIG, $why) unless $n;
     POSIX::sigprocmask(SIG_BLOCK, $block);
-    for my $i (1 .. $n->{$pool}) {
+    for my $i ($gate ? (0) : (1 .. $n->{$pool})) {
       my $fh = open_slot($pool, $i) or next;
       if (flock($fh, LOCK_EX | LOCK_NB)) {
         $lock = $fh;
@@ -385,7 +389,8 @@ if (!$nested) {
     if ($now - $last_heartbeat >= $heartbeat) {
       $last_heartbeat = $now;
       printf STDERR "trellis heavy: waiting %ds for a %s slot (%s=%d); held: %s\n",
-        $now - $waited_since, $pool, $POOL{$pool}{key}, $n->{$pool}, held_summary($pool, $n->{$pool});
+        $now - $waited_since, $gate ? 'process-gate' : $pool,
+        $POOL{$pool}{key}, $n->{$pool}, held_summary($pool, $n->{$pool});
     }
     Time::HiRes::sleep($poll);
   }
@@ -597,6 +602,9 @@ while (1) {
     } elsif (!$leader_exited && $leader =~ /Z/) {
       $leader_exited = 1;
       trace('leader-zombie');
+      # Require a new scan started after observing the zombie: this scan's
+      # initial PID enumeration may predate the leader's final forks.
+      next;
     }
     if (defined $leader && $leader_exited && $others == 0) {
       trace('group-empty');

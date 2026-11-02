@@ -324,7 +324,8 @@ class SecondaryReadTests(unittest.TestCase):
             return -1 if mib[2] == PID else 0
         class Admitted(Exception):
             pass
-        with mock.patch.object(GATE, "process_table", return_value=table), \
+        with tempfile.TemporaryDirectory(prefix="race-state-") as state_dir, \
+                mock.patch.object(GATE, "process_table", return_value=table), \
                 mock.patch.object(GATE, "process_identity", return_value=(os.getpid(), 1000000)), \
                 mock.patch.object(GATE, "process_files", return_value=[]), \
                 mock.patch.object(GATE, "boot_session", return_value="fixture"), \
@@ -343,6 +344,7 @@ class SecondaryReadTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as stdout, \
                 contextlib.redirect_stderr(io.StringIO()) as stderr:
             state.return_value.records.return_value = []
+            state.return_value.root = Path(state_dir)
             libc.sysctl.side_effect = arguments
             try:
                 result = GATE.main([])

@@ -249,6 +249,7 @@ postjob_registry_result() {
     _attachment_hooks_dispatcher_common_body() {
       printf "%s\n" \
         "project_root=/unused; managed_dir=/unused" \
+        "trellis_enter_command_scratch() { :; }" \
         "git() { return 1; }" \
         "trellis_read_sidecar() { case \"\$1\" in */release-payload) printf payload;; esac; }" \
         "trellis_prior_hook() { return 1; }" \

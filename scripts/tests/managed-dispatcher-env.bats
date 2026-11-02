@@ -9,6 +9,8 @@ setup() {
   MANIFEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   # shellcheck disable=SC1090
   source "$REPO_ROOT/scripts/lib/attachment.sh"
+  CONTROL_TOOLCHAIN="$(_attachment_toolchain_path_resolve /usr/bin:/bin:/usr/sbin:/sbin 2>/dev/null)"
+  CONTROL_PAIR="$(_attachment_toolchain_path_resolve /usr/bin:/bin 2>/dev/null)"
   DISPATCHER_TEXT="$(_attachment_hooks_dispatcher_common_body "$PAYLOAD" "core-rules/githooks/pre-push" "$MANIFEST")"
   PRE_PUSH_TEXT="$(_attachment_hooks_pre_push_dispatcher_body "$PAYLOAD" "core-rules/githooks/pre-push" "$MANIFEST")"
   BODY="$(printf '%s\n' "$DISPATCHER_TEXT" | /usr/bin/awk 'seen{print} /^# trellis-managed-dispatcher-body$/ {seen=1}')"
@@ -748,7 +750,7 @@ gate_first_line() {
   prepare_path_stage_fixture
   owner="$(path_stage_owner)"
   # Duplicates still count: the comparison is over the deduplicated set.
-  jq '.toolchain_path = ["/usr/bin","/bin","/usr/sbin","/sbin","/bin"]' "$owner" > "$owner.new"
+  jq --argjson control "$CONTROL_TOOLCHAIN" '.toolchain_path = $control + [$control[1]]' "$owner" > "$owner.new"
   mv "$owner.new" "$owner"
   chmod 600 "$owner"
   run_path_pre_push_from "$PATH_STAGE_PROJECT"
@@ -765,12 +767,12 @@ gate_first_line() {
 @test "gate: a toolchain with one real entry beside the control set still runs" {
   prepare_path_stage_fixture
   owner="$(path_stage_owner)"
-  jq --arg b "$PATH_RECORDED_B" '.toolchain_path = [$b,"/usr/bin","/bin"]' "$owner" > "$owner.new"
+  jq --arg b "$PATH_RECORDED_B" --argjson control "$CONTROL_PAIR" '.toolchain_path = [$b] + $control' "$owner" > "$owner.new"
   mv "$owner.new" "$owner"
   chmod 600 "$owner"
   run_path_pre_push_from "$PATH_STAGE_PROJECT"
   [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
-  printf '%s\n' "$output" | grep -Fx "GATE_PATH=$PATH_RECORDED_B:/usr/bin:/bin" >/dev/null
+  printf '%s\n' "$output" | grep -Fx "GATE_PATH=$PATH_RECORDED_B:$(jq -r 'join(":")' <<< "$CONTROL_PAIR")" >/dev/null
 }
 
 @test "control-only predicate: canonical subset test over split, realpath'd, deduplicated entries" {
@@ -822,6 +824,7 @@ prepare_fake_payload() {
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$FAKE_PAYLOAD/scripts/trellis-launcher.sh"
   cp "$REPO_ROOT/scripts/lib/attachment.sh" "$FAKE_PAYLOAD/scripts/lib/attachment.sh"
   cp "$REPO_ROOT/scripts/lib/trellis-home.sh" "$FAKE_PAYLOAD/scripts/lib/trellis-home.sh"
+  cp "$REPO_ROOT/scripts/lib/release_stamp.py" "$FAKE_PAYLOAD/scripts/lib/release_stamp.py"
 }
 
 generate_in_preloaded_context() {
@@ -945,13 +948,13 @@ CONTROL
     --arg checkout "$checkout" --arg worktree "$worktree" \
     --arg root "$SCRATCH_PROJECT" --arg payload "$payload" \
     --arg managed "$managed" --arg prior "$prior_hooks" \
-    --arg recorded "$SCRATCH_RECORDED_BIN" '
+    --arg recorded "$SCRATCH_RECORDED_BIN" --argjson control "$CONTROL_PAIR" '
     {
       schema_version:1, status:"committed", fleet:"personal",
       project_id:"scratch-fixture", checkout_id:$checkout, worktree_id:$worktree,
       attachment_id:"00000000-0000-0000-0000-000000000003",
       project_root:$root, worktree_root:$root, release:"1.2.3",
-      toolchain_path:[$recorded,"/usr/bin","/bin"],
+      toolchain_path:([$recorded] + $control),
       artifacts:[{path:".trellis/runtime",kind:"symlink",target:$payload}],
       git_hooks:{
         enabled:true, managed_hooks_path:$managed, previous_hooks_path:$prior,
@@ -1253,7 +1256,9 @@ PY
       failure) body='exit 9'; expected=9 ;;
       term) body='kill -TERM "$PPID"; exit 0'; expected=143 ;;
     esac
-    SCRATCH_CARRIER_BODY='printf "GATE_HOME=%s\nGATE_OWNER=%s\nGATE_MODE=%s\n" "$HOME" "$(stat -f %u "$HOME")" "$(stat -f %Lp "$HOME")" >> '"$ROOT"'/gate-homes.txt
+    SCRATCH_CARRIER_BODY='owner="$(stat -f %u "$HOME" 2>/dev/null)" || owner="$(stat -c %u "$HOME")"
+mode="$(stat -f %Lp "$HOME" 2>/dev/null)" || mode="$(stat -c %a "$HOME")"
+printf "GATE_HOME=%s\nGATE_OWNER=%s\nGATE_MODE=%s\n" "$HOME" "$owner" "$mode" >> '"$ROOT"'/gate-homes.txt
 [ -d "$HOME" ] && [ ! -L "$HOME" ] || exit 20
 '"$body" prepare_scratch_fixture
     run_scratch_pre_push

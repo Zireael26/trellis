@@ -227,7 +227,9 @@ SH
   t14_setup_sandbox
   t14_make_runtime_release
   t14_make_project
-  t14_attach
+  # No postjob, so no release stamp: the pre-add check verifies in full.
+  TRELLIS_ATTACH_POSTJOB=off t14_attach
+  rm -rf "$TRELLIS_HOME/state/release-stamps"
   seed_counted_copy
   before="$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")"
 
@@ -237,6 +239,35 @@ SH
   [ "$(grep -c '^locate$' "$SEED_COUNT_LOG")" -eq 1 ]
   [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG")" -eq 1 ]
   [ "$(t14_sha256_text "$(cat "$TRELLIS_HOME/registry.json")")" = "$before" ]
+}
+
+# Spec 072 U5: worktree add's post-checkout reconcile verifies the release in
+# full, so the pre-add check takes an unchanged release stamp instead; a stamp
+# the release no longer matches falls back to the full verify.
+@test "pre-add seed skips the release re-hash on an unchanged stamp and verifies a changed one" {
+  t14_setup_sandbox
+  t14_make_runtime_release
+  t14_make_project
+  TRELLIS_ATTACH_POSTJOB=off t14_attach
+  seed_counted_copy
+  release="$TRELLIS_HOME/releases/$T14_RELEASE"
+  rm -rf "$TRELLIS_HOME/state/release-stamps"
+  token="$(python3 -I "$release/payload/scripts/lib/release_stamp.py" check "$TRELLIS_HOME" "$release")" || :
+  python3 -I "$release/payload/scripts/lib/release_stamp.py" write "$TRELLIS_HOME" "$release" "$token"
+
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$T14_PROJECT" --pre-add --quiet
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^locate$' "$SEED_COUNT_LOG" || true)" -eq 0 ]
+  [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG")" -eq 1 ]
+
+  # A mode change and back moves ctime: the stamp misses.
+  chmod u+w "$release/payload/core-rules/CLAUDE.md"
+  chmod u-w "$release/payload/core-rules/CLAUDE.md"
+  : > "$SEED_COUNT_LOG"
+  run bash "$COUNTED_SEED_DIR/seed-inheritance-symlinks.sh" --target "$T14_PROJECT" --pre-add --quiet
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c '^locate$' "$SEED_COUNT_LOG")" -eq 1 ]
+  [ "$(grep -c '^exclude$' "$SEED_COUNT_LOG")" -eq 1 ]
 }
 
 @test "seed single locate refuses a tampered immutable attach before execution" {
@@ -452,6 +483,8 @@ fi
 exec "$real_git" "\$@"
 EOF
   chmod 755 "$trace_bin/git"
+  # No stamp, so the release is hashed in full: once, not once per sibling.
+  rm -rf "$TRELLIS_HOME/state/release-stamps"
   : > "$hash_log"
 
   run env PATH="$trace_bin:$PATH" TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$T14_PROJECT"

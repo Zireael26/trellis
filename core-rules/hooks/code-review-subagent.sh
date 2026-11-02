@@ -9,10 +9,13 @@
 #     REVIEW_MIN_LINES env vars from project .claude/hooks/config.sh.
 #   - Dispatches a code-review subagent against the diff; findings are advisory.
 #   - Blocks only on severity=critical returned by the subagent.
+#   - After a completed review, the next one sees only the change since the
+#     tree it covered; a failed review is retried at most 3 times per diff and
+#     then reported as unreviewed on every Stop (spec 072 U8, see below).
 #   - Budget: 60s soft cap.
-#   - Cross-family review (inside Herdr) is owned by lib/code-reviewer.sh:
+#   - Cross-family review (inside an hc terminal) is owned by lib/code-reviewer.sh:
 #     operator override → validated pi one-shot → deterministic fallback.
-#     Same-family Claude is never the Herdr reviewer route.
+#     Same-family Claude is never the hc reviewer route.
 #
 # Dependencies: jq (required), git (required for diff / skipped otherwise).
 #
@@ -212,6 +215,90 @@ if [ -f "$MARKER" ]; then
   exit 0
 fi
 
+# --- Delta review and bounded retry (spec 072 U8) ---
+# State lives outside the worktree, beside the turn baseline:
+# <TRELLIS_HOME|~/.trellis>/state/code-review/<worktree hash>/
+#   reviewed.claude — "<HEAD|unborn> <tree>" of the last COMPLETED review
+#   fail.<diff hash> — failed attempts on that exact diff
+# A completed review records the tree it covered; the next one reviews only
+# the change from that tree, when the recorded HEAD is an ancestor of HEAD and
+# both trees are readable. Anything else reviews the full diff, as before.
+# A failed review leaves no marker and no recorded tree: the same diff is
+# retried on each Stop up to CR_MAX_ATTEMPTS times, then every Stop says it
+# is unreviewed until the diff changes. A failure never reads as reviewed.
+CR_MAX_ATTEMPTS=3
+CR_HARNESS=claude
+CR_STATE="" CR_TREE="" CR_HEAD="unborn" CR_FAILS=0
+_cr_tree() {
+  local idx real out
+  # Resolve the real index BEFORE pointing GIT_INDEX_FILE elsewhere: a copy of
+  # it keeps every tracked path (harness directories included) and its stat
+  # cache, so `add -u` hashes only what changed. No index file and an unborn
+  # HEAD mean nothing is tracked yet; any other failure to copy returns
+  # nothing, and the caller reviews the full diff.
+  real=$(git rev-parse --git-path index 2>/dev/null) && [ -n "$real" ] || return 1
+  idx=$(mktemp "${TMPDIR:-/tmp}/trellis-review-index.XXXXXX") || return 1
+  if [ -e "$real" ]; then
+    cp "$real" "$idx" 2>/dev/null || { rm -f "$idx"; return 1; }
+  elif git rev-parse -q --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+    rm -f "$idx"
+    return 1
+  else
+    rm -f "$idx"
+  fi
+  out=$( export GIT_INDEX_FILE="$idx"
+    { [ -e "$idx" ] || git read-tree --empty; } \
+      && git add -u 2>/dev/null \
+      && git add -A -- ':/' ':(exclude,top).claude' ':(exclude,top).codex' 2>/dev/null \
+      && git write-tree 2>/dev/null ) || out=""
+  rm -f "$idx" "$idx.lock"
+  [ -n "$out" ] && printf '%s' "$out"
+}
+_cr_warn() {
+  printf '%s\n' "$1" >&2
+  jq -nc --arg ctx "$1" '{additionalContext: $ctx}'
+}
+# _cr_failed <message> — count one failed attempt on this diff, say so, exit 0.
+_cr_failed() {
+  local n=$((CR_FAILS + 1))
+  [ -z "$CR_STATE" ] || ( umask 077 && printf '%s\n' "$n" > "$CR_STATE/fail.$DIFF_HASH" ) 2>/dev/null
+  printf '%s (attempt %s of %s on this diff)\n' "$1" "$n" "$CR_MAX_ATTEMPTS" >&2
+  exit 0
+}
+if CR_STATE=$(_se_turn_state_dir "$PROJECT_DIR"); then
+  CR_STATE="${CR_STATE%/turn-baseline/*}/code-review/${CR_STATE##*/}"
+  ( umask 077 && mkdir -p "$CR_STATE" ) 2>/dev/null || CR_STATE=""
+else
+  CR_STATE=""
+fi
+if [ -n "$CR_STATE" ]; then
+  CR_FAILS=$(cat "$CR_STATE/fail.$DIFF_HASH" 2>/dev/null) || CR_FAILS=0
+  case "$CR_FAILS" in ''|*[!0-9]*) CR_FAILS=0 ;; esac
+  if [ "$CR_FAILS" -ge "$CR_MAX_ATTEMPTS" ]; then
+    _cr_warn "code-review-subagent: review unavailable: $CR_FAILS attempts failed on this exact diff, so it is UNREVIEWED. It will not be retried until the diff changes; fix the reviewer or change the diff."
+    exit 0
+  fi
+  CR_HEAD=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || CR_HEAD=unborn
+  CR_TREE=$(_cr_tree) || CR_TREE=""
+  CR_PREV=""
+  [ -z "$CR_TREE" ] || CR_PREV=$(cat "$CR_STATE/reviewed.$CR_HARNESS" 2>/dev/null) || CR_PREV=""
+  read -r CR_PREV_HEAD CR_PREV_TREE _ <<< "$CR_PREV"
+  CR_OID='^[0-9a-f]{40}([0-9a-f]{24})?$'
+  if [[ "$CR_PREV_TREE" =~ $CR_OID ]] && { [ "$CR_PREV_HEAD" = unborn ] || [[ "$CR_PREV_HEAD" =~ $CR_OID ]]; }; then
+    if [ "$CR_PREV_TREE" = "$CR_TREE" ]; then
+      # This exact tree is what the last completed review covered.
+      exit 0
+    fi
+    if { [ "$CR_PREV_HEAD" = unborn ] || git merge-base --is-ancestor "$CR_PREV_HEAD" HEAD 2>/dev/null; } \
+       && CR_DELTA=$(git diff --no-ext-diff "$CR_PREV_TREE" "$CR_TREE" 2>/dev/null) && [ -n "$CR_DELTA" ]; then
+      FULL_BYTES=$(printf '%s' "$CR_DELTA" | wc -c | tr -d ' ')
+      DIFF=$(printf '%s' "$CR_DELTA" | head -c 200000)
+      CR_TRUNCATED=0
+      [ "$FULL_BYTES" -le 200000 ] || CR_TRUNCATED=1
+    fi
+  fi
+fi
+
 # --- Build the reviewer envelope ---
 # At L4/L5 the reviewer must also verify decision-log completeness vs diff.
 # Pass the decisions-log content (if any) and the level as a JSON envelope.
@@ -241,7 +328,7 @@ REVIEW_PAYLOAD=$(jq -nc \
 # caller side would hide the degradation. stdout (the one findings line)
 # is captured and validated before it can authorize an idempotency marker.
 #
-# Cross-family review is inside the canonical ladder: a current Herdr deciding
+# Cross-family review is inside the canonical ladder: a current hc deciding
 # artifact selects a pi one-shot; there is no Anthropic fallback on that path.
 REVIEWER_LIB="$HOOK_DIR/lib/code-reviewer.sh"
 if [ ! -f "$REVIEWER_LIB" ]; then
@@ -256,8 +343,7 @@ else
   REVIEWER_STATUS=$?
 fi
 if [ "$REVIEWER_STATUS" -ne 0 ]; then
-  printf '%s\n' 'code-review-subagent: review degraded: reviewer command failed; this diff will be retried on the next Stop' >&2
-  exit 0
+  _cr_failed 'code-review-subagent: review degraded: reviewer command failed; this diff will be retried on the next Stop'
 fi
 
 # Parse exactly one JSON object. `fromjson?` turns malformed reviewer text into
@@ -276,8 +362,7 @@ if VALIDATED_FINDINGS=$(printf '%s' "$FINDINGS" | jq -Rces '
   '); then
   :
 else
-  printf '%s\n' 'code-review-subagent: review degraded: reviewer returned a malformed findings envelope; this diff will be retried on the next Stop' >&2
-  exit 0
+  _cr_failed 'code-review-subagent: review degraded: reviewer returned a malformed findings envelope; this diff will be retried on the next Stop'
 fi
 FINDINGS="$VALIDATED_FINDINGS"
 # A missing status counts as completed only for a rung-1 operator override
@@ -309,12 +394,10 @@ fi
 # SAFETY: a truncated (prefix-only) review must never mint a completed marker —
 # force the status away from completed so the marker below is never written.
 if [ "$CR_TRUNCATED" -eq 1 ]; then
-  COMPLETION_STATUS="incomplete"
-  printf '%s\n' "code-review-subagent: review incomplete: diff (${FULL_BYTES} bytes) exceeds the 200000-byte reviewer payload cap; only the prefix was reviewed, no marker written — will re-review on the next Stop" >&2
+  _cr_failed "code-review-subagent: review incomplete: diff (${FULL_BYTES} bytes) exceeds the 200000-byte reviewer payload cap; only the prefix was reviewed, no marker written — will re-review on the next Stop"
 fi
 if [ "$COMPLETION_STATUS" != "completed" ]; then
-  [ "$CR_TRUNCATED" -eq 1 ] || printf '%s\n' "code-review-subagent: cross-family review unmet (status=${COMPLETION_STATUS}); no marker written — will re-review on the next Stop" >&2
-  exit 0
+  _cr_failed "code-review-subagent: cross-family review unmet (status=${COMPLETION_STATUS}); no marker written — will re-review on the next Stop"
 fi
 if ! mkdir -p "$REPO_ROOT/.claude"; then
   exit 0
@@ -322,5 +405,17 @@ fi
 if ! : > "$MARKER"; then
   exit 0
 fi
+# The completed review covered CR_TREE: the next one reviews only what changes
+# after it. Markers and failure counts older than 7 days are swept here.
+if [ -n "$CR_STATE" ]; then
+  rm -f "$CR_STATE/fail.$DIFF_HASH"
+  if [ -n "$CR_TREE" ] && CR_TMP=$(mktemp "$CR_STATE/.reviewed.XXXXXX" 2>/dev/null); then
+    if ! { printf '%s %s\n' "$CR_HEAD" "$CR_TREE" > "$CR_TMP" && mv -f "$CR_TMP" "$CR_STATE/reviewed.$CR_HARNESS"; }; then
+      rm -f "$CR_TMP"
+    fi
+  fi
+  find "$CR_STATE" -maxdepth 1 -type f -name 'fail.*' -mtime +7 -exec rm -f {} + 2>/dev/null
+fi
+find "$REPO_ROOT/.claude" -maxdepth 1 -type f -name '.review-done-*' -mtime +7 -exec rm -f {} + 2>/dev/null
 
 exit 0

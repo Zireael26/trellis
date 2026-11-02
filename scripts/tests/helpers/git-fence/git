@@ -34,39 +34,44 @@ fi
 
 fence_python() {
   if [ -n "$FIXED_PYTHON" ]; then
-    "$FIXED_PYTHON" "$@"
+    "$FIXED_PYTHON" -I "$@"
   else
     command -v python3 >/dev/null 2>&1 || fence_die "python3 is required to inspect mutation targets"
-    python3 "$@"
+    python3 -I "$@"
   fi
 }
 
 canonical_path() {
+  # Existing directories without dot segments or repeated separators have an
+  # unambiguous physical spelling in shell. Keep Python for other paths,
+  # including missing destinations and dangling/looping symlinks.
+  case "$1" in
+    -|.|..|./*|../*|*/./*|*/../*|*/.|*/..|*//*) ;;
+    *)
+      if [ -d "$1" ]; then
+        (CDPATH='' cd -P -- "$1" && pwd -P) 2>/dev/null && return 0
+      fi
+      ;;
+  esac
   fence_python - "$1" <<'PY'
 import os
 import sys
 
-print(os.path.realpath(os.path.abspath(sys.argv[1])))
+# Resolve symlinks before parent segments, just as Git/filesystem traversal
+# does: abspath first would hide an escape through inside/link/../outside.
+print(os.path.realpath(sys.argv[1]))
 PY
 }
 
 FENCE_ROOT="$(canonical_path "$FENCE_ROOT")" || fence_die "could not canonicalize test root"
 
-path_is_fenced() {
-  local candidate
-  candidate="$(canonical_path "$1")" || return 1
-  case "$candidate/" in
-    "$FENCE_ROOT"/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 require_fenced_path() {
   local operation="$1" candidate="$2" canonical
   canonical="$(canonical_path "$candidate")" || fence_die "$operation target cannot be canonicalized: $candidate"
-  if ! path_is_fenced "$canonical"; then
-    fence_die "$operation targets '$canonical' outside test root '$FENCE_ROOT'"
-  fi
+  case "$canonical/" in
+    "$FENCE_ROOT"/*) ;;
+    *) fence_die "$operation targets '$canonical' outside test root '$FENCE_ROOT'" ;;
+  esac
 }
 
 # Parse Git's global options so repository probes use exactly the same -C,

@@ -1,9 +1,8 @@
 #!/usr/bin/env bats
 # Regression coverage for the canonical suite's Git mutation boundary.
 #
-# This file never invokes the host Git binary. FAKE_GIT only records argv and
-# answers the fence's read-only common-dir/per-worktree-git-dir probes; a
-# delegated config/worktree/init command is observable without mutating a repo.
+# Most cases use FAKE_GIT to record argv and answer the fence's read-only
+# identity probes. The actual-Git case below mutates only sandbox repositories.
 
 REPO_ROOT="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 FENCE="$REPO_ROOT/scripts/tests/helpers/git-fence/git"
@@ -38,11 +37,12 @@ run_fence() {
   run env \
     TRELLIS_TEST_GIT_FENCE_ROOT="$FIXTURE_ROOT" \
     TRELLIS_TEST_REAL_GIT="$FAKE_GIT" \
+    TRELLIS_TEST_REAL_PYTHON="${FENCE_PYTHON:-${TRELLIS_TEST_REAL_PYTHON:-}}" \
     FENCE_GIT_LOG="$GIT_LOG" \
     FENCE_FAKE_COMMON_DIR="$FENCE_FAKE_COMMON_DIR" \
     FENCE_FAKE_NO_COMMON="${FENCE_FAKE_NO_COMMON:-0}" \
     GIT_DIR="${FENCE_INHERITED_GIT_DIR:-}" \
-    "$FENCE" "$@"
+    bash "$FENCE" "$@"
 }
 
 make_install_harness() {
@@ -50,10 +50,11 @@ make_install_harness() {
   mkdir -p "$CONTRACT_ROOT/scripts/tests/helpers/git-fence" "$CONTRACT_ROOT/scripts/lib"
   cp "$RUNNER" "$CONTRACT_ROOT/scripts/run-tests.sh"
   cp "$REPO_ROOT/scripts/lib/test-suites.sh" "$CONTRACT_ROOT/scripts/lib/test-suites.sh"
+  cp "$REPO_ROOT/scripts/lib/trellis-python.sh" "$CONTRACT_ROOT/scripts/lib/trellis-python.sh"
   cp "$REPO_ROOT/scripts/tests/helpers/git-fence/git" "$CONTRACT_ROOT/scripts/tests/helpers/git-fence/git"
   cp "$REPO_ROOT/scripts/tests/helpers/git-fence/mktemp" "$CONTRACT_ROOT/scripts/tests/helpers/git-fence/mktemp"
 
-  python3 - "$RUNNER" "$BATS_TEST_TMPDIR/install-harness.sh" <<'PY_HARNESS'
+  python3 -I - "$RUNNER" "$BATS_TEST_TMPDIR/install-harness.sh" <<'PY_HARNESS'
 from pathlib import Path
 import sys
 
@@ -208,9 +209,177 @@ PY_HARNESS
   [ "$(wc -l < "$GIT_LOG" | tr -d ' ')" -eq 12 ]
 }
 
-@test "installer ignores hostile inherited Python pin and installs with caller PATH Python" {
+@test "existing directory routes use shell resolution without starting Python" {
+  mkdir -p "$FIXTURE_ROOT/repo/.git"
+  ln -s "$FIXTURE_ROOT/repo" "$FIXTURE_ROOT/repo-link"
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo-link/.git"
+  FENCE_PYTHON="$BATS_TEST_TMPDIR/no-python"
+  printf '#!/bin/bash\nexit 88\n' > "$FENCE_PYTHON"
+  chmod 700 "$FENCE_PYTHON"
+  cd "$FIXTURE_ROOT"
+
+  run_fence -C repo-link --git-dir .git --work-tree "$FIXTURE_ROOT/repo-link" config user.name Fixture
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -F -- 'config user.name Fixture' "$GIT_LOG" >/dev/null
+}
+
+@test "missing destinations retain the Python resolver fallback" {
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo/.git"
+  FENCE_PYTHON="$BATS_TEST_TMPDIR/python-spy"
+  export FENCE_REAL_PYTHON="${TRELLIS_TEST_REAL_PYTHON:-$(command -v python3)}"
+  export FENCE_PYTHON_LOG="$BATS_TEST_TMPDIR/python.log"
+  cat > "$FENCE_PYTHON" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$FENCE_PYTHON_LOG"
+exec "$FENCE_REAL_PYTHON" "$@"
+SH
+  chmod 700 "$FENCE_PYTHON"
+
+  run_fence init "$FIXTURE_ROOT/new/nested-repo"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -F -- "-I - $FIXTURE_ROOT/new/nested-repo" "$FENCE_PYTHON_LOG" >/dev/null
+  grep -F -- "init $FIXTURE_ROOT/new/nested-repo" "$GIT_LOG" >/dev/null
+}
+
+@test "symlinked directories and config files cannot escape the fixture" {
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo/.git"
+  FENCE_FAKE_NO_COMMON=1
+  ln -s "$OUTSIDE_ROOT" "$FIXTURE_ROOT/outside-link"
+  printf 'sentinel\n' > "$OUTSIDE_ROOT/config"
+  ln -s "$OUTSIDE_ROOT/config" "$FIXTURE_ROOT/config-link"
+  ln -s "$OUTSIDE_ROOT/not-created" "$FIXTURE_ROOT/dangling-link"
+
+  for target in outside-link/new dangling-link/new; do
+    run_fence init "$FIXTURE_ROOT/$target"
+    [ "$status" -eq 97 ] || { echo "$output"; false; }
+    [[ "$output" == *"outside test root"* ]]
+  done
+  run_fence -C "$FIXTURE_ROOT/outside-link" config user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence config --file "$FIXTURE_ROOT/config-link" user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [ "$(< "$OUTSIDE_ROOT/config")" = sentinel ]
+  run grep -E ' (init|config|clean)( |$)' "$GIT_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "dot segments and relative chained C routes cannot escape the fixture" {
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo/.git"
+  FENCE_FAKE_NO_COMMON=1
+  mkdir -p "$FIXTURE_ROOT/subdir"
+  cd "$FIXTURE_ROOT"
+
+  run_fence init "../operator-repo/new"
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -C subdir -C ../../operator-repo config user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -Csubdir -C../../operator-repo config user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence config --file "./subdir/../../operator-repo/config" user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run grep -E ' (init|config|clean)( |$)' "$GIT_LOG"
+  [ "$status" -eq 1 ]
+}
+
+@test "relative git-dir work-tree and inherited GIT_DIR symlink escapes are refused" {
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo/.git"
+  ln -s "$OUTSIDE_ROOT" "$FIXTURE_ROOT/escape"
+  cd "$FIXTURE_ROOT"
+
+  run_fence -C "$FIXTURE_ROOT" --git-dir escape config user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -C "$FIXTURE_ROOT" --git-dir=escape config user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -C "$FIXTURE_ROOT" --work-tree escape clean -fd
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -C "$FIXTURE_ROOT" --work-tree=escape clean -fd
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  FENCE_INHERITED_GIT_DIR=escape
+  run_fence -C "$FIXTURE_ROOT" init --bare "$FIXTURE_ROOT/new.git"
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [ ! -s "$GIT_LOG" ]
+}
+
+@test "actual Git cannot traverse symlink parents through destinations or routing options" {
+  mkdir -p "$OUTSIDE_ROOT/deep"
+  ln -s "$OUTSIDE_ROOT/deep" "$FIXTURE_ROOT/link"
+  FAKE_GIT="${TRELLIS_TEST_REAL_GIT:-$(command -v git)}"
+  FENCE_FAKE_COMMON_DIR=""
+
+  run_fence init -q "$FIXTURE_ROOT/link/../escaped-repo"
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence -C "$FIXTURE_ROOT/link/.." init -q escaped-cwd
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence --git-dir="$FIXTURE_ROOT/link/../outside.git" init --bare "$FIXTURE_ROOT/new.git"
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence --work-tree="$FIXTURE_ROOT/link/../outside-tree" clean -fd
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_fence config --file "$FIXTURE_ROOT/link/../config" user.name Fixture
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  FENCE_INHERITED_GIT_DIR="$FIXTURE_ROOT/link/../inherited.git"
+  run_fence init --bare "$FIXTURE_ROOT/another.git"
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [ ! -e "$OUTSIDE_ROOT/escaped-repo" ]
+  [ ! -e "$OUTSIDE_ROOT/escaped-cwd" ]
+  [ ! -e "$OUTSIDE_ROOT/outside.git" ]
+  [ ! -e "$OUTSIDE_ROOT/inherited.git" ]
+  [ ! -e "$OUTSIDE_ROOT/config" ]
+}
+
+@test "shell resolver matches Python for symlinks dot segments and unusual paths" {
+  run python3 -I - "$BATS_TEST_TMPDIR" "$FENCE" "$FAKE_GIT" <<'PY_PATHS'
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+root, fence, git = map(Path, sys.argv[1:])
+inside, outside = root / "inside", root / "outside"
+for directory in (inside / "dir", outside / "dir"):
+    directory.mkdir(parents=True)
+(inside / "link").symlink_to(outside / "dir")
+(inside / "dangling").symlink_to(outside / "missing")
+(inside / "loop").symlink_to("loop")
+(inside / "file").write_text("fixture\n")
+for name in ("space dir", "tab\tdir", "line\ndir", "trailing\n", "-", "-dash", "[glob]"):
+    (inside / name).mkdir()
+# Use the checked-in function body rather than a second shell implementation.
+prefix = fence.read_text().split('\nFENCE_ROOT="$(canonical_path', 1)[0]
+driver = root / "resolver.sh"
+driver.write_text(prefix + '''
+for path in "$@"; do
+  resolved="$(canonical_path "$path")" || exit $?
+  printf '%s\\0' "$resolved"
+done
+''')
+paths = ["", ".", "..", "-", "/", "//", "///", str(inside) + "/"]
+for base in (inside, outside, inside / "link", inside / "dangling", inside / "loop", inside / "file"):
+    for suffix in ("", "/.", "/..", "/../dir", "/missing/../dir", "/./dir", "//dir", "/new/child"):
+        absolute = str(base) + suffix
+        paths.extend((absolute, os.path.relpath(base, inside) + suffix))
+paths.extend(str(path) for path in inside.iterdir())
+os.chdir(inside)
+expected = [os.path.realpath(path).rstrip("\n") for path in paths]
+env = dict(os.environ, TRELLIS_TEST_GIT_FENCE_ROOT=str(inside), TRELLIS_TEST_REAL_GIT=str(git), CDPATH=str(outside), OLDPWD=str(outside))
+for bash in dict.fromkeys(("/bin/bash", shutil.which("bash"))):
+    result = subprocess.run([bash, str(driver), *paths], cwd=inside, env=env, capture_output=True, check=True)
+    actual = [os.fsdecode(value) for value in result.stdout.split(b"\0")[:-1]]
+    assert actual == expected, [(path, want, got) for path, want, got in zip(paths, expected, actual) if want != got]
+    print(bash, len(paths), "paths matched")
+PY_PATHS
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "installer ignores hostile fence Python pin and installs with the shared resolver" {
   make_install_harness
-  real_python="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+  real_python="$(
+    . "$REPO_ROOT/scripts/lib/trellis-python.sh"
+    TRELLIS_HOME=/dev/null trellis_python &&
+      "$TRELLIS_PYTHON" -I -c 'import os,sys; print(os.path.realpath(sys.executable))'
+  )"
   marker="$BATS_TEST_TMPDIR/hostile-python-called"
   hostile_python="$BATS_TEST_TMPDIR/hostile-python"
   printf '#!/bin/bash\n: > %q\nprintf "%%s\\n" %q\n' \
@@ -291,7 +460,7 @@ for tool in git mktemp python; do
   [ ! -e "$root/forged-$tool-called" ] || exit 85
 done
 
-"$TRELLIS_TEST_REAL_PYTHON" - "$root" "$bin" <<'PY_MODE'
+"$TRELLIS_TEST_REAL_PYTHON" -I - "$root" "$bin" <<'PY_MODE'
 from pathlib import Path
 import os
 import stat
@@ -372,7 +541,7 @@ SH
 }
 
 @test "actual Git worktree operations preserve outside paths and permit fenced destinations" {
-  run python3 - "$BATS_TEST_TMPDIR" "$FENCE" "${TRELLIS_TEST_REAL_GIT:-$(command -v git)}" <<'PY_LIVE'
+  run python3 -I - "$BATS_TEST_TMPDIR" "$FENCE" "${TRELLIS_TEST_REAL_GIT:-$(command -v git)}" <<'PY_LIVE'
 import os
 from pathlib import Path
 import subprocess
@@ -391,7 +560,7 @@ def git(*args):
     return subprocess.run([real_git, "-C", str(repo), *args], env=env, capture_output=True, text=True, check=True)
 
 def guarded(*args, expected=0):
-    result = subprocess.run([fence, "-C", str(repo), *args], env={**env, "TRELLIS_TEST_GIT_FENCE_ROOT": str(inside), "TRELLIS_TEST_REAL_GIT": real_git}, capture_output=True, text=True)
+    result = subprocess.run(["bash", fence, "-C", str(repo), *args], env={**env, "TRELLIS_TEST_GIT_FENCE_ROOT": str(inside), "TRELLIS_TEST_REAL_GIT": real_git}, capture_output=True, text=True)
     assert result.returncode == expected, (args, result.returncode, result.stdout, result.stderr)
 
 git("init", "-q")

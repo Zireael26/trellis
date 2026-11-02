@@ -63,7 +63,7 @@ function fixture(t) {
 
 test('large pre-action input and image-sized shell result cross the process boundary without argv payload', async t => {
   const f = fixture(t);
-  const largeInput = 'x'.repeat(2 * 1024 * 1024);
+  const largeInput = 'gh pr create --title ' + 'x'.repeat(2 * 1024 * 1024);
   const pre = await f.handlers.get('tool_call')({
     toolCallId: 'large-input', toolName: 'bash', input: { command: largeInput },
   }, f.ctx);
@@ -166,7 +166,7 @@ test('temporary event transport cleans up after spawn failure/cancellation and r
       throw failure;
     };
     const blocked = await f.handlers.get('tool_call')({
-      toolCallId: failure.name, toolName: 'bash', input: { command: 'printf small' },
+      toolCallId: failure.name, toolName: 'bash', input: { command: 'gh pr create' },
     }, f.ctx);
     assert.equal(blocked.block, true);
     assert.match(blocked.reason, /spawn failure sentinel|cancel sentinel/);
@@ -185,7 +185,7 @@ test('temporary event transport cleans up after spawn failure/cancellation and r
   const directory = () => dirname(eventFile);
   t.after(() => { if (eventFile) rmSync(directory(), { recursive: true, force: true }); });
   const blocked = await f.handlers.get('tool_call')({
-    toolCallId: 'cleanup-refusal', toolName: 'bash', input: { command: 'printf small' },
+    toolCallId: 'cleanup-refusal', toolName: 'bash', input: { command: 'gh pr create' },
   }, f.ctx);
   assert.equal(blocked.block, true);
   assert.match(blocked.reason, /event transport cleanup failed/);

@@ -26,7 +26,7 @@ function fixture(t) {
   const messages = [];
   const notifications = [];
   const pi = {
-    on: (name, handler) => handlers.set(name, handler),
+    on: (name, handler) => handlers.set(name, name === 'before_agent_start' ? (event, ctx) => handler({ messageType: 'user', ...event }, ctx) : handler),
     getAllTools: () => [],
     sendMessage: (...args) => messages.push(args),
     exec: async (_script, args) => {
@@ -165,19 +165,19 @@ test('policy dedupe compares exact current block and preserves other parent text
 
 test('pre-action context survives tool result and user bash queues next-turn context', async t => {
   const f = fixture(t);
-  f.hook('block-destructive.sh', `printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"pre sentinel"}}'`);
-  f.hook('pr-gate-shiftleft.sh', 'exit 0');
+  f.hook('block-destructive.sh', 'exit 0');
+  f.hook('pr-gate-shiftleft.sh', `printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"pre sentinel"}}'`);
   f.hook('truncation-check.sh', 'exit 0');
-  const call = { toolCallId: 'shell', toolName: 'bash', input: { command: 'pwd' } };
+  const call = { toolCallId: 'shell', toolName: 'bash', input: { command: 'gh pr create' } };
   assert.equal(await f.handlers.get('tool_call')(call, f.ctx), undefined);
   const result = await f.handlers.get('tool_result')({ ...call, content: [], isError: false }, f.ctx);
   assert.match(result.content[0].text, /pre sentinel/);
-  await f.handlers.get('user_bash')({ command: 'pwd', cwd: f.cwd, excludeFromContext: false }, f.ctx);
+  await f.handlers.get('user_bash')({ command: 'gh pr create', cwd: f.cwd, excludeFromContext: false }, f.ctx);
   assert.match(f.messages[0][0].content, /pre sentinel/);
   assert.equal(f.messages[0][1].deliverAs, 'nextTurn');
   f.hook('block-destructive.sh', `printf '%s\\n' '{"decision":"block","reason":"deny sentinel"}'`);
   assert.equal((await f.handlers.get('tool_call')(call, f.ctx)).block, true);
-  assert.equal((await f.handlers.get('user_bash')({ command: 'pwd', cwd: f.cwd, excludeFromContext: false }, f.ctx)).result.exitCode, 1);
+  assert.equal((await f.handlers.get('user_bash')({ command: 'gh pr create', cwd: f.cwd, excludeFromContext: false }, f.ctx)).result.exitCode, 1);
 });
 
 test('unsupported reads stay model visible without UI fatigue; genuine errors stay visible', async t => {
@@ -199,7 +199,7 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
   ]) {
     f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: 'stderr sentinel', code: 0 });
     // Reads no longer cross the process boundary; exercise its errors on shell.
-    await f.handlers.get('tool_call')({ toolCallId: 'shell-errors', toolName: 'bash', input: { command: 'pwd' } }, f.ctx);
+    await f.handlers.get('tool_call')({ toolCallId: 'shell-errors', toolName: 'bash', input: { command: 'gh pr create' } }, f.ctx);
   }
   assert.equal(f.notifications.length, 3);
 });

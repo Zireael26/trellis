@@ -233,13 +233,19 @@ trellis_home_is_valid_semver() {
 # NORMATIVE DEFINITION of the release-store execution-payload predicate.
 #
 # A stable launcher never executes the installed release directory itself: it
-# seals a private snapshot of the configured release under another name and
-# executes that. So a verified payload is legitimately either
+# seals a snapshot of the configured release under another name and executes
+# that. So a verified payload is legitimately one of
 #
 #   HOME/releases/VERSION/payload                      (the installed release)
-#   HOME/releases/.tmp.VERSION.exec.SUFFIX/payload     (its execution snapshot)
+#   HOME/releases/.exec/VERSION-DIGEST/payload         (its persistent execution
+#                                                       snapshot, DIGEST being the
+#                                                       sha256 of its release.json)
+#   HOME/releases/.tmp.VERSION.exec.SUFFIX/payload     (the per-run snapshot of
+#                                                       launchers before 1.4.0)
 #
-# and nothing else in the store. Every gate in the tree that admits a payload
+# and nothing else in the store. The persistent form matches the version whole
+# too: what follows "VERSION-" must be exactly 64 lowercase hex digits, so the
+# snapshot of release 1.2.3-rc is not accepted under 1.2.3. Every gate in the tree that admits a payload
 # decides exactly this question, so the answer is defined once, here, and
 # unit-tested here. SIX callers cannot reach this function at the moment they
 # ask — five direct-source gates that run before any library may be sourced
@@ -263,13 +269,28 @@ trellis_home_is_valid_semver() {
 #
 # Pure string predicate: it touches no filesystem and reads no environment, so
 # a caller must still prove the paths are real, unlinked, and canonical.
+#
+# The line below declares that every gate of this payload accepts the
+# persistent .exec form. The stable launcher reads it from the verified payload
+# and runs older payloads, which lack it, from a per-run snapshot instead
+# (launcher_payload_runs_from_exec_store). Keep it exactly as written while the
+# predicate accepts .exec/VERSION-DIGEST.
+# trellis-payload-capability: exec-snapshot
 trellis_home_snapshot_payload_matches() {
   local home="$1" payload="$2" version="$3" snapshot_root snapshot_base rest suffix
   [ "$payload" = "$home/releases/$version/payload" ] && return 0
   snapshot_root="${payload%/payload}"
   [ "$snapshot_root" != "$payload" ] || return 1
-  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   snapshot_base="${snapshot_root##*/}"
+  if [ "${snapshot_root%/*}" = "$home/releases/.exec" ]; then
+    suffix="${snapshot_base#"$version"-}"
+    [ "$suffix" != "$snapshot_base" ] && [ "${#suffix}" -eq 64 ] || return 1
+    case "$suffix" in
+      *[!0-9a-f]*) return 1 ;;
+    esac
+    return 0
+  fi
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   rest="${snapshot_base#.tmp.}"
   [ "$rest" != "$snapshot_base" ] || return 1
   suffix="${rest#"$version".exec.}"
@@ -831,8 +852,10 @@ trellis_home_validate_config() {
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
     # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
+    # alone (spec 054), so a bad value disables only the heavy gate. projects
+    # (per-project host settings such as stop_checks.fast) is typed by the
+    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)

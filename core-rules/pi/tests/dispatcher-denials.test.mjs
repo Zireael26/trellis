@@ -13,11 +13,12 @@ const nested = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDe
 function fixture(t) {
   const cwd = mkdtempSync(resolve(tmpdir(), 'trellis-denials-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.trellis/runtime/core-rules/codex/hooks', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
+  for (const dir of ['.trellis/runtime/core-rules/pi/hooks', '.trellis/runtime/core-rules/hooks/lib', '.trellis/runtime/core-rules/codex/hooks/lib', 'tmp']) mkdirSync(resolve(cwd, dir), { recursive: true });
   const script = resolve(cwd, '.trellis/runtime/core-rules/pi/hooks/dispatch.sh');
   copyFileSync(dispatcher, script);
   // Required guards run through the runtime's supervisor, beside the dispatcher.
   copyFileSync(new URL('../../hooks/lib/guard-supervise.pl', import.meta.url), resolve(cwd, '.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl'));
+  copyFileSync(new URL('../../hooks/lib/guard-rules.sh', import.meta.url), resolve(cwd, '.trellis/runtime/core-rules/codex/hooks/lib/guard-rules.sh'));
   writeFileSync(resolve(cwd, '.trellis/runtime/trellis.config.json'), '{}');
   const hook = (name, output, rc, stderr = '') => {
     const quote = value => `'${value.replaceAll("'", "'\\''")}'`;

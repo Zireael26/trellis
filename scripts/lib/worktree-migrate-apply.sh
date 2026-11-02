@@ -23,7 +23,10 @@ wm_state_dir() {
 }
 
 wm_id() {
-  printf '%s' "$1" | shasum -a 256 | cut -c1-64
+  local digest
+  digest="$(printf '%s' "$1" | shasum -a 256 2>/dev/null)" ||
+    digest="$(printf '%s' "$1" | sha256sum 2>/dev/null)" || return 1
+  printf '%s\n' "${digest%% *}"
 }
 
 # wm_journal JOURNAL ACTION OLD NEW STEP [ERROR] [EXTRA-JSON]

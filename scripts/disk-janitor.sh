@@ -115,6 +115,8 @@ Usage:
                                            identity; multiple clones are refused.
   disk-janitor.sh --scopes caches,worktrees,stores,docker,releases
                                            Limit scopes (default: these five).
+  disk-janitor.sh --scopes release-tmp     Opt-in: orphaned persistent execution
+                                           work, uninstalled snapshots and stamps.
   disk-janitor.sh --scopes pi              Opt-in, report-only: pi temp files,
                                            spill logs and orphan pi worktrees
                                            (never in the default set; --apply
@@ -200,6 +202,12 @@ Scopes:
               reap-tmp` (spec 069 D3): both .tmp.<version>.exec.<suffix> and
               .tmp.<version>.verify.<suffix> scratch. Only reap-tmp reapable
               rows become [delete]; keep/refused rows are [skip]/[candidate].
+  release-tmp Host-global, opt-in: .exec/.tmp.* with a dead owner, or no owner
+              and older than 1d; snapshots and stamps for uninstalled releases;
+              stamp-writer temp files older than 1d. Active/installed releases,
+              live owners and snapshots with live handles are kept. Unknown
+              owners or failed lsof checks fail closed. --apply confirms first.
+              The releases scope above still owns legacy execution staging.
   pi          Host-global, opt-in: spill logs (pi-bash-*.log older than 1d or
               over 1 GiB, no open handle) apply-delete across the _pi root,
               ~/.pi-worktrees, the legacy root, bare $TMPDIR, $TMPDIR/pi and
@@ -291,11 +299,11 @@ validate_scopes() {
   IFS=','
   for s in $SCOPES; do
     case "$s" in
-      caches|worktrees|stores|docker|releases|pi|orphans|logs|tmp|transcripts) ;;
+      caches|worktrees|stores|docker|releases|release-tmp|pi|orphans|logs|tmp|transcripts) ;;
       "") ;;
       *)
         IFS="$ifs_save"
-        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases, pi, orphans, logs, tmp, transcripts)" >&2
+        echo "disk-janitor: unknown scope: $s (valid: caches, worktrees, stores, docker, releases, release-tmp, pi, orphans, logs, tmp, transcripts)" >&2
         exit 2
         ;;
     esac
@@ -692,7 +700,7 @@ done < <(jq -c '.entries[]' "$REGISTRY_SNAPSHOT_TMP")
 # Failure is recorded in the snapshot itself; dj_worktree_in_use interprets that
 # marker as "in use" so a broken safety check can only close the reap gate.
 if scope_enabled worktrees || scope_enabled pi || scope_enabled orphans ||
-   scope_enabled logs || scope_enabled tmp; then
+   scope_enabled logs || scope_enabled tmp || scope_enabled release-tmp; then
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
 fi
 
@@ -1490,6 +1498,12 @@ fi
 if scope_enabled releases; then
   scan_release_staging
 fi
+if scope_enabled release-tmp; then
+  if dj_release_tmp scan >>"$PLAN_TMP"; then :; else
+    plan_row release-tmp skip scan "$TRELLIS_HOME" 0 - "scan failed; results incomplete"
+    EXIT_STATUS=1
+  fi
+fi
 if scope_enabled pi; then
   scan_pi
 fi
@@ -1531,7 +1545,8 @@ PI_RECLAIMABLE_BYTES="$(sum_bytes pi reclaimable)"
 # 0 B. Apply must key on planned rows as well as reclaimable bytes.
 WT_DELETE_COUNT="$(awk -F'\t' '$1=="worktrees" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")"
 WT_REAPED_BYTES=0
-TOTAL_RECLAIM_BYTES=$((CACHE_DELETE_BYTES + WT_DELETE_BYTES + RELEASE_STAGING_DELETE_BYTES))
+RELEASE_TMP_DELETE_BYTES="$(sum_bytes release-tmp delete)"
+TOTAL_RECLAIM_BYTES=$((CACHE_DELETE_BYTES + WT_DELETE_BYTES + RELEASE_STAGING_DELETE_BYTES + RELEASE_TMP_DELETE_BYTES))
 
 # Largest single cache (for the ceiling tripwire).
 LARGEST_CACHE_BYTES="$(awk -F'\t' '$1=="caches" && $5>m { m=$5 } END { printf "%.0f", m+0 }' "$PLAN_TMP")"
@@ -1579,6 +1594,18 @@ print_pi_rows() {
   printf '  reclaimable by hand (aged pi temp files, spill logs + orphan pi worktrees): %s\n' "$(dj_human_bytes "$PI_RECLAIMABLE_BYTES")"
 }
 
+print_release_tmp_rows() {
+  local scope verdict kind path bytes repo detail device inode
+  scope_enabled release-tmp || return 0
+  echo "== Release temporary state (host-global) =="
+  while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail device inode; do
+    [ "$scope" = release-tmp ] || continue
+    printf '  [%s] %s (%s) — %s: %s\n' "$verdict" "$path" "$(dj_human_bytes "$bytes")" "$kind" "$detail"
+  done <"$PLAN_TMP"
+  printf '  planned release-tmp bytes: %s\n' "$(dj_human_bytes "$RELEASE_TMP_DELETE_BYTES")"
+  echo
+}
+
 render_report() {
   local line scope verdict kind path bytes repo detail
   local fleet project_id checkout_id worktree_id common owner_root
@@ -1593,6 +1620,7 @@ render_report() {
   echo
 
   # --- recurrence pre-pass ---
+  print_release_tmp_rows
   echo "== Recurrence pre-pass: turbo outputs =="
   if [ -n "$TURBO_LANDMINES" ]; then
     echo "  UNSCOPED turbo outputs found (this is the cache-blowup root cause):"
@@ -1741,7 +1769,7 @@ INNER
       "$DOCKER_ANON_DANGLING_COUNT" "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"
   fi
   # D7 coverage: unattributed = df used − scanned bytes (GiB and %).
-  # Scanned = caches + worktrees + releases + stores + pi + logs + tmp plan
+  # Scanned = caches + worktrees + releases + release-tmp + stores + pi + logs + tmp plan
   # bytes (all validated numerics; awk sums treat text as 0, bash arithmetic
   # below runs only on validated uints).
   {
@@ -1752,7 +1780,8 @@ INNER
     _cov_cache="${CACHE_ALL_BYTES:-0}"; case "$_cov_cache" in ''|*[!0-9]*) _cov_cache=0 ;; esac
     _cov_wt="${WT_TOTAL_BYTES:-0}"; case "$_cov_wt" in ''|*[!0-9]*) _cov_wt=0 ;; esac
     _cov_rel="${RELEASE_STAGING_ALL_BYTES:-0}"; case "$_cov_rel" in ''|*[!0-9]*) _cov_rel=0 ;; esac
-    _cov_scanned=$(( _cov_cache + _cov_wt + _cov_rel + _cov_stores + _cov_pi + _cov_logs + _cov_tmp ))
+    _cov_release_tmp="$(sum_bytes release-tmp '*')"; case "$_cov_release_tmp" in ''|*[!0-9]*) _cov_release_tmp=0 ;; esac
+    _cov_scanned=$(( _cov_cache + _cov_wt + _cov_rel + _cov_release_tmp + _cov_stores + _cov_pi + _cov_logs + _cov_tmp ))
     _cov_used="$(df -k "$TRELLIS_HOME" 2>/dev/null | awk 'NR==2 {print $3*1024}')"
     case "$_cov_used" in ''|*[!0-9]*) _cov_used=0 ;; esac
     if [ "$_cov_used" -gt 0 ] && [ "$_cov_scanned" -ge 0 ] 2>/dev/null; then
@@ -1854,6 +1883,7 @@ if [ "$MODE" = "dry-run" ]; then
     fi
     echo
   fi
+  print_release_tmp_rows
   echo "== Planned totals =="
   printf '  host-project plan: %s\n' "$(dj_human_bytes "$TOTAL_RECLAIM_BYTES")"
   if scope_enabled releases; then
@@ -2125,6 +2155,20 @@ if scope_enabled releases; then
     dj_host_release_apply
   fi
   echo
+fi
+if scope_enabled release-tmp; then
+  print_release_tmp_rows
+  if [ "$(awk -F'\t' '$1=="release-tmp" && $2=="delete" { n++ } END { print n+0 }' "$PLAN_TMP")" -gt 0 ] &&
+     confirm_category "orphaned release temporary state"; then
+    if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
+    # shellcheck disable=SC2034  # consume the complete plan row positionally.
+    while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail device inode; do
+      [ "$scope" = release-tmp ] && [ "$verdict" = delete ] || continue
+      if dj_release_tmp remove "$path" "$device" "$inode"; then :; else
+        EXIT_STATUS=1
+      fi
+    done <"$PLAN_TMP"
+  fi
 fi
 # --- stores --- D6 (spec 069): prune lives in dj_host_store_apply (called via
 # dj_host_apply below), using each tool's own prune command, never rm.

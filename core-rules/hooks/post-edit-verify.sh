@@ -49,9 +49,26 @@ case "$FILE_PATH" in
     if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
        || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
        || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-      if command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
-        OUT=$(npx --no-install eslint --quiet "$FILE_PATH" 2>&1)
-        if [ $? -ne 0 ]; then
+      # A local install runs directly: one node start, not npx's probe plus
+      # run (~0.4 s each). Anything else keeps the npx lookup unchanged.
+      ESLINT=()
+      if command -v npx >/dev/null 2>&1; then
+        if [ -f node_modules/.bin/eslint ] && [ -x node_modules/.bin/eslint ]; then
+          ESLINT=(./node_modules/.bin/eslint)
+        elif npx --no-install eslint --version >/dev/null 2>&1; then
+          ESLINT=(npx --no-install eslint)
+        fi
+      fi
+      if [ "${#ESLINT[@]}" -gt 0 ]; then
+        OUT=$("${ESLINT[@]}" --quiet "$FILE_PATH" 2>&1)
+        RC=$?
+        # A local install that cannot even print --version (missing module, no
+        # node) is no eslint, as when npx probed first; only failures pay this.
+        if [ "$RC" -ne 0 ] && [ "${ESLINT[0]}" = ./node_modules/.bin/eslint ] &&
+           ! ./node_modules/.bin/eslint --version >/dev/null 2>&1; then
+          RC=0
+        fi
+        if [ "$RC" -ne 0 ]; then
           ERRORS="${ERRORS}eslint: ${FILE_PATH}
 ${OUT}
 

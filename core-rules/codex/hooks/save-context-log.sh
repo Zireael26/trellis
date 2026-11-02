@@ -66,6 +66,22 @@ fi
 REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 
 OUT="${REPO_ROOT}/context-log.md"
+
+# Stop fires on every turn, and the log only changes when the transcript grew
+# (spec 072 U8). Skip the rewrite when the transcript and context-log.md are
+# exactly as this hook's last write left them; no transcript, no state, or any
+# stat failure writes as before.
+SCL_STATE=""
+if [ -n "$TRANSCRIPT" ] && SCL_STATE=$(_se_turn_state_dir "$PROJECT_DIR"); then
+  SCL_STATE="${SCL_STATE%/turn-baseline/*}/context-log/${SCL_STATE##*/}"
+  if [ -f "$OUT" ] && SCL_KEY=$(_se_stat_lines "s:$TRANSCRIPT" "l:$OUT") \
+     && [ "$(cat "$SCL_STATE" 2>/dev/null)" = "$SCL_KEY" ]; then
+    exit 0
+  fi
+else
+  SCL_STATE=""
+fi
+
 TMPDIR=""
 _TMPDIR_MK=$(mktemp -d "${OUT}.tmp.XXXXXX" 2>&1)
 _TMPDIR_STATUS=$?
@@ -222,6 +238,9 @@ if [ $_MV_STATUS -ne 0 ]; then
   echo "save-context-log: failed to rename temp file to $OUT — $_MV_OUT" >&2
   rm -rf "${TMPDIR:?}"
   exit 0
+fi
+if [ -n "$SCL_STATE" ] && SCL_KEY=$(_se_stat_lines "s:$TRANSCRIPT" "l:$OUT"); then
+  ( umask 077 && mkdir -p "${SCL_STATE%/*}" && printf '%s\n' "$SCL_KEY" > "$SCL_STATE" ) 2>/dev/null
 fi
 
 rm -rf "${TMPDIR:?}"

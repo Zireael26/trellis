@@ -18,9 +18,10 @@
 # owner_sha256 no longer match the live owner record.
 #
 # Checks, in order: hooks-path (re-asserts a husky-reset core.hooksPath through
-# the doctor R4.6 repair), release (full immutable release verify), owner-
-# artifacts, exclude, toolchain, registry (consistency, and the exact-owner
-# reconcile only when the row disagrees).
+# the doctor R4.6 repair), release (full immutable release verify, skipped
+# when the release stamp proves it unchanged since one), owner-artifacts,
+# exclude, toolchain, registry (consistency, and the exact-owner reconcile only
+# when the row disagrees).
 #
 # Locks (no new lock): the per-checkout attachment lock is acquired non-blocking
 # for hooksPath repair and the final commit (journal/owner re-check, registry
@@ -40,6 +41,8 @@
 # doctor --fix and the managed pre-push. Bash 3.2 compatible.
 
 _ATTACH_POSTJOB_SELF="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/attach-postjob.sh"
+# shellcheck source=release-stamp.sh
+. "${_ATTACH_POSTJOB_SELF%/*}/release-stamp.sh"
 ATTACH_STATUS_PENDING_WARN_SECONDS=900
 ATTACH_POSTJOB_RETRIES=6
 ATTACH_POSTJOB_EX_FAILED=1
@@ -279,13 +282,22 @@ _attach_postjob_checkout_lock() {
 attach_postjob_verify() {
   local home="$1" owner="$2" root="$3" release payload joined rc
   release="$(jq -r '.release' "$owner")" || { printf 'fail\trelease\t4\tthe owner record is unreadable; run trellis doctor\n'; return 1; }
-  # rc reads the check's own status: `if ! f; then rc=$?` would read the
-  # negation (always 0), so every leg below uses `||` to keep the true code.
-  payload="$(TRELLIS_HOME="$home" release_store_locate "$release")" || {
-    rc=$?
-    printf 'fail\trelease\t%s\timmutable release %s does not verify; reinstall it (trellis release install %s), then trellis doctor --fix\n' "$rc" "$release" "$release"
-    return 1
-  }
+  # Spec 072 D-A: a release stamped by an earlier full verify and unchanged
+  # since skips release_store_locate's verify; anything else takes it, and its
+  # success stamps the release for the next caller.
+  if payload="$(TRELLIS_HOME="$home" release_store_release_path "$release" 2>/dev/null)" &&
+     release_stamp_check "$home" "$payload"; then
+    :
+  else
+    # rc reads the check's own status: `if ! f; then rc=$?` would read the
+    # negation (always 0), so every leg below uses `||` to keep the true code.
+    payload="$(TRELLIS_HOME="$home" release_store_locate "$release")" || {
+      rc=$?
+      printf 'fail\trelease\t%s\timmutable release %s does not verify; reinstall it (trellis release install %s), then trellis doctor --fix\n' "$rc" "$release" "$release"
+      return 1
+    }
+    release_stamp_write "$home" "$payload" || :
+  fi
   if ! jq -e --arg payload "$payload/payload" '
        ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink" and .target == $payload)] | length) == 1
      ' "$owner" >/dev/null 2>&1; then

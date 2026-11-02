@@ -22,10 +22,11 @@ surfaces.
 | `slop-tripwire.sh` | PostToolUse (Edit/Write/MultiEdit) | new |
 | `truncation-check.sh` | unregistered (was PostToolUse Grep/Bash/Read) | upstream |
 | `track-read.sh` | PostToolUse (Read/Write/Edit/MultiEdit) | new |
-| `session-context.sh` | SessionStart (startup/resume) | new |
+| `session-start.sh` | SessionStart (the one registered command; dispatches the three below by source) | new |
+| `session-context.sh` | SessionStart (startup/resume, via `session-start.sh`) | new |
 | `save-context-log.sh` | PreCompact | new |
-| `post-compact-context.sh` | SessionStart (compact) | new |
-| `inject-primer-index.sh` | SessionStart | new |
+| `post-compact-context.sh` | SessionStart (compact, via `session-start.sh`) | new |
+| `inject-primer-index.sh` | SessionStart (startup/resume, via `session-start.sh`) | new |
 | `skill-size-preflight.sh` | unregistered (was SessionStart advisory) | new |
 | `env-echo.sh` | SessionStart (environment probe) | new |
 | `core-rules/hooks/wiki-skill-suggest.sh` | PostToolUse (Write/Edit/MultiEdit) | new |
@@ -37,7 +38,7 @@ surfaces.
 
 | Script | Event | Origin |
 |---|---|---|
-| `herdr-foreman-session.sh` | SessionStart (Herdr user-global) | new |
+| `herdr-foreman-session.sh` | SessionStart (Herdr app / hc terminal, user-global) | new |
 | `trellis-worktree-create.sh` | WorktreeCreate (central-root `cc-<name>` worktree, detached attach) | new |
 | `trellis-worktree-remove.sh` | WorktreeRemove (refuses unsaved work; detach, `git worktree remove`, merged-branch delete) | new |
 

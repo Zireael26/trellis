@@ -2070,6 +2070,10 @@ fi
 if perl_row="$(hc_guard_supervisor_perl)"; then :; else
   report '  ' "$?" "$perl_row"
 fi
+# Host-only Stop setting (spec 072): INFO when set, WARN when ignored.
+if fast_row="$(hc_stop_checks_fast "$HOME_PATH")"; then :; else
+  report '  ' "$?" "$fast_row"
+fi
 if run_check '  ' hc_portable_user_surface "$HOME_PATH"; then
   :
 else

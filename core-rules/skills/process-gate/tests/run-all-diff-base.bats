@@ -8,6 +8,7 @@ RECEIPT_RE='^diff-base: ([0-9a-f]{12}|-) ([^ ]+) via (explicit|pr-cache|recorded
 ROWS="check-pr.sh check-secrets.sh check-bypass.sh check-tests.sh check-docs.sh check-security-diff.sh check-analyze.sh check-slop.sh"
 
 setup() {
+  unset PG_PUSH_TEST_SCOPE
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   local real name
   real="$(cd "$BATS_TEST_DIRNAME/.." && pwd)/scripts"
@@ -140,14 +141,16 @@ db_resolve() { DB_BASE_SHA=""; DB_BASE_REF="-"; DB_SOURCE="refused"; DB_REASON="
 STUB
 }
 
-# assert_fallback <branch> <subjects>: every row got <branch>..HEAD and its
-# commits, and the receipt names <branch> via fallback at its tip.
+# assert_fallback <branch> <subjects>: Tests gets pinned endpoints, other rows
+# retain <branch>..HEAD, and the receipt names the fallback branch at its tip.
 assert_fallback() {
-  local tip name
+  local tip name expected
   tip="$(git -C "$REPO" rev-parse "$1")"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   for name in $ROWS; do
-    [ "$(cat "$LOGS/$name")" = "$(printf 'range=%s..HEAD\n%s' "$1" "$2")" ] || { echo "$name:"; cat "$LOGS/$name"; return 1; }
+    expected="$1..HEAD"
+    [ "$name" != check-tests.sh ] || expected="$tip..$HEAD_SHA"
+    [ "$(cat "$LOGS/$name")" = "$(printf 'range=%s\n%s' "$expected" "$2")" ] || { echo "$name:"; cat "$LOGS/$name"; return 1; }
   done
   [[ "$(receipt_line)" == *" $1 via fallback ("*") range=${tip:0:12}..${HEAD_SHA:0:12} "* ]] || { echo "$output"; return 1; }
 }

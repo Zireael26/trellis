@@ -9,6 +9,7 @@
 # so "full" means the marker exists and "narrowed" means it does not.
 
 setup() {
+  unset PG_PUSH_TEST_SCOPE
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-tests.sh"
   PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/proj.XXXXXX")"
@@ -116,6 +117,25 @@ full_for() {
 }
 
 # --- passive records narrow --------------------------------------------------
+
+@test "tag push scope forces the full battery even for passive docs" {
+  branch release-docs
+  put CHANGELOG.md
+  commit docs
+  export PG_PUSH_TEST_SCOPE=full
+  run_gate
+  [ "$status" -eq 0 ]
+  assert_full
+}
+
+@test "merge mode retains the passive-docs exemption" {
+  branch docs
+  put CHANGELOG.md
+  commit "passive record"
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --mode=merge --range=main..HEAD 2>&1"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  assert_narrowed 1
+}
 
 @test "passive records on the base allowlist narrow the battery and say so" {
   branch docs

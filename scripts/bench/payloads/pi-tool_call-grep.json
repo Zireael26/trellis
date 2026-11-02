@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "pre_action",
+  "native_event": "tool_call",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "grep",
+    "family": "local_tool",
+    "target_coverage": "none",
+    "targets": [],
+    "input": {
+      "pattern": "add",
+      "path": "."
+    }
+  },
+  "result": null
+}

@@ -93,7 +93,7 @@ explicitly selected rerun. Do not report the unavailable attempt as success.
 
 ## Herdr foreman lane
 
-Inside Herdr (`HERDR_ENV=1`) a multi-unit task may run through a pi foreman workflow
+Inside a Herdr app terminal (herdr-core `hc`) a multi-unit task may run through a pi foreman workflow
 whose subagents are chosen per role from live quota. Topology, the cross-family rule,
 and commit-at-phase-boundary obligations: `core-rules/references/herdr-foreman.md`.
 

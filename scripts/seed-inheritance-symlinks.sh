@@ -153,6 +153,8 @@ attachment_reconcile() {
   . "$script_dir/lib/release-store.sh"
   # shellcheck source=lib/attachment.sh
   . "$script_dir/lib/attachment.sh"
+  # shellcheck source=lib/release-stamp.sh
+  . "$script_dir/lib/release-stamp.sh"
 
   home="$(trellis_home_resolve "")" || return "$?"
   registry="$(local_registry_path "$home")" || return "$?"
@@ -243,7 +245,17 @@ attachment_reconcile() {
   ' >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
   harnesses_json="$(local_registry_normalize_harnesses "$(printf '%s\n' "$registration" | jq -c '.harnesses')")" || return "$?"
   [ "$harnesses_json" != '[]' ] || return "$TRELLIS_EX_STATE"
-  TRELLIS_HOME="$home" release_store_locate "$release" >/dev/null || return "$?"
+  # Spec 072 U5: worktree add runs this pre-add check and then the new
+  # worktree's post-checkout reconcile, which verifies the release in full
+  # before anything attaches. For the first of the two, a release stamp left
+  # by a full verify and unchanged since stands in for the re-hash.
+  if [ "$PRE_ADD" -eq 1 ] &&
+     payload="$(TRELLIS_HOME="$home" release_store_release_path "$release" 2>/dev/null)" &&
+     release_stamp_check "$home" "$payload"; then
+    :
+  else
+    TRELLIS_HOME="$home" release_store_locate "$release" >/dev/null || return "$?"
+  fi
   payload="$(TRELLIS_HOME="$home" release_store_release_path "$release")" || return "$?"
   payload="$payload/payload"
   [ -d "$payload" ] && [ ! -L "$payload" ] || return "$TRELLIS_EX_STATE"

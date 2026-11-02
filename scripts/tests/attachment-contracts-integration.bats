@@ -248,11 +248,11 @@ assert_rolled_back_to_baseline() {
   [ "$expected" = "$actual" ]
 
   # The pinned SessionStart renders name the fixture launcher and home, never a
-  # placeholder and never an ambient variable. Three Claude commands since the
-  # skill-size-preflight route retired (as in surface-plan.bats).
+  # placeholder and never an ambient variable. One command per harness since the
+  # session-start dispatcher (spec 072 U4; as in surface-plan.bats).
   jq -e --arg launcher "$T25_LAUNCHER" --arg home "$T25_TRELLIS_HOME" --arg user "$T25_USER_HOME" '
     [.hooks.SessionStart[].hooks[].command] as $commands
-    | ($commands | length) == 3
+    | ($commands | length) == 1
     and all($commands[];
       contains($launcher) and contains($home) and contains($user)
       and (contains("__TRELLIS_") | not)
@@ -260,7 +260,7 @@ assert_rolled_back_to_baseline() {
   ' "$T25_PROJECT/.claude/settings.local.json" >/dev/null
   jq -e --arg launcher "$T25_LAUNCHER" '
     [.hooks.SessionStart[].hooks[].command] as $commands
-    | ($commands | length) == 3 and all($commands[]; contains($launcher))
+    | ($commands | length) == 1 and all($commands[]; contains($launcher))
   ' "$T25_PROJECT/.codex/hooks.json" >/dev/null
 
   # The project keeps its own keys in both merge destinations.

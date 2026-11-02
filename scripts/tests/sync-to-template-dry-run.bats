@@ -34,8 +34,10 @@ setup() {
   cp "$REPO_ROOT/scripts/lib/mirror-lint.sh" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/lib/trellis.config.schema.json" "$SOURCE/scripts/lib/"
   # The mirror rebuilds the release record from the fetched tag with the
-  # installers' writer, and verifies a payload tag with the shipped tool.
-  cp "$REPO_ROOT/scripts/lib/release-store.sh" "$REPO_ROOT/scripts/lib/semver.sh" "$SOURCE/scripts/lib/"
+  # installers' writer, and verifies a payload tag with the shipped tool. The
+  # store library sources the release stamp beside it.
+  cp "$REPO_ROOT/scripts/lib/release-store.sh" "$REPO_ROOT/scripts/lib/semver.sh" \
+    "$REPO_ROOT/scripts/lib/release-stamp.sh" "$REPO_ROOT/scripts/lib/release_stamp.py" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/release-payload-commit.sh" "$SOURCE/scripts/"
   cat > "$SOURCE/trellis.config.json" <<EOF
 {

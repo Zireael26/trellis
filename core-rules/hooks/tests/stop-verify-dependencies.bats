@@ -110,7 +110,9 @@ assert_block() {
     printf '{}\n' > "$PROJECT_DIR/tsconfig.json"
     run_hook
     assert_block 'typecheck (tsc):'
-    [ "$(cut -d '|' -f2- "$CALL_LOG")" = 'npx|--no-install tsc --noEmit' ]
+    # Checks run concurrently (spec 072 U8): the test step may also have
+    # started; the first planned failure, tsc, is the one that blocks.
+    cut -d '|' -f2- "$CALL_LOG" | grep -qx 'npx|--no-install tsc --noEmit'
     (cd "$PROJECT_DIR" && rm tsconfig.json)
   done
   touch "$PROJECT_DIR/eslint.config.js"
@@ -126,7 +128,8 @@ EOF
     assert_block 'lint (eslint):'
     [[ "$output" == *'eslint: invalid configuration'* ]]
     [[ "$output" != *'verification unavailable'* ]]
-    [ "$(cut -d '|' -f2- "$CALL_LOG")" = $'npx|--no-install eslint --version\nnpx|--no-install eslint . --quiet' ]
+    # The test step runs concurrently with eslint (spec 072 U8).
+    [ "$(cut -d '|' -f2- "$CALL_LOG" | grep '^npx|')" = $'npx|--no-install eslint --version\nnpx|--no-install eslint . --quiet' ]
   done
 }
 
@@ -290,7 +293,10 @@ EOF
     run_hook
     [ "$status" -eq 0 ]
     [ -z "$output" ]
-    [ "$(cut -d '|' -f2- "$CALL_LOG")" = $'cargo|check\ngo|vet ./...\ncargo|clippy --quiet --message-format=short -- -D warnings\ncargo|test --quiet' ]
+    # Concurrent groups interleave; cargo's own members keep their order.
+    # The reuse key probes `cargo --version` / `go version` for toolchain proxies.
+    [ "$(cut -d '|' -f2- "$CALL_LOG" | grep -vx -e 'cargo|--version' -e 'go|version' | sort)" = "$(printf '%s\n' 'cargo|check' 'go|vet ./...' 'cargo|clippy --quiet --message-format=short -- -D warnings' 'cargo|test --quiet' | sort)" ]
+    [ "$(cut -d '|' -f2- "$CALL_LOG" | grep '^cargo|' | grep -vx 'cargo|--version' | cut -d ' ' -f1)" = $'cargo|check\ncargo|clippy\ncargo|test' ]
   done
 }
 

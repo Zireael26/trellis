@@ -967,6 +967,18 @@ EOF
 }
 
 # ===========================================================================
+# release-tmp: persistent execution work and verification stamps (spec 072 T5)
+# ===========================================================================
+
+# scan emits plan rows; remove accepts exactly one planned path and inode.
+# The sink rechecks installation, active release, owner birth and age; snapshots
+# additionally require a successful lsof snapshot with no live handle.
+dj_release_tmp() {
+  python3 -I "$_DISK_JANITOR_LIB_DIR/release_tmp.py" "$TRELLIS_HOME" "$1" \
+    "$LSOF_SNAPSHOT_TMP" "$(trellis_process_birth_python)" "${@:2}"
+}
+
+# ===========================================================================
 # scope D: release execution staging (host-global)
 # ===========================================================================
 

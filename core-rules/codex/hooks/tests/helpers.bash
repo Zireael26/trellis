@@ -27,12 +27,12 @@
 # Resolve canonical sources from $BATS_TEST_DIRNAME (= .../codex/hooks/tests).
 
 # Test isolation: these suites exercise the OUTSIDE-Herdr reviewer ladder (rung 2b,
-# `claude` on PATH). When the gate is launched from a Herdr pane the shards inherit
-# HERDR_ENV/HERDR_WORKSPACE_ID/HERDR_PANE_ID through os.environ, code-reviewer.sh
+# `claude` on PATH). When the gate is launched from a Herdr (hc) terminal the shards inherit
+# HC_SCOPE/HC_TERMINAL_ID through os.environ, code-reviewer.sh
 # takes the rung-2a (`pi`) branch instead, and every rung-2b assertion fails against
 # the operator's live roles-resolved.json. Scrub them here so the suite is
-# environment-independent. Tests that need Herdr set them explicitly per-invocation.
-unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_SOCKET_PATH HERDR_BIN_PATH
+# environment-independent. Tests that need hc set them explicitly per-invocation.
+unset HC_SCOPE HC_TERMINAL_ID HC_TERMINAL_SOCKET
 
 _codex_hook_src() { printf '%s' "$BATS_TEST_DIRNAME/../stop-verify.sh"; }
 _codex_lib_dir()  { printf '%s' "$BATS_TEST_DIRNAME/../lib"; }

@@ -14,12 +14,18 @@ uses 7200 seconds, a 60-second reserve, and a 5-second TERM grace.
 
 Spec 066 process: START provenance precedes admission and the first planner;
 <aggregate>.provenance.jsonl retains caller and effective fenced shard snapshots
-without changing the timing TSV. Active release is the read-only config pointer,
-not a source VERSION inference or a certification of the installed payload.
+and the shard priority decision without changing the timing TSV. Active release
+is the read-only config pointer, not a source VERSION inference or a certification
+of the installed payload.
 
 Spec 067 P1h: after verified-empty teardown, a failing shard's output and timing
 rows are copied to <state>/failed-shards/<token>/ before the run root is deleted;
 `--runs-reap` prunes those entries after seven days.
+
+Selection: repeated `--test-file=scripts/tests/NAME.bats` arguments are deduplicated
+and carried to the planner and every shard. A successful run then writes
+PG_TESTS_RECEIPT_FILE (one line: `narrowed M`, or `full` without selection) only
+after the aggregate receipt and containment teardown; any failure writes nothing.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -46,6 +53,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from receipt_provenance import safe_capture, emit
+from gate_receipts import state_root as gate_state_root, digest, passing_rows, private
+from gate_verdict import safe_inputs, find_verdict, key as verdict_key, describe as describe_verdict
 
 MAX_SHARD_COUNT = 16
 
@@ -146,6 +155,14 @@ def process_identity(pid: int) -> Optional[Tuple[int, int]]:
         if _LIBPROC.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
             return None
         return (info.pid, info.start_sec * 1000000 + info.start_usec)
+    if sys.platform.startswith("linux"):
+        try:
+            fields = Path("/proc/{}/stat".format(pid)).read_text().rsplit(")", 1)[1].split()
+            boot = next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines()
+                        if line.startswith("btime "))
+            return (pid, int(boot) * 1000000 + int(fields[19]) * 1000000 // os.sysconf("SC_CLK_TCK"))
+        except (OSError, ValueError, IndexError, StopIteration):
+            return None
     return None
 
 
@@ -574,30 +591,255 @@ def save_record(path: Path, data: Dict[str, Any]) -> None:
 
 
 class RunState:
-    def __init__(self) -> None:
-        self.root = Path(os.environ.get("TRELLIS_GATE_STATE_DIR", str(
-            Path.home() / ".local/state/trellis-gate"))).expanduser().absolute()
+    POLL_SECONDS = 2.0
+    HEARTBEAT_SECONDS = 15.0
+    LEASE_SECONDS = 60.0
+
+    def __init__(self, head: str = "unknown", no_wait: bool = False) -> None:
+        try:
+            self.root = gate_state_root()
+        except ValueError as exc:
+            raise ContainmentError(str(exc)) from exc
         _private_directory(self.root)
         self.runs = self.root / "runs"
-        _private_directory(self.runs)
-        self.lock_fd = os.open(str(self.root / "lock"),
-                               os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        info = os.fstat(self.lock_fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        self.queue = self.root / "gate-queue"
+        for directory in (self.runs, self.queue):
+            _private_directory(directory)
+        self.holder = self.root / "gate-holder.json"
+        self.lock_fd = self._open_lock("queue.lock")
+        self.legacy_fd: Optional[int] = None
+        self.guard = threading.Lock()
+        self.stop = threading.Event()
+        self.error: Optional[Exception] = None
+        self.thread: Optional[threading.Thread] = None
+        self.path: Optional[Path] = None
+        self.stale: Dict[str, float] = {}
+        identity = process_identity(os.getpid())
+        if identity is None:
             os.close(self.lock_fd)
+            raise ContainmentError("{} queue process birth identity unavailable".format(
+                "libproc" if sys.platform == "darwin" else "procfs"))
+        self.entry = {"token": uuid.uuid4().hex, "pid": identity[0], "start_us": identity[1],
+                      "head": head, "heartbeat": time.time()}
+        try:
+            wait = _positive_float("TRELLIS_LOCAL_GATE_QUEUE_WAIT", 3 * GLOBAL_DEADLINE_SECONDS)
+            end = time.monotonic() + wait
+            while True:
+                with self.guard:
+                    locked = self._lock()
+                    if locked:
+                        try:
+                            if self._admit(no_wait):
+                                break
+                        finally:
+                            fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                if no_wait or time.monotonic() >= end:
+                    raise ContainmentError("queue wait bounded exit 70; holder={} waiters={}".format(
+                        self.holder, ",".join(p.name for p in self.queue.glob("*.json"))))
+                time.sleep(min(self.POLL_SECONDS, max(0, end - time.monotonic())))
+            # Process-directed signals must stay pending while _spawn blocks
+            # them in the main thread through durable child registration.
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGALRM})
+            try:
+                self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+                self.thread.start()
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        except BaseException:
+            self.close()
+            raise
+
+    def _open_lock(self, name: str) -> int:
+        fd = os.open(str(self.root / name), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            os.close(fd)
             raise ContainmentError("state lock is not owner-private")
+        return fd
+
+    def _lock(self) -> bool:
         try:
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(self.lock_fd)
-            raise ContainmentError("state busy; retained records: {}".format(
-                ", ".join(str(p) for p in self.records()))) from exc
+            return True
+        except BlockingIOError:
+            return False
+
+    def _read(self, path: Path) -> Dict[str, Any]:
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError("not owner-private")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if (not re.fullmatch(r"[0-9a-f]{32}", data["token"])
+                    or not isinstance(data["pid"], int) or data["pid"] <= 1
+                    or not isinstance(data["start_us"], int) or data["start_us"] <= 0
+                    or not isinstance(data["head"], str)
+                    or not isinstance(data["heartbeat"], (int, float))
+                    or not math.isfinite(data["heartbeat"]) or data["heartbeat"] <= 0):
+                raise ValueError("invalid lease")
+            return data
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ContainmentError("corrupt queue entry {}: {}".format(path, exc)) from exc
+
+    def _quarantine(self, path: Path, reason: str) -> None:
+        target = path.with_name(path.name + ".quarantine-" + uuid.uuid4().hex)
+        os.rename(path, target)
+        print("run-tests-local: WARN {} {}; evidence={}".format(reason, path, target), flush=True)
+
+    def _live(self, path: Path, holder: bool = False) -> Optional[Dict[str, Any]]:
+        if not path.exists() and not path.is_symlink():
+            return None
+        try:
+            data = self._read(path)
+        except ContainmentError:
+            if holder:
+                raise  # Corrupt holders require an operator; never guess.
+            self._quarantine(path, "corrupt waiter")
+            return None
+        identity = process_identity(data["pid"])
+        dead = identity is not None and identity != (data["pid"], data["start_us"])
+        if identity is None:
+            dead = _pid_gone(data["pid"], 0)
+        token = data["token"]
+        if time.time() - data["heartbeat"] > self.LEASE_SECONDS:
+            dead = dead or self.stale.get(token) == data["heartbeat"]
+            self.stale[token] = data["heartbeat"]
+        else:
+            self.stale.pop(token, None)
+        if dead:
+            self._quarantine(path, "dead lease")
+            return None
+        return data
+
+    def _create(self, path: Path) -> None:
+        self.entry["heartbeat"] = time.time()
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(self.entry, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.path = path
+
+    def _admit(self, no_wait: bool) -> bool:
+        holder = self._live(self.holder, holder=True)
+        waiters = []
+        for path in sorted(self.queue.glob("*.json")):
+            if not re.fullmatch(r"[0-9]{20}\.json", path.name):
+                self._quarantine(path, "corrupt ticket")
+            elif self._live(path):
+                waiters.append(path)
+        if no_wait and (holder or waiters):
+            raise ContainmentError("queue occupied (--no-wait); holder={} waiters={}".format(
+                holder["head"] if holder else "none", len(waiters)))
+        if self.path is None:
+            next_path = self.queue / "next"
+            try:
+                if next_path.exists() or next_path.is_symlink():
+                    if not private(next_path):
+                        raise ValueError("next ticket is not owner-private")
+                    ticket = int(next_path.read_text())
+                else:
+                    ticket = 1
+                if ticket < 1:
+                    raise ValueError("nonpositive ticket")
+            except (OSError, ValueError) as exc:
+                raise ContainmentError("corrupt queue next ticket") from exc
+            while True:
+                try:
+                    self._create(self.queue / ("{:020d}.json".format(ticket)))
+                    break
+                except FileExistsError:
+                    ticket += 1
+            fd, temporary = tempfile.mkstemp(prefix=".next-", dir=str(self.queue))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(str(ticket + 1) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, next_path)
+                _fsync_directory(self.queue)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            waiters.append(self.path)
+            waiters.sort()
+        # Refresh waiting leases on every poll; holders use the background thread.
+        if not self.path.exists():
+            raise ContainmentError("queue waiter lease lost")
+        self.entry["heartbeat"] = time.time()
+        save_record(self.path, self.entry)
+        if not holder and waiters[0] == self.path:
+            # Keep the pre-072 lock for the entire admitted run. Metadata uses
+            # queue.lock so waiters can still ticket and refresh their leases.
+            if self.legacy_fd is None:
+                self.legacy_fd = self._open_lock("lock")
+            try:
+                fcntl.flock(self.legacy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                ticket_path = self.path
+                self._create(self.holder)
+                ticket_path.unlink()
+                print("run-tests-local: queue admitted ticket={}".format(ticket_path.stem), flush=True)
+                return True
+        position = waiters.index(self.path) + 1
+        print("run-tests-local: queue position={} holder={} estimated_start={}s".format(
+            position, holder["head"] if holder else "legacy-lock", position * GLOBAL_DEADLINE_SECONDS), flush=True)
+        return False
+
+    def _heartbeat(self) -> None:
+        while not self.stop.wait(self.HEARTBEAT_SECONDS):
+            try:
+                with self.guard:
+                    if not self._lock():
+                        continue
+                    try:
+                        if self._read(self.path)["token"] != self.entry["token"]:
+                            raise ContainmentError("queue lease lost")
+                        self.entry["heartbeat"] = time.time()
+                        save_record(self.path, self.entry)
+                    finally:
+                        fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            except (OSError, ContainmentError) as exc:
+                self.error = exc
+                return
+
+    def check(self) -> None:
+        if self.error is not None:
+            raise ContainmentError("queue heartbeat failed: {}".format(self.error))
 
     def records(self) -> List[Path]:
         return sorted(self.runs.glob("*.json"))
 
-    def close(self) -> None:
-        os.close(self.lock_fd)
+    def close(self, deadline: Optional[float] = None) -> None:
+        end = deadline if deadline is not None else time.monotonic() + TERM_GRACE_SECONDS
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(max(0, end - time.monotonic()))
+            if self.thread.is_alive():
+                raise ContainmentError("queue heartbeat shutdown unverified; lease retained")
+        if not self.guard.acquire(timeout=max(0, end - time.monotonic())):
+            raise ContainmentError("queue shutdown lock unavailable; lease retained")
+        try:
+            if self._lock():
+                try:
+                    if self.path is not None and self.path.exists():
+                        try:
+                            if self._read(self.path)["token"] == self.entry["token"]:
+                                self.path.unlink()
+                        except ContainmentError:
+                            pass  # Preserve corrupt evidence; never mask the run's result.
+                finally:
+                    fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+            # A contended metadata lock leaves a dead lease for the next observer.
+            os.close(self.lock_fd)
+            if self.legacy_fd is not None:
+                os.close(self.legacy_fd)
+                self.legacy_fd = None
+        finally:
+            self.guard.release()
 
 
 def _read_record(path: Path) -> Dict[str, Any]:
@@ -918,6 +1160,54 @@ def _prune_failed_shards(state: RunState) -> None:
         print("run-tests-local: could not prune failing shard output: {}".format(exc), file=sys.stderr)
 
 
+def _persist_passing_aggregate(state: RunState, data: Dict[str, Any], aggregate: Path,
+                               root: Path, end: float) -> Path:
+    content = aggregate.read_bytes()
+    passing_rows(content)
+    tree = _command(["git", "-C", str(root), "rev-parse", data["head"] + "^{tree}"], end).strip()
+    kept = state.root / "passing-runs" / data["token"]
+    _private_directory(kept.parent)
+    _private_directory(kept)
+    fd = os.open(str(kept / "aggregate.tsv"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    save_record(kept / "run.json", {"id": data["token"], "head": data["head"], "tree": tree,
+                "completed_at": time.time(), "aggregate_sha256": digest(content)})
+    print("run-tests-local: retained passing aggregate: {}".format(kept), flush=True)
+    return kept
+
+
+def _invalidate_verdicts(state: RunState, root: Path, end: float) -> None:
+    directory = state.root / "verdicts"
+    if not directory.exists():
+        return
+    if not private(directory, True):
+        raise ContainmentError("verdict directory is not owner-private")
+    tree = _command(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], end).strip()
+    for path in directory.glob("*.json"):
+        try:
+            if private(path) and json.loads(path.read_text(encoding="utf-8"))["inputs"]["tree"] == tree:
+                path.unlink()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+
+
+def _write_verdict(state: RunState, before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]], kept: Path) -> None:
+    if before is None or (state.root / "reuse-disabled.json").exists() or after != before:
+        return
+    record = json.loads((kept / "run.json").read_text(encoding="utf-8"))
+    directory = state.root / "verdicts"
+    _private_directory(directory)
+    save_record(directory / (verdict_key(before) + ".json"), {
+        "schema": 1, "key": verdict_key(before), "inputs": before,
+        "status": "pass", "complete": True, "containment": "verified-empty",
+        "id": record["id"], "aggregate_sha256": record["aggregate_sha256"],
+        "completed_at": record["completed_at"]})
+    print("run-tests-local: wrote verdict {}".format(record["id"]), flush=True)
+
+
 def _receipt(data: Dict[str, Any], survivors: int, retained: bool) -> None:
     entries = data.get("unreadable_excluded", [])
     for entry in entries:
@@ -1060,6 +1350,14 @@ def _new_run(state: RunState, root: Path, end: float, started_us: int,
         raise
 
 
+def _shard_priority(environment: Dict[str, str]) -> Tuple[List[str], str]:
+    # nice, not a QoS class: QoS would confine shards to efficiency cores (B4 sec 6).
+    # A missing nice runs shards unprefixed, and the receipt names that fallback.
+    if shutil.which("nice", path=environment.get("PATH", os.defpath)):
+        return ["nice", "-n", "10"], "applied: nice -n 10"
+    return [], "unavailable: nice not on PATH; shards run at inherited priority"
+
+
 def _spawn(data: Dict[str, Any], path: Path, fd: int, processes: List[subprocess.Popen],
            command: Sequence[str], root: Path, environment: Dict[str, str], output: Any) -> subprocess.Popen:
     # Block interruptions through Popen + durable registration. SIGKILL may
@@ -1074,14 +1372,15 @@ def _spawn(data: Dict[str, Any], path: Path, fd: int, processes: List[subprocess
     # A one-byte admission handshake prevents a very short planner/shard from
     # exiting before its live birth identity is captured. exec keeps PID/PGID
     # and inherited sentinel/heavy descriptors; EOF refuses execution.
-    loader = ("import os,sys; fd=int(sys.argv[1]); go=os.read(fd,1); os.close(fd); "
+    loader = ("import os,sys,signal; signal.pthread_sigmask(signal.SIG_SETMASK," +
+              repr(sorted(int(signum) for signum in mask)) + "); "
+              "fd=int(sys.argv[1]); go=os.read(fd,1); os.close(fd); "
               "os.execvpe(sys.argv[2],sys.argv[2:],os.environ) if go==b'g' else os._exit(125)")
     try:
         process = subprocess.Popen([sys.executable, "-c", loader, str(ready_read), *command],
                                    cwd=str(root), env=environment,
                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                   start_new_session=True, pass_fds=(fd, ready_read) + _heavy_fds(),
-                                   preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, mask))
+                                   start_new_session=True, pass_fds=(fd, ready_read) + _heavy_fds())
         processes.append(process)
         identity = process_identity(process.pid)
         if identity is None:
@@ -1170,6 +1469,14 @@ def _write_aggregate(path: Path, records: Sequence[Dict[str, Any]], expected: Op
             raise ValueError("nonzero timing receipt exit: {}".format(row))
 
 
+def _write_scope_receipt(path: Path, selected: Sequence[str]) -> None:
+    # The process-gate PG_TESTS_RECEIPT contract: exactly one newline-terminated line.
+    # M counts the unique selected files; an unselected run is the full suite.
+    line = "PG_TESTS_RECEIPT narrowed {}\n".format(len(selected)) if selected else "PG_TESTS_RECEIPT full\n"
+    with path.open("w", encoding="utf-8") as receipt:
+        receipt.write(line)
+
+
 def _replay_output(records: Sequence[Dict[str, Any]]) -> None:
     output = sys.stdout.buffer
     for record in records:
@@ -1182,7 +1489,7 @@ def _replay_output(records: Sequence[Dict[str, Any]]) -> None:
 
 
 def _usage() -> str:
-    return "usage: scripts/run-tests-local.py [--runs-status|--runs-reap]"
+    return "usage: scripts/run-tests-local.py [--no-wait|--runs-status|--runs-reap|--verdict-status [--head=COMMIT]|--test-file=scripts/tests/NAME.bats ...]"
 
 
 def main(argv: Sequence[str]) -> int:
@@ -1193,7 +1500,21 @@ def main(argv: Sequence[str]) -> int:
     if argv in (["-h"], ["--help"]):
         print(_usage())
         return 0
-    if argv and argv not in (["--runs-status"], ["--runs-reap"]):
+    if argv and argv[0] == "--verdict-status":
+        if len(argv) > 2 or (len(argv) == 2 and not re.fullmatch(r"--head=[0-9a-f]{40,64}", argv[1])):
+            return 64
+        root = Path(__file__).resolve().parent.parent
+        record = find_verdict(safe_inputs(root, argv[1][7:] if len(argv) == 2 else "HEAD"))
+        if record is None:
+            return 1
+        print(describe_verdict(record))
+        return 0
+    selected: List[str] = []
+    selection_args = [arg for arg in argv if arg != "--no-wait"]
+    if selection_args and argv.count("--no-wait") <= 1 and all(
+            re.fullmatch(r"--test-file=scripts/tests/[A-Za-z0-9_-]+\.bats", arg) for arg in selection_args):
+        selected = list(dict.fromkeys(selection_args))
+    if argv and not selected and argv not in (["--no-wait"], ["--runs-status"], ["--runs-reap"]):
         print("run-tests-local: invalid arguments\n" + _usage(), file=sys.stderr)
         return 64
     try:
@@ -1202,7 +1523,11 @@ def main(argv: Sequence[str]) -> int:
         print("run-tests-local: {}".format(exc), file=sys.stderr)
         return 64
     if argv == ["--runs-status"]:
-        root = Path(os.environ.get("TRELLIS_GATE_STATE_DIR", str(Path.home() / ".local/state/trellis-gate"))).expanduser()
+        try:
+            root = gate_state_root()
+        except (OSError, ValueError) as exc:
+            print("run-tests-local: {}".format(exc), file=sys.stderr)
+            return 70
         records = sorted((root / "runs").glob("*.json"))
         corrupt = False
         for path in records:
@@ -1217,7 +1542,14 @@ def main(argv: Sequence[str]) -> int:
     root = Path(__file__).resolve().parent.parent
     aggregate = None
     configured = os.environ.get("TRELLIS_LOCAL_GATE_RECEIPT")
-    if not argv:
+    # Consume the gate's parent-only interface before fingerprinting the suite
+    # environment. Receipt paths are not test inputs; narrowed argv never seals
+    # a full verdict, and an explicit pushed head still must match the checkout.
+    scope_path = os.environ.pop("PG_TESTS_RECEIPT_FILE", "")
+    scope_receipt = Path(scope_path) if scope_path else None
+    gated_head = os.environ.pop("PG_TESTS_HEAD", "HEAD")
+    os.environ.pop("PG_TESTS_BASE", None)
+    if argv in ([], ["--no-wait"]) or selected:
         # START precedes admission; a configured receipt retains refusals too.
         # Tool/release probes are read-only; no Trellis command is invoked.
         provenance = safe_capture(root, [sys.executable, str(Path(__file__).resolve()), *argv])
@@ -1245,14 +1577,24 @@ def main(argv: Sequence[str]) -> int:
     deadline_at = started + deadline
     productive_at = deadline_at - reserve
     state = None
+    inputs = None
+    after_inputs = None
+    kept = None
     try:
-        state = RunState()
+        state = RunState(head=provenance.get("head", "unknown") if argv != ["--runs-reap"] else "reap",
+                         no_wait="--no-wait" in argv)
+        # Queue waiting is outside both the productive and cleanup deadline.
+        started_us = time.time_ns() // 1000
+        started = time.monotonic()
+        deadline_at = started + deadline
+        productive_at = deadline_at - reserve
+        if argv != ["--runs-reap"]:
+            _invalidate_verdicts(state, root, productive_at)
         # Quarantine corruption by name even if a host capability is also
         # unavailable. No source failure can make a durable record disappear.
         for path in state.records():
             _read_record(path)
-        if argv == ["--runs-reap"]:
-            _prune_failed_shards(state)
+        _prune_failed_shards(state)
         if argv == ["--runs-reap"] and not state.records():
             state.close()
             return 0
@@ -1272,8 +1614,10 @@ def main(argv: Sequence[str]) -> int:
         print("run-tests-local: {}".format(exc), file=sys.stderr)
         if state is not None:
             state.close()
-        configured_state = Path(os.environ.get("TRELLIS_GATE_STATE_DIR", str(Path.home() / ".local/state/trellis-gate"))).expanduser()
-        retained = any((configured_state / "runs").glob("*.json"))
+        try:
+            retained = any((gate_state_root() / "runs").glob("*.json"))
+        except (OSError, ValueError):
+            retained = False  # Invalid roots are refused before creating state.
         _receipt({"token": "unstarted"}, 1, retained)
         return 70
 
@@ -1284,6 +1628,9 @@ def main(argv: Sequence[str]) -> int:
     # nested runner must not hand that receipt path to its own planner.
     environment.pop("TRELLIS_TEST_TSV", None)
     environment.pop("TRELLIS_TEST_PROVENANCE_RECEIPT", None)
+    # Scoped-gate variables describe the parent's range; descendants never receive them.
+    for name in ("PG_TESTS_BASE", "PG_TESTS_HEAD", "PG_TESTS_RECEIPT_FILE", "PG_PUSH_TEST_SCOPE"):
+        environment.pop(name, None)
     environment["TRELLIS_GATE_RUN_ID"] = data["token"]
     environment["TMPDIR"] = str(run_root / "tmp")
     environment["TRELLIS_GATE_STATE_DIR"] = str(run_root / "state")
@@ -1319,11 +1666,30 @@ def main(argv: Sequence[str]) -> int:
         if aggregate is None:
             raise ValueError("timing receipt unavailable")
         planner_output = run_root / "planner.out"
+
+        def contained_probe(command: Sequence[str], env: Dict[str, str], cwd: Path) -> str:
+            # Version probes are registered groups with the same sentinel/token
+            # as shards, and all run before the final verified-empty scan.
+            probe_env = dict(env, TRELLIS_GATE_RUN_ID=data["token"], TMPDIR=str(run_root / "tmp"))
+            with planner_output.open("wb") as stream:
+                process = _spawn(data, record_path, sentinel_fd, processes, command, cwd, probe_env, stream)
+                end = time.monotonic() + 2
+                while observe_exit(process) is None:
+                    if time.monotonic() >= end:
+                        return "unavailable: probe timeout"
+                    time.sleep(0.01)
+            if observe_exit(process):
+                return "unavailable: probe exit {}".format(observe_exit(process))
+            lines = planner_output.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            return lines[0] if lines else "unavailable: empty probe"
+
+        inputs = None if selected else safe_inputs(root, gated_head, version_probe=contained_probe)
         with planner_output.open("wb") as stream:
             planner = _spawn(data, record_path, sentinel_fd, processes,
-                             ["bash", str(runner), "--scope=local", "--shard=1/{}".format(SHARD_COUNT), "--plan"],
+                             ["bash", str(runner), "--scope=local", "--shard=1/{}".format(SHARD_COUNT), "--plan", *selected],
                              root, environment, stream)
             while observe_exit(planner) is None:
+                state.check()
                 time.sleep(0.02)
         plan = planner_output.read_text(encoding="utf-8")
         planner_status = observe_exit(planner)
@@ -1343,7 +1709,11 @@ def main(argv: Sequence[str]) -> int:
             raise ValueError("shard plan missing total rows")
         print("run-tests-local: planned shard totals: " + ", ".join(
             "shard {}={}".format(i, totals[i]) for i in range(1, SHARD_COUNT + 1)), flush=True)
+        # Only shards are niced: the planner above keeps inherited priority.
+        shard_prefix, priority = _shard_priority(environment)
+        emit({"phase": "shard-priority", "priority": priority}, aggregate)
         for shard in range(1, SHARD_COUNT + 1):
+            state.check()
             output_path = run_root / "shard-{}.out".format(shard)
             receipt_path = run_root / "shard-{}.tsv".format(shard)
             receipt_path.write_text(RECEIPT_HEADER + "\n", encoding="utf-8")
@@ -1356,11 +1726,12 @@ def main(argv: Sequence[str]) -> int:
                 shard_environment["TRELLIS_TEST_PROVENANCE_RECEIPT"] = str(aggregate)
                 try:
                     entry["process"] = _spawn(data, record_path, sentinel_fd, processes,
-                        ["bash", str(runner), "--scope=local", "--shard={}/{}".format(shard, SHARD_COUNT)],
+                        [*shard_prefix, "bash", str(runner), "--scope=local", "--shard={}/{}".format(shard, SHARD_COUNT), *selected],
                         root, shard_environment, stream)
                 except OSError as exc:
                     stream.write("run-tests-local: could not start shard {}: {}\n".format(shard, exc).encode())
         while any(entry["process"] is not None and observe_exit(entry["process"]) is None for entry in shards):
+            state.check()
             for entry in shards:
                 if entry["process"] is not None and observe_exit(entry["process"]) is not None and entry["finished"] is None:
                     entry["finished"] = time.monotonic()
@@ -1374,6 +1745,8 @@ def main(argv: Sequence[str]) -> int:
         print("run-tests-local: aggregate receipt: {}".format(aggregate), flush=True)
         result = 0 if len(shards) == SHARD_COUNT and all(
             e["process"] is not None and observe_exit(e["process"]) == 0 for e in shards) else 1
+        if result == 0 and inputs is not None:
+            after_inputs = None if selected else safe_inputs(root, gated_head, version_probe=contained_probe)
     except _DeadlineExit:
         print("run-tests-local: global deadline exceeded (productive cutoff)", file=sys.stderr)
         result = 124
@@ -1411,6 +1784,12 @@ def main(argv: Sequence[str]) -> int:
                 for process in processes:
                     process.wait()
                 _retain_failed_shards(state, data, shards)
+                if result == 0 and interrupt is None:
+                    state.check()
+                    try:
+                        kept = _persist_passing_aggregate(state, data, aggregate, root, teardown_end)
+                    except (OSError, ValueError, ContainmentError) as exc:
+                        print("run-tests-local: could not retain passing aggregate: {}".format(exc), file=sys.stderr)
                 _delete_empty_record(record_path, data)
         except (OSError, ContainmentError, _DeadlineExit) as exc:
             survivors = max(1, survivors)
@@ -1427,13 +1806,26 @@ def main(argv: Sequence[str]) -> int:
                 except _DeadlineExit:
                     continue
             os.close(sentinel_fd)
-            state.close()
+            # Keep queue ownership through the final receipt and verdict commit.
             # Final receipt output is inside the same hard deadline as cleanup.
             signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline_at - time.monotonic()))
             try:
                 _receipt(data, survivors, record_path.exists())
+                if not survivors and not result and interrupt is None and kept is not None:
+                    _write_verdict(state, inputs, after_inputs, kept)
             except (_DeadlineExit, OSError):
                 result = 124 if not survivors else 71
+            else:
+                # The scope receipt needs a clean aggregate, empty teardown and no signal;
+                # a write failure fails the run closed.
+                if result == 0 and not survivors and interrupt is None and scope_receipt is not None:
+                    try:
+                        _write_scope_receipt(scope_receipt, selected)
+                    except _DeadlineExit:
+                        result = 124
+                    except OSError as exc:
+                        print("run-tests-local: could not write PG_TESTS_RECEIPT_FILE: {}".format(exc), file=sys.stderr)
+                        result = 1
             finally:
                 # A pending alarm can be delivered at this call; the itimer is one-shot,
                 # so retry until the disarm itself completes.
@@ -1443,8 +1835,21 @@ def main(argv: Sequence[str]) -> int:
                         break
                     except _DeadlineExit:
                         continue
+                try:
+                    state.close(deadline_at)
+                except ContainmentError as exc:
+                    print("run-tests-local: {}".format(exc), file=sys.stderr)
+                    result = 71
                 for signum, handler in old_handlers.items():
                     signal.signal(signum, handler)
+    if (survivors or interrupt is not None or result) and inputs is not None:
+        # A deadline/interrupt during finalization must not leave a reusable pass.
+        path = state.root / "verdicts" / (verdict_key(inputs) + ".json")
+        try:
+            if json.loads(path.read_text(encoding="utf-8"))["id"] == data["token"]:
+                path.unlink()
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     return 71 if survivors else (128 + interrupt if interrupt is not None else result)
 
 

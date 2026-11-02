@@ -10,6 +10,7 @@
 # live under a private TRELLIS_HOME, never ~/.trellis.
 
 load helpers
+bats_require_minimum_version 1.5.0
 
 setup() {
   setup_deployed_hook
@@ -82,6 +83,148 @@ baseline_file() {
   printf '%s' "$files"
 }
 
+# --- baseline hash portability ------------------------------------------------
+
+# Allowlist only fixture delegates: never inherit a host shasum, sha256sum or
+# env through PATH. perl hashes the fingerprint (run through /usr/bin/env);
+# only the state location still hashes with shasum or sha256sum.
+baseline_hash_path() {
+  local bin="$BATS_TEST_TMPDIR/baseline-hash-bin" tool
+  mkdir -p "$bin"
+  for tool in git awk cut cat perl; do
+    ln -s "$(command -v "$tool")" "$bin/$tool"
+  done
+  printf '%s' "$bin"
+}
+
+run_baseline_helper() {
+  local bin="$1"
+  shift
+  run env PATH="$bin" "$BASH" -c 'source "$1"; shift; "$@"' _ \
+    "${BASELINE_HOOK%/*}/lib/deps.sh" "$@"
+}
+
+# The fingerprint under the suite's own PATH, which a restricted one must match.
+full_fingerprint() {
+  ( source "${BASELINE_HOOK%/*}/lib/deps.sh" && _se_tree_fingerprint "$PROJECT_DIR" )
+}
+
+# Without a usable state hash the turn state location is unknown, so no
+# baseline can be read and the turn counts as unknown. The fingerprint uses
+# neither tool and must still be the whole one.
+assert_baseline_state_unknown() {
+  local bin="$1" expected
+  expected="$(full_fingerprint)"
+  [[ "$expected" =~ ^[0-9a-f]{40,64}\ [0-9a-f]{64}$ ]]
+  run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
+  [ "$status" -ne 0 ] && [ -z "$output" ] ||
+    { echo "unavailable hash produced state: $status $output"; return 1; }
+  run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
+  [ "$status" -eq 0 ] && [ "$output" = "$expected" ] ||
+    { echo "fingerprint without a state hash: $status $output (want $expected)"; return 1; }
+}
+
+# A fingerprint that cannot be computed is empty and fails, and an empty
+# fingerprint reads unknown: never a partial hash.
+assert_fingerprint_unknown() {
+  local bin="$1" nonce digest
+  nonce="$(printf '%032d' 0)"
+  digest="$(printf '%064d' 0)"
+  run --separate-stderr env PATH="$bin" "$BASH" -c 'source "$1"; _se_tree_fingerprint "$2"' _ \
+    "${BASELINE_HOOK%/*}/lib/deps.sh" "$PROJECT_DIR"
+  [ "$status" -ne 0 ] && [ -z "$output" ] ||
+    { echo "unavailable perl produced fingerprint: $status $output"; return 1; }
+  run_baseline_helper "$bin" _se_turn_baseline_state \
+    "trellis-turn-baseline v2 $nonce unborn $digest" "$output" "$nonce"
+  [ "$status" -eq 0 ]
+  [ "$output" = unknown ]
+}
+
+@test "codex: sha256sum-only PATH preserves turn state location and full fingerprints" {
+  command -v sha256sum >/dev/null 2>&1 || skip "sha256sum is not installed"
+  local bin expected before
+  bin="$(baseline_hash_path)"
+  ln -s "$(command -v sha256sum)" "$bin/sha256sum"
+  [ ! -e "$bin/shasum" ] && [ ! -e "$bin/env" ]
+  expected="$(cd "$PROJECT_DIR" && pwd -P)"
+  expected="$(printf '%s' "$expected" | sha256sum)"
+  expected="${expected%% *}"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+  run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$TRELLIS_HOME/state/turn-baseline/${expected:0:16}" ]
+  [ ! -e "$output" ]
+  run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(full_fingerprint)" ]
+  [ "${output%% *}" = "$(git -C "$PROJECT_DIR" rev-parse HEAD)" ]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  before="$output"
+  run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$before" ]
+  printf 'actual edit this turn\n' >> "$PROJECT_DIR/app.js"
+  run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
+  [ "$status" -eq 0 ]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  [ "$output" != "$before" ]
+}
+
+@test "codex: missing baseline hash tools leave the state unknown and the fingerprint whole" {
+  local bin
+  bin="$(baseline_hash_path)"
+  assert_baseline_state_unknown "$bin"
+}
+
+@test "codex: failed sha256sum output is not accepted as a turn state location" {
+  local bin
+  bin="$(baseline_hash_path)"
+  cat > "$bin/sha256sum" <<'SH'
+#!/bin/sh
+cat >/dev/null
+printf '%064d  -\n' 0
+exit 1
+SH
+  chmod +x "$bin/sha256sum"
+  assert_baseline_state_unknown "$bin"
+}
+
+@test "codex: existing shasum failure is not retried with sha256sum" {
+  local bin
+  bin="$(baseline_hash_path)"
+  export HASH_FALLBACK_LOG="$BATS_TEST_TMPDIR/hash-fallback.log"
+  cat > "$bin/shasum" <<'SH'
+#!/bin/sh
+cat >/dev/null
+printf '%064d  -\n' 0
+exit 1
+SH
+  cat > "$bin/sha256sum" <<'SH'
+#!/bin/sh
+printf 'fallback\n' >> "$HASH_FALLBACK_LOG"
+cat >/dev/null
+printf '%064d  -\n' 0
+SH
+  chmod +x "$bin/shasum" "$bin/sha256sum"
+  assert_baseline_state_unknown "$bin"
+  [ ! -e "$HASH_FALLBACK_LOG" ]
+}
+
+@test "codex: a missing or failing fingerprint perl leaves the fingerprint unknown" {
+  local bin
+  bin="$(baseline_hash_path)"
+  rm "$bin/perl"
+  assert_fingerprint_unknown "$bin"
+  cat > "$bin/perl" <<'SH'
+#!/bin/sh
+cat >/dev/null
+printf '%064d\n' 0
+exit 1
+SH
+  chmod +x "$bin/perl"
+  assert_fingerprint_unknown "$bin"
+}
+
 @test "codex: no-op turn on a dirty tree: no receipt demand" {
   turn_entry
   turn_stop
@@ -99,6 +242,14 @@ baseline_file() {
     printf 'state\n' > "$PROJECT_DIR/$path"
   done
   printf 'notes\n' > "$PROJECT_DIR/notes.md"
+  turn_stop
+  assert_no_receipt_demand
+}
+
+@test "codex: another agent's pi runtime output on a no-edit turn: no receipt demand" {
+  turn_entry
+  mkdir -p "$PROJECT_DIR/.pi/subagent-schedules"
+  printf '{}\n' > "$PROJECT_DIR/.pi/subagent-schedules/0001.json"
   turn_stop
   assert_no_receipt_demand
 }

@@ -121,6 +121,15 @@ wm_wt() {
   git -C "$1" worktree add -q -b "$2" "$3" main
 }
 
+# Hash files or stdin without relying on Perl's shasum being on the control PATH.
+wm_fixture_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@"
+  else
+    sha256sum "$@"
+  fi
+}
+
 # wm_owner PATH RELEASE [ARTIFACTS-JSON] — a minimal attachment owner record
 # naming PATH.
 wm_owner() {
@@ -128,7 +137,7 @@ wm_owner() {
   mkdir -p "$dir"
   jq -n --arg root "$1" --arg release "$2" --argjson artifacts "${3:-[]}" \
     '{worktree_root:$root, release:$release, status:"committed", artifacts:$artifacts}' \
-    > "$dir/$(printf '%s' "$1" | shasum -a 256 | cut -c1-16).json"
+    > "$dir/$(printf '%s' "$1" | wm_fixture_sha256 - | cut -c1-16).json"
 }
 
 # wm_age PATH DAYS — make a worktree's git activity DAYS old.

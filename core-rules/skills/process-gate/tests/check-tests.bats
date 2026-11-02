@@ -17,6 +17,7 @@
 # Exit codes: 0=pass, 2=warn, 1=fail(BLOCK).
 
 setup() {
+  unset PG_PUSH_TEST_SCOPE
   # SCRIPT is overridable (PG_TEST_SCRIPT) so the red-green driver @test can
   # point the SAME fixtures at a reconstructed PRE-FIX copy of the scripts/
   # tree (see "RED-GREEN DRIVER" below, DL-P7-08 item 2). Default is the
@@ -909,6 +910,34 @@ JSON
     { echo "green run created failure output: $TRELLIS_GATE_STATE_DIR/failed-shards"; false; }
 }
 
+@test "failed output pins the default state root independently of XDG_STATE_HOME" {
+  export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" TMPDIR="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+  unset TRELLIS_GATE_STATE_DIR
+  export XDG_STATE_HOME="$BATS_TEST_TMPDIR/agent-state"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "pinned output\\n"; exit 1'
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  local failure_file
+  failure_file="$(printf '%s\n' "$output" | awk '/full output saved at / { sub(/^.*full output saved at /, ""); print; exit }')"
+  [[ "$failure_file" == "$HOME/.local/state/trellis-gate/failed-shards/"*/output.txt ]] || { echo "$output"; return 1; }
+  [ -f "$failure_file" ]
+  [ ! -e "$XDG_STATE_HOME" ]
+}
+
+@test "failed output refuses relative and checkout-local state before writing" {
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "refused output\\n"; exit 1'
+  local configured
+  for configured in relative-state "" "$PROJECT_DIR/state"; do
+    export TRELLIS_GATE_STATE_DIR="$configured"
+    run_gate
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"full output could not be saved in an owner-private failed-shards directory"* ]] || { echo "$output"; return 1; }
+    [ ! -e "$PROJECT_DIR/state" ]
+    [ ! -e "$PROJECT_DIR/relative-state" ]
+  done
+}
+
 @test "failed output refuses a symlinked state root" {
   local target="$BATS_TEST_TMPDIR/state-target"
   mkdir -m 700 "$target"
@@ -1196,7 +1225,7 @@ SH
   cp "$skill_dir/scripts/lib/common.sh" "$skill_dir/scripts/lib/diff-base.sh" "$tree/scripts/lib/"
   # `elif` since spec 054 put the heavy-slot branch in front of this one.
   sed -e 's/^\( *\)\(el\)*if \[ -n "\$PG_TIMEOUT_RUNNER" \]; then$/\1\2if command -v timeout >\/dev\/null 2>\&1; then/' \
-      -e 's/out="\$(run_with_timeout "\$limit" bash -c "\$cmd" 2>&1)"; rc=\$?/out="$(timeout "$limit" bash -c "$cmd" 2>\&1)"; rc=$?/' \
+      -e 's/run_with_timeout "\$limit"/timeout "$limit"/' \
       "$skill_dir/scripts/check-tests.sh" > "$tree/scripts/check-tests.sh"
   chmod +x "$tree/scripts/check-tests.sh"
   [ "$(grep -cF 'run_with_timeout "$limit"' "$tree/scripts/check-tests.sh")" -eq 0 ] ||
@@ -1244,9 +1273,9 @@ heavy_gate_setup() {
   HEAVY_SANDBOX="$sandbox"
 }
 
-@test "H8: a held heavy slot delays the battery without spending its timeout" {
+@test "H8: a held gate reservation delays the battery without spending its timeout" {
   heavy_gate_setup 1
-  "$PROCESS_GATE_HEAVY_LAUNCHER" heavy --lane holder -- sh -c "touch '$HEAVY_SANDBOX/ready'; sleep 2" >/dev/null 2>&1 3>&- &
+  "$PROCESS_GATE_HEAVY_LAUNCHER" heavy --lane process-gate -- sh -c "touch '$HEAVY_SANDBOX/ready'; sleep 2" >/dev/null 2>&1 3>&- &
   HEAVY_HOLDER_PID=$!
   local tries=100
   while [ ! -e "$HEAVY_SANDBOX/ready" ] && [ "$tries" -gt 0 ]; do sleep 0.05; tries=$((tries - 1)); done
@@ -1301,5 +1330,5 @@ heavy_gate_setup() {
   heavy_gate_setup 1
   run_gate
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"exited 3"* && "$output" == *"<a b><c>"* && "$output" == *"slot=1"* ]] || { echo "heavy: $output"; false; }
+  [[ "$output" == *"exited 3"* && "$output" == *"<a b><c>"* && "$output" == *"slot=0"* ]] || { echo "heavy: $output"; false; }
 }

@@ -1,0 +1,24 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "@PROJECT@/src/a.ts",
+    "old_string": "return a + b;",
+    "new_string": "return a + b; // checked",
+    "replace_all": false
+  },
+  "tool_response": {
+    "filePath": "@PROJECT@/src/a.ts",
+    "oldString": "return a + b;",
+    "newString": "return a + b; // checked",
+    "originalFile": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+    "structuredPatch": [],
+    "userModified": false,
+    "replaceAll": false
+  },
+  "tool_use_id": "toolu_bench_0001"
+}

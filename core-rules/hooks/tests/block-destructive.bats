@@ -259,21 +259,95 @@ run_codex_with_cmd() {
 }
 
 # --- **/secrets/** reads: GCP/k8s resource identifiers are not file reads -----
-# Upstreamed from the affected consumer 2026-09-04. GCP and Kubernetes resource names carry
-# a literal "secrets/" segment, so the unnarrowed rule denied every pipeline that
-# merely POST-PROCESSED gcloud/kubectl output. Nothing is read from disk there.
+# Upstreamed from the affected consumer 2026-09-04: GCP and Kubernetes resource
+# names carry a literal "secrets/" segment. Since 1.4.0 the Claude exemption
+# applies only when every command on the line is a literal read-only gcloud
+# secrets or kubectl get/describe command (optionally after sudo), the text has
+# no quote, backslash, #, < or >, and no identifier is given to a flag
+# (rules/destructive.json, exempt). The exemption guards against accidental
+# secret reads by agents; a deliberate same-user bypass is out of scope. The
+# Codex twin has no exemption.
 
-@test "secrets-path: allows grep over a gcloud resource identifier in output" {
-  out="$(run_with_cmd 'gcloud secrets versions access latest --secret=x | grep projects/12345/secrets/db-password')"
+# "tail" is a resource named like a reader, so only the exemption allows these.
+@test "secrets-path: Claude allows a resource identifier passed to a read-only gcloud or kubectl command" {
+  out="$(run_with_cmd "gcloud secrets describe tail projects/p/secrets/s")"
+  [[ "$out" != *deny* ]] || { echo "$out"; false; }
+  out="$(run_with_cmd "sudo kubectl get secret tail namespaces/n/secrets/s")"
   [[ "$out" != *deny* ]] || { echo "$out"; false; }
 }
 
-@test "secrets-path: allows sed over a kubernetes resource identifier in output" {
-  out="$(run_with_cmd 'kubectl get secret -o name | sed -n "s#namespaces/prod/secrets/api-key##p"')"
-  [[ "$out" != *deny* ]] || { echo "$out"; false; }
+# The 2026-09-04 cases: denied again since 1.4.0, because a grep/sed stage can be
+# made to read a file (-e PATTERN FILE, <FILE). Select the resource with gcloud
+# --filter/--format or kubectl -o jsonpath instead of piping into grep or sed.
+@test "secrets-path: grep or sed over piped gcloud/kubectl output is denied in both twins" {
+  assert_both_deny 'gcloud secrets versions access latest --secret=x | grep projects/12345/secrets/db-password'
+  assert_both_deny 'kubectl get secret -o name | sed -n "s#namespaces/prod/secrets/api-key##p"'
 }
 
-@test "secrets-path: allows awk over a gcloud resource identifier in output" {
+@test "secrets-path: a # hiding a here-doc is denied in both twins" {
+  assert_both_deny $'gcloud x \'#\' <<EOF\ncat projects/p/secrets/s\nEOF'
+  assert_both_deny $'gcloud x \' #\' <<gcloud\ngcloud x tail projects/p/secrets/s\ngcloud'
+}
+
+@test "secrets-path: any other command, quote, redirection or flag-given identifier is denied in both twins" {
+  local cmd
+  while IFS= read -r cmd; do
+    assert_both_deny "$cmd" || return 1
+  done <<'EOF'
+gcloud x | grep -e x projects/p/secrets/s
+gcloud x | grep -ex projects/p/secrets/s
+gcloud x | grep --regexp=x projects/p/secrets/s
+gcloud x | sed --expression=p projects/p/secrets/s
+gcloud x | grep x <projects/p/secrets/s
+gcloud() { cat "$@"; }; gcloud beta logging tail projects/p/secrets/s
+function kubectl { cat "$@"; }; kubectl tail namespaces/n/secrets/s
+alias gcloud=cat; gcloud beta logging tail projects/p/secrets/s
+PATH=/tmp/evil:$PATH gcloud beta logging tail 'x="projects/p/secrets/s"'
+BASH_ENV=/tmp/e gcloud beta logging tail 'x="projects/p/secrets/s"'
+FOO=1 sudo gcloud beta logging tail 'x="projects/p/secrets/s"'
+gcloud version | cat projects/123/secrets/key
+g\cloud beta logging tail 'x="projects/p/secrets/s"'
+$x beta logging tail 'x="projects/p/secrets/s"'
+cd /tmp/evil; gcloud beta logging tail 'x="projects/p/secrets/s"'
+gcloud beta logging tail 'protoPayload.resourceName="projects/p/secrets/s"'
+kubectl exec pod -- tail namespaces/n/secrets/s
+gcloud compute scp vm:/var/log/tail projects/p/secrets/s
+gcloud secrets describe tail 'x' projects/p/secrets/s
+kubectl get secret \-f tail namespaces/n/secrets/s
+gcloud secrets describe tail --flags-file=projects/p/secrets/s
+gcloud secrets describe tail --any projects/p/secrets/s
+gcloud beta logging tail 'x="projects/p/secrets/s"' # note
+kubectl --token-file=/tmp/t exec pod -- tail namespaces/n/secrets/s
+kubectl cp ns/pod:/var/log/tail namespaces/n/secrets/s
+gcloud storage cp gs://b/tail projects/p/secrets/s
+CLOUDSDK_CONFIG=/tmp/c gcloud beta logging tail 'x="projects/p/secrets/s"'
+hash -p /tmp/evil gcloud; gcloud beta logging tail 'x="projects/p/secrets/s"'
+printf -v PATH /tmp/evil; gcloud beta logging tail 'x="projects/p/secrets/s"'
+{ export KUBECONFIG=/tmp/k; }; kubectl exec pod -- tail namespaces/n/secrets/s
+gcloud beta logging tail 'x="projects/p/secrets/s"' < /tmp/in
+gcloud beta logging tail --flags-file=/tmp/f 'x="projects/p/secrets/s"'
+kubectl --kubeconfig=/tmp/k exec pod -- tail namespaces/n/secrets/s
+kubectl -f/tmp/x exec pod -- tail namespaces/n/secrets/s
+/bin/cat projects/p/secrets/s
+gcloud x | /usr/bin/grep projects/p/secrets/s
+gcloud x | grep foo projects/p/secrets/s
+kubectl get x | sed -n p projects/p/secrets/x
+gcloud x | sed -i s/a/b/ projects/p/secrets/s
+gcloud x | grep -r projects/p/secrets/s
+gcloud x | grep -rn projects/p/secrets/s .
+gcloud x | grep -f projects/p/secrets/s
+gcloud x | grep --file=projects/p/secrets/s
+gcloud x | grep --fil projects/p/secrets/s
+gcloud x | grep --include=x projects/p/secrets/s
+gcloud x | grep projects/p/secrets/s < projects/q/secrets/t
+gcloud x | awk -f projects/p/secrets/s
+gcloud x | grep projects/../secrets/s
+gcloud x || grep projects/p/secrets/s
+cat foo | grep projects/p/secrets/s
+EOF
+}
+
+@test "secrets-path: awk over an escaped resource name is not a secrets read" {
   out="$(run_with_cmd 'gcloud secrets list --format=json | awk "/projects\/998877\/secrets\/token/ {print}"')"
   [[ "$out" != *deny* ]] || { echo "$out"; false; }
 }
@@ -355,9 +429,38 @@ EOF
   [ "$rc" -eq 2 ] || { echo "rc=$rc $out"; false; }
 }
 
-@test "N2 known gap (Claude): a secrets read after an unrelated gcloud statement" {
-  # gcloud version; cat projects/123/secrets/key
-  skip "known gap: argv-parse backlog (N2)"
+# Closed in 1.4.0: an identifier outside the gcloud/kubectl simple command,
+# or one whose segment starts with a dot, is never exempt.
+@test "secrets-path: Claude denies a secrets read outside the gcloud or kubectl command" {
+  local cmd
+  while IFS= read -r cmd; do
+    assert_both_deny "$cmd" || return 1
+  done <<'EOF'
+gcloud version; cat projects/123/secrets/key
+kubectl version; cat projects/../secrets/x
+gcloud x && cat namespaces/./secrets/y
+kubectl get pods || cat projects/1/secrets/k
+gcloud config list | cat projects/../secrets/x
+kubectl x & cat projects/p/secrets/y
+echo "kubectl " ; cat projects/p/secrets/y
+echo kubectl cat projects/p/secrets/y
+$(cat projects/p/secrets/y) # kubectl
+kubectl get x # cat projects/p/secrets/y
+(kubectl get x) cat projects/p/secrets/y
+kubectl get x $(cat projects/p/secrets/y)
+kubectl get x `cat projects/p/secrets/y`
+gcloud beta logging tail 'protoPayload.resourceName="projects/../secrets/s"'
+EOF
+  assert_both_deny $'gcloud auth list\ncat projects/../secrets/x'
+}
+
+@test "secrets-path: gcloud and kubectl secret commands without a reader stay allowed" {
+  local cmd
+  for cmd in 'gcloud secrets versions access projects/p/secrets/s/versions/latest' \
+    'gcloud secrets versions access latest --secret=s --project=p' 'kubectl get secret -n ns name'; do
+    out="$(run_with_cmd "$cmd")"
+    [[ "$out" != *deny* ]] || { echo "$cmd: $out"; return 1; }
+  done
 }
 
 @test "N2 known gap: pipe into xargs rm -rf (targets on stdin)" {

@@ -534,3 +534,131 @@ EOF
   [ -z "$out" ]
   [ ! -e "$MARKER" ]
 }
+
+# --- Release integrity chain (spec 072 U4): stamp -> full verify -> WARN. A
+# post-attach verdict is never evidence on its own. The inline per-file verify
+# is gone; these pin the order and that no leg ever passes silently. ---------
+
+write_postjob_status() {
+  local state="$1" owner_sha="${2:-}" dir="$TRELLIS_HOME/state/attachment-status/$CHECKOUT_ID"
+  [ -n "$owner_sha" ] || owner_sha="$(session_sha256_file "$TRELLIS_HOME/state/attachments/$CHECKOUT_ID/$WT_ID.json")"
+  mkdir -p "$dir"
+  chmod 700 "$TRELLIS_HOME/state/attachment-status" "$dir"
+  jq -n --arg state "$state" --arg checkout "$CHECKOUT_ID" --arg worktree "$WT_ID" \
+    --arg attachment "$WT_ATTACHMENT" --arg sha "$owner_sha" '{
+      schema_version:1,state:$state,checkout_id:$checkout,worktree_id:$worktree,
+      attachment_id:$attachment,owner_sha256:$sha,updated_at:now,checks:[],failure:null}' > "$dir/$WT_ID.json"
+  chmod 600 "$dir/$WT_ID.json"
+}
+
+# A copy of both hook trees under $LAYOUT/core-rules, so a test decides which
+# release libraries the hooks can reach through $LAYOUT/scripts/lib.
+copy_hook_layout() {
+  LAYOUT="$SANDBOX/layout"
+  mkdir -p "$LAYOUT/core-rules/codex"
+  cp -R "$HOOKS_DIR" "$LAYOUT/core-rules/hooks"
+  cp -R "$CODEX_HOOKS_DIR" "$LAYOUT/core-rules/codex/hooks"
+}
+
+# The real stamp library beside a release-store.sh whose verify only records
+# that it ran and refuses, so a test can see whether the chain reached it.
+fake_full_verify_layout() {
+  copy_hook_layout
+  FULL_VERIFY_MARKER="$SANDBOX/full-verify-ran"
+  mkdir -p "$LAYOUT/scripts/lib"
+  cp "$HOOKS_DIR/../../scripts/lib/release-stamp.sh" "$HOOKS_DIR/../../scripts/lib/release_stamp.py" "$LAYOUT/scripts/lib/"
+  printf 'release_store_locate() { : > %q; return 1; }\n' "$FULL_VERIFY_MARKER" > "$LAYOUT/scripts/lib/release-store.sh"
+}
+
+stamp_count() {
+  find "$TRELLIS_HOME/state/release-stamps" -type f -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]'
+}
+
+tamper_release() {
+  chmod u+w "$RUNTIME/core-rules" "$RUNTIME/core-rules/CLAUDE.md"
+  printf '# poisoned\n' > "$RUNTIME/core-rules/CLAUDE.md"
+  chmod a-w "$RUNTIME/core-rules/CLAUDE.md" "$RUNTIME/core-rules"
+}
+
+tamper_manifest() {
+  chmod u+w "$RELEASE_DIR" "$RELEASE_DIR/release.json"
+  jq '.tree[0].oid = "1111111111111111111111111111111111111111"' "$RELEASE_DIR/release.json" > "$SANDBOX/release.next.json"
+  cat "$SANDBOX/release.next.json" > "$RELEASE_DIR/release.json"
+  chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
+}
+
+# Review HIGH-1: the post-attach verdict binds the owner record, not today's
+# release bytes, so it never stands in for the stamp or the verify.
+@test "a post-attach ok verdict does not vouch for release payload bytes changed since" {
+  build_attachment_fixture
+  out="$(run_session_context "$HOOK" "$WT")"
+  [ "$(stamp_count)" -eq 1 ]
+  write_postjob_status ok
+  tamper_release
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate: $out"; false; }
+  done
+}
+
+@test "a post-attach ok verdict does not vouch for a release manifest changed since" {
+  build_attachment_fixture
+  out="$(run_session_context "$HOOK" "$WT")"
+  [ "$(stamp_count)" -eq 1 ]
+  write_postjob_status ok
+  tamper_manifest
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate: $out"; false; }
+  done
+}
+
+@test "postjob pending and no stamp runs the full verify, which stamps a good release and refuses a tampered one" {
+  build_attachment_fixture
+  write_postjob_status pending
+  [ "$(stamp_count)" -eq 0 ]
+  out="$(run_session_context "$HOOK" "$WT")"
+  [[ "$(extract_ctx "$out")" != *"Trellis attachment is missing"* ]] || { echo "$out"; false; }
+  [ "$(stamp_count)" -eq 1 ] || { echo "the full verify did not stamp the release"; false; }
+
+  tamper_release
+  for candidate in "$HOOK" "$CODEX_HOOK"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$candidate: $out"; false; }
+  done
+}
+
+@test "an unchanged release stamp confirms the release without a verify, a changed one does not" {
+  build_attachment_fixture
+  out="$(run_session_context "$HOOK" "$WT")"
+  [ "$(stamp_count)" -eq 1 ]
+  fake_full_verify_layout
+  for candidate in "$LAYOUT/core-rules/hooks/session-context.sh" "$LAYOUT/core-rules/codex/hooks/session-context.sh"; do
+    out="$(run_session_context "$candidate" "$WT")"
+    [[ "$(extract_ctx "$out")" != *"Trellis attachment is missing"* ]] || { echo "$candidate: $out"; false; }
+    [ ! -e "$FULL_VERIFY_MARKER" ] || { echo "$candidate ran the full verify past an unchanged stamp"; false; }
+  done
+
+  tamper_release
+  for candidate in "$LAYOUT/core-rules/hooks/session-context.sh" "$LAYOUT/core-rules/codex/hooks/session-context.sh"; do
+    rm -f "$FULL_VERIFY_MARKER"
+    out="$(run_session_context "$candidate" "$WT")"
+    [ -e "$FULL_VERIFY_MARKER" ] || { echo "$candidate trusted a changed release"; false; }
+    [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$out"; false; }
+  done
+}
+
+@test "no verdict, no stamp and no verify library warns, and the session still starts" {
+  build_attachment_fixture
+  copy_hook_layout
+  write_postjob_status pending
+  for candidate in "$LAYOUT/core-rules/hooks/session-context.sh" "$LAYOUT/core-rules/codex/hooks/session-context.sh"; do
+    run run_session_context "$candidate" "$WT"
+    [ "$status" -eq 0 ] || { echo "$candidate: $output"; false; }
+    ctx="$(extract_ctx "$output")"
+    [[ "$ctx" == *"Trellis could not confirm the release integrity of this opted-in worktree"* ]] || { echo "$candidate: $ctx"; false; }
+    [[ "$ctx" == *"Report this finding to the operator"* ]] || { echo "$ctx"; false; }
+    [[ "$ctx" == *"Branch: t14-session"* ]] || { echo "$candidate dropped the session context: $ctx"; false; }
+  done
+  [ "$(stamp_count)" -eq 0 ]
+}

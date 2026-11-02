@@ -35,7 +35,11 @@
 #   Targets are lexically normalized via _se_normpath before compare so the
 #   store side (track-read) and the compare side here agree (DL-P5-10).
 #
-# Dependencies: jq (required), shasum, awk (BSD).
+# Knobs (warn budget, messages): core-rules/hooks/rules/reread.json, compiled into
+# lib/guard-rules.sh by scripts/gen-guard-rules.py.
+#
+# Dependencies: jq (required — one call; the autonomy resolver on the warn path
+# makes its own), sha256sum or shasum, awk (BSD), git.
 
 set -u
 
@@ -55,8 +59,16 @@ __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
+__gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
+[ -f "$__gr_lib" ] || { echo "reread-guard: missing sibling lib at $__gr_lib — re-run sync-hooks" >&2; exit 1; }
+# shellcheck source=lib/guard-rules.sh disable=SC1090
+. "$__gr_lib"
+
+# One jq run for every field; each reads as its own `$(jq -r ...)` call did.
+_gr_jq_fields "$INPUT" '.tool_input.file_path // empty' '.transcript_path // empty' '.session_id // empty'
+
 # --- target file ---
-T=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
+T=${GR_FV[0]}
 [ -n "$T" ] || exit 0   # empty target → permit (fail-open)
 
 # Resolve a relative target against the project dir (Codex may pass relative;
@@ -96,13 +108,14 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
   # to log falls back to stderr; either way we PERMIT (logged escape). The
   # breadcrumb uses the already-normalized $T (FIX-4).
   ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || ROOT=""
-  TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null) || TP=""
-  SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SID=""
+  TP=${GR_FV[1]}; [ "${GR_FE[1]}" = 0 ] || TP=""
+  SID=${GR_FV[2]}; [ "${GR_FE[2]}" = 0 ] || SID=""
   KEY=$(_se_state_key "$TP" "$SID") || KEY=""
   if [ -n "$ROOT" ] && [ -n "$KEY" ]; then
     STATE_DIR="$ROOT/.claude/.reread-state"
-    if mkdir -p "$STATE_DIR" 2>/dev/null; then
-      now=$(date +%s 2>/dev/null) || now=0
+    if [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null; then
+      _gr_now
+      now=${GR_NOW:-0}
       printf '%s\t%s\n' "$now" "OVERRIDE:$T" >> "$STATE_DIR/$KEY.warns.tsv" 2>/dev/null \
         || echo "reread-guard: TRELLIS_REREAD_OVERRIDE=1 logged-escape for $T (warns.tsv unwritable)" >&2
     else
@@ -115,8 +128,9 @@ if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
 fi
 
 # --- derive the shared state key (DL-P5-09: one helper, zero inline copies) ---
-TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || exit 0
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || exit 0
+[ "${GR_FE[1]}" = 0 ] && [ "${GR_FE[2]}" = 0 ] || exit 0
+TP=${GR_FV[1]}
+SID=${GR_FV[2]}
 KEY=$(_se_state_key "$TP" "$SID") || exit 0
 [ -n "$KEY" ] || exit 0   # key derivation failed → permit (fail-open)
 
@@ -133,7 +147,9 @@ STATE_DIR="$ROOT/.claude/.reread-state"
 TURN_EPOCH=0
 EPOCH_FILE="$STATE_DIR/$KEY.epoch"
 if [ -f "$EPOCH_FILE" ]; then
-  _e=$(head -1 "$EPOCH_FILE" 2>/dev/null | tr -d '[:space:]')
+  _e=""
+  IFS= read -r _e 2>/dev/null < "$EPOCH_FILE"
+  _e=${_e//[[:space:]]/}
   case "$_e" in
     ''|*[!0-9]*) TURN_EPOCH=0 ;;
     *) TURN_EPOCH="$_e" ;;
@@ -158,11 +174,9 @@ fi
 # and built-in precedence. Reread state handling remains local and fail-open.
 _se_resolve_autonomy "$ROOT"
 
-# warn-budget(level): L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
-case "$AUTONOMY_LEVEL" in
-  4|5) BUDGET=1 ;;
-  *)   BUDGET=2 ;;
-esac
+# warn-budget(level) from rules/reread.json: L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
+_gr_reread_budget "$AUTONOMY_LEVEL"
+BUDGET=$GR_BUDGET
 
 # count warns already issued for T THIS turn = warns.tsv rows with
 # col1 == turn_epoch AND col2 == T.
@@ -180,17 +194,17 @@ if [ "$WARN_COUNT" -lt "$BUDGET" ]; then
   # WARN: record the warn, advise on STDERR, PERMIT (no permissionDecision).
   # Failing to record a warn → fail-open: still PERMIT (we never escalate to a
   # block on a state error).
-  if mkdir -p "$STATE_DIR" 2>/dev/null; then
+  if [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null; then
     printf '%s\t%s\n' "$TURN_EPOCH" "$T" >> "$WARNS_FILE" 2>/dev/null || true
   fi
-  N=$((WARN_COUNT + 1))
-  echo "reread-guard: about to edit $T not Read this turn (warn $N/$BUDGET). Read it first, or export TRELLIS_REREAD_OVERRIDE=1. Repeated FAILED stale edits will BLOCK." >&2
+  _gr_reread_warn_msg "$T" "$((WARN_COUNT + 1))" "$BUDGET"
+  printf '%s\n' "$GR_MSG" >&2
   exit 0
 fi
 
 # BLOCK: budget exhausted. Emit the PreToolUse deny decision; exit 0.
-REASON="reread-guard: BLOCKED edit of $T — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override."
-jq -nc \
-  --arg reason "$REASON" \
-  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+_gr_reread_block_msg "$T"
+_gr_json_str "$GR_MSG"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
+  "$GR_JSON"
 exit 0

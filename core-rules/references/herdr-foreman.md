@@ -1,6 +1,6 @@
 # herdr-foreman — multi-model orchestration inside Herdr
 
-Applies when a session runs inside Herdr (`HERDR_ENV=1`). The executable procedure and
+Applies when a session runs in a Herdr app terminal (herdr-core `hc`: `HC_SCOPE` and `HC_TERMINAL_ID` are set). The executable procedure and
 quota-aware role chains are the copy in the **active immutable Trellis release** under
 `core-rules/skills/herdr-foreman/`; that release alone decides. A legacy user-level copy
 under `~/.claude/skills/herdr-foreman/` may be read for discovery and never authorizes a
@@ -10,7 +10,7 @@ decision. This file states the rules the apex, foreman, and workers must agree o
 
 | Role | Who | Owns |
 |---|---|---|
-| Apex (one per project) | the active user-selected main agent, in the pane that started the session | briefs, git, executed receipts, acceptance, operator-facing decisions |
+| Apex (one per project) | the active user-selected main agent, in the hc terminal that started the session | briefs, git, executed receipts, acceptance, operator-facing decisions |
 | Foreman (one per worktree, optional) | pi parent session (Sol xhigh by default) driving dynamic workflows/subagents | fan-out, worker choice, receipts it runs itself, **commits at phase boundaries** when the work order delegates that bounded Git action |
 | Workers | named pi subagents chosen per role from live quota | one bounded unit each; never commit, push, or merge |
 | Configured named routes | e.g. an Opus author, a Claude code-reviewer via the Agent tool | the roles the classifier or the operator selected for this run — a configured route, not an identity that owns the role universally |
@@ -27,7 +27,7 @@ otherwise.
 dropped, and a write failure aborts the start. Before that, `core-rules/pi/lib/validate-project-pi.sh` refuses any
 `.pi` content the protected base has not approved (B0-6); every Trellis pi
 launcher runs it. A pi apex that needs workflows writes the same file in its
-own cwd before it starts. A running pane keeps the tools it started with.
+own cwd before it starts. A running agent keeps the tools it started with.
 
 ## Rules
 
@@ -35,82 +35,71 @@ own cwd before it starts. A running pane keeps the tools it started with.
 2. **Quota decides, not preference.** Roles resolve from the live usage snapshot against ordered chains in `roles.json`; a chain with no candidate in quota is surfaced to the operator, never silently swapped for another family. Unmetered routes count as available; exhausted or disabled providers do not.
 3. **Spend free compute on redundancy, not scope.** Three-vote adversarial refute per finding; two to three independent attempts plus a judge on hard units; loop-until-dry for discovery.
 4. **Receipts are executed, never reported.** Apex and foreman each run the named receipt command and assert pass counts. Worker and foreman self-reports are claims.
-5. **Contracts live on disk.** The brief (`HANDOFF.md`) is the session-survivable contract; it names the apex pane, worktree, decisions, environment traps, phase boundaries, and hard stops. Chat is not a contract.
+5. **Contracts live on disk.** The brief (`HANDOFF.md`) is the session-survivable contract; it names the apex's hc address, worktree, decisions, environment traps, phase boundaries, and hard stops. Chat is not a contract.
 6. **Preserve phase-boundary work under the work order's Git authorization.** The apex owns commits unless the work order explicitly delegates that bounded action to the foreman. When a phase's suites are green, the authorized owner commits if authorized; otherwise retain the diff and receipts for the apex without treating the skill as Git permission. A dead session leaving thousands of uncommitted lines is the failure this rule exists to prevent.
 7. **Hard stops stay with the apex and operator.** PR, merge, deploy, prod mutation, secret handling, scope change.
 8. **Stealth and unmetered routes get code and tests only.** No `.env`, tfvars, kubeconfigs, or tokens to third-party routes of unknown provenance.
-9. **Finish includes teardown.** Accepted, superseded, or abandoned workstream → close the foreman pane; it is a held resource like a named teammate.
+9. **Finish includes teardown.** Accepted, superseded, or abandoned workstream → end the foreman (`hc kill <t>`, then `hc rm <t>`); it is a held resource like a named teammate.
 
-## Panel layout and teardown
+## Visibility and teardown
 
-A panel is a visible review surface and a held resource. Keep it readable enough
-to review:
-
-- Keep a panel to a readable 1+4 grid: the Apex orchestrator holds the full-height
-  left 40%, and the right 60% fills on demand as a 2x2 of at most four foremen.
-  Each completed foreman slot is 30% wide and half-height, smaller than the Apex.
-  The orchestrator keeps full height because it is where the operator reads and
-  coordinates; foremen are glanced at, not read line by line. Fill all four slots
-  before giving the fifth foreman an overflow tab rather than shrinking the
-  orchestrator or crowding the operator's working tab. Panes remain visible in
-  the grid; `foreman-start.sh` passes `--no-focus` to the split and both
-  overflow-move call sites so the operator's focused pane and active tab do not
-  change. `--tab <label>` prefers an existing labelled tab with room, then the
-  caller's tab with room, and labels a new tab only when both are full or unavailable.
-- **HARD RULE (owner): all delegated agent work runs in a visible Herdr pane** —
-  workers, reviewers, consults, foremen, research, and one-shot `pi -p`/`codex exec`.
-  Only harness-native subagents (Claude Code Agent tool, in-process Plan subagents)
-  and Dynamic Workflow agents are exempt. No hidden model CLIs in background
-  shells, `nohup`, orphaned processes, or Python/shell supervisors.
+- Delegated agents run as the apex's `hc` sub-agents (`hc run --bg`), listed under
+  the apex in the Herdr app's Agents sidebar with live status. No pane is opened
+  for them and Trellis carries no pane or grid placement; the operator peeks at an
+  agent or pulls it into a pane with the app's own controls.
+- Agents run interactively, never in a print mode (`pi -p`, `codex exec`,
+  `claude -p`), so they stay watchable, steerable and available for another turn.
+  Harness-native subagents and Dynamic Workflow agents are the only other route.
   Non-model jobs (process-gate runs, test suites) are outside this rule.
-- Close each owned foreman or worker pane as soon as its output is accepted,
-  superseded, or abandoned; never close unrelated operator panes. In a review panel, close reviewers before starting the judge: the
-  judge reads their persisted reports, not live sessions. Close the panel's tab
-  when the workstream finishes.
+- End each agent you started as soon as its output is accepted, superseded, or
+  abandoned (`hc kill <t>`, then `hc rm <t>`); never end terminals you did not
+  start. On a review panel, end the reviewers before starting the judge: the judge
+  reads their persisted reports, not live sessions.
+- A stuck agent is the apex's to handle: hc notes the parent when a child goes
+  `blocked`, errors or exits. The apex reads it (`hc read <t>`), answers within its
+  authority, never forces past a permission prompt, and asks the operator for the
+  rest.
 
 ## pi launch forms (1.1.0 and above)
 
 Verified on pi 1.0 (2026-10-02) and unchanged on 1.1.0, the supported floor
 ([pi setup guide](../../AGENT_PI_SETUP.md), step 1).
 
-Reviewer / one-shot form — in a visible pane, including bounded print requests:
+Reviewer / one-shot form — an interactive pi sub-agent briefed at launch:
 
 ```sh
-P=$(herdr pane split "$HERDR_PANE_ID" --direction right --cwd <dir> | jq -r .result.pane.pane_id)
-herdr pane run "$P" 'bash -c "set -o pipefail; pi -p --model <provider/model:effort> --no-tools --no-approve -nc \"\$(cat bundle.md)\" < /dev/null | tee out.md"; echo "ONESHOT-DONE rc=$?"'
-herdr pane wait-output "$P" --regex 'ONESHOT-DONE rc=[0-9]+' --source recent   # apex waits in its harness's background-wait, not a model process
-herdr pane close "$P"   # after reading out.md
+hc run --bg --name review-x --cwd <dir> pi --model <provider/model:effort> --tools read,grep,find,ls,write,bash --no-approve -nc @bundle.md "Review the bundle above. Read-only: write only out.md, then hc send $HC_TERMINAL_ID \"DONE out.md\"."
+hc wait --children any   # the report arrives as your next input
+hc kill review-x; hc rm review-x   # after reading out.md
 ```
 
-Record each such pane wherever the session tracks its workers before dispatch,
-then close it once its output is read. The same visible-pane form applies to
-`codex exec`. `pipefail` preserves a failing model command's exit code through
-`tee`; the marker reports the inner Bash's status. The escaped `\$` defers bundle
-expansion to that inner Bash, and `\"` preserves the bundle as one prompt argument.
+On another machine add `--on laptop` (its address is then `laptop/t7`) and copy
+the bundle there first.
 
-- `-p` runs a print request with the explicitly selected `--model`.
-- `--no-tools` empties the tool registry, so MCP and codemode cannot re-enable tools.
+- `--tools read,grep,find,ls,write,bash` is the minimum the report protocol needs:
+  `write` for the findings file and `bash` for `hc send`. The brief bounds it to
+  read-only work; `bash` can still mutate, so never point a reviewer at a tree
+  whose changes would matter. Use `--no-tools` only when the apex collects the
+  answer itself with `hc read`.
 - `--no-approve` skips cwd project `.pi/` resources (global `defaultProjectTrust` is
   `always`). It is not a sandbox; user-level extensions still load.
 - `-nc` turns off `AGENTS.md`/`CLAUDE.md` discovery, which otherwise loads whatever the
   trust setting, so repository instructions stay out of the review. User-level
   extensions and skills can still add context.
-- `< /dev/null` closes non-TTY stdin; print mode otherwise reads to EOF without a timeout.
 
 Foremen and implementers never pass `-nc`/`--no-context-files` or `--no-rules`:
 they must ingest the worktree's CLAUDE.md/Trellis layer. Automated runs state the
 project-trust decision explicitly (`--no-approve` or that the worktree's project
 resources are intended); never silently add `--approve`.
 
-Pi 1.0 defaults to fullscreen. `herdr pane read --source visible` reads it
-(verified 2026-10-02); no `--tui-mode regular` is needed.
+Pi defaults to fullscreen; `hc read <t>` reads its screen and history.
 
-Gemini 3.8 Flash tool use depends on the pi-antigravity version a pane loaded at
+Gemini 3.8 Flash tool use depends on the pi-antigravity version an agent loaded at
 start. Under 0.7.0, both codemode-only and control failed with 20/20
 `MALFORMED_FUNCTION_CALL`; under 0.9.0 the same synthetic read/grep/find/ls fixture
 ran 16/16 correct with no malformed calls
 ([ADR](../../docs/adr/2026-10-02-pi-1.0-adoption.md)). `~/.pi/agent/settings.json`
-shows the installed version, not what a running pane loaded: a pane started before
+shows the installed version, not what a running agent loaded: an agent started before
 0.9.0 was installed (2026-10-03, about 03:30 IST) still runs 0.7.0 and stays
 `--no-tools` until restarted. Re-probe with that fixture before relying on Gemini
 tools for other tool shapes, and after any later pi-antigravity upgrade.

@@ -819,6 +819,296 @@ render in place under an rc.25 anchor is not a supported state, because the
 expected-command pin lives in the payload. Re-materialize scheduled tasks after
 a rollback for the same reason they are re-materialized after an upgrade.
 
+## `1.3.21` → `1.4.0` adoption
+
+1.4.0 removes most of the latency Trellis adds to agent work (spec 072) and
+moves Herdr integration to the Herdr desktop app's core, `hc` (spec 073). The
+gains reach a machine three ways, and adoption alone does not deliver all of
+them:
+
+| 1.4.0 change | Delivered by | Why |
+|---|---|---|
+| shared guard rules, pi in-process guards and batched lifecycle, supervisor wake-up, Python and `eslint` resolution, Stop reuse, delta review, session-context integrity from the stamp, Muse/GLM retirement and `argon` on `antigravity` | adopt alone | payload-resident, reached through `.trellis/runtime` |
+| Herdr integration moves to `hc` (spec 073) | adopt | the old `herdr` CLI is not supported; run agents from the Herdr desktop app |
+| post-checkout fast paths and hook digest memo | adopt alone | adoption regenerates the managed git-hook dispatchers and records `state/hook-digests/` |
+| gate queue, Tests-row reuse, branch-push test-file selector, row order, gate slot, battery changes | adopt alone | payload-resident; they act on projects that run the process gate |
+| release stamps, persistent `.exec` snapshot, metadata-only `help` / `heavy --status`, caller PATH for `trellis bench` | launcher reinstall | the stable launcher is installed by `configure`, not by adoption |
+| one SessionStart dispatcher route (`trellis hook session-start`); `onFailure`, exec form, timeouts and `if` filters in Claude settings | re-render (`detach`/`attach`) | `.claude/settings.local.json` and `.codex/hooks.json` are attach-time output; `release adopt` does not rewrite them |
+
+A render older than 1.4.0 keeps calling `trellis hook session-context`, which
+still works and gets cheap once the launcher is reinstalled. Re-render with the
+documented `detach` and `attach` pair (and `relink --user`, which
+`configure --release` runs when an owned user attachment exists) when you want
+the single `session-start` dispatcher route and the new Claude hook fields.
+
+**Herdr is now the desktop app's core, `hc` (spec 073).** Trellis no longer
+reads `HERDR_*` or calls the `herdr` CLI. Run the apex in a Herdr app terminal
+(`HC_SCOPE` set; `hc` 0.1.15 or later on PATH). After adoption, re-run
+`resolve-roles.py --implementer <agent>` once in each apex terminal: decisions
+keyed to the old workspace/pane fields fail closed. Callers of `foreman-start.sh`
+now pass a brief file as the second argument and drop `--tab`/direction.
+`foreman-prompt.sh` is gone; use `hc send <address> "<text>"`. Remote lanes use
+`hc run --on <machine>`.
+
+### Install, adopt and re-key role decisions
+
+Most users install from the public mirror; set `RELEASE_REMOTE` to it. The
+stepwise route reviews between operations; `trellis upgrade` is also valid
+because 1.4.0 is not installed yet.
+
+1. **Install and verify 1.4.0:**
+
+   ```sh
+   (
+     set -e
+     TARGET_RELEASE=1.4.0
+     : "${RELEASE_REMOTE:?Set the remote containing annotated tag v$TARGET_RELEASE}"
+     : "${TRELLIS:=trellis}"
+     : "${TRELLIS_HOME:=$HOME/.trellis}"
+     export TRELLIS_HOME
+     "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
+     "$TRELLIS" release verify "$TARGET_RELEASE"
+   )
+   ```
+
+2. **Reinstall the launcher from the 1.4.0 payload**, exactly as
+   [Reinstalling the launcher](#reinstalling-the-launcher) describes, with
+   `TARGET_RELEASE=1.4.0`. That `configure` call also makes 1.4.0 the active
+   management CLI (and relinks an owned user surface). Until the reinstall,
+   commands still run on macOS and ext4/XFS: the 1.3.21 launcher verifies and
+   copies the release on every call, as before. **On Linux/Btrfs**, every
+   launcher from `1.0.0-rc.24` through `1.3.21` (`0d37cf1d3`) reuses an
+   `os.listdir(fd)` directory cursor that stays at EOF after the snapshot is
+   populated, leaving `release.json` writable (`0600`) so verification refuses
+   it. Fixed in 1.4.0 (`a0454d1f2`, `ac0a54412`) by opening fresh directory
+   descriptions in `release-store` and the launcher; Linux/Btrfs hosts must
+   install the 1.4.0 launcher during the upgrade (run `configure` without
+   `--no-install-launcher`, or follow
+   [Reinstalling the launcher](#reinstalling-the-launcher)).
+
+3. **Adopt 1.4.0 and check the registry:**
+
+   ```sh
+   "$TRELLIS" release adopt 1.4.0 --all
+   "$TRELLIS" doctor
+   ```
+
+   Use `--fleet NAME` or `--project ID --fleet NAME` for narrower scope. The
+   first launcher run per release pays one full verify and writes the schema-2
+   release stamp (`state/release-stamps/`) and the execution snapshot
+   (`releases/.exec/`); later runs check the stamp. Stamps and snapshots are
+   keyed by release digest and are never shared between versions.
+
+4. **Re-run `resolve-roles.py --implementer` once per apex terminal (spec 073):**
+
+   In each Herdr desktop app apex terminal (`HC_SCOPE` and `HC_TERMINAL_ID`
+   set), re-key `~/.trellis/state/roles-resolved.json` to the `hc` terminal:
+
+   ```sh
+   python3 -I "$HOME/.claude/skills/herdr-foreman/scripts/resolve-roles.py" \
+     --implementer <agent>
+   ```
+
+   Decisions written by 1.3.21 or older are keyed to
+   `herdr_workspace_id`/`herdr_pane_id` and fail closed once until this command
+   runs in the apex terminal.
+
+5. **Reclaim disk left by older launchers** (report first, then apply per
+   category):
+
+   ```sh
+   trellis disk-janitor --scopes releases,release-tmp
+   trellis disk-janitor --scopes releases,release-tmp --apply
+   ```
+
+   The `releases` scope reaps legacy `.tmp.<version>.exec.*` staging; the
+   opt-in `release-tmp` scope reaps orphaned `.exec` work and the snapshots and
+   stamps of uninstalled releases. Both keep anything with a live owner or an
+   open handle.
+
+### Claude Code floor
+
+`trellis doctor` warns when the installed Claude Code is below **2.1.295**
+(1.3.21 warned below 2.1.294), the first version whose `onFailure` field and
+exec-form hooks the rendered settings use. It is a WARN, never a failure. Below
+2.1.295 (or when `claude --version`, run with the forwarded caller `PATH`,
+cannot be read) the renderer emits the legacy pre-exec shell-form hook wiring
+without `onFailure`; the guard supervisor still blocks on a crash or timeout,
+so the slower wiring is equally safe, and `doctor` accepts the form matching
+the client. Upgrade Claude Code first, then re-render, so the render picks up
+exec form and `onFailure: "block"` on the three enforcing PreToolUse guards.
+
+### Measure with `trellis bench`
+
+`trellis bench` copies the active installed release into a private sandbox,
+attaches a fixture project there, and times hooks, lifecycle routes and,
+optionally, a battery. It only reads your store. Run it under `trellis heavy`
+when the numbers matter, at normal load (load average below the core count, no
+battery running):
+
+```sh
+trellis heavy --lane bench -- trellis bench --suite hooks,lifecycle --n 30
+```
+
+Sandbox setup installs and attaches a release before timing anything, which
+takes minutes. Receipts land in the current directory (or `--out DIR`) as
+`bench-<date>-<label>.{json,md}`; home, temp and
+user strings are replaced with tokens and PATH is recorded as counts, so a
+receipt can be shared. Add `--suite gate --gate-tsv <aggregate.tsv>
+--gate-wall <seconds>` to summarize a battery. The launcher forwards your PATH
+to `bench` only from 1.4.0, so reinstall it first or hooks are timed under the
+sanitized control PATH.
+
+### Optional host settings
+
+Trellis does not change these, and no 1.4.0 target depends on them. `doctor`
+checks Spotlight indexing on the worktree root and reports `stop_checks.fast`
+(INFO when active, WARN when ignored); it does not inspect macOS Developer
+Tools.
+
+- **macOS Developer Tools.** Add your terminal (and any multiplexer that starts
+  agents) under System Settings → Privacy & Security → Developer Tools. Without
+  it, Gatekeeper and XProtect scan every new executable on first exec, about
+  340 ms each, which test stubs and fresh scripts hit constantly.
+- **Spotlight.** Exclude the worktree root under System Settings → Spotlight →
+  Search Privacy. Current macOS ignores a `.metadata_never_index` file, so the
+  sentinel alone does not stop indexing.
+- **A faster Stop suite.** `stop_checks.fast` in the machine config; see
+  [Optional host setting: a faster Stop test step](#optional-host-setting-a-faster-stop-test-step).
+
+### What changes for agents
+
+- **`hc` only (spec 073) and the retired Muse routes.** Trellis drives Herdr
+  only through `hc` (`HC_SCOPE` and `HC_TERMINAL_ID` set); `HERDR_ENV`,
+  `HERDR_PANE_ID`, `HERDR_WORKSPACE_ID` and the `herdr` CLI (`0.9.x`) are gone.
+  `foreman-start.sh <worktree> <brief-file> [name]` launches the pi foreman
+  with one `hc run --bg` as a sub-agent of the calling terminal, passing the
+  brief as pi's initial message and binding
+  `~/.pi/agent/sessions/trellis-dispatch/<dispatch-id>.jsonl` before launch.
+  `--tab`, direction arguments and `foreman-prompt.sh` are removed; workers
+  report and ask questions with `hc send <apex> "<text>"`, and the apex waits
+  with `hc wait --children`. Delegated agents appear under their apex in the
+  app's Agents sidebar without splitting panes. Inside an `hc` terminal, the pi
+  cross-family review rung, scoped role decisions and the foreman `SessionStart`
+  context run again. Muse (`cheap`, `cheap-1`, `cheap-2`, `muse-meta`) and
+  `glm-flash` are removed from the `herdr-foreman` catalog and chains, the
+  `cheap-*` and `muse-meta-*` pi agent files are deleted, `argon` runs on
+  `antigravity/gemini-4-argon:high` at the head of `reviewer`, and `Explore`,
+  `Plan` and `general-purpose` route to Haiku (`docs/adr/2026-11-01-retire-muse.md`).
+- **Stop reuse (spec 072).** A passing Stop is reused — and the DoD line says
+  so — only while the tree, the raw exported environment (all of it except
+  `PWD`, `OLDPWD` and `_`), each check's argv and the identity of every tool it
+  runs are unchanged, so a new harness session or any changed input reruns the
+  checks once. Reuse applies only to checks run by a listed native interpreter
+  (`node`, `nodejs`, `python*`, `perl*`) or an in-worktree script invoked
+  through a `#!` naming one of those interpreters or an exact `pnpm` 8–11 shim
+  in its own directory (covering `tsc`, `eslint` and `vitest` from
+  `node_modules/.bin`, and `pytest` and `mypy` from `.venv`); shell scripts are
+  never parsed, any other native tool (such as native `ruff`) gets a full run,
+  and `cargo`, `go` and `rustc` checks always rerun. Only a run in which every
+  check passed writes a receipt, and only if the full key still matches
+  afterwards. When checks run, typecheck, lint and tests run concurrently. The
+  pre-push and merge gates never read Stop receipts, and an optional host-only
+  `stop_checks.fast` in `$TRELLIS_HOME/config.json` is never reused.
+- **The queue and gate (spec 072).**
+  - A second local battery queues (under `$HOME/.local/state/trellis-gate`
+    regardless of `XDG_STATE_HOME`) and prints its position, the holder's head
+    and an estimated start instead of failing `state busy`. Queue wait does not
+    count against the run deadline; pass `--no-wait` to keep the fail-fast exit
+    `70`.
+  - `trellis heavy --lane process-gate --light` now exits `2`; gates need the
+    reserved heavy slot. A gate started inside an ordinary `trellis heavy` or
+    `--light` wrapper also exits `2` before admission; start it directly.
+  - On push, a hard cheap-row failure (secrets, bypass, stack, security or
+    anti-slop) refuses before the battery and Tests shows `n/a`. Merge runs
+    every row as before.
+  - The Tests row reuses a runner-written verdict (up to seven days old) only
+    when all bound inputs match, printing the reused run's id and date.
+    Branch-only pushes on projects that declare `PROCESS_GATE_TEST_MAP` in the
+    range base can narrow to mapped test files (`Tests: narrowed: M selected`);
+    tag, mixed and merge gates always run the full suite. A project whose full
+    battery already runs the gate's typecheck and lint can declare
+    `PROCESS_GATE_TEST_COVERS_STATIC` in its process-gate config to skip the
+    duplicate run in full-battery mode.
+  - The local gate runner `scripts/run-tests-local.py` is macOS-only (its
+    process containment uses `libproc`, unchanged since 1.3.x) and launches
+    nothing on Linux. On Linux, run Bats suites directly, or use
+    `scripts/trace-full-battery.sh`, which needs `strace`.
+
+### Roll back
+
+Rollback is the reverse adoption plus the 1.3.21 launcher. Before it, delete
+any `projects` key from `config.json`: 1.3.21 validates the machine config as a
+closed object and refuses it.
+
+```sh
+(
+  set -e
+  ROLLBACK_RELEASE=1.3.21
+  : "${TRELLIS:=trellis}"
+  "$TRELLIS" release verify "$ROLLBACK_RELEASE"
+  "$TRELLIS" release adopt "$ROLLBACK_RELEASE" --all
+)
+```
+
+Then reinstall the 1.3.21 launcher with the same
+[launcher procedure](#reinstalling-the-launcher), `TARGET_RELEASE=1.3.21`. The
+1.4.0 launcher can still run the 1.3.21 payload in the meantime, from a
+per-run verified copy, because that payload does not declare the snapshot
+capability. A project re-rendered under 1.4.0 keeps that render; restore the
+1.3.21 render with the detach/attach pair and `--release 1.3.21`. Keep 1.4.0
+installed; its stamps and snapshot stay until `disk-janitor --scopes
+release-tmp` finds the release uninstalled.
+
+## Optional host setting: a faster Stop test step
+
+From spec 072, the Stop hook can run a faster suite in place of its detected
+test step (`npm test`, `pytest`, `cargo test`, `go test ./...`) for a project
+you name. It is a host setting only, in the machine config, never in the
+repository: a `stop_checks` key in `.trellis.json` or anywhere else in the
+checkout is ignored, because a same-user agent can write it.
+
+```json
+{
+  "projects": {
+    "/Users/you/projects/app": { "stop_checks": { "fast": "pnpm vitest run --changed" } }
+  }
+}
+```
+
+- The key is the physical path of the project's main checkout (`pwd -P` in
+  it); linked worktrees of that project use the same entry.
+- The value is one line of 1–1024 printable characters. It runs from the
+  project root. Typecheck and lint still run, a fast run is never reused and
+  never writes a pass receipt, and the pre-push and merge gates ignore it.
+- It is honoured only while `config.json` is a regular file you own with mode
+  0600 or stricter, in a directory with no group or other write bit. Anything
+  else, or a malformed value, runs the detected suite and says so in the Stop
+  advisory. `trellis doctor` lists projects with a fast suite (INFO) and warns
+  when the hook would ignore one.
+- Add `projects` only once both `active_cli_release` and the stable launcher
+  are on a release that accepts it. Older CLIs validate `config.json` as a
+  closed object and stop with `machine config failed schema-aware validation`.
+  Remove the key before rolling back to such a release.
+
+Edit the file without loosening its mode:
+
+```sh
+(
+  set -e
+  : "${TRELLIS_HOME:=$HOME/.trellis}"
+  root="$(cd /path/to/project && pwd -P)"
+  tmp="$(umask 077 && mktemp "$TRELLIS_HOME/.config.XXXXXX")"
+  jq --arg r "$root" --arg c 'pnpm vitest run --changed' \
+    '.projects[$r].stop_checks.fast = $c' "$TRELLIS_HOME/config.json" > "$tmp"
+  mv "$tmp" "$TRELLIS_HOME/config.json"
+  trellis doctor
+)
+```
+
+To stop using it, delete `projects.<root>.stop_checks` (or the whole
+`projects` key) the same way.
+
 ## `1.3.19` → `1.3.20` adoption
 
 1.3.20 repairs managed-exclude owner metadata left by **any group adoption run

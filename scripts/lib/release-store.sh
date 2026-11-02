@@ -9,6 +9,13 @@ if [ "${TRELLIS_LIBS_PRELOADED:-}" != 1 ]; then
   # shellcheck source=semver.sh
   . "$_RELEASE_STORE_LIB_DIR/semver.sh"
 fi
+# Not a preloaded dependency: the in-memory command bundle carries no stamp
+# program, and without release_stamp_check release_store_locate verifies in
+# full, so only a library loaded from its file reads stamps.
+if [ -n "${_RELEASE_STORE_LIB_DIR:-}" ]; then
+  # shellcheck source=release-stamp.sh
+  . "$_RELEASE_STORE_LIB_DIR/release-stamp.sh"
+fi
 
 release_store_err() {
   printf 'trellis release: %s\n' "$*" >&2
@@ -199,8 +206,48 @@ release_store_locate() {
     release_store_err "release not installed: $version"
     return 5
   fi
-  release_store_verify_path "$path" "$version" || return $?
+  release_store_verify_installed "$path" "$version" || return $?
   printf '%s\n' "$path"
+}
+
+# One listing of the whole release refuses any ACL. On macOS the "@" an xattr
+# puts after the mode hides the "+" of an ACL from the full verify's `ls -l`, so
+# list the ACL entries themselves with -e; where ls has no -e (GNU), the mode
+# column's "+" is reliable. A stamp cannot vouch for what that verify misses,
+# so this runs on every call, stamp hit or not.
+release_store_release_has_no_acl() {
+  local release_dir="${1:-}" listing
+  listing="$(find "$release_dir" -print0 | LC_ALL=C /usr/bin/xargs -0 /bin/ls -lde 2>/dev/null)" ||
+    listing="$(find "$release_dir" -print0 | LC_ALL=C /usr/bin/xargs -0 /bin/ls -ld 2>/dev/null)" || return 1
+  printf '%s\n' "$listing" |
+    /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }'
+}
+
+# Spec 072 D-A for release_store_locate: a release stamp left by a full verify
+# and unchanged since (release-stamp.sh) answers without a re-hash, and counts
+# as this shell's verify for release_store_verify_path's memo, as the full
+# verify would. Any miss runs the full verify, whose verdict decides; a missing
+# stamp never passes. locate only reads stamps: the stable launcher writes this
+# same stamp before any payload runs, so every launched route finds it, while
+# read-only callers (doctor, show-config) and a refused attach leave no new
+# state behind. An explicit verify (release_store_verify: `trellis release
+# verify`, doctor's integrity rows) stays a full verify in every fresh process.
+# The in-memory command bundle carries no stamp program, so there
+# release_stamp_check is undefined and every locate verifies in full.
+release_store_verify_installed() {
+  local release_dir="${1:-}" version="${2:-}" key
+  release_store_release_has_no_acl "$release_dir" || {
+    release_store_err "release content carries an ACL: $release_dir"
+    return 4
+  }
+  if declare -F release_stamp_check >/dev/null &&
+    release_stamp_check "${release_dir%/releases/*}" "$release_dir"; then
+    if key="$(release_store_verify_memo_key "$release_dir" "$version" 0 0)"; then
+      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\n'
+    fi
+    return 0
+  fi
+  release_store_verify_path "$release_dir" "$version"
 }
 
 release_store_list() {
@@ -1796,9 +1843,20 @@ def digest_regular(parent_fd, name, label):
             os.close(descriptor)
 
 
+def fresh_names(directory_fd):
+    # A directory descriptor already read once can stay at EOF and miss
+    # entries created since (Linux/Btrfs). A fresh open file description
+    # enumerates every entry without changing confinement.
+    scan_fd = os.open(".", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        return sorted(os.listdir(scan_fd))
+    finally:
+        os.close(scan_fd)
+
+
 def seal_tree(directory_fd, label):
     try:
-        names = sorted(os.listdir(directory_fd))
+        names = fresh_names(directory_fd)
     except OSError as error:
         state("could not enumerate snapshot output %s: %s" % (label, error))
     for name in names:
@@ -1871,7 +1929,7 @@ try:
     os.close(payload_source_fd)
     payload_source_fd = None
 
-    if sorted(os.listdir(source_fd)) != ["payload", "release.json"]:
+    if fresh_names(source_fd) != ["payload", "release.json"]:
         state("release snapshot source changed while copying")
     seal_tree(snapshot_fd, "")
     os.fchmod(snapshot_fd, 0o500)
@@ -1904,8 +1962,16 @@ release_store_snapshot_payload_matches() {
   [ "$payload" = "$home/releases/$version/payload" ] && return 0
   snapshot_root="${payload%/payload}"
   [ "$snapshot_root" != "$payload" ] || return 1
-  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   snapshot_base="${snapshot_root##*/}"
+  if [ "${snapshot_root%/*}" = "$home/releases/.exec" ]; then
+    suffix="${snapshot_base#"$version"-}"
+    [ "$suffix" != "$snapshot_base" ] && [ "${#suffix}" -eq 64 ] || return 1
+    case "$suffix" in
+      *[!0-9a-f]*) return 1 ;;
+    esac
+    return 0
+  fi
+  [ "${snapshot_root%/*}" = "$home/releases" ] || return 1
   rest="${snapshot_base#.tmp.}"
   [ "$rest" != "$snapshot_base" ] || return 1
   suffix="${rest#"$version".exec.}"
@@ -3030,9 +3096,9 @@ release_store_install() (
   release_store_write_manifest_json "$manifest_tsv" "$stage/release.json" "$version" "$tag" "$commit" "$remote" || return 4
 
   release_store_verify_path "$stage" "$version" 1 1 || return 4
-  find "$payload" -type f -exec chmod a-w {} \; || return 5
+  find "$payload" -type f -exec chmod a-w {} + || return 5
   chmod a-w "$stage/release.json" || return 5
-  find "$payload" -type d -exec chmod a-w {} \; || return 5
+  find "$payload" -type d -exec chmod a-w {} + || return 5
   chmod a-w "$stage" || return 5
   release_store_verify_path "$stage" "$version" 0 1 || return 4
 

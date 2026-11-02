@@ -304,7 +304,7 @@
           "description": "Spec 069: scopes that --apply skips (report and dry-run still scan them). The per-scope rollback switch. Default [].",
           "type": "array",
           "items": {
-            "enum": ["caches", "worktrees", "stores", "docker", "releases", "pi", "orphans", "logs", "tmp", "transcripts"]
+            "enum": ["caches", "worktrees", "stores", "docker", "releases", "release-tmp", "pi", "orphans", "logs", "tmp", "transcripts"]
           },
           "uniqueItems": true
         }

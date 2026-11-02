@@ -11,8 +11,8 @@ none of it, and Trellis no longer ships the adapter patch.
 Route a unit that needs a browser page or a native desktop app to a harness that
 has computer use:
 
-- **Codex CLI in Herdr**, in a visible pane:
-  `herdr agent start <name> --kind codex --pane <id> -- --search`.
+- **Codex CLI in Herdr**, as an hc sub-agent:
+  `hc run --bg --name <name> --cwd <dir> codex --no-daemon --search "<task>"`.
 - **Claude Code**, with its own computer-use and browser tools.
 
 The `trellis-computer-use` skill still links into `~/.pi/agent/skills` from the

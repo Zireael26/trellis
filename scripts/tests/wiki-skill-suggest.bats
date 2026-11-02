@@ -260,30 +260,25 @@ assert_missing_dependency() {
   local claude_template="$REPO_ROOT/core-rules/templates/claude-settings.local.json"
   local codex_template="$REPO_ROOT/core-rules/templates/codex-hooks.local.json"
   local manifest="$REPO_ROOT/core-rules/inheritance-manifest.json"
-  local claude_command codex_command template command
-  claude_command='TRELLIS_ROOT="$CLAUDE_PROJECT_DIR/.trellis/runtime" "$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/wiki-skill-suggest.sh"'
-  codex_command='TRELLIS_ROOT="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime" "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/wiki-skill-suggest.sh"'
+  local template
+  local claude_hook codex_hook hook
+  # Claude spawns the hook in exec form; Codex keeps its shell command.
+  claude_hook='{"type":"command","command":"/usr/bin/env","args":["TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime","${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/wiki-skill-suggest.sh"]}'
+  codex_hook='{"type":"command","command":"TRELLIS_ROOT=\"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime\" \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/wiki-skill-suggest.sh\""}'
 
   for template in "$claude_template" "$codex_template"; do
     if [ "$template" = "$claude_template" ]; then
-      command="$claude_command"
+      hook="$claude_hook"
     else
-      command="$codex_command"
+      hook="$codex_hook"
     fi
-    run jq -e --arg command "$command" --arg status "$REGISTRATION_STATUS" '
-      ([.hooks.PostToolUse[]
-        | select(any(.hooks[]?; .command? == $command))]
-       == [{
-         matcher: "Write|Edit|MultiEdit",
-         hooks: [{
-           type: "command",
-           command: $command,
-           timeout: 5,
-           statusMessage: $status
-         }]
-       }])
+    run jq -e --argjson hook "$hook" --arg status "$REGISTRATION_STATUS" '
+      ($hook + {timeout: 5, statusMessage: $status}) as $want
+      | ([.hooks.PostToolUse[]
+        | select(any(.hooks[]?; . == $want))]
+       == [{matcher: "Write|Edit|MultiEdit", hooks: [$want]}])
       and ([.hooks | to_entries[] | .value[]? | .hooks[]?
-            | select(.command? == $command)] | length) == 1
+            | select(.command? == $hook.command and .args? == $hook.args)] | length) == 1
       and ([.. | strings | select(contains("wiki-skill-suggest.sh"))] | length) == 1
     ' "$template"
     [ "$status" -eq 0 ] || { echo "$output"; false; }

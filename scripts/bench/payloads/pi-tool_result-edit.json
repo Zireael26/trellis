@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "post_action",
+  "native_event": "tool_result",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "edit",
+    "family": "file_mutation",
+    "target_coverage": "complete",
+    "targets": [
+      {
+        "operation": "update",
+        "path": "src/a.ts"
+      }
+    ],
+    "input": {
+      "path": "src/a.ts",
+      "edits": [
+        {
+          "oldText": "return a + b;",
+          "newText": "return a + b; // checked"
+        }
+      ]
+    }
+  },
+  "result": {
+    "status": "succeeded",
+    "is_error": false,
+    "output": [
+      {
+        "type": "text",
+        "text": "Successfully replaced text in src/a.ts."
+      }
+    ]
+  },
+  "in_process_read_tracking": true
+}

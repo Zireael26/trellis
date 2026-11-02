@@ -152,9 +152,22 @@ scripts/lint-shell-tree.sh'
 # <file>|<prefix> pairs exempt for ONE prefix only, so any other excluded prefix
 # in the same file still fails. Each names the attached PROJECT's own specs/
 # tree, resolved against a project root (or describes it in a config comment),
-# never the payload's specs/, which a payload has never needed.
+# never the payload's specs/, which a payload has never needed. The checkout-only
+# test selector and contained runner name source test inventory, not payload data;
+# so do the runner's exact-input verdict, tag-push reuse (it reads the audit from
+# the tag's Git tree) and the maintainer-run metadata trace and weight refresh,
+# whose specs/ default is the source checkout's own timing evidence.
 SCAN_EXEMPT_PAIRS='core-rules/hooks/lib/spec-gate-core.sh|specs/
 scripts/check-gate-inventory.sh|scripts/tests/
+scripts/lib/push-test-map.py|scripts/tests/
+scripts/run-tests-local.py|scripts/tests/
+scripts/lib/gate_verdict.py|scripts/tests/
+scripts/lib/gate_verdict.py|core-rules/hooks/tests/
+scripts/lib/gate_verdict.py|core-rules/codex/hooks/tests/
+scripts/lib/tag_push_reuse.py|scripts/tests/
+scripts/trace-release-metadata.py|scripts/tests/
+scripts/refresh-stage-weights.py|scripts/tests/
+scripts/refresh-stage-weights.py|specs/
 core-rules/skills/process-gate/scripts/check-analyze.sh|specs/
 core-rules/skills/orchestrate/recipes/conductor.wf.js|specs/
 core-rules/skills/orchestrate/recipes/digest-adopt.wf.js|specs/
@@ -279,6 +292,19 @@ repo_file_list() {
   run scan_references "$root" "$root/list"
   [[ "$output" == *"core-rules/hooks/tests/"* ]] || { echo "$output"; false; }
   [[ "$output" != *": specs/: "* ]] || { echo "$output"; false; }
+}
+
+@test "A3.3 source-checkout selectors exempt only their test inventory references" {
+  local root="$BATS_TEST_TMPDIR/selector-root" path
+  mkdir -p "$root/core-rules" "$root/scripts/lib"
+  cp "$REPO_ROOT/core-rules/payload-exclude.txt" "$root/core-rules/"
+  for path in scripts/lib/push-test-map.py scripts/run-tests-local.py scripts/lib/gate_verdict.py \
+    scripts/lib/tag_push_reuse.py scripts/trace-release-metadata.py; do
+    printf 'tests="scripts/tests/x.bats"\nother="specs/001/spec.md"\n' > "$root/$path"
+    printf '%s\n' "$path" > "$root/list"
+    run scan_references "$root" "$root/list"
+    [ "$output" = "$path: specs/: other=\"specs/001/spec.md\"" ] || { echo "$output"; false; }
+  done
 }
 
 @test "A3.3 every tracked tests/ directory is listed or kept, and an unlisted one fails" {

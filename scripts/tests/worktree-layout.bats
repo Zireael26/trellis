@@ -51,7 +51,9 @@ rows() {
   run bash "$SCRIPT" root-init
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [ -d "$ROOT" ] && [ -e "$ROOT/.metadata_never_index" ]
-  [ "$(stat -f %Lp "$ROOT" 2>/dev/null || stat -c %a "$ROOT")" = 755 ]
+  local mode
+  mode="$(stat -f %Lp "$ROOT" 2>/dev/null)" || mode="$(stat -c %a "$ROOT")"
+  [ "$mode" = 755 ]
   grep -Fxq "tmutil addexclusion $ROOT" "$STUB_LOG"
   [[ "$output" == *"[Excluded]"* ]] || { echo "$output"; return 1; }
   run bash "$SCRIPT" root-init

@@ -463,7 +463,9 @@ import time"}
   [ -s "$A3_RACE_INODE" ]
   # The writer's directory is still there, and is still the writer's.
   [ -d "$PROJECT/empty" ] && [ ! -L "$PROJECT/empty" ]
-  [ "$(stat -f %i "$PROJECT/empty" 2>/dev/null || stat -c %i "$PROJECT/empty")" = "$(cat "$A3_RACE_INODE")" ]
+  # GNU stat -f can emit filesystem data even when it fails; discard it.
+  inode="$(stat -f %i "$PROJECT/empty" 2>/dev/null)" || inode="$(stat -c %i "$PROJECT/empty")"
+  [ "$inode" = "$(cat "$A3_RACE_INODE")" ]
   [ ! -e "$JOURNAL" ] && [ ! -e "$LOG" ] && [ ! -e "$OWNER" ]
   [ -z "$(find "$PROJECT" -name '.*attachment-stage-*' -o -name '.trellis-attachment-remove-*')" ]
 }

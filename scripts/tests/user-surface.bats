@@ -883,6 +883,21 @@ teardown() {
   [ ! -L "$journal" ]
 }
 
+# stale_directory_cursor <dir> — "stale" when a directory descriptor listed
+# while empty still lists nothing after an entry is added (Linux Btrfs), else
+# "fresh". Same probe as trellis-launcher.bats A3.4.
+stale_directory_cursor() {
+  python3 -I - "$1" <<'PY'
+import os, sys, tempfile
+d = tempfile.mkdtemp(dir=sys.argv[1])
+fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+os.listdir(fd)
+open(os.path.join(d, "entry"), "w").close()
+print("stale" if not os.listdir(fd) else "fresh")
+os.close(fd)
+PY
+}
+
 @test "1.3.9 configure interruption names the 1.3.10 payload recovery command" {
   local old_source new_attach link owner_before journal configure_source remedy
   old_source="$SANDBOX/released 1.3.9 source"
@@ -903,6 +918,17 @@ teardown() {
   chmod 600 "$SANDBOX/old config"
   mv "$SANDBOX/old config" "$TRELLIS_HOME/config.json"
   run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release 1.3.9
+  # Launchers through 1.3.21 seal their execution snapshot by listing it
+  # through a descriptor opened while it was empty. Btrfs keeps that cursor at
+  # the end, so the 1.3.9 launcher refuses its own still-writable snapshot and
+  # cannot run any release there (fixed since by fresh_names). Pin that exact
+  # refusal; the interruption path below needs a 1.3.9 launcher that runs.
+  if [ "$(stale_directory_cursor "$SANDBOX")" = stale ]; then
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"configured release record is missing, writable, or invalid: $TRELLIS_HOME/releases/.tmp.1.3.9.exec."* ]] ||
+      { echo "$output"; false; }
+    return 0
+  fi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   link="$HOME/.agents/skills/herdr-foreman"
   owner_before="$(sha256_file "$(user_owner_path)")"

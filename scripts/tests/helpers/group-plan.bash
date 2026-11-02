@@ -4,6 +4,8 @@
 # Actual released surfaces, not a hand-built approximation of the six leaves.
 # Build, seal and historically adopt once per file. Each case receives an
 # independent physical copy; every fixed adoption/sync/add still runs for real.
+# shellcheck source=scripts/tests/helpers/fixture-clone.bash
+. "${BASH_SOURCE[0]%/*}/fixture-clone.bash"
 group_plan_build_release_repo() {
   local version="$1" repo="$2" ref="v$1" file
   [ "$version" != 1.3.10 ] || ref=HEAD
@@ -41,7 +43,7 @@ group_plan_release() {
   [ -d "$GROUP_PLAN_RELEASE_CACHE/trellis-home/releases/$version" ] || return 1
   mkdir -p "$TRELLIS_HOME_FIX/releases" || return 1
   chmod 700 "$TRELLIS_HOME_FIX/releases" || return 1
-  cp -Rp "$GROUP_PLAN_RELEASE_CACHE/trellis-home/releases/$version" "$TRELLIS_HOME_FIX/releases/" || return 1
+  fixture_clone "$GROUP_PLAN_RELEASE_CACHE/trellis-home/releases/$version" "$TRELLIS_HOME_FIX/releases/$version" || return 1
   RELEASE_DIR="$TRELLIS_HOME_FIX/releases/$version"
 }
 

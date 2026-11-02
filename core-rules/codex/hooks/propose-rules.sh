@@ -120,8 +120,11 @@ _pr_temp_sibling() {
 _pr_preserve_mode() {
   local source="$1" target="$2" mode=""
   [ -f "$source" ] || return 0
-  mode=$(stat -f '%Lp' "$source" 2>/dev/null || stat -c '%a' "$source" 2>/dev/null || true)
-  [ -n "$mode" ] && chmod "$mode" "$target" 2>/dev/null || true
+  # GNU first: GNU stat -f is a filesystem query that prints a report and
+  # fails, so a BSD-first chain captures that report instead of the mode.
+  mode=$(stat -c '%a' "$source" 2>/dev/null) || mode=$(stat -f '%Lp' "$source" 2>/dev/null) || mode=""
+  case "$mode" in ''|*[!0-7]*) return 0 ;; esac
+  chmod "$mode" "$target" 2>/dev/null || true
 }
 
 _pr_prepare_append() {

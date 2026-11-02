@@ -151,6 +151,21 @@ _vr_state_root() {
   local create="${1:-0}" root mode
   root="$_VR_COMMON_DIR/$_VR_DIR_NAME"
 
+  # stop-verify runs its checks concurrently, so another producer can create
+  # the directory between the test and the mkdir. Then it is validated as a
+  # pre-existing directory, never trusted as our own.
+  if [ ! -e "$root" ] && [ ! -L "$root" ] && [ "$create" = "1" ]; then
+    if ( umask 077 && mkdir "$root" ) 2>/dev/null; then
+      chmod 700 "$root" 2>/dev/null || true
+      _vr_canonical_dir "$root" || {
+        _VR_PERSIST_ERROR="created receipt directory failed validation: $root"
+        return 1
+      }
+      _VR_STATE_ROOT="$root"
+      return 0
+    fi
+  fi
+
   if [ -e "$root" ] || [ -L "$root" ]; then
     if [ -L "$root" ]; then
       _VR_PERSIST_ERROR="receipt directory is a symlink: $root"
@@ -171,15 +186,8 @@ _vr_state_root() {
     esac
   else
     [ "$create" = "1" ] || { _VR_PERSIST_ERROR="no receipt directory at $root"; return 1; }
-    ( umask 077 && mkdir "$root" ) 2>/dev/null || {
-      _VR_PERSIST_ERROR="could not create the receipt directory: $root"
-      return 1
-    }
-    chmod 700 "$root" 2>/dev/null || true
-    _vr_canonical_dir "$root" || {
-      _VR_PERSIST_ERROR="created receipt directory failed validation: $root"
-      return 1
-    }
+    _VR_PERSIST_ERROR="could not create the receipt directory: $root"
+    return 1
   fi
 
   _VR_STATE_ROOT="$root"
@@ -194,7 +202,8 @@ _vr_tmpdir() {
     return 1
   fi
   if [ ! -e "$tmp" ]; then
-    ( umask 077 && mkdir "$tmp" ) 2>/dev/null || {
+    # A concurrent producer may win the mkdir; validation below covers both.
+    ( umask 077 && mkdir "$tmp" ) 2>/dev/null || [ -d "$tmp" ] || {
       _VR_PERSIST_ERROR="could not create the receipt staging directory: $tmp"
       return 1
     }

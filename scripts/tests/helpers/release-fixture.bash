@@ -8,6 +8,8 @@
 # is installed by the stable launcher that bootstrap payload backs.
 #
 # Callers set REPO_ROOT before loading this helper.
+# shellcheck source=scripts/tests/helpers/fixture-clone.bash
+. "${BASH_SOURCE[0]%/*}/fixture-clone.bash"
 
 release_fixture_canonical_dir() {
   (CDPATH='' cd "$1" && pwd -P)
@@ -138,6 +140,17 @@ release_fixture_prototype_build() {
   jq '.active_cli_release = "9.9.9"' "$home/config.json" > "$home/config.next" || return 1
   mv "$home/config.next" "$home/config.json" || return 1
   chmod 600 "$home/config.json" || return 1
+  # Release stamps (state/release-stamps, state/exec-stamps) and the launcher's
+  # execution snapshots (releases/.exec) are per-machine caches named by the
+  # sha256 of a release.json that records the prototype's absolute remote, and
+  # a stamp binds inodes and the prototype's paths. A clone rewrites that
+  # remote and gets fresh inodes, so a copy could never be hit and would only
+  # name the prototype. Leave them out; each clone builds its own on first run.
+  if [ -d "$home/releases/.exec" ]; then
+    chmod -R u+w "$home/releases/.exec" || return 1
+    rm -rf "$home/releases/.exec" || return 1
+  fi
+  rm -rf "$home/state/release-stamps" "$home/state/exec-stamps" || return 1
 }
 
 # release_fixture_rewrite_release_remote <release_dir> <remote>
@@ -169,16 +182,13 @@ release_fixture_rewrite_release_remote() {
 # four roots `release_fixture_bootstrap` + `release_fixture_install` would have
 # produced in it directly, and names nothing outside itself.
 release_fixture_prototype_clone() {
-  local proto="$1" sandbox="$2"
+  local proto="$1" sandbox="$2" name
   local config="$sandbox/trellis/config.json"
 
   [ -d "$proto" ] && [ -d "$sandbox" ] || return 1
-  cp -Rp \
-    "$proto/user" \
-    "$proto/trellis" \
-    "$proto/release" \
-    "$proto/bootstrap release source" \
-    "$sandbox/" || return 1
+  for name in user trellis release 'bootstrap release source'; do
+    fixture_clone "$proto/$name" "$sandbox/$name" || return 1
+  done
   chmod 700 "$sandbox/user" "$sandbox/trellis" || return 1
 
   # config.json: source_root and the fleet discovery root are absolute.

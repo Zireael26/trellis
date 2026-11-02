@@ -203,7 +203,12 @@ linked_hooks_fixture() {
       context="$(attachment_contextual_render_context "$2")" || exit 91
       attachment_contextual_template_render "$1/core-rules/templates/$3" "core-rules/templates/$3" "$context"
     ' _ "$REPO" "$trellis_home" "$name")"
-    command="$(printf '%s\n' "$rendered" | jq -r '[.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[].command] | .[0]')"
+    # Shell form runs through sh; exec form (Claude) is spawned directly with
+    # ${CLAUDE_PROJECT_DIR} substituted in each element, as the client does.
+    command="$(printf '%s\n' "$rendered" | jq -r --arg dir "$PROJECT" '
+      [.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[]
+       | if has("args") then [.command] + .args | map(split("${CLAUDE_PROJECT_DIR}") | join($dir) | @sh) | join(" ")
+         else .command end] | .[0]')"
     [[ "$command" == *hookspath-guard.sh* ]] || { echo "$name: $command"; false; }
     run bash -c 'cd "$1" && printf "%s" "$2" | env CLAUDE_PROJECT_DIR="$1" CODEX_PROJECT_DIR="$1" /bin/sh -c "$3"' _ \
       "$PROJECT" "$(event 'pnpm install')" "$command"

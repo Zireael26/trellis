@@ -39,7 +39,10 @@
 #
 # State contract: see reread-guard.sh header. track-read OWNS reads.tsv.
 #
-# Dependencies: jq (required), shasum, awk (BSD), date.
+# Failure markers: core-rules/hooks/rules/reread.json, compiled into
+# lib/guard-rules.sh by scripts/gen-guard-rules.py.
+#
+# Dependencies: jq (required — one call), sha256sum or shasum, awk (BSD), git.
 
 set -u
 
@@ -51,6 +54,11 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
 _se_require_jq "track-read"
+
+__gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
+[ -f "$__gr_lib" ] || { echo "track-read: missing sibling lib at $__gr_lib — re-run sync-codex-hooks" >&2; exit 1; }
+# shellcheck source=lib/guard-rules.sh disable=SC1090
+. "$__gr_lib"
 
 # Sibling first; the in-place fallback applies only inside the declared
 # runtime's Codex tree (spec 055 R1.1), never a project-controlled hooks/lib/.
@@ -64,21 +72,21 @@ fi
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
 . "$__ta_lib"
 
-NORMALIZED=$(_ta_normalize_action codex post_action "$INPUT") || exit 0
-FAMILY=$(printf '%s' "$NORMALIZED" | jq -r '.action.family')
-case "$FAMILY" in
+# One jq run normalizes the event and yields every field this tracker reads.
+_ta_guard_fields post_action "$INPUT" "$GR_EDIT_FAILURE_RE" "$GR_EDIT_FAILURE_FLAGS" || exit 0
+case "$TA_FAMILY" in
   file_read|file_mutation)
-    [ "$(printf '%s' "$NORMALIZED" | jq -r '.result.status')" != "failed" ] || exit 0 ;;
+    [ "$TA_STATUS" != "failed" ] || exit 0 ;;
   *) exit 0 ;;
 esac
 
-ACTION_CWD=$(printf '%s' "$NORMALIZED" | jq -r '.cwd // empty')
+ACTION_CWD=$TA_CWD
 [ -d "$ACTION_CWD" ] || ACTION_CWD="$(_se_project_dir)"
 
 # Codex may pass a relative file_path; resolve against the project dir. Claude
 # always passes absolute (verbatim). Store + compare identically with the guard.
 record_target() {
-  local T="$1" NOW
+  local T="$1"
   T=$(_ta_resolve_path "$ACTION_CWD" "$T") || return 0
 
 # FIX-5 (DL-P5-10): reads.tsv is TAB-delimited, newline-terminated. A target
@@ -109,26 +117,27 @@ T=$(_se_normpath "$T")
 [ -n "$T" ] || return 0
 
 # --- derive the shared state key (DL-P5-09: one helper, zero inline copies) ---
-TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty') || exit 0
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty') || exit 0
-KEY=$(_se_state_key "$TP" "$SID") || return 0
+KEY=$(_se_state_key "$TA_TP" "$TA_SID") || return 0
 [ -n "$KEY" ] || return 0   # key derivation failed → fail-open (no record)
 
 # --- resolve root + record ---
 ROOT=$(_se_repo_root "$(_se_project_dir)" 2>/dev/null) || return 0
 [ -n "$ROOT" ] || return 0
 STATE_DIR="$(_se_harness_home "$ROOT")/.reread-state"
-mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+[ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null || return 0
 
-NOW=$(date +%s 2>/dev/null) || return 0
-printf '%s\t%s\n' "$NOW" "$T" >> "$STATE_DIR/$KEY.reads.tsv" 2>/dev/null || return 0
+_gr_now
+[ -n "$GR_NOW" ] || return 0
+printf '%s\t%s\n' "$GR_NOW" "$T" >> "$STATE_DIR/$KEY.reads.tsv" 2>/dev/null || return 0
 }
 
-while IFS=$'\t' read -r OPERATION SOURCE_PATH DESTINATION; do
-  case "$OPERATION" in
-    read|create|update) record_target "$SOURCE_PATH" ;;
-    rename) record_target "$DESTINATION" ;;
+__i=0
+while [ "$__i" -lt "${#TA_OPS[@]}" ]; do
+  case "${TA_OPS[__i]}" in
+    read|create|update) record_target "${TA_PATHS[__i]}" ;;
+    rename) record_target "${TA_DESTS[__i]}" ;;
     delete) ;;
   esac
-done < <(_ta_targets_tsv "$NORMALIZED")
+  __i=$((__i + 1))
+done
 exit 0

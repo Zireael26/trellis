@@ -40,37 +40,23 @@ checkout_lock_path() {
   printf '%s/state/locks/attachment-checkout-%s.lock\n' "$TRELLIS_HOME" "$checkout"
 }
 
-# The budget is a CONTENTION allowance, not a timing expectation: on an idle
-# machine the lock appears in well under a second, so the happy path never
-# spends it. The original 2 s was the whole reason the signal cases read as
-# flaky — under a parallel full-battery run the detach process could not reach
-# its lock write inside the window, the signaler exited 1, and the failure
-# looked like a signal-handling defect rather than a starved test. Measured at
-# this tip: 3/3 green quiescently (one full-suite run plus two targeted reruns),
-# 2/2 red under load with the old budget.
-#
-# The budget is WALL CLOCK, and it has to be: the invariant it must satisfy is
-# "expire before the holder lets go", and the holder's grip
-# (`ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK`) is measured in seconds. Expressed as an
-# iteration count it was not checkable — 1500 iterations of `sleep 0.01` is
-# 15 s of sleeping plus 1500 process spawns, which measured 23.9 s under a load
-# average of 6.45 against a 30 s hold, and a 2-core runner executing four shards
-# is strictly worse. The margin that comment called comfortable was ~6 s and
-# shrank with contention, in the direction the budget was widened to tolerate.
-#
-# Seconds, so the comparison against the hold is arithmetic a reader can do.
+# The holder's grip (`ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK`, seconds) only has to
+# outlast the gap between the lock appearing and the signal being sent. Reaching
+# the lock is not timed at all: under a loaded full battery the detach process
+# took longer than any fixed budget (2 s, then 20 s), the waiter gave up without
+# signalling, and the held detach ran to completion with status 0. The waiter
+# instead watches the detach process itself and gives up only once it exits.
 CHECKOUT_LOCK_HOLD_SECONDS=30
-WAIT_FOR_CHECKOUT_LOCK_SECONDS=20
 
+# wait_for_checkout_lock <pid> — succeed once the checkout lock link exists;
+# fail once <pid> (the process expected to take it) has exited without it.
 wait_for_checkout_lock() {
-  local path deadline
+  local path pid="$1"
   path="$(checkout_lock_path)"
-  deadline=$((SECONDS + WAIT_FOR_CHECKOUT_LOCK_SECONDS))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    [ -L "$path" ] && return 0
+  until [ -L "$path" ]; do
+    kill -0 "$pid" 2>/dev/null || { [ -L "$path" ]; return; }
     sleep 0.01
   done
-  return 1
 }
 
 checkout_lock_pid() {
@@ -364,7 +350,7 @@ run_detach() {
 
   ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT" >"$SANDBOX/held-detach.log" 2>&1 &
   background_pid=$!
-  wait_for_checkout_lock
+  wait_for_checkout_lock "$background_pid"
   holder_pid="$(checkout_lock_pid)"
 
   run_detach
@@ -393,21 +379,18 @@ run_detach() {
   [ "$status" -eq 0 ]
 
   for signal in HUP INT TERM; do
-    (
-      wait_for_checkout_lock || exit 1
-      kill -"$signal" "$(checkout_lock_pid)" || exit 1
-    ) &
-    signaler_pid=$!
-    # Bats' within-file semaphore launches tests as asynchronous Bash jobs,
-    # which inherit SIGINT ignored. Restore foreground-command disposition
-    # before exec so the real detach process can install its own INT trap.
-    run env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" \
+    # Asynchronous Bash jobs (this one, and Bats' within-file semaphore jobs)
+    # inherit SIGINT ignored. Restore the default disposition before exec so
+    # the real detach process can install its own INT trap.
+    env ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK="$CHECKOUT_LOCK_HOLD_SECONDS" \
       python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
-      "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT"
-    [ "$status" -eq 5 ] || { printf 'signal=%s status=%s\n%s\n' "$signal" "$status" "$output" >&2; false; }
-    signaler_status=0
-    wait "$signaler_pid" || signaler_status=$?
-    [ "$signaler_status" -eq 0 ]
+      "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT" >"$SANDBOX/signal-detach.log" 2>&1 &
+    detach_pid=$!
+    wait_for_checkout_lock "$detach_pid"
+    kill -"$signal" "$(checkout_lock_pid)"
+    status=0
+    wait "$detach_pid" || status=$?
+    [ "$status" -eq 5 ] || { printf 'signal=%s status=%s\n' "$signal" "$status" >&2; cat "$SANDBOX/signal-detach.log" >&2; false; }
     [ ! -e "$(checkout_lock_path)" ]
     [ ! -L "$(checkout_lock_path)" ]
   done
@@ -444,7 +427,7 @@ run_detach() {
     and (has("hooks") | not) and (has("effortLevel") | not) and (has("permissions") | not)' \
     "$PROJECT/.claude/settings.local.json"
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
-  jq -e '[.hooks.SessionStart[].hooks[].command] | length == 3
+  jq -e '[.hooks.SessionStart[].hooks[].command] | length == 1
     and all(.[]; contains("${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}") and (contains("__TRELLIS_") | not))' \
     "$PROJECT/.codex/hooks.json"
   [ -L "$PROJECT/.trellis/runtime" ]

@@ -13,6 +13,13 @@
 # The second half proves the one path the audit left unproven: pushing a
 # deletions-only payload tag through the managed pre-push, without --no-verify.
 
+setup() {
+  local sandbox
+  sandbox="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+  export HOME="$sandbox/home" TRELLIS_HOME="$sandbox/trellis" TMPDIR="$sandbox/tmp"
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+}
+
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 load helpers/payload-fixture
 
@@ -26,27 +33,36 @@ CONSUMER_PATTERNS=(
 # and its matched line with the indentation trimmed, so moving a hit is free but
 # changing, adding or removing one fails until the entry is re-reviewed. The
 # failure prints every hit under the entry and the digest it now has.
-CONSUMER_ALLOWLIST='scripts/lib/release-store.sh|2|b842673ff8b25bae|installer: fetches refs/tags/<tag>:refs/tags/<tag> into a fresh repository, full history, no branch, not shallow
+CONSUMER_ALLOWLIST='scripts/trace-release-metadata.py|1|23f572761adf933a|audit parser: conservatively recognizes tag-reference file probes in captured logs; no tag discovery or release selection
+scripts/lib/release-store.sh|2|b842673ff8b25bae|installer: fetches refs/tags/<tag>:refs/tags/<tag> into a fresh repository, full history, no branch, not shallow
 scripts/trellis-launcher.sh|2|056f774f16eb9aa8|launcher bootstrap install: the same explicit tag refspec as the store
 scripts/sync-to-template.sh|2|85c7d99542690d3c|mirror: fetches the installed tag by explicit refspec and main beside it (R3.6)
 scripts/release-payload-commit.sh|4|44ff032b8536bb6b|identity gate: resolves refs/tags/<tag>; is-ancestor checks the approved commit against the fetched origin/main, never the tag
+scripts/lib/push-test-map.py|1|c29d4f80f37d2d3d|push test selection: ancestor check between range endpoint commits, never discovers a release
 scripts/lib/worktree-migrate-classify.sh|1|8e5d9e2d3e948a28|migrate classify: merged-PR check between a head and a remote branch tip, no tag discovery
 scripts/lib/worktree-migrate-preserve.sh|1|91755fab79e70b04|migrate preserve: reads one refs/heads ref to confirm the preserve push landed, never lists tags
-core-rules/githooks/pre-push|3|8997fa86b330e05b|gate dispatch: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
-core-rules/husky/pre-push|3|cb331fcaea38dc04|husky twin: gates off-main tag ranges; ancestry only omits a tag gate whose range lies inside the gated branch range (tag under the branch tip and branch base under the tag base); a tag case arm only exempts tags from the unsupported-ref refusal; never discovers a release
+core-rules/githooks/pre-push|4|2cc110527a78aaf2|gate dispatch: verifies only the explicitly pushed release tag before reuse; existing per-ref ranges and containment remain; never discovers a release
+core-rules/husky/pre-push|4|658cea39ec0609f9|husky twin: verifies only the explicitly pushed release tag before reuse; existing per-ref ranges and containment remain; never discovers a release
+scripts/lib/tag_push_reuse.py|1|4b7a5022032454fa|T31: validates the explicit pushed tag namespace; no latest-tag discovery or ancestry-based release choice
+scripts/tests/test_tag_push_reuse.py|2|bf6d6c6fae0f6146|T31 fixtures: one valid explicit release tag and one VERSION-mismatched tag
+scripts/tests/test_full_trace.py|2|6dd620a2450f57ea|T32 fixtures: captured fd and relative tag-path operands; no tag discovery or release choice
 core-rules/hooks/trellis-worktree-remove.sh|1|97d070632a511735|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
+core-rules/hooks/code-review-subagent.sh|1|b02b974cd3a615a3|delta review: is-ancestor between the last reviewed HEAD and HEAD, never reads a tag
+core-rules/codex/hooks/code-review-subagent.sh|1|5a01dade2475be86|codex twin: the same delta-review ancestry check between two commits
+core-rules/hooks/tests/spec-gate-cache.bats|1|240120e0d4f4acb3|fixture: creates an unrelated tag ref to prove any ref change invalidates the spec-gate cache key; no release read
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
 core-rules/skills/process-gate/scripts/lib/diff-base.sh|1|f2894e8dac5d879b|is-ancestor between two commits for base refinement, no tag involved
 scripts/verify-conductor-spec-inventory.mjs|2|b24ec11275dc1812|is-ancestor between main refs, no tag involved
 scripts/tests/helpers/git-fence/git|4|37ec6942f05001b9|test fence: parses --depth and ls-remote as argv shapes, fetches nothing
 scripts/tests/helpers/payload-fixture.bash|3|638b0793f379ead0|fixture: pushes fixture tags by explicit refspec; checks refs/tags/v1.3.6 exists before git show
-scripts/tests/pre-push-range.bats|11|9958d6726e67e317|fixtures: simulated tag ref updates exercise per-tag ranges, branch containment, fail-closed underivable ranges and the unsupported-ref refusal in both carriers
+scripts/tests/helpers/historical-releases.bash|1|e545ee0acc6ff758|historical fixture key: resolves only the five explicitly listed old version tags; never discovers a latest release
+scripts/tests/pre-push-range.bats|12|82a791dac3bda4db|fixtures: simulated tag ref updates exercise per-tag ranges, branch containment, fail-closed underivable ranges and the unsupported-ref refusal in both carriers
 scripts/tests/pre-push-diff-base.bats|3|2d82a0e5e490f878|fixtures: simulated tag ref updates prove a tag-only push skips spec-gate and a branch+tag push hands spec-gate the branch, never the tag
 scripts/tests/sync-to-template-dry-run.bats|2|8fbb38a541f590d7|fixture: pushes a fixture tag by explicit refspec
 scripts/tests/release-payload-commit.bats|1|652b7a5664ff9f9c|fixture: points the fixture tag ref at a hand-built tag object so --verify-tag reads its header
 scripts/tests/user-surface.bats|1|506af448a3090479|fixture: checks the v1.3.9 release tag exists before archiving its shipped runtime
 .github/workflows/bats.yml|2|5d6f3d57d87a557c|CI: fetches the v1.3.6 and v1.3.9 tags by explicit refspec, depth 1, for old-runtime probes
-CHANGELOG.md|1|b1337350f0392162|prose: the 1.3.11 pre-push notes name the refs/heads/* and refs/tags/* refusal; no consumer
+CHANGELOG.md|2|1ce69640c1afdd81|prose: the 1.3.11 pre-push notes name the refs/heads/* and refs/tags/* refusal, and the 1.4.0 notes name the T32 trace tools; no consumer
 docs/UPGRADING.md|3|b6deba7648e8cf62|prose: tag refs classify push ranges, not release discovery; git describe on main no longer names the newest release, which is cosmetic; the 1.3.11 unsupported-ref refusal names refs/tags/*
 AGENT_PI_SETUP.md|1|d115d46558230798|npm list --depth=0, not git
 specs/043-pi-harness-adoption/guide/SETUP.md|1|cba8efcdb8435007|npm list --depth=0, not git

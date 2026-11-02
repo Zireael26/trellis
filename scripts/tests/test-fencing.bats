@@ -12,7 +12,7 @@
 #
 # HOME is deliberately not fenced globally: tool caches and credentials hang off
 # it. The HOME-first readers (code-reviewer.sh, herdr-foreman-session.sh) are
-# kept off live state by the HERDR_* scrub, not by this guard.
+# kept off live state by the HC_* scrub, not by this guard.
 
 REPO_ROOT="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 SENTINEL="LB8-REAL-TRELLIS-HOME-SENTINEL"
@@ -23,7 +23,7 @@ FENCE_EXEMPT=(
   "scripts/tests/doctor-fix-part1.bats|names the hook only as a payload file; doctor runs under an explicit TRELLIS_HOME"
   "scripts/tests/hook-inventory.bats|parses hook sources; the only execution renders hook config through attachment.sh with HOME=\$RENDER_HOME and an explicit sandbox Trellis home, never a reader"
   "scripts/tests/non-trellis-inert.bats|t25_inert_env sets HOME and TRELLIS_HOME for every hook run"
-  "scripts/tests/release-store.bats|names payload leaves only; every CLI call passes a sandbox TRELLIS_HOME"
+  "scripts/tests/release-store-part1.bats|names payload leaves only; every CLI call passes a sandbox TRELLIS_HOME"
   "scripts/tests/test-fencing.bats|this guard; it runs readers only through the suites it checks"
   "scripts/tests/wiki-skill-suggest.bats|both hook runners pass a sandbox HOME and TRELLIS_HOME through env"
   "core-rules/hooks/tests/session-context-worktree.bats|every test builds a fixture that exports a sandbox TRELLIS_HOME"
@@ -273,7 +273,7 @@ canary_pass() {
   local suite="$1" filter="$2" mode="$3"
   shift 3
   : > "$CANARY_LOG"
-  run env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID "$@" \
+  run env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$@" \
     HOME="$FAKE_HOME" TMPDIR="$NESTED_TMP" PATH="$BATS_TEST_TMPDIR/shim:$PATH" \
     bats --filter "$filter" "$REPO_ROOT/$suite"
 

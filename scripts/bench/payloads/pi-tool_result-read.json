@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "harness": "pi",
+  "cwd": "@PROJECT@",
+  "session_id": "bench-session-0001",
+  "session_file": "@TRANSCRIPT@",
+  "phase": "post_action",
+  "native_event": "tool_result",
+  "action": {
+    "id": "bench-call-0001",
+    "tool_name": "read",
+    "family": "file_read",
+    "target_coverage": "complete",
+    "targets": [
+      {
+        "operation": "read",
+        "path": "src/a.ts"
+      }
+    ],
+    "input": {
+      "path": "src/a.ts"
+    }
+  },
+  "result": {
+    "status": "succeeded",
+    "is_error": false,
+    "output": [
+      {
+        "type": "text",
+        "text": "export function add(a: number, b: number): number {\n  return a + b;\n}\n"
+      }
+    ]
+  },
+  "in_process_read_tracking": true
+}

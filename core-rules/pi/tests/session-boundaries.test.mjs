@@ -25,7 +25,7 @@ function fixture(t) {
   const f = { base, cwd, attach, handlers, messages, notifications, calls,
     decision: { schema_version: 1, capability_status: 'enforced', decision: 'allow' } };
   const pi = {
-    on: (name, handler) => handlers.set(name, handler),
+    on: (name, handler) => handlers.set(name, name === 'before_agent_start' ? (event, ctx) => handler({ messageType: 'user', ...event }, ctx) : handler),
     // Pi 0.85 agent-session/source-info builtin metadata; loader local extension metadata.
     getAllTools: () => [
       ...['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'].map(name => ({
@@ -47,7 +47,7 @@ function fixture(t) {
     sessionManager: { getSessionId: () => 'session', getSessionFile: () => '/fixture/session.jsonl' } };
   f.fire = (name, event = {}, ctx = f.ctx) => handlers.get(name)(event, ctx);
   f.turn = () => f.fire('before_agent_start', { systemPrompt: 'parent' });
-  f.bash = (extra = {}) => f.fire('user_bash', { command: 'pwd', cwd, excludeFromContext: false, ...extra });
+  f.bash = (extra = {}) => f.fire('user_bash', { command: 'gh pr create --title fixture', cwd, excludeFromContext: false, ...extra });
   return f;
 }
 const call = (id = 'r', input = { path: 'file' }) => ({ toolCallId: id, toolName: 'read', input });
@@ -136,18 +136,16 @@ for (const toolName of ['Agent', 'SubagentWorkflow']) {
     assert.match(diagnostic, /SubagentWorkflow/);
   });
 
-  test(`${toolName} with policy dispatches and exposes unsupported mediation`, async t => {
+  test(`${toolName} with policy exposes unsupported mediation without dispatch`, async t => {
     const f = fixture(t);
     f.decision = { schema_version: 1, capability_status: 'unsupported', decision: 'allow', reason: `${toolName} child mediation unsupported` };
     const event = { ...call(toolName), toolName };
     assert.equal(await f.fire('tool_call', event), undefined);
-    const action = f.calls.at(-1).event.action;
-    assert.equal(action.family, 'local_tool');
-    assert.equal(action.target_coverage, 'none');
-    assert.deepEqual(action.targets, []);
     const post = await f.fire('tool_result', result(event));
     assert.match(post.content[0].text, /capability: unsupported/);
-    assert.match(post.content[0].text, /child mediation unsupported/);
+    assert.match(post.content[0].text, /pre_action\/local_tool: unsupported — no pre-action handler/);
+    assert.match(post.content[0].text, /post_action\/local_tool: unsupported — no post-action handler/);
+    assert.equal(f.calls.length, 0);
   });
 }
 
@@ -155,15 +153,13 @@ test('pure builtin searches pass without policy; unknown tools refuse without fi
   const f = fixture(t);
   const ctx = { ...f.ctx, cwd: f.attach('missing', false) };
   for (const toolName of ['grep', 'find', 'ls']) {
-    assert.equal(await f.fire('tool_call', { ...call(toolName), toolName }, ctx), undefined);
-    const action = f.calls.at(-1).event.action;
-    assert.equal(action.tool_name, toolName);
-    assert.equal(action.family, 'local_tool');
-    assert.equal(action.target_coverage, 'none');
-    assert.deepEqual(action.targets, []);
+    const event = { ...call(toolName), toolName };
+    assert.equal(await f.fire('tool_call', event, ctx), undefined);
+    const post = await f.fire('tool_result', result(event), ctx);
+    assert.match(post?.content?.[0]?.text ?? '', /capability: unsupported|^$/);
   }
   for (const toolName of ['agent', 'custom']) assert.equal((await f.fire('tool_call', { ...call(toolName), toolName }, ctx)).block, true);
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 0);
 });
 
 test('post envelope retains deep pre-input snapshot after trusted handler mutation', async t => {

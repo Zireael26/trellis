@@ -6,8 +6,16 @@
 #   - TRELLIS_REVIEW_IN_PROGRESS=1: exit 0 immediately (nested-review guard).
 #   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).
 #   - Pure chat / no edits: exit 0 (skip).
-#   - Runs checks in order. On any failure, emit
+#   - Runs checks concurrently (cargo's members in order) and blocks on the
+#     first failure in plan order: emit
 #     {"decision":"block","reason":"<step>: <sliced output>"} on stdout and exit 0.
+#   - Reuse (spec 072 U8): a pass receipt whose key matches the tree
+#     fingerprint, planned commands, tools, environment and policy skips the
+#     run and says so; any doubt runs the checks (lib/deps.sh § Stop check
+#     reuse). Only passes are recorded, so a failure is never reused.
+#   - stop_checks.fast, from TRELLIS_HOME config.json only (never the
+#     checkout), replaces the test step when that file passes its ownership
+#     and mode checks. A fast run is never reused.
 #   - Error slicing: typecheck/lint → first 30 lines; tests → last 30 lines.
 #   - Budget: 90s soft cap.
 #   - Receipts gate (Step 5): on a dirty non-doc tree with no open todos and all
@@ -75,7 +83,8 @@ __se_pm_lib="$(dirname "${BASH_SOURCE[0]}")/lib/pm.sh"
 [ -f "$__se_pm_lib" ] && . "$__se_pm_lib"
 
 # Optional: durable executed-verification receipts (spec 045 T6). This records
-# what actually ran; it NEVER skips, shortens, or reuses a check. If the shared
+# what actually ran; it NEVER skips, shortens, or reuses a check (the Stop pass
+# receipts below are a separate store and record no execution). If the shared
 # library is absent the fallback below runs the SAME command with the SAME
 # capture and the SAME exit status and says so on stderr — visible degradation,
 # never a bypass and never a false green.
@@ -140,6 +149,8 @@ TURN_RANGE_FILES=""
 __se_blocked=0
 __se_harness=codex
 [ "${TRELLIS_HARNESS:-codex}" = "pi" ] && __se_harness=pi
+__se_sdir=""
+__se_now=""
 if command -v git >/dev/null 2>&1; then
   __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
   __se_key=""
@@ -151,7 +162,7 @@ if command -v git >/dev/null 2>&1; then
       __se_baseline=$(cat "$__se_sdir/$__se_harness.$__se_key" 2>/dev/null) || __se_baseline=""
       rm -f "$__se_sdir/$__se_harness.$__se_key" || __se_baseline=""
       __se_nonces=$(_se_turn_nonce_take "$__se_sdir" "$__se_harness.$__se_key")
-      if __se_now=$(_se_tree_fingerprint "$PROJECT_DIR"); then
+      if __se_now=$(_se_tree_fingerprint "$PROJECT_DIR" "$__se_sdir/fp-cache"); then
         TURN_STATE=$(_se_turn_baseline_state "$__se_baseline" "$__se_now" "$__se_nonces")
       fi
       if [ "$TURN_STATE" = "changed" ]; then
@@ -282,11 +293,16 @@ _se_find_subtree() {
   printf '%s' "$common"
 }
 
-# Keep unavailable checks visible on every receipt/advisory exit, without
-# emitting multiple Stop objects or manufacturing executed verification evidence.
+# Keep unavailable checks, reused checks and ignored policy visible on every
+# receipt/advisory exit, without emitting multiple Stop objects or
+# manufacturing executed verification evidence.
 VERIFICATION_UNAVAILABLE=""
+VERIFICATION_NOTE=""
 _se_verification_advisory() {
   local message="$1"
+  if [ -n "$VERIFICATION_NOTE" ]; then
+    message="${VERIFICATION_NOTE}${message:+$'\n'}${message}"
+  fi
   if [ -n "$VERIFICATION_UNAVAILABLE" ]; then
     message="${VERIFICATION_UNAVAILABLE}${message:+$'\n'}${message}"
   fi
@@ -526,6 +542,24 @@ fi
 
 CHECKS_RUN=0
 
+# Steps 2–4 plan their checks instead of running them one by one. The plan is
+# the input of the reuse key (spec 072 U8): a pass receipt for the same key
+# skips the run. Otherwise every check runs, groups concurrently and the
+# members of a group in order (cargo serializes on its build lock anyway), and
+# the first planned check that failed blocks with the same reason and slicing
+# the sequential run gave.
+__se_ck_id=(); __se_ck_form=(); __se_ck_label=(); __se_ck_slice=()
+__se_ck_group=(); __se_ck_dir=(); __se_ck_cmd=()
+# _se_plan_check <id> <argv|shell> <block step> <head|tail> <group> <dir> <command...>
+_se_plan_check() {
+  local n=${#__se_ck_id[@]}
+  __se_ck_id[n]=$1; __se_ck_form[n]=$2; __se_ck_label[n]=$3
+  __se_ck_slice[n]=$4; __se_ck_group[n]=$5; __se_ck_dir[n]=$6
+  shift 6
+  __se_ck_cmd[n]="$*"
+  CHECKS_RUN=$((CHECKS_RUN + 1))
+}
+
 # Parse before ANY JS runner/version probe: absent installs cannot mask a bad
 # manifest. Dependency-free package scripts do not require node_modules.
 HAS_TEST=""
@@ -594,12 +628,13 @@ _se_mypy_pyproject_files() {
 if [ -f "tsconfig.json" ] && [ "$JS_AVAILABLE" -eq 0 ]; then
   _se_js_unavailable
 elif [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run typecheck.tsc argv npx --no-install tsc --noEmit
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "typecheck (tsc)" "$SLICED"
+  # The node_modules/.bin copy npx --no-install would resolve, run directly
+  # (same argv, no npx startup, and a closure the reuse key can bind). With
+  # none inside the worktree, npx runs it and that Stop is never reused.
+  if __se_bin=$(_se_node_bin tsc "$PWD"); then
+    _se_plan_check typecheck.tsc argv "typecheck (tsc)" head tsc "$PWD" "$__se_bin" --noEmit
+  else
+    _se_plan_check typecheck.tsc argv "typecheck (tsc)" head tsc "$PWD" npx --no-install tsc --noEmit
   fi
 fi
 
@@ -612,93 +647,57 @@ if [ -n "$MYPY_CMD" ]; then
     HAS_MYPY_CFG=1
   fi
   if [ "$HAS_MYPY_CFG" = "1" ]; then
-    CHECKS_RUN=$((CHECKS_RUN + 1))
     # A configured [tool.mypy] files list is mypy's own target set; a positional
     # '.' would override it and re-collect conftest modules.
     if _se_mypy_pyproject_files; then
-      _vr_run typecheck.mypy shell "$MYPY_CMD"
+      _se_plan_check typecheck.mypy shell "typecheck (mypy)" head mypy "$PWD" "$MYPY_CMD"
     else
-      _vr_run typecheck.mypy shell "$MYPY_CMD ."
-    fi
-    OUT="$_VR_OUTPUT"
-    if [ "$_VR_STATUS" -ne 0 ]; then
-      SLICED=$(printf '%s' "$OUT" | head -30)
-      emit_block "typecheck (mypy)" "$SLICED"
+      _se_plan_check typecheck.mypy shell "typecheck (mypy)" head mypy "$PWD" "$MYPY_CMD ."
     fi
   fi
 fi
 
 # Rust
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run typecheck.cargo-check argv cargo check
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "typecheck (cargo check)" "$SLICED"
-  fi
+  _se_plan_check typecheck.cargo-check argv "typecheck (cargo check)" head cargo "$PWD" cargo check
 fi
 
 # Go
 if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run typecheck.go-vet argv go vet ./...
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "typecheck (go vet)" "$SLICED"
-  fi
+  _se_plan_check typecheck.go-vet argv "typecheck (go vet)" head go-vet "$PWD" go vet ./...
 fi
 
 # --- Step 3: Lint (repo-wide) ---
-# ESLint
+# ESLint. The probe's output is the eslint version the reuse key binds.
+ESLINT_VERSION=""
 if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
   if [ "$JS_AVAILABLE" -eq 0 ]; then
     _se_js_unavailable
-  elif command -v npx >/dev/null 2>&1 && npx --no-install eslint --version >/dev/null 2>&1; then
-    CHECKS_RUN=$((CHECKS_RUN + 1))
-    _vr_run lint.eslint argv npx --no-install eslint . --quiet
-    OUT="$_VR_OUTPUT"
-    if [ "$_VR_STATUS" -ne 0 ]; then
-      SLICED=$(printf '%s' "$OUT" | head -30)
-      emit_block "lint (eslint)" "$SLICED"
-    fi
+  elif ! command -v npx >/dev/null 2>&1; then
+    :
+  elif __se_bin=$(_se_node_bin eslint "$PWD"); then
+    ESLINT_VERSION=$("$__se_bin" --version 2>/dev/null) \
+      && _se_plan_check lint.eslint argv "lint (eslint)" head eslint "$PWD" "$__se_bin" . --quiet
+  elif ESLINT_VERSION=$(npx --no-install eslint --version 2>/dev/null); then
+    _se_plan_check lint.eslint argv "lint (eslint)" head eslint "$PWD" npx --no-install eslint . --quiet
   fi
 fi
 
 # ruff
 if command -v ruff >/dev/null 2>&1 && { [ -f "pyproject.toml" ] || [ -f "ruff.toml" ] || [ -f ".ruff.toml" ]; }; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run lint.ruff argv ruff check .
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "lint (ruff)" "$SLICED"
-  fi
+  _se_plan_check lint.ruff argv "lint (ruff)" head ruff "$PWD" ruff check .
 fi
 
 # clippy
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run lint.clippy argv cargo clippy --quiet --message-format=short -- -D warnings
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "lint (clippy)" "$SLICED"
-  fi
+  _se_plan_check lint.clippy argv "lint (clippy)" head cargo "$PWD" cargo clippy --quiet --message-format=short -- -D warnings
 fi
 
 # golangci-lint
 if [ -f "go.mod" ] && command -v golangci-lint >/dev/null 2>&1; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run lint.golangci-lint argv golangci-lint run
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    SLICED=$(printf '%s' "$OUT" | head -30)
-    emit_block "lint (golangci-lint)" "$SLICED"
-  fi
+  _se_plan_check lint.golangci-lint argv "lint (golangci-lint)" head golangci-lint "$PWD" golangci-lint run
 fi
 
 # Resolve Python's test runner before selecting a manifest branch so mixed
@@ -736,14 +735,279 @@ elif [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
   TEST_CMD="go test ./..."
 fi
 
-if [ -n "$TEST_CMD" ]; then
-  CHECKS_RUN=$((CHECKS_RUN + 1))
-  _vr_run test shell "$TEST_CMD"
-  OUT="$_VR_OUTPUT"
-  if [ "$_VR_STATUS" -ne 0 ]; then
-    # Tests: last 30 lines (stack traces / assertions land at the end).
-    SLICED=$(printf '%s' "$OUT" | tail -30)
-    emit_block "test (${TEST_CMD})" "$SLICED"
+# A faster Stop suite comes only from machine config:
+# projects.<canonical root>.stop_checks.fast in <TRELLIS_HOME>/config.json
+# (_se_stop_fast_config). Nothing in the checkout can set it; .trellis.json
+# and the working tree are writable by a same-user agent. It replaces the test
+# step and runs from the project root. A config that fails the ownership and
+# mode checks, or a malformed value, keeps the detected suite and says so. A
+# fast run is never reused and never earns a pass receipt. The merge gate
+# never reads this key and always runs its own checks.
+STOP_FAST_CMD=$(_se_stop_fast_config "$PROJECT_DIR")
+case $? in
+  0) [ -z "$STOP_FAST_CMD" ] \
+       || VERIFICATION_NOTE="stop-verify: the test step ran stop_checks.fast from TRELLIS_HOME config.json (${STOP_FAST_CMD}), not the detected suite; not reused." ;;
+  1) STOP_FAST_CMD=""
+     VERIFICATION_NOTE="stop-verify: stop_checks.fast in TRELLIS_HOME config.json is unreadable or malformed (want a one-line string under projects.<root>.stop_checks); ran the full test step." ;;
+  *) STOP_FAST_CMD=""
+     VERIFICATION_NOTE="stop-verify: stop_checks.fast ignored: TRELLIS_HOME config.json must be a regular file you own with mode 0600 or stricter, in a directory with no group or other write bit; ran the full test step." ;;
+esac
+if [ -n "$STOP_FAST_CMD" ]; then
+  _se_plan_check test.fast shell "test (stop_checks.fast: ${STOP_FAST_CMD})" tail test "$PROJECT_DIR" "$STOP_FAST_CMD"
+elif [ -n "$TEST_CMD" ]; then
+  case "$TEST_CMD" in
+    cargo\ *) __se_test_group=cargo ;;
+    *) __se_test_group='test' ;;
+  esac
+  _se_plan_check test shell "test (${TEST_CMD})" tail "$__se_test_group" "$PWD" "$TEST_CMD"
+fi
+
+# _se_stop_key <fingerprint> — print the sha256 reuse key for the planned
+# checks, or fail when any input cannot be bound; the caller then runs the
+# checks and writes no receipt. It over-includes on purpose: anything that
+# might change a result changes the key, and then the checks run.
+#   - no perl setting (PERL5OPT, PERL5LIB, PERLLIB, PERL5DB, PERL_*) and no
+#     BASH_ENV may be exported at all, and every perl here runs with the
+#     first four unset: perl does the policing below.
+#   - every PATH entry must be absolute with no . or .. segment, and every
+#     word of every check and each resolved program plain bytes
+#     ([A-Za-z0-9_@%+=:,./-]): what is resolved here is what runs.
+#   - each planned program must be a script inside the worktree (covered by
+#     the fingerprint and the ignored digest: node_modules/.bin, .venv) run
+#     by a listed interpreter, a listed interpreter itself (node, nodejs,
+#     python*, perl*: _se_tool_closure), or npm/pnpm with its whole
+#     installation tree bound (_se_pkg_digest), its subcommand limited to
+#     running a package.json script whose programs pass the same rule
+#     (_se_pm_progs), and its config files bound (_se_pm_config). Any
+#     other native program (cargo, go, rustc, ruff, a compiled tool) or
+#     script outside the worktree, npx included, gets a full run: the key
+#     cannot see the code or configuration it reads. cargo, go, rustc,
+#     rustup, gofmt and golangci-lint are refused by name too.
+#   - the whole exported environment, harness and agent variables included,
+#     since any check may read any variable. Only PWD, OLDPWD and _ are left
+#     out: each check's cd and exec overwrite them before it runs, from the
+#     directories and command already in the key. Read raw, so a name bash
+#     would not list is bound too; an exported function refuses reuse. A
+#     variable that selects code by path or option (NODE_OPTIONS=--require=,
+#     NODE_PATH, PYTHONPATH, LD_PRELOAD, GO*, CARGO_*, GIT_*, ...) refuses
+#     reuse too (_se_env_moves_code): its text is not the code it selects.
+#   - every git-ignored input, recursively (_se_ignored_digest).
+_se_stop_key() {
+  local i prog n sum top checks="" progs=() words=() closure kind path roots pkgroots=() pkg="" pmcfg="" envsum ignored stats shells=()
+  # perl polices the rest, so nothing may reach into perl itself: any perl
+  # setting, or BASH_ENV, refuses before the first perl runs.
+  for n in $(compgen -e); do
+    case "$n" in (PERL5OPT|PERL5LIB|PERLLIB|PERL5DB|PERL_*|BASH_ENV) return 1 ;; esac
+  done
+  top=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) \
+    && top=$(CDPATH='' cd -P "$top" 2>/dev/null && pwd -P) || return 1
+  # An empty or relative PATH entry is the working directory to execvp and
+  # env: the programs resolved here would not be the ones that run.
+  case ":$PATH:" in (*::*) return 1 ;; esac
+  IFS=: read -r -a words <<< "$PATH"
+  for n in "${words[@]}"; do
+    case "$n" in (/*) ;; (*) return 1 ;; esac
+    case "$n/" in (*/./*|*/../*) return 1 ;; esac
+  done
+  for (( i = 0; i < CHECKS_RUN; i++ )); do
+    checks="${checks}check ${__se_ck_id[$i]} ${__se_ck_form[$i]} ${__se_ck_dir[$i]} ${__se_ck_cmd[$i]}"$'\n'
+    # A check must be plain words of plain bytes: no operator, expansion,
+    # quote, escape or glob that eval would read differently from this split.
+    read -r -a words <<< "${__se_ck_cmd[$i]}"
+    for n in "${words[@]}"; do
+      case "$n" in (*[!A-Za-z0-9_@%+=:,./-]*) return 1 ;; esac
+    done
+    # Launchers that fetch or pick code at run time are never reused, as
+    # any word of the command: npx and pnpx run whichever copy they find,
+    # dlx and exec subcommands are refused in _se_pm_progs. Nor are the Rust
+    # and Go toolchains, whose configuration and caches the key cannot see.
+    for n in "${words[@]}"; do
+      case "${n##*/}" in
+        (npx|pnpx|bunx|dlx|yarn|yarnpkg|corepack|bun|deno|cargo|go|rustc|rustup|gofmt|golangci-lint) return 1 ;;
+      esac
+    done
+    prog=${words[0]}
+    case "$prog" in
+      /*) ;;
+      */*) prog="${__se_ck_dir[$i]}/$prog" ;;
+      *) prog=$(command -v "$prog" 2>/dev/null) || return 1 ;;
+    esac
+    case "$prog" in (/*) ;; (*) return 1 ;; esac
+    case "$prog" in (*[!A-Za-z0-9_@%+=:,./-]*) return 1 ;; esac
+    progs[${#progs[@]}]=$prog
+    # npm/pnpm: only `run <script>`, `run-script <script>` or `test`, every
+    # program its scripts start, the shell that runs them, and every npmrc
+    # and pnpm config file it reads.
+    case "${prog##*/}" in
+      npm|pnpm)
+        n=$(_se_pm_progs "$top" "${__se_ck_dir[$i]}" "${words[@]}") || return 1
+        while IFS= read -r path; do
+          case "$path" in
+            '') ;;
+            arg$'\t'*) pmcfg="${pmcfg}${path}"$'\n' ;;
+            *) progs[${#progs[@]}]=$path ;;
+          esac
+        done <<< "$n"
+        n=$(command -v sh 2>/dev/null) || return 1
+        shells=("$n" /bin/sh)
+        n=$(_se_pm_config "${__se_ck_dir[$i]}") || return 1
+        pmcfg="${pmcfg}${n}"$'\n' ;;
+    esac
+  done
+  closure=$(_se_tool_closure "$top" "${progs[@]}") || return 1
+  # The shell npm runs scripts with: native, bound by identity.
+  if [ "${#shells[@]}" -gt 0 ]; then
+    n=$(_se_tool_closure "$top" --shell "${shells[@]}") || return 1
+    closure="${closure}"$'\n'"${n}"
+  fi
+  while IFS=$'\t' read -r kind path _ _ _ roots; do
+    case "$kind" in
+      tree|native) ;;
+      pm)
+        while [ -n "$roots" ]; do
+          pkgroots[${#pkgroots[@]}]=${roots%%$'\t'*}
+          case "$roots" in *$'\t'*) roots=${roots#*$'\t'} ;; *) roots="" ;; esac
+        done ;;
+      *) return 1 ;;
+    esac
+  done <<< "$closure"
+  if [ "${#pkgroots[@]}" -gt 0 ]; then
+    pkg=$(_se_pkg_digest "${pkgroots[@]}") || return 1
+  fi
+  ! _se_env_moves_code "$top" || return 1
+  # The raw environment the checks inherit, names bash would not list
+  # (a.b=1) included. An exported function (BASH_FUNC_*) refuses reuse: its
+  # body would run in place of the program it names.
+  envsum=$(/usr/bin/env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB perl -MDigest::SHA -e '
+      my $d = Digest::SHA->new(256);
+      for my $n (sort keys %ENV) {
+        exit 3 if $n =~ /^BASH_FUNC_/;
+        $d->add("$n=$ENV{$n}\0") unless $n eq "PWD" || $n eq "OLDPWD" || $n eq "_";
+      }
+      print $d->hexdigest') || return 1
+  ignored=$(_se_ignored_digest "$PROJECT_DIR") || return 1
+  stats=$(_se_stat_lines "s:${BASH_SOURCE[0]}" "s:$__se_lib" "s:$__se_vr_lib" "s:$__se_pm_lib" \
+    "s:$PROJECT_DIR/.trellis.json" "s:${HOME:-/nonexistent}/.pyenv/version" \
+    "s:${RUSTUP_HOME:-${HOME:-/nonexistent}/.rustup}/settings.toml") || return 1
+  sum=$(printf '%s\n' 'trellis-stop-key v2' "fp $1" "cwd $(pwd -P) $PWD" "$checks" "$closure" "pkg $pkg" "pmcfg $pmcfg" \
+    "eslint $ESLINT_VERSION" "env ${envsum%% *}" "ignored $ignored" "$stats" | shasum -a 256) || return 1
+  sum=${sum%% *}
+  [ "${#sum}" -eq 64 ] || return 1
+  printf '%s' "$sum"
+}
+
+# _se_check_job <lead> <outdir> — run, in order, every planned check whose
+# group <lead> leads, writing <n>.out and <n>.rc for each. Stops at the first
+# failure: the collector blocks on it before reaching a later member.
+_se_check_job() {
+  local k argv=()
+  for (( k = $1; k < CHECKS_RUN; k++ )); do
+    [ "${__se_ck_lead[$k]}" -eq "$1" ] || continue
+    if ! cd "${__se_ck_dir[$k]}" 2>/dev/null; then
+      printf 'could not enter %s' "${__se_ck_dir[$k]}" > "$2/$k.out"
+      printf '1\n' > "$2/$k.rc"
+      return 0
+    fi
+    if [ "${__se_ck_form[$k]}" = argv ]; then
+      read -r -a argv <<< "${__se_ck_cmd[$k]}"
+      _vr_run "${__se_ck_id[$k]}" argv "${argv[@]}"
+    else
+      _vr_run "${__se_ck_id[$k]}" shell "${__se_ck_cmd[$k]}"
+    fi
+    printf '%s' "$_VR_OUTPUT" > "$2/$k.out"
+    printf '%s\n' "$_VR_STATUS" > "$2/$k.rc"
+    [ "$_VR_STATUS" -eq 0 ] || return 0
+  done
+}
+
+# _se_run_checks — run the plan and block on the first planned check that
+# failed (or never recorded an exit status). Jobs still running at that point
+# are signalled with their descendants and reaped, so no check outlives the
+# hook. Returns only when every check passed.
+__se_ck_lead=(); __se_ck_pid=(); __se_ck_reaped=()
+_se_check_abort() {
+  local i live=""
+  for (( i = 0; i < CHECKS_RUN; i++ )); do
+    [ -n "${__se_ck_pid[$i]:-}" ] && [ -z "${__se_ck_reaped[$i]:-}" ] && live="$live ${__se_ck_pid[$i]}"
+  done
+  if [ -n "$live" ]; then
+    # shellcheck disable=SC2086  # one pid per word
+    _se_kill_tree $live
+    # shellcheck disable=SC2086
+    wait $live 2>/dev/null
+  fi
+  rm -rf "$__se_ck_out"
+}
+_se_run_checks() {
+  local i j rc out
+  __se_ck_out=$(mktemp -d "${TMPDIR:-/tmp}/trellis-stop.XXXXXX") \
+    || emit_block "checks" "could not create a private directory for check output under ${TMPDIR:-/tmp}"
+  for (( i = 0; i < CHECKS_RUN; i++ )); do
+    __se_ck_lead[i]=$i
+    for (( j = 0; j < i; j++ )); do
+      if [ "${__se_ck_group[$j]}" = "${__se_ck_group[$i]}" ]; then
+        __se_ck_lead[i]=$j
+        break
+      fi
+    done
+  done
+  trap '_se_check_abort; exit 143' TERM INT HUP
+  for (( i = 0; i < CHECKS_RUN; i++ )); do
+    [ "${__se_ck_lead[$i]}" -eq "$i" ] || continue
+    _se_check_job "$i" "$__se_ck_out" < /dev/null &
+    __se_ck_pid[i]=$!
+  done
+  for (( i = 0; i < CHECKS_RUN; i++ )); do
+    j=${__se_ck_lead[$i]}
+    if [ -z "${__se_ck_reaped[$j]:-}" ]; then
+      wait "${__se_ck_pid[$j]}"
+      __se_ck_reaped[j]=1
+    fi
+    rc=$(cat "$__se_ck_out/$i.rc" 2>/dev/null) || rc=""
+    [ "$rc" = 0 ] && continue
+    out=$(cat "$__se_ck_out/$i.out" 2>/dev/null)
+    [ -n "$rc" ] || out="check did not finish: no exit status was recorded"
+    _se_check_abort
+    trap - TERM INT HUP
+    # Typecheck/lint: first 30 lines. Tests: last 30 (stack traces and
+    # assertions land at the end).
+    if [ "${__se_ck_slice[$i]}" = tail ]; then
+      out=$(printf '%s' "$out" | tail -30)
+    else
+      out=$(printf '%s' "$out" | head -30)
+    fi
+    emit_block "${__se_ck_label[$i]}" "$out"
+  done
+  trap - TERM INT HUP
+  rm -rf "$__se_ck_out"
+}
+
+if [ "$CHECKS_RUN" -gt 0 ]; then
+  STOP_RECEIPT="" STOP_KEY="" STOP_FP=""
+  if [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$STOP_FAST_CMD" ] \
+     && STOP_RECEIPT=$(_se_stop_receipt_file "$PROJECT_DIR" "$__se_harness") \
+     && { [ -n "$__se_now" ] && STOP_FP="$__se_now" \
+          || STOP_FP=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}"); } \
+     && STOP_KEY=$(_se_stop_key "$STOP_FP"); then
+    if _se_stop_receipt_match "$STOP_RECEIPT" "$STOP_KEY"; then
+      VERIFICATION_NOTE="${VERIFICATION_NOTE:+$VERIFICATION_NOTE$'\n'}stop-verify: checks reused, not re-run: pass receipt ${STOP_KEY:0:12} matches this tree, commands, tools and policy (${STOP_RECEIPT})."
+    else
+      _se_run_checks
+      # A receipt certifies exactly what the checks consumed: every input in
+      # the key, ignored files and tools included, must read the same after
+      # the run as before it. Anything that moved, whether a check wrote it
+      # or another process did, means no receipt (the next Stop runs again).
+      if STOP_FP2=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}") \
+         && [ "$(_se_stop_key "$STOP_FP2")" = "$STOP_KEY" ]; then
+        _se_stop_receipt_write "$STOP_RECEIPT" "$STOP_KEY" "$(
+          printf 'harness %s\nwritten %s\n' "$__se_harness" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for (( __se_i = 0; __se_i < CHECKS_RUN; __se_i++ )); do
+            printf 'check %s %s\n' "${__se_ck_id[$__se_i]}" "${__se_ck_cmd[$__se_i]}"
+          done)"
+      fi
+    fi
+  else
+    _se_run_checks
   fi
 fi
 
@@ -763,16 +1027,10 @@ fi
 _se_receipt_gate
 
 # --- Pass / no-check advisory ---
-if [ -n "$VERIFICATION_UNAVAILABLE" ]; then
-  rm -f "$STATE_FILE"
-  _se_verification_advisory ''
-  exit 0
-fi
-if [ "$CHECKS_RUN" -eq 0 ]; then
-  rm -f "$STATE_FILE"
-  _se_emit_system_message "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."
-  exit 0
-fi
-
 rm -f "$STATE_FILE"
+if [ "$CHECKS_RUN" -eq 0 ] && [ -z "$VERIFICATION_UNAVAILABLE" ]; then
+  _se_verification_advisory "stop-verify: no typecheck/lint/test configured for this repo. Task completion is unverified — state this to the user."
+  exit 0
+fi
+_se_verification_advisory ''
 exit 0

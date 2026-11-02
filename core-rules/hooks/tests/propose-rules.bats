@@ -450,6 +450,7 @@ run_hook() {
   COUNT="$BATS_TEST_TMPDIR/l5.count"; : > "$COUNT"
   PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
 
+  chmod 640 "$CANONICAL_ROOT/gotchas.md" "$CANONICAL_ROOT/decisions-log.md"
   run_hook
   [ "$status" -eq 0 ]
   [ "$(claude_call_count "$COUNT")" -eq 1 ]
@@ -457,6 +458,11 @@ run_hook() {
   [[ "$(cat "$CANONICAL_ROOT/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]]
   [[ "$(cat "$CANONICAL_ROOT/decisions-log.md")" == *"propose-rules auto-appended a surfaced gotcha"* ]]
   [[ "$(cat "$WORKTREE/gotchas.md")" != *"## 2026-08-23 — Canonical gotcha writes"* ]]
+  # The append replaces each record by rename; the original mode must survive it.
+  for record in gotchas.md decisions-log.md; do
+    mode="$(stat -c '%a' "$CANONICAL_ROOT/$record" 2>/dev/null || stat -f '%Lp' "$CANONICAL_ROOT/$record")"
+    [ "$mode" = 640 ] || { echo "$record mode $mode"; false; }
+  done
 
   run_hook
   [ "$status" -eq 0 ]

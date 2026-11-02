@@ -244,6 +244,12 @@ printf '%s:%s:%s:%s\n' "\${CLAUDE_PROJECT_DIR:+claude}\${CODEX_PROJECT_DIR:+code
 SH
     chmod 755 "$repo/$hook"
   done
+  mkdir -p "$repo/core-rules/hooks/lib" "$repo/core-rules/codex/hooks/lib"
+  for hook in core-rules/hooks core-rules/codex/hooks; do
+    cp "$REPO_ROOT/$hook/session-start.sh" "$repo/$hook/session-start.sh"
+    cp "$REPO_ROOT/$hook/lib/deps.sh" "$repo/$hook/lib/deps.sh"
+    chmod 755 "$repo/$hook/session-start.sh"
+  done
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
   cat > "$repo/core-rules/husky/pre-push" <<'SH'
 #!/usr/bin/env bash
@@ -317,9 +323,11 @@ poison_context_runtime() {
     "$CONTEXT_PROJECT/.trellis/runtime/core-rules/hooks" \
     "$CONTEXT_PROJECT/.trellis/runtime/core-rules/codex/hooks"
   for hook in \
+    core-rules/hooks/session-start.sh \
     core-rules/hooks/session-context.sh \
     core-rules/hooks/post-compact-context.sh \
     core-rules/hooks/inject-primer-index.sh \
+    core-rules/codex/hooks/session-start.sh \
     core-rules/codex/hooks/session-context.sh \
     core-rules/codex/hooks/post-compact-context.sh \
     core-rules/codex/hooks/inject-primer-index.sh; do
@@ -433,6 +441,26 @@ run_managed_pre_push() {
   run bash -c 'cd "$1" && "$2" origin fixture < "$3"' _ "$PROJECT" "$managed/pre-push" "$refs"
 }
 
+@test "NUL deferral records preserve tabs newlines quotes spaces backslashes and leading dashes" {
+  local leaf target='target with spaces '\''single'\'' "double" \slash' surfaces actual expected
+  local -a leaves=($'-tab\tleaf' $'-line\nleaf' $'-trailing\n' '-quotes '\''single'\'' "double" \slash')
+  mkdir -p "$PROJECT/render"
+  for leaf in "${leaves[@]}"; do
+    ln -s -- "$target" "$PROJECT/$leaf"
+    printf 'project seed\n' > "$PROJECT/render/$leaf"
+  done
+  surfaces="$(jq -cn --arg target "$target" --args '{artifacts:[$ARGS.positional[]
+    | {kind:"symlink",source_scope:"payload",source:"source",destination:.,target:$target},
+      {kind:"render",destination:("render/" + .),render_if_absent:true}]}' -- "${leaves[@]}")"
+  # Direct decoder coverage does not relax the public manifest's control-byte refusal.
+  . "$ATTACH"
+  actual="$(attach_deferred_leaves "$PROJECT" "$SANDBOX" "$surfaces")"
+  expected="$(printf '%s\n' "$surfaces" | jq -cS '[.artifacts[]
+    | if .kind == "render" then {path:.destination,kind:"file",target:null,reason:"project-authored-render"}
+      else {path:.destination,kind:"symlink",target:.target,reason:"pre-existing-symlink"} end] | sort_by(.path)')"
+  [ "$actual" = "$expected" ] || { printf 'actual: %s\nexpected: %s\n' "$actual" "$expected"; return 1; }
+}
+
 @test "attach expands both harnesses into absent local parent leaves and keeps tracked Git clean" {
   run_attach
   [ "$status" -eq 0 ]
@@ -462,28 +490,28 @@ run_managed_pre_push() {
   [ -f "$codex_settings" ]
   jq -e --arg home "$TRELLIS_HOME" --arg user_home "$CONTEXT_OS_HOME" --arg launcher "$CONTEXT_LAUNCHER" '
     [.hooks.SessionStart[].hooks[].command] as $commands
-    | ($commands | length) == 3
+    | ($commands | length) == 1
     and all($commands[];
       startswith("/usr/bin/env -i HOME=")
       and contains("TRELLIS_HOME=") and contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
       and contains("/bin/bash --noprofile --norc")
-      and contains("$CLAUDE_PROJECT_DIR")
-      and (contains("__TRELLIS_") | not)
+      and endswith(" hook session-start claude \"$CLAUDE_PROJECT_DIR\"")
       and (contains(".trellis/runtime") | not)
+      and (contains("__TRELLIS_") | not)
       and (contains("$HOME") | not)
       and (contains("$TRELLIS_HOME") | not)
       and (contains("$PATH") | not))
   ' "$claude_settings" >/dev/null || { jq -c '[.hooks.SessionStart[].hooks[].command]' "$claude_settings"; false; }
   jq -e --arg home "$TRELLIS_HOME" --arg user_home "$CONTEXT_OS_HOME" --arg launcher "$CONTEXT_LAUNCHER" '
     [.hooks.SessionStart[].hooks[].command] as $commands
-    | ($commands | length) == 3
+    | ($commands | length) == 1
     and all($commands[];
       startswith("/usr/bin/env -i HOME=")
       and contains("TRELLIS_HOME=") and contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
       and contains("/bin/bash --noprofile --norc")
-      and contains("${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}")
-      and (contains("__TRELLIS_") | not)
+      and endswith(" hook session-start codex \"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}\"")
       and (contains(".trellis/runtime") | not)
+      and (contains("__TRELLIS_") | not)
       and (contains("$HOME") | not)
       and (contains("$TRELLIS_HOME") | not)
       and (contains("$PATH") | not))
@@ -522,7 +550,7 @@ run_managed_pre_push() {
   [ "$(sha256_file "$claude_settings")" = "$claude_hash" ]
   [ "$(sha256_file "$codex_settings")" = "$codex_hash" ]
 
-  poison_context_runtime
+  CONTEXT_ATTACKER_MARKER="$SANDBOX/attacker-ran"
   CONTEXT_HOSTILE_HOME="$SANDBOX/hostile-home"
   CONTEXT_HOSTILE_TRELLIS_HOME="$SANDBOX/hostile-trellis-home"
   CONTEXT_POISON_BIN="$SANDBOX/poison-bin"
@@ -539,23 +567,24 @@ SH
   printf ': > "%s"\n' "$CONTEXT_ATTACKER_MARKER" > "$CONTEXT_BASH_ENV"
   printf ': > "%s"\n' "$CONTEXT_ATTACKER_MARKER" > "$CONTEXT_ENV"
   printf '{"source":"startup"}\n' > "$CONTEXT_HOOK_INPUT"
-  rm -f "$CONTEXT_PAYLOAD_LOG" "$CONTEXT_ATTACKER_MARKER"
-
-  run_contextual_session claude "$claude_settings"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  run_contextual_session codex "$codex_settings"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-
+  # session-start runs session-context then inject-primer-index on startup.
   expected="$(
     printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
-    printf 'claude:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
-    printf 'codex:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'codex:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
     printf 'codex:%s:%s:%s\n' "$CONTEXT_PROJECT" "$CONTEXT_OS_HOME" "$TRELLIS_HOME"
   )"
-  [ "$(cat "$CONTEXT_PAYLOAD_LOG")" = "$expected" ]
-  [ ! -e "$CONTEXT_ATTACKER_MARKER" ]
+
+  for anchor in intact poisoned; do
+    [ "$anchor" = intact ] || poison_context_runtime
+    rm -f "$CONTEXT_PAYLOAD_LOG" "$CONTEXT_ATTACKER_MARKER"
+    run_contextual_session claude "$claude_settings"
+    [ "$status" -eq 0 ] || { echo "$anchor: $output"; false; }
+    run_contextual_session codex "$codex_settings"
+    [ "$status" -eq 0 ] || { echo "$anchor: $output"; false; }
+    [ "$(cat "$CONTEXT_PAYLOAD_LOG")" = "$expected" ] || { echo "$anchor:"; cat "$CONTEXT_PAYLOAD_LOG"; false; }
+    [ ! -e "$CONTEXT_ATTACKER_MARKER" ]
+  done
 }
 
 @test "contextual renderer rejects malformed placeholders and unsafe stable launchers" {
@@ -2538,7 +2567,8 @@ attach_with_caller_path() {
   attach_with_caller_path "$real:/usr/bin:/bin"
   [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
   owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
-  jq -e --arg real "$real" '.toolchain_path == [$real,"/usr/bin","/bin"]' "$owner" >/dev/null ||
+  jq -e --arg real "$real" --arg usr "$(canonical_dir /usr/bin)" --arg bin "$(canonical_dir /bin)" \
+    '.toolchain_path == [$real,$usr,$bin]' "$owner" >/dev/null ||
     { jq -c '.toolchain_path' "$owner"; false; }
 }
 
@@ -2579,7 +2609,8 @@ assert_refresh_changed_nothing() {
   refresh_fixture
   run_refresh "$NEW_BIN:/usr/bin:/bin"
   [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
-  jq -e --arg new "$NEW_BIN" '.toolchain_path == [$new,"/usr/bin","/bin"]' "$REFRESH_OWNER" >/dev/null ||
+  jq -e --arg new "$NEW_BIN" --arg usr "$(canonical_dir /usr/bin)" --arg bin "$(canonical_dir /bin)" \
+    '.toolchain_path == [$new,$usr,$bin]' "$REFRESH_OWNER" >/dev/null ||
     { jq -c '.toolchain_path' "$REFRESH_OWNER"; false; }
   # Every byte except the toolchain value is identical.
   jq -cS --slurpfile before "$SANDBOX/owner.before" '.toolchain_path = $before[0].toolchain_path' \

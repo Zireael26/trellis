@@ -270,7 +270,7 @@ run_hook() {
 setup() {
   # This file does not `load helpers`, so the scrub in helpers.bash never reaches
   # it. See scripts/run-tests.sh (hooks stage) for the same reason at gate level.
-  unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_SOCKET_PATH HERDR_BIN_PATH
+  unset HC_SCOPE HC_TERMINAL_ID HC_TERMINAL_SOCKET
   HOOK="$(deploy_hook)"
   CLAUDELESS_BIN="$(make_claudeless_bindir)"
   unset TRELLIS_ROOT

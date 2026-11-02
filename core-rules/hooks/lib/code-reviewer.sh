@@ -16,7 +16,7 @@
 #   stdout : EXACTLY one line of JSON with a findings array. Built-in LLM
 #            success includes status=completed; legacy override envelopes may
 #            omit status. Any rung-2 route that fails or is unavailable (pi
-#            absent or failing inside Herdr, claude absent or failing outside)
+#            absent or failing inside an hc terminal, claude absent or failing outside)
 #            includes status=degraded with deterministic fallback findings. Only
 #            the recursion-guarded nested run emits a bare deterministic
 #            envelope. The CALLER decides block/allow.
@@ -29,17 +29,17 @@
 #   LADDER (first that works wins):
 #     rung 1: $CODE_REVIEWER_CMD set + resolvable → exec it (operator override),
 #             passing the untouched stdin through.
-#     rung 2a: inside Herdr (`HERDR_ENV=1`) with `pi` on PATH and a current
+#     rung 2a: inside an hc terminal (`HC_SCOPE` and `HC_TERMINAL_ID` set) with `pi` on PATH and a current
 #             deciding artifact at ~/.trellis/state/roles-resolved.json that is
 #             authorized by the active immutable release roles.json, scoped to
-#             this exact workspace/pane, fresh, private regular mode 0600,
+#             this exact hc terminal (`HC_SCOPE`), fresh, private regular mode 0600,
 #             policy-bound, cross-family, and non-degraded → one-turn
 #             `pi -p --no-session --no-tools --no-extensions --no-skills
 #             --no-prompt-templates --no-themes --no-context-files --no-approve
 #             --model "$model"` with the reviewer prompt as the positional
 #             argument and the envelope on stdin. No Anthropic fallback, no
 #             fixed-model or agent-file fallback. Recursion guard applies.
-#     rung 2b: outside Herdr, `claude` on PATH → one-turn LLM reviewer
+#     rung 2b: outside hc, `claude` on PATH → one-turn LLM reviewer
 #             (verified invocation), unless the recursion guard is already set.
 #     rung 3: deterministic regex fallback (ALWAYS available) — committed-secret
 #             criticals + left-in-debugger important. Conservative by design:
@@ -382,6 +382,25 @@ llm_review() {
 }
 
 # ---------------------------------------------------------------------------
+# reviewer_python
+#   Set TRELLIS_PYTHON to a real CPython, never a pyenv-style shim (~0.4 s a
+#   call). Only the payload's own resolver is trusted, found from this file's
+#   physical directory (the Codex hook reaches it as codex/hooks/../../hooks);
+#   a mapped copy keeps the PATH lookup. Status 1 when none is available.
+# ---------------------------------------------------------------------------
+reviewer_python() {
+  local dir
+  dir="$(CDPATH='' cd -P -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd -P)" || dir=""
+  case "$dir" in
+    */core-rules/hooks/lib)
+      # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+      . "$dir/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+  esac
+  command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=python3
+  command -v "$TRELLIS_PYTHON" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
 # reviewer_roles_config
 #   Print the active release's canonical roles.json. A deciding artifact is
 #   never authorized by a project copy, a legacy user copy, or this source tree:
@@ -394,9 +413,9 @@ reviewer_roles_config() {
     [ -n "${HOME:-}" ] || return 1
     trellis_home="$HOME/.trellis"
   fi
-  command -v python3 >/dev/null 2>&1 || return 1
+  reviewer_python || return 1
 
-  python3 - "$trellis_home" <<'PY'
+  "$TRELLIS_PYTHON" - "$trellis_home" <<'PY'
 import json
 import os
 import sys
@@ -440,22 +459,26 @@ PY
 #   independent, and not declared degraded; every available candidate/seat
 #   must still validate. A degraded or missing reviewer fails closed.
 # ---------------------------------------------------------------------------
+# Inside a herdr-core (`hc`) terminal: the Herdr app sets both for every
+# terminal it runs. HC_SCOPE is unique per terminal; HC_TERMINAL_ID is reused.
+in_hc_terminal() {
+  [ -n "${HC_SCOPE:-}" ] && [ -n "${HC_TERMINAL_ID:-}" ]
+}
+
 resolve_reviewer_model() {
   local state_home="${HOME:-${TRELLIS_HOME:-}}" state="" config=""
 
   # roles-resolved.json is HOME-shared Trellis state. It is meaningful only in
-  # the Herdr pane that produced its exact scoped decision.
-  [ "${HERDR_ENV:-}" = "1" ] || return 1
-  [ -n "${HERDR_WORKSPACE_ID:-}" ] || return 1
-  [ -n "${HERDR_PANE_ID:-}" ] || return 1
+  # the hc terminal that produced its exact scoped decision.
+  in_hc_terminal || return 1
 
   [ -n "$state_home" ] || return 1
   state="$state_home/.trellis/state/roles-resolved.json"
-  command -v python3 >/dev/null 2>&1 || return 1
+  reviewer_python || return 1
   config="$(reviewer_roles_config)" || return 1
   [ -f "$state" ] || return 1
 
-  python3 - "$state" "$config" <<'PY'
+  "$TRELLIS_PYTHON" - "$state" "$config" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -648,11 +671,9 @@ try:
     ):
         reject()
 
-    if os.environ.get("HERDR_ENV") != "1":
-        reject()
-    workspace = os.environ.get("HERDR_WORKSPACE_ID")
-    pane = os.environ.get("HERDR_PANE_ID")
-    if not nonempty_string(workspace) or not nonempty_string(pane):
+    hc_scope = os.environ.get("HC_SCOPE")
+    hc_terminal = os.environ.get("HC_TERMINAL_ID")
+    if not nonempty_string(hc_scope) or not nonempty_string(hc_terminal):
         reject()
     scope = artifact["resolution_scope"]
     scope_keys = {
@@ -663,8 +684,8 @@ try:
         "implementer_family",
         "cross_family_enforced",
         "verdict_families_distinct",
-        "herdr_workspace_id",
-        "herdr_pane_id",
+        "hc_scope",
+        "hc_terminal_id",
     }
     if (
         not isinstance(scope, dict)
@@ -679,12 +700,12 @@ try:
                 "implementer_model",
                 "implementer_provider",
                 "implementer_family",
-                "herdr_workspace_id",
-                "herdr_pane_id",
+                "hc_scope",
+                "hc_terminal_id",
             )
         )
-        or scope["herdr_workspace_id"] != workspace
-        or scope["herdr_pane_id"] != pane
+        or scope["hc_scope"] != hc_scope
+        or scope["hc_terminal_id"] != hc_terminal
     ):
         reject()
     identity = configured_identity(agents, scope["implementer"])
@@ -973,25 +994,25 @@ main() {
   INPUT="$(cat || true)"
 
   # --- rung 2: LLM reviewer, unless the recursion guard is already tripped.
-  # Inside Herdr the only model route is cross-family pi (validated deciding
-  # artifact). Same-family Claude is never a fallback on that path. Outside
-  # Herdr the Claude Code/Codex `claude -p` rung remains. A failed claude rung
-  # falls through to rung 3 and is carried in the output envelope so callers
-  # do not record that fallback as a completed LLM review. Herdr pi fail-closed
+  # Inside an hc terminal the only model route is cross-family pi (validated
+  # deciding artifact). Same-family Claude is never a fallback on that path.
+  # Outside hc the Claude Code/Codex `claude -p` rung remains. A failed claude
+  # rung falls through to rung 3 and is carried in the output envelope so
+  # callers do not record that fallback as a completed LLM review. hc pi fail-closed
   # (no valid deciding artifact / no pi) still falls to the deterministic rung,
   # but that is no cross-family review either: every route that reaches rung 3
   # without a completed LLM verdict is marked degraded, so the caller never
   # mints the idempotency marker for it.
   local review_degraded=0 verdict
   if [ "${TRELLIS_REVIEW_IN_PROGRESS:-0}" != "1" ]; then
-    if [ "${HERDR_ENV:-}" = "1" ]; then
+    if in_hc_terminal; then
       if command -v pi >/dev/null 2>&1; then
         if verdict="$(pi_review "$INPUT")"; then
           printf '%s\n' "$verdict"
           return 0
         fi
       else
-        echo "code-reviewer: review degraded: pi is not on PATH inside Herdr; deterministic fallback will be used" >&2
+        echo "code-reviewer: review degraded: pi is not on PATH inside an hc terminal; deterministic fallback will be used" >&2
       fi
       review_degraded=1
     elif command -v claude >/dev/null 2>&1; then

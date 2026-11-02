@@ -197,7 +197,18 @@ trellis_task_context() {
     return 1
   fi
 
-  python="$(command -v python3 2>/dev/null || printf '')"
+  # Inside a payload, the payload's resolver skips pyenv-style shims (~0.4 s a
+  # call) and reuses a caller's TRELLIS_PYTHON; elsewhere PATH decides.
+  case "$lib" in
+    */core-rules/hooks/lib)
+      # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+      . "$lib/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+  esac
+  if command -v trellis_python >/dev/null 2>&1 && trellis_python; then
+    python="$TRELLIS_PYTHON"
+  else
+    python="$(command -v python3 2>/dev/null || printf '')"
+  fi
   case "$python" in /*) ;; *) python="" ;; esac
   if [ -z "$python" ] || [ ! -x "$python" ]; then
     _trellis_task_context_advisory "python_unavailable"

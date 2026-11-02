@@ -209,7 +209,7 @@ prepare_managed_hooks() {
 
 prepare_older_managed_hooks() {
   local managed payload release old_lib old_lib_tmp old_oid home_oid manifest
-  local old_launcher launcher_oid
+  local old_launcher launcher_oid stamp_oid
   local legacy_post legacy_pre
   managed="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID"
   payload="$TRELLIS_HOME/releases/$RELEASE/payload"
@@ -242,15 +242,20 @@ prepare_older_managed_hooks() {
   # from; without it the emitters return 1 and the generator emits nothing.
   cp "$BATS_TEST_DIRNAME/../trellis-launcher.sh" "$old_launcher" || return 1
   chmod 755 "$old_launcher" || return 1
+  # The same holds for the release stamp program the generator embeds.
+  cp "$BATS_TEST_DIRNAME/../lib/release_stamp.py" "${old_lib%/*}/release_stamp.py" || return 1
+  stamp_oid="$(git hash-object "${old_lib%/*}/release_stamp.py")" || return 1
   old_oid="$(git hash-object "$old_lib")" || return 1
   home_oid="$(git hash-object "${old_lib%/*}/trellis-home.sh")" || return 1
   launcher_oid="$(git hash-object "$old_launcher")" || return 1
   # One rewrite: the manifest hash below covers release.json, so all copied
   # payload files must be in it before the manifest is taken.
   rewrite_json_0600 "$release/release.json" --arg oid "$old_oid" --arg home "$home_oid" --arg launcher "$launcher_oid" \
+    --arg stamp "$stamp_oid" \
     '.tree += [{path:"scripts/lib/attachment.sh",mode:"100755",oid:$oid},
                {path:"scripts/lib/trellis-home.sh",mode:"100755",oid:$home},
-               {path:"scripts/trellis-launcher.sh",mode:"100755",oid:$launcher}]' || return 1
+               {path:"scripts/trellis-launcher.sh",mode:"100755",oid:$launcher},
+               {path:"scripts/lib/release_stamp.py",mode:"100644",oid:$stamp}]' || return 1
   manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")" || return 1
   legacy_post="$(
     TRELLIS_LIBS_PRELOADED=1 TRELLIS_VERIFIED_PAYLOAD="$payload" /bin/bash --noprofile --norc -c '
@@ -317,6 +322,52 @@ teardown() {
     --arg source "$SOURCE_FILE" \
     '.status == "prepared" and .phase == 0 and .applied == [] and .pending == null and .artifacts[0].source == $source' \
     "$JOURNAL"
+}
+
+@test "NUL artifact fields preserve spaces quotes backslashes and leading dashes through ownership" {
+  local leaf='-leaf with '\''single'\'' "double" quotes\slash' record
+  make_plan "$PLAN" file
+  rewrite_json_0600 "$PLAN" --arg leaf "$leaf" '
+    .artifacts[0].path = $leaf
+    | .artifacts += [{path:"parent with spaces",kind:"parent"},
+                    {path:("parent with spaces/" + $leaf),kind:"symlink",target:$leaf}]'
+  run attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+  [ "$status" -eq 0 ]
+  run attachment_commit "$TRELLIS_HOME" "$JOURNAL"
+  [ "$status" -eq 0 ]
+  cmp "$SOURCE_FILE" "$PROJECT/$leaf"
+  _attachment_symlink_matches "$PROJECT/parent with spaces/$leaf" "$leaf"
+  run _attachment_verify_owner_artifacts "$OWNER"
+  [ "$status" -eq 0 ]
+  run _attachment_verify_detach_owner_artifacts "$OWNER"
+  [ "$status" -eq 0 ]
+  record="$(jq -c . "$PLAN")"
+  run _attachment_validate_destinations_absent "$record"
+  [ "$status" -eq 3 ]
+  printf 'drift\n' > "$PROJECT/$leaf"
+  run _attachment_verify_owner_artifacts "$OWNER"
+  [ "$status" -eq 3 ]
+  run _attachment_verify_detach_owner_artifacts "$OWNER"
+  [ "$status" -eq 3 ]
+}
+
+@test "NUL destination decoding keeps tabs embedded and trailing newlines in one path" {
+  local leaf record
+  for leaf in $'-tab\tleaf' $'-line\nleaf' $'-trailing\n'; do
+    make_plan "$PLAN" file
+    rewrite_json_0600 "$PLAN" --arg leaf "$leaf" '.artifacts[0].path = $leaf'
+    record="$(jq -c . "$PLAN")"
+    run _attachment_validate_destinations_absent "$record"
+    [ "$status" -eq 0 ]
+    printf 'collision\n' > "$PROJECT/$leaf"
+    run _attachment_validate_destinations_absent "$record"
+    [ "$status" -eq 3 ]
+    rm -- "$PROJECT/$leaf"
+    # Decoding does not widen the public plan schema's control-byte policy.
+    run attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+    [ "$status" -eq 4 ]
+    [ ! -e "$JOURNAL" ]
+  done
 }
 
 @test "filesystem identities are stable and distinguish sibling objects" {

@@ -340,22 +340,22 @@ EOF
 }
 
 # =========================================================================
-# Herdr cross-family path: never fall through to same-family Claude.
+# hc cross-family path: never fall through to same-family Claude.
 # =========================================================================
-@test "herdr: HERDR_ENV=1 skips the claude rung (no Anthropic fallback)" {
+@test "hc: an hc terminal skips the claude rung (no Anthropic fallback)" {
   local claude_count="$BATS_TEST_TMPDIR/claude.count" pi_count="$BATS_TEST_TMPDIR/pi.count"
   stub_path="$(make_claude_stub \
     "printf x >> '$claude_count'; printf '%s\\n' '{\"findings\":[{\"severity\":\"minor\",\"file\":\"a.py\",\"line\":3,\"msg\":\"from-llm-stub\",\"confidence\":0.4}]}'")"
   printf '#!/usr/bin/env bash\nprintf x >> "%s"\n' "$pi_count" > "$stub_path/pi"
   chmod +x "$stub_path/pi"
-  local private_home="$BATS_TEST_TMPDIR/herdr-home"
+  local private_home="$BATS_TEST_TMPDIR/hc-home"
   mkdir -m 700 "$private_home"
   [ ! -e "$private_home/.trellis/state/roles-resolved.json" ]
 
   PATH_BACKUP="$PATH"; export PATH="$stub_path:$PATH"
   unset CODE_REVIEWER_CMD
-  HOME="$private_home" HERDR_ENV=1 \
-    HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+  HOME="$private_home" \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
     run_reviewer "$CLEAN_DIFF"
   export PATH="$PATH_BACKUP"; rm -rf "$stub_path"
 

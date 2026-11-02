@@ -6,7 +6,7 @@
 # probes cost up to 2 x 20 s) and never adopts a cached roles-resolved.json:
 # the file carries no resolver-origin attestation, so a same-account writer
 # could plant a fresh, internally consistent roster (B4-S1). The hook removes
-# this pane's cached artifact, leaves another pane's alone, and reports the
+# this terminal's cached artifact, leaves another terminal's alone, and reports the
 # roles as undecided with the on-demand resolver command. The spec 052 SC7
 # fixtures (built by sc7_artifacts.py, never by the resolver) are planted as
 # that cached artifact; the active-release resolver is a stub that counts its
@@ -41,14 +41,15 @@ with open(os.environ["RESOLVER_CALLS"], "a") as sink:
 time.sleep(30)
 PY
   printf '#!/usr/bin/env bash\nexit 0\n' >"$CLI_DIR/pi"
-  cat >"$CLI_DIR/herdr" <<'EOF'
+  cat >"$CLI_DIR/hc" <<'EOF'
 #!/usr/bin/env bash
-printf '{"result":{"agents":[]}}\n'
+[ "${1:-}" = ls ] || exit 64
+if [ -n "${FAKE_HC_LS:-}" ]; then printf '%s\n' "$FAKE_HC_LS"; else printf '{"terminals":[]}\n'; fi
 EOF
-  chmod +x "$CLI_DIR/pi" "$CLI_DIR/herdr"
+  chmod +x "$CLI_DIR/pi" "$CLI_DIR/hc"
 
   python3 "$SC7_BUILDER" "$SKILL/roles.json" "$SC7_DIR" \
-    fixture-workspace fixture-pane fixture-workspace:fixture-pane:sc7-pass
+    fixture-scope fixture-terminal fixture-scope:sc7-pass
 }
 
 # plant_roster SOURCE: install SOURCE as the cached deciding roster, mode 0600.
@@ -70,15 +71,15 @@ PY
   chmod 600 "$ROLE_STATE"
 }
 
-# run_session HOOK [PANE]: one SessionStart in the fixture workspace. Fails
+# run_session HOOK [TERMINAL]: one SessionStart in the fixture scope. Fails
 # when the hook exits nonzero, called the resolver, or overran the budget.
 run_session() {
-  local hook="$1" pane="${2:-fixture-pane}" start
+  local hook="$1" terminal="${2:-fixture-terminal}" start
   : >"$RESOLVER_CALLS"
   start=$(date +%s)
   run env -u CODE_REVIEWER_CMD \
     HOME="$FAKE_HOME" TRELLIS_HOME="$FAKE_HOME/.trellis" \
-    HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID="$pane" \
+    HC_SCOPE=fixture-scope HC_TERMINAL_ID="$terminal" \
     RESOLVER_CALLS="$RESOLVER_CALLS" PATH="$CLI_DIR:$PATH" \
     bash "$hook"
   ELAPSED=$(( $(date +%s) - start ))
@@ -93,31 +94,37 @@ run_session() {
   cmp "${SESSION_HOOKS[@]}"
 }
 
-@test "visible-pane HARD rule precedes DEGRADED identity and missing-pi exits in both hooks" {
+@test "both hooks print no visible-pane rule and exit DEGRADED without pi" {
   local hook
-  local rule="HARD RULE (owner): all delegated agent work (workers, reviewers, consults, foremen, research, one-shot pi -p/codex exec) MUST use visible Herdr panes; only harness-native subagents and Dynamic Workflow agents are exempt. One-shot: core-rules/references/herdr-foreman.md § pi launch forms (1.1.0 and above)."
   mkdir -p "$CLI_DIR/no-pi"
   for hook in "${SESSION_HOOKS[@]}"; do
-    run env HERDR_ENV=1 HERDR_WORKSPACE_ID= HERDR_PANE_ID= /bin/bash "$hook"
-    [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -eq 2 ]
-    [ "${lines[0]}" = "$rule" ]
-    [[ "${lines[1]}" == "DEGRADED: inside Herdr but the current workspace or pane identity is unavailable;"* ]]
-
-    # Empty PATH forces the next early exit without touching resolver state.
-    run env HERDR_ENV=1 HERDR_WORKSPACE_ID=fixture-workspace HERDR_PANE_ID=fixture-pane \
+    # Empty PATH forces the missing-pi exit without touching resolver state.
+    run env HC_SCOPE=fixture-scope HC_TERMINAL_ID=fixture-terminal \
       PATH="$CLI_DIR/no-pi" /bin/bash "$hook"
     [ "$status" -eq 0 ]
-    [ "${#lines[@]}" -eq 2 ]
-    [ "${lines[0]}" = "$rule" ]
-    [[ "${lines[1]}" == "DEGRADED: inside Herdr but pi is not on PATH;"* ]]
+    [ "${#lines[@]}" -eq 1 ]
+    [[ "${lines[0]}" == "DEGRADED: inside Herdr but pi is not on PATH;"* ]]
+    [[ "$output" != *"HARD RULE"* && "$output" != *"visible"* ]] || { echo "$output"; false; }
   done
 }
 
-@test "both session hooks stay silent outside Herdr" {
+@test "live pi agents from hc ls are listed by address, name, status and folder" {
   local hook
   for hook in "${SESSION_HOOKS[@]}"; do
-    run env -u HERDR_ENV /bin/bash "$hook"
+    rm -f "$ROLE_STATE"
+    FAKE_HC_LS='{"terminals":[{"address":"t5","name":"lane-a","agent":"pi","status":"working","cwd":"/w/lane-a"},{"address":"t6","agent":"claude-code","status":"idle","cwd":"/w/x"}]}'
+    export FAKE_HC_LS
+    run_session "$hook"
+    unset FAKE_HC_LS
+    [[ "$output" == *"Live pi agents: t5 lane-a(working,lane-a)"* ]] || { echo "$output"; false; }
+    [[ "$output" != *"t6"* ]] || { echo "$output"; false; }
+  done
+}
+
+@test "both session hooks stay silent outside hc, even with the old HERDR_ENV set" {
+  local hook
+  for hook in "${SESSION_HOOKS[@]}"; do
+    run env -u HC_SCOPE -u HC_TERMINAL_ID HERDR_ENV=1 HERDR_WORKSPACE_ID=w HERDR_PANE_ID=p /bin/bash "$hook"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
   done
@@ -129,19 +136,19 @@ UNDECIDED="DEGRADED: SessionStart does not adopt a cached deciding roster; imple
 # command, and nothing is reported as adopted or decided.
 assert_undecided() {
   [[ "$output" == *"$UNDECIDED"* ]] || { echo "$1: undecided line missing: $output"; return 1; }
-  [[ "$output" == *"--implementer <agent> in this pane"* ]] || { echo "$1: on-demand command missing: $output"; return 1; }
-  [[ "$output" == *"Existing pi panes"* ]] || { echo "$1: pi panes missing: $output"; return 1; }
+  [[ "$output" == *"--implementer <agent> in this terminal"* ]] || { echo "$1: on-demand command missing: $output"; return 1; }
+  [[ "$output" == *"Live pi agents"* ]] || { echo "$1: pi agents missing: $output"; return 1; }
   [[ "$output" != *"Cached deciding roster ("* && "$output" != *"adopted"* ]] || {
     echo "$1 adopted a cached roster: $output"; return 1; }
 }
 
-@test "C04/B4-S1: a fresh, consistent non-resolver roster for this pane is not adopted and is removed" {
+@test "C04/B4-S1: a fresh, consistent non-resolver roster for this terminal is not adopted and is removed" {
   local hook
   for hook in "${SESSION_HOOKS[@]}"; do
     plant_roster "$SC7_DIR/a.json"
     run_session "$hook"
     assert_undecided "$hook"
-    [[ "$output" == *"Removed this pane's cached deciding roster at $ROLE_STATE"* ]] || { echo "$output"; false; }
+    [[ "$output" == *"Removed this terminal's cached deciding roster at $ROLE_STATE"* ]] || { echo "$output"; false; }
     [ ! -e "$ROLE_STATE" ] || { echo "$hook kept the planted roster"; false; }
   done
 }
@@ -162,9 +169,9 @@ assert_undecided() {
   local hook
   for hook in "${SESSION_HOOKS[@]}"; do
     plant_roster "$SC7_DIR/a.json"
-    rewrite_roster 'artifact["resolved_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(timespec="seconds"); artifact["resolution_scope"]["herdr_pane_id"] = "other-pane"; artifact["resolution_nonce"] = "fixture-workspace:other-pane:old"'
-    # Replay: relabel the stale foreign roster as this pane's and refresh it.
-    rewrite_roster 'artifact["resolved_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"); artifact["resolution_scope"]["herdr_pane_id"] = "fixture-pane"'
+    rewrite_roster 'artifact["resolved_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(timespec="seconds"); artifact["resolution_scope"]["hc_terminal_id"] = "other-terminal"; artifact["resolution_nonce"] = "fixture-scope:old"'
+    # Replay: relabel the stale foreign roster as this terminal's and refresh it.
+    rewrite_roster 'artifact["resolved_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"); artifact["resolution_scope"]["hc_terminal_id"] = "fixture-terminal"'
     run_session "$hook"
     assert_undecided "$hook"
     [ ! -e "$ROLE_STATE" ]
@@ -182,17 +189,17 @@ assert_undecided() {
   done
 }
 
-@test "C04: another pane's cached roster, valid or tampered, is left untouched and not adopted" {
+@test "C04: another terminal's cached roster, valid or tampered, is left untouched and not adopted" {
   local hook case before
   for case in a c; do
     for hook in "${SESSION_HOOKS[@]}"; do
       plant_roster "$SC7_DIR/$case.json"
       before="$(cksum <"$ROLE_STATE")"
-      run_session "$hook" other-pane
+      run_session "$hook" other-terminal
       assert_undecided "$hook"
-      [[ "$output" == *"belongs to another Herdr workspace or pane; it was left in place"* ]] || { echo "$output"; false; }
-      [ -f "$ROLE_STATE" ] || { echo "$hook removed SC7($case) from another pane"; false; }
-      [ "$(cksum <"$ROLE_STATE")" = "$before" ] || { echo "$hook modified another pane's roster"; false; }
+      [[ "$output" == *"belongs to another hc terminal; it was left in place"* ]] || { echo "$output"; false; }
+      [ -f "$ROLE_STATE" ] || { echo "$hook removed SC7($case) from another terminal"; false; }
+      [ "$(cksum <"$ROLE_STATE")" = "$before" ] || { echo "$hook modified another terminal's roster"; false; }
     done
   done
 }

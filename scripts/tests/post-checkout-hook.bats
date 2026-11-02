@@ -18,7 +18,23 @@ teardown() {
   if [ -n "${T14_WORKTREE:-}" ] && [ -d "$T14_WORKTREE" ] && [ -d "${T14_PROJECT:-}" ]; then
     git -C "$T14_PROJECT" worktree remove --force "$T14_WORKTREE" 2>/dev/null || true
   fi
+  wait_for_postjob || true
   t14_teardown_sandbox
+}
+
+# A reconcile that attaches starts the detached attach postjob from the
+# installed payload. The dispatcher runs that reconcile under env -i, so the
+# runner's TRELLIS_ATTACH_POSTJOB=off never reaches it. The job sources payload
+# libraries as it starts and writes under TRELLIS_HOME until it ends, so wait
+# for it before tampering with a payload file or removing the sandbox. Its
+# detached Perl parent already carries the postjob path in its argv.
+wait_for_postjob() {
+  local tries=0
+  while pgrep -f "$TRELLIS_HOME/releases/.*/attach-postjob.sh" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 600 ] || { echo 'attach postjob did not finish'; return 1; }
+    sleep 0.1
+  done
 }
 
 dispatcher_path() {
@@ -291,7 +307,12 @@ make_control_only_donor() {
   t14_attach
   [ "$?" -eq 0 ] || return 1
   donor_owner="$(t14_owner_for_root "$T14_PROJECT")"
-  jq -cS '.toolchain_path = ["/usr/bin","/bin"]' "$donor_owner" > "$T14_SANDBOX/donor.next"
+  # The sanitized control PATH as attach records it: canonical entries, the
+  # duplicate kept (merged /usr makes /bin resolve to /usr/bin on Linux).
+  CONTROL_PAIR="$(bash -c 'source "$1"; _attachment_toolchain_path_resolve /usr/bin:/bin 2>/dev/null' _ \
+    "$REPO_ROOT/scripts/lib/attachment.sh")" || return 1
+  jq -e 'length == 2' <<< "$CONTROL_PAIR" >/dev/null || return 1
+  jq -cS --argjson control "$CONTROL_PAIR" '.toolchain_path = $control' "$donor_owner" > "$T14_SANDBOX/donor.next"
   mv -f "$T14_SANDBOX/donor.next" "$donor_owner"
   chmod 600 "$donor_owner"
 }
@@ -308,7 +329,8 @@ make_control_only_donor() {
   warnings="$(printf '%s\n' "$output" | grep -c 'donor toolchain is the sanitized control PATH' || true)"
   [ "$warnings" -eq 1 ] || { printf 'warnings=%s\n%s\n' "$warnings" "$output"; false; }
   linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
-  jq -e '.toolchain_path == ["/usr/bin","/bin"]' "$linked_owner" >/dev/null
+  jq -e --argjson control "$CONTROL_PAIR" '.toolchain_path == $control' "$linked_owner" >/dev/null ||
+    { jq -c '.toolchain_path' "$linked_owner"; false; }
 }
 
 @test "unattended: a control-only donor is copied and the next push is refused with the refresh remedy" {
@@ -320,7 +342,8 @@ make_control_only_donor() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
   linked_owner="$(t14_owner_for_root "$T14_WORKTREE")"
   [ -f "$linked_owner" ] || { printf 'linked worktree was not attached\n%s\n' "$output"; false; }
-  jq -e '.toolchain_path == ["/usr/bin","/bin"]' "$linked_owner" >/dev/null
+  jq -e --argjson control "$CONTROL_PAIR" '.toolchain_path == $control' "$linked_owner" >/dev/null ||
+    { jq -c '.toolchain_path' "$linked_owner"; false; }
 
   printf '%s\n' 'refs/heads/x deadbeef refs/heads/x abcdef' > "$T14_SANDBOX/refs"
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
@@ -415,6 +438,7 @@ restore_payload_file() {
 @test "post-checkout refuses a tampered executed file before the reconcile runs" {
   t14_attach
   [ "$?" -eq 0 ]
+  wait_for_postjob
   managed="$(dispatcher_path)"
   for path in scripts/seed-inheritance-symlinks.sh scripts/lib/semver.sh \
       scripts/lib/local-registry.sh scripts/attach-project.sh; do
@@ -431,6 +455,33 @@ restore_payload_file() {
     [ ! -e "$marker" ] || { printf 'tampered %s ran\n' "$path"; false; }
     restore_payload_file "$path"
   done
+}
+
+# Spec 072 T3: pre-push's full carrier verify stamps the release, post-checkout
+# then passes on the stamp, and a later change to an executed file misses the
+# stamp and is refused by the executed-file check exactly as without one.
+@test "post-checkout passes on the release stamp and still refuses a tampered executed file" {
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  printf '%s\n' 'refs/heads/x deadbeef refs/heads/x abcdef' > "$T14_SANDBOX/refs"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
+    _ "$T14_PROJECT" "$managed/pre-push" "$T14_SANDBOX/refs"
+  stamps=("$TRELLIS_HOME/state/release-stamps/$T14_RELEASE-"*.json)
+  [ -f "${stamps[0]}" ] && [ "${#stamps[@]}" -eq 1 ] || { printf 'no stamp; pre-push said:\n%s\n' "$output"; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  [ "$status" -eq 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  wait_for_postjob
+
+  marker="$T14_SANDBOX/stamped tamper ran"
+  tamper_payload_file scripts/lib/semver.sh "$marker"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  [ "$status" -ne 0 ] || { printf 'status=%s\n%s\n' "$status" "$output"; false; }
+  [[ "$output" == *'managed release reconciliation payload is unavailable'* ]] || { printf '%s\n' "$output"; false; }
+  [ ! -e "$marker" ]
 }
 
 @test "a tampered non-executed file passes the post-checkout check and pre-push's full verify refuses it" {

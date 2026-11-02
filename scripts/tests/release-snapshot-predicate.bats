@@ -84,6 +84,74 @@ function_is_called() {
   ' "$1"
 }
 
+teardown() {
+  # The copier regression deliberately produces immutable directories.
+  [ ! -d "$BATS_TEST_TMPDIR/copier" ] || chmod -R u+w "$BATS_TEST_TMPDIR/copier"
+}
+
+copy_and_check_snapshot() {
+  local implementation="$1" root="$BATS_TEST_TMPDIR/copier" releases source snapshot digest name
+  export TRELLIS_HOME="$root/home"
+  releases="$TRELLIS_HOME/releases"
+  source="$releases/1.2.3"
+  name=.tmp.1.2.3.exec.Ab3xY9
+  snapshot="$releases/$name"
+  mkdir -p "$source/payload/nested" "$snapshot" || return 1
+  printf 'fixture record\n' > "$source/release.json"
+  printf '#!/bin/sh\nexit 0\n' > "$source/payload/nested/run.sh"
+  printf 'fixture content\n' > "$source/payload/plain.txt"
+  chmod 755 "$source/payload/nested/run.sh"
+  ln -s plain.txt "$source/payload/link"
+  digest="$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$source/release.json")" || return 1
+  if [ "$implementation" = release-store ]; then
+    . "$REPO_ROOT/scripts/lib/release-store.sh"
+    release_store_copy_snapshot_no_follow "$releases" 1.2.3 "$name" "$digest" || return $?
+  else
+    local function launcher="$REPO_ROOT/scripts/trellis-launcher.sh"
+    TRELLIS_EX_USAGE=2
+    TRELLIS_EX_UNAVAILABLE=5
+    for function in launcher_absolute_path_is_clean launcher_snapshot_payload_matches \
+      launcher_snapshot_name_is_safe launcher_error launcher_copy_snapshot_no_follow; do
+      eval "$function() { $(extract_function_body "$launcher" "$function")
+}" || return 1
+    done
+    launcher_copy_snapshot_no_follow "$releases" 1.2.3 "$name" "$digest" || return $?
+  fi
+  # The destination is listed while empty before it is populated. Reusing
+  # that descriptor's enumeration cursor must not skip the later sealing walk.
+  python3 -I - "$source" "$snapshot" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+source, snapshot = map(Path, sys.argv[1:])
+for directory, dirs, files in os.walk(snapshot):
+    parent = Path(directory)
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o500, f"unsealed directory: {parent}"
+    for name in files:
+        path = parent / name
+        relative = path.relative_to(snapshot)
+        if path.is_symlink():
+            assert os.readlink(path) == os.readlink(source / relative)
+            continue
+        expected_mode = 0o500 if relative.as_posix().endswith("run.sh") else 0o400
+        assert stat.S_IMODE(path.stat().st_mode) == expected_mode, f"unsealed file: {path}"
+        assert path.read_bytes() == (source / relative).read_bytes(), f"changed bytes: {path}"
+assert (snapshot / "payload/nested/run.sh").is_file()
+PY
+}
+
+@test "release-store copier seals every entry after inspecting an empty destination" {
+  run copy_and_check_snapshot release-store
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "launcher copier seals every entry after inspecting an empty destination" {
+  run copy_and_check_snapshot launcher
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
 @test "the seven snapshot-payload predicates are one definition" {
   local normative copy
   normative="$(extract_function_body "$HOME_LIB" trellis_home_snapshot_payload_matches)"
@@ -225,6 +293,66 @@ launcher_name_is_safe() {
   [ "$status" -ne 0 ] || { echo 'treated the version as a glob'; false; }
 }
 
+# The same reconstruction for the persistent snapshot's work-directory gate.
+launcher_work_name_is_safe() {
+  local defs="$BATS_TEST_TMPDIR/launcher-work-fns.sh" launcher
+  launcher="$REPO_ROOT/scripts/trellis-launcher.sh"
+  {
+    printf 'launcher_snapshot_payload_matches() {\n'
+    extract_function_body "$launcher" launcher_snapshot_payload_matches
+    printf '}\nlauncher_exec_work_name_is_safe() {\n'
+    extract_function_body "$launcher" launcher_exec_work_name_is_safe
+    printf '}\n'
+  } > "$defs"
+  bash -c 'set -u; . "$1"; launcher_exec_work_name_is_safe "$2" "$3" "$4"' _ \
+    "$defs" "$1" "$2" "$3"
+}
+
+@test "the launcher name gate binds a snapshot work directory to its own release" {
+  local d=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-$d.Ab3xY9" 1.2.3
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # The version is matched whole: release 1.2.3-rc's work directory shares the
+  # whole `.tmp.1.2.3-` prefix with release 1.2.3's.
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-rc-$d.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a foreign release work directory'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-rc-$d.Ab3xY9" 1.2.3-rc
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # The finished snapshot and the installed release are not work directories,
+  # nor is the per-run snapshot name of launchers before 1.4.0.
+  run launcher_work_name_is_safe /h/releases "1.2.3-$d" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a finished snapshot as a work directory'; false; }
+  run launcher_work_name_is_safe /h/releases 1.2.3 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted an installed release dir'; false; }
+  run launcher_work_name_is_safe /h/releases .tmp.1.2.3.exec.Ab3xY9 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a per-run snapshot name'; false; }
+
+  # Missing marker, a short or non-hex digest, empty, non-alphanumeric and
+  # path-carrying suffixes, a missing suffix.
+  run launcher_work_name_is_safe /h/releases "1.2.3-$d.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a work name without .tmp.'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-${d%?}.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a short digest'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-${d%?}G.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a non-hex digest'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-$d." 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted an empty suffix'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-$d.a-b" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a non-alphanumeric suffix'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-$d.a/b" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a suffix carrying a path separator'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1.2.3-$d" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a work name with no suffix'; false; }
+
+  # Another release's work directory, and the version is not a glob.
+  run launcher_work_name_is_safe /h/releases ".tmp.9.9.9-$d.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted another release work directory'; false; }
+  run launcher_work_name_is_safe /h/releases ".tmp.1x2x3-$d.Ab3xY9" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'treated the version as a glob'; false; }
+}
+
 # Same reconstruction for the release-store twin. `release-store.sh` CAN be
 # sourced (it is a library and installs no traps), but the two functions are
 # rebuilt from their extracted bodies anyway so this test and the pin above are
@@ -290,6 +418,42 @@ release_store_name_is_safe() {
 
   run matches /h /h/releases/.tmp.1.2.3.exec.Ab3xY9/payload 1.2.3
   [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  run matches /h "/h/releases/.exec/1.2.3-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/payload" 1.2.3
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a persistent snapshot is accepted only as exactly VERSION-<64 hex> in .exec" {
+  local d=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # Release 1.2.3-rc's snapshot under the 1.2.3 attestation, and the reverse.
+  run matches /h "/h/releases/.exec/1.2.3-rc-$d/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a foreign release snapshot under a prefix version'; false; }
+  run matches /h "/h/releases/.exec/1.2.3-rc-$d/payload" 1.2.3-rc
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run matches /h "/h/releases/.exec/1.2.3-$d/payload" 1.2
+  [ "$status" -ne 0 ] || { echo 'accepted a snapshot under a version prefix'; false; }
+
+  # Short, long, upper-case and non-hex digests; no digest; a work directory.
+  run matches /h "/h/releases/.exec/1.2.3-${d%?}/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a short digest'; false; }
+  run matches /h "/h/releases/.exec/1.2.3-${d}0/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a long digest'; false; }
+  run matches /h "/h/releases/.exec/1.2.3-$(printf '%s' "$d" | tr a-f A-F)/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted an upper-case digest'; false; }
+  run matches /h "/h/releases/.exec/1.2.3-${d%?}g/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a non-hex digest'; false; }
+  run matches /h /h/releases/.exec/1.2.3/payload 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a snapshot without a digest'; false; }
+  run matches /h "/h/releases/.exec/.tmp.1.2.3-$d.Ab3xY9/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a work directory as a payload'; false; }
+
+  # Only directly in releases/.exec of this home.
+  run matches /h "/h/releases/.exec/x/1.2.3-$d/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a nested snapshot'; false; }
+  run matches /h "/other/releases/.exec/1.2.3-$d/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a snapshot under another home'; false; }
+  run matches /h "/h/releases/1.2.3-$d/payload" 1.2.3
+  [ "$status" -ne 0 ] || { echo 'accepted a snapshot outside .exec'; false; }
 }
 
 @test "a snapshot of a dot-bearing release is not accepted under a prefix version" {

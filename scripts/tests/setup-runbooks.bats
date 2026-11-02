@@ -455,9 +455,9 @@ refute_line_matches() {
   assert_line_matches "selected fleet:        $FLEET"
   assert_line_matches "registry project:      $PROJECT_ID"
   assert_line_matches "$TRELLIS_HOME/releases/$RELEASE_VERSION/payload"
-  # Immutable execution: the route reads its policy from the sealed private
+  # Immutable execution: the route reads its policy from the sealed execution
   # snapshot the launcher executes, never from the mutable source clone.
-  assert_line_matches "$TRELLIS_HOME/releases/.tmp.$RELEASE_VERSION.exec."
+  assert_line_matches "$TRELLIS_HOME/releases/.exec/$RELEASE_VERSION-"
   refute_line_matches "policy file:          $SOURCE_ROOT"
 
   run fixture_git -C "$PROJECT_ROOT" status --porcelain=v1 --untracked-files=all

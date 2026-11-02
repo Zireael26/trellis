@@ -1,0 +1,13 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Glob",
+  "tool_input": {
+    "pattern": "**/*.ts",
+    "path": "@PROJECT@"
+  },
+  "tool_use_id": "toolu_bench_0001"
+}

@@ -229,6 +229,18 @@ tag_reachable() {
   git merge-base --is-ancestor "$tag_commit" "$2" 2>/dev/null
 }
 
+# Reuse is eligible only after the release payload identity check. Tests repeats
+# the check at its own boundary; an unavailable verifier keeps the full gate.
+verified_release_tag() (
+  tag_ref="$1"
+  pushed="$2"
+  [ "$(git rev-parse --verify "$tag_ref" 2>/dev/null)" = "$pushed" ] || exit 1
+  approved=$(git rev-parse --verify "$pushed^{commit}^1" 2>/dev/null) || exit 1
+  verifier="${MANAGED_PAYLOAD:-$PROJECT_ROOT}/scripts/release-payload-commit.sh"
+  [ -f "$verifier" ] || exit 1
+  bash -p "$verifier" --verify-tag "${tag_ref#refs/tags/}" "$approved"
+)
+
 # Classify every pushed ref, then refuse or select the range. Called once
 # runner discovery and the runtime check have set DIFFBASE and TRELLIS_ROOT.
 classify_refs() {
@@ -570,6 +582,18 @@ if [ -n "$RANGE" ]; then
   fi
 fi
 
+# A mixed branch+tag push may coalesce its tag gate into the branch gate, so
+# force the entire push full whenever ANY tag is present. Never trust ambient
+# scope from the caller; only an observed branch-only push may use the selector.
+# Merge mode keeps its existing docs-only policy unless tags require full tests.
+unset PG_PUSH_TEST_SCOPE
+if [ -n "$TAG_RANGES" ]; then
+  PG_PUSH_TEST_SCOPE=full
+elif [ "$MODE" = push ] && [ "$BRANCH_SEEN" = 1 ]; then
+  PG_PUSH_TEST_SCOPE=branch
+fi
+if [ -n "${PG_PUSH_TEST_SCOPE:-}" ]; then export PG_PUSH_TEST_SCOPE; fi
+
 echo "[pre-push] Trellis verification starting (mode=$MODE)..."
 [ -z "$RECEIPT" ] || printf '%s\n' "$RECEIPT"
 
@@ -611,7 +635,10 @@ run_gate_range() {
   # Save the range and target before `set --` rebinds $1 below.
   gate_range="$1"
   gate_target="${2:-}"
+  gate_tag="${3:-}"
   set -- --mode="$MODE"
+  [ -z "$TAG_RANGES" ] || set -- "$@" --tag-push
+  [ -z "$gate_tag" ] || set -- "$@" "--release-tag=$gate_tag"
   [ -z "$gate_range" ] || set -- "$@" --range="$gate_range"
   [ -z "$gate_target" ] || set -- "$@" "$gate_target"
   # Capture rc without tripping `set -e`: commands in an `if` test are exempt,
@@ -695,6 +722,15 @@ for tag_entry in $TAG_RANGES; do
     continue
   fi
   resolve_ref --ref "${tag_entry%%:*}" --head "${trange##*..}" --range "$trange" --format=receipt || exit 1
-  run_gate_range "$trange" || exit 1
+  tag_identity=""
+  # Mixed or multi-tag pushes are deliberately unclassified for reuse.
+  if [ "$TAG_ONLY" = 1 ] && [ "$TAG_RANGES" = "$tag_entry" ]; then
+    if verified_release_tag "${tag_entry%%:*}" "${trange##*..}"; then
+      tag_identity="${tag_entry%%:*}:${trange##*..}"
+    else
+      echo "[pre-push] release tag not verified for reuse; running full tests." >&2
+    fi
+  fi
+  run_gate_range "$trange" "" "$tag_identity" || exit 1
 done
 exit 0

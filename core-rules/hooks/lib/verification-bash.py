@@ -59,9 +59,20 @@ def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
-def normalized(code):
-    return code.replace(co_filename=ADAPTER, co_consts=tuple(
-        normalized(item) if isinstance(item, types.CodeType) else item for item in code.co_consts))
+def normalized(value):
+    if isinstance(value, types.CodeType):
+        return value.replace(co_filename=sys.intern(ADAPTER), co_consts=normalized(value.co_consts))
+    # Marshal records string interning, which can differ between equal loads.
+    # Canonicalize that representation, preserving every constant's value/type.
+    if isinstance(value, str):
+        return sys.intern(value)
+    if isinstance(value, tuple):
+        return tuple(normalized(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(normalized(item) for item in value)
+    if isinstance(value, slice):
+        return slice(normalized(value.start), normalized(value.stop), normalized(value.step))
+    return value
 
 
 def read_bytes(fd, end, cap=None):

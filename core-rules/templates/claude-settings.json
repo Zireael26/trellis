@@ -109,21 +109,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-context.sh",
-            "timeout": 10,
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh",
+            "timeout": 30,
             "statusMessage": "Loading session context..."
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/post-compact-context.sh",
-            "timeout": 10,
-            "statusMessage": "Restoring context after compact..."
-          },
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/inject-primer-index.sh",
-            "timeout": 5,
-            "statusMessage": "Loading primer index..."
           },
           {
             "type": "command",

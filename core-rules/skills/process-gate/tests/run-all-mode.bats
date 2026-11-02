@@ -16,6 +16,11 @@
 # keeps idx 5 (inline, not a script) at n/a so it never affects the verdict.
 
 setup() {
+  local sandbox
+  sandbox="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+  export HOME="$sandbox/home" TRELLIS_HOME="$sandbox/trellis" TMPDIR="$sandbox/tmp"
+  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+  unset PG_PUSH_TEST_SCOPE
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   REAL_SCRIPTS="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts"
   STUB="$(mktemp -d "$BATS_TEST_TMPDIR/process-gate.XXXXXX")"
@@ -78,6 +83,17 @@ teardown() {
   [ -n "${PROJECT_DIR:-}" ] && [ -d "$PROJECT_DIR" ] && rm -rf "$PROJECT_DIR"
   [ -n "${SCRATCH:-}" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"
   return 0
+}
+
+@test "render: metadata selection and exact-input reuse receipts stay visible" {
+  local receipt
+  for receipt in 'Tests: narrowed (release-metadata: 3 files)' \
+    'tests: reused verdict aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, ran 2026-10-31T00:00:00+00:00)'; do
+    printf '#!/usr/bin/env bash\nprintf "  %%s\\n" %q\n' "$receipt" > "$STUB/scripts/check-tests.sh"
+    run_all merge
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [[ "$output" == *"Overall: MERGEABLE"*"$receipt"* ]] || { echo "$output"; false; }
+  done
 }
 
 # run_all <mode> — invoke the staged aggregator from inside the fixture so the

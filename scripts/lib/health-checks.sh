@@ -1761,8 +1761,10 @@ hc_portable_machine_config() {
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
     # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots"])
+    # alone (spec 054), so a bad value disables only the heavy gate. projects
+    # (per-project host settings such as stop_checks.fast) is typed by the
+    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -3087,22 +3089,24 @@ hc_launcher_currency() {
 }
 
 # Claude Code 2.1.294 fixed prompt-hook fail-open and the hook skip on a matcher
-# failure, both of which let a PreToolUse guard's decision lapse. WARN below it,
-# stay silent at or above it, INFO when the installed version can't be read.
-HC_CLAUDE_CODE_MIN_VERSION=2.1.294
+# failure, both of which let a PreToolUse guard's decision lapse; 2.1.295 added
+# the hook `onFailure` key. Attach renders exec-form hooks with onFailure only at
+# or above it, else the shell-form wiring (attachment_claude_on_failure_supported).
+# WARN below 2.1.295, stay silent at or above it, INFO when the installed
+# version can't be read.
+HC_CLAUDE_CODE_MIN_VERSION=2.1.295
 hc_claude_code_version() {
   local version
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "claude-code version: unreadable (claude not found on PATH); the $HC_CLAUDE_CODE_MIN_VERSION hook fail-open fixes are unverified"
+  if ! version="$(attachment_claude_code_version)"; then
+    echo "claude-code version: unreadable (claude not found on PATH); the $HC_CLAUDE_CODE_MIN_VERSION hook floor is unverified"
     return "$HC_INFO"
   fi
-  version="$(claude --version </dev/null 2>/dev/null | head -n 1 | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')" || version=""
   if [ -z "$version" ]; then
-    echo "claude-code version: unreadable (claude --version gave no X.Y.Z); the $HC_CLAUDE_CODE_MIN_VERSION hook fail-open fixes are unverified"
+    echo "claude-code version: unreadable (claude --version gave no X.Y.Z); the $HC_CLAUDE_CODE_MIN_VERSION hook floor is unverified"
     return "$HC_INFO"
   fi
   [ "$(hc_higher_version "$version" "$HC_CLAUDE_CODE_MIN_VERSION")" = "$version" ] && return "$HC_OK"
-  echo "claude-code version: $version is below $HC_CLAUDE_CODE_MIN_VERSION, which fixed prompt-hook fail-open and the hook skip on a matcher failure; update Claude Code"
+  echo "claude-code version: $version is below $HC_CLAUDE_CODE_MIN_VERSION; 2.1.294 fixed prompt-hook fail-open and 2.1.295 added hook onFailure, so attached settings render the shell-form hooks without onFailure and only the guard supervisor fails closed; update Claude Code, then detach + attach"
   return "$HC_WARN"
 }
 
@@ -3143,24 +3147,58 @@ hc_guard_supervisor_perl() {
   return "$HC_ERROR"
 }
 
+# INFO when TRELLIS_HOME config.json sets projects.<root>.stop_checks.fast for
+# any project (spec 072): the Stop hook then runs that command in place of the
+# detected test step there. WARN when the value would be ignored because the
+# file fails the hook's checks (owned by this user, mode 0600 or stricter, in a
+# directory with no group or other write bit). Silent when nothing is set.
+hc_stop_checks_fast() {
+  local cfg="$1/config.json" roots
+  [ -f "$cfg" ] || return "$HC_OK"
+  roots="$(jq -r '[(.projects // {}) | objects | to_entries[]
+      | select(.value | objects | .stop_checks | objects | .fast | strings | length > 0)
+      | .key | gsub("[[:cntrl:]]"; "?")] | join(", ")' "$cfg" 2>/dev/null)" || return "$HC_OK"
+  [ -n "$roots" ] || return "$HC_OK"
+  if perl -e '
+    my $f = shift;
+    (my $d = $f) =~ s{/[^/]*$}{};
+    my @l = lstat $f;
+    my @d = stat $d;
+    exit !(@l && ($l[2] & 0170000) == 0100000 && $l[4] == $> && ($l[2] & 07177) == 0
+      && @d && ($d[2] & 022) == 0);' "$cfg"; then
+    echo "stop_checks.fast: the Stop hook runs a configured faster suite instead of the detected test step for $roots (never reused; the merge gate still runs its own checks)"
+    return "$HC_INFO"
+  fi
+  echo "stop_checks.fast: set for $roots but ignored: $cfg must be a regular file you own with mode 0600 or stricter, in a directory with no group or other write bit"
+  return "$HC_WARN"
+}
+
 # WARN when a bright-line guard registration is not stall-safe: not started
 # through guard-supervise.pl, a client timeout below 30 s, or a supervisor file
-# that is not there (the entry would then deny every guarded call). Rendered
-# settings change only on detach + attach; `release adopt` never rewrites them.
-# A legacy direct-copy .claude/settings.json is checked too.
+# that is not there (the entry would then deny every guarded call). The
+# attach-rendered Claude settings must also carry `onFailure: "block"` when the
+# installed Claude Code supports it. Rendered settings change only on detach +
+# attach; `release adopt` never rewrites them. A legacy direct-copy
+# .claude/settings.json is checked too.
 hc_guard_registrations() {
-  local root="$1" file rows found="" guard timeout sup path problem bad
+  local root="$1" file rows found="" guard timeout on_failure sup path problem bad
+  local on_failure_supported=""
   for file in .claude/settings.local.json .claude/settings.json .codex/hooks.json; do
     [ -f "$root/$file" ] || continue
+    # Exec form (`args`) names the supervisor as the argument after
+    # `guard-supervise`; shell form quotes it inside the command string.
     if ! rows="$(jq -r '
       .hooks.PreToolUse[]?.hooks[]?
-      | select((.command // "") | test("/(block-destructive|reread-guard|skill-preload-guard)\\.sh"))
-      | [(.command | capture("/(?<g>[a-z-]+)\\.sh") | .g), (.timeout // "unset"),
-         (.command | capture("guard-supervise \"(?<p>[^\"]+)\"") | .p) // ""] | @tsv' "$root/$file" 2>/dev/null)"; then
+      | ([.command // ""] + (.args // []) | join(" ")) as $text
+      | select($text | test("/(block-destructive|reread-guard|skill-preload-guard)\\.sh"))
+      | [($text | capture("/(?<g>[a-z-]+)\\.sh") | .g), (.timeout // "unset"), (.onFailure // "none"),
+         (if has("args")
+          then (.args | index("guard-supervise")) as $i | if $i == null then "" else .args[$i + 1] // "" end
+          else (.command | capture("guard-supervise \"(?<p>[^\"]+)\"") | .p) // "" end)] | @tsv' "$root/$file" 2>/dev/null)"; then
       found="${found:+$found; }$file: unreadable"
       continue
     fi
-    while IFS=$'\t' read -r guard timeout sup; do
+    while IFS=$'\t' read -r guard timeout on_failure sup; do
       [ -n "$guard" ] || continue
       problem="" bad=false
       case "$timeout" in ''|*[!0-9]*) bad=true ;; *) [ "$timeout" -ge 30 ] || bad=true ;; esac
@@ -3168,8 +3206,16 @@ hc_guard_registrations() {
         problem=", unsupervised"
       else
         path="${sup//\$\{CODEX_PROJECT_DIR:-\$\{CLAUDE_PROJECT_DIR:-\$PWD\}\}/$root}"
+        path="${path//\$\{CLAUDE_PROJECT_DIR\}/$root}"
         path="${path//\$CLAUDE_PROJECT_DIR/$root}"
         [ -f "$path" ] || problem=", supervisor missing"
+      fi
+      if [ "$file" = .claude/settings.local.json ] && [ "$on_failure" != block ]; then
+        if [ -z "$on_failure_supported" ]; then
+          on_failure_supported=no
+          attachment_claude_on_failure_supported && on_failure_supported=yes
+        fi
+        [ "$on_failure_supported" = no ] || problem="$problem, no onFailure block"
       fi
       [ -z "$problem" ] && [ "$bad" = false ] || found="${found:+$found; }$file: $guard (timeout $timeout$problem)"
     done <<< "$rows"

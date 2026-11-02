@@ -44,7 +44,26 @@ setup() {
 }
 
 teardown() {
+  local f
+  # A survivor from a failed group-kill test must not outlive the test.
+  for f in "$BATS_TEST_TMPDIR"/*.pid; do
+    [ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null || true
+  done
   teardown_project_dir
+}
+
+# assert_gone <pid-file>: the recorded process has exited. Its reparented
+# zombie may take a moment to be reaped, so allow 2 s.
+assert_gone() {
+  local pid
+  pid="$(cat "$1")"
+  [ -n "$pid" ] || { echo "no pid in $1"; return 1; }
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  echo "pid $pid ($1) survived the supervisor"
+  return 1
 }
 
 # Prepend a 6s sleep to a library the guard sources: a slow bootstrap.
@@ -80,23 +99,41 @@ finish_run() {
 # run_registered <template> <guard> <event>: run the rendered command for
 # <guard> the way the client does, against the copied runtime.
 run_registered() {
-  local cmd
-  cmd="$(jq -r --arg g "/$2.sh" '[.hooks.PreToolUse[].hooks[].command | select(contains($g))][0]' "$REPO/$1")"
+  local hook part
+  local -a argv=()
+  hook="$(jq -c --arg g "/$2.sh" '[.hooks.PreToolUse[].hooks[]
+    | select([.command] + (.args // []) | join(" ") | contains($g))][0]' "$REPO/$1")"
+  if printf '%s' "$hook" | jq -e 'has("args")' >/dev/null; then
+    # Exec form: the client spawns the program directly and substitutes
+    # ${CLAUDE_PROJECT_DIR} in each element as plain text.
+    while IFS= read -r -d '' part; do
+      argv+=("$part")
+    done < <(printf '%s' "$hook" | jq -j --arg dir "$PROJECT_DIR" \
+      '([.command] + .args)[] | split("${CLAUDE_PROJECT_DIR}") | join($dir) | (., "\u0000")')
+  else
+    argv=(/bin/bash -c "$(printf '%s' "$hook" | jq -r '.command')")
+  fi
   start=$SECONDS
   set +e
   # shellcheck disable=SC2086
   output="$(cd "$PROJECT_DIR" && printf '%s' "$3" | env HOME="$BATS_TEST_TMPDIR/home" \
     CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" ${EXTRA_ENV:-} \
-    /bin/bash -c "$cmd" 2>"$BATS_TEST_TMPDIR/stderr")"
+    "${argv[@]}" 2>"$BATS_TEST_TMPDIR/stderr")"
   finish_run
 }
 
-# entry_script <claude|codex>: the shipped sh entry, taken from the template.
+# entry_script <claude|codex>: the shipped sh entry, taken from the template:
+# the argument after `-c` in exec form, the single-quoted script in shell form.
 entry_script() {
   local template="$CLAUDE_TEMPLATE"
   [ "$1" = codex ] && template="$CODEX_TEMPLATE"
-  jq -r '.hooks.PreToolUse[0].hooks[0].command' "$REPO/$template" |
-    sed -n "s/^.*\/bin\/sh -c '\(.*\)' guard-supervise .*$/\1/p"
+  jq -r '.hooks.PreToolUse[0].hooks[0]
+    | if has("args") then .args[(.args | index("-c")) + 1] else .command end' "$REPO/$template" |
+    if [ "$1" = codex ]; then
+      sed -n "s/^.*\/bin\/sh -c '\(.*\)' guard-supervise .*$/\1/p"
+    else
+      cat
+    fi
 }
 
 # supervise <claude|codex> <stub-or-path> [input]: the shipped sh entry and the
@@ -300,6 +337,57 @@ exit 0"
   assert_quick
 }
 
+@test "200 KiB on each stream neither deadlocks nor truncates the decision" {
+  extend_test_deadline
+  # 200 KiB of stderr before and after the decision, whose reason is 200 KiB.
+  local pad="head -c 204800 /dev/zero | tr '\\0' e >&2" fill="r=\$(head -c 204800 /dev/zero | tr '\\0' x)"
+  stub claude-big.sh "$fill
+$pad
+printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"%s\"}}\\n' \"\$r\"
+$pad"
+  stub codex-big.sh "$fill
+$pad
+printf '{\"decision\":\"block\",\"reason\":\"%s\"}\\n' \"\$r\"
+$pad
+exit 2"
+  supervise claude claude-big.sh
+  [ "$status" -eq 0 ] || { echo "status=$status ${output:0:200}"; false; }
+  printf '%s' "$output" | jq -se 'length == 1 and .[0].hookSpecificOutput.permissionDecision == "deny"
+    and .[0].hookSpecificOutput.permissionDecisionReason == ("x" * 204800)' >/dev/null ||
+    { echo "${output:0:200}"; false; }
+  [ "${#stderr}" -eq 409600 ] || { echo "stderr bytes=${#stderr}"; false; }
+  supervise codex codex-big.sh
+  [ "$status" -eq 2 ] || { echo "status=$status ${output:0:200}"; false; }
+  printf '%s' "$output" | jq -se 'length == 1 and .[0].reason == ("x" * 204800)' >/dev/null ||
+    { echo "${output:0:200}"; false; }
+  [ "${#stderr}" -eq 409600 ] || { echo "stderr bytes=${#stderr}"; false; }
+  assert_quick
+}
+
+@test "a grandchild in the guard's group dies with it when the guard overruns" {
+  local harness
+  stub fork-hang.sh "sleep 30 & echo \$! > '$BATS_TEST_TMPDIR/grandchild.pid'
+sleep 30"
+  for harness in claude codex; do
+    supervise "$harness" fork-hang.sh
+    assert_deny "$harness" "$TIMED_OUT" || { echo "$harness"; return 1; }
+    assert_quick
+    assert_gone "$BATS_TEST_TMPDIR/grandchild.pid" || { echo "$harness"; return 1; }
+  done
+}
+
+@test "a grandchild that outlives the guard with its output open dies with the group" {
+  local harness
+  stub orphan.sh "sleep 30 & echo \$! > '$BATS_TEST_TMPDIR/grandchild.pid'
+exit 0"
+  for harness in claude codex; do
+    supervise "$harness" orphan.sh
+    assert_deny "$harness" 'output still open; refusing$' || { echo "$harness"; return 1; }
+    assert_quick
+    assert_gone "$BATS_TEST_TMPDIR/grandchild.pid" || { echo "$harness"; return 1; }
+  done
+}
+
 # --- results -------------------------------------------------------------------
 
 @test "exec failure, exit 1, exit 127 and a signal are denied for both harnesses" {
@@ -332,6 +420,68 @@ exit 0"
   for target in two.sh malformed.sh empty-object.sh foo.sh claude-shape.sh empty-block.sh; do
     supervise codex "$target"
     assert_codex_block 'refusing$' || { echo "codex $target"; return 1; }
+  done
+}
+
+@test "a hanging guard is killed at the deadline and refused for both harnesses" {
+  local harness
+  stub hang.sh "echo \$\$ > '$BATS_TEST_TMPDIR/guard.pid'
+exec sleep 30"
+  for harness in claude codex; do
+    supervise "$harness" hang.sh
+    assert_deny "$harness" "$TIMED_OUT" || { echo "$harness"; return 1; }
+    assert_quick
+    assert_gone "$BATS_TEST_TMPDIR/guard.pid" || { echo "$harness"; return 1; }
+  done
+}
+
+@test "a guard that crashes after printing an allow is refused for both harnesses" {
+  local harness
+  stub crash.sh "printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}'
+kill -SEGV \$\$"
+  for harness in claude codex; do
+    supervise "$harness" crash.sh
+    assert_deny "$harness" 'killed by signal 11; refusing$' || { echo "$harness"; return 1; }
+  done
+}
+
+@test "two valid decisions are refused, never read as either one" {
+  extend_test_deadline
+  local target out
+  local allow='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+  local deny='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no"}}'
+  local block='{"decision":"block","reason":"no"}'
+  stub claude-lines.sh "printf '%s\\n%s\\n' '$allow' '$deny'"
+  stub claude-joined.sh "printf '%s%s' '$allow' '$allow'"
+  stub codex-lines.sh "printf '%s\\n%s\\n' '$block' '$block'; exit 2"
+  stub pi-lines.sh "printf '%s\\n%s\\n' '$block' '$allow'"
+  for target in claude-lines.sh claude-joined.sh; do
+    supervise claude "$target"
+    assert_claude_deny 'not exactly one decision document; refusing$' || { echo "$target"; return 1; }
+  done
+  supervise codex codex-lines.sh
+  assert_codex_block 'not exactly one decision document; refusing$'
+  set +e
+  out="$(printf '{}' | perl "$RT/$SUP" pi test-guard "$STUBS/pi-lines.sh" 2>/dev/null)"
+  status=$?
+  set -e
+  [ "$status" -eq 2 ] || { echo "pi status=$status $out"; false; }
+  printf '%s' "$out" | jq -e '.decision == "block" and (.reason | test("not exactly one decision document"))' >/dev/null
+}
+
+@test "garbage around or instead of a decision is refused for both harnesses" {
+  extend_test_deadline
+  local harness target
+  local allow='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+  stub word.sh 'echo allow'
+  stub binary.sh "printf '\\000\\377\\376{}'"
+  stub trailing.sh "printf '%s garbage' '$allow'"
+  stub leading.sh "printf 'note: %s' '$allow'"
+  for harness in claude codex; do
+    for target in word.sh binary.sh trailing.sh leading.sh; do
+      supervise "$harness" "$target"
+      assert_deny "$harness" 'not exactly one decision document; refusing$' || { echo "$harness $target"; return 1; }
+    done
   done
 }
 
@@ -421,9 +571,6 @@ exit 0"
       *) echo "$template $guard: ${got#*|}"; return 1 ;;
     esac
   done <<'EOF'
-core-rules/templates/claude-settings.local.json|claude|block-destructive|"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" claude block-destructive "$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/block-destructive.sh"
-core-rules/templates/claude-settings.local.json|claude|reread-guard|"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" claude reread-guard "$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/reread-guard.sh"
-core-rules/templates/claude-settings.local.json|claude|skill-preload-guard|"$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" claude skill-preload-guard "$CLAUDE_PROJECT_DIR/.trellis/runtime/core-rules/hooks/skill-preload-guard.sh"
 core-rules/templates/codex-hooks.local.json|codex|block-destructive|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex block-destructive "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/block-destructive.sh"
 core-rules/templates/codex-hooks.local.json|codex|reread-guard|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex reread-guard "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/reread-guard.sh"
 core-rules/templates/claude-settings.json|claude|block-destructive|"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude block-destructive "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh"
@@ -432,6 +579,29 @@ core-rules/templates/claude-settings.json|claude|skill-preload-guard|"$CLAUDE_PR
 core-rules/codex/hooks.json|codex|block-destructive|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/lib/guard-supervise.pl" codex block-destructive /bin/bash "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/block-destructive.sh"
 core-rules/codex/hooks.json|codex|reread-guard|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/lib/guard-supervise.pl" codex reread-guard /bin/bash "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/reread-guard.sh"
 EOF
+}
+
+# Claude 2.1.295+: the attach-rendered template starts each guard in exec form
+# (no user shell) through the same sanitizing sh entry, and adds onFailure
+# block so a guard that cannot start, times out or exits oddly still blocks.
+@test "the Claude local template starts each bright-line guard in exec form with onFailure block at 30s" {
+  local guard rt='${CLAUDE_PROJECT_DIR}/.trellis/runtime'
+  for guard in block-destructive reread-guard skill-preload-guard; do
+    jq -e --arg g "$guard" --arg rt "$rt" --arg sanitize "$SANITIZE" --argjson timeout "$CLIENT_TIMEOUT" '
+      [.hooks.PreToolUse[].hooks[] | select((.args // []) | index($rt + "/core-rules/hooks/" + $g + ".sh"))]
+      | length == 1
+      and (.[0] | .command == "/usr/bin/env"
+        and .timeout == $timeout
+        and .onFailure == "block"
+        and (has("if") | not)
+        and (.args | length) == 9
+        and .args[0] == "TRELLIS_ROOT=" + $rt
+        and .args[1:3] == ["/bin/sh", "-c"]
+        and (.args[3] | contains($sanitize))
+        and .args[4:] == ["guard-supervise", $rt + "/core-rules/hooks/lib/guard-supervise.pl", "claude", $g,
+                          $rt + "/core-rules/hooks/" + $g + ".sh"])
+    ' "$REPO/$CLAUDE_TEMPLATE" >/dev/null || { echo "$guard"; return 1; }
+  done
 }
 
 @test "the inheritance manifest links guard-supervise.pl for every harness, without widening a suffix" {
@@ -449,8 +619,8 @@ EOF
 }
 
 @test "the pi dispatcher starts required guards through the supervisor with a clean perl env" {
-  grep -q 'env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV' "$REPO/core-rules/pi/hooks/dispatch.sh"
-  grep -q 'perl "$(dispatch_dir)/../../hooks/lib/guard-supervise.pl" pi' "$REPO/core-rules/pi/hooks/dispatch.sh"
+  grep -qF "command = ['env', '-u', 'PERL5OPT', '-u', 'PERL5LIB', '-u', 'PERLLIB', '-u', 'PERL5DB', '-u', 'ENV', '-u', 'BASH_ENV'," "$REPO/core-rules/pi/hooks/dispatch.sh"
+  grep -qF "'perl', str(DISPATCH_DIR / '../../hooks/lib/guard-supervise.pl'), 'pi'" "$REPO/core-rules/pi/hooks/dispatch.sh"
 }
 
 @test "shipped supervisor deadline is 20s, well below the 30s client timeout" {
@@ -460,12 +630,9 @@ EOF
   [ "$output" = 0 ] || { echo "the supervisor reads the environment"; false; }
 }
 
-@test "advisory pr-gate-shiftleft keeps its own 120s timeout" {
-  local template
-  for template in "$CLAUDE_TEMPLATE" "$CODEX_TEMPLATE"; do
-    jq -e '[.hooks.PreToolUse[].hooks[] | select(.command | contains("/pr-gate-shiftleft.sh")) | .timeout] == [120]' \
-      "$REPO/$template" >/dev/null || { echo "$template"; return 1; }
-  done
+@test "advisory pr-gate-shiftleft keeps its own 120s timeout on Codex" {
+  jq -e '[.hooks.PreToolUse[].hooks[] | select(.command | contains("/pr-gate-shiftleft.sh")) | .timeout] == [120]' \
+    "$REPO/$CODEX_TEMPLATE" >/dev/null
 }
 
 # --- client permissions.deny backing -----------------------------------------

@@ -20,11 +20,35 @@ teardown() {
 }
 
 file_size() {
-  stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null
+  local value
+  value="$(stat -f '%z' "$1" 2>/dev/null)" || value="$(stat -c '%s' "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "$value"
 }
 
 file_inode() {
-  stat -f '%i' "$1" 2>/dev/null || stat -c '%i' "$1" 2>/dev/null
+  local value
+  value="$(stat -f '%i' "$1" 2>/dev/null)" || value="$(stat -c '%i' "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "$value"
+}
+
+@test "GNU stat: failed BSD probe stdout cannot hide an oversized log" {
+  stat --version >/dev/null 2>&1 || skip "requires GNU stat"
+  local target="$MOCK_ROOT1/pi-bash-gnu-stat.log" probe inode
+  truncate -s 2147483649 "$target"
+  # Reproduce GNU stat's failure mode, including the stdout it leaves behind.
+  if probe="$(stat -f '%z' "$target" 2>/dev/null)"; then
+    echo "expected the BSD stat probe to fail"; return 1
+  fi
+  [ -n "$probe" ]
+  [ "$(file_size "$target")" = 2147483649 ]
+  inode="$(stat -c '%i' "$target")"
+  [ "$(file_inode "$target")" = "$inode" ]
+
+  run "$WATCHDOG" --root "$MOCK_ROOT1"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"truncated $target (2147483649 bytes,"* ]]
+  [ "$(stat -c '%s' "$target")" = 0 ]
+  [ "$(stat -c '%i' "$target")" = "$inode" ]
 }
 
 @test "truncates pi-bash-*.log over 2 GiB to 0 and preserves inode" {

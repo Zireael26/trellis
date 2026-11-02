@@ -77,7 +77,8 @@ assert_python_hook_calls() {
     run env PROCESS_GATE_NO_RECEIPTS=1 PYTHON_TOOL_LOG="$call_log" \
       PATH="$fake_bin:/usr/bin:/bin" bash "$candidate" <<<'{}'
     [ "$status" -eq 0 ]
-    [ "$(cat "$call_log")" = "$expected" ]
+    # Checks run concurrently (spec 072 U8), so the log order is not fixed.
+    [ "$(sort "$call_log")" = "$(printf '%s\n' "$expected" | sort)" ]
   done
 }
 
@@ -287,7 +288,7 @@ EOF
       GLOBAL_TOOL_LOG="$global_log" PATH="$fake_bin:/usr/bin:/bin" \
       bash "$candidate" <<<'{}'
     [ "$status" -eq 0 ]
-    [ "$(cat "$local_log")" = $'mypy .\npytest --tb=short -q' ]
+    [ "$(sort "$local_log")" = $'mypy .\npytest --tb=short -q' ]
     [ ! -s "$global_log" ]
   done
 }
@@ -430,7 +431,7 @@ EOF
     run env PROCESS_GATE_NO_RECEIPTS=1 LOCAL_TOOL_LOG="$local_log" \
       PYTHON_TOOL_LOG="$call_log" PATH="$fake_bin:/usr/bin:/bin" bash "$candidate" <<<'{}'
     [ "$status" -eq 0 ]
-    [ "$(cat "$local_log")" = $'mypy \npytest --tb=short -q' ]
+    [ "$(sort "$local_log")" = $'mypy \npytest --tb=short -q' ]
     [ ! -s "$call_log" ]
   done
 }

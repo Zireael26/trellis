@@ -674,17 +674,24 @@ adopt_husky_fixture() {
   git -C "$PORTABLE_PROJECT" config --local core.hooksPath .husky/_
 }
 
+# Capture attempts separately: GNU stat -f can print filesystem data on failure.
+fixture_mode() {
+  local mode
+  mode="$(stat -f %Lp "$1" 2>/dev/null)" || mode="$(stat -c %a "$1")" || return 1
+  printf '%s\n' "$mode"
+}
+
 # Bytes and mode of every record, and every entry of the managed dir (which
 # holds the sidecar), by type.
 adopt_snapshot() {
   local f
   for f in "$HF_OWNER" ${HF_SIBLING_OWNER:+"$HF_SIBLING_OWNER"}; do
-    printf 'R %s %s %s\n' "$f" "$(stat -f %Lp "$f")" "$(shasum -a 256 < "$f" | awk '{print $1}')"
+    printf 'R %s %s %s\n' "$f" "$(fixture_mode "$f")" "$(shasum -a 256 < "$f" | awk '{print $1}')"
   done
   ( cd "$HF_MANAGED" && find . -print | LC_ALL=C sort | while IFS= read -r f; do
       if [ -L "$f" ]; then printf 'L %s %s\n' "$f" "$(readlink "$f")"
-      elif [ -d "$f" ]; then printf 'D %s %s\n' "$f" "$(stat -f %Lp "$f")"
-      else printf 'F %s %s %s\n' "$f" "$(stat -f %Lp "$f")" "$(shasum -a 256 < "$f" | awk '{print $1}')"
+      elif [ -d "$f" ]; then printf 'D %s %s\n' "$f" "$(fixture_mode "$f")"
+      else printf 'F %s %s %s\n' "$f" "$(fixture_mode "$f")" "$(shasum -a 256 < "$f" | awk '{print $1}')"
       fi
     done )
 }
@@ -728,7 +735,7 @@ assert_linked_record_unchanged() {
 
 assert_adopted() {
   [ "$(jq -r '.git_hooks.previous_hooks_path' "$HF_OWNER")" = ".husky/_" ]
-  [ "$(stat -f %Lp "$HF_OWNER")" = 600 ]
+  [ "$(fixture_mode "$HF_OWNER")" = 600 ]
   strict_verifies "$HF_OWNER" || { echo "strict verification failed for $HF_OWNER"; false; }
   assert_linked_record_unchanged
   [ "$(cat "$HF_MANAGED/previous-hooks-path")" = ".husky/_" ]

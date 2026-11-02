@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Process-table liveness checks shared by process-gate coordination and the
-# disk-janitor build guard. Executable identity comes from `comm`; flattened
+# disk-janitor build guard. Executable identity comes from `ucomm`; flattened
 # argv is secondary context only, never identity by itself and never a kill list.
+# Gate script paths with whitespace lose their argv boundaries in ps output:
+# a primary path and a different script given that path as an argument can look
+# identical. Reconstructed candidates return ERROR unless the primary token is
+# an existing regular file (relative paths are resolved in the process cwd).
+# Shell -c and Python -c/-m payloads are excluded before reconstruction.
 #
 # Exit codes:
 #   0  CLEAR: the snapshot is valid and no matching process is live
 #   1  BUSY: one or more verified process groups are live
-#   2  ERROR: usage or process-table probe failure (callers must fail closed)
+#   2  ERROR: usage, probe failure or ambiguous identity (callers must fail closed)
 
 set -u
 
@@ -40,7 +45,7 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then
   exit 2
 fi
 
-snapshot="$(LC_ALL=C ps -ww -eo pid=,ppid=,pgid=,comm=,args= 2>/dev/null)"
+snapshot="$(LC_ALL=C ps -ww -eo pid=,ppid=,pgid=,ucomm=,args= 2>/dev/null)"
 ps_status=$?
 if [ "$ps_status" -ne 0 ] || [ -z "$snapshot" ]; then
   printf 'ERROR process-table snapshot unavailable\n' >&2
@@ -59,7 +64,8 @@ function is_python(name) {
   return name == "Python" || name == "python" || name ~ /^python[0-9]+([.][0-9]+)*$/
 }
 function is_js_runtime(name) {
-  return name == "node" || name == "nodejs" || name == "bun" || name == "deno"
+  # Node names its Linux main thread: MainThread in 24, node-MainThread in 26.
+  return name == "node" || name == "MainThread" || name == "node-MainThread" || name == "nodejs" || name == "bun" || name == "deno"
 }
 function is_bundler(name) {
   return name ~ /^(next|vite|turbo|webpack|webpack-cli|tsc)([.](js|mjs|cjs|cmd))?$/
@@ -85,6 +91,14 @@ function has_bats_path(start,    i) {
   for (i = start; i <= NF; i++) if ($i ~ /[.]bats$/) return 1
   return 0
 }
+function gate_script(kind, path, start,    program) {
+  program = base_name(path)
+  if (kind == "python") return program == "run-tests-local.py" ? program : ""
+  if (program == "run-all.sh" || program == "run-tests.sh" || program == "trellis-doctor") return program
+  if (program ~ /[.]bats$/) return "bats"
+  if ((program == "bats" || program ~ /^bats-/) && has_bats_path(start)) return "bats"
+  return ""
+}
 function has_build_action(start,    i, token) {
   for (i = start; i <= NF; i++) {
     token = $i
@@ -95,6 +109,7 @@ function has_build_action(start,    i, token) {
 BEGIN {
   valid = 0
   found = 0
+  ambiguous = 0
 }
 $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
   valid++
@@ -108,21 +123,25 @@ $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
       target = comm
     } else if (comm == "bats" || comm ~ /^bats-/) {
       if (has_bats_path(5)) target = "bats"
-    } else if (is_shell(comm)) {
-      pos = primary_index("shell", 6)
+    } else if (is_shell(comm) || is_python(comm)) {
+      kind = is_shell(comm) ? "shell" : "python"
+      pos = primary_index(kind, 6)
       if (pos > 0) {
-        program = base_name($(pos))
-        if (program == "run-all.sh" || program == "run-tests.sh" || program == "trellis-doctor") {
-          target = program
-        } else if (program ~ /[.]bats$/) {
-          target = "bats"
-        } else if ((program == "bats" || program ~ /^bats-/) && has_bats_path(pos + 1)) {
-          target = "bats"
+        candidate = $(pos)
+        target = gate_script(kind, candidate, pos + 1)
+        if (target == "") {
+          # Only extend from the primary script position, never from a -c/-m
+          # payload. ps cannot prove which spaces belong to the script path.
+          for (i = pos + 1; i <= NF; i++) {
+            candidate = candidate " " $i
+            if (gate_script(kind, candidate, i + 1) != "") {
+              printf "ERROR\tpid=%s\tpgid=%s\tcomm=%s\tambiguous interpreter script path\t%s\n", $1, $3, comm, $(pos)
+              ambiguous = 1
+              break
+            }
+          }
         }
       }
-    } else if (is_python(comm)) {
-      pos = primary_index("python", 6)
-      if (pos > 0 && base_name($(pos)) == "run-tests-local.py") target = "run-tests-local.py"
     }
   } else if (mode == "build" && index(args, project) > 0) {
     pos = 0
@@ -150,11 +169,51 @@ $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
 }
 END {
   if (valid == 0) exit 3
+  if (ambiguous) exit 4
   if (found) exit 1
   exit 0
 }
 ')"
 awk_status=$?
+
+# ps loses argv boundaries, but an existing primary script rules out extending
+# that token into a whitespace-bearing path. Never resolve relative to our cwd.
+primary_is_file() {
+  local pid="$1" primary="$2" cwd field
+  case "$primary" in
+    /*) [ -f "$primary" ]; return ;;
+  esac
+  case "$(uname -s)" in
+    Linux) [ -f "/proc/$pid/cwd/$primary" ] ;;
+    Darwin)
+      cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null)" || return 1
+      while IFS= read -r field; do
+        case "$field" in
+          n*) [ -f "${field#n}/$primary" ]; return ;;
+        esac
+      done <<< "$cwd"
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$awk_status" -eq 4 ]; then
+  evidence=""
+  awk_status=0
+  while IFS=$'\t' read -r record pid pgid comm detail primary; do
+    if [ "$record" = ERROR ]; then
+      primary_is_file "${pid#pid=}" "$primary" && continue
+      awk_status=4
+      evidence+="${record}"$'\t'"${pid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${detail}"$'\n'
+    else
+      # Preserve verified BUSY rows even when every ambiguous row was cleared.
+      [ "$awk_status" -eq 4 ] || awk_status=1
+      evidence+="${record}"$'\t'"${pid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${detail}"$'\t'"${primary}"$'\n'
+    fi
+  done <<< "$result"
+  result="${evidence%$'\n'}"
+fi
 
 case "$awk_status" in
   0)
@@ -172,6 +231,10 @@ case "$awk_status" in
     }
     printf '%s\n' "$result"
     exit 1
+    ;;
+  4)
+    printf '%s\n' "$result" >&2
+    exit 2
     ;;
   *)
     printf 'ERROR malformed process-table snapshot\n' >&2

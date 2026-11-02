@@ -1,0 +1,13 @@
+{
+  "session_id": "bench-session-0001",
+  "transcript_path": "@TRANSCRIPT@",
+  "cwd": "@PROJECT@",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "@PROJECT@/src/new.ts",
+    "content": "export const x = 1;\n"
+  },
+  "tool_use_id": "toolu_bench_0001"
+}
